@@ -33,9 +33,10 @@ project-root/
 │           ├── types.py    # Types used across the data layer 
 │           └── ...         # One .py file per ETL served via Prefect
 ├── scripts/                # Entrypoints
-└── tests/                  # Tests
-    ├── unit/
-    └── integration/
+├── tests/                  # Tests
+│   ├── unit/
+│   └── integration/
+└── .env.example            # All supported env vars
 ```
 
 ## Key Design Choices
@@ -97,6 +98,7 @@ We use `uv` to manage our Python virtual environment, dependencies, and run the 
 When developing new features you always have to:
 - Plan and ask for user validation
 - Implement the feature
+    - Update @.env.example + @src/twin/config/settings.py with any new required env vars
 - Write unit and integration tests
 - Run the steps from `Test` and fix any errors
 - Scan for any potential bugs that weren't detected within the `Test` step and highlight them for validation

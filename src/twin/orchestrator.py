@@ -2,11 +2,11 @@
 Prefect workflow orchestrator.
 
 Registers and serves all workflow deployments.
-Start the Prefect server first, then run this file to serve the workflows.
+The Prefect server runs via Docker Compose (make local-start).
 
 Usage:
-    make prefect-server    # in one terminal
-    make serve-workflows   # in another terminal
+    make local-start       # start infra (MongoDB + Prefect)
+    make serve-workflows   # serve workflow deployments
 """
 
 from prefect import serve

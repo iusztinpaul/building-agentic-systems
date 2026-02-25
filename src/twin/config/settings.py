@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class MongoSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="")
 
+    mongo_host: str = "localhost"
     mongo_port: int = 27017
     mongo_initdb_root_username: str = "twin"
     mongo_initdb_root_password: str = "twin"
@@ -17,7 +18,7 @@ class MongoSettings(BaseSettings):
         return (
             f"mongodb://{self.mongo_initdb_root_username}:"
             f"{self.mongo_initdb_root_password}"
-            f"@localhost:{self.mongo_port}"
+            f"@{self.mongo_host}:{self.mongo_port}"
             f"/?directConnection=true&authSource=admin"
         )
 
