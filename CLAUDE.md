@@ -7,11 +7,12 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 ## Key Components
 
 - **Data Pipeline:** ETL pipelines gathering data from multiple sourcing and normalizing everything into the `documents` collection. One ETL pipeline per source. Sources:
-    - Substack RSS Feeds (e.g., https://www.decodingai.com/feed)
-    - Articles
-    - YouTube RSS Feeds
-    - YouTube Videos
-    - Markdown Files
+    - Substack RSS feeds (e.g., https://www.decodingai.com/feed)
+    - Substack articles
+    - YouTube RSS feeds
+    - YouTube videos
+    - Custom sites
+    - Markdown files
     - HuggingFace Datasets (e.g., https://huggingface.co/datasets/arxiv-community/arxiv_dataset)
 - **Memory Pipeline:** Pipeline that maps `documents` to `knowledge graph objects` within the `knowledge_graph_log` collection by cleaning, chunking, graph extracting, normalizing and embedding the content of the chunks.
 - **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored as immutable logs within the `knowledge_graph_log` collection, while building a query view for retrieval by aggregating logs with the same ID.
@@ -22,17 +23,19 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 ```
 project-root/
 ├── src/
-│   └── twin/            # Core Python module
-│       ├── config/      # Configuration
-│       ├── entities/    # Key data structures as ORMs
-│       └── data/        # Data ETLs
-│           ├── core/    # Core module business logic
-│           ├── types.py # Types used across the data layer 
-│           └── ...      # One .py file per ETL served via Prefect
-├── scripts/             # Entrypoints
-└── tests/               # Tests
-    - units
-    - integration
+│   └── twin/               # Core Python module
+│       ├── config/         # Configuration
+│       ├── entities/       # Key data structures as ORMs
+│       ├── db.py           # Database connection helpers
+│       ├── orchestrator.py # Orchestrator integration
+│       └── data/           # Data ETLs
+│           ├── core/       # Core module business logic
+│           ├── types.py    # Types used across the data layer 
+│           └── ...         # One .py file per ETL served via Prefect
+├── scripts/                # Entrypoints
+└── tests/                  # Tests
+    ├── unit/
+    └── integration/
 ```
 
 ## Key Design Choices
@@ -42,13 +45,15 @@ project-root/
     - The `entities` folder defines shared ODM, enums or other data structures data are used all over the project. While we have local `types.py` files per app module to define data types that will be used only within that current module or layers upwards. 
     - Infrastructure exceptions we don't plan to change: MongoDB, Prefect, Opik. Thus, it doesn't make sense to make them modular. 
     - Flat structure and naming based on actionability rather than dogmatic clean architecture.
-- Structure the tests following a one-on-one relationship with the core python module.
 - Properties of pipelines:
     - Idempotency
     - Retries
     - Checkpointing
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
 
+### Tests
+
+- Structure the tests following a one-on-one relationship with the core python module.
 - When writing tests respect:
     - **Naming**: Files must be `test_*.py`; functions must be `test_*`.
     - **Pattern**: Use AAA (Arrange, Act, Assert).
@@ -62,6 +67,7 @@ project-root/
 - **ODM:** Beanie + PyMongo Async driver
 - **MCP Server Framework:** FastMCP
 - **Testing:** Pytest
+- **Logging:** Native Python logger (never prints!)
 
 - **LLM API:** Gemini
 - **Embedding Models API:** Voyage AI
@@ -69,7 +75,7 @@ project-root/
 - **Crawling and scraping:** Firecrawl
 
 - **Unified memory and database:** MongoDB
-- **Orchestrator and durable workflows:** Prefect
+- **Orchestrator and durable workflows:** Prefect (sitemap: https://docs.prefect.io/llms.txt)
 - **Observability and evals:** Opik
 - **Containerization:** Docker
 - **CI/CD:** GitHub Actions

@@ -15,6 +15,7 @@ dependencies = [
     "httpx>=0.28",
     "beautifulsoup4>=4.13",
     "pydantic-settings>=2.9",
+    "prefect>=3.6.19",
 ]
 
 [tool.hatch.build.targets.wheel]

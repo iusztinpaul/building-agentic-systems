@@ -62,7 +62,16 @@ local-test: # Validate MongoDB setup (text, vector, graph search).
 	uv run python scripts/test_mongodb_setup.py
 
 
+# --- Orchestration ---
+
+prefect-server: # Start the Prefect server locally.
+	uv run prefect server start
+
+serve-workflows: # Serve Prefect workflow deployments.
+	PREFECT_API_URL=http://127.0.0.1:4200/api uv run python -m src.twin.orchestrator
+
+
 # --- Data Pipelines ---
 
-run-etl-substack: # Run Substack RSS ETL pipeline. Usage: make run-etl-substack FEED_URL=https://www.decodingai.com/feed
-	uv run python scripts/run_data_pipeline.py $(FEED_URL)
+run-etl-substack: # Trigger Substack RSS ETL via Prefect. Usage: make run-etl-substack FEED_URL=https://www.decodingai.com/feed
+	PREFECT_API_URL=http://127.0.0.1:4200/api uv run python scripts/run_data_pipeline.py $(FEED_URL)

@@ -90,7 +90,7 @@ class TestSubstackRSSFeedETLExtractOne:
         assert "Hello" in doc.content
         assert "world" in doc.content
         assert "<p>" not in doc.content
-        assert len(doc.references) == 2
+        assert doc.references == []
         assert doc.summary_embedding == []
 
     async def test_extract_one_fallback_to_summary(self, etl):

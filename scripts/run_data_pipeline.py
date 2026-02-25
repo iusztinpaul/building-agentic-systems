@@ -1,5 +1,9 @@
 """
-Run the Substack RSS ETL pipeline.
+Trigger the Substack RSS ETL pipeline via Prefect.
+
+Requires:
+    - Prefect server running (make prefect-server)
+    - Workflows served (make serve-workflows)
 
 Usage:
     uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed
@@ -7,27 +11,35 @@ Usage:
 """
 
 import asyncio
-import logging
 import sys
 
-from twin.config.settings import settings
-from twin.data.substack_rss import SubstackRSSFeedETL
-from twin.db import init_mongodb
+from prefect.client.orchestration import get_client
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
+DEPLOYMENT_NAME = "run-substack-rss-etl/substack-rss-etl"
+POLL_INTERVAL_SECONDS = 2
 
 
 async def main(feed_urls: list[str]) -> None:
-    client = await init_mongodb(
-        settings.mongo.mongo_uri, settings.mongo.mongo_initdb_database
-    )
+    async with get_client() as client:
+        deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
-    try:
-        etl = SubstackRSSFeedETL()
-        documents = await etl.run_batch(feed_urls)
-        print(f"\nDone. Ingested {len(documents)} new documents.")
-    finally:
-        await client.close()
+        flow_run = await client.create_flow_run_from_deployment(
+            deployment_id=deployment.id,
+            parameters={"feed_urls": feed_urls},
+        )
+        print(f"Flow run created: {flow_run.id}")
+        base_url = str(client.api_url).removesuffix("/api")
+        print(f"Track at: {base_url}/runs/flow-run/{flow_run.id}")
+
+        while True:
+            run = await client.read_flow_run(flow_run.id)
+            if run.state and run.state.is_final():
+                if run.state.is_completed():
+                    print("\nDone. Flow completed successfully.")
+                else:
+                    print(f"\nFlow finished with state: {run.state.name}")
+                break
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

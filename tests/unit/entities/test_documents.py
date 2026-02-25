@@ -25,12 +25,9 @@ class TestDocumentModel:
 
     async def test_missing_required_fields(self):
         with pytest.raises(ValidationError):
-            Document(
-                source_type=SourceType.SUBSTACK,
-                source_uri="https://example.com/p/test",
-            )
+            Document(source_type=SourceType.SUBSTACK)
 
-    async def test_with_embedding_and_references(self):
+    async def test_with_embedding(self):
         doc = Document(
             source_type=SourceType.SUBSTACK,
             source_uri="https://example.com/p/test-article",
@@ -40,9 +37,21 @@ class TestDocumentModel:
             content="Content.",
             authors=["Author One", "Author Two"],
             date=datetime(2026, 2, 1, tzinfo=timezone.utc),
-            references=["https://ref1.com", "https://ref2.com"],
         )
 
         assert doc.summary_embedding == [0.1, 0.2, 0.3]
         assert len(doc.authors) == 2
-        assert len(doc.references) == 2
+
+    async def test_latent_document(self):
+        doc = Document(
+            source_type=SourceType.LATENT,
+            source_uri="https://example.com/some-external-link",
+        )
+
+        assert doc.source_type == SourceType.LATENT
+        assert doc.title is None
+        assert doc.summary is None
+        assert doc.content is None
+        assert doc.authors == []
+        assert doc.date is None
+        assert doc.references == []
