@@ -1,0 +1,73 @@
+services:
+  mongodb:
+    image: mongodb/mongodb-community-server:8.2.5-ubi9
+    container_name: twin-mongodb
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/data/keyfile"]
+    volumes:
+      - mongodata:/data/db
+      - mongoconfig:/data/configdb
+      - ./docker/mongodb/keyfile:/data/keyfile:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb-init:
+    image: mongodb/mongodb-community-server:8.2.5-ubi9
+    container_name: twin-mongodb-init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    entrypoint: >
+      mongosh --host mongodb:27017
+        -u "${MONGO_INITDB_ROOT_USERNAME}" -p "${MONGO_INITDB_ROOT_PASSWORD}"
+        --authenticationDatabase admin --eval '
+        try {
+          rs.status();
+          print("Replica set already initialized.");
+        } catch(e) {
+          rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongodb:27017" }] });
+          print("Replica set initiated.");
+        }
+
+        sleep(2000);
+
+        const adminDb = db.getSiblingDB("admin");
+        const existingUser = adminDb.getUser("mongot");
+        if (!existingUser) {
+          adminDb.createUser({
+            user: "mongot",
+            pwd: "mongot",
+            roles: [{ role: "searchCoordinator", db: "admin" }]
+          });
+          print("mongot user created.");
+        } else {
+          print("mongot user already exists.");
+        }
+      '
+
+  mongot:
+    image: mongodb/mongodb-community-search:0.60.1
+    container_name: twin-mongot
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+    ports:
+      - "${MONGOT_PORT:-27028}:27028"
+    volumes:
+      - ./docker/mongot/config.yml:/mongot-community/config.default.yml:ro
+      - ./docker/mongot/passwordFile:/etc/mongot/secrets/passwordFile:ro
+
+volumes:
+  mongodata:
+  mongoconfig:
