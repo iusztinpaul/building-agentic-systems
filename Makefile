@@ -57,3 +57,12 @@ local-stop: # Stop local infrastructure.
 
 local-restart: # Restart local infrastructure.
 	docker compose down && docker compose up -d
+
+local-test: # Validate MongoDB setup (text, vector, graph search).
+	uv run python scripts/test_mongodb_setup.py
+
+
+# --- Data Pipelines ---
+
+run-etl-substack: # Run Substack RSS ETL pipeline. Usage: make run-etl-substack FEED_URL=https://www.decodingai.com/feed
+	uv run python scripts/run_data_pipeline.py $(FEED_URL)

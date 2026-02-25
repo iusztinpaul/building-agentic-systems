@@ -5,13 +5,14 @@ services:
     ports:
       - "${MONGO_PORT:-27017}:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/data/keyfile"]
+      MONGODB_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGODB_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    command: ["--config", "/etc/mongod.conf"]
     volumes:
       - mongodata:/data/db
       - mongoconfig:/data/configdb
       - ./docker/mongodb/keyfile:/data/keyfile:ro
+      - ./docker/mongodb/mongod.conf:/etc/mongod.conf:ro
     healthcheck:
       test: ["CMD", "mongosh", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
       interval: 10s

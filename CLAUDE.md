@@ -1,4 +1,4 @@
-# The WHY
+# The Why
 
 Build your digital twin through knowledge graphs, ontologies, memory, LLMs and agents.
 
@@ -6,7 +6,13 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 
 ## Key Components
 
-- **Data Pipeline:** ETL pipelines gathering data from multiple sourcing and normalizing everything into the `documents` collection.
+- **Data Pipeline:** ETL pipelines gathering data from multiple sourcing and normalizing everything into the `documents` collection. One ETL pipeline per source. Sources:
+    - Substack RSS Feeds (e.g., https://www.decodingai.com/feed)
+    - Articles
+    - YouTube RSS Feeds
+    - YouTube Videos
+    - Markdown Files
+    - HuggingFace Datasets (e.g., https://huggingface.co/datasets/arxiv-community/arxiv_dataset)
 - **Memory Pipeline:** Pipeline that maps `documents` to `knowledge graph objects` within the `knowledge_graph_log` collection by cleaning, chunking, graph extracting, normalizing and embedding the content of the chunks.
 - **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored as immutable logs within the `knowledge_graph_log` collection, while building a query view for retrieval by aggregating logs with the same ID.
 - **Agentic Tools:** Tools used to query or write to the unified memory. 
@@ -16,17 +22,39 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 ```
 project-root/
 ├── src/
-│   └── twin/      # Core Python module
-├── scripts/       # Entrypoints
-└── tests/         # Tests
+│   └── twin/            # Core Python module
+│       ├── config/      # Configuration
+│       ├── entities/    # Key data structures as ORMs
+│       └── data/        # Data ETLs
+│           ├── core/    # Core module business logic
+│           ├── types.py # Types used across the data layer 
+│           └── ...      # One .py file per ETL served via Prefect
+├── scripts/             # Entrypoints
+└── tests/               # Tests
+    - units
+    - integration
 ```
 
 ## Key Design Choices
 
 - We are using Python with async patterns.
-- Loose clean architecture design decoupling infrastructure, serving, app and domain logic. 
-    - Infrastructure exceptions we don't plan to change: MongoDB, Prefect, Opik
+- Loose clean architecture design decoupling infrastructure, serving, app and domain logic:
+    - The `entities` folder defines shared ODM, enums or other data structures data are used all over the project. While we have local `types.py` files per app module to define data types that will be used only within that current module or layers upwards. 
+    - Infrastructure exceptions we don't plan to change: MongoDB, Prefect, Opik. Thus, it doesn't make sense to make them modular. 
+    - Flat structure and naming based on actionability rather than dogmatic clean architecture.
 - Structure the tests following a one-on-one relationship with the core python module.
+- Properties of pipelines:
+    - Idempotency
+    - Retries
+    - Checkpointing
+- All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
+
+- When writing tests respect:
+    - **Naming**: Files must be `test_*.py`; functions must be `test_*`.
+    - **Pattern**: Use AAA (Arrange, Act, Assert).
+    - **Fixtures**: Use `conftest.py` for shared logic; avoid manual setup/teardown methods.
+    - **Mocking**: Use `pytest-mock` (the `mocker` fixture) to isolate unit tests from your MongoDB.
+    - **Parametrize**: Use `@pytest.mark.parametrize` to test multiple inputs (e.g., different sensor values) in a single function.
 
 ## Tech Stack
 
@@ -38,6 +66,7 @@ project-root/
 - **LLM API:** Gemini
 - **Embedding Models API:** Voyage AI
 - **Model Definition:** HuggingFace Transformers
+- **Crawling and scraping:** Firecrawl
 
 - **Unified memory and database:** MongoDB
 - **Orchestrator and durable workflows:** Prefect
@@ -88,3 +117,7 @@ make tests
 ```
 
 ## Run
+
+If not present directly in the @Makefile, run any custom Python file using: `uv run python ...`
+
+Use `mongosh` to interact with MongoDB directly through the CLI.
