@@ -16,7 +16,6 @@ class TestDocumentIntegration:
             source_uri="https://example.com/p/round-trip",
             title="Round Trip Test",
             summary="Testing insert and read.",
-            summary_embedding=[0.1, 0.2],
             content="Full content here.",
             authors=["Paul Iusztin"],
             date=datetime(2026, 3, 1, tzinfo=timezone.utc),
@@ -34,7 +33,6 @@ class TestDocumentIntegration:
         assert fetched.source_uri == "https://example.com/p/round-trip"
         assert fetched.title == "Round Trip Test"
         assert fetched.summary == "Testing insert and read."
-        assert fetched.summary_embedding == [0.1, 0.2]
         assert fetched.content == "Full content here."
         assert fetched.authors == ["Paul Iusztin"]
         assert fetched.date == datetime(2026, 3, 1, tzinfo=timezone.utc)

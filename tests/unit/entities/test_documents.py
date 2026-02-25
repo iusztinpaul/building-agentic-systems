@@ -20,26 +20,23 @@ class TestDocumentModel:
 
         assert doc.source_type == SourceType.SUBSTACK
         assert doc.source_uri == "https://example.com/p/test-article"
-        assert doc.summary_embedding == []
         assert doc.references == []
 
     async def test_missing_required_fields(self):
         with pytest.raises(ValidationError):
             Document(source_type=SourceType.SUBSTACK)
 
-    async def test_with_embedding(self):
+    async def test_multiple_authors(self):
         doc = Document(
             source_type=SourceType.SUBSTACK,
             source_uri="https://example.com/p/test-article",
             title="Test Article",
             summary="A test article.",
-            summary_embedding=[0.1, 0.2, 0.3],
             content="Content.",
             authors=["Author One", "Author Two"],
             date=datetime(2026, 2, 1, tzinfo=timezone.utc),
         )
 
-        assert doc.summary_embedding == [0.1, 0.2, 0.3]
         assert len(doc.authors) == 2
 
     async def test_latent_document(self):

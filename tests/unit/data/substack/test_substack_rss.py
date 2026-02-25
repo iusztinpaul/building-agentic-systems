@@ -1,6 +1,10 @@
+import httpx
+import pytest
+
 from twin.data.substack.substack_rss import (
     extract_document,
     extract_references,
+    fetch_feed,
     html_to_plain_text,
     parse_date,
 )
@@ -110,3 +114,87 @@ class TestExtractDocument:
         assert doc.content == ""
         assert doc.authors == ["Unknown"]
         assert doc.summary == ""
+
+
+class TestFetchFeed:
+    def _mock_httpx(self, mocker, mock_response):
+        """Patch httpx.AsyncClient so `async with … as client` returns a mock
+        whose `.get()` resolves to *mock_response*."""
+        mock_client = mocker.AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.get.return_value = mock_response
+        mocker.patch(
+            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+        return mock_client
+
+    async def test_returns_parsed_entries(self, mocker):
+        mock_response = mocker.Mock(text="<rss>mock</rss>")
+        mock_client = self._mock_httpx(mocker, mock_response)
+
+        entries = [{"title": "Entry 1"}, {"title": "Entry 2"}]
+        mocker.patch(
+            "twin.data.substack.substack_rss.feedparser.parse",
+            return_value=mocker.Mock(bozo=False, entries=entries),
+        )
+
+        result = await fetch_feed("https://example.com/feed")
+
+        assert result == entries
+        mock_client.get.assert_called_once_with(
+            "https://example.com/feed", follow_redirects=True, timeout=30
+        )
+
+    async def test_raises_on_http_error(self, mocker):
+        mock_response = mocker.Mock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Not Found",
+            request=mocker.Mock(),
+            response=mocker.Mock(status_code=404),
+        )
+        self._mock_httpx(mocker, mock_response)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await fetch_feed("https://example.com/feed")
+
+    async def test_raises_on_malformed_feed_without_entries(self, mocker):
+        mock_response = mocker.Mock(text="not xml")
+        self._mock_httpx(mocker, mock_response)
+
+        mocker.patch(
+            "twin.data.substack.substack_rss.feedparser.parse",
+            return_value=mocker.Mock(
+                bozo=True, entries=[], bozo_exception=Exception("bad")
+            ),
+        )
+
+        with pytest.raises(ValueError, match="Failed to parse RSS feed"):
+            await fetch_feed("https://example.com/feed")
+
+    async def test_bozo_feed_with_entries_returns_entries(self, mocker):
+        mock_response = mocker.Mock(text="<rss>partial</rss>")
+        self._mock_httpx(mocker, mock_response)
+
+        entries = [{"title": "Recovered Entry"}]
+        mocker.patch(
+            "twin.data.substack.substack_rss.feedparser.parse",
+            return_value=mocker.Mock(bozo=True, entries=entries),
+        )
+
+        result = await fetch_feed("https://example.com/feed")
+
+        assert result == entries
+
+    async def test_returns_empty_list_for_empty_feed(self, mocker):
+        mock_response = mocker.Mock(text="<rss></rss>")
+        self._mock_httpx(mocker, mock_response)
+
+        mocker.patch(
+            "twin.data.substack.substack_rss.feedparser.parse",
+            return_value=mocker.Mock(bozo=False, entries=[]),
+        )
+
+        result = await fetch_feed("https://example.com/feed")
+
+        assert result == []
