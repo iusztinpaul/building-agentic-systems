@@ -15,7 +15,7 @@ import sys
 
 from prefect.client.orchestration import get_client
 
-DEPLOYMENT_NAME = "run-substack-rss-etl/substack-rss-etl"
+DEPLOYMENT_NAME = "ingest-substack-rss-feed-batch-etl/ingest-substack-rss-feed-batch-etl"
 POLL_INTERVAL_SECONDS = 2
 
 

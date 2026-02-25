@@ -56,6 +56,10 @@ class TestExtractReferences:
         refs = _extract_references(html)
         assert refs == ["https://real.com"]
 
+    def test_no_anchor_tags(self):
+        html = "<p>No links here.</p>"
+        assert _extract_references(html) == []
+
 
 class TestParseDate:
     def test_rfc2822_format(self):
@@ -98,3 +102,18 @@ class TestSubstackRSSFeedETLExtractOne:
         doc = await etl.extract_one(entry)
 
         assert doc.content == "A short subtitle for the article."
+
+    async def test_extract_one_missing_author_defaults_to_unknown(self, etl):
+        entry = {k: v for k, v in SAMPLE_ENTRY.items() if k != "author"}
+        doc = await etl.extract_one(entry)
+
+        assert doc.authors == ["Unknown"]
+
+    async def test_extract_one_empty_entry(self, etl):
+        doc = await etl.extract_one({})
+
+        assert doc.source_uri == ""
+        assert doc.title == ""
+        assert doc.content == ""
+        assert doc.authors == ["Unknown"]
+        assert doc.summary == ""

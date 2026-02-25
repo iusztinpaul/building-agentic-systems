@@ -11,12 +11,19 @@ Usage:
 
 from prefect import serve
 
-from twin.data.substack_rss import run_substack_rss_etl
+from twin.data.substack_rss import (
+    ingest_substack_rss_feed,
+    ingest_substack_rss_feed_batch,
+)
 
 if __name__ == "__main__":
     serve(
-        run_substack_rss_etl.to_deployment(
-            name="substack-rss-etl",
+        ingest_substack_rss_feed.to_deployment(
+            name="ingest-substack-rss-feed-etl",
+            tags=["data-pipeline", "substack"],
+        ),
+        ingest_substack_rss_feed_batch.to_deployment(
+            name="ingest-substack-rss-feed-batch-etl",
             tags=["data-pipeline", "substack"],
         ),
     )

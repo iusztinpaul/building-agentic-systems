@@ -167,18 +167,13 @@ class SubstackRSSFeedETL(BaseETL):
 _etl = SubstackRSSFeedETL()
 
 
-@task(name="extract-substack-entry", retries=2, retry_delay_seconds=1.0)
-async def extract_substack_entry(raw_entry: dict) -> Document:
-    return await _etl.extract_one(raw_entry)
+@flow(name="ingest-substack-rss-feed-etl", log_prints=True)
+async def ingest_substack_rss_feed(feed_url: str) -> list[Document]:
+    return await _etl.run(feed_url)
 
 
-@flow(name="ingest-substack-feed", log_prints=True)
-async def ingest_substack_feed(source_uri: str) -> list[Document]:
-    return await _etl.run(source_uri)
-
-
-@flow(name="run-substack-rss-etl", log_prints=True)
-async def run_substack_rss_etl(feed_urls: list[str]) -> list[Document]:
+@flow(name="ingest-substack-rss-feed-batch-etl", log_prints=True)
+async def ingest_substack_rss_feed_batch(feed_urls: list[str]) -> list[Document]:
     await init_mongodb(settings.mongo.mongo_uri, settings.mongo.mongo_initdb_database)
 
     return await _etl.run_batch(feed_urls)
