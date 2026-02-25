@@ -11,7 +11,7 @@ Usage:
 
 from prefect import serve
 
-from twin.data.substack_rss import (
+from twin.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
 )

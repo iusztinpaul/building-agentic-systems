@@ -75,10 +75,16 @@ project-root/
 - **Crawling and scraping:** Firecrawl
 
 - **Unified memory and database:** MongoDB
-- **Orchestrator and durable workflows:** Prefect (sitemap: https://docs.prefect.io/llms.txt)
+- **Orchestrator and durable workflows:** Prefect (
 - **Observability and evals:** Opik
 - **Containerization:** Docker
 - **CI/CD:** GitHub Actions
+
+### Orchestrator and Durable Workflows
+
+- Tool: Prefect
+- Sitemap: https://docs.prefect.io/llms.txt
+- You can access deployments via `uv run prefect deployment ...` CLI commands. For example to run a deployment served in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
 
 # The How 
 

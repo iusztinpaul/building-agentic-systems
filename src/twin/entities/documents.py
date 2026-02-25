@@ -16,7 +16,6 @@ class Document(BeanieDocument):
     source_uri: Indexed(str, unique=True)
     title: str | None = None
     summary: str | None = None
-    summary_embedding: list[float] = []
     content: str | None = None
     authors: list[str] = []
     date: datetime | None = None
