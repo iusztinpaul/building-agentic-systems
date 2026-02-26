@@ -103,20 +103,15 @@ async def _text_search(
     *,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Run $search text query on the knowledge_graph collection."""
+    """Run $text query on the knowledge_graph collection.
+
+    Uses a standard MongoDB text index (not Atlas Search).
+    """
 
     pipeline = [
-        {
-            "$search": {
-                "index": "text_index",
-                "text": {
-                    "query": query,
-                    "path": ["properties.content", "properties.aliases", "_id"],
-                },
-            }
-        },
-        {"$match": {"kind": "node"}},
-        {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
+        {"$match": {"kind": "node", "$text": {"$search": query}}},
+        {"$addFields": {"_search_score": {"$meta": "textScore"}}},
+        {"$sort": {"_search_score": -1}},
         {"$limit": limit},
     ]
 
@@ -206,7 +201,12 @@ async def expand_graph(
 
         new_frontier: set[Any] = set()
         async for edge in collection.find(edge_filter):
-            edge_id = edge["_id"]
+            raw_id = edge["_id"]
+            edge_id = (
+                tuple(sorted(raw_id.items()))
+                if isinstance(raw_id, dict)
+                else raw_id
+            )
             if edge_id in seen_edge_ids:
                 continue
             seen_edge_ids.add(edge_id)

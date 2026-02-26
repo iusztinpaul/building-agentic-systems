@@ -46,6 +46,4 @@ class MockEmbeddingModel(BaseEmbeddingModel):
         self._dimensions = dimensions
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        return [
-            [random.random() for _ in range(self._dimensions)] for _ in texts
-        ]
+        return [[random.random() for _ in range(self._dimensions)] for _ in texts]

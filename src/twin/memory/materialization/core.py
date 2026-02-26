@@ -4,8 +4,10 @@ Materialization pipeline: rebuild the knowledge_graph collection from logs.
 1. Aggregate knowledge_graph_log into deduplicated nodes and edges.
 2. Write atomically to knowledge_graph via $out.
 3. Compute embeddings for nodes that lack them.
+4. Ensure text and vector search indexes exist.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Collection names (match Beanie Settings.name).
 _LOG_COLLECTION = "knowledge_graph_log"
 _KG_COLLECTION = "knowledge_graph"
+
+# Index names (shared with query module).
+_TEXT_INDEX_NAME = "text_index"
+_VECTOR_INDEX_NAME = "vector_index"
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +113,11 @@ def build_materialization_pipeline() -> list[dict[str, Any]]:
         },
     ]
 
-    # Start with nodes, union edges, then $out.
+    # TODO: Switch from $out to $merge to preserve indexes at scale.
+    # $out drops and recreates the collection (losing all indexes), which
+    # forces a full index rebuild after every materialization. With millions
+    # of documents this becomes costly. $merge upserts in-place and preserves
+    # indexes, but requires a separate cleanup step to remove stale documents.
     pipeline: list[dict[str, Any]] = [
         *node_branch,
         {"$unionWith": {"coll": _LOG_COLLECTION, "pipeline": edge_branch}},
@@ -215,3 +225,70 @@ async def _embed_batch(
         await collection.bulk_write(ops)
 
     return len(ops)
+
+
+# ---------------------------------------------------------------------------
+# 4. Ensure search indexes
+# ---------------------------------------------------------------------------
+
+
+async def ensure_indexes(client: AsyncMongoClient, database: str) -> None:
+    """Create text and vector search indexes on the knowledge_graph collection.
+
+    Safe to call repeatedly — skips indexes that already exist.
+    Must be called after every materialization since $out drops the collection.
+    """
+
+    db = client[database]
+    collection = db[_KG_COLLECTION]
+
+    # --- Text index (for $text queries) ---
+    await collection.create_index(
+        [
+            ("name", "text"),
+            ("properties.content", "text"),
+            ("properties.aliases", "text"),
+        ],
+        name=_TEXT_INDEX_NAME,
+    )
+    logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, _KG_COLLECTION)
+
+    # --- Vector search index (for $vectorSearch) ---
+    cursor = await collection.list_search_indexes()
+    existing = [idx["name"] async for idx in cursor]
+    if _VECTOR_INDEX_NAME in existing:
+        logger.info("Vector search index '%s' already exists", _VECTOR_INDEX_NAME)
+        return
+
+    dimensions = app_config.models.embedding.dimensions
+    await collection.create_search_index(
+        model={
+            "name": _VECTOR_INDEX_NAME,
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": dimensions,
+                        "similarity": "cosine",
+                    }
+                ]
+            },
+        }
+    )
+
+    # Wait for mongot to sync the index.
+    logger.info("Waiting for vector search index to be ready...")
+    for _ in range(30):
+        cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
+        results = await cursor.to_list()
+        if results:
+            await asyncio.sleep(3)
+            logger.info("Vector search index '%s' ready", _VECTOR_INDEX_NAME)
+            return
+        await asyncio.sleep(2)
+
+    logger.warning(
+        "Vector search index '%s' did not appear in time", _VECTOR_INDEX_NAME
+    )

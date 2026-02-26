@@ -9,7 +9,7 @@ from prefect.cache_policies import NO_CACHE
 
 from twin.config.settings import settings
 from twin.db import init_mongodb
-from twin.memory.materialization.core import embed_nodes, materialize
+from twin.memory.materialization.core import embed_nodes, ensure_indexes, materialize
 from twin.models.get_model import get_embedding_model
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,11 @@ async def embed_nodes_task(client, database: str) -> int:
     return await embed_nodes(client, database, embedding_model)
 
 
+@task(name="ensure-kg-indexes", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
+async def ensure_indexes_task(client, database: str) -> None:
+    await ensure_indexes(client, database)
+
+
 @flow(name="memory-materialization-etl", log_prints=True)
 async def memory_materialization() -> None:
     """Rebuild the materialized knowledge_graph from logs and embed nodes."""
@@ -38,5 +43,6 @@ async def memory_materialization() -> None:
 
     await materialize_task(client, database)
     count = await embed_nodes_task(client, database)
+    await ensure_indexes_task(client, database)
 
     logger.info("Materialization pipeline finished. Embedded %d nodes.", count)
