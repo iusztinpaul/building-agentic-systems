@@ -28,10 +28,22 @@ project-root/
 │       ├── entities/       # Key data structures as ORMs
 │       ├── db.py           # Database connection helpers
 │       ├── orchestrator.py # Orchestrator integration
-│       └── data/           # Data ETLs
-│           ├── core/       # Core module business logic
-│           ├── types.py    # Types used across the data layer 
-│           └── ...         # One .py file per ETL served via Prefect
+│       ├── data/           # Data ETLs
+│       │   ├── core/       # Core module business logic
+│       │   ├── types.py    # Types used across the data layer 
+│       │   └── ...         # One .py file per ETL served via Prefect
+│       └── memory/         # Unified memory module
+│           ├── types.py    # Types used across the memory layer
+│           ├── extraction/ # Chunking, graph extraction, embedding
+│           ├── materialization/ # Query views built from memory logs
+│           └── query/      # Query interfaces over unified memory
+├── models/                # Model configuration and utilities
+│   ├── config.py          # Global model configuration
+│   ├── exceptions.py      # Model-related exception types
+│   ├── get_model.py       # Model factory and loading
+│   ├── base.py            # Base interfaces
+│   ├── gemini.py          # Gemini models
+│   └── fake_model.py      # Fake models for testing
 ├── scripts/                # Entrypoints
 ├── tests/                  # Tests
 │   ├── unit/
