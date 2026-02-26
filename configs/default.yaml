@@ -1,6 +1,10 @@
 # Application configuration for the digital twin system.
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 
+sources:
+  substack:
+    - https://www.decodingai.com/feed
+
 models:
   llm:
     provider: gemini

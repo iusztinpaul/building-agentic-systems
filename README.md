@@ -72,13 +72,13 @@ make serve-workflows
 
 ### Step 1: Data pipelines
 
-Ingest documents from Substack RSS feeds into the `documents` collection:
+Ingest documents from Substack RSS feeds into the `documents` collection. Feed URLs are configured in `configs/default.yaml` under `sources.substack`:
 
 ```bash
-# Single feed
-make run-etl-substack FEED_URL=https://www.decodingai.com/feed
+# Use feeds from config
+make run-etl-substack
 
-# Multiple feeds (via script)
+# Or override with explicit URLs
 uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed https://other.substack.com/feed
 ```
 

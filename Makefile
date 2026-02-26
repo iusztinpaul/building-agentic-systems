@@ -70,5 +70,5 @@ serve-workflows: # Serve Prefect workflow deployments.
 
 # --- Data Pipelines ---
 
-run-etl-substack: # Trigger Substack RSS ETL via Prefect. Usage: make run-etl-substack FEED_URL=https://www.decodingai.com/feed
-	uv run python scripts/run_data_pipeline.py $(FEED_URL)
+run-etl-substack: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
+	uv run python scripts/run_data_pipeline.py

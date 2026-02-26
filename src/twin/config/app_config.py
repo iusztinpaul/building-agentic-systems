@@ -53,7 +53,12 @@ class QueryConfig(BaseModel):
     embedding_batch_size: int = 64
 
 
+class SourcesConfig(BaseModel):
+    substack: list[str] = []
+
+
 class AppConfig(BaseModel):
+    sources: SourcesConfig = SourcesConfig()
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()

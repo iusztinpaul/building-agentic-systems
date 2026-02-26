@@ -6,14 +6,19 @@ Requires:
     - Workflows served (make serve-workflows)
 
 Usage:
-    uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed
+    uv run python scripts/run_data_pipeline.py
     uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed https://other.substack.com/feed
+
+Reads feed URLs from configs/default.yaml (sources.substack) by default.
+CLI arguments override the config.
 """
 
 import asyncio
 import sys
 
 from prefect.client.orchestration import get_client
+
+from twin.config.app_config import app_config
 
 DEPLOYMENT_NAME = (
     "ingest-substack-rss-feed-batch-etl/ingest-substack-rss-feed-batch-etl"
@@ -45,10 +50,13 @@ async def main(feed_urls: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    feed_urls = sys.argv[1:] or app_config.sources.substack
+
+    if not feed_urls:
         print(
-            "Usage: uv run python scripts/run_data_pipeline.py <feed_url> [feed_url ...]"
+            "Usage: uv run python scripts/run_data_pipeline.py [feed_url ...]\n"
+            "       Or configure sources.substack in configs/default.yaml"
         )
         sys.exit(1)
 
-    asyncio.run(main(sys.argv[1:]))
+    asyncio.run(main(feed_urls))
