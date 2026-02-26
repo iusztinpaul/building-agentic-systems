@@ -193,6 +193,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pymongo" },
     { name = "pyvis" },
+    { name = "pyyaml" },
     { name = "tiktoken" },
 ]
 
@@ -221,6 +222,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.9" },
     { name = "pymongo", specifier = ">=4.16.0" },
     { name = "pyvis", specifier = ">=0.3" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 

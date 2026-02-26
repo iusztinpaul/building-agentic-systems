@@ -44,6 +44,7 @@ project-root/
 │   ├── base.py            # Base interfaces
 │   ├── gemini.py          # Gemini models
 │   └── fake_model.py      # Fake models for testing
+├── configs/                # App YAML configs
 ├── scripts/                # Entrypoints
 ├── tests/                  # Tests
 │   ├── unit/

@@ -141,11 +141,18 @@ LLM_EXTRACTABLE_NODE_TYPES: set[NodeType] = {
 }
 
 LLM_EXTRACTABLE_EDGE_TYPES: set[EdgeType] = {
-    EdgeType.MENTIONS,
     EdgeType.RELATED_TO,
     EdgeType.TODO,
     EdgeType.EXPERIENCED,
     EdgeType.HAS,
+}
+
+# Edges created deterministically by pipeline code (not LLM-extracted).
+STRUCTURAL_EDGE_TYPES: set[EdgeType] = {
+    EdgeType.PART_OF,
+    EdgeType.NEXT,
+    EdgeType.MENTIONS,
+    EdgeType.REFERENCED,
 }
 
 

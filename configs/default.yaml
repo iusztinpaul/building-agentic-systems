@@ -1,0 +1,17 @@
+# Application configuration for the digital twin system.
+# Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
+
+models:
+  llm:
+    provider: gemini
+    model: gemini-2.5-flash-lite
+  embedding:
+    provider: gemini
+    model: text-embedding-004
+    dimensions: 768
+
+extraction:
+  chunk_size: 512
+  chunk_overlap: 64
+  llm_concurrency: 5
+  similarity_threshold: 0.85

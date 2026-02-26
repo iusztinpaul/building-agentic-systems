@@ -24,6 +24,7 @@ dependencies = [
     "pyvis>=0.3",
     "networkx>=3.0",
     "google-genai>=1.65.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]
