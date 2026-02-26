@@ -14,6 +14,7 @@ from typing import Any
 from pymongo import AsyncMongoClient
 
 from twin.config.app_config import app_config
+from twin.entities.knowledge_graph import NodeType
 from twin.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,72 @@ async def _embed_batch(
 
 
 # ---------------------------------------------------------------------------
-# 4. Ensure search indexes
+# 4. Reverse edges for bidirectional traversal
+# ---------------------------------------------------------------------------
+
+# Node type pairs that get reverse edges so $graphLookup can traverse
+# in both directions (person ↔ document).
+_BIDIRECTIONAL_PAIRS: set[tuple[str, str]] = {
+    (NodeType.PERSON, NodeType.DOCUMENT),
+    (NodeType.DOCUMENT, NodeType.PERSON),
+    (NodeType.PERSON, NodeType.PERSON),
+    (NodeType.DOCUMENT, NodeType.DOCUMENT),
+}
+
+
+async def create_reverse_edges(client: AsyncMongoClient, database: str) -> int:
+    """Create reverse copies of edges between person and document nodes.
+
+    For each matching edge, inserts a new edge with swapped source/target
+    and direction='reverse'. This enables $graphLookup to chain through
+    person↔document connections in both directions.
+
+    Returns the number of reverse edges created.
+    """
+
+    db = client[database]
+    collection = db[_KG_COLLECTION]
+
+    # Build $or filter for all bidirectional pairs.
+    pair_filters = [
+        {"source_type": src, "target_type": tgt} for src, tgt in _BIDIRECTIONAL_PAIRS
+    ]
+    query = {"kind": "edge", "$or": pair_filters}
+
+    reverse_docs: list[dict[str, Any]] = []
+    async for edge in collection.find(query):
+        reverse_docs.append(
+            {
+                "_id": {
+                    "source_node_id": edge["target_node_id"],
+                    "target_node_id": edge["source_node_id"],
+                    "type": edge["type"],
+                },
+                "kind": "edge",
+                "type": edge["type"],
+                "source_node_id": edge["target_node_id"],
+                "source_type": edge["target_type"],
+                "target_node_id": edge["source_node_id"],
+                "target_type": edge["source_type"],
+                "properties": edge.get("properties", {}),
+                "sources": edge.get("sources", []),
+                "created_at": edge["created_at"],
+                "updated_at": edge["updated_at"],
+                "direction": "reverse",
+            }
+        )
+
+    if reverse_docs:
+        await collection.insert_many(reverse_docs)
+
+    logger.info(
+        "Created %d reverse edges for bidirectional traversal", len(reverse_docs)
+    )
+    return len(reverse_docs)
+
+
+# ---------------------------------------------------------------------------
+# 5. Ensure search indexes
 # ---------------------------------------------------------------------------
 
 

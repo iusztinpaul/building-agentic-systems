@@ -168,67 +168,82 @@ async def expand_graph(
 ) -> QueryResult:
     """Starting from seed node _ids, traverse edges up to max_hops.
 
-    Strategy:
-    - Query all edges where source_node_id or target_node_id is in the
-      current frontier, then expand the frontier with newly discovered nodes.
-    - Repeat for max_hops iterations.
-    - Finally hydrate all discovered node documents.
+    Uses two $graphLookup passes (outgoing + incoming) to do bidirectional
+    traversal, then hydrates all discovered node documents.
     """
 
     max_hops = max_hops if max_hops is not None else app_config.query.max_hops
     db = client[database]
     collection = db[_KG_COLLECTION]
 
-    visited_node_ids: set[Any] = set(node_ids)
-    frontier: set[Any] = set(node_ids)
+    if not node_ids or max_hops == 0:
+        # No traversal — just hydrate seed nodes.
+        all_nodes: list[dict[str, Any]] = []
+        if node_ids:
+            async for node in collection.find(
+                {"kind": "node", "_id": {"$in": list(node_ids)}}
+            ):
+                all_nodes.append(node)
+        return QueryResult(nodes=all_nodes, edges=[])
+
+    # $graphLookup maxDepth is 0-indexed: 0 = direct edges, 1 = two hops, etc.
+    depth = max_hops - 1
+
+    pipeline = [
+        {"$match": {"kind": "node", "_id": {"$in": node_ids}}},
+        # Outgoing: seed._id → edge.source_node_id, follow edge.target_node_id
+        {
+            "$graphLookup": {
+                "from": _KG_COLLECTION,
+                "startWith": "$_id",
+                "connectFromField": "target_node_id",
+                "connectToField": "source_node_id",
+                "as": "outgoing",
+                "maxDepth": depth,
+                "restrictSearchWithMatch": {"kind": "edge"},
+            }
+        },
+        # Incoming: seed._id → edge.target_node_id, follow edge.source_node_id
+        {
+            "$graphLookup": {
+                "from": _KG_COLLECTION,
+                "startWith": "$_id",
+                "connectFromField": "source_node_id",
+                "connectToField": "target_node_id",
+                "as": "incoming",
+                "maxDepth": depth,
+                "restrictSearchWithMatch": {"kind": "edge"},
+            }
+        },
+        # Merge both directions into a single deduplicated array per seed.
+        {"$project": {"edges": {"$setUnion": ["$outgoing", "$incoming"]}}},
+    ]
+
+    cursor = await collection.aggregate(pipeline)
+
+    # Collect and deduplicate edges across all seed nodes.
+    seen_edge_ids: set = set()
     all_edges: list[dict[str, Any]] = []
-    seen_edge_ids: set[Any] = set()
+    node_id_set: set[Any] = set(node_ids)
 
-    for _hop in range(max_hops):
-        if not frontier:
-            break
-
-        frontier_list = list(frontier)
-
-        # Find edges connected to the frontier (either direction).
-        edge_filter = {
-            "kind": "edge",
-            "$or": [
-                {"source_node_id": {"$in": frontier_list}},
-                {"target_node_id": {"$in": frontier_list}},
-            ],
-        }
-
-        new_frontier: set[Any] = set()
-        async for edge in collection.find(edge_filter):
+    async for doc in cursor:
+        for edge in doc.get("edges", []):
             raw_id = edge["_id"]
-            edge_id = (
-                tuple(sorted(raw_id.items()))
-                if isinstance(raw_id, dict)
-                else raw_id
+            edge_key = (
+                tuple(sorted(raw_id.items())) if isinstance(raw_id, dict) else raw_id
             )
-            if edge_id in seen_edge_ids:
+            if edge_key in seen_edge_ids:
                 continue
-            seen_edge_ids.add(edge_id)
+            seen_edge_ids.add(edge_key)
             all_edges.append(edge)
-
-            # Discover new node ids.
-            src = edge["source_node_id"]
-            tgt = edge["target_node_id"]
-            if src not in visited_node_ids:
-                new_frontier.add(src)
-                visited_node_ids.add(src)
-            if tgt not in visited_node_ids:
-                new_frontier.add(tgt)
-                visited_node_ids.add(tgt)
-
-        frontier = new_frontier
+            node_id_set.add(edge["source_node_id"])
+            node_id_set.add(edge["target_node_id"])
 
     # Hydrate all discovered nodes.
     all_nodes: list[dict[str, Any]] = []
-    if visited_node_ids:
+    if node_id_set:
         async for node in collection.find(
-            {"kind": "node", "_id": {"$in": list(visited_node_ids)}}
+            {"kind": "node", "_id": {"$in": list(node_id_set)}}
         ):
             all_nodes.append(node)
 

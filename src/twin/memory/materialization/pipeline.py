@@ -9,7 +9,12 @@ from prefect.cache_policies import NO_CACHE
 
 from twin.config.settings import settings
 from twin.db import init_mongodb
-from twin.memory.materialization.core import embed_nodes, ensure_indexes, materialize
+from twin.memory.materialization.core import (
+    create_reverse_edges,
+    embed_nodes,
+    ensure_indexes,
+    materialize,
+)
 from twin.models.get_model import get_embedding_model
 
 logger = logging.getLogger(__name__)
@@ -24,6 +29,13 @@ async def materialize_task(client, database: str) -> None:
 async def embed_nodes_task(client, database: str) -> int:
     embedding_model = get_embedding_model()
     return await embed_nodes(client, database, embedding_model)
+
+
+@task(
+    name="create-reverse-edges", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE
+)
+async def create_reverse_edges_task(client, database: str) -> int:
+    return await create_reverse_edges(client, database)
 
 
 @task(name="ensure-kg-indexes", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
@@ -42,6 +54,7 @@ async def memory_materialization() -> None:
     database = settings.mongo.mongo_initdb_database
 
     await materialize_task(client, database)
+    await create_reverse_edges_task(client, database)
     count = await embed_nodes_task(client, database)
     await ensure_indexes_task(client, database)
 
