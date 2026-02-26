@@ -48,7 +48,10 @@ async def ingest_substack_rss_feed(feed_url: str) -> list[Document]:
 
 @flow(name="ingest-substack-rss-feed-batch-etl", log_prints=True)
 async def ingest_substack_rss_feed_batch(feed_urls: list[str]) -> list[Document]:
-    await init_mongodb(settings.mongo.mongo_uri, settings.mongo.mongo_initdb_database)
+    await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
 
     results = await asyncio.gather(
         *[ingest_substack_rss_feed(feed_url) for feed_url in feed_urls]

@@ -68,6 +68,7 @@ project-root/
 - **ODM:** Beanie + PyMongo Async driver
 - **MCP Server Framework:** FastMCP
 - **Testing:** Pytest
+- **CLI:** Click
 - **Logging:** Native Python logger (never prints!)
 
 - **LLM API:** Gemini

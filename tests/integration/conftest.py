@@ -8,7 +8,9 @@ TEST_DATABASE = "integration_tests_twin"
 
 @pytest.fixture(scope="session")
 async def mongo_client():
-    client = await init_mongodb(settings.mongo.mongo_uri, TEST_DATABASE)
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(), TEST_DATABASE
+    )
 
     yield client
 

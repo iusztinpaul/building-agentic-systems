@@ -8,7 +8,9 @@ TEST_DATABASE = "unit_tests_twin"
 
 @pytest.fixture(scope="session", autouse=True)
 async def _init_beanie():
-    client = await init_mongodb(settings.mongo.mongo_uri, TEST_DATABASE)
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(), TEST_DATABASE
+    )
 
     yield
 

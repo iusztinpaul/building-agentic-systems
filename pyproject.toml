@@ -16,6 +16,13 @@ dependencies = [
     "beautifulsoup4>=4.13",
     "pydantic-settings>=2.9",
     "prefect>=3.6.19",
+    "langchain-mongodb>=0.5",
+    "langchain-google-genai>=2.1",
+    "langchain-text-splitters>=0.3",
+    "tiktoken>=0.12.0",
+    "click>=8.0",
+    "pyvis>=0.3",
+    "networkx>=3.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -27,6 +34,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-mock>=3.15.1",
     "ruff>=0.15.2",
+    "pre-commit>=4.0",
 ]
 
 [tool.pytest.ini_options]

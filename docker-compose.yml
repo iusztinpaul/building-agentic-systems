@@ -14,7 +14,19 @@ services:
       - ./docker/mongodb/keyfile:/data/keyfile:ro
       - ./docker/mongodb/mongod.conf:/etc/mongod.conf:ro
     healthcheck:
-      test: ["CMD", "mongosh", "-u", "${MONGO_INITDB_ROOT_USERNAME}", "-p", "${MONGO_INITDB_ROOT_PASSWORD}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "-u",
+          "${MONGO_INITDB_ROOT_USERNAME}",
+          "-p",
+          "${MONGO_INITDB_ROOT_PASSWORD}",
+          "--authenticationDatabase",
+          "admin",
+          "--eval",
+          "db.adminCommand('ping')",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -80,7 +92,13 @@ services:
     volumes:
       - prefectdata:/root/.prefect
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:4200/api/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import httpx; httpx.get('http://localhost:4200/api/health')",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5

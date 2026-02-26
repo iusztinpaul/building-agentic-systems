@@ -36,7 +36,7 @@ DATABASE_NAME = "test_twin_db"
 
 
 async def setup() -> AsyncMongoClient:
-    client = AsyncMongoClient(settings.mongo.mongo_uri)
+    client = AsyncMongoClient(settings.mongo.mongo_uri.get_secret_value())
     await init_beanie(database=client[DATABASE_NAME], document_models=[TwinAsset])
     return client
 
