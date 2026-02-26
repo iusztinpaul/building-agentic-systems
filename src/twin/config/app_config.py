@@ -31,6 +31,7 @@ class EmbeddingConfig(BaseModel):
     provider: str = "gemini"
     model: str = "text-embedding-004"
     dimensions: int = 768
+    mock: bool = False
 
 
 class ModelsConfig(BaseModel):
@@ -45,9 +46,17 @@ class ExtractionConfig(BaseModel):
     similarity_threshold: float = 0.85
 
 
+class QueryConfig(BaseModel):
+    top_k: int = 10
+    max_hops: int = 3
+    rrf_k: int = 60
+    embedding_batch_size: int = 64
+
+
 class AppConfig(BaseModel):
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
+    query: QueryConfig = QueryConfig()
 
 
 def load_app_config(path: str | Path | None = None) -> AppConfig:

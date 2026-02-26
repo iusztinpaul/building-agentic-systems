@@ -1,7 +1,12 @@
+import logging
+
 from twin.config.app_config import app_config
 from twin.config.settings import settings
 from twin.models.base import BaseLLM, BaseEmbeddingModel
+from twin.models.fake_model import MockEmbeddingModel
 from twin.models.gemini import GeminiEmbeddingModel, GeminiLLM
+
+logger = logging.getLogger(__name__)
 
 
 def get_llm(provider: str | None = None) -> BaseLLM:
@@ -19,6 +24,12 @@ def get_llm(provider: str | None = None) -> BaseLLM:
 
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     """Factory for embedding model instances."""
+
+    if app_config.models.embedding.mock:
+        logger.warning("Using mock embedding model (random vectors)")
+        return MockEmbeddingModel(
+            dimensions=app_config.models.embedding.dimensions,
+        )
 
     provider = provider or app_config.models.embedding.provider
 

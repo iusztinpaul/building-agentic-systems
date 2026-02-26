@@ -16,6 +16,7 @@ from twin.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed_batch,
 )
 from twin.memory.extraction.pipeline import memory_extraction
+from twin.memory.materialization.pipeline import memory_materialization
 
 if __name__ == "__main__":
     serve(
@@ -30,5 +31,9 @@ if __name__ == "__main__":
         memory_extraction.to_deployment(
             name="memory-extraction-etl",
             tags=["memory-pipeline", "extraction"],
+        ),
+        memory_materialization.to_deployment(
+            name="memory-materialization-etl",
+            tags=["memory-pipeline", "materialization"],
         ),
     )

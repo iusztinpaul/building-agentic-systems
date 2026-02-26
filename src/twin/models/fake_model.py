@@ -1,3 +1,4 @@
+import random
 from typing import Any
 
 from twin.config.app_config import app_config
@@ -35,3 +36,16 @@ class FakeEmbeddingModel(BaseEmbeddingModel):
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[0.0] * self._dimensions for _ in texts]
+
+
+class MockEmbeddingModel(BaseEmbeddingModel):
+    """Returns random vectors in [0, 1]. Drop-in replacement when the real API is unavailable."""
+
+    def __init__(self, dimensions: int | None = None) -> None:
+        dimensions = dimensions or app_config.models.embedding.dimensions
+        self._dimensions = dimensions
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [random.random() for _ in range(self._dimensions)] for _ in texts
+        ]

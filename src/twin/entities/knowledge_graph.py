@@ -65,7 +65,7 @@ class EdgeLogEntry(KnowledgeGraphLogEntry):
 # --- Materialized Collection (knowledge_graph) ---
 # Rebuilt from the log via aggregation pipeline with $out.
 # Nodes and edges coexist with different _id types:
-#   - Nodes: _id = entity name (str)
+#   - Nodes: _id = "type:name" (str), e.g. "person:alice"
 #   - Edges: _id = {source_node_id, target_node_id, type} (dict)
 # Single model with optional fields since $out bypasses Beanie.
 
@@ -76,6 +76,7 @@ class KnowledgeGraphEntry(BeanieDocument):
     type: NodeType | EdgeType
 
     # Node fields
+    name: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] = Field(default_factory=list)
 

@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from twin.entities.knowledge_graph import EdgeType, NodeType
 
@@ -38,3 +38,10 @@ class ExtractionResult(BaseModel):
             nodes=self.nodes + other.nodes,
             edges=self.edges + other.edges,
         )
+
+
+class QueryResult(BaseModel):
+    """Result of a memory query: seed nodes, expanded nodes, and edges."""
+
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)

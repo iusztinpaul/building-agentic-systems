@@ -74,6 +74,7 @@ project-root/
     - **Fixtures**: Use `conftest.py` for shared logic; avoid manual setup/teardown methods.
     - **Mocking**: Use `pytest-mock` (the `mocker` fixture) to isolate unit tests from your MongoDB.
     - **Parametrize**: Use `@pytest.mark.parametrize` to test multiple inputs (e.g., different sensor values) in a single function.
+- Call the `testing-python` SKILL for step-by-step details
 
 ## Tech Stack
 

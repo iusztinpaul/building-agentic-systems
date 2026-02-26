@@ -9,9 +9,16 @@ models:
     provider: gemini
     model: text-embedding-004
     dimensions: 768
+    mock: true
 
 extraction:
   chunk_size: 512
   chunk_overlap: 64
   llm_concurrency: 5
   similarity_threshold: 0.85
+
+query:
+  top_k: 10
+  max_hops: 3
+  rrf_k: 60
+  embedding_batch_size: 64
