@@ -17,6 +17,7 @@ import logging
 
 import click
 
+from twin.config.app_config import app_config
 from twin.config.settings import settings
 from twin.db import init_mongodb
 from twin.memory.query.core import query_memory
@@ -92,14 +93,14 @@ async def _run(
 @click.option(
     "--top-k",
     "-k",
-    default=10,
+    default=app_config.query.top_k,
     show_default=True,
     help="Number of seed nodes to retrieve.",
 )
 @click.option(
     "--max-hops",
     "-h",
-    default=3,
+    default=app_config.query.max_hops,
     show_default=True,
     help="Max hops for graph expansion.",
 )

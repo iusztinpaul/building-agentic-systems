@@ -12,7 +12,7 @@ export PYTHONPATH = ./src/
 
 # --- Default Values ---
 
-QA_FOLDERS := src/ tests/ scripts/
+QA_FOLDERS := src/ tests/ scripts/ deploy/
 DIR_PATH ?= inputs/tests/00_debug
 HUMAN_FEEDBACK ?=
 TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
@@ -62,6 +62,18 @@ local-test: # Validate MongoDB setup (text, vector, graph search).
 	uv run python scripts/test_mongodb_setup.py
 
 
+# --- Deployment ---
+
+deploy-embedding: # Deploy vLLM embedding server (voyage-4-nano) to Modal.
+	uv run modal deploy deploy/modal_vllm_embedding.py
+
+deploy-embedding-test: # Test the deployed vLLM embedding server on Modal.
+	uv run modal run deploy/modal_vllm_embedding.py
+
+deploy-embedding-stop: # Stop the deployed vLLM embedding server on Modal.
+	uv run modal app stop vllm-embedding-voyage-4-nano
+
+
 # --- Orchestration ---
 
 serve-workflows: # Serve Prefect workflow deployments.
@@ -81,3 +93,8 @@ run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect
 
 run-memory-pipeline-materialization: # Trigger memory materialization pipeline via Prefect.
 	uv run python scripts/run_materialization_pipeline.py
+
+# --- Querying ---
+
+query-graph: # Query and visualize the knowledge graph. Pass QUERY="your query" for search, omit for full graph.
+	uv run python scripts/query_graph.py $(if $(QUERY),--query "$(QUERY)",)

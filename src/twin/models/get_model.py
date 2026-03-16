@@ -45,9 +45,10 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
             model=app_config.models.embedding.model,
             dimensions=app_config.models.embedding.dimensions,
         )
-    if provider == "voyage":
+    if provider == "openai_compatible":
+        base_url = app_config.models.embedding.base_url or settings.embedding_base_url
         return OpenAICompatibleEmbeddingModel(
-            base_url=settings.embedding_base_url,
+            base_url=base_url,
             api_key=settings.embedding_api_key.get_secret_value(),
             model=app_config.models.embedding.model,
             dimensions=app_config.models.embedding.dimensions,
