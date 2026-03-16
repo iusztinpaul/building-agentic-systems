@@ -10,9 +10,10 @@ models:
     provider: gemini
     model: gemini-2.5-flash-lite
   embedding:
-    provider: gemini
-    model: text-embedding-004
-    dimensions: 768
+    provider: openai_compatible
+    model: voyageai/voyage-4-nano
+    dimensions: 512
+    base_url: https://your-workspace--vllm-embedding-voyage-4-nano-serve.modal.run/v1
     mock: true
 
 extraction:

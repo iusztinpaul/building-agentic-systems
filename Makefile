@@ -12,7 +12,7 @@ export PYTHONPATH = ./src/
 
 # --- Default Values ---
 
-QA_FOLDERS := src/ tests/ scripts/
+QA_FOLDERS := src/ tests/ scripts/ deploy/
 DIR_PATH ?= inputs/tests/00_debug
 HUMAN_FEEDBACK ?=
 TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
@@ -72,3 +72,12 @@ serve-workflows: # Serve Prefect workflow deployments.
 
 run-etl-substack: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
 	uv run python scripts/run_data_pipeline.py
+
+
+# --- Deployment ---
+
+deploy-embedding: # Deploy vLLM embedding server (voyage-4-nano) to Modal.
+	uv run modal deploy deploy/modal_vllm_embedding.py
+
+deploy-embedding-test: # Test the deployed vLLM embedding server on Modal.
+	uv run modal run deploy/modal_vllm_embedding.py

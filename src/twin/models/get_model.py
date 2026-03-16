@@ -5,6 +5,7 @@ from twin.config.settings import settings
 from twin.models.base import BaseLLM, BaseEmbeddingModel
 from twin.models.fake_model import MockEmbeddingModel
 from twin.models.gemini import GeminiEmbeddingModel, GeminiLLM
+from twin.models.openai_embedding import OpenAICompatibleEmbeddingModel
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     if provider == "gemini":
         return GeminiEmbeddingModel(
             api_key=settings.google_api_key.get_secret_value(),
+            model=app_config.models.embedding.model,
+            dimensions=app_config.models.embedding.dimensions,
+        )
+    if provider == "openai_compatible":
+        return OpenAICompatibleEmbeddingModel(
+            base_url=app_config.models.embedding.base_url,
+            api_key=settings.vllm_api_key.get_secret_value(),
             model=app_config.models.embedding.model,
             dimensions=app_config.models.embedding.dimensions,
         )

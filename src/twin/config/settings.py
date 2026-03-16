@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     mongo: MongoSettings = MongoSettings()
     google_api_key: SecretStr = SecretStr("")
+    vllm_api_key: SecretStr = SecretStr("EMPTY")
 
 
 settings = Settings()
