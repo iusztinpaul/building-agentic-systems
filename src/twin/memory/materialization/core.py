@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from pymongo import AsyncMongoClient
+from pymongo.errors import BulkWriteError
 
 from twin.config.app_config import app_config
 from twin.entities.knowledge_graph import NodeType
@@ -284,13 +285,20 @@ async def create_reverse_edges(client: AsyncMongoClient, database: str) -> int:
             }
         )
 
+    inserted = 0
     if reverse_docs:
-        await collection.insert_many(reverse_docs)
+        try:
+            result = await collection.insert_many(reverse_docs, ordered=False)
+            inserted = len(result.inserted_ids)
+        except BulkWriteError as exc:
+            inserted = exc.details.get("nInserted", 0)
+            logger.info(
+                "Skipped %d duplicate reverse edges",
+                len(reverse_docs) - inserted,
+            )
 
-    logger.info(
-        "Created %d reverse edges for bidirectional traversal", len(reverse_docs)
-    )
-    return len(reverse_docs)
+    logger.info("Created %d reverse edges for bidirectional traversal", inserted)
+    return inserted
 
 
 # ---------------------------------------------------------------------------

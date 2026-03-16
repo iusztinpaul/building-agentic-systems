@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     mongo: MongoSettings = MongoSettings()
     google_api_key: SecretStr = SecretStr("")
+    embedding_api_key: SecretStr = SecretStr("EMPTY")
+    embedding_base_url: str = "http://localhost:8000/v1"
 
 
 settings = Settings()

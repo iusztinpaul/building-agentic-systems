@@ -10,10 +10,9 @@ models:
     provider: gemini
     model: gemini-2.5-flash-lite
   embedding:
-    provider: gemini
-    model: text-embedding-004
-    dimensions: 768
-    mock: true
+    provider: sentence-transformers
+    model: voyageai/voyage-4-nano
+    dimensions: 2048
 
 extraction:
   chunk_size: 512

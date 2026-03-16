@@ -65,6 +65,10 @@ project-root/
     - Checkpointing
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
 
+## Writing Python Code
+
+- Always add types to function or method parameters and return types. Even if they return `None`.
+
 ### Tests
 
 - Structure the tests following a one-on-one relationship with the core python module.
@@ -145,7 +149,21 @@ Ultimately, run the tests and fix the core module for any potential issues:
 make tests
 ```
 
-## Run
+## Running Pipelines
+
+To test a pipeline after making changes:
+
+1. **Re-serve the workflows** to pick up the latest code (restart `make serve-workflows`)
+2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
+```
+make run-data-pipeline
+make run-memory-pipeline-extraction
+... # other make *pipeline* commands
+```
+
+Always use these Make commands instead of `prefect deployment run` directly — the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
+
+## Running Custom Commands
 
 If not present directly in the @Makefile, run any custom Python file using: `uv run python ...`
 
