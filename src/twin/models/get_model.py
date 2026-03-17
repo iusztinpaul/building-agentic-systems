@@ -5,8 +5,9 @@ from twin.config.settings import settings
 from twin.models.base import BaseLLM, BaseEmbeddingModel
 from twin.models.fake_model import MockEmbeddingModel
 from twin.models.gemini import GeminiEmbeddingModel, GeminiLLM
-from twin.models.openai_embedding import OpenAICompatibleEmbeddingModel
+from twin.models.modal_embedding import ModalEmbeddingModel
 from twin.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from twin.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,15 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
             model=app_config.models.embedding.model,
             dimensions=app_config.models.embedding.dimensions,
         )
-    if provider == "openai_compatible":
-        base_url = app_config.models.embedding.base_url or settings.embedding_base_url
-        return OpenAICompatibleEmbeddingModel(
-            base_url=base_url,
-            api_key=settings.embedding_api_key.get_secret_value(),
+    if provider == "modal":
+        return ModalEmbeddingModel(
+            api_key=settings.modal_embedding_api_key.get_secret_value(),
             model=app_config.models.embedding.model,
-            dimensions=app_config.models.embedding.dimensions,
+        )
+    if provider == "voyage":
+        return VoyageMultimodalEmbeddingModel(
+            api_key=settings.voyage_api_key.get_secret_value(),
+            model=app_config.models.embedding.model,
+            output_dimension=app_config.models.embedding.dimensions,
         )
     raise ValueError(f"Unknown embedding provider: {provider}")

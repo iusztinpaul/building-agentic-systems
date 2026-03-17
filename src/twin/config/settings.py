@@ -28,8 +28,8 @@ class Settings(BaseSettings):
 
     mongo: MongoSettings = MongoSettings()
     google_api_key: SecretStr = SecretStr("")
-    embedding_api_key: SecretStr = SecretStr("EMPTY")
-    embedding_base_url: str = "http://localhost:8000/v1"
+    voyage_api_key: SecretStr = SecretStr("")
+    modal_embedding_api_key: SecretStr = SecretStr("")
 
 
 settings = Settings()

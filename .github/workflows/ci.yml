@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  # MongoDB (used by docker-compose and tests)
+  MONGO_HOST: localhost
+  MONGO_PORT: "27017"
+  MONGO_INITDB_ROOT_USERNAME: twin
+  MONGO_INITDB_ROOT_PASSWORD: twin
+  MONGO_INITDB_DATABASE: twin
+  MONGOT_PORT: "27028"
+  # Prefect (not started in CI, but env var needed by settings)
+  PREFECT_PORT: "4200"
+  PREFECT_API_URL: http://127.0.0.1:4200/api
+  # Mock API keys (not called in unit tests)
+  GOOGLE_API_KEY: mock-google-api-key
+  VOYAGE_API_KEY: mock-voyage-api-key
+  MODAL_EMBEDDING_API_KEY: mock-modal-embedding-api-key
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Format check
+        run: uv run ruff format --check src/ tests/ scripts/ deploy/
+
+      - name: Lint check
+        run: uv run ruff check src/ tests/ scripts/ deploy/
+
+      - name: Start MongoDB infrastructure
+        run: docker compose up -d mongodb mongodb-init mongot
+
+      - name: Wait for MongoDB to be ready
+        run: |
+          echo "Waiting for MongoDB to be healthy..."
+          for i in $(seq 1 30); do
+            if docker compose exec -T mongodb mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" \
+              -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "db.adminCommand('ping')" 2>/dev/null; then
+              echo "MongoDB is ready."
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 5
+          done
+
+      - name: Wait for replica set to initialize
+        run: |
+          echo "Waiting for replica set..."
+          for i in $(seq 1 30); do
+            STATUS=$(docker compose exec -T mongodb mongosh \
+              -u "$MONGO_INITDB_ROOT_USERNAME" \
+              -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin \
+              --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null)
+            if [ "$STATUS" = "1" ]; then
+              echo "Replica set is ready."
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 5
+          done
+
+      - name: Run tests
+        run: uv run pytest
+        env:
+          PYTHONPATH: ./src/
+
+      - name: Stop infrastructure
+        if: always()
+        run: docker compose down

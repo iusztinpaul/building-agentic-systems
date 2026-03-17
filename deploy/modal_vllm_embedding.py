@@ -1,6 +1,7 @@
 """Deploy voyageai/voyage-4-nano as an OpenAI-compatible embedding server on Modal via vLLM."""
 
 import json
+import os
 import subprocess
 
 import modal
@@ -24,14 +25,16 @@ vllm_image = (
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
-app = modal.App("vllm-embedding-voyage-4-nano")
+app = modal.App("vllm-embedding-models")
 
 
 @app.function(
+    name="voyageai-voyage-4-nano",
     image=vllm_image,
     gpu="A10G",
     scaledown_window=15 * MINUTES,
     timeout=10 * MINUTES,
+    secrets=[modal.Secret.from_name("vllm-embedding-api-key")],
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
@@ -39,7 +42,9 @@ app = modal.App("vllm-embedding-voyage-4-nano")
 )
 @modal.concurrent(max_inputs=64)
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
-def serve():
+def voyageai_voyage_4_nano():
+    api_key = os.environ["MODAL_EMBEDDING_API_KEY"]
+
     cmd = [
         "vllm",
         "serve",
@@ -61,6 +66,8 @@ def serve():
         "--max-model-len",
         "32768",
         "--enforce-eager",
+        "--api-key",
+        api_key,
         "--pooler-config",
         json.dumps({"pooling_type": "MEAN"}),
         "--hf-overrides",
@@ -76,9 +83,16 @@ def serve():
 async def test():
     import aiohttp
 
-    url = await serve.get_web_url.aio()
+    api_key = os.environ.get("MODAL_EMBEDDING_API_KEY", "")
+    if not api_key:
+        raise SystemExit(
+            "Set MODAL_EMBEDDING_API_KEY env var (same value as the Modal secret) to run this test."
+        )
 
-    async with aiohttp.ClientSession(base_url=url) as session:
+    url = await voyageai_voyage_4_nano.get_web_url.aio()
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    async with aiohttp.ClientSession(base_url=url, headers=headers) as session:
         print(f"Health check: {url}")
         async with session.get(
             "/health", timeout=aiohttp.ClientTimeout(total=5 * MINUTES)

@@ -11,9 +11,8 @@ models:
     model: gemini-2.5-flash-lite
   embedding:
     provider: sentence-transformers
-    model: voyageai/voyage-4-nano
-    dimensions: 2048
-    base_url: https://your-workspace--vllm-embedding-voyage-4-nano-serve.modal.run/v1
+    model: all-MiniLM-L6-v2
+    dimensions: 384
 
 extraction:
   chunk_size: 512

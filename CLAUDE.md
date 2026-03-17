@@ -23,33 +23,37 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 ```
 project-root/
 ├── src/
-│   └── twin/               # Core Python module
-│       ├── config/         # Configuration
-│       ├── entities/       # Key data structures as ORMs
-│       ├── db.py           # Database connection helpers
-│       ├── orchestrator.py # Orchestrator integration
-│       ├── data/           # Data ETLs
-│       │   ├── core/       # Core module business logic
-│       │   ├── types.py    # Types used across the data layer 
-│       │   └── ...         # One .py file per ETL served via Prefect
-│       └── memory/         # Unified memory module
-│           ├── types.py    # Types used across the memory layer
-│           ├── extraction/ # Chunking, graph extraction, embedding
-│           ├── materialization/ # Query views built from memory logs
-│           └── query/      # Query interfaces over unified memory
-├── models/                # Model configuration and utilities
-│   ├── config.py          # Global model configuration
-│   ├── exceptions.py      # Model-related exception types
-│   ├── get_model.py       # Model factory and loading
-│   ├── base.py            # Base interfaces
-│   ├── gemini.py          # Gemini models
-│   └── fake_model.py      # Fake models for testing
-├── configs/                # App YAML configs
-├── scripts/                # Entrypoints
-├── tests/                  # Tests
+│   └── twin/                        # Core Python module
+│       ├── config/                  # Configuration
+│       ├── entities/                # Key data structures as ORMs
+│       ├── db.py                    # Database connection helpers
+│       ├── orchestrator.py          # Orchestrator integration
+│       ├── data/                    # Data ETLs
+│       │   ├── core/                # Core module business logic
+│       │   ├── types.py             # Types used across the data layer
+│       │   └── ...                  # One .py file per ETL served via Prefect
+│       └── memory/                  # Unified memory module
+│           ├── types.py             # Types used across the memory layer
+│           ├── extraction/          # Chunking, graph extraction, embedding
+│           ├── materialization/     # Query views built from memory logs
+│           └── query/               # Query interfaces over unified memory
+├── models/                          # Model configuration and utilities
+│   ├── base.py                      # Base interfaces (BaseLLM, BaseEmbeddingModel)
+│   ├── exceptions.py                # Model-related exception types
+│   ├── get_model.py                 # Model factory and loading
+│   ├── gemini.py                    # Gemini LLM and embedding models
+│   ├── modal_embedding.py           # Modal provider: dynamic URL resolution + health check
+│   ├── voyage_multimodal_embedding.py # Voyage AI multimodal embeddings API
+│   ├── sentence_transformer.py      # In-process sentence-transformers embedding
+│   └── fake_model.py                # Fake/mock models for testing
+├── deploy/                          # Cloud deployment scripts
+│   └── modal_vllm_embedding.py      # Modal vLLM embedding server (voyage-4-nano)
+├── configs/                         # App YAML configs
+├── scripts/                         # Entrypoints
+├── tests/                           # Tests
 │   ├── unit/
 │   └── integration/
-└── .env.example            # All supported env vars
+└── .env.example                     # All supported env vars
 ```
 
 ## Key Design Choices
@@ -82,6 +86,7 @@ project-root/
 
 ## Tech Stack
 
+### Core
 - **Data validation and structuring:** Pydantic
 - **ODM:** Beanie + PyMongo Async driver
 - **MCP Server Framework:** FastMCP
@@ -89,13 +94,17 @@ project-root/
 - **CLI:** Click
 - **Logging:** Native Python logger (never prints!)
 
+- **Embedding Model Definition:** Sentence Transformers
+
+### Services
 - **LLM API:** Gemini
 - **Embedding Models API:** Voyage AI
-- **Model Definition:** HuggingFace Transformers
 - **Crawling and scraping:** Firecrawl
 
+### Infrastructure
 - **Unified memory and database:** MongoDB
-- **Orchestrator and durable workflows:** Prefect (
+- **Orchestrator and durable workflows:** Prefect
+- **Serving AI Models**: Modal
 - **Observability and evals:** Opik
 - **Containerization:** Docker
 - **CI/CD:** GitHub Actions
@@ -153,18 +162,28 @@ make tests
 
 To test a pipeline after making changes:
 
-1. **Re-serve the workflows** to pick up the latest code (restart `make serve-workflows`)
+1. **Serve the workflows** in a background process to pick up the latest code:
+```
+make serve-workflows &
+```
+If a serve process is already running, kill it first and re-serve to pick up the latest code changes.
+
 2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
 ```
 make run-data-pipeline
 make run-memory-pipeline-extraction
-... # other make *pipeline* commands
+make run-memory-pipeline-materialization
 ```
 
-Always use these Make commands instead of `prefect deployment run` directly — the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
+The `make serve-workflows` process must be running for pipeline triggers to be picked up, as it acts as the in-process Prefect worker. Without it, deployments are registered but no worker will execute them.
+
+Always use these Make commands instead of `prefect deployment run` directly, as the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
 
 ## Running Custom Commands
 
-If not present directly in the @Makefile, run any custom Python file using: `uv run python ...`
+As we use `uv` any custom command that is not present in the @Makefile, but uses Python or other dependency installed through uv, usually available in @pyproject.toml, is run by prefixing it with `uv run ...`, such as:
+- `uv run python ...`
+- `uv run prefect ...`
+- `uv run modal ...`
 
-Use `mongosh` to interact with MongoDB directly through the CLI.
+Always use `mongosh` to interact with MongoDB directly through the CLI, which is installed directly on the system.

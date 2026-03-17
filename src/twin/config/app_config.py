@@ -31,7 +31,6 @@ class EmbeddingConfig(BaseModel):
     provider: str = "gemini"
     model: str = "text-embedding-004"
     dimensions: int = 768
-    base_url: str = ""
 
 
 class ModelsConfig(BaseModel):

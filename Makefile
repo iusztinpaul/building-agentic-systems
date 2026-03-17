@@ -25,6 +25,9 @@ help: # Display this help message with a list of available commands.
 build: # Build the project.
 	uv sync
 
+generate-secret-key: # Generate a random secret key (e.g. for MODAL_EMBEDDING_API_KEY).
+	@uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+
 
 # --- Tests & QA ---
 
@@ -64,14 +67,16 @@ local-test: # Validate MongoDB setup (text, vector, graph search).
 
 # --- Deployment ---
 
-deploy-embedding: # Deploy vLLM embedding server (voyage-4-nano) to Modal.
+deploy-embedding-model: # Deploy vLLM embedding server (voyage-4-nano) to Modal. Creates the API key secret if missing.
+	@uv run modal secret list 2>/dev/null | grep -q "vllm-embedding-api" || \
+		uv run modal secret create vllm-embedding-api-key MODAL_EMBEDDING_API_KEY="$(MODAL_EMBEDDING_API_KEY)"
 	uv run modal deploy deploy/modal_vllm_embedding.py
 
-deploy-embedding-test: # Test the deployed vLLM embedding server on Modal.
+deploy-embedding-model-test: # Test the deployed vLLM embedding server on Modal.
 	uv run modal run deploy/modal_vllm_embedding.py
 
-deploy-embedding-stop: # Stop the deployed vLLM embedding server on Modal.
-	uv run modal app stop vllm-embedding-voyage-4-nano
+deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
+	uv run modal app stop vllm-embedding-models
 
 
 # --- Orchestration ---

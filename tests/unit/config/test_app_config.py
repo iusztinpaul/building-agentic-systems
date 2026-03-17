@@ -9,7 +9,7 @@ class TestLoadAppConfig:
 
         assert config.models.llm.provider == "gemini"
         assert config.models.llm.model == "gemini-2.5-flash-lite"
-        assert config.models.embedding.dimensions == 512
+        assert config.models.embedding.dimensions == 384
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
 

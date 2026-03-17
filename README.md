@@ -8,6 +8,10 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [Docker](https://www.docker.com/) and Docker Compose
 - [GNU Make](https://www.gnu.org/software/make/)
+
+- [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/)
+- [MongoDB Compass](https://www.mongodb.com/products/tools/compass)
+
 - A [Google AI API key](https://aistudio.google.com/apikey) (for Gemini LLM extraction)
 
 ## Installation
