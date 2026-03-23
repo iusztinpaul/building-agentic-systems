@@ -1,6 +1,9 @@
 import logging
+from collections.abc import Generator
 from datetime import datetime, timezone
 
+import httpx
+from bs4 import BeautifulSoup
 from datasets import load_dataset
 from pymongo.errors import DuplicateKeyError
 
@@ -10,14 +13,20 @@ logger = logging.getLogger(__name__)
 
 ARXIV_HF_DATASET = "librarian-bots/arxiv-metadata-snapshot"
 ARXIV_BASE_URL = "https://arxiv.org/abs/"
+ARXIV_HTML_URL = "https://arxiv.org/html/"
 
 
-def parse_update_date(date_str: str | None) -> datetime:
-    """Parse an arxiv update_date string (YYYY-MM-DD) into a timezone-aware datetime."""
+def parse_update_date(date_value: str | datetime | None) -> datetime:
+    """Parse an arxiv update_date string (YYYY-MM-DD) or datetime into a timezone-aware datetime."""
 
-    if date_str:
+    if isinstance(date_value, datetime):
+        if date_value.tzinfo is None:
+            return date_value.replace(tzinfo=timezone.utc)
+        return date_value
+
+    if date_value:
         try:
-            return datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(
+            return datetime.strptime(date_value.strip(), "%Y-%m-%d").replace(
                 tzinfo=timezone.utc
             )
         except ValueError, TypeError:
@@ -44,39 +53,94 @@ def extract_document(raw_entry: dict) -> Document:
     source_uri = f"{ARXIV_BASE_URL}{arxiv_id}" if arxiv_id else ""
 
     abstract = (raw_entry.get("abstract") or "").strip()
-    categories = (raw_entry.get("categories") or "").strip()
 
     return Document(
         source_type=SourceType.HUGGINGFACE,
         source_uri=source_uri,
         title=(raw_entry.get("title") or "").strip(),
-        summary=categories,
-        content=abstract,
+        summary=abstract,
+        content="",
         authors=parse_authors(raw_entry.get("authors")),
         date=parse_update_date(raw_entry.get("update_date")),
     )
 
 
-def fetch_dataset(max_samples: int) -> list[dict]:
-    """Stream the arxiv dataset from HuggingFace and return up to max_samples entries."""
+def fetch_dataset_batches(
+    max_samples: int, batch_size: int
+) -> Generator[list[dict], None, None]:
+    """Stream the arxiv dataset from HuggingFace and yield batches of entries.
+
+    Yields lists of up to ``batch_size`` entries, stopping after ``max_samples`` total.
+    """
 
     logger.info(
-        "Streaming arxiv dataset from %s (max_samples=%d)",
+        "Streaming arxiv dataset from %s (max_samples=%d, batch_size=%d)",
         ARXIV_HF_DATASET,
         max_samples,
+        batch_size,
     )
 
     ds = load_dataset(ARXIV_HF_DATASET, split="train", streaming=True)
 
-    entries: list[dict] = []
-    for i, entry in enumerate(ds):
-        if i >= max_samples:
+    batch: list[dict] = []
+    count = 0
+    for entry in ds:
+        if count >= max_samples:
             break
-        entries.append(dict(entry))
+        batch.append(dict(entry))
+        count += 1
+        if len(batch) >= batch_size:
+            logger.info(
+                "Yielding batch of %d entries (total so far: %d)", len(batch), count
+            )
+            yield batch
+            batch = []
 
-    logger.info("Fetched %d entries from arxiv dataset", len(entries))
+    if batch:
+        logger.info("Yielding final batch of %d entries (total: %d)", len(batch), count)
+        yield batch
 
-    return entries
+    logger.info("Finished streaming. Total entries: %d", count)
+
+
+async def fetch_paper_content(source_uri: str) -> str:
+    """Fetch the full paper content from the arXiv HTML endpoint.
+
+    Returns the extracted text or an empty string if the paper
+    is not available in HTML format.
+    """
+
+    arxiv_id = source_uri.removeprefix(ARXIV_BASE_URL)
+    if not arxiv_id:
+        return ""
+
+    url = f"{ARXIV_HTML_URL}{arxiv_id}"
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            response = await client.get(url)
+        if response.status_code != 200:
+            logger.debug(
+                "HTML not available for %s (status %d)", arxiv_id, response.status_code
+            )
+            return ""
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        article = (
+            soup.find("article")
+            or soup.find("main")
+            or soup.find("div", class_="ltx_page_content")
+        )
+        if not article:
+            logger.debug("No article element found for %s", arxiv_id)
+            return ""
+
+        text = article.get_text(separator="\n", strip=True)
+        logger.info("Fetched full content for %s (%d chars)", arxiv_id, len(text))
+        return text
+
+    except httpx.HTTPError:
+        logger.warning("Failed to fetch HTML for %s", arxiv_id, exc_info=True)
+        return ""
 
 
 async def load_document(doc: Document) -> Document | None:

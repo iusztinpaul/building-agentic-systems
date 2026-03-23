@@ -54,6 +54,9 @@ class QueryConfig(BaseModel):
 
 class HuggingFaceArxivDatasetConfig(BaseModel):
     max_samples: int = 10
+    fetch_content: bool = False
+    batch_size: int = 50
+    concurrency: int = 10
 
 
 class SourcesConfig(BaseModel):

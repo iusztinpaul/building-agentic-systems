@@ -6,6 +6,9 @@ sources:
     - https://www.decodingai.com/feed
   huggingface_arxiv_dataset:
     max_samples: 10
+    fetch_content: false
+    batch_size: 50
+    concurrency: 10
 
 models:
   llm:

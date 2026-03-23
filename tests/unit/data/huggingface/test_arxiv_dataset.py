@@ -1,6 +1,10 @@
+import httpx
+import pytest
+
 from twin.data.huggingface.arxiv_dataset import (
     extract_document,
-    fetch_dataset,
+    fetch_dataset_batches,
+    fetch_paper_content,
     parse_authors,
     parse_update_date,
 )
@@ -74,8 +78,8 @@ class TestExtractDocument:
         assert doc.source_type == SourceType.HUGGINGFACE
         assert doc.source_uri == "https://arxiv.org/abs/2103.12345"
         assert doc.title == "A Study on Neural Networks"
-        assert doc.summary == "cs.LG cs.AI"
-        assert doc.content == "We present a novel approach to neural networks."
+        assert doc.summary == "We present a novel approach to neural networks."
+        assert doc.content == ""
         assert doc.authors == ["Jane Doe", "John Smith", "Alice Johnson"]
         assert doc.date.year == 2021
         assert doc.date.month == 3
@@ -109,41 +113,171 @@ class TestExtractDocument:
         assert doc.date.tzinfo is not None
 
 
-class TestFetchDataset:
-    def test_returns_limited_entries(self, mocker) -> None:
-        fake_entries = [{"id": f"2103.{i:05d}"} for i in range(20)]
-        mock_ds = iter(fake_entries)
+class TestFetchPaperContent:
+    @pytest.mark.asyncio
+    async def test_successful_fetch(self, mocker) -> None:
+        html = "<html><body><article>Full paper text here.</article></body></html>"
+        mock_response = mocker.Mock()
+        mock_response.status_code = 200
+        mock_response.text = html
+
+        mock_client = mocker.AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
-            return_value=mock_ds,
+            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            return_value=mock_client,
         )
 
-        result = fetch_dataset(max_samples=5)
+        result = await fetch_paper_content("https://arxiv.org/abs/2401.00001")
 
-        assert len(result) == 5
-        assert result[0]["id"] == "2103.00000"
-        assert result[4]["id"] == "2103.00004"
+        assert result == "Full paper text here."
+
+    @pytest.mark.asyncio
+    async def test_404_returns_empty(self, mocker) -> None:
+        mock_response = mocker.Mock()
+        mock_response.status_code = 404
+
+        mock_client = mocker.AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+
+        result = await fetch_paper_content("https://arxiv.org/abs/0704.0001")
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_no_article_element_returns_empty(self, mocker) -> None:
+        html = "<html><body><p>No article tag</p></body></html>"
+        mock_response = mocker.Mock()
+        mock_response.status_code = 200
+        mock_response.text = html
+
+        mock_client = mocker.AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+
+        result = await fetch_paper_content("https://arxiv.org/abs/2401.00001")
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_http_error_returns_empty(self, mocker) -> None:
+        mock_client = mocker.AsyncMock()
+        mock_client.get.side_effect = httpx.HTTPError("connection failed")
+        mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+
+        result = await fetch_paper_content("https://arxiv.org/abs/2401.00001")
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_empty_source_uri_returns_empty(self) -> None:
+        assert await fetch_paper_content("") == ""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tag",
+        ["article", "main"],
+    )
+    async def test_fallback_tags(self, mocker, tag: str) -> None:
+        html = f"<html><body><{tag}>Content in {tag}.</{tag}></body></html>"
+        mock_response = mocker.Mock()
+        mock_response.status_code = 200
+        mock_response.text = html
+
+        mock_client = mocker.AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            return_value=mock_client,
+        )
+
+        result = await fetch_paper_content("https://arxiv.org/abs/2401.00001")
+
+        assert result == f"Content in {tag}."
+
+
+class TestFetchDatasetBatches:
+    def test_yields_correct_batch_sizes(self, mocker) -> None:
+        fake_entries = [{"id": f"2103.{i:05d}"} for i in range(10)]
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=iter(fake_entries),
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=10, batch_size=3))
+
+        assert len(batches) == 4
+        assert len(batches[0]) == 3
+        assert len(batches[1]) == 3
+        assert len(batches[2]) == 3
+        assert len(batches[3]) == 1
+
+    def test_stops_at_max_samples(self, mocker) -> None:
+        fake_entries = [{"id": f"2103.{i:05d}"} for i in range(20)]
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=iter(fake_entries),
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=5, batch_size=3))
+        total = sum(len(b) for b in batches)
+
+        assert total == 5
+        assert len(batches) == 2
+        assert len(batches[0]) == 3
+        assert len(batches[1]) == 2
 
     def test_returns_all_when_fewer_than_max(self, mocker) -> None:
         fake_entries = [{"id": f"2103.{i:05d}"} for i in range(3)]
-        mock_ds = iter(fake_entries)
         mocker.patch(
             "twin.data.huggingface.arxiv_dataset.load_dataset",
-            return_value=mock_ds,
+            return_value=iter(fake_entries),
         )
 
-        result = fetch_dataset(max_samples=10)
+        batches = list(fetch_dataset_batches(max_samples=10, batch_size=5))
 
-        assert len(result) == 3
+        assert len(batches) == 1
+        assert len(batches[0]) == 3
 
     def test_returns_empty_for_zero_max(self, mocker) -> None:
         fake_entries = [{"id": "2103.00000"}]
-        mock_ds = iter(fake_entries)
         mocker.patch(
             "twin.data.huggingface.arxiv_dataset.load_dataset",
-            return_value=mock_ds,
+            return_value=iter(fake_entries),
         )
 
-        result = fetch_dataset(max_samples=0)
+        batches = list(fetch_dataset_batches(max_samples=0, batch_size=5))
 
-        assert result == []
+        assert batches == []
+
+    def test_exact_batch_boundary(self, mocker) -> None:
+        fake_entries = [{"id": f"2103.{i:05d}"} for i in range(6)]
+        mocker.patch(
+            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=iter(fake_entries),
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=6, batch_size=3))
+
+        assert len(batches) == 2
+        assert all(len(b) == 3 for b in batches)

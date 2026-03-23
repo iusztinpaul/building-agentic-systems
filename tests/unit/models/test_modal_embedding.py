@@ -190,7 +190,9 @@ class TestModalEmbeddingModelHealthCheck:
 
         with patch("aiohttp.ClientSession") as mock_session_cls:
             mock_session = AsyncMock()
-            mock_session.get.side_effect = aiohttp.ClientError("connection refused")
+            mock_session.get = MagicMock(
+                side_effect=aiohttp.ClientError("connection refused")
+            )
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session.__aexit__ = AsyncMock(return_value=False)
             mock_session_cls.return_value = mock_session
