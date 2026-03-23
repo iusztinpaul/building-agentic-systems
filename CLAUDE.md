@@ -83,6 +83,9 @@ project-root/
     - **Mocking**: Use `pytest-mock` (the `mocker` fixture) to isolate unit tests from your MongoDB.
     - **Parametrize**: Use `@pytest.mark.parametrize` to test multiple inputs (e.g., different sensor values) in a single function.
 - Call the `testing-python` SKILL for step-by-step details
+- What to **AVOID**:
+  - Writing unit tests for Prefect, Modal, Opik or other infra components. They represent our infrastructure layer, 
+which is tested only via integration tests.
 
 ## Tech Stack
 

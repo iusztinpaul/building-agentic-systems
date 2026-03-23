@@ -144,7 +144,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
     for n in raw.get("nodes", []):
         try:
             node_type = NodeType(n["type"])
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             logger.warning("Skipping node with invalid type: %s", n)
             continue
         if node_type not in LLM_EXTRACTABLE_NODE_TYPES:
@@ -162,7 +162,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
     for e in raw.get("edges", []):
         try:
             edge_type = EdgeType(e["type"])
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             logger.warning("Skipping edge with invalid type: %s", e)
             continue
         if edge_type not in LLM_EXTRACTABLE_EDGE_TYPES:
@@ -173,7 +173,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
         try:
             src_type = NodeType(e["source_type"])
             tgt_type = NodeType(e["target_type"])
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             logger.warning("Skipping edge with invalid node types: %s", e)
             continue
 
