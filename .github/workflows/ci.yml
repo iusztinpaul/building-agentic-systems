@@ -54,9 +54,6 @@ jobs:
           echo "Waiting for MongoDB to be healthy..."
           for i in $(seq 1 30); do
             if docker compose -f docker-compose.yml -f docker-compose.ci.yml exec -T mongodb mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" \
-              -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin \
               --eval "db.adminCommand('ping')" 2>/dev/null; then
               echo "MongoDB is ready."
               break
@@ -81,6 +78,16 @@ jobs:
             echo "Attempt $i/30..."
             sleep 5
           done
+
+      - name: Debug MongoDB state
+        if: always()
+        run: |
+          echo "=== Container status ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml ps -a
+          echo "=== MongoDB logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs mongodb 2>&1 | tail -30
+          echo "=== MongoDB-init logs ==="
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs mongodb-init 2>&1 | tail -30
 
       - name: Run tests
         run: uv run pytest
