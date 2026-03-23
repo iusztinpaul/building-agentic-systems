@@ -8,6 +8,7 @@ from pymongo import IndexModel
 
 class SourceType(StrEnum):
     SUBSTACK = "substack"
+    HUGGINGFACE = "huggingface"
     LATENT = "latent"
 
 

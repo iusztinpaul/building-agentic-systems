@@ -52,8 +52,15 @@ class QueryConfig(BaseModel):
     embedding_batch_size: int = 64
 
 
+class HuggingFaceArxivDatasetConfig(BaseModel):
+    max_samples: int = 10
+
+
 class SourcesConfig(BaseModel):
     substack: list[str] = []
+    huggingface_arxiv_dataset: HuggingFaceArxivDatasetConfig = (
+        HuggingFaceArxivDatasetConfig()
+    )
 
 
 class AppConfig(BaseModel):

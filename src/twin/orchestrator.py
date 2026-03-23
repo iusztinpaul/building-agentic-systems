@@ -11,6 +11,7 @@ Usage:
 
 from prefect import serve
 
+from twin.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from twin.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
@@ -27,6 +28,10 @@ if __name__ == "__main__":
         ingest_substack_rss_feed_batch.to_deployment(
             name="ingest-substack-rss-feed-batch-etl",
             tags=["data-pipeline", "substack"],
+        ),
+        ingest_arxiv_dataset.to_deployment(
+            name="ingest-arxiv-dataset-etl",
+            tags=["data-pipeline", "huggingface"],
         ),
         memory_extraction.to_deployment(
             name="memory-extraction-etl",

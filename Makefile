@@ -90,6 +90,9 @@ serve-workflows: # Serve Prefect workflow deployments.
 run-data-pipeline: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
 	uv run python scripts/run_data_pipeline.py
 
+run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samples from configs/default.yaml.
+	uv run python scripts/run_arxiv_data_pipeline.py
+
 
 # --- Memory Pipelines ---
 

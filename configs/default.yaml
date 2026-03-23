@@ -4,6 +4,8 @@
 sources:
   substack:
     - https://www.decodingai.com/feed
+  huggingface_arxiv_dataset:
+    max_samples: 10
 
 models:
   llm:
