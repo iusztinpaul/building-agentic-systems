@@ -124,13 +124,29 @@ We use `uv` to manage our Python virtual environment, dependencies, and run the 
 ## Developing New Features
 
 When developing new features you always have to:
+- If not on a different branch than `main`, create a new branch and switch to it.
 - Plan and ask for user validation
-- Implement the feature
-    - Update @.env.example + @src/twin/config/settings.py with any new required env vars
+- Implement the feature. Special considerations:
+  - Add new dependencies to @pyproject.toml
+  - Update @.env.example + @src/twin/config/settings.py with any new required env vars
+- Before editing any files, always:
+   1. Show the proposed changes (search/replace blocks or a diff) to the user first.                                                                                                                                                                                                                                      
+   2. Wait for explicit user approval before applying the edit.                                                                                                                                                                                                                                                           
+   3. Never modify files without confirmation.
 - Write unit and integration tests
 - Run the steps from `Test` and fix any errors
 - Scan for any potential bugs that weren't detected within the `Test` step and highlight them for validation
-- Suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`  based on the latest changes from the feature and highlights done by the user
+- Suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`  based on the 
+latest highlights done by the user on where you haven't respected the project guidelines.
+- Push the branch to GitHub and open a PR against `main`.
+- Check if PR passed the CI/CD pipeline and if not, fix the errors by using `gh` to check the logs and re-run the pipelines until they pass.
+- Check all the diffs and fix any errors, warnings or suboptimal code.
+- DON'T merge the PR. The user will.
+
+## Working with Git
+
+- Always use `git commit -m <message>` to commit changes, where the messages follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.
+
 
 ## Build
 
@@ -179,11 +195,19 @@ The `make serve-workflows` process must be running for pipeline triggers to be p
 
 Always use these Make commands instead of `prefect deployment run` directly, as the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
 
-## Running Custom Commands
+## Running Custom Commands for Project Level Dependencies
 
-As we use `uv` any custom command that is not present in the @Makefile, but uses Python or other dependency installed through uv, usually available in @pyproject.toml, is run by prefixing it with `uv run ...`, such as:
-- `uv run python ...`
+Use `uv` to run any custom command that is not present in the @Makefile, but uses Python or other dependency installed through uv, usually available in @pyproject.toml.
+
+Run them by prefixing the command with `uv run ...`, such as:
+- `uv run python ...` 
 - `uv run prefect ...`
 - `uv run modal ...`
 
-Always use `mongosh` to interact with MongoDB directly through the CLI, which is installed directly on the system.
+## Running Custom Commands for Accessing Infrastructure and External Services 
+
+Always use the following CLIs installed directly on the system:
+
+- MongoDB: `mongosh` CLI for CRUD operations and monitoring on the local MongoDB instance.
+- GitHub: `gh` CLI to interact with the remote GitHub repository this project is attached to (e.g., accessing PRs, issues or GitHub Actions)
+- Git: `git` CLI for generic Git operations.
