@@ -52,7 +52,15 @@ jobs:
           sudo chown 999:999 docker/mongodb/keyfile
 
       - name: Start MongoDB infrastructure
-        run: docker compose up -d mongodb mongodb-init mongot
+        run: |
+          docker compose up -d mongodb
+          sleep 5
+          echo "=== MongoDB container status ==="
+          docker compose ps -a
+          echo "=== MongoDB container logs ==="
+          docker compose logs mongodb
+          echo "=== Starting remaining services ==="
+          docker compose up -d mongodb-init mongot
 
       - name: Wait for MongoDB to be ready
         run: |
