@@ -113,7 +113,8 @@ project-root/
 
 - Tool: Prefect
 - Sitemap: https://docs.prefect.io/llms.txt
-- You can access deployments via `uv run prefect deployment ...` CLI commands. For example to run a deployment served in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
+- You can access deployments via `uv run prefect deployment ...` CLI commands. For example, to run a deployment served 
+in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
 
 # The How 
 

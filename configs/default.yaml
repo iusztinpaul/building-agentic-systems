@@ -4,6 +4,10 @@
 sources:
   substack:
     - https://www.decodingai.com/feed
+    - https://maximelabonne.substack.com/feed
+    - https://modelcraft.substack.com/feed
+    - https://www.latent.space/feed
+    - https://alexeyondata.substack.com/feed
   huggingface_arxiv_dataset:
     max_samples: 10
     fetch_content: false

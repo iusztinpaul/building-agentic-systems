@@ -1,3 +1,5 @@
+from prefect import tags as prefect_tags
+
 from twin.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from twin.entities.documents import Document, SourceType
 
@@ -33,7 +35,8 @@ class TestIngestArxivDatasetFlow:
             return_value=mongo_client,
         )
 
-        result = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+        with prefect_tags("tests"):
+            result = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
 
         assert len(result) == 5
         for doc in result:
@@ -58,7 +61,8 @@ class TestIngestArxivDatasetFlow:
             return_value=mongo_client,
         )
 
-        first_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+        with prefect_tags("tests"):
+            first_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
         assert len(first_run) == 5
 
         mocker.patch(
@@ -66,7 +70,8 @@ class TestIngestArxivDatasetFlow:
             return_value=iter(FAKE_ENTRIES),
         )
 
-        second_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+        with prefect_tags("tests"):
+            second_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
         assert len(second_run) == 0
 
         db_docs = await Document.find(
@@ -88,7 +93,8 @@ class TestIngestArxivDatasetFlow:
             return_value=_make_mock_client(mocker, "Full paper text."),
         )
 
-        result = await ingest_arxiv_dataset(max_samples=2, fetch_content=True)
+        with prefect_tags("tests"):
+            result = await ingest_arxiv_dataset(max_samples=2, fetch_content=True)
 
         assert len(result) == 2
         for doc in result:
@@ -114,7 +120,8 @@ class TestIngestArxivDatasetFlow:
             return_value=mongo_client,
         )
 
-        result = await ingest_arxiv_dataset(max_samples=7, fetch_content=False)
+        with prefect_tags("tests"):
+            result = await ingest_arxiv_dataset(max_samples=7, fetch_content=False)
 
         assert len(result) == 7
         db_docs = await Document.find(
@@ -138,7 +145,8 @@ class TestIngestArxivDatasetFlow:
             return_value=mongo_client,
         )
 
-        result = await ingest_arxiv_dataset(max_samples=1, fetch_content=False)
+        with prefect_tags("tests"):
+            result = await ingest_arxiv_dataset(max_samples=1, fetch_content=False)
 
         assert len(result) == 1
         assert result[0].id == latent.id

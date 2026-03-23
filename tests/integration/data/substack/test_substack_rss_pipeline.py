@@ -1,3 +1,5 @@
+from prefect import tags as prefect_tags
+
 from twin.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
@@ -37,7 +39,8 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
-        result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+        with prefect_tags("tests"):
+            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
 
         assert len(result) == 3
         for doc in result:
@@ -60,7 +63,8 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
-        first_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
+        with prefect_tags("tests"):
+            first_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
         assert len(first_run) == 3
 
         mocker.patch(
@@ -72,7 +76,8 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
-        second_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
+        with prefect_tags("tests"):
+            second_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
         assert len(second_run) == 0
 
         db_docs = await Document.find(
@@ -90,7 +95,8 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES[:1]),
         )
 
-        result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+        with prefect_tags("tests"):
+            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
 
         assert len(result) == 1
         assert len(result[0].references) == 1
@@ -118,7 +124,8 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES[:1]),
         )
 
-        result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+        with prefect_tags("tests"):
+            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
 
         assert len(result) == 1
         assert result[0].id == latent.id
@@ -141,12 +148,13 @@ class TestIngestSubstackRssFeedBatchFlow:
             return_value=mongo_client,
         )
 
-        result = await ingest_substack_rss_feed_batch(
-            feed_urls=[
-                "https://blog-a.example.com/feed",
-                "https://blog-b.example.com/feed",
-            ]
-        )
+        with prefect_tags("tests"):
+            result = await ingest_substack_rss_feed_batch(
+                feed_urls=[
+                    "https://blog-a.example.com/feed",
+                    "https://blog-b.example.com/feed",
+                ]
+            )
 
         # Both feeds return the same 1 entry with the same link, so second is a dup
         assert len(result) == 1
