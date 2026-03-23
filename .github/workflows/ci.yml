@@ -46,6 +46,11 @@ jobs:
       - name: Lint check
         run: uv run ruff check src/ tests/ scripts/ deploy/
 
+      - name: Fix MongoDB keyfile permissions
+        run: |
+          chmod 400 docker/mongodb/keyfile
+          sudo chown 999:999 docker/mongodb/keyfile
+
       - name: Start MongoDB infrastructure
         run: docker compose up -d mongodb mongodb-init mongot
 
