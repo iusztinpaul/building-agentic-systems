@@ -49,7 +49,8 @@ def _parse_article_date(soup: BeautifulSoup) -> datetime:
         value = _extract_meta(soup, attr)
         if value:
             try:
-                return datetime.fromisoformat(value)
+                dt = datetime.fromisoformat(value)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
 
@@ -58,14 +59,16 @@ def _parse_article_date(soup: BeautifulSoup) -> datetime:
         dt_attr = time_tag.get("datetime", "")
         if dt_attr:
             try:
-                return datetime.fromisoformat(dt_attr)
+                dt = datetime.fromisoformat(dt_attr)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
 
         text = time_tag.get_text(strip=True)
         if _ISO_DATE_RE.match(text):
             try:
-                return datetime.fromisoformat(text)
+                dt = datetime.fromisoformat(text)
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 pass
 

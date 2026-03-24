@@ -56,7 +56,7 @@ project-root/
 └── .env.example                     # All supported env vars
 ```
 
-## Key Design Choices
+## Key Python Design Choices
 
 - We are using Python with async patterns.
 - Loose clean architecture design decoupling infrastructure, serving, app and domain logic:
@@ -68,12 +68,9 @@ project-root/
     - Retries
     - Checkpointing
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
-
-## Writing Python Code
-
 - Always add types to function or method parameters and return types. Even if they return `None`.
 
-### Tests
+### Writing Tests
 
 - Structure the tests following a one-on-one relationship with the core python module.
 - When writing tests respect:
@@ -141,12 +138,13 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @pyproject.toml
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
-  - After any atomic change, commit and push the changes to git using the `commit-commands` plugin
+  - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git.
 - Write unit and integration tests:
   - Write unit and integrations tests for the core functionality.
   - Run the tests. In case of errors fix the code until all the tests successfully run.
   - Run the actual code testing and debugging how the code works on dev machine.
   - In case of errors, write regression tests for the given errors, fix them, and repeat.
+  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
 - Update memory: 
   - If the user corrected you in any way, suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`
 - PR workflow:
@@ -200,7 +198,10 @@ If a serve process is already running, kill it first and re-serve to pick up the
 
 2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
 ```
-make run-data-pipeline
+make run-all-data-pipelines
+make run-substack-rss-data-pipeline
+make run-substack-article-data-pipeline
+make run-arxiv-data-pipeline
 make run-memory-pipeline-extraction
 make run-memory-pipeline-materialization
 ```
