@@ -4,6 +4,7 @@
 sources:
   substack:
     - https://www.decodingai.com/feed
+  substack_articles: []
   huggingface_arxiv_dataset:
     max_samples: 10
 
