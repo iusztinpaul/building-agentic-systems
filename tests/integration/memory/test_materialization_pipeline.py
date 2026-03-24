@@ -102,6 +102,7 @@ async def _clean_kg_collection(mongo_client):
     await mongo_client[TEST_DATABASE].drop_collection("knowledge_graph")
 
 
+@pytest.mark.usefixtures("_skip_without_mongot")
 class TestMemoryMaterializationPipeline:
     async def test_materializes_nodes_and_edges(self, mongo_client, mocker) -> None:
         await _seed_kg_log()
