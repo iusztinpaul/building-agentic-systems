@@ -14,6 +14,10 @@ services:
       timeout: 5s
       retries: 5
 
+  mongot:
+    volumes:
+      - ./docker/mongot/config.ci.yml:/mongot-community/config.default.yml:ro
+
   mongodb-init:
     entrypoint: >
       mongosh --host mongodb:27017 --eval '
