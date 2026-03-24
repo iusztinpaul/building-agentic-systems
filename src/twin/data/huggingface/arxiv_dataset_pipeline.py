@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 @task(name="extract-arxiv-document")
-def extract_document(raw_entry: dict) -> Document:
+def extract_document(raw_entry: dict) -> Document | None:
     return _extract_document(raw_entry)
 
 
@@ -74,7 +74,11 @@ async def ingest_arxiv_dataset(
         documents = [extract_document(entry) for entry in batch]
 
         results = await asyncio.gather(
-            *[_process_document(doc, fetch_content, semaphore) for doc in documents]
+            *[
+                _process_document(doc, fetch_content, semaphore)
+                for doc in documents
+                if doc is not None
+            ]
         )
         ingested.extend(r for r in results if r is not None)
 

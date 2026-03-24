@@ -61,6 +61,7 @@ class HuggingFaceArxivDatasetConfig(BaseModel):
 
 class SourcesConfig(BaseModel):
     substack: list[str] = []
+    substack_articles: list[str] = []
     huggingface_arxiv_dataset: HuggingFaceArxivDatasetConfig = (
         HuggingFaceArxivDatasetConfig()
     )

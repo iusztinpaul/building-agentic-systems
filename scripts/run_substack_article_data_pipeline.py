@@ -1,14 +1,14 @@
 """
-Trigger the substack RSS data pipeline individually via Prefect.
+Trigger the substack article data pipeline individually via Prefect.
 
-Reads feed URLs from configs/default.yaml and passes them as parameters.
+Reads article URLs from configs/default.yaml and passes them as parameters.
 
 Requires:
     - Prefect server running (make local-start)
     - Workflows served (make serve-workflows)
 
 Usage:
-    uv run python scripts/run_substack_data_pipeline.py
+    uv run python scripts/run_substack_article_data_pipeline.py
 """
 
 import asyncio
@@ -23,16 +23,14 @@ from twin.config.app_config import app_config
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = (
-    "ingest-substack-rss-feed-batch-etl/ingest-substack-rss-feed-batch-etl"
-)
+DEPLOYMENT_NAME = "ingest-substack-article-batch-etl/ingest-substack-article-batch-etl"
 POLL_INTERVAL_SECONDS = 2
 
 
 async def main() -> None:
-    feed_urls = app_config.sources.substack
-    if not feed_urls:
-        logger.error("No substack feeds configured in configs/default.yaml")
+    article_urls = app_config.sources.substack_articles
+    if not article_urls:
+        logger.error("No substack articles configured in configs/default.yaml")
         sys.exit(1)
 
     async with get_client() as client:
@@ -40,7 +38,7 @@ async def main() -> None:
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
-            parameters={"feed_urls": feed_urls},
+            parameters={"article_urls": article_urls},
         )
         logger.info("Flow run created: %s", flow_run.id)
         base_url = str(client.api_url).rstrip("/").removesuffix("/api")
@@ -65,7 +63,9 @@ async def main() -> None:
             run = await client.read_flow_run(flow_run.id)
             if run.state and run.state.is_final():
                 if run.state.is_completed():
-                    logger.info("Done. Substack data pipeline completed successfully.")
+                    logger.info(
+                        "Done. Substack article data pipeline completed successfully."
+                    )
                 else:
                     logger.error(
                         "Flow finished with state: %s", run.state.name

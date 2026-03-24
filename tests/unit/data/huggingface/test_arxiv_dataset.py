@@ -85,14 +85,10 @@ class TestExtractDocument:
         assert doc.date.month == 3
         assert doc.references == []
 
-    def test_empty_entry(self) -> None:
-        doc = extract_document({})
+    def test_empty_entry_returns_none(self) -> None:
+        result = extract_document({})
 
-        assert doc.source_uri == ""
-        assert doc.title == ""
-        assert doc.content == ""
-        assert doc.summary == ""
-        assert doc.authors == ["Unknown"]
+        assert result is None
 
     def test_none_fields(self) -> None:
         entry = {

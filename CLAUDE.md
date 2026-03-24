@@ -83,6 +83,7 @@ project-root/
     - **Mocking**: Use `pytest-mock` (the `mocker` fixture) to isolate unit tests from your MongoDB.
     - **Parametrize**: Use `@pytest.mark.parametrize` to test multiple inputs (e.g., different sensor values) in a single function.
 - Call the `testing-python` SKILL for step-by-step details
+- Fix any `warnings`. Rerun the tests until we have 0 warnings.
 - What to **AVOID**:
   - Writing unit tests for Prefect, Modal, Opik or other infra components. They represent our infrastructure layer, 
 which is tested only via integration tests.
@@ -140,7 +141,7 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @pyproject.toml
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
-  - After any atomic change, commit it to git using the `commit-commands` plugin
+  - After any atomic change, commit and push the changes to git using the `commit-commands` plugin
 - Write unit and integration tests:
   - Write unit and integrations tests for the core functionality.
   - Run the tests. In case of errors fix the code until all the tests successfully run.
