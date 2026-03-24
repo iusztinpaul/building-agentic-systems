@@ -1,1 +1,52 @@
-services: {}
+services:
+  mongodb:
+    entrypoint: ["mongod"]
+    command: ["--replSet", "rs0", "--bind_ip_all", "--setParameter", "mongotHost=twin-mongot:27028", "--setParameter", "searchIndexManagementHostAndPort=twin-mongot:27028", "--setParameter", "skipAuthenticationToSearchIndexManagementServer=true", "--setParameter", "useGrpcForSearch=true"]
+    environment:
+      MONGODB_INITDB_ROOT_USERNAME: ""
+      MONGODB_INITDB_ROOT_PASSWORD: ""
+    volumes:
+      - mongodata:/data/db
+      - mongoconfig:/data/configdb
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb-init:
+    entrypoint: >
+      mongosh --host mongodb:27017 --eval '
+        try {
+          rs.status();
+          print("Replica set already initialized.");
+        } catch(e) {
+          rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongodb:27017" }] });
+          print("Replica set initiated.");
+        }
+
+        sleep(2000);
+
+        const adminDb = db.getSiblingDB("admin");
+        try {
+          adminDb.createUser({
+            user: "twin",
+            pwd: "twin",
+            roles: [{ role: "root", db: "admin" }]
+          });
+          print("twin user created.");
+        } catch(e) {
+          print("twin user already exists or error: " + e.message);
+        }
+
+        try {
+          adminDb.createUser({
+            user: "mongot",
+            pwd: "mongot",
+            roles: [{ role: "searchCoordinator", db: "admin" }]
+          });
+          print("mongot user created.");
+        } catch(e) {
+          print("mongot user already exists or error: " + e.message);
+        }
+      '
