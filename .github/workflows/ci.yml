@@ -46,6 +46,9 @@ jobs:
       - name: Lint check
         run: uv run ruff check src/ tests/ scripts/ deploy/
 
+      - name: Fix keyfile permissions
+        run: chmod 400 docker/mongodb/keyfile
+
       - name: Start infrastructure
         run: docker compose up -d mongodb mongodb-init mongot prefect-server
 
