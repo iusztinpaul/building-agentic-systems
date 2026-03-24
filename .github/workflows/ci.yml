@@ -50,7 +50,11 @@ jobs:
         run: chmod 400 docker/mongodb/keyfile
 
       - name: Start infrastructure
-        run: docker compose up -d mongodb mongodb-init mongot prefect-server
+        run: docker compose up -d mongodb mongodb-init mongot prefect-server || true
+
+      - name: Debug MongoDB container
+        if: always()
+        run: docker logs twin-mongodb 2>&1 | tail -30
 
       - name: Wait for MongoDB to be ready
         run: |
