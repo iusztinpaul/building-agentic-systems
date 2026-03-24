@@ -1,1 +1,36 @@
-services: {}
+services:
+  mongodb:
+    volumes:
+      - mongodata:/data/db
+      - mongoconfig:/data/configdb
+      - ./docker/mongodb/mongod.ci.conf:/etc/mongod.conf:ro
+
+  mongot:
+    volumes:
+      - ./docker/mongot/config.ci.yml:/mongot-community/config.default.yml:ro
+
+  mongodb-init:
+    entrypoint: >
+      mongosh --host mongodb:27017 --eval '
+        try {
+          rs.status();
+          print("Replica set already initialized.");
+        } catch(e) {
+          rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongodb:27017" }] });
+          print("Replica set initiated.");
+        }
+
+        sleep(2000);
+
+        const adminDb = db.getSiblingDB("admin");
+        try {
+          adminDb.createUser({
+            user: "twin",
+            pwd: "twin",
+            roles: [{ role: "root", db: "admin" }]
+          });
+          print("twin user created.");
+        } catch(e) {
+          print("twin user already exists or error: " + e.message);
+        }
+      '
