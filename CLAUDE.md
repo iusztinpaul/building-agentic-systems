@@ -159,12 +159,11 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
   - Repeat until the `code-review` and CI/CD passes.
   - DON'T merge the PR. The user will.
 
-## Working with Git
+### Workflow When Doing Commits With Git
 
-- Before doing commits follow ALL the steps from `Running QA and Tests`
-- Use the `commit-commands` plugin to do 
-- Always use `git commit -m <message>` to commit changes, where the messages follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.
-
+- Before doing any commit follow ALL the steps from `Running QA and Tests`
+- Use the `commit-commands` plugin to do commits
+- Push the commit to remote origin
 
 ## Build
 
