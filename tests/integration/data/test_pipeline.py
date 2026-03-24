@@ -107,9 +107,7 @@ def _make_full_config(
     mock_config.sources.huggingface_arxiv_dataset.batch_size = 50
     mock_config.sources.huggingface_arxiv_dataset.concurrency = 10
     mocker.patch("twin.data.pipeline.app_config", mock_config)
-    mocker.patch(
-        "twin.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config
-    )
+    mocker.patch("twin.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
     return mock_config
 
 
@@ -224,9 +222,7 @@ class TestIngestAllData:
         assert len(substack_docs) >= 1
         assert len(hf_docs) == 2
 
-    async def test_runs_only_arxiv_when_no_substack(
-        self, mongo_client, mocker
-    ) -> None:
+    async def test_runs_only_arxiv_when_no_substack(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_arxiv_source(mocker)
         _make_full_config(

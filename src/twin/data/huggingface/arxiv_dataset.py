@@ -29,7 +29,7 @@ def parse_update_date(date_value: str | datetime | None) -> datetime:
             return datetime.strptime(date_value.strip(), "%Y-%m-%d").replace(
                 tzinfo=timezone.utc
             )
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     return datetime.now(tz=timezone.utc)
@@ -51,7 +51,10 @@ def extract_document(raw_entry: dict) -> Document | None:
 
     arxiv_id = raw_entry.get("id", "")
     if not arxiv_id:
-        logger.warning("Skipping arxiv entry with missing or empty ID: %s", raw_entry.get("title", "<no title>"))
+        logger.warning(
+            "Skipping arxiv entry with missing or empty ID: %s",
+            raw_entry.get("title", "<no title>"),
+        )
         return None
 
     source_uri = f"{ARXIV_BASE_URL}{arxiv_id}"

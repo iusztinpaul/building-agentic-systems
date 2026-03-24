@@ -37,9 +37,7 @@ async def ingest_all_data() -> list[Document]:
 
     substack_feeds = app_config.sources.substack
     if substack_feeds:
-        logger.info(
-            "Starting substack RSS pipeline with %d feeds", len(substack_feeds)
-        )
+        logger.info("Starting substack RSS pipeline with %d feeds", len(substack_feeds))
         substack_docs = await ingest_substack_rss_feed_batch(substack_feeds)
         all_ingested.extend(substack_docs)
         logger.info("Substack RSS pipeline ingested %d documents", len(substack_docs))
@@ -53,7 +51,9 @@ async def ingest_all_data() -> list[Document]:
         )
         article_docs = await ingest_substack_article_batch(substack_articles)
         all_ingested.extend(article_docs)
-        logger.info("Substack article pipeline ingested %d documents", len(article_docs))
+        logger.info(
+            "Substack article pipeline ingested %d documents", len(article_docs)
+        )
     else:
         logger.info("Substack article pipeline skipped: no articles configured")
 

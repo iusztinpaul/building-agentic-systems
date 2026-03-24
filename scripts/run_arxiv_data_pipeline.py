@@ -63,9 +63,7 @@ async def main(max_samples: int) -> None:
                 if run.state.is_completed():
                     logger.info("Done. Flow completed successfully.")
                 else:
-                    logger.error(
-                        "Flow finished with state: %s", run.state.name
-                    )
+                    logger.error("Flow finished with state: %s", run.state.name)
                     sys.exit(1)
                 break
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
