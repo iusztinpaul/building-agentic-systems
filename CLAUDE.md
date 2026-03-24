@@ -119,33 +119,43 @@ which is tested only via integration tests.
 - You can access deployments via `uv run prefect deployment ...` CLI commands. For example, to run a deployment served 
 in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
 
+### Access Documentation 
+
+Use the `context7` MCP server to find out more about the tech stack usage and good practices.
+
 # The How 
 
 We manage all the core commands through GNU Make as our command center. 
 
 We use `uv` to manage our Python virtual environment, dependencies, and run the project. Also, we use `ruff` as our formatter and linter. 
 
-## Developing New Features
+## Developing New Features and Bug Fixes Workflow
 
-When developing new features you always have to:
-- If not on a different branch than `main`, create a new branch and switch to it.
+At the beginning of a conversation ALWAYS ask the user if they are developing a new feature/bug or continue working 
+on an existing one. 
+
+When developing new features follow this exact plan:
+- Create a new branch that branches off from the current active branch. If the active branch is `main`, 
+it branches off from `main`. If it's a feature branch `feat/...`, it branches off from that.
 - Plan and ask for user validation
-- Implement the feature. Special considerations:
+- Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @pyproject.toml
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
-- Before editing any files, always:
-   1. Show the proposed changes (search/replace blocks or a diff) to the user first.                                                                                                                                                                                                                                      
-   2. Wait for explicit user approval before applying the edit.                                                                                                                                                                                                                                                           
-   3. Never modify files without confirmation.
-- Write unit and integration tests
-- Run the steps from `Test` and fix any errors
-- Scan for any potential bugs that weren't detected within the `Test` step and highlight them for validation
-- Suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`  based on the 
-latest highlights done by the user on where you haven't respected the project guidelines.
-- Push the branch to GitHub and open a PR against `main`.
-- Check if PR passed the CI/CD pipeline and if not, fix the errors by using `gh` to check the logs and re-run the pipelines until they pass.
-- Check all the diffs and fix any errors, warnings or suboptimal code.
-- DON'T merge the PR. The user will.
+  - After any atomic change, commit it to git using the `commit-commands` plugin
+- Write unit and integration tests:
+  - Write unit and integrations tests for the core functionality.
+  - Run the tests. In case of errors fix the code until all the tests successfully run.
+  - Run the actual code testing and debugging how the code works on dev machine.
+  - In case of errors, write regression tests for the given errors, fix them, and repeat.
+- Update memory: 
+  - If the user corrected you in any way, suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`
+- PR workflow:
+  - Use the `create-pr` skill to open/update the PR
+  - Use the `code-review` plugin to review and optimize the code.
+  - Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
+  - After fixing the PR, use the `create-pr` skill to update the description
+  - Repeat until the `code-review` and CI/CD passes.
+  - DON'T merge the PR. The user will.
 
 ## Working with Git
 
