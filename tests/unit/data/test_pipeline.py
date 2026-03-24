@@ -96,7 +96,7 @@ class TestIngestAllData:
 
         _make_config(mocker, substack_feeds=[], substack_articles=[])
 
-        result = await ingest_all_data()
+        await ingest_all_data()
 
         mock_rss.assert_not_awaited()
         mock_articles.assert_not_awaited()
