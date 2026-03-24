@@ -14,7 +14,7 @@ env:
   MONGO_INITDB_ROOT_PASSWORD: twin
   MONGO_INITDB_DATABASE: twin
   MONGOT_PORT: "27028"
-  # Prefect (not started in CI, but env var needed by settings)
+  # Prefect
   PREFECT_PORT: "4200"
   PREFECT_API_URL: http://127.0.0.1:4200/api
   # Mock API keys (not called in unit tests)
@@ -46,8 +46,8 @@ jobs:
       - name: Lint check
         run: uv run ruff check src/ tests/ scripts/ deploy/
 
-      - name: Start MongoDB infrastructure
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init mongot
+      - name: Start infrastructure (MongoDB + Prefect)
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init mongot prefect-server
 
       - name: Wait for MongoDB to be ready
         run: |
@@ -73,6 +73,18 @@ jobs:
               --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null)
             if [ "$STATUS" = "1" ]; then
               echo "Replica set is ready."
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 5
+          done
+
+      - name: Wait for Prefect to be ready
+        run: |
+          echo "Waiting for Prefect server..."
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:4200/api/health > /dev/null 2>&1; then
+              echo "Prefect server is ready."
               break
             fi
             echo "Attempt $i/30..."
