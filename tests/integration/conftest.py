@@ -27,8 +27,9 @@ async def mongot_available(mongo_client) -> bool:
     test_col = db.get_collection("_mongot_probe")
     try:
         await test_col.insert_one({"_probe": True})
-        cursor = test_col.aggregate([{"$listSearchIndexes": {}}])
-        await cursor.to_list(length=1)
+        await test_col.create_search_index(
+            {"definition": {"mappings": {"dynamic": True}}, "name": "probe_index"}
+        )
     except pymongo.errors.OperationFailure as e:
         if "Search Index Management service" in str(e):
             return False
