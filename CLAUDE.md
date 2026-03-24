@@ -70,6 +70,10 @@ project-root/
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
 - Always add types to function or method parameters and return types. Even if they return `None`.
 
+### Writing Scripts
+
+- Scripts (entry points in `scripts/`) must call `init_logger()` from `twin.logging` at module level to configure logging.
+
 ### Writing Tests
 
 - Structure the tests following a one-on-one relationship with the core python module.
@@ -157,6 +161,8 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 
 ## Working with Git
 
+- Before doing commits follow ALL the steps from `Running QA and Tests`
+- Use the `commit-commands` plugin to do 
 - Always use `git commit -m <message>` to commit changes, where the messages follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.
 
 
@@ -166,7 +172,7 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 make build
 ```
 
-## Test
+## Running QA and Tests
 
 First always fix the formatting and linting errors with the fix commands:
 ```

@@ -19,8 +19,9 @@ from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
 from twin.config.app_config import app_config
+from twin.logging import init_logger
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+init_logger()
 logger = logging.getLogger(__name__)
 
 DEPLOYMENT_NAME = (

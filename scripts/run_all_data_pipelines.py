@@ -19,7 +19,9 @@ import sys
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+from twin.logging import init_logger
+
+init_logger()
 logger = logging.getLogger(__name__)
 
 DEPLOYMENT_NAME = "ingest-all-data-etl/ingest-all-data-etl"
