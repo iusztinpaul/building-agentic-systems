@@ -47,14 +47,12 @@ jobs:
         run: uv run ruff check src/ tests/ scripts/ deploy/
 
       - name: Fix keyfile permissions
-        run: chmod 400 docker/mongodb/keyfile
+        run: |
+          chmod 400 docker/mongodb/keyfile
+          sudo chown 999:999 docker/mongodb/keyfile
 
       - name: Start infrastructure
-        run: docker compose up -d mongodb mongodb-init mongot prefect-server || true
-
-      - name: Debug MongoDB container
-        if: always()
-        run: docker logs twin-mongodb 2>&1 | tail -30
+        run: docker compose up -d mongodb mongodb-init mongot prefect-server
 
       - name: Wait for MongoDB to be ready
         run: |
