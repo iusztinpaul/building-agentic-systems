@@ -1,16 +1,14 @@
 """
-Trigger the Substack RSS ETL pipeline via Prefect.
+Trigger the substack RSS data pipeline individually via Prefect.
+
+Reads feed URLs from configs/default.yaml and passes them as parameters.
 
 Requires:
-    - Prefect server running (make prefect-server)
+    - Prefect server running (make local-start)
     - Workflows served (make serve-workflows)
 
 Usage:
-    uv run python scripts/run_data_pipeline.py
-    uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed https://other.substack.com/feed
-
-Reads feed URLs from configs/default.yaml (sources.substack) by default.
-CLI arguments override the config.
+    uv run python scripts/run_substack_data_pipeline.py
 """
 
 import asyncio
@@ -32,7 +30,12 @@ DEPLOYMENT_NAME = (
 POLL_INTERVAL_SECONDS = 2
 
 
-async def main(feed_urls: list[str]) -> None:
+async def main() -> None:
+    feed_urls = app_config.sources.substack
+    if not feed_urls:
+        logger.error("No substack feeds configured in configs/default.yaml")
+        sys.exit(1)
+
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
@@ -63,7 +66,7 @@ async def main(feed_urls: list[str]) -> None:
             run = await client.read_flow_run(flow_run.id)
             if run.state and run.state.is_final():
                 if run.state.is_completed():
-                    logger.info("Done. Flow completed successfully.")
+                    logger.info("Done. Substack data pipeline completed successfully.")
                 else:
                     logger.error("Flow finished with state: %s", run.state.name)
                     sys.exit(1)
@@ -72,13 +75,4 @@ async def main(feed_urls: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    feed_urls = sys.argv[1:] or app_config.sources.substack
-
-    if not feed_urls:
-        logger.error(
-            "Usage: uv run python scripts/run_data_pipeline.py [feed_url ...]\n"
-            "       Or configure sources.substack in configs/default.yaml"
-        )
-        sys.exit(1)
-
-    asyncio.run(main(feed_urls))
+    asyncio.run(main())

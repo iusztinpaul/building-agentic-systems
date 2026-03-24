@@ -56,7 +56,7 @@ project-root/
 └── .env.example                     # All supported env vars
 ```
 
-## Key Design Choices
+## Key Python Design Choices
 
 - We are using Python with async patterns.
 - Loose clean architecture design decoupling infrastructure, serving, app and domain logic:
@@ -68,12 +68,13 @@ project-root/
     - Retries
     - Checkpointing
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
-
-## Writing Python Code
-
 - Always add types to function or method parameters and return types. Even if they return `None`.
 
-### Tests
+### Writing Scripts
+
+- Scripts (entry points in `scripts/`) must call `init_logger()` from `twin.logging` at module level to configure logging.
+
+### Writing Tests
 
 - Structure the tests following a one-on-one relationship with the core python module.
 - When writing tests respect:
@@ -83,6 +84,10 @@ project-root/
     - **Mocking**: Use `pytest-mock` (the `mocker` fixture) to isolate unit tests from your MongoDB.
     - **Parametrize**: Use `@pytest.mark.parametrize` to test multiple inputs (e.g., different sensor values) in a single function.
 - Call the `testing-python` SKILL for step-by-step details
+- Fix any `warnings`. Rerun the tests until we have 0 warnings.
+- What to **AVOID**:
+  - Writing unit tests for Prefect, Modal, Opik or other infra components. They represent our infrastructure layer, 
+which is tested only via integration tests.
 
 ## Tech Stack
 
@@ -103,7 +108,6 @@ project-root/
 
 ### Infrastructure
 - **Unified memory and database:** MongoDB
-- **Orchestrator and durable workflows:** Prefect
 - **Serving AI Models**: Modal
 - **Observability and evals:** Opik
 - **Containerization:** Docker
@@ -113,7 +117,12 @@ project-root/
 
 - Tool: Prefect
 - Sitemap: https://docs.prefect.io/llms.txt
-- You can access deployments via `uv run prefect deployment ...` CLI commands. For example to run a deployment served in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
+- You can access deployments via `uv run prefect deployment ...` CLI commands. For example, to run a deployment served 
+in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
+
+### Access Documentation 
+
+Use the `context7` MCP server to find out more about the tech stack usage and good practices.
 
 # The How 
 
@@ -121,30 +130,39 @@ We manage all the core commands through GNU Make as our command center.
 
 We use `uv` to manage our Python virtual environment, dependencies, and run the project. Also, we use `ruff` as our formatter and linter. 
 
-## Developing New Features
+## Developing New Features and Bug Fixes Workflow
 
-When developing new features you always have to:
-- If not on a different branch than `main`, create a new branch and switch to it.
+At the beginning of a conversation ALWAYS ask the user if they are developing a new feature/bug or continue working 
+on an existing one. 
+
+When developing new features follow this exact plan:
+- Create a new branch that branches off from the current active branch. If the active branch is `main`, 
+it branches off from `main`. If it's a feature branch `feat/...`, it branches off from that.
 - Plan and ask for user validation
-- Implement the feature. Special considerations:
+- Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @pyproject.toml
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
-- Before editing any files, always:
-   1. Show the proposed changes (search/replace blocks or a diff) to the user first.                                                                                                                                                                                                                                      
-   2. Wait for explicit user approval before applying the edit.                                                                                                                                                                                                                                                           
-   3. Never modify files without confirmation.
-- Write unit and integration tests
-- Run the steps from `Test` and fix any errors
-- Scan for any potential bugs that weren't detected within the `Test` step and highlight them for validation
-- Suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`  based on the 
-latest highlights done by the user on where you haven't respected the project guidelines.
-- Push the branch to GitHub and open a PR against `main`.
-- Check if PR passed the CI/CD pipeline and if not, fix the errors by using `gh` to check the logs and re-run the pipelines until they pass.
-- Check all the diffs and fix any errors, warnings or suboptimal code.
-- DON'T merge the PR. The user will.
+  - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git.
+- Write unit and integration tests:
+  - Write unit and integrations tests for the core functionality.
+  - Run the tests. In case of errors fix the code until all the tests successfully run.
+  - Run the actual code testing and debugging how the code works on dev machine.
+  - In case of errors, write regression tests for the given errors, fix them, and repeat.
+  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
+- Update memory: 
+  - If the user corrected you in any way, suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`
+- PR workflow:
+  - Use the `create-pr` skill to open/update the PR
+  - Use the `code-review` plugin to review and optimize the code.
+  - Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
+  - After fixing the PR, use the `create-pr` skill to update the description
+  - Repeat until the `code-review` and CI/CD passes.
+  - DON'T merge the PR. The user will.
 
 ## Working with Git
 
+- Before doing commits follow ALL the steps from `Running QA and Tests`
+- Use the `commit-commands` plugin to do 
 - Always use `git commit -m <message>` to commit changes, where the messages follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.
 
 
@@ -154,7 +172,7 @@ latest highlights done by the user on where you haven't respected the project gu
 make build
 ```
 
-## Test
+## Running QA and Tests
 
 First always fix the formatting and linting errors with the fix commands:
 ```
@@ -186,7 +204,10 @@ If a serve process is already running, kill it first and re-serve to pick up the
 
 2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
 ```
-make run-data-pipeline
+make run-all-data-pipelines
+make run-substack-rss-data-pipeline
+make run-substack-article-data-pipeline
+make run-arxiv-data-pipeline
 make run-memory-pipeline-extraction
 make run-memory-pipeline-materialization
 ```

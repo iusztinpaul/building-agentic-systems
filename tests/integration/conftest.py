@@ -1,3 +1,4 @@
+import pymongo.errors
 import pytest
 
 from twin.config.settings import settings
@@ -16,6 +17,31 @@ async def mongo_client():
 
     await client.drop_database(TEST_DATABASE)
     await client.close()
+
+
+@pytest.fixture(scope="session")
+async def mongot_available(mongo_client) -> bool:
+    """Check if the mongot search index service is reachable."""
+
+    db = mongo_client.get_database(TEST_DATABASE)
+    test_col = db.get_collection("_mongot_probe")
+    try:
+        await test_col.insert_one({"_probe": True})
+        await test_col.create_search_index(
+            {"definition": {"mappings": {"dynamic": True}}, "name": "probe_index"}
+        )
+    except pymongo.errors.OperationFailure as e:
+        if "Search Index Management service" in str(e):
+            return False
+    finally:
+        await db.drop_collection("_mongot_probe")
+    return True
+
+
+@pytest.fixture()
+async def _skip_without_mongot(mongot_available) -> None:
+    if not mongot_available:
+        pytest.skip("mongot search index service is not available")
 
 
 @pytest.fixture(autouse=True)

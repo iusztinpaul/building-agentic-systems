@@ -1,18 +1,21 @@
 services:
   mongodb:
-    entrypoint: ["mongod"]
-    command: ["--replSet", "rs0", "--bind_ip_all", "--setParameter", "mongotHost=twin-mongot:27028", "--setParameter", "searchIndexManagementHostAndPort=twin-mongot:27028", "--setParameter", "skipAuthenticationToSearchIndexManagementServer=false", "--setParameter", "useGrpcForSearch=true"]
     environment:
       MONGODB_INITDB_ROOT_USERNAME: ""
       MONGODB_INITDB_ROOT_PASSWORD: ""
-    volumes:
-      - mongodata:/data/db
-      - mongoconfig:/data/configdb
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - mongodata:/data/db
+      - mongoconfig:/data/configdb
+      - ./docker/mongodb/mongod.ci.conf:/etc/mongod.conf:ro
+
+  mongot:
+    volumes:
+      - ./docker/mongot/config.ci.yml:/mongot-community/config.default.yml:ro
 
   mongodb-init:
     entrypoint: >
@@ -37,16 +40,5 @@ services:
           print("twin user created.");
         } catch(e) {
           print("twin user already exists or error: " + e.message);
-        }
-
-        try {
-          adminDb.createUser({
-            user: "mongot",
-            pwd: "mongot",
-            roles: [{ role: "searchCoordinator", db: "admin" }]
-          });
-          print("mongot user created.");
-        } catch(e) {
-          print("mongot user already exists or error: " + e.message);
         }
       '

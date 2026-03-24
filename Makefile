@@ -86,12 +86,23 @@ serve-workflows: # Serve Prefect workflow deployments.
 
 
 # --- Data Pipelines ---
+# Pattern: run-<data-pipeline-name>-data-pipeline
 
-run-data-pipeline: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
-	uv run python scripts/run_data_pipeline.py
+run-all-data-pipelines: # Trigger all data pipelines (Substack RSS, articles, arxiv) via Prefect.
+	uv run python scripts/run_all_data_pipelines.py
+
+run-substack-rss-data-pipeline: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
+	uv run python scripts/run_substack_data_pipeline.py
+
+run-substack-article-data-pipeline: # Trigger Substack article ETL via Prefect. Reads article URLs from configs/default.yaml.
+	uv run python scripts/run_substack_article_data_pipeline.py
+
+run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samples from configs/default.yaml.
+	uv run python scripts/run_arxiv_data_pipeline.py
 
 
 # --- Memory Pipelines ---
+# Pattern: run-<memory-pipeline-name>-memory-pipeline
 
 run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Optionally pass DOC_IDS="id1 id2".
 	uv run python scripts/run_memory_pipeline.py $(DOC_IDS)

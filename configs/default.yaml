@@ -4,6 +4,26 @@
 sources:
   substack:
     - https://www.decodingai.com/feed
+    - https://maximelabonne.substack.com/feed
+    - https://modelcraft.substack.com/feed
+    - https://www.latent.space/feed
+    - https://alexeyondata.substack.com/feed
+  substack_articles:
+    - https://www.decodingai.com/p/ai-agents-foundations-course
+    - https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
+    - https://www.decodingai.com/p/context-engineering-2025s-1-skill
+    - https://www.decodingai.com/p/llm-structured-outputs-the-only-way
+    - https://www.decodingai.com/p/stop-building-ai-agents-use-these
+    - https://www.decodingai.com/p/tool-calling-from-scratch-to-production
+    - https://www.decodingai.com/p/ai-agents-planning
+    - https://www.decodingai.com/p/building-production-react-agents
+    - https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
+    - https://www.decodingai.com/p/stop-converting-documents-to-text
+  huggingface_arxiv_dataset:
+    max_samples: 10
+    fetch_content: false
+    batch_size: 50
+    concurrency: 10
 
 models:
   llm:

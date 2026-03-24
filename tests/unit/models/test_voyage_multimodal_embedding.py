@@ -162,7 +162,9 @@ class TestVoyageMultimodalEmbed:
 
     async def test_embed_raises_on_connection_error(self, model):
         mock_session = AsyncMock()
-        mock_session.post.side_effect = aiohttp.ClientError("connection refused")
+        mock_session.post = MagicMock(
+            side_effect=aiohttp.ClientError("connection refused")
+        )
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
