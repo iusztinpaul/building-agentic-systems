@@ -24,12 +24,17 @@ async def mongot_available(mongo_client) -> bool:
     """Check if the mongot search index service is reachable."""
 
     db = mongo_client.get_database(TEST_DATABASE)
+    test_col = db.get_collection("_mongot_probe")
     try:
-        await db.command({"listSearchIndexes": "test_probe"})
+        await test_col.insert_one({"_probe": True})
+        await test_col.aggregate([
+            {"$listSearchIndexes": {}}
+        ]).to_list(length=1)
     except pymongo.errors.OperationFailure as e:
         if "Search Index Management service" in str(e):
             return False
-        return True
+    finally:
+        await db.drop_collection("_mongot_probe")
     return True
 
 
