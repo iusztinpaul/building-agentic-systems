@@ -79,6 +79,20 @@ jobs:
             sleep 5
           done
 
+      - name: Wait for mongot to be ready
+        run: |
+          echo "Waiting for mongot search service on port $MONGOT_PORT..."
+          for i in $(seq 1 30); do
+            if nc -z localhost $MONGOT_PORT 2>/dev/null; then
+              echo "mongot port is open, waiting 10s for sync..."
+              sleep 10
+              echo "mongot is ready."
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 5
+          done
+
       - name: Wait for Prefect to be ready
         run: |
           echo "Waiting for Prefect server..."
