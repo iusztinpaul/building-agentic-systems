@@ -106,7 +106,6 @@ which is tested only via integration tests.
 
 ### Infrastructure
 - **Unified memory and database:** MongoDB
-- **Orchestrator and durable workflows:** Prefect
 - **Serving AI Models**: Modal
 - **Observability and evals:** Opik
 - **Containerization:** Docker
