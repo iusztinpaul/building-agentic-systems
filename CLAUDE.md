@@ -126,9 +126,9 @@ Use the `context7` MCP server to find out more about the tech stack usage and go
 
 # The How 
 
-We manage all the core commands through GNU Make as our command center. 
+We manage all the core commands through GNU Make as our command center. File available at @Makefile. Run all the commands with `make ...`
 
-We use `uv` to manage our Python virtual environment, dependencies, and run the project. Also, we use `ruff` as our formatter and linter. 
+We use `uv` to manage our Python project such as the virtual environment(s), dependencies, and overall package the project.
 
 ## Developing New Features and Bug Fixes Workflow
 
@@ -142,7 +142,7 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @pyproject.toml
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
-  - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git.
+  - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git. Always check if the `pre-commit` passes.
 - Write unit and integration tests:
   - Write unit and integrations tests for the core functionality.
   - Run the tests. In case of errors fix the code until all the tests successfully run.
@@ -152,18 +152,13 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Update memory: 
   - If the user corrected you in any way, suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`
 - PR workflow:
-  - Use the `create-pr` skill to open/update the PR
-  - Use the `code-review` plugin to review and optimize the code.
-  - Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
-  - After fixing the PR, use the `create-pr` skill to update the description
-  - Repeat until the `code-review` and CI/CD passes.
-  - DON'T merge the PR. The user will.
-
-## Working with Git
-
-- Before doing commits follow ALL the steps from `Running QA and Tests`
-- Use the `commit-commands` plugin to do 
-- Always use `git commit -m <message>` to commit changes, where the messages follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) format.
+  1. Use the `create-pr` skill to open/update the PR.
+  2. Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
+  3. Use the `code-review` plugin to review the code.
+  4. Fix the code, based on the reviews and repeat step 2 in case the CI/CD pipeline fails.
+  5. Repeat until the `code-review` and CI/CD passes.
+  6. Use the `create-pr` skill to update the description,
+  7. DON'T merge the PR. The user will.
 
 
 ## Build
@@ -173,6 +168,8 @@ make build
 ```
 
 ## Running QA and Tests
+
+We use `ruff` as our formatter and linter. 
 
 First always fix the formatting and linting errors with the fix commands:
 ```
