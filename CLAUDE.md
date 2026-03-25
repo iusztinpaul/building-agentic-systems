@@ -149,8 +149,6 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
   - Run the actual code testing and debugging how the code works on dev machine.
   - In case of errors, write regression tests for the given errors, fix them, and repeat.
   - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
-- Update memory: 
-  - If the user corrected you in any way, suggest any potential updates for the main `CLAUDE.md` file, local `CLAUDE.md` or `.claude/rules`
 - PR workflow:
   1. Use the `create-pr` skill to open/update the PR.
   2. Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
@@ -159,7 +157,6 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
   5. Repeat until the `code-review` and CI/CD passes.
   6. Use the `create-pr` skill to update the description,
   7. DON'T merge the PR. The user will.
-
 
 ## Build
 
@@ -229,3 +226,7 @@ Always use the following CLIs installed directly on the system:
 - MongoDB: `mongosh` CLI for CRUD operations and monitoring on the local MongoDB instance.
 - GitHub: `gh` CLI to interact with the remote GitHub repository this project is attached to (e.g., accessing PRs, issues or GitHub Actions)
 - Git: `git` CLI for generic Git operations.
+
+## Self Improve
+
+Run the `self-improve` SKILL to analyze corrections from the session and persist lessons learned to CLAUDE.md files or memory.
