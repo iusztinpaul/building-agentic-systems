@@ -6,6 +6,7 @@ include .env
 export
 
 export UV_PROJECT_ENVIRONMENT=.venv
+export VIRTUAL_ENV=.venv
 export PYTHONPATH = ./src/
 
 .PHONY: tests
@@ -114,3 +115,6 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 
 query-graph: # Query and visualize the knowledge graph. Pass QUERY="your query" for search, omit for full graph.
 	uv run python scripts/query_graph.py $(if $(QUERY),--query "$(QUERY)",)
+
+serve-mcp: # Serve the MCP server for knowledge graph queries.
+	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)

@@ -45,3 +45,7 @@ query:
   max_hops: 3
   rrf_k: 60
   embedding_batch_size: 64
+
+mcp:
+  max_retries: 1
+  max_results: 50
