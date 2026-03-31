@@ -566,6 +566,7 @@ async def upsert_graph_entries(
             UpdateOne(
                 {"_id": node_id},
                 [
+                    # Stage 1: merge properties and set scalar fields.
                     {
                         "$set": {
                             "kind": "node",
@@ -575,12 +576,6 @@ async def upsert_graph_entries(
                                 "$mergeObjects": [
                                     {"$ifNull": ["$properties", {}]},
                                     node.properties,
-                                ]
-                            },
-                            "properties.aliases": {
-                                "$setUnion": [
-                                    {"$ifNull": ["$properties.aliases", []]},
-                                    aliases,
                                 ]
                             },
                             "sources": {
@@ -593,7 +588,19 @@ async def upsert_graph_entries(
                             "updated_at": now,
                             "embedding": {"$ifNull": ["$embedding", []]},
                         }
-                    }
+                    },
+                    # Stage 2: union aliases (separate stage to avoid
+                    # conflicting paths with 'properties').
+                    {
+                        "$set": {
+                            "properties.aliases": {
+                                "$setUnion": [
+                                    {"$ifNull": ["$properties.aliases", []]},
+                                    aliases,
+                                ]
+                            },
+                        }
+                    },
                 ],
                 upsert=True,
             )
