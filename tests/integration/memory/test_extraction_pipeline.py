@@ -70,6 +70,10 @@ class TestMemoryExtractionPipeline:
             return_value=mongo_client,
         )
         mocker.patch(
+            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            TEST_DATABASE,
+        )
+        mocker.patch(
             "twin.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
@@ -112,6 +116,10 @@ class TestMemoryExtractionPipeline:
             return_value=mongo_client,
         )
         mocker.patch(
+            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            TEST_DATABASE,
+        )
+        mocker.patch(
             "twin.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM(),
         )
@@ -144,6 +152,10 @@ class TestMemoryExtractionPipeline:
             return_value=mongo_client,
         )
         mocker.patch(
+            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            TEST_DATABASE,
+        )
+        mocker.patch(
             "twin.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE, FAKE_LLM_RESPONSE]),
         )
@@ -167,6 +179,10 @@ class TestMemoryExtractionPipeline:
             return_value=mongo_client,
         )
         mocker.patch(
+            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            TEST_DATABASE,
+        )
+        mocker.patch(
             "twin.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
@@ -187,6 +203,10 @@ class TestMemoryExtractionPipeline:
         mocker.patch(
             "twin.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
+        )
+        mocker.patch(
+            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            TEST_DATABASE,
         )
         mocker.patch(
             "twin.memory.extraction.pipeline.get_llm",

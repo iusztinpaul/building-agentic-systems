@@ -512,6 +512,13 @@ async def normalize_nodes(
                     # Also map the old canonical name.
                     canonical_map[old_key] = db_name
 
+                    # Flatten the chain: update any Phase A entry that
+                    # still points to the old intermediate name so edge
+                    # remapping resolves in a single hop.
+                    for k, v in canonical_map.items():
+                        if v == old_name and k != old_key:
+                            canonical_map[k] = db_name
+
                     logger.info(
                         "Resolved '%s' → '%s' (cross-document, type=%s)",
                         old_name,
@@ -583,6 +590,11 @@ async def upsert_graph_entries(
     for node in result.nodes:
         node_id = build_node_id(node.type, node.name)
         aliases = node.properties.get("aliases", [])
+        # Exclude aliases from the merge so Stage 1 does not overwrite
+        # the existing aliases array — Stage 2 handles alias accumulation.
+        props_without_aliases = {
+            k: v for k, v in node.properties.items() if k != "aliases"
+        }
         ops.append(
             UpdateOne(
                 {"_id": node_id},
@@ -596,7 +608,7 @@ async def upsert_graph_entries(
                             "properties": {
                                 "$mergeObjects": [
                                     {"$ifNull": ["$properties", {}]},
-                                    node.properties,
+                                    props_without_aliases,
                                 ]
                             },
                             "sources": {
