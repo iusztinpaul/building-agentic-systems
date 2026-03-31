@@ -2,7 +2,6 @@
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -87,26 +86,13 @@ async def seed_graph(mongo_client):
     await col.delete_many({"_id": {"$in": [alice_id, bob_id, edge_id]}})
 
 
-def _make_ctx(client, llm, embedding_model):
-    """Build a minimal MCP Context mock with the expected lifespan_context."""
-
-    ctx = MagicMock()
-    ctx.lifespan_context = {
-        "client": client,
-        "database": TEST_DATABASE,
-        "llm": llm,
-        "embedding_model": embedding_model,
-    }
-    return ctx
-
-
 # ---------------------------------------------------------------------------
 # query_memory (NL-to-pipeline tool)
 # ---------------------------------------------------------------------------
 
 
 class TestQueryMemoryTool:
-    async def test_returns_matching_nodes(self, mongo_client, seed_graph):
+    async def test_returns_matching_nodes(self, make_mcp_ctx, seed_graph):
         """FakeLLM returns a pipeline that matches person nodes — tool returns them."""
 
         llm = FakeLLM(
@@ -119,7 +105,7 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find all people", ctx)
 
@@ -128,7 +114,7 @@ class TestQueryMemoryTool:
         assert "alice" in names
         assert "bob" in names
 
-    async def test_strips_embeddings_from_output(self, mongo_client, seed_graph):
+    async def test_strips_embeddings_from_output(self, make_mcp_ctx, seed_graph):
         llm = FakeLLM(
             [
                 {
@@ -139,13 +125,13 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find alice", ctx)
 
         assert "embedding" not in result
 
-    async def test_returns_edges(self, mongo_client, seed_graph):
+    async def test_returns_edges(self, make_mcp_ctx, seed_graph):
         llm = FakeLLM(
             [
                 {
@@ -156,7 +142,7 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find relationships", ctx)
 
@@ -165,7 +151,7 @@ class TestQueryMemoryTool:
         assert parsed[0]["source_node_id"] == seed_graph["alice_id"]
         assert parsed[0]["target_node_id"] == seed_graph["bob_id"]
 
-    async def test_empty_result_returns_empty_list(self, mongo_client, seed_graph):
+    async def test_empty_result_returns_empty_list(self, make_mcp_ctx, seed_graph):
         llm = FakeLLM(
             [
                 {
@@ -176,14 +162,14 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find episodes", ctx)
 
         parsed = json.loads(result)
         assert parsed == []
 
-    async def test_retries_on_bad_first_pipeline(self, mongo_client, seed_graph):
+    async def test_retries_on_bad_first_pipeline(self, make_mcp_ctx, seed_graph):
         """First LLM response has a blocked stage; second is valid — retry succeeds."""
 
         llm = FakeLLM(
@@ -197,7 +183,7 @@ class TestQueryMemoryTool:
                 },
             ]
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find people", ctx)
 
@@ -206,7 +192,7 @@ class TestQueryMemoryTool:
         assert llm.call_count == 2
 
     async def test_visualize_flag_generates_html(
-        self, mongo_client, seed_graph, tmp_path, mocker
+        self, make_mcp_ctx, seed_graph, tmp_path, mocker
     ):
         llm = FakeLLM(
             [
@@ -225,7 +211,7 @@ class TestQueryMemoryTool:
                 "twin.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
-        ctx = _make_ctx(mongo_client, llm, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
 
         result = await query_memory("find people", ctx, visualize=True)
 
@@ -240,10 +226,10 @@ class TestQueryMemoryTool:
 
 
 class TestSearchMemoryTool:
-    async def test_returns_nodes_via_text_search(self, mongo_client, seed_graph):
+    async def test_returns_nodes_via_text_search(self, make_mcp_ctx, seed_graph):
         """Text index is available — search_memory finds nodes by name."""
 
-        ctx = _make_ctx(mongo_client, None, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1)
 
@@ -251,10 +237,10 @@ class TestSearchMemoryTool:
         node_ids = {doc.get("_id") for doc in parsed}
         assert seed_graph["alice_id"] in node_ids
 
-    async def test_graph_expansion_includes_edges(self, mongo_client, seed_graph):
+    async def test_graph_expansion_includes_edges(self, make_mcp_ctx, seed_graph):
         """Graph expansion from alice should discover the related_to edge and bob."""
 
-        ctx = _make_ctx(mongo_client, None, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1)
 
@@ -262,10 +248,10 @@ class TestSearchMemoryTool:
         ids = {doc.get("_id") for doc in parsed}
         assert seed_graph["edge_id"] in ids or seed_graph["bob_id"] in ids
 
-    async def test_no_results_returns_empty(self, mongo_client, seed_graph):
+    async def test_no_results_returns_empty(self, make_mcp_ctx, seed_graph):
         """A query with no matches returns an empty list."""
 
-        ctx = _make_ctx(mongo_client, None, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
 
         result = await search_memory("xyznonexistent999", ctx, top_k=5, max_hops=0)
 
@@ -273,7 +259,7 @@ class TestSearchMemoryTool:
         assert parsed == []
 
     async def test_visualize_flag_generates_html(
-        self, mongo_client, seed_graph, tmp_path, mocker
+        self, make_mcp_ctx, seed_graph, tmp_path, mocker
     ):
         output_file = tmp_path / "graph.html"
         mocker.patch(
@@ -282,7 +268,7 @@ class TestSearchMemoryTool:
                 "twin.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
-        ctx = _make_ctx(mongo_client, None, FakeEmbeddingModel())
+        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1, visualize=True)
 

@@ -1,6 +1,8 @@
 """FastMCP server with lifespan for MongoDB + model initialization."""
 
 import logging
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @lifespan
-async def app_lifespan(server: FastMCP):
+async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     """Initialize MongoDB connection and ML models at startup."""
 
     database = settings.mongo.mongo_initdb_database

@@ -27,6 +27,14 @@ def _visualize(docs: list[dict[str, Any]]) -> str:
 
     nodes = [d for d in docs if d.get("kind") == "node"]
     edges = [d for d in docs if d.get("kind") == "edge"]
+
+    if not nodes and not edges:
+        logger.warning(
+            "Visualization skipped: no documents have a 'kind' field "
+            "(query may have projected it away)."
+        )
+        return "\n\nVisualization skipped: returned documents lack 'kind' field."
+
     result = QueryResult(nodes=nodes, edges=edges)
 
     graph = build_networkx_graph(result)

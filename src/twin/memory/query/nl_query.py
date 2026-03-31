@@ -166,7 +166,7 @@ def validate_pipeline(
     Returns the (possibly modified) pipeline with safety guards injected.
     """
 
-    max_results = max_results or app_config.mcp.max_results
+    max_results = max_results if max_results is not None else app_config.mcp.max_results
 
     if not pipeline:
         raise PipelineValidationError("Pipeline is empty")
@@ -202,14 +202,13 @@ def validate_pipeline(
         if stage_name == "$limit":
             has_limit = True
 
-    # Inject $limit if missing.
+    # Return a new list with safety guards injected (avoid mutating the input).
+    safe_pipeline = list(pipeline)
     if not has_limit:
-        pipeline.append({"$limit": max_results})
+        safe_pipeline.append({"$limit": max_results})
+    safe_pipeline.append({"$project": {"embedding": 0}})
 
-    # Strip embedding field from results.
-    pipeline.append({"$project": {"embedding": 0}})
-
-    return pipeline
+    return safe_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +250,6 @@ async def _replace_embedding_placeholder(
 async def nl_to_pipeline(
     llm: BaseLLM,
     query: str,
-    *,
-    embedding_model: BaseEmbeddingModel | None = None,
 ) -> list[dict[str, Any]]:
     """Translate a natural language query to a MongoDB aggregation pipeline."""
 
@@ -264,9 +261,6 @@ async def nl_to_pipeline(
         raise PipelineValidationError(
             f"LLM response missing 'pipeline' key or not a list: {result}"
         )
-
-    if embedding_model is not None:
-        pipeline = await _replace_embedding_placeholder(pipeline, embedding_model)
 
     return pipeline
 
@@ -299,10 +293,9 @@ async def execute_nl_query(
 
     for attempt in range(1 + max_retries):
         try:
-            pipeline = await nl_to_pipeline(
-                llm, current_prompt, embedding_model=embedding_model
-            )
+            pipeline = await nl_to_pipeline(llm, current_prompt)
             pipeline = validate_pipeline(pipeline)
+            pipeline = await _replace_embedding_placeholder(pipeline, embedding_model)
 
             logger.info(
                 "Executing NL query (attempt %d/%d): %s",

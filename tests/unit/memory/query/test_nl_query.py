@@ -271,7 +271,9 @@ class TestNlToPipeline:
         with pytest.raises(PipelineValidationError, match="pipeline"):
             await nl_to_pipeline(mock_llm, "find all nodes")
 
-    async def test_replaces_embedding_when_model_provided(self, mocker):
+    async def test_preserves_embedding_placeholder(self, mocker):
+        """nl_to_pipeline no longer replaces placeholders — that's done later."""
+
         mock_llm = mocker.AsyncMock()
         mock_llm.generate_json.return_value = {
             "pipeline": [
@@ -287,16 +289,12 @@ class TestNlToPipeline:
                 {"$limit": 5},
             ]
         }
-        mock_embed = mocker.AsyncMock()
-        mock_embed.embed.return_value = [[0.1, 0.2]]
 
-        result = await nl_to_pipeline(
-            mock_llm, "semantic search", embedding_model=mock_embed
-        )
+        result = await nl_to_pipeline(mock_llm, "semantic search")
 
-        assert result[0]["$vectorSearch"]["queryVector"] == [0.1, 0.2]
+        assert result[0]["$vectorSearch"]["queryVector"] == "__EMBED__"
 
-    async def test_skips_embedding_when_no_model(self, mocker):
+    async def test_returns_pipeline_without_embedding(self, mocker):
         mock_llm = mocker.AsyncMock()
         mock_llm.generate_json.return_value = {
             "pipeline": [
