@@ -165,10 +165,7 @@ Always run the following steps when finishing a feature or any piece of code:
  1. Format and lint: `make format-fix && make lint-fix && make format-check && make lint-check`
  2. Pre-commit: `make pre-commit`
  3. Tests: `make tests`
- 4. End-to-end: make serve-workflows & → make run-*memory*-pipeline-extraction → make run-memory-pipeline-indexing → make query-graph QUERY="test query" →
- verify results.
- 5. Idempotency: Run extraction twice on the same document. Verify node/edge counts stay the same (upserts, not duplicates).
-
+ 4. Run and verify the code end-to-end. For example, when make testing the memory run: `make serve-workflows & `→ `make run-memory-pipeline-extraction` → `make run-memory-pipeline-indexing` → `make query-graph QUERY="test query"` → verify results.
 
 ## Build
 
