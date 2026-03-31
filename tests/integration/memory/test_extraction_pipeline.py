@@ -3,7 +3,7 @@
 from prefect import tags as prefect_tags
 
 from twin.entities.documents import Document, SourceType
-from twin.entities.knowledge_graph import EdgeType, KnowledgeGraphLogEntry, NodeType
+from twin.entities.knowledge_graph import EdgeType, NodeType
 from twin.memory.extraction.pipeline import memory_extraction
 from twin.models.fake_model import FakeLLM
 
@@ -48,13 +48,15 @@ async def _insert_test_document(
     return doc
 
 
-async def _get_raw_logs(mongo_client, doc_id) -> tuple[list[dict], list[dict]]:
-    """Query raw log entries via pymongo to avoid Beanie is_root deserialization."""
-    col = mongo_client[TEST_DATABASE]["knowledge_graph_log"]
-    all_logs = await col.find({"source_document_id": doc_id}).to_list()
-    node_logs = [e for e in all_logs if e["kind"] == "node"]
-    edge_logs = [e for e in all_logs if e["kind"] == "edge"]
-    return node_logs, edge_logs
+async def _get_graph_entries(
+    mongo_client, source_doc_id
+) -> tuple[list[dict], list[dict]]:
+    """Query knowledge_graph entries that reference a given source document."""
+    col = mongo_client[TEST_DATABASE]["knowledge_graph"]
+    all_entries = await col.find({"sources": source_doc_id}).to_list()
+    node_entries = [e for e in all_entries if e["kind"] == "node"]
+    edge_entries = [e for e in all_entries if e["kind"] == "edge"]
+    return node_entries, edge_entries
 
 
 class TestMemoryExtractionPipeline:
@@ -80,18 +82,19 @@ class TestMemoryExtractionPipeline:
         assert len(result.nodes) > 0
         assert len(result.edges) > 0
 
-        node_logs, edge_logs = await _get_raw_logs(mongo_client, doc.id)
-        assert len(node_logs) > 0
-        assert len(edge_logs) > 0
+        node_entries, edge_entries = await _get_graph_entries(mongo_client, doc.id)
+        assert len(node_entries) > 0
+        assert len(edge_entries) > 0
 
         # Verify structural nodes: at least one DOCUMENT and one CHUNK node
-        node_types = {n["type"] for n in node_logs}
+        node_types = {n["type"] for n in node_entries}
         assert NodeType.DOCUMENT in node_types
         assert NodeType.CHUNK in node_types
 
-        # Verify LLM-extracted person node
-        person_nodes = [n for n in node_logs if n["type"] == NodeType.PERSON]
+        # Verify LLM-extracted person node with type-prefixed _id
+        person_nodes = [n for n in node_entries if n["type"] == NodeType.PERSON]
         assert len(person_nodes) >= 1
+        assert person_nodes[0]["_id"] == "person:alice"
         assert person_nodes[0]["name"] == "alice"
 
     async def test_skips_document_without_content(self, mongo_client, mocker) -> None:
@@ -120,10 +123,9 @@ class TestMemoryExtractionPipeline:
         assert len(results[0].nodes) == 0
         assert len(results[0].edges) == 0
 
-        all_logs = await KnowledgeGraphLogEntry.find(
-            KnowledgeGraphLogEntry.source_document_id == doc.id
-        ).to_list()
-        assert len(all_logs) == 0
+        node_entries, edge_entries = await _get_graph_entries(mongo_client, doc.id)
+        assert len(node_entries) == 0
+        assert len(edge_entries) == 0
 
     async def test_processes_multiple_documents(self, mongo_client, mocker) -> None:
         doc1 = await _insert_test_document(
@@ -154,8 +156,8 @@ class TestMemoryExtractionPipeline:
             assert len(result.nodes) > 0
 
         for doc in [doc1, doc2]:
-            node_logs, _ = await _get_raw_logs(mongo_client, doc.id)
-            assert len(node_logs) > 0
+            node_entries, _ = await _get_graph_entries(mongo_client, doc.id)
+            assert len(node_entries) > 0
 
     async def test_structural_edges_created(self, mongo_client, mocker) -> None:
         doc = await _insert_test_document()
@@ -172,16 +174,14 @@ class TestMemoryExtractionPipeline:
         with prefect_tags("tests"):
             await memory_extraction(document_ids=[str(doc.id)])
 
-        _, edge_logs = await _get_raw_logs(mongo_client, doc.id)
-        edge_types = {e["type"] for e in edge_logs}
+        _, edge_entries = await _get_graph_entries(mongo_client, doc.id)
+        edge_types = {e["type"] for e in edge_entries}
 
         assert EdgeType.PART_OF in edge_types
         assert EdgeType.MENTIONS in edge_types
 
-    async def test_idempotent_log_entries_accumulate(
-        self, mongo_client, mocker
-    ) -> None:
-        """Running extraction twice on the same document appends new log entries."""
+    async def test_idempotent_upserts(self, mongo_client, mocker) -> None:
+        """Running extraction twice on the same document produces the same count."""
         doc = await _insert_test_document()
 
         mocker.patch(
@@ -196,8 +196,8 @@ class TestMemoryExtractionPipeline:
         with prefect_tags("tests"):
             await memory_extraction(document_ids=[str(doc.id)])
 
-        first_node_logs, _ = await _get_raw_logs(mongo_client, doc.id)
-        first_count = len(first_node_logs)
+        first_nodes, first_edges = await _get_graph_entries(mongo_client, doc.id)
+        first_count = len(first_nodes) + len(first_edges)
         assert first_count > 0
 
         mocker.patch(
@@ -208,6 +208,8 @@ class TestMemoryExtractionPipeline:
         with prefect_tags("tests"):
             await memory_extraction(document_ids=[str(doc.id)])
 
-        second_node_logs, _ = await _get_raw_logs(mongo_client, doc.id)
-        second_count = len(second_node_logs)
-        assert second_count == first_count * 2
+        second_nodes, second_edges = await _get_graph_entries(mongo_client, doc.id)
+        second_count = len(second_nodes) + len(second_edges)
+
+        # Upserts are idempotent — same count after two runs
+        assert second_count == first_count

@@ -1,12 +1,12 @@
 """
-Core business logic for knowledge‑graph extraction.
+Core business logic for knowledge-graph extraction.
 
 Pure functions (aside from the LLM call and DB writes) that:
-1. Chunk a document into token‑bounded pieces.
+1. Chunk a document into token-bounded pieces.
 2. Ask an LLM to extract nodes & edges per chunk.
 3. Build structural entries (PART_OF, NEXT, MENTIONS) deterministically.
 4. Normalise duplicate nodes via fuzzy matching.
-5. Persist the result to the knowledge_graph_log collection.
+5. Upsert the result to the knowledge_graph collection.
 """
 
 import asyncio
@@ -19,12 +19,14 @@ from uuid import uuid4
 
 import tiktoken
 from beanie import PydanticObjectId
+from pymongo import UpdateOne
 
+from twin.config.app_config import app_config
 from twin.entities.knowledge_graph import (
-    EdgeLogEntry,
     EdgeType,
-    NodeLogEntry,
     NodeType,
+    build_edge_id,
+    build_node_id,
 )
 from twin.entities.ontology import (
     EDGE_CONSTRAINTS,
@@ -32,11 +34,12 @@ from twin.entities.ontology import (
     LLM_EXTRACTABLE_NODE_TYPES,
     get_ontology_schema,
 )
-from twin.config.app_config import app_config
 from twin.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
 from twin.models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
+
+_KG_COLLECTION = "knowledge_graph"
 
 # ---------------------------------------------------------------------------
 # 1. Chunking
@@ -50,7 +53,7 @@ def chunk_document(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
 ) -> list[str]:
-    """Split *text* into token‑bounded chunks with overlap."""
+    """Split *text* into token-bounded chunks with overlap."""
 
     chunk_size = (
         chunk_size if chunk_size is not None else app_config.extraction.chunk_size
@@ -80,7 +83,7 @@ def chunk_document(
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a knowledge‑graph extraction engine.
+You are a knowledge-graph extraction engine.
 
 Given a chunk of text, extract entities (nodes) and relationships (edges)
 according to the ontology below.  Return **only** valid JSON that matches
@@ -316,7 +319,7 @@ def build_structural_entries(
 
 
 def normalize_nodes(result: ExtractionResult) -> ExtractionResult:
-    """Merge near‑duplicate nodes by fuzzy‑matching names within each type."""
+    """Merge near-duplicate nodes by fuzzy-matching names within each type."""
 
     # Map (type, original_name) → canonical_name
     canonical_map: dict[tuple[NodeType, str], str] = {}
@@ -362,64 +365,84 @@ def normalize_nodes(result: ExtractionResult) -> ExtractionResult:
 
 
 # ---------------------------------------------------------------------------
-# 5. Persistence
+# 5. Persistence (upsert to knowledge_graph)
 # ---------------------------------------------------------------------------
 
 
-async def store_log_entries(
+async def upsert_graph_entries(
     result: ExtractionResult,
     *,
     source_document_id: PydanticObjectId,
-) -> list[NodeLogEntry | EdgeLogEntry]:
-    """Write extraction results to knowledge_graph_log. Returns saved entries."""
+    database: str,
+    client: Any,
+) -> int:
+    """Upsert extraction results directly to the knowledge_graph collection.
+
+    Returns the number of upsert operations executed.
+    """
 
     now = datetime.now(tz=UTC)
-    entries: list[NodeLogEntry | EdgeLogEntry] = []
+    collection = client[database][_KG_COLLECTION]
+    ops: list[UpdateOne] = []
 
     for node in result.nodes:
-        entries.append(
-            NodeLogEntry(
-                name=node.name,
-                type=node.type,
-                properties=node.properties,
-                source_document_id=source_document_id,
-                chunk_id=node.chunk_id,
-                created_at=now,
+        node_id = build_node_id(node.type, node.name)
+        ops.append(
+            UpdateOne(
+                {"_id": node_id},
+                {
+                    "$set": {
+                        "kind": "node",
+                        "type": node.type.value,
+                        "name": node.name,
+                        "properties": node.properties,
+                    },
+                    "$addToSet": {"sources": source_document_id},
+                    "$min": {"created_at": now},
+                    "$max": {"updated_at": now},
+                    "$setOnInsert": {"embedding": []},
+                },
+                upsert=True,
             )
         )
 
     for edge in result.edges:
-        entries.append(
-            EdgeLogEntry(
-                source_node_id=edge.source_node_id,
-                source_type=edge.source_type,
-                target_node_id=edge.target_node_id,
-                target_type=edge.target_type,
-                type=edge.type,
-                properties=edge.properties,
-                source_document_id=source_document_id,
-                chunk_id=edge.chunk_id,
-                created_at=now,
+        src_id = build_node_id(edge.source_type, edge.source_node_id)
+        tgt_id = build_node_id(edge.target_type, edge.target_node_id)
+        edge_id = build_edge_id(src_id, edge.type, tgt_id)
+        ops.append(
+            UpdateOne(
+                {"_id": edge_id},
+                {
+                    "$set": {
+                        "kind": "edge",
+                        "type": edge.type.value,
+                        "source_node_id": src_id,
+                        "source_type": edge.source_type.value,
+                        "target_node_id": tgt_id,
+                        "target_type": edge.target_type.value,
+                        "properties": edge.properties,
+                    },
+                    "$addToSet": {"sources": source_document_id},
+                    "$min": {"created_at": now},
+                    "$max": {"updated_at": now},
+                },
+                upsert=True,
             )
         )
 
-    if entries:
-        node_entries = [e for e in entries if isinstance(e, NodeLogEntry)]
-        if node_entries:
-            await NodeLogEntry.insert_many(node_entries)
-        edge_entries = [e for e in entries if isinstance(e, EdgeLogEntry)]
-        if edge_entries:
-            await EdgeLogEntry.insert_many(edge_entries)
+    if ops:
+        await collection.bulk_write(ops, ordered=False)
 
     logger.info(
-        "Stored %d log entries (nodes=%d, edges=%d) for document %s",
-        len(entries),
+        "Upserted %d entries (nodes=%d, edges=%d) for document %s",
+        len(ops),
         len(result.nodes),
         len(result.edges),
         source_document_id,
     )
 
-    return entries
+    return len(ops)
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +459,10 @@ async def extract_and_store(
     source_uri: str,
     date: str | None = None,
     reference_uris: list[str] | None = None,
+    database: str,
+    client: Any,
 ) -> ExtractionResult:
-    """End‑to‑end: chunk → extract → structural → normalise → persist."""
+    """End-to-end: chunk → extract → structural → normalise → upsert."""
 
     # 1. Chunk
     chunks = chunk_document(content)
@@ -479,10 +504,12 @@ async def extract_and_store(
     combined = llm_result.merge(structural)
     normalised = normalize_nodes(combined)
 
-    # 5. Persist
-    await store_log_entries(
+    # 5. Upsert to knowledge_graph
+    await upsert_graph_entries(
         normalised,
         source_document_id=document_id,
+        database=database,
+        client=client,
     )
 
     return normalised

@@ -1,12 +1,12 @@
 """
-Trigger the memory materialization pipeline via Prefect.
+Trigger the memory indexing pipeline via Prefect.
 
 Requires:
     - Prefect server running (make prefect-server)
     - Workflows served (make serve-workflows)
 
 Usage:
-    uv run python scripts/run_materialization_pipeline.py
+    uv run python scripts/run_indexing_pipeline.py
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from twin.logging import init_logger
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = "memory-materialization-etl/memory-materialization-etl"
+DEPLOYMENT_NAME = "memory-indexing-etl/memory-indexing-etl"
 POLL_INTERVAL_SECONDS = 2
 
 

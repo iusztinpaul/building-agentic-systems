@@ -14,8 +14,8 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
     - Custom sites
     - Markdown files
     - HuggingFace Datasets (e.g., https://huggingface.co/datasets/arxiv-community/arxiv_dataset)
-- **Memory Pipeline:** Pipeline that maps `documents` to `knowledge graph objects` within the `knowledge_graph_log` collection by cleaning, chunking, graph extracting, normalizing and embedding the content of the chunks.
-- **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored as immutable logs within the `knowledge_graph_log` collection, while building a query view for retrieval by aggregating logs with the same ID.
+- **Memory Pipeline:** Pipeline that maps `documents` to `knowledge graph objects` within the `knowledge_graph` collection by cleaning, chunking, graph extracting, normalizing and upserting nodes and edges directly.
+- **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored in a single mutable `knowledge_graph` collection with upsert semantics. Nodes use `_id = "type:name"` and edges use `_id = "source|type|target"` string identifiers.
 - **Agentic Tools:** Tools used to query or write to the unified memory. 
 
 ## Project Structure
@@ -35,7 +35,7 @@ project-root/
 │       └── memory/                  # Unified memory module
 │           ├── types.py             # Types used across the memory layer
 │           ├── extraction/          # Chunking, graph extraction, embedding
-│           ├── materialization/     # Query views built from memory logs
+│           ├── materialization/     # Post-extraction indexing (reverse edges, embeddings, search indexes)
 │           └── query/               # Query interfaces over unified memory
 ├── models/                          # Model configuration and utilities
 │   ├── base.py                      # Base interfaces (BaseLLM, BaseEmbeddingModel)
@@ -158,6 +158,18 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
   6. Use the `create-pr` skill to update the description,
   7. DON'T merge the PR. The user will.
 
+## Step-by-Step Verification Steps
+
+Always run the following steps when finishing a feature or any piece of code:
+
+ 1. Format and lint: `make format-fix && make lint-fix && make format-check && make lint-check`
+ 2. Pre-commit: `make pre-commit`
+ 3. Tests: `make tests`
+ 4. End-to-end: make serve-workflows & → make run-*memory*-pipeline-extraction → make run-memory-pipeline-indexing → make query-graph QUERY="test query" →
+ verify results.
+ 5. Idempotency: Run extraction twice on the same document. Verify node/edge counts stay the same (upserts, not duplicates).
+
+
 ## Build
 
 ```
@@ -203,7 +215,7 @@ make run-substack-rss-data-pipeline
 make run-substack-article-data-pipeline
 make run-arxiv-data-pipeline
 make run-memory-pipeline-extraction
-make run-memory-pipeline-materialization
+make run-memory-pipeline-indexing
 ```
 
 The `make serve-workflows` process must be running for pipeline triggers to be picked up, as it acts as the in-process Prefect worker. Without it, deployments are registered but no worker will execute them.

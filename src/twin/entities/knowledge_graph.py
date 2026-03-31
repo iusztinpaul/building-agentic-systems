@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
 from beanie import Document as BeanieDocument
 from beanie import Indexed, PydanticObjectId
@@ -30,48 +30,28 @@ class EdgeType(StrEnum):
     HAS = "has"
 
 
-# --- Log Collection (knowledge_graph_log) ---
-# Immutable, append-only. Each entry is a single observation
-# of a node or edge extracted from a specific chunk.
+# --- ID builders ---
 
 
-class KnowledgeGraphLogEntry(BeanieDocument):
-    kind: Indexed(str)
-    properties: dict[str, Any] = Field(default_factory=dict)
-    source_document_id: Indexed(PydanticObjectId)
-    chunk_id: str
-    created_at: datetime
-
-    class Settings:
-        name = "knowledge_graph_log"
-        is_root = True
+def build_node_id(node_type: NodeType, name: str) -> str:
+    """Build a node ``_id`` string: ``"type:name"``."""
+    return f"{node_type}:{name}"
 
 
-class NodeLogEntry(KnowledgeGraphLogEntry):
-    kind: Literal["node"] = "node"
-    name: Indexed(str)
-    type: NodeType
+def build_edge_id(source_node_id: str, edge_type: EdgeType, target_node_id: str) -> str:
+    """Build an edge ``_id`` string: ``"source|type|target"``."""
+    return f"{source_node_id}|{edge_type}|{target_node_id}"
 
 
-class EdgeLogEntry(KnowledgeGraphLogEntry):
-    kind: Literal["edge"] = "edge"
-    source_node_id: Indexed(str)
-    source_type: NodeType
-    target_node_id: Indexed(str)
-    target_type: NodeType
-    type: EdgeType
-
-
-# --- Materialized Collection (knowledge_graph) ---
-# Rebuilt from the log via aggregation pipeline with $out.
-# Nodes and edges coexist with different _id types:
+# --- Single collection (knowledge_graph) ---
+# Nodes and edges coexist with string _id values:
 #   - Nodes: _id = "type:name" (str), e.g. "person:alice"
-#   - Edges: _id = {source_node_id, target_node_id, type} (dict)
-# Single model with optional fields since $out bypasses Beanie.
+#   - Edges: _id = "source|type|target" (str), e.g. "person:alice|todo|task:write"
+# Upserted directly during extraction (no separate log collection).
 
 
 class KnowledgeGraphEntry(BeanieDocument):
-    id: Any = None
+    id: str
     kind: Indexed(str)
     type: NodeType | EdgeType
 
