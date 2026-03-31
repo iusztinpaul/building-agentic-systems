@@ -6,7 +6,7 @@ import pytest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
-from twin.memory.materialization.pipeline import memory_indexing
+from twin.memory.indexing.pipeline import memory_indexing
 from twin.models.fake_model import FakeEmbeddingModel
 
 TEST_DATABASE = "integration_tests_twin"
@@ -16,7 +16,7 @@ TEST_DATABASE = "integration_tests_twin"
 def _patch_database_name(mocker):
     """Ensure indexing uses the test database, not the real one."""
     mocker.patch(
-        "twin.memory.materialization.pipeline.settings.mongo.mongo_initdb_database",
+        "twin.memory.indexing.pipeline.settings.mongo.mongo_initdb_database",
         TEST_DATABASE,
     )
 
@@ -116,11 +116,11 @@ class TestMemoryIndexingPipeline:
         await _seed_knowledge_graph(mongo_client)
 
         mocker.patch(
-            "twin.memory.materialization.pipeline.init_mongodb",
+            "twin.memory.indexing.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.materialization.pipeline.get_embedding_model",
+            "twin.memory.indexing.pipeline.get_embedding_model",
             return_value=FakeEmbeddingModel(dimensions=8),
         )
 
@@ -136,11 +136,11 @@ class TestMemoryIndexingPipeline:
         await _seed_knowledge_graph(mongo_client)
 
         mocker.patch(
-            "twin.memory.materialization.pipeline.init_mongodb",
+            "twin.memory.indexing.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.materialization.pipeline.get_embedding_model",
+            "twin.memory.indexing.pipeline.get_embedding_model",
             return_value=FakeEmbeddingModel(dimensions=8),
         )
 
@@ -160,11 +160,11 @@ class TestMemoryIndexingPipeline:
         await _seed_knowledge_graph(mongo_client)
 
         mocker.patch(
-            "twin.memory.materialization.pipeline.init_mongodb",
+            "twin.memory.indexing.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.materialization.pipeline.get_embedding_model",
+            "twin.memory.indexing.pipeline.get_embedding_model",
             return_value=FakeEmbeddingModel(dimensions=8),
         )
 
@@ -180,11 +180,11 @@ class TestMemoryIndexingPipeline:
         await _seed_knowledge_graph(mongo_client)
 
         mocker.patch(
-            "twin.memory.materialization.pipeline.init_mongodb",
+            "twin.memory.indexing.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.materialization.pipeline.get_embedding_model",
+            "twin.memory.indexing.pipeline.get_embedding_model",
             return_value=FakeEmbeddingModel(dimensions=8),
         )
 

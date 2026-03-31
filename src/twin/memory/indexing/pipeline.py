@@ -11,7 +11,7 @@ from prefect.cache_policies import NO_CACHE
 
 from twin.config.settings import settings
 from twin.db import init_mongodb
-from twin.memory.materialization.core import (
+from twin.memory.indexing.core import (
     create_reverse_edges,
     embed_nodes,
     ensure_indexes,

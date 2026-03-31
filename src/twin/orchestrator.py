@@ -22,7 +22,7 @@ from twin.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed_batch,
 )
 from twin.memory.extraction.pipeline import memory_extraction
-from twin.memory.materialization.pipeline import memory_indexing
+from twin.memory.indexing.pipeline import memory_indexing
 
 if __name__ == "__main__":
     serve(

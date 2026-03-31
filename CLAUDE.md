@@ -35,7 +35,7 @@ project-root/
 │       └── memory/                  # Unified memory module
 │           ├── types.py             # Types used across the memory layer
 │           ├── extraction/          # Chunking, graph extraction, embedding
-│           ├── materialization/     # Post-extraction indexing (reverse edges, embeddings, search indexes)
+│           ├── indexing/            # Post-extraction indexing (reverse edges, embeddings, search indexes)
 │           └── query/               # Query interfaces over unified memory
 ├── models/                          # Model configuration and utilities
 │   ├── base.py                      # Base interfaces (BaseLLM, BaseEmbeddingModel)

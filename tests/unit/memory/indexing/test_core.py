@@ -1,4 +1,4 @@
-from twin.memory.materialization.core import _node_to_text
+from twin.memory.indexing.core import _node_to_text
 
 
 class TestNodeToText:
