@@ -456,13 +456,14 @@ async def normalize_nodes(
             continue
 
         matched = False
-        for kept in kept_nodes:
-            if kept.type != node.type:
-                continue
-            if _matches_node(node, kept.name, _get_node_aliases(kept), threshold):
-                _merge_into_canonical(kept, node, canonical_map)
-                matched = True
-                break
+        if node.type in LLM_EXTRACTABLE_NODE_TYPES:
+            for kept in kept_nodes:
+                if kept.type != node.type:
+                    continue
+                if _matches_node(node, kept.name, _get_node_aliases(kept), threshold):
+                    _merge_into_canonical(kept, node, canonical_map)
+                    matched = True
+                    break
 
         if not matched:
             canonical_map[key] = node.name

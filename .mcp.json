@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "twin-memory": {
+      "command": "uv",
+      "args": [
+        "run",
+        "python",
+        "scripts/serve_mcp.py"
+      ],
+      "env": {
+        "ENV_FILE_PATH": ".env"
+      }
+    }
+  }
+}

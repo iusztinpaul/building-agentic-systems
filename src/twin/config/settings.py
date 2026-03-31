@@ -1,9 +1,13 @@
+import os
+
 from pydantic import SecretStr, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_env_file = os.environ.get("ENV_FILE_PATH", ".env")
+
 
 class MongoSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", env_file=_env_file, extra="ignore")
 
     mongo_host: str = "localhost"
     mongo_port: int = 27017
@@ -24,7 +28,7 @@ class MongoSettings(BaseSettings):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", env_file=_env_file, extra="ignore")
 
     mongo: MongoSettings = MongoSettings()
     google_api_key: SecretStr = SecretStr("")

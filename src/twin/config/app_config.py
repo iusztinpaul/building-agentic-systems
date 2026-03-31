@@ -67,11 +67,17 @@ class SourcesConfig(BaseModel):
     )
 
 
+class MCPConfig(BaseModel):
+    max_retries: int = 1
+    max_results: int = 50
+
+
 class AppConfig(BaseModel):
     sources: SourcesConfig = SourcesConfig()
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()
+    mcp: MCPConfig = MCPConfig()
 
 
 def load_app_config(path: str | Path | None = None) -> AppConfig:
