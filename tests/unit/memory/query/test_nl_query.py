@@ -1,9 +1,12 @@
 import pytest
+from pymongo.errors import OperationFailure
 
 from twin.entities.knowledge_graph import EdgeType, NodeType
 from twin.memory.query.nl_query import (
     _replace_embedding_placeholder,
     build_nl_query_system_prompt,
+    execute_nl_query,
+    nl_to_pipeline,
     validate_pipeline,
 )
 from twin.models.exceptions import PipelineValidationError
@@ -237,3 +240,235 @@ class TestReplaceEmbeddingPlaceholder:
 
         with pytest.raises(PipelineValidationError, match="queryText"):
             await _replace_embedding_placeholder(pipeline, mock_model)
+
+
+class TestNlToPipeline:
+    async def test_returns_validated_pipeline(self, mocker):
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {
+            "pipeline": [
+                {"$match": {"kind": "node"}},
+                {"$limit": 10},
+            ]
+        }
+
+        result = await nl_to_pipeline(mock_llm, "find all nodes")
+
+        assert any("$match" in s for s in result)
+        mock_llm.generate_json.assert_called_once()
+
+    async def test_missing_pipeline_key_raises(self, mocker):
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {"wrong_key": []}
+
+        with pytest.raises(PipelineValidationError, match="pipeline"):
+            await nl_to_pipeline(mock_llm, "find all nodes")
+
+    async def test_pipeline_not_a_list_raises(self, mocker):
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {"pipeline": "not a list"}
+
+        with pytest.raises(PipelineValidationError, match="pipeline"):
+            await nl_to_pipeline(mock_llm, "find all nodes")
+
+    async def test_replaces_embedding_when_model_provided(self, mocker):
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {
+            "pipeline": [
+                {
+                    "$vectorSearch": {
+                        "index": "vector_index",
+                        "path": "embedding",
+                        "queryVector": "__EMBED__",
+                        "queryText": "semantic search",
+                        "limit": 10,
+                    }
+                },
+                {"$limit": 5},
+            ]
+        }
+        mock_embed = mocker.AsyncMock()
+        mock_embed.embed.return_value = [[0.1, 0.2]]
+
+        result = await nl_to_pipeline(
+            mock_llm, "semantic search", embedding_model=mock_embed
+        )
+
+        assert result[0]["$vectorSearch"]["queryVector"] == [0.1, 0.2]
+
+    async def test_skips_embedding_when_no_model(self, mocker):
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {
+            "pipeline": [
+                {"$match": {"kind": "node"}},
+                {"$limit": 5},
+            ]
+        }
+
+        result = await nl_to_pipeline(mock_llm, "find nodes")
+
+        assert any("$match" in s for s in result)
+
+
+class _AsyncCursorStub:
+    """Minimal async iterator that yields documents from a list."""
+
+    def __init__(self, docs: list[dict]) -> None:
+        self._docs = list(docs)
+        self._idx = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._idx >= len(self._docs):
+            raise StopAsyncIteration
+        doc = self._docs[self._idx]
+        self._idx += 1
+        return doc
+
+
+class TestExecuteNlQuery:
+    @pytest.fixture()
+    def mock_deps(self, mocker):
+        """Shared mocks for execute_nl_query tests."""
+
+        mock_llm = mocker.AsyncMock()
+        mock_embed = mocker.AsyncMock()
+        mock_embed.embed.return_value = [[0.1, 0.2]]
+
+        mock_collection = mocker.AsyncMock()
+        mock_collection.aggregate.return_value = _AsyncCursorStub(
+            [{"_id": "person:alice", "name": "Alice"}]
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.__getitem__.return_value.__getitem__.return_value = mock_collection
+
+        return {
+            "client": mock_client,
+            "database": "test_db",
+            "llm": mock_llm,
+            "embedding_model": mock_embed,
+            "collection": mock_collection,
+        }
+
+    async def test_successful_query(self, mock_deps):
+        mock_deps["llm"].generate_json.return_value = {
+            "pipeline": [
+                {"$match": {"kind": "node"}},
+                {"$limit": 10},
+            ]
+        }
+
+        results = await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find all people",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+        )
+
+        assert len(results) == 1
+        assert results[0]["_id"] == "person:alice"
+        mock_deps["collection"].aggregate.assert_called_once()
+
+    async def test_retries_on_validation_error(self, mock_deps):
+        mock_deps["llm"].generate_json.side_effect = [
+            {"pipeline": [{"$out": "evil"}]},  # First attempt: blocked stage
+            {
+                "pipeline": [
+                    {"$match": {"kind": "node"}},
+                    {"$limit": 10},
+                ]
+            },  # Second attempt: valid
+        ]
+
+        results = await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find nodes",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+            max_retries=1,
+        )
+
+        assert len(results) == 1
+        assert mock_deps["llm"].generate_json.call_count == 2
+
+    async def test_retries_on_operation_failure(self, mock_deps):
+        mock_deps["llm"].generate_json.return_value = {
+            "pipeline": [
+                {"$match": {"kind": "node"}},
+                {"$limit": 10},
+            ]
+        }
+        mock_deps["collection"].aggregate.side_effect = [
+            OperationFailure("bad query"),
+            _AsyncCursorStub([{"_id": "person:bob", "name": "Bob"}]),
+        ]
+
+        results = await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find nodes",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+            max_retries=1,
+        )
+
+        assert len(results) == 1
+
+    async def test_raises_after_max_retries_exhausted(self, mock_deps):
+        mock_deps["llm"].generate_json.return_value = {"pipeline": [{"$out": "evil"}]}
+
+        with pytest.raises(PipelineValidationError):
+            await execute_nl_query(
+                client=mock_deps["client"],
+                database=mock_deps["database"],
+                query="find nodes",
+                llm=mock_deps["llm"],
+                embedding_model=mock_deps["embedding_model"],
+                max_retries=1,
+            )
+
+        assert mock_deps["llm"].generate_json.call_count == 2
+
+    async def test_retry_prompt_includes_original_query_and_error(self, mock_deps):
+        mock_deps["llm"].generate_json.side_effect = [
+            {"pipeline": [{"$out": "evil"}]},
+            {
+                "pipeline": [
+                    {"$match": {"kind": "node"}},
+                    {"$limit": 10},
+                ]
+            },
+        ]
+
+        await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find all people",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+            max_retries=1,
+        )
+
+        retry_prompt = mock_deps["llm"].generate_json.call_args_list[1][0][0]
+        assert "find all people" in retry_prompt
+        assert "error" in retry_prompt.lower()
+
+    async def test_zero_retries_fails_immediately(self, mock_deps):
+        mock_deps["llm"].generate_json.return_value = {"pipeline": [{"$out": "evil"}]}
+
+        with pytest.raises(PipelineValidationError):
+            await execute_nl_query(
+                client=mock_deps["client"],
+                database=mock_deps["database"],
+                query="find nodes",
+                llm=mock_deps["llm"],
+                embedding_model=mock_deps["embedding_model"],
+                max_retries=0,
+            )
+
+        assert mock_deps["llm"].generate_json.call_count == 1
