@@ -228,10 +228,7 @@ async def expand_graph(
 
     async for doc in cursor:
         for edge in doc.get("edges", []):
-            raw_id = edge["_id"]
-            edge_key = (
-                tuple(sorted(raw_id.items())) if isinstance(raw_id, dict) else raw_id
-            )
+            edge_key = edge["_id"]
             if edge_key in seen_edge_ids:
                 continue
             seen_edge_ids.add(edge_key)

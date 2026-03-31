@@ -9,6 +9,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 from prefect.cache_policies import NO_CACHE
+from pymongo import AsyncMongoClient
 
 from twin.config.settings import settings
 from twin.db import init_mongodb
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 async def extract_document_task(
     llm: BaseLLM,
     doc: Document,
+    client: AsyncMongoClient,
+    database: str,
 ) -> ExtractionResult:
     """Extract knowledge graph entries from a single document."""
 
@@ -50,6 +53,8 @@ async def extract_document_task(
         source_uri=doc.source_uri,
         date=doc.date.isoformat() if doc.date else None,
         reference_uris=reference_uris or None,
+        database=database,
+        client=client,
     )
 
 
@@ -64,10 +69,11 @@ async def memory_extraction(
                      If None, processes all documents that have content.
     """
 
-    await init_mongodb(
+    client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
+    database = settings.mongo.mongo_initdb_database
 
     llm = get_llm()
 
@@ -84,7 +90,7 @@ async def memory_extraction(
 
     results: list[ExtractionResult] = []
     for doc in docs:
-        result = await extract_document_task(llm, doc)
+        result = await extract_document_task(llm, doc, client, database)
         results.append(result)
 
     total_nodes = sum(len(r.nodes) for r in results)

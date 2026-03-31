@@ -283,7 +283,7 @@ class TestBuildStructuralEntries:
 
 
 class TestNormalizeNodes:
-    def test_merges_similar_names(self):
+    async def test_merges_similar_names(self):
         result = ExtractionResult(
             nodes=[
                 ExtractedNode(
@@ -300,11 +300,11 @@ class TestNormalizeNodes:
             edges=[],
         )
 
-        normalised = normalize_nodes(result)
+        normalised = await normalize_nodes(result)
         person_nodes = [n for n in normalised.nodes if n.type == NodeType.PERSON]
         assert len(person_nodes) == 1
 
-    def test_keeps_different_names(self):
+    async def test_keeps_different_names(self):
         result = ExtractionResult(
             nodes=[
                 ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
@@ -313,10 +313,10 @@ class TestNormalizeNodes:
             edges=[],
         )
 
-        normalised = normalize_nodes(result)
+        normalised = await normalize_nodes(result)
         assert len(normalised.nodes) == 2
 
-    def test_different_types_not_merged(self):
+    async def test_different_types_not_merged(self):
         result = ExtractionResult(
             nodes=[
                 ExtractedNode(
@@ -333,10 +333,10 @@ class TestNormalizeNodes:
             edges=[],
         )
 
-        normalised = normalize_nodes(result)
+        normalised = await normalize_nodes(result)
         assert len(normalised.nodes) == 2
 
-    def test_remaps_edge_endpoints(self):
+    async def test_remaps_edge_endpoints(self):
         result = ExtractionResult(
             nodes=[
                 ExtractedNode(name="alice smith", type=NodeType.PERSON, properties={}),
@@ -353,15 +353,147 @@ class TestNormalizeNodes:
             ],
         )
 
-        normalised = normalize_nodes(result)
+        normalised = await normalize_nodes(result)
         assert normalised.edges[0].source_node_id == "alice smith"
         assert normalised.edges[0].target_node_id == "alice smith"
 
-    def test_empty_result(self):
+    async def test_empty_result(self):
         result = ExtractionResult()
-        normalised = normalize_nodes(result)
+        normalised = await normalize_nodes(result)
         assert normalised.nodes == []
         assert normalised.edges == []
+
+    async def test_resolves_via_alias_match(self):
+        """New node name matches a kept node's aliases."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(
+                    name="alice",
+                    type=NodeType.PERSON,
+                    properties={"aliases": ["ali", "bob"]},
+                ),
+                ExtractedNode(
+                    name="bob",
+                    type=NodeType.PERSON,
+                    properties={"email": "bob@x.com"},
+                ),
+            ],
+            edges=[],
+        )
+
+        normalised = await normalize_nodes(result)
+        person_nodes = [n for n in normalised.nodes if n.type == NodeType.PERSON]
+        assert len(person_nodes) == 1
+        assert person_nodes[0].name == "alice"
+        assert "bob" in person_nodes[0].properties.get("aliases", [])
+
+    async def test_resolves_via_reverse_alias_match(self):
+        """New node's aliases contain a kept node's name."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(
+                    name="robert",
+                    type=NodeType.PERSON,
+                    properties={},
+                ),
+                ExtractedNode(
+                    name="bob",
+                    type=NodeType.PERSON,
+                    properties={"aliases": ["robert"]},
+                ),
+            ],
+            edges=[],
+        )
+
+        normalised = await normalize_nodes(result)
+        person_nodes = [n for n in normalised.nodes if n.type == NodeType.PERSON]
+        assert len(person_nodes) == 1
+        assert person_nodes[0].name == "robert"
+        assert "bob" in person_nodes[0].properties.get("aliases", [])
+
+    async def test_no_cross_type_alias_resolution(self):
+        """Alias match should respect type boundaries."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(
+                    name="alpha",
+                    type=NodeType.TASK,
+                    properties={"content": "task", "aliases": ["beta"]},
+                ),
+                ExtractedNode(
+                    name="beta",
+                    type=NodeType.EPISODE,
+                    properties={"content": "episode"},
+                ),
+            ],
+            edges=[],
+        )
+
+        normalised = await normalize_nodes(result)
+        assert len(normalised.nodes) == 2
+
+    async def test_alias_lists_merged_as_union(self):
+        """Aliases from both nodes are unioned, non-canonical name added."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(
+                    name="alice",
+                    type=NodeType.PERSON,
+                    properties={"aliases": ["ali"]},
+                ),
+                ExtractedNode(
+                    name="alice",
+                    type=NodeType.PERSON,
+                    properties={"aliases": ["alice doe"]},
+                ),
+            ],
+            edges=[],
+        )
+
+        normalised = await normalize_nodes(result)
+        aliases = normalised.nodes[0].properties.get("aliases", [])
+        assert "ali" in aliases
+        assert "alice doe" in aliases
+
+    async def test_edge_dedup_after_resolution(self):
+        """Edges that become identical after node resolution are merged."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
+                ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
+            ],
+            edges=[
+                ExtractedEdge(
+                    source_node_id="alice",
+                    source_type=NodeType.PERSON,
+                    target_node_id="write code",
+                    target_type=NodeType.TASK,
+                    type=EdgeType.TODO,
+                ),
+                ExtractedEdge(
+                    source_node_id="alice",
+                    source_type=NodeType.PERSON,
+                    target_node_id="write code",
+                    target_type=NodeType.TASK,
+                    type=EdgeType.TODO,
+                ),
+            ],
+        )
+
+        normalised = await normalize_nodes(result)
+        assert len(normalised.edges) == 1
+
+    async def test_normalize_without_db_params(self):
+        """Calling without client/database still works (in-memory only)."""
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
+            ],
+            edges=[],
+        )
+
+        normalised = await normalize_nodes(result)
+        assert len(normalised.nodes) == 1
 
 
 # ---------------------------------------------------------------------------

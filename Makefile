@@ -107,8 +107,8 @@ run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samp
 run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Optionally pass DOC_IDS="id1 id2".
 	uv run python scripts/run_memory_pipeline.py $(DOC_IDS)
 
-run-memory-pipeline-materialization: # Trigger memory materialization pipeline via Prefect.
-	uv run python scripts/run_materialization_pipeline.py
+run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes).
+	uv run python scripts/run_indexing_pipeline.py
 
 # --- Querying ---
 

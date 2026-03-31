@@ -2,9 +2,9 @@ from beanie import init_beanie
 from pymongo import AsyncMongoClient
 
 from twin.entities.documents import Document
-from twin.entities.knowledge_graph import KnowledgeGraphEntry, KnowledgeGraphLogEntry
+from twin.entities.knowledge_graph import KnowledgeGraphEntry
 
-ALL_DOCUMENT_MODELS = [Document, KnowledgeGraphLogEntry, KnowledgeGraphEntry]
+ALL_DOCUMENT_MODELS = [Document, KnowledgeGraphEntry]
 
 
 async def init_mongodb(uri: str, database: str) -> AsyncMongoClient:
