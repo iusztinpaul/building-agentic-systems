@@ -380,7 +380,14 @@ async def _fetch_candidate_nodes(
 ) -> dict[NodeType, list[dict[str, Any]]]:
     """Batch-query MongoDB for existing nodes that might match new names.
 
-    Issues one query per node type. Matches on name OR aliases.
+    Uses ``$text`` search (on the text index covering ``name``,
+    ``properties.content``, and ``properties.aliases``) to find candidates,
+    then falls back to exact ``$in`` matching if the text index is
+    unavailable.  The ``$text`` approach retrieves a broader candidate pool
+    (tokenised, stemmed word matching) so that the downstream
+    ``_matches_node()`` check can apply fuzzy SequenceMatcher scoring.
+
+    Issues one query per node type.
     Returns candidates grouped by node type.
     """
     candidates: dict[NodeType, list[dict[str, Any]]] = {}
@@ -388,15 +395,29 @@ async def _fetch_candidate_nodes(
         if not names:
             continue
         name_list = list(names)
-        query = {
-            "kind": "node",
-            "type": node_type.value,
-            "$or": [
-                {"name": {"$in": name_list}},
-                {"properties.aliases": {"$in": name_list}},
-            ],
-        }
-        docs = await collection.find(query).to_list()
+        search_text = " ".join(name_list)
+
+        # Try $text search first (broader: word-level, stemmed).
+        try:
+            query: dict[str, Any] = {
+                "kind": "node",
+                "type": node_type.value,
+                "$text": {"$search": search_text},
+            }
+            docs = await collection.find(query).to_list()
+        except Exception:
+            # Text index unavailable — fall back to exact $in matching.
+            logger.debug("Text search unavailable, falling back to $in query")
+            query = {
+                "kind": "node",
+                "type": node_type.value,
+                "$or": [
+                    {"name": {"$in": name_list}},
+                    {"properties.aliases": {"$in": name_list}},
+                ],
+            }
+            docs = await collection.find(query).to_list()
+
         if docs:
             candidates[node_type] = docs
     return candidates
