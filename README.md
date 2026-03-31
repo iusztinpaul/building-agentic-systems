@@ -76,34 +76,36 @@ make serve-workflows
 
 ### Step 1: Data pipelines
 
-Ingest documents from Substack RSS feeds into the `documents` collection. Feed URLs are configured in `configs/default.yaml` under `sources.substack`:
+Ingest documents from multiple sources into the `documents` collection. Sources are configured in `configs/default.yaml`:
 
 ```bash
-# Use feeds from config
-make run-etl-substack
+# Run all data pipelines (Substack RSS, articles, arxiv)
+make run-all-data-pipelines
 
-# Or override with explicit URLs
-uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed https://other.substack.com/feed
+# Or run individual pipelines
+make run-substack-rss-data-pipeline
+make run-substack-article-data-pipeline
+make run-arxiv-data-pipeline
 ```
 
 ### Step 2: Memory extraction
 
-Extract knowledge graph entities (nodes + edges) from documents into the `knowledge_graph_log` collection:
+Extract knowledge graph entities (nodes + edges) from documents and upsert them directly into the `knowledge_graph` collection:
 
 ```bash
 # Process all unprocessed documents
-uv run python scripts/run_memory_pipeline.py
+make run-memory-pipeline-extraction
 
 # Process specific documents by ID
-uv run python scripts/run_memory_pipeline.py 507f1f77bcf86cd799439011
+make run-memory-pipeline-extraction DOC_IDS="507f1f77bcf86cd799439011"
 ```
 
-### Step 3: Materialization
+### Step 3: Indexing
 
-Rebuild the materialized `knowledge_graph` collection from logs, compute embeddings, create reverse edges for bidirectional traversal, and ensure search indexes:
+Create reverse edges for bidirectional traversal, compute embeddings, and ensure search indexes on the `knowledge_graph` collection:
 
 ```bash
-uv run python scripts/run_materialization_pipeline.py
+make run-memory-pipeline-indexing
 ```
 
 ### Step 4: Query and visualize
@@ -112,13 +114,10 @@ Query the knowledge graph and generate an interactive HTML visualization:
 
 ```bash
 # Visualize the full graph
-uv run python scripts/query_graph.py
+make query-graph
 
 # Query a specific topic
-uv run python scripts/query_graph.py -q "Paul Iusztin"
-
-# Customize search parameters
-uv run python scripts/query_graph.py -q "MLOps" --top-k 5 --max-hops 2 -o result.html
+make query-graph QUERY="Paul Iusztin"
 ```
 
 ## Monitoring
@@ -139,7 +138,7 @@ uv run prefect dashboard open
 
 ### MongoDB Compass
 
-Download [MongoDB Compass](https://www.mongodb.com/products/tools/compass) and connect to your local MongoDB to inspect collections (`documents`, `knowledge_graph_log`, `knowledge_graph`):
+Download [MongoDB Compass](https://www.mongodb.com/products/tools/compass) and connect to your local MongoDB to inspect collections (`documents`, `knowledge_graph`):
 
 ```
 mongodb://twin:twin@localhost:27017/?directConnection=true&authSource=admin
