@@ -120,6 +120,29 @@ make query-graph
 make query-graph QUERY="Paul Iusztin"
 ```
 
+### Step 5: MCP server
+
+Expose the knowledge graph as an [MCP](https://modelcontextprotocol.io/) server so LLM clients (Claude Code, Claude Desktop, Cursor, etc.) can query your twin's memory with natural language.
+
+**Tools provided:**
+
+| Tool | Description |
+|------|-------------|
+| `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, and filters. |
+| `search_memory` | Semantic + text search with graph expansion. Best for open-ended or exploratory queries. |
+
+Both tools accept a `visualize` flag that renders an interactive HTML graph and opens it in the browser.
+
+**Run standalone:**
+
+```bash
+make serve-mcp
+```
+
+**Use with Claude Code:**
+
+The `.mcp.json` at the project root auto-configures the server. Claude Code picks it up automatically — no extra setup needed.
+
 ## Monitoring
 
 ### Prefect dashboard
