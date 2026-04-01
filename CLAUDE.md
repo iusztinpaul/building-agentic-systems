@@ -144,11 +144,12 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
   - Update @.env.example + @src/twin/config/settings.py with any new required env vars
   - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git. Always check if the `pre-commit` passes.
 - Write unit and integration tests:
-  - Write unit and integrations tests for the core functionality.
-  - Run the tests. In case of errors fix the code until all the tests successfully run.
+  - Write unit and integration tests for the core functionality.
+  - Run `make unit-tests` frequently during development (after each atomic change) to catch regressions early.
+  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
   - Run the actual code testing and debugging how the code works on dev machine.
   - In case of errors, write regression tests for the given errors, fix them, and repeat.
-  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
+  - Only run `make integration-tests` when the feature is considered done and ready for PR. Integration tests can take up to 15 minutes.
 - PR workflow:
   1. Use the `create-pr` skill to open/update the PR.
   2. Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
@@ -160,12 +161,16 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 
 ## Step-by-Step Verification Steps
 
-Always run the following steps when finishing a feature or any piece of code:
+During development, run these steps after every atomic change:
 
  1. Format and lint: `make format-fix && make lint-fix && make format-check && make lint-check`
  2. Pre-commit: `make pre-commit`
- 3. Tests: `make tests`
- 4. Run and verify the code end-to-end. For example, when make testing the memory run: `make serve-workflows & `→ `make run-memory-pipeline-extraction` → `make run-memory-pipeline-indexing` → `make query-graph QUERY="test query"` → verify results.
+ 3. Unit tests: `make unit-tests`
+
+When the feature is considered done and ready for PR, also run:
+
+ 4. Integration tests: `make integration-tests` (can take up to 15 minutes)
+ 5. Run and verify the code end-to-end. For example, when testing the memory run: `make serve-workflows & `→ `make run-memory-pipeline-extraction` → `make run-memory-pipeline-indexing` → `make query-graph QUERY="test query"` → verify results.
 
 ## Build
 
@@ -190,7 +195,17 @@ make lint-check
 make pre-commit
 ```
 
-Ultimately, run the tests and fix the core module for any potential issues:
+Run unit tests frequently during development:
+```
+make unit-tests
+```
+
+Run integration tests only when the feature is done (can take up to 15 minutes):
+```
+make integration-tests
+```
+
+Or run all tests together:
 ```
 make tests
 ```

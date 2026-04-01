@@ -32,8 +32,14 @@ generate-secret-key: # Generate a random secret key (e.g. for MODAL_EMBEDDING_AP
 
 # --- Tests & QA ---
 
-tests: # Run tests.
+tests: # Run all tests (unit + integration).
 	uv run pytest
+
+unit-tests: # Run unit tests only.
+	uv run pytest tests/unit
+
+integration-tests: # Run integration tests only (can take up to 15 minutes).
+	uv run pytest tests/integration
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files
