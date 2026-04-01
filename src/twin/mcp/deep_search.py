@@ -28,8 +28,13 @@ _CONTEXT_MAX_LEN = 120
 # ---------------------------------------------------------------------------
 
 
+_MAX_SLUG_LEN = 120
+
+
 def slugify(text: str) -> str:
     """Convert an ``_id`` string to a filename-safe slug.
+
+    Long slugs are truncated and suffixed with a short hash for uniqueness.
 
     Examples:
         >>> slugify("person:alice")
@@ -40,6 +45,13 @@ def slugify(text: str) -> str:
 
     s = text.replace("|", "--").replace(":", "-").replace(" ", "_")
     s = re.sub(r"[^a-zA-Z0-9._\-]", "", s)
+
+    if len(s) > _MAX_SLUG_LEN:
+        import hashlib
+
+        suffix = hashlib.sha256(text.encode()).hexdigest()[:8]
+        s = s[: _MAX_SLUG_LEN - 9] + "-" + suffix
+
     return s
 
 
