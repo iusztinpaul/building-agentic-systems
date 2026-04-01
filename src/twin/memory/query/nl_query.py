@@ -206,6 +206,11 @@ def validate_pipeline(
     safe_pipeline = list(pipeline)
     if not has_limit:
         safe_pipeline.append({"$limit": max_results})
+    else:
+        # Clamp any existing $limit that exceeds max_results.
+        for stage in safe_pipeline:
+            if "$limit" in stage and stage["$limit"] > max_results:
+                stage["$limit"] = max_results
     safe_pipeline.append({"$project": {"embedding": 0}})
 
     return safe_pipeline
@@ -278,6 +283,7 @@ async def execute_nl_query(
     embedding_model: BaseEmbeddingModel,
     *,
     max_retries: int | None = None,
+    max_results: int | None = None,
 ) -> list[dict[str, Any]]:
     """End-to-end: NL -> pipeline -> validate -> execute -> results.
 
@@ -294,7 +300,7 @@ async def execute_nl_query(
     for attempt in range(1 + max_retries):
         try:
             pipeline = await nl_to_pipeline(llm, current_prompt)
-            pipeline = validate_pipeline(pipeline)
+            pipeline = validate_pipeline(pipeline, max_results=max_results)
             pipeline = await _replace_embedding_placeholder(pipeline, embedding_model)
 
             logger.info(

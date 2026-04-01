@@ -191,6 +191,26 @@ class TestQueryMemoryTool:
         assert len(parsed) >= 1
         assert llm.call_count == 2
 
+    async def test_max_results_limits_output(self, make_mcp_ctx, seed_graph):
+        """max_results caps the number of documents returned."""
+
+        llm = FakeLLM(
+            [
+                {
+                    "pipeline": [
+                        {"$match": {"kind": "node", "type": "person"}},
+                        {"$limit": 10},
+                    ]
+                }
+            ]
+        )
+        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+
+        result = await query_memory("find all people", ctx, max_results=1)
+
+        parsed = json.loads(result)
+        assert len(parsed) == 1
+
     async def test_visualize_flag_generates_html(
         self, make_mcp_ctx, seed_graph, tmp_path, mocker
     ):
@@ -247,6 +267,17 @@ class TestSearchMemoryTool:
         parsed = json.loads(result)
         ids = {doc.get("_id") for doc in parsed}
         assert seed_graph["edge_id"] in ids or seed_graph["bob_id"] in ids
+
+    async def test_max_results_truncates_output(self, make_mcp_ctx, seed_graph):
+        """max_results caps total nodes + edges returned."""
+
+        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+
+        # Without cap, alice search returns alice node + edge + bob node = 3 docs.
+        result = await search_memory("alice", ctx, top_k=5, max_hops=1, max_results=2)
+
+        parsed = json.loads(result)
+        assert len(parsed) <= 2
 
     async def test_no_results_returns_empty(self, make_mcp_ctx, seed_graph):
         """A query with no matches returns an empty list."""

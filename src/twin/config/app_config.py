@@ -47,7 +47,7 @@ class ExtractionConfig(BaseModel):
 
 class QueryConfig(BaseModel):
     top_k: int = 10
-    max_hops: int = 3
+    max_hops: int = 1
     rrf_k: int = 60
     embedding_batch_size: int = 64
 
@@ -69,7 +69,7 @@ class SourcesConfig(BaseModel):
 
 class MCPConfig(BaseModel):
     max_retries: int = 1
-    max_results: int = 50
+    max_results: int = 10
 
 
 class AppConfig(BaseModel):

@@ -47,7 +47,12 @@ def _visualize(docs: list[dict[str, Any]]) -> str:
 
 
 @mcp.tool
-async def query_memory(query: str, ctx: Context, visualize: bool = False) -> str:
+async def query_memory(
+    query: str,
+    ctx: Context,
+    visualize: bool = False,
+    max_results: int = 10,
+) -> str:
     """Query the knowledge graph using natural language.
 
     Dynamically translates the query into a MongoDB aggregation pipeline.
@@ -57,6 +62,7 @@ async def query_memory(query: str, ctx: Context, visualize: bool = False) -> str
     Args:
         query: Natural language question about the knowledge graph.
         visualize: If true, also render an interactive HTML graph visualization.
+        max_results: Maximum number of documents to return (default 10).
     """
 
     lc = ctx.lifespan_context
@@ -66,6 +72,7 @@ async def query_memory(query: str, ctx: Context, visualize: bool = False) -> str
         query=query,
         llm=lc["llm"],
         embedding_model=lc["embedding_model"],
+        max_results=max_results,
     )
     output = _serialize(results)
 
@@ -80,7 +87,8 @@ async def search_memory(
     query: str,
     ctx: Context,
     top_k: int = 10,
-    max_hops: int = 3,
+    max_hops: int = 1,
+    max_results: int = 10,
     visualize: bool = False,
 ) -> str:
     """Search the knowledge graph using semantic + text search with graph expansion.
@@ -92,6 +100,7 @@ async def search_memory(
         query: Search query text.
         top_k: Number of seed nodes to retrieve.
         max_hops: Maximum hops for graph expansion.
+        max_results: Maximum total documents (nodes + edges) to return (default 10).
         visualize: If true, also render an interactive HTML graph visualization.
     """
 
@@ -105,6 +114,8 @@ async def search_memory(
         max_hops=max_hops,
     )
     docs = result.nodes + result.edges
+    if len(docs) > max_results:
+        docs = docs[:max_results]
     output = _serialize(docs)
 
     if visualize and docs:
