@@ -210,5 +210,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Twin working directory (short-term session data)
+.twin/
+
 # MacOS
 .DS_Store

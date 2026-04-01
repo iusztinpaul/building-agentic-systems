@@ -132,30 +132,6 @@ class TestMemoryIndexingPipeline:
         for node in nodes:
             assert len(node["embedding"]) == 8
 
-    async def test_reverse_edges_created(self, mongo_client, mocker) -> None:
-        await _seed_knowledge_graph(mongo_client)
-
-        mocker.patch(
-            "twin.memory.indexing.pipeline.init_mongodb",
-            return_value=mongo_client,
-        )
-        mocker.patch(
-            "twin.memory.indexing.pipeline.get_embedding_model",
-            return_value=FakeEmbeddingModel(dimensions=8),
-        )
-
-        with prefect_tags("tests"):
-            await memory_indexing()
-
-        kg = mongo_client[TEST_DATABASE]["knowledge_graph"]
-        reverse_edges = await kg.find({"direction": "reverse"}).to_list()
-        # MENTIONS (document→person) should have a reverse edge
-        assert len(reverse_edges) >= 1
-        # Verify reverse edge has string _id
-        for edge in reverse_edges:
-            assert isinstance(edge["_id"], str)
-            assert "|" in edge["_id"]
-
     async def test_text_index_created(self, mongo_client, mocker) -> None:
         await _seed_knowledge_graph(mongo_client)
 

@@ -11,6 +11,8 @@ Usage:
 
 from prefect import serve
 
+from twin.data.conversation_pipeline import ingest_conversation
+from twin.data.file_pipeline import ingest_file
 from twin.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from twin.data.pipeline import ingest_all_data
 from twin.data.substack.substack_article_pipeline import (
@@ -57,5 +59,13 @@ if __name__ == "__main__":
         memory_indexing.to_deployment(
             name="memory-indexing-etl",
             tags=["memory-pipeline", "indexing"],
+        ),
+        ingest_file.to_deployment(
+            name="ingest-file-etl",
+            tags=["data-pipeline", "file"],
+        ),
+        ingest_conversation.to_deployment(
+            name="ingest-conversation-etl",
+            tags=["data-pipeline", "conversation"],
         ),
     )

@@ -9,5 +9,19 @@
     "context7@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
     "commit-commands@claude-plugins-official": true
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SESSION_ID=$(jq -r '.session_id // empty'); SENTINEL=\"/tmp/.claude-twin-ingested-${SESSION_ID}\"; if [ -f \"$SENTINEL\" ]; then echo '{}'; else touch \"$SENTINEL\"; echo '{\"decision\":\"block\",\"reason\":\"Please run: /twin-memory extract current conversation\"}'; fi",
+            "timeout": 5,
+            "statusMessage": "Checking twin memory ingestion..."
+          }
+        ]
+      }
+    ]
   }
 }

@@ -65,8 +65,6 @@ class KnowledgeGraphEntry(BeanieDocument):
     source_type: NodeType | None = None
     target_node_id: str | None = None
     target_type: NodeType | None = None
-    direction: str | None = None  # "reverse" for bidirectional traversal edges
-
     # Provenance
     sources: list[PydanticObjectId] = Field(default_factory=list)
 
