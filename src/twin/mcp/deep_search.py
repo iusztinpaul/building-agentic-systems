@@ -15,11 +15,10 @@ from uuid import uuid4
 
 import yaml
 
+from twin.config.paths import MEMORY_DIR
 from twin.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
-
-_MEMORY_ROOT = Path(".memory")
 _CONTEXT_MAX_LEN = 120
 
 
@@ -224,7 +223,7 @@ def write_deep_search_results(
     """
 
     session_id = session_id or uuid4().hex[:12]
-    session_dir = _MEMORY_ROOT / session_id
+    session_dir = MEMORY_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
     docs = results.nodes + results.edges
