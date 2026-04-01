@@ -110,6 +110,22 @@ class TestValidatePipeline:
         assert len(limit_stages) == 1
         assert limit_stages[0]["$limit"] == 5
 
+    def test_existing_limit_clamped_to_max_results(self):
+        pipeline = [{"$match": {"kind": "node"}}, {"$limit": 100}]
+        result = validate_pipeline(pipeline, max_results=5)
+
+        limit_stages = [s for s in result if "$limit" in s]
+        assert len(limit_stages) == 1
+        assert limit_stages[0]["$limit"] == 5
+
+    def test_existing_limit_below_max_results_unchanged(self):
+        pipeline = [{"$match": {"kind": "node"}}, {"$limit": 3}]
+        result = validate_pipeline(pipeline, max_results=10)
+
+        limit_stages = [s for s in result if "$limit" in s]
+        assert len(limit_stages) == 1
+        assert limit_stages[0]["$limit"] == 3
+
     def test_embedding_stripped(self):
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 10}]
         result = validate_pipeline(pipeline)
@@ -455,6 +471,29 @@ class TestExecuteNlQuery:
         retry_prompt = mock_deps["llm"].generate_json.call_args_list[1][0][0]
         assert "find all people" in retry_prompt
         assert "error" in retry_prompt.lower()
+
+    async def test_max_results_forwarded_to_pipeline(self, mock_deps):
+        """When max_results is passed, the executed pipeline contains a $limit with that value."""
+
+        mock_deps["llm"].generate_json.return_value = {
+            "pipeline": [
+                {"$match": {"kind": "node"}},
+            ]
+        }
+
+        await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find nodes",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+            max_results=7,
+        )
+
+        executed_pipeline = mock_deps["collection"].aggregate.call_args[0][0]
+        limit_stages = [s for s in executed_pipeline if "$limit" in s]
+        assert len(limit_stages) == 1
+        assert limit_stages[0]["$limit"] == 7
 
     async def test_zero_retries_fails_immediately(self, mock_deps):
         mock_deps["llm"].generate_json.return_value = {"pipeline": [{"$out": "evil"}]}
