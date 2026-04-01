@@ -10,6 +10,8 @@ class SourceType(StrEnum):
     SUBSTACK = "substack"
     HUGGINGFACE = "huggingface"
     LATENT = "latent"
+    FILE = "file"
+    CONVERSATION = "conversation"
 
 
 class Document(BeanieDocument):

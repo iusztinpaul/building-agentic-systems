@@ -26,6 +26,10 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     llm = get_llm()
     embedding_model = get_embedding_model()
 
+    from twin.memory.indexing.core import ensure_indexes
+
+    await ensure_indexes(client, database)
+
     logger.info("MCP server ready (database=%s)", database)
     try:
         yield {
@@ -42,9 +46,13 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
 mcp = FastMCP(
     "Twin Memory",
     instructions=(
-        "Query a personal knowledge graph built from documents, people, tasks, "
+        "Query and build a personal knowledge graph of documents, people, tasks, "
         "episodes, and preferences. Use 'query_memory' for flexible natural language "
-        "queries. Use 'search_memory' as a reliable fallback for semantic similarity search."
+        "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
+        "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
+        "returns a lightweight index; read individual files for details. "
+        "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
+        "and 'ingest_conversation' to extract knowledge from conversations."
     ),
     lifespan=app_lifespan,
 )

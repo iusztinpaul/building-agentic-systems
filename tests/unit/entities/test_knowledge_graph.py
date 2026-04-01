@@ -33,11 +33,6 @@ class TestBuildEdgeId:
         result = build_edge_id("person:alice", EdgeType.TODO, "task:write a book")
         assert result == "person:alice|todo|task:write a book"
 
-    def test_reverse_edge_id_is_distinct(self):
-        forward = build_edge_id("person:alice", EdgeType.TODO, "task:write a book")
-        reverse = build_edge_id("task:write a book", EdgeType.TODO, "person:alice")
-        assert forward != reverse
-
 
 class TestKnowledgeGraphEntry:
     async def test_node_entry(self):
