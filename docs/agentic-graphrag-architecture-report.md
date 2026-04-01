@@ -251,29 +251,374 @@ Creates **two indexes** on the `knowledge_graph` collection:
 
 ---
 
-## 6. MCP Server
+## 6. Building the GraphRAG FastMCP Server
 
 **Framework:** FastMCP  
 **File:** `src/twin/mcp/server.py`  
 **Entry point:** `scripts/serve_mcp.py`
 
-### Lifespan Management
+### Why MCP?
+
+The Model Context Protocol (MCP) is a standard for connecting AI assistants to external tools and data sources. Instead of baking knowledge graph access into a single monolithic agent, MCP lets you build the memory as a **standalone server** that any MCP-compatible harness (Claude Code, OpenCode, Cursor, Windsurf, etc.) can connect to. The server exposes tools over a JSON-RPC protocol, and the harness discovers and calls them naturally during conversation.
+
+This means the same knowledge graph can serve multiple agents, multiple interfaces, and multiple use cases -- without rewriting any integration code.
+
+### Server Architecture
+
+The MCP server is a thin orchestration layer. It owns **zero** business logic. Every tool handler delegates to existing business logic modules:
+
+```
+src/twin/mcp/
+    server.py          # FastMCP instance + lifespan (DB, models, indexes)
+    tools.py           # 6 tool handlers (thin delegation)
+    ingest.py          # Inline ingestion orchestrator (extraction + indexing)
+    deep_search.py     # Progressive disclosure (writes results to disk)
+```
+
+This separation is deliberate. The MCP layer is a **delivery mechanism**, not a logic layer. The same extraction, indexing, and query logic runs identically whether triggered by an MCP tool call or a Prefect batch pipeline. This means:
+- Business logic is tested independently of the MCP framework
+- You can swap FastMCP for another MCP framework without touching query/ingestion code
+- Batch pipelines and real-time MCP calls share the same code paths
+
+### Lifespan: Dependency Initialization
+
+FastMCP's lifespan pattern solves a critical problem: **expensive resources** (database connections, ML models) should be initialized once at startup, not per-request. The lifespan yields a context dictionary that every tool handler receives:
 
 ```python
 @lifespan
-async def app_lifespan(server: FastMCP):
-    # 1. Initialize MongoDB connection (async)
-    # 2. Load LLM (Gemini) and embedding model (Sentence Transformers)
-    # 3. Ensure MongoDB indexes exist
-    # 4. Yield context dict to all tool handlers
-    # 5. Cleanup: close MongoDB client on shutdown
+async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
+    # 1. Connect to MongoDB (async driver, timezone-aware)
+    client = await init_mongodb(settings.mongo.mongo_uri.get_secret_value(), database)
+    
+    # 2. Load models (once, reused across all tool calls)
+    llm = get_llm()                    # Gemini 2.5 Flash Lite
+    embedding_model = get_embedding_model()  # Sentence Transformers (local)
+    
+    # 3. Ensure search indexes exist (text + vector)
+    await ensure_indexes(client, database)
+    
+    # 4. Yield shared context to all tool handlers
+    yield {"client": client, "database": database, "llm": llm, "embedding_model": embedding_model}
+    
+    # 5. Cleanup on shutdown
+    await client.close()
 ```
 
-The server name is `"Twin Memory"` with instructions that guide Claude on how to use the tools.
+Every tool handler accesses these via `ctx.lifespan_context`:
+```python
+@mcp.tool
+async def search_memory(query: str, ctx: Context, ...) -> str:
+    lc = ctx.lifespan_context
+    result = await structured_query_memory(
+        client=lc["client"], database=lc["database"],
+        query=query, embedding_model=lc["embedding_model"], ...
+    )
+```
 
-### Transport
+### Server Instructions
 
-Configured via `.mcp.json` at project root:
+The `FastMCP` constructor takes an `instructions` string -- a natural language description of the server's purpose that the harness surfaces to the AI model. This is how the model learns **what the server does** before seeing individual tool schemas:
+
+```python
+mcp = FastMCP(
+    "Twin Memory",
+    instructions=(
+        "Query and build a personal knowledge graph of documents, people, tasks, "
+        "episodes, and preferences. Use 'query_memory' for flexible natural language "
+        "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
+        "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
+        "returns a lightweight index; read individual files for details. "
+        "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
+        "and 'ingest_conversation' to extract knowledge from conversations."
+    ),
+    lifespan=app_lifespan,
+)
+```
+
+### Tool Registration Pattern
+
+Tools are registered via the `@mcp.tool` decorator in a separate `tools.py` file, imported at the bottom of `server.py`:
+
+```python
+# server.py — bottom of file
+import twin.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
+```
+
+This import side-effect pattern keeps `server.py` focused on infrastructure (lifespan, config) while `tools.py` owns all tool definitions. FastMCP reads each tool's **function signature** (parameter names, types, defaults) and **docstring** (description, arg docs) to auto-generate the MCP tool schema that the harness sees.
+
+### Entry Point
+
+The entry point is minimal -- just logging setup and `mcp.run()`:
+
+```python
+# scripts/serve_mcp.py
+from twin.logging import init_logger
+init_logger()
+
+from twin.mcp.server import mcp
+
+if __name__ == "__main__":
+    mcp.run()
+```
+
+`mcp.run()` starts the server on the configured transport (stdio by default). The server blocks until the harness closes the connection.
+
+---
+
+## 7. MCP Tool Design: Search + Write
+
+**File:** `src/twin/mcp/tools.py`
+
+### Design Principle: Tools as Thin Delegates
+
+Every MCP tool follows the same pattern:
+1. **Extract** lifespan context (`ctx.lifespan_context`)
+2. **Delegate** to a business logic function
+3. **Serialize** the result (strip embeddings, convert BSON types)
+4. **Return** a string (MCP tools always return strings)
+
+No tool contains business logic. No tool directly queries MongoDB. This makes tools trivially testable and keeps the MCP layer swappable.
+
+### Search Tools (3): Reading from Memory
+
+#### Tool 1: `search_memory` -- The Default
+
+```python
+@mcp.tool
+async def search_memory(
+    query: str, ctx: Context,
+    top_k: int = 10, max_hops: int = 1, max_results: int = 10, visualize: bool = False,
+) -> str:
+    """Search the knowledge graph using semantic + text search with graph expansion."""
+```
+
+**Why it's the default:** It's the most forgiving tool. It combines vector similarity and text search via RRF fusion, then expands the graph around seed nodes. Even vague queries return useful results because the hybrid search catches both semantic meaning (vector) and exact keywords (text).
+
+**Design decisions:**
+- `top_k=10`: Number of seed nodes from the initial search. Higher values cast a wider net but return more noise.
+- `max_hops=1`: Graph expansion depth. 1 hop gets directly connected entities. 2+ hops can explode in dense graphs.
+- `max_results=10`: Hard cap on returned documents. Critical for preventing context window overflow in the harness.
+- `visualize=False`: Optionally renders an interactive HTML graph and opens it in the browser. Useful for spatial understanding but adds latency.
+
+**Return format:** Serialized JSON via `bson.json_util.dumps` (handles `ObjectId`, `datetime`). Embedding vectors are **always stripped** -- they're large float arrays that waste tokens and provide no human-readable value.
+
+#### Tool 2: `query_memory` -- Structured Precision
+
+```python
+@mcp.tool
+async def query_memory(
+    query: str, ctx: Context,
+    visualize: bool = False, max_results: int = 10,
+) -> str:
+    """Query the knowledge graph using natural language."""
+```
+
+**Why it exists separately:** `search_memory` can't do aggregations ("how many tasks does Paul have?"), exact filters ("show me all episodes from January"), or complex graph traversals ("find all people 2 hops from Paul who have tasks"). `query_memory` translates natural language to a MongoDB aggregation pipeline via the LLM, giving it the full expressive power of MongoDB's query language.
+
+**Design decisions:**
+- No `top_k` or `max_hops` params -- the LLM decides the query shape based on intent
+- Safety validation whitelist prevents write operations
+- Self-correction: on pipeline error, feeds the error back to the LLM for a retry
+- `__EMBED__` placeholder pattern lets the LLM use vector search without knowing embedding dimensions
+
+#### Tool 3: `deep_search_memory` -- Progressive Disclosure
+
+```python
+@mcp.tool
+async def deep_search_memory(
+    query: str, ctx: Context,
+    top_k: int = 50, max_hops: int = 3, session_id: str | None = None,
+) -> str:
+    """Broad search across the knowledge graph with progressive disclosure."""
+```
+
+**Why it exists:** Large knowledge graphs can return hundreds of nodes and edges for a broad query. Dumping all of that into the harness context window wastes tokens and confuses the model. Deep search solves this with **progressive disclosure**:
+
+1. Runs an expanded search (50 seeds, 3 hops -- much wider than `search_memory`)
+2. Writes **individual markdown files** per node/edge to `.twin/{session_id}/`
+3. Returns a **YAML index** with one-line summaries:
+   ```yaml
+   results:
+     - id: "person:paul iusztin"
+       kind: node
+       type: person
+       name: paul iusztin
+       file: person-paul_iusztin.md
+       context: "person: paul iusztin — aliases: paul"
+     - id: "person:paul iusztin|todo|task:build harness"
+       kind: edge
+       type: todo
+       source: "person:paul iusztin"
+       target: "task:build harness"
+       file: person-paul_iusztin--todo--task-build_harness.md
+       context: "person:paul iusztin —[todo]→ task:build harness"
+   ```
+4. The harness reads individual files on-demand using the `Read` tool
+
+This pattern keeps the context window lean while giving the model access to the full result set.
+
+**Design decisions:**
+- `top_k=50` and `max_hops=3`: Much wider than `search_memory` defaults -- this is for exploration, not precision
+- Files written as markdown with YAML frontmatter -- human-readable and tool-friendly
+- `session_id` allows reusing results across turns without re-running the search
+- Slugified filenames from `_id` strings (`person:paul iusztin` -> `person-paul_iusztin.md`)
+- Long slugs truncated with SHA-256 suffix for uniqueness
+
+### Write Tools (3): Writing to Memory
+
+#### Tool 4: `ingest_url` -- Web Content
+
+```python
+@mcp.tool
+async def ingest_url(url: str, ctx: Context) -> str:
+    """Fetch a web page and ingest its content into the knowledge graph."""
+```
+
+**Design decisions:**
+- Routes URLs through a registry-based dispatcher (`data/core/ingest.py`) that matches URL patterns to pipelines
+- Handles deduplication: if the URL was already ingested, returns `{"status": "already_ingested"}`
+- Structured error responses for network errors, HTTP errors, and unsupported URLs -- the harness can act on these
+- Runs the **full pipeline inline** after data ingestion: extraction + indexing in one call
+- Returns node/edge counts so the harness can confirm what was extracted
+
+#### Tool 5: `ingest_file` -- Local Files
+
+```python
+@mcp.tool
+async def ingest_file(file_path: str, ctx: Context, title: str | None = None) -> str:
+    """Read a local file and ingest its content into the knowledge graph."""
+```
+
+**Design decisions:**
+- Supports `.txt`, `.md`, `.html` (HTML auto-converted to plain text)
+- Graceful error handling for filesystem errors (`FileNotFoundError`, `IsADirectoryError`, `PermissionError`)
+- Optional `title` override -- defaults to filename
+
+#### Tool 6: `ingest_conversation` -- Conversation Text
+
+```python
+@mcp.tool
+async def ingest_conversation(conversation_text: str, ctx: Context, title: str | None = None) -> str:
+    """Extract knowledge from a conversation and add it to the knowledge graph."""
+```
+
+**Design decisions:**
+- Validates non-empty input before processing
+- Each conversation gets a UUID-based `source_uri` (always unique, no dedup)
+- This is the tool that the Stop hook triggers at session end -- it extracts people, tasks, episodes, and preferences from the conversation
+
+### Inline Ingestion Pipeline (`src/twin/mcp/ingest.py`)
+
+All three write tools call `run_ingestion_pipeline()` after creating the `Document`. This function runs the **full memory pipeline inline** -- not via Prefect:
+
+```python
+async def run_ingestion_pipeline(document, *, client, database, llm, embedding_model):
+    # 1. Resolve reference URIs from the Document
+    reference_uris = [ref.source_uri for ref in document.references if isinstance(ref, Document)]
+    
+    # 2. Extract: chunk + LLM extract + structural entries + normalize + upsert
+    result = await extract_and_store(llm, document_id=document.id, content=document.content, ...)
+    
+    # 3. Index: embed new nodes
+    await embed_nodes(client, database, embedding_model)
+    
+    # 4. Return summary
+    return {"status": "ingested", "nodes_extracted": len(result.nodes), "edges_extracted": len(result.edges), ...}
+```
+
+**Why inline instead of Prefect?** MCP tool calls are synchronous from the harness perspective -- the user is waiting for a response. Dispatching to Prefect would mean the content isn't queryable until the async pipeline completes. Inline execution means a single `ingest_url` call goes from raw URL to **queryable knowledge graph** in one step.
+
+### Serialization Design
+
+Two helpers handle all output formatting:
+
+```python
+def _serialize(docs: list[dict]) -> str:
+    """Strip embeddings, serialize with bson.json_util for ObjectId/datetime support."""
+    cleaned = [{k: v for k, v in doc.items() if k != "embedding"} for doc in docs]
+    return json_util.dumps(cleaned, indent=2)
+
+def _visualize(docs: list[dict]) -> str:
+    """Build networkx graph from nodes/edges, render as interactive HTML via pyvis."""
+```
+
+**Key design choice:** Embeddings are always stripped before returning to the harness. A 384-dim float array per node wastes ~1500 tokens and provides zero value to the model or user.
+
+---
+
+## 8. Skills: Teaching the Harness When to Use Each Tool
+
+**File:** `.claude/skills/twin-memory/SKILL.md`
+
+### What is a Skill?
+
+A skill is a markdown file that provides **structured guidance** to the AI model inside the harness. When the user invokes `/twin-memory <query>`, the skill content is injected into the model's context alongside the MCP tool schemas. Skills bridge the gap between "the tool exists" and "the model knows when and how to use it well."
+
+Without skills, the model relies only on tool docstrings -- which describe **what** each tool does, but not **when** to pick one over another, or **how** to present results to the user.
+
+### Skill Structure
+
+The skill has four sections that guide the model's behavior:
+
+#### 1. Reading Strategy (Decision Tree)
+
+```
+Is the query structured/precise (counts, filters, aggregations)?
+  → YES: Use `query_memory`
+  → NO: Is the query broad/exploratory (map connections, comprehensive context)?
+    → YES: Use `deep_search_memory` (progressive disclosure)
+    → NO: Use `search_memory` (default -- most forgiving)
+```
+
+- **`search_memory`** -- "Start here when unsure." The hybrid search is tolerant of vague queries.
+- **`query_memory`** -- For questions that need MongoDB's full aggregation power: counts, date filters, specific lookups.
+- **`deep_search_memory`** -- For broad exploration. The skill teaches the **progressive disclosure workflow**:
+  1. Call `deep_search_memory("topic")` -- get the YAML index
+  2. Scan `context` fields to identify relevant entries
+  3. Use `Read` tool on individual file paths for full details
+  4. Summarize findings for the user
+
+#### 2. Writing Strategy
+
+- **`ingest_url`** -- When user shares a URL
+- **`ingest_file`** -- When user wants to add a local file
+- **`ingest_conversation`** -- At end of session or when user wants to persist learnings
+
+#### 3. Presentation Guidelines
+
+- Summarize results in human-readable format (never dump raw JSON)
+- Group by entity type (people, tasks, episodes, documents)
+- Highlight relationships and connections between entities
+- For deep search: present index summary first, offer to dive deeper
+- For ingestion: report what was created (document title, node count, edge count)
+
+#### 4. Knowledge Graph Reference
+
+Quick reference of all node types (6), edge types (8), and source types (5) so the model can construct meaningful queries and interpret results without guessing.
+
+### Why Skills Matter
+
+Tools alone tell the model **what it can do**. Skills tell it **what it should do** in context. Consider the difference:
+
+| Without skill | With skill |
+|--------------|-----------|
+| Model sees 6 tools with docstrings | Model knows `search_memory` is the default, `query_memory` is for precision |
+| Model dumps raw JSON to user | Model groups by entity type and highlights relationships |
+| Model calls `search_memory` for "how many tasks?" | Model calls `query_memory` which can generate `$count` pipelines |
+| Model returns all deep search results at once | Model scans YAML index, reads only relevant files |
+
+---
+
+## 9. Hooking the MCP Server to a Harness (Claude Code, OpenCode, etc.)
+
+### What is a Harness?
+
+A harness is any MCP-compatible host that connects to MCP servers and exposes their tools to an AI model. Examples: Claude Code, OpenCode, Cursor, Windsurf, Cline, Continue. The MCP server doesn't know or care which harness is connected -- it speaks the MCP protocol and returns results.
+
+### Connection: `.mcp.json`
+
+The harness discovers MCP servers via a `.mcp.json` file at the project root:
+
 ```json
 {
   "mcpServers": {
@@ -286,98 +631,105 @@ Configured via `.mcp.json` at project root:
 }
 ```
 
-Default transport: **stdio** (Claude Code spawns the server as a subprocess).
+**How it works:**
+1. The harness reads `.mcp.json` when it starts or opens a project
+2. It spawns each server as a **subprocess** using the specified `command` and `args`
+3. Communication happens over **stdio** (JSON-RPC messages on stdin/stdout)
+4. The harness calls `tools/list` to discover all 6 tools with their schemas
+5. The harness calls `tools/call` when the model wants to use a tool
 
----
+**Why stdio?** It's the simplest transport -- no ports, no networking, no auth. The harness owns the server's lifecycle (start on open, kill on close). For remote deployment, FastMCP also supports SSE transport (`mcp.run(transport="sse")`), which the `Makefile` exposes via `make serve-mcp TRANSPORT=sse`.
 
-## 7. MCP Server Tools
+### Claude Code Integration (3 Layers)
 
-**File:** `src/twin/mcp/tools.py`
+Claude Code connects to the MCP server through three complementary layers:
 
-### Search/Read Tools (3)
+#### Layer 1: MCP Server (`.mcp.json`)
 
-| Tool | Purpose | Key Parameters | Returns |
-|------|---------|---------------|---------|
-| `query_memory` | NL -> MongoDB pipeline | `query`, `visualize=False`, `max_results=10` | Serialized JSON (embeddings stripped) |
-| `search_memory` | Hybrid search + graph expansion | `query`, `top_k=10`, `max_hops=1`, `max_results=10`, `visualize=False` | Serialized JSON (embeddings stripped) |
-| `deep_search_memory` | Broad exploration, saves to disk | `query`, `top_k=50`, `max_hops=3`, `session_id=None` | YAML index with file paths |
+The base connection. Claude Code spawns the server, discovers 6 tools, and can call them during conversation. This works out-of-the-box with zero additional config.
 
-### Write/Ingest Tools (3)
+#### Layer 2: Skills (`.claude/skills/twin-memory/SKILL.md`)
 
-| Tool | Purpose | Key Parameters | Returns |
-|------|---------|---------------|---------|
-| `ingest_url` | Fetch + ingest web content | `url` | JSON summary (node/edge counts) |
-| `ingest_file` | Ingest local files (.txt, .md, .html) | `file_path`, `title=None` | JSON summary (node/edge counts) |
-| `ingest_conversation` | Extract knowledge from conversation text | `conversation_text`, `title=None` | JSON summary (node/edge counts) |
+Skills are a **Claude Code-specific** feature (not part of the MCP protocol). When the user types `/twin-memory <query>`, the skill content is injected into the model's context. The skill teaches the model:
+- Which tool to pick for which query type
+- How to present results to the user
+- The progressive disclosure workflow for deep search
 
-### Ingestion Pipeline (`src/twin/mcp/ingest.py`)
+Other harnesses (OpenCode, Cursor) don't have skills -- they rely on tool docstrings and server instructions alone. This means the same MCP server works everywhere, but Claude Code gets a **richer experience** because the model has more guidance on tool selection and result presentation.
 
-When an ingestion tool is called, it runs the **full pipeline inline** (not via Prefect):
-1. Data pipeline: fetch + extract + load -> `Document`
-2. Memory extraction: chunk + LLM extract + structural entries + normalize + upsert
-3. Indexing: embed new nodes
+#### Layer 3: Hooks (`.claude/settings.json`)
 
-This means a single `ingest_url` call goes from raw URL to queryable knowledge graph in one step.
+Hooks are another **Claude Code-specific** feature. They run shell commands in response to lifecycle events. The `Stop` hook auto-ingests conversations:
 
----
-
-## 8. Skills
-
-**File:** `.claude/skills/twin-memory/SKILL.md`
-
-The `twin-memory` skill is a Claude Code skill that provides structured guidance on **when and how to use each MCP tool**:
-
-### Reading Strategy (decision tree)
-- **`search_memory`** -- Default for most queries. Semantic + text search with graph expansion. "Start here when unsure."
-- **`query_memory`** -- For structured/precise questions (counts, filters, aggregations). Uses LLM-to-pipeline translation.
-- **`deep_search_memory`** -- For broad exploration. Progressive disclosure: returns YAML index, then read individual files.
-
-### Writing Strategy
-- **`ingest_url`** -- When user shares a URL
-- **`ingest_file`** -- When user wants to add a local file
-- **`ingest_conversation`** -- At end of session or when user wants to persist conversation knowledge
-
-### Presentation Guidelines
-- Summarize results in human-readable format (never dump raw JSON)
-- Group by entity type (people, tasks, episodes, documents)
-- Highlight relationships between entities
-- For deep search: present index first, offer to dive deeper
-
----
-
-## 9. Claude Code Connection
-
-### How Claude Code connects to the MCP server
-
-1. **`.mcp.json`** at project root declares the `twin-memory` MCP server
-2. Claude Code reads this config and spawns the server as a subprocess via `uv run python scripts/serve_mcp.py`
-3. Communication happens over **stdio** (JSON-RPC)
-4. The server's lifespan initializes MongoDB, LLM, and embedding model
-5. Claude Code discovers the 6 tools and can call them during conversation
-
-### Stop Hook (Auto-Ingestion)
-
-**File:** `.claude/settings.json`
-
-A **Stop hook** runs when Claude Code finishes a response:
 ```json
 {
   "hooks": {
     "Stop": [{
       "hooks": [{
         "type": "command",
-        "command": "...checks sentinel file...if not ingested, blocks with: 'Please run: /twin-memory extract current conversation'"
+        "command": "SESSION_ID=$(jq -r '.session_id // empty'); SENTINEL=\"/tmp/.claude-twin-ingested-${SESSION_ID}\"; if [ -f \"$SENTINEL\" ]; then echo '{}'; else touch \"$SENTINEL\"; echo '{\"decision\":\"block\",\"reason\":\"Please run: /twin-memory extract current conversation\"}'; fi",
+        "timeout": 5
       }]
     }]
   }
 }
 ```
 
-This ensures that **every conversation gets ingested into the knowledge graph** before the session ends. It uses a sentinel file (`/tmp/.claude-twin-ingested-{SESSION_ID}`) to only prompt once per session.
+**How it works:**
+1. Claude Code fires the Stop hook when the model finishes a response
+2. The hook checks for a sentinel file at `/tmp/.claude-twin-ingested-{SESSION_ID}`
+3. **First time this session:** No sentinel file exists -> hook returns `"decision": "block"` with the message "Please run: /twin-memory extract current conversation"
+4. Claude Code shows this message to the model, which then invokes the `ingest_conversation` tool
+5. **Subsequent turns:** Sentinel file exists -> hook passes through silently
 
-### Skill Integration
+This creates a **self-sustaining feedback loop**: every coding session automatically enriches the knowledge graph with new people, tasks, episodes, and preferences discussed in conversation.
 
-The `twin-memory` skill is registered in `.claude/skills/twin-memory/SKILL.md` and can be invoked via `/twin-memory <query>`. It provides Claude with the decision tree for choosing the right tool.
+### Connecting to Other Harnesses (OpenCode, Cursor, Windsurf)
+
+The MCP server works with **any** MCP-compatible harness. The only requirement is the `.mcp.json` file (or equivalent config format). Here's what differs:
+
+| Feature | Claude Code | OpenCode | Cursor / Windsurf |
+|---------|------------|----------|-------------------|
+| **MCP connection** | `.mcp.json` (auto-discovered) | `mcp.json` or CLI config | Built-in MCP settings panel |
+| **Tool discovery** | Automatic via `tools/list` | Automatic via `tools/list` | Automatic via `tools/list` |
+| **Server instructions** | Surfaced to model context | Surfaced to model context | Surfaced to model context |
+| **Skills** | `.claude/skills/` (rich tool guidance) | Not supported -- relies on tool docstrings | Not supported |
+| **Hooks** | `.claude/settings.json` (auto-ingestion) | Not supported | Not supported |
+| **Tool docstrings** | Full support | Full support | Full support |
+
+**What harnesses without skills/hooks lose:**
+- No decision tree for tool selection (model must figure it out from docstrings)
+- No progressive disclosure guidance (model may dump all deep search results at once)
+- No auto-ingestion of conversations (user must manually trigger ingestion)
+- No presentation guidelines (model may dump raw JSON)
+
+**What they keep:**
+- All 6 tools work identically
+- Server instructions provide high-level guidance
+- Tool docstrings describe parameters and behavior
+- The knowledge graph is fully queryable and writable
+
+### The 3-Layer Pattern for Any MCP Server
+
+This architecture suggests a reusable pattern for connecting any MCP server to a harness:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3: Hooks (harness-specific automation)           │
+│  Auto-ingest conversations, trigger pipelines, etc.     │
+│  Only works in harnesses that support hooks             │
+├─────────────────────────────────────────────────────────┤
+│  Layer 2: Skills (harness-specific guidance)            │
+│  Decision trees, presentation rules, workflows          │
+│  Only works in harnesses that support skills            │
+├─────────────────────────────────────────────────────────┤
+│  Layer 1: MCP Server (universal, protocol-standard)     │
+│  Tools, server instructions, lifespan, transport        │
+│  Works in ALL MCP-compatible harnesses                  │
+└─────────────────────────────────────────────────────────┘
+```
+
+Layer 1 is portable. Layers 2 and 3 are progressive enhancements that make the experience richer in harnesses that support them, while degrading gracefully in those that don't.
 
 ---
 
