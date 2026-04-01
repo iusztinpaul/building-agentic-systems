@@ -1,11 +1,17 @@
 """MCP tool handlers — thin delegation to business logic."""
 
+import json
 import logging
 from typing import Any
 
+import httpx
 from bson import json_util
 from fastmcp import Context
 
+from twin.data.conversation_pipeline import ingest_conversation as _ingest_conversation
+from twin.data.core.ingest import ingest_url as _ingest_url_dispatch
+from twin.data.file_pipeline import ingest_file as _ingest_file
+from twin.mcp.ingest import run_ingestion_pipeline
 from twin.mcp.server import mcp
 from twin.memory.query.core import query_memory as structured_query_memory
 from twin.memory.query.nl_query import execute_nl_query
@@ -122,3 +128,115 @@ async def search_memory(
         output += _visualize(docs)
 
     return output
+
+
+# ---------------------------------------------------------------------------
+# Ingestion tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def ingest_url(url: str, ctx: Context) -> str:
+    """Fetch a web page and ingest its content into the knowledge graph.
+
+    Routes the URL to the appropriate data pipeline (currently supports
+    Substack articles), then runs memory extraction and indexing.
+
+    Args:
+        url: The web URL to fetch and ingest.
+    """
+
+    try:
+        document = await _ingest_url_dispatch(url)
+    except ValueError as exc:
+        return json.dumps({"error": "unsupported_url", "detail": str(exc)})
+    except httpx.HTTPStatusError as exc:
+        return json.dumps(
+            {"error": "http_error", "detail": f"HTTP {exc.response.status_code}: {url}"}
+        )
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        return json.dumps(
+            {"error": "network_error", "detail": f"Could not reach {url}: {exc}"}
+        )
+
+    if document is None:
+        return json.dumps({"status": "already_ingested", "url": url})
+
+    lc = ctx.lifespan_context
+    summary = await run_ingestion_pipeline(
+        document,
+        client=lc["client"],
+        database=lc["database"],
+        llm=lc["llm"],
+        embedding_model=lc["embedding_model"],
+    )
+    return json.dumps(summary)
+
+
+@mcp.tool
+async def ingest_file(
+    file_path: str,
+    ctx: Context,
+    title: str | None = None,
+) -> str:
+    """Read a local file and ingest its content into the knowledge graph.
+
+    Supports .txt, .md, and .html files. Creates a Document, then runs
+    memory extraction and indexing.
+
+    Args:
+        file_path: Absolute path to the file to ingest.
+        title: Optional title override. Defaults to the filename.
+    """
+
+    try:
+        document = await _ingest_file(file_path, title)
+    except (FileNotFoundError, IsADirectoryError, PermissionError, ValueError) as exc:
+        return json.dumps({"error": "file_error", "detail": str(exc)})
+
+    if document is None:
+        return json.dumps({"status": "already_ingested", "file_path": file_path})
+
+    lc = ctx.lifespan_context
+    summary = await run_ingestion_pipeline(
+        document,
+        client=lc["client"],
+        database=lc["database"],
+        llm=lc["llm"],
+        embedding_model=lc["embedding_model"],
+    )
+    return json.dumps(summary)
+
+
+@mcp.tool
+async def ingest_conversation(
+    conversation_text: str,
+    ctx: Context,
+    title: str | None = None,
+) -> str:
+    """Extract knowledge from a conversation and add it to the knowledge graph.
+
+    Processes conversation text through the extraction pipeline to identify
+    people, tasks, episodes, preferences, and relationships.
+
+    Args:
+        conversation_text: The full conversation text to process.
+        title: Optional title for the conversation document.
+    """
+
+    if not conversation_text.strip():
+        return json.dumps(
+            {"error": "empty_input", "detail": "Conversation text must not be empty."}
+        )
+
+    document = await _ingest_conversation(conversation_text, title)
+
+    lc = ctx.lifespan_context
+    summary = await run_ingestion_pipeline(
+        document,
+        client=lc["client"],
+        database=lc["database"],
+        llm=lc["llm"],
+        embedding_model=lc["embedding_model"],
+    )
+    return json.dumps(summary)
