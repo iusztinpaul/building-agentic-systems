@@ -42,6 +42,8 @@ from twin.models.base import BaseLLM
 logger = logging.getLogger(__name__)
 
 _KG_COLLECTION = "knowledge_graph"
+_MAX_ALIASES = 50
+_MAX_SOURCES = 500
 
 # ---------------------------------------------------------------------------
 # 1. Chunking
@@ -613,9 +615,14 @@ async def upsert_graph_entries(
                                 ]
                             },
                             "sources": {
-                                "$setUnion": [
-                                    {"$ifNull": ["$sources", []]},
-                                    [source_document_id],
+                                "$slice": [
+                                    {
+                                        "$setUnion": [
+                                            {"$ifNull": ["$sources", []]},
+                                            [source_document_id],
+                                        ]
+                                    },
+                                    _MAX_SOURCES,
                                 ]
                             },
                             "created_at": {"$ifNull": ["$created_at", now]},
@@ -624,13 +631,19 @@ async def upsert_graph_entries(
                         }
                     },
                     # Stage 2: union aliases (separate stage to avoid
-                    # conflicting paths with 'properties').
+                    # conflicting paths with 'properties'). Capped to
+                    # prevent unbounded growth from typos/variants.
                     {
                         "$set": {
                             "properties.aliases": {
-                                "$setUnion": [
-                                    {"$ifNull": ["$properties.aliases", []]},
-                                    aliases,
+                                "$slice": [
+                                    {
+                                        "$setUnion": [
+                                            {"$ifNull": ["$properties.aliases", []]},
+                                            aliases,
+                                        ]
+                                    },
+                                    _MAX_ALIASES,
                                 ]
                             },
                         }
@@ -663,9 +676,14 @@ async def upsert_graph_entries(
                                 ]
                             },
                             "sources": {
-                                "$setUnion": [
-                                    {"$ifNull": ["$sources", []]},
-                                    [source_document_id],
+                                "$slice": [
+                                    {
+                                        "$setUnion": [
+                                            {"$ifNull": ["$sources", []]},
+                                            [source_document_id],
+                                        ]
+                                    },
+                                    _MAX_SOURCES,
                                 ]
                             },
                             "created_at": {"$ifNull": ["$created_at", now]},
