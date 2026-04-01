@@ -87,10 +87,6 @@ def build_networkx_graph(result: QueryResult) -> nx.DiGraph:
         )
 
     for edge in result.edges:
-        # Skip reverse edges (used only for $graphLookup traversal).
-        if edge.get("direction") == "reverse":
-            continue
-
         edge_type = edge.get("type", "")
         src = str(edge.get("source_node_id", ""))
         tgt = str(edge.get("target_node_id", ""))

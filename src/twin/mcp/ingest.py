@@ -10,7 +10,7 @@ from typing import Any
 
 from twin.entities.documents import Document
 from twin.memory.extraction.core import extract_and_store
-from twin.memory.indexing.core import create_reverse_edges, embed_nodes
+from twin.memory.indexing.core import embed_nodes
 from twin.models.base import BaseEmbeddingModel, BaseLLM
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ async def run_ingestion_pipeline(
         client=client,
     )
 
-    await create_reverse_edges(client, database)
     await embed_nodes(client, database, embedding_model)
 
     return {

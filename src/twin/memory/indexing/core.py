@@ -2,9 +2,8 @@
 Indexing pipeline for the knowledge graph.
 
 Post-extraction steps that prepare the graph for querying:
-1. Create reverse edges for bidirectional $graphLookup traversal.
-2. Compute embeddings for nodes that lack them.
-3. Ensure text and vector search indexes exist.
+1. Compute embeddings for nodes that lack them.
+2. Ensure text and vector search indexes exist.
 """
 
 import asyncio
@@ -12,10 +11,8 @@ import logging
 from typing import Any
 
 from pymongo import AsyncMongoClient, UpdateOne
-from pymongo.errors import BulkWriteError
 
 from twin.config.app_config import app_config
-from twin.entities.knowledge_graph import NodeType, build_edge_id
 from twin.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -28,80 +25,7 @@ _VECTOR_INDEX_NAME = "vector_index"
 
 
 # ---------------------------------------------------------------------------
-# 1. Reverse edges for bidirectional traversal
-# ---------------------------------------------------------------------------
-
-# Node type pairs that get reverse edges so $graphLookup can traverse
-# in both directions (person ↔ document).
-_BIDIRECTIONAL_PAIRS: set[tuple[str, str]] = {
-    (NodeType.PERSON, NodeType.DOCUMENT),
-    (NodeType.DOCUMENT, NodeType.PERSON),
-    (NodeType.PERSON, NodeType.PERSON),
-    (NodeType.DOCUMENT, NodeType.DOCUMENT),
-}
-
-
-async def create_reverse_edges(client: AsyncMongoClient, database: str) -> int:
-    """Create reverse copies of edges between person and document nodes.
-
-    For each matching edge, upserts a new edge with swapped source/target
-    and direction='reverse'. This enables $graphLookup to chain through
-    person↔document connections in both directions.
-
-    Returns the number of reverse edges upserted.
-    """
-
-    db = client[database]
-    collection = db[_KG_COLLECTION]
-
-    # Build $or filter for all bidirectional pairs.
-    pair_filters = [
-        {"source_type": src, "target_type": tgt} for src, tgt in _BIDIRECTIONAL_PAIRS
-    ]
-    query = {"kind": "edge", "direction": {"$exists": False}, "$or": pair_filters}
-
-    ops: list[UpdateOne] = []
-    async for edge in collection.find(query):
-        reverse_id = build_edge_id(
-            edge["target_node_id"], edge["type"], edge["source_node_id"]
-        )
-        ops.append(
-            UpdateOne(
-                {"_id": reverse_id},
-                {
-                    "$set": {
-                        "kind": "edge",
-                        "type": edge["type"],
-                        "source_node_id": edge["target_node_id"],
-                        "source_type": edge["target_type"],
-                        "target_node_id": edge["source_node_id"],
-                        "target_type": edge["source_type"],
-                        "properties": edge.get("properties", {}),
-                        "sources": edge.get("sources", []),
-                        "created_at": edge["created_at"],
-                        "updated_at": edge["updated_at"],
-                        "direction": "reverse",
-                    },
-                },
-                upsert=True,
-            )
-        )
-
-    upserted = 0
-    if ops:
-        try:
-            result = await collection.bulk_write(ops, ordered=False)
-            upserted = result.upserted_count + result.modified_count
-        except BulkWriteError as exc:
-            upserted = exc.details.get("nUpserted", 0) + exc.details.get("nModified", 0)
-            logger.info("Bulk write completed with some errors for reverse edges")
-
-    logger.info("Upserted %d reverse edges for bidirectional traversal", upserted)
-    return upserted
-
-
-# ---------------------------------------------------------------------------
-# 2. Embed nodes
+# 1. Embed nodes
 # ---------------------------------------------------------------------------
 
 
