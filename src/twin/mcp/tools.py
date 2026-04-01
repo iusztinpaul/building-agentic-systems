@@ -11,6 +11,7 @@ from fastmcp import Context
 from twin.data.conversation_pipeline import ingest_conversation as _ingest_conversation
 from twin.data.core.ingest import ingest_url as _ingest_url_dispatch
 from twin.data.file_pipeline import ingest_file as _ingest_file
+from twin.mcp.deep_search import write_deep_search_results
 from twin.mcp.ingest import run_ingestion_pipeline
 from twin.mcp.server import mcp
 from twin.memory.query.core import query_memory as structured_query_memory
@@ -128,6 +129,48 @@ async def search_memory(
         output += _visualize(docs)
 
     return output
+
+
+@mcp.tool
+async def deep_search_memory(
+    query: str,
+    ctx: Context,
+    top_k: int = 50,
+    max_hops: int = 3,
+    session_id: str | None = None,
+) -> str:
+    """Broad search across the knowledge graph with progressive disclosure.
+
+    Runs an expanded search (more seeds, deeper traversal) and saves full
+    results to disk as individual markdown files. Returns a YAML index with
+    one-line summaries for each node and edge found.
+
+    Use the file paths in the index to selectively read only the entries
+    you need — avoids flooding the context window with all results at once.
+
+    Args:
+        query: Search query text.
+        top_k: Number of seed nodes to retrieve (default 50).
+        max_hops: Maximum hops for graph expansion (default 3).
+        session_id: Optional session identifier for the output directory.
+    """
+
+    lc = ctx.lifespan_context
+    result = await structured_query_memory(
+        client=lc["client"],
+        database=lc["database"],
+        query=query,
+        embedding_model=lc["embedding_model"],
+        top_k=top_k,
+        max_hops=max_hops,
+    )
+
+    if not result.nodes and not result.edges:
+        return "No results found."
+
+    _, index_yaml = write_deep_search_results(query, result, session_id)
+
+    return index_yaml
 
 
 # ---------------------------------------------------------------------------
