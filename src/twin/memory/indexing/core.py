@@ -98,7 +98,7 @@ async def _embed_batch(
 
 
 async def ensure_indexes(client: AsyncMongoClient, database: str) -> None:
-    """Create text and vector search indexes on the knowledge_graph collection.
+    """Create classic and search indexes on the knowledge_graph collection.
 
     Safe to call repeatedly — skips indexes that already exist.
     """
@@ -106,7 +106,8 @@ async def ensure_indexes(client: AsyncMongoClient, database: str) -> None:
     db = client[database]
     collection = db[_KG_COLLECTION]
 
-    # --- Text index (for $text queries) ---
+    # --- Classic indexes ---
+
     await collection.create_index(
         [
             ("name", "text"),
@@ -117,28 +118,83 @@ async def ensure_indexes(client: AsyncMongoClient, database: str) -> None:
     )
     logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, _KG_COLLECTION)
 
+    # Compound indexes for common query patterns.
+    await collection.create_index(
+        [("kind", 1), ("source_node_id", 1)],
+        name="kind_source_node",
+    )
+    await collection.create_index(
+        [("kind", 1), ("target_node_id", 1)],
+        name="kind_target_node",
+    )
+    await collection.create_index(
+        [("kind", 1), ("embedding", 1)],
+        name="kind_embedding",
+    )
+    logger.info("Compound indexes ensured on %s", _KG_COLLECTION)
+
     # --- Vector search index (for $vectorSearch) ---
-    cursor = await collection.list_search_indexes()
-    existing = [idx["name"] async for idx in cursor]
-    if _VECTOR_INDEX_NAME in existing:
-        logger.info("Vector search index '%s' already exists", _VECTOR_INDEX_NAME)
-        return
+    await _ensure_vector_index(collection)
+
+
+async def _ensure_vector_index(collection: Any) -> None:
+    """Create or recreate the vector search index with filter fields.
+
+    Drops and recreates the index if it exists without the required
+    ``kind`` and ``type`` filter fields.
+    """
 
     dimensions = app_config.models.embedding.dimensions
+    required_definition = {
+        "fields": [
+            {
+                "type": "vector",
+                "path": "embedding",
+                "numDimensions": dimensions,
+                "similarity": "cosine",
+            },
+            {
+                "type": "filter",
+                "path": "kind",
+            },
+            {
+                "type": "filter",
+                "path": "type",
+            },
+        ]
+    }
+
+    cursor = await collection.list_search_indexes()
+    existing_indexes = {idx["name"]: idx async for idx in cursor}
+
+    if _VECTOR_INDEX_NAME in existing_indexes:
+        existing = existing_indexes[_VECTOR_INDEX_NAME]
+        existing_fields = (
+            existing.get("latestDefinition", {}).get("fields")
+            or existing.get("definition", {}).get("fields")
+            or []
+        )
+        filter_paths = {f["path"] for f in existing_fields if f.get("type") == "filter"}
+        if {"kind", "type"}.issubset(filter_paths):
+            logger.info(
+                "Vector search index '%s' already has filter fields",
+                _VECTOR_INDEX_NAME,
+            )
+            return
+
+        logger.info(
+            "Vector search index '%s' missing filter fields — recreating",
+            _VECTOR_INDEX_NAME,
+        )
+        await collection.drop_search_index(_VECTOR_INDEX_NAME)
+        # Allow mongot to process the drop before recreating.
+        await asyncio.sleep(2)
+
     await collection.create_search_index(
         model={
             "name": _VECTOR_INDEX_NAME,
             "type": "vectorSearch",
-            "definition": {
-                "fields": [
-                    {
-                        "type": "vector",
-                        "path": "embedding",
-                        "numDimensions": dimensions,
-                        "similarity": "cosine",
-                    }
-                ]
-            },
+            "definition": required_definition,
         }
     )
 

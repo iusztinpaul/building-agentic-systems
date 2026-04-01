@@ -1,12 +1,17 @@
+from unittest.mock import AsyncMock, MagicMock
+
 from beanie import PydanticObjectId
 
 from twin.entities.knowledge_graph import EdgeType, NodeType
 from twin.memory.extraction.core import (
+    _MAX_ALIASES,
+    _MAX_SOURCES,
     _parse_extraction,
     build_structural_entries,
     chunk_document,
     extract_entities,
     normalize_nodes,
+    upsert_graph_entries,
 )
 from twin.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
 from twin.models.fake_model import FakeLLM
@@ -523,3 +528,111 @@ class TestExtractionResultMerge:
         merged = a.merge(b)
         assert len(merged.nodes) == 2
         assert len(merged.edges) == 1
+
+
+# ---------------------------------------------------------------------------
+# upsert_graph_entries — array cap verification
+# ---------------------------------------------------------------------------
+
+
+def _extract_pipeline_ops(bulk_write_mock: AsyncMock) -> list:
+    """Return the list of UpdateOne operations passed to bulk_write."""
+    args, _ = bulk_write_mock.call_args
+    return args[0]
+
+
+def _find_slice_in_pipeline(pipeline_stages: list, path: str) -> int | None:
+    """Walk aggregation-pipeline update stages and return the $slice limit
+    applied to *path*, or ``None`` if no $slice is found."""
+    for stage in pipeline_stages:
+        sets = stage.get("$set", {})
+        # Walk dot-path keys (e.g. "properties.aliases" or "sources").
+        for key, expr in sets.items():
+            if key == path and isinstance(expr, dict) and "$slice" in expr:
+                return expr["$slice"][1]
+    return None
+
+
+class TestUpsertGraphEntriesArrayCaps:
+    async def test_node_sources_capped(self):
+        collection = AsyncMock()
+        client = MagicMock()
+        client.__getitem__ = MagicMock(
+            return_value=MagicMock(__getitem__=MagicMock(return_value=collection))
+        )
+
+        result = ExtractionResult(
+            nodes=[ExtractedNode(name="alice", type=NodeType.PERSON, properties={})],
+            edges=[],
+        )
+        await upsert_graph_entries(
+            result,
+            source_document_id=PydanticObjectId(),
+            database="test",
+            client=client,
+        )
+
+        ops = _extract_pipeline_ops(collection.bulk_write)
+        node_op = ops[0]
+        pipeline = node_op._doc
+        assert _find_slice_in_pipeline(pipeline, "sources") == _MAX_SOURCES
+
+    async def test_node_aliases_capped(self):
+        collection = AsyncMock()
+        client = MagicMock()
+        client.__getitem__ = MagicMock(
+            return_value=MagicMock(__getitem__=MagicMock(return_value=collection))
+        )
+
+        result = ExtractionResult(
+            nodes=[
+                ExtractedNode(
+                    name="alice",
+                    type=NodeType.PERSON,
+                    properties={"aliases": ["ali"]},
+                )
+            ],
+            edges=[],
+        )
+        await upsert_graph_entries(
+            result,
+            source_document_id=PydanticObjectId(),
+            database="test",
+            client=client,
+        )
+
+        ops = _extract_pipeline_ops(collection.bulk_write)
+        node_op = ops[0]
+        pipeline = node_op._doc
+        assert _find_slice_in_pipeline(pipeline, "properties.aliases") == _MAX_ALIASES
+
+    async def test_edge_sources_capped(self):
+        collection = AsyncMock()
+        client = MagicMock()
+        client.__getitem__ = MagicMock(
+            return_value=MagicMock(__getitem__=MagicMock(return_value=collection))
+        )
+
+        result = ExtractionResult(
+            nodes=[],
+            edges=[
+                ExtractedEdge(
+                    source_node_id="alice",
+                    source_type=NodeType.PERSON,
+                    target_node_id="write code",
+                    target_type=NodeType.TASK,
+                    type=EdgeType.TODO,
+                )
+            ],
+        )
+        await upsert_graph_entries(
+            result,
+            source_document_id=PydanticObjectId(),
+            database="test",
+            client=client,
+        )
+
+        ops = _extract_pipeline_ops(collection.bulk_write)
+        edge_op = ops[0]
+        pipeline = edge_op._doc
+        assert _find_slice_in_pipeline(pipeline, "sources") == _MAX_SOURCES

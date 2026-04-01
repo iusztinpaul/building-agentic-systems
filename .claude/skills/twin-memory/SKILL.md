@@ -1,6 +1,6 @@
 ---
 name: twin-memory
-description: Query, explore, and write to the twin's knowledge graph memory. Use when the user asks to recall, search, visualize, or ingest information (people, tasks, episodes, preferences, documents, URLs, files, conversations).
+description: "Query, explore, and write to the twin's knowledge graph memory. Use when the user asks to recall, search, visualize, or ingest information (people, tasks, episodes, preferences, documents, URLs, files, conversations). PROACTIVE USE: Also use this skill to extract the current conversation whenever something meaningful was discussed (technical decisions, debugging sessions, architecture changes, new learnings) or when the user switches to a different topic. When extracting conversations proactively, always run the ingestion in a background agent to avoid blocking the user."
 argument-hint: <natural language query or instruction>
 allowed-tools: mcp__twin-memory__query_memory, mcp__twin-memory__search_memory, mcp__twin-memory__deep_search_memory, mcp__twin-memory__ingest_url, mcp__twin-memory__ingest_file, mcp__twin-memory__ingest_conversation, Read
 ---
@@ -70,6 +70,7 @@ Use these tools when the user wants to add content to the knowledge graph:
 - Extracts people, tasks, episodes, preferences, and relationships from the text
 - Returns a JSON summary with node/edge counts
 - Use when: user wants to remember a conversation, or at the end of a session to persist learnings
+- **Proactive use:** Also ingest when meaningful topics were discussed (technical decisions, debugging sessions, architecture changes, new learnings) or when the user switches to a different topic. Always run proactive ingestion in a **background agent** to avoid blocking the user.
 
 ### After ingestion
 - Confirm what was extracted (node/edge counts) in a human-readable summary
