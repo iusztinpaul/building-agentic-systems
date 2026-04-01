@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from twin.config.paths import MEMORY_DIR
 from twin.mcp.deep_search import slugify, write_deep_search_results
 from twin.mcp.tools import deep_search_memory
 from twin.memory.types import QueryResult
@@ -69,12 +70,11 @@ def sample_results():
 
 @pytest.fixture()
 def memory_dir():
-    """Ensure .memory is cleaned up after tests."""
+    """Ensure MEMORY_DIR (.twin/memory/) is cleaned up after tests."""
 
     yield
-    memory_path = Path(".memory")
-    if memory_path.exists():
-        shutil.rmtree(memory_path)
+    if MEMORY_DIR.exists():
+        shutil.rmtree(MEMORY_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -83,18 +83,22 @@ def memory_dir():
 
 
 class TestSlugify:
-    def test_node_id(self):
-        assert slugify("person:alice") == "person-alice"
+    @pytest.mark.parametrize(
+        "input_id, expected",
+        [
+            ("person:alice", "person-alice"),
+            (
+                "person:alice|related_to|person:bob",
+                "person-alice--related_to--person-bob",
+            ),
+            ("task:write report", "task-write_report"),
+        ],
+        ids=["node_id", "edge_id", "spaces_replaced"],
+    )
+    def test_known_ids(self, input_id: str, expected: str) -> None:
+        assert slugify(input_id) == expected
 
-    def test_edge_id(self):
-        assert slugify("person:alice|related_to|person:bob") == (
-            "person-alice--related_to--person-bob"
-        )
-
-    def test_spaces_replaced(self):
-        assert slugify("task:write report") == "task-write_report"
-
-    def test_complex_id(self):
+    def test_complex_id_strips_url_chars(self) -> None:
         result = slugify("chunk:https://example.com/p/article#chunk-0")
         assert "/" not in result
         assert "#" not in result

@@ -234,7 +234,13 @@ async def ingest_file(
 
     try:
         document = await _ingest_file(file_path, title)
-    except (FileNotFoundError, IsADirectoryError, PermissionError, ValueError) as exc:
+    except (
+        FileNotFoundError,
+        IsADirectoryError,
+        PermissionError,
+        ValueError,
+        UnicodeDecodeError,
+    ) as exc:
         return json.dumps({"error": "file_error", "detail": str(exc)})
 
     if document is None:
@@ -273,6 +279,9 @@ async def ingest_conversation(
         )
 
     document = await _ingest_conversation(conversation_text, title)
+
+    if document is None:
+        return json.dumps({"status": "already_ingested"})
 
     lc = ctx.lifespan_context
     summary = await run_ingestion_pipeline(
