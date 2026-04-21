@@ -14,10 +14,10 @@ install: # Install dependencies via bun.
 	bun install
 
 dev: # Watch mode — re-runs on save. Interactive mode arrives at M3 (Ink).
-	bun --watch run src/index.ts
+	bun --watch run src/index.tsx
 
 run: # One-shot run. Pass PROMPT="..." or arguments will be forwarded.
-	bun run src/index.ts $(if $(PROMPT),--print "$(PROMPT)",)
+	bun run src/index.tsx $(if $(PROMPT),--print "$(PROMPT)",)
 
 typecheck: # Run the TypeScript compiler in type-check-only mode.
 	bun tsc --noEmit
@@ -35,7 +35,7 @@ lint: # Lint via Biome.
 	bunx biome check src
 
 build: # Compile to a standalone binary at dist/tree.
-	bun build src/index.ts --compile --outfile dist/tree
+	bun build src/index.tsx --compile --outfile dist/tree
 
 clean: # Remove build artifacts and installed deps.
 	rm -rf dist node_modules

@@ -14,7 +14,9 @@ export type LoopEvent =
   | { type: "assistant_text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; id: string; name: string; content: string; isError?: boolean }
-  | { type: "done"; reason: "end_turn" | "max_iterations" }
+  // `messages` is the full accumulated history at turn end — interactive consumers
+  // (Ink REPL) reuse it as the starting point for the next user turn.
+  | { type: "done"; reason: "end_turn" | "max_iterations"; messages: Message[] }
   | { type: "error"; message: string };
 
 export interface LoopOptions {
@@ -60,7 +62,7 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
     }
 
     if (pending.length === 0) {
-      yield { type: "done", reason: "end_turn" };
+      yield { type: "done", reason: "end_turn", messages };
       return;
     }
 
@@ -133,5 +135,5 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
     messages.push({ role: "user", content: results });
   }
 
-  yield { type: "done", reason: "max_iterations" };
+  yield { type: "done", reason: "max_iterations", messages };
 }

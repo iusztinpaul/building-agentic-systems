@@ -1,19 +1,22 @@
 #!/usr/bin/env bun
-// Tree — CLI harness entry (Milestone 2 of docs/harness-plan.md).
-// Consumes the agent loop as an async generator. Ink TUI arrives at M3.
+// Tree — harness entry (Milestone 3 of docs/harness-plan.md).
+// With `--print "<prompt>"` or a positional prompt: CLI streaming to stdout.
+// Without a prompt: mount the Ink REPL.
 
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { render } from "ink";
 import { loop } from "./agent/loop";
+import { App } from "./app";
 import { createClient } from "./client";
 import type { Message } from "./messages";
 import { builtInTools } from "./tools/registry";
+import type { ToolContext } from "./tools/types";
 
 // When invoked via `make harness-run`, cwd is apps/harness/. That's almost never what
 // the user wants — they want repo-scope globs/reads. Walk up to find the monorepo root.
 function findRepoRoot(start: string = process.cwd()): string {
   let dir = start;
-  // Cap the climb at a few levels to avoid walking off the filesystem.
   for (let i = 0; i < 8; i++) {
     if (existsSync(join(dir, ".git")) || existsSync(join(dir, "docker-compose.yml"))) {
       return dir;
@@ -31,7 +34,7 @@ const SYSTEM_PROMPT = [
   "Use them proactively — prefer tools over speculation. Answer concisely.",
 ].join(" ");
 
-function parseArgs(argv: string[]): { prompt: string } {
+function parseArgs(argv: string[]): { prompt?: string } {
   let prompt: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -41,11 +44,6 @@ function parseArgs(argv: string[]): { prompt: string } {
       prompt = a;
     }
   }
-  if (!prompt) {
-    console.error('usage: tree --print "<prompt>"');
-    console.error('   or: tree "<prompt>"');
-    process.exit(2);
-  }
   return { prompt };
 }
 
@@ -54,21 +52,11 @@ function truncate(s: string, n = 200): string {
   return `${s.slice(0, n)}… (${s.length - n} more chars)`;
 }
 
-async function main(): Promise<void> {
-  const { prompt } = parseArgs(process.argv.slice(2));
-
-  const client = (() => {
-    try {
-      return createClient();
-    } catch (err) {
-      console.error(`tree: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  })();
-
-  const abort = new AbortController();
-  process.on("SIGINT", () => abort.abort());
-
+async function runPrintMode(
+  client: ReturnType<typeof createClient>,
+  prompt: string,
+  toolContext: ToolContext,
+): Promise<void> {
   const messages: Message[] = [{ role: "user", content: prompt }];
 
   let lastEvent: "text" | "tool" | "none" = "none";
@@ -77,7 +65,7 @@ async function main(): Promise<void> {
     messages,
     systemPrompt: SYSTEM_PROMPT,
     tools: builtInTools,
-    toolContext: { cwd: findRepoRoot(), signal: abort.signal },
+    toolContext,
   })) {
     if (ev.type === "assistant_text") {
       process.stdout.write(ev.text);
@@ -103,6 +91,47 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   }
+}
+
+async function main(): Promise<void> {
+  const { prompt } = parseArgs(process.argv.slice(2));
+
+  const client = (() => {
+    try {
+      return createClient();
+    } catch (err) {
+      console.error(`tree: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  })();
+
+  const abort = new AbortController();
+  process.on("SIGINT", () => abort.abort());
+
+  const toolContext: ToolContext = { cwd: findRepoRoot(), signal: abort.signal };
+
+  if (prompt !== undefined) {
+    await runPrintMode(client, prompt, toolContext);
+    return;
+  }
+
+  // Interactive mode — mount Ink.
+  if (!process.stdout.isTTY) {
+    console.error(
+      'tree: interactive mode requires a TTY. Use --print "<prompt>" or pipe a prompt as arg.',
+    );
+    process.exit(1);
+  }
+
+  const instance = render(
+    <App
+      client={client}
+      systemPrompt={SYSTEM_PROMPT}
+      tools={builtInTools}
+      toolContext={toolContext}
+    />,
+  );
+  await instance.waitUntilExit();
 }
 
 main();
