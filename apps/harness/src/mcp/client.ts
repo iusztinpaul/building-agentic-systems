@@ -20,19 +20,36 @@ export interface McpServer {
 
 const CLIENT_INFO = { name: "tree", version: "0.1.0" };
 
-export async function connectMcpServer(name: string, spawn: McpSpawn): Promise<McpServer> {
-  const transport = new StdioClientTransport({
-    command: spawn.command,
-    args: spawn.args,
-    env: spawn.env,
-    cwd: spawn.cwd,
-    // Merge the server's stderr into our stderr so import errors / tracebacks
-    // from the Python side surface in the harness terminal.
-    stderr: "inherit",
-  });
+// Dependency-injection seam for tests. Production callers omit this entirely
+// and get the real StdioClientTransport + Client; unit tests provide a fake
+// Client whose listTools / callTool / close behaviour they can script.
+export interface McpConnectDeps {
+  createTransport?: (spawn: McpSpawn) => unknown;
+  createClient?: () => Client;
+}
 
-  const client = new Client(CLIENT_INFO);
-  await client.connect(transport);
+export async function connectMcpServer(
+  name: string,
+  spawn: McpSpawn,
+  deps?: McpConnectDeps,
+): Promise<McpServer> {
+  const transport =
+    deps?.createTransport?.(spawn) ??
+    new StdioClientTransport({
+      command: spawn.command,
+      args: spawn.args,
+      env: spawn.env,
+      cwd: spawn.cwd,
+      // Merge the server's stderr into our stderr so import errors / tracebacks
+      // from the Python side surface in the harness terminal.
+      stderr: "inherit",
+    });
+
+  const client = deps?.createClient?.() ?? new Client(CLIENT_INFO);
+  // The production path pairs StdioClientTransport with Client.connect; tests
+  // may pass a fake transport that doesn't extend Transport — the cast tells
+  // TS "the caller owns the pairing" and matches the runtime contract.
+  await client.connect(transport as Parameters<Client["connect"]>[0]);
 
   const tools = await listAllTools(client);
   return {
