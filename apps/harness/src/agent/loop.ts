@@ -25,6 +25,22 @@ export type PermissionCheck = (
   tool: AnyTool,
 ) => Promise<"allow" | "deny">;
 
+export interface BeforeToolDecision {
+  block: boolean;
+  reason?: string;
+}
+
+export type BeforeToolHook = (
+  toolName: string,
+  input: Record<string, unknown>,
+) => Promise<BeforeToolDecision>;
+
+export type AfterToolHook = (
+  toolName: string,
+  input: Record<string, unknown>,
+  result: { content: string; isError?: boolean },
+) => Promise<void>;
+
 export interface LoopOptions {
   client: GoogleGenAI;
   messages: Message[];
@@ -39,12 +55,28 @@ export interface LoopOptions {
   // Called whenever the loop appends a message to its history (assistant turns + tool
   // results). Callers use this to persist sessions without waiting for `done`.
   onMessage?: (message: Message) => void;
+  // M7 hooks — both optional. onBeforeTool runs before execution and can block;
+  // onAfterTool runs after for observation only. The loop calls them for every tool,
+  // including read-only ones (since PreToolUse/PostToolUse in Claude Code fire for
+  // every tool). Consumers wire these to the shell-exec hook runner.
+  onBeforeTool?: BeforeToolHook;
+  onAfterTool?: AfterToolHook;
 }
 
 const PERMISSION_DENIED = "Permission denied by user.";
 
 export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
-  const { client, systemPrompt, tools, toolContext, model, permission, onMessage } = opts;
+  const {
+    client,
+    systemPrompt,
+    tools,
+    toolContext,
+    model,
+    permission,
+    onMessage,
+    onBeforeTool,
+    onAfterTool,
+  } = opts;
   const messages: Message[] = [...opts.messages];
   const registry = new Map(tools.map((t) => [t.name, t]));
   const maxIterations = opts.maxIterations ?? 10;
@@ -118,6 +150,31 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
         continue;
       }
 
+      // PreToolUse hook — fires for every tool (including read-only). A blocking
+      // hook short-circuits before the permission gate.
+      if (onBeforeTool) {
+        const hookDecision = await onBeforeTool(call.name, call.args);
+        if (hookDecision.block) {
+          const reason = hookDecision.reason ?? "Blocked by PreToolUse hook.";
+          const res: ToolResultBlock = {
+            type: "tool_result",
+            tool_use_id: call.id,
+            tool_name: call.name,
+            content: reason,
+            is_error: true,
+          };
+          results.push(res);
+          yield {
+            type: "tool_result",
+            id: call.id,
+            name: call.name,
+            content: reason,
+            isError: true,
+          };
+          continue;
+        }
+      }
+
       // Permission gate — only applied to destructive tools. Read-only tools run freely.
       if (tool.isDestructive && permission) {
         const decision = await permission(call.name, call.args, tool);
@@ -159,6 +216,15 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
           content: out.content,
           isError: out.isError,
         };
+        // PostToolUse — fires after a successful call. Observation only; we don't
+        // re-yield anything from its output.
+        if (onAfterTool) {
+          try {
+            await onAfterTool(call.name, call.args, { content: out.content, isError: out.isError });
+          } catch {
+            // hooks shouldn't break the loop
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const res: ToolResultBlock = {

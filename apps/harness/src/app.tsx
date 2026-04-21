@@ -3,12 +3,14 @@ import type { GoogleGenAI } from "@google/genai";
 import { Box, Static, Text, useApp, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loop } from "./agent/loop";
+import { type AfterToolHook, type BeforeToolHook, loop } from "./agent/loop";
 import {
   type SubagentProgressEvent,
   type SubagentType,
   makeSpawnSubagent,
 } from "./agent/subagents";
+import type { HookConfig } from "./hooks/config";
+import { runMatchingHooks } from "./hooks/runner";
 import type { Message } from "./messages";
 import { type Rule, evaluateRules, suggestPattern } from "./permissions/policy";
 import { PermissionPrompt } from "./permissions/prompt";
@@ -20,6 +22,7 @@ import { Input } from "./ui/Input";
 import { AssistantMessage, ErrorMessage, UserMessage } from "./ui/Message";
 import { Spinner } from "./ui/Spinner";
 import { ToolCall } from "./ui/ToolCall";
+import { applySlashCommand } from "./ui/slash";
 
 // UI-layer message model. Distinct from the neutral Message / ContentBlock vocabulary
 // in messages.ts: here we care about how things *render*, not how the model sees them.
@@ -54,6 +57,8 @@ export interface AppProps {
   session?: SessionStore;
   // Prior history to preload (resume/continue).
   initialHistory?: Message[];
+  // User/project shell-exec hooks loaded at startup.
+  hooks?: HookConfig;
 }
 
 function uiMessagesFromHistory(history: Message[]): UiMessage[] {
@@ -98,6 +103,7 @@ export function App({
   toolContext,
   session,
   initialHistory,
+  hooks,
 }: AppProps): React.ReactElement {
   const [messages, setMessages] = useState<UiMessage[]>(() =>
     initialHistory ? uiMessagesFromHistory(initialHistory) : [],
@@ -236,15 +242,104 @@ export function App({
     );
   }, []);
 
+  // Hook-driven callbacks — stable references so loop options don't re-identify
+  // every render.
+  const onBeforeTool: BeforeToolHook = useCallback(
+    async (toolName, input) => {
+      if (!hooks) return { block: false };
+      const result = await runMatchingHooks(
+        "PreToolUse",
+        hooks,
+        { tool: toolName, input },
+        { toolName, input },
+      );
+      for (const fire of result.fires) {
+        session?.appendEvent("hook", {
+          event: "PreToolUse",
+          tool: toolName,
+          command: fire.command,
+          exitCode: fire.exitCode,
+          decision: result.blocked ? "block" : "allow",
+        });
+      }
+      return { block: result.blocked, reason: result.reason };
+    },
+    [hooks, session],
+  );
+
+  const onAfterTool: AfterToolHook = useCallback(
+    async (toolName, input, res) => {
+      if (!hooks) return;
+      const result = await runMatchingHooks(
+        "PostToolUse",
+        hooks,
+        { tool: toolName, input, result: res },
+        { toolName, input },
+      );
+      for (const fire of result.fires) {
+        session?.appendEvent("hook", {
+          event: "PostToolUse",
+          tool: toolName,
+          command: fire.command,
+          exitCode: fire.exitCode,
+        });
+      }
+    },
+    [hooks, session],
+  );
+
   const submit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || thinking) return;
 
+      // Slash commands — dispatched client-side, never sent to the LLM.
+      if (trimmed.startsWith("/")) {
+        const res = applySlashCommand(trimmed, {
+          cwd: toolContext.cwd,
+          clearHistory: () => {
+            historyRef.current = [];
+            setMessages([]);
+          },
+        });
+        if (res) {
+          setInput("");
+          setMessages((prev) => [...prev, { id: randomUUID(), kind: "error", text: res.info }]);
+          return;
+        }
+      }
+
       setInput("");
+
+      // UserPromptSubmit hook — can mutate or block the prompt before we send it.
+      let effectivePrompt = trimmed;
+      if (hooks) {
+        const pre = await runMatchingHooks("UserPromptSubmit", hooks, { prompt: trimmed });
+        for (const fire of pre.fires) {
+          session?.appendEvent("hook", {
+            event: "UserPromptSubmit",
+            command: fire.command,
+            exitCode: fire.exitCode,
+            decision: pre.blocked ? "block" : pre.modifiedPrompt ? "mutate" : "allow",
+          });
+        }
+        if (pre.blocked) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: randomUUID(),
+              kind: "error",
+              text: `(prompt blocked by hook: ${pre.reason ?? "unknown reason"})`,
+            },
+          ]);
+          return;
+        }
+        if (pre.modifiedPrompt) effectivePrompt = pre.modifiedPrompt;
+      }
+
       const userId = randomUUID();
-      setMessages((prev) => [...prev, { id: userId, kind: "user", text: trimmed }]);
-      const userMessage: Message = { role: "user", content: trimmed };
+      setMessages((prev) => [...prev, { id: userId, kind: "user", text: effectivePrompt }]);
+      const userMessage: Message = { role: "user", content: effectivePrompt };
       historyRef.current = [...historyRef.current, userMessage];
       session?.appendMessage(userMessage);
       setThinking(true);
@@ -262,6 +357,8 @@ export function App({
         parentSessionId: session?.sessionId ?? "no-session",
         cwd: toolContext.cwd,
         permission: askPermission,
+        onBeforeTool,
+        onAfterTool,
         onProgress: onSubagentEvent,
       });
 
@@ -273,6 +370,8 @@ export function App({
           tools,
           toolContext: { ...toolContext, signal: abort.signal, depth: 0, spawnSubagent },
           permission: askPermission,
+          onBeforeTool,
+          onAfterTool,
           onMessage: (m) => session?.appendMessage(m),
         })) {
           if (ev.type === "assistant_text") {
@@ -330,8 +429,30 @@ export function App({
         setThinking(false);
       }
     },
-    [client, systemPrompt, tools, toolContext, thinking, askPermission, session, onSubagentEvent],
+    [
+      client,
+      systemPrompt,
+      tools,
+      toolContext,
+      thinking,
+      askPermission,
+      session,
+      hooks,
+      onBeforeTool,
+      onAfterTool,
+      onSubagentEvent,
+    ],
   );
+
+  // Stop hooks fire on graceful Ink unmount. We intentionally don't await here —
+  // Ink's cleanup path is synchronous; the runner races the process exit. For
+  // reliable Stop execution, use the CLI path which awaits before returning.
+  useEffect(() => {
+    return () => {
+      if (!hooks) return;
+      runMatchingHooks("Stop", hooks, { reason: "exit" }).catch(() => {});
+    };
+  }, [hooks]);
 
   // Split rendering: <Static /> for settled messages (it only renders on append,
   // which gives us crisp streaming for append-only events). In-progress messages

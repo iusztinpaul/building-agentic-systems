@@ -15,10 +15,12 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { render } from "ink";
-import { loop } from "./agent/loop";
+import { type AfterToolHook, type BeforeToolHook, loop } from "./agent/loop";
 import { makeSpawnSubagent } from "./agent/subagents";
 import { App } from "./app";
 import { createClient } from "./client";
+import { type HookConfig, loadHooks } from "./hooks/config";
+import { runMatchingHooks } from "./hooks/runner";
 import { mcpServersToTools } from "./mcp/adapter";
 import { type McpServer, connectMcpServer } from "./mcp/client";
 import { findMcpConfig, loadMcpConfig, resolveSpawn } from "./mcp/config";
@@ -138,8 +140,26 @@ async function runPrintMode(
   tools: AnyTool[],
   initialHistory: Message[],
   session: SessionStore,
+  hooks: HookConfig,
 ): Promise<void> {
-  const userMessage: Message = { role: "user", content: prompt };
+  // UserPromptSubmit — runs before we add the user message to the conversation.
+  let effectivePrompt = prompt;
+  const pre = await runMatchingHooks("UserPromptSubmit", hooks, { prompt });
+  for (const fire of pre.fires) {
+    session.appendEvent("hook", {
+      event: "UserPromptSubmit",
+      command: fire.command,
+      exitCode: fire.exitCode,
+      decision: pre.blocked ? "block" : pre.modifiedPrompt ? "mutate" : "allow",
+    });
+  }
+  if (pre.blocked) {
+    console.error(`tree: prompt blocked by hook: ${pre.reason ?? "unknown reason"}`);
+    return;
+  }
+  if (pre.modifiedPrompt) effectivePrompt = pre.modifiedPrompt;
+
+  const userMessage: Message = { role: "user", content: effectivePrompt };
   const messages: Message[] = [...initialHistory, userMessage];
   session.appendMessage(userMessage);
 
@@ -153,6 +173,42 @@ async function runPrintMode(
     return "allow" as const;
   };
 
+  const onBeforeTool: BeforeToolHook = async (toolName, input) => {
+    const result = await runMatchingHooks(
+      "PreToolUse",
+      hooks,
+      { tool: toolName, input },
+      { toolName, input },
+    );
+    for (const fire of result.fires) {
+      session.appendEvent("hook", {
+        event: "PreToolUse",
+        tool: toolName,
+        command: fire.command,
+        exitCode: fire.exitCode,
+        decision: result.blocked ? "block" : "allow",
+      });
+    }
+    return { block: result.blocked, reason: result.reason };
+  };
+
+  const onAfterTool: AfterToolHook = async (toolName, input, res) => {
+    const result = await runMatchingHooks(
+      "PostToolUse",
+      hooks,
+      { tool: toolName, input, result: res },
+      { toolName, input },
+    );
+    for (const fire of result.fires) {
+      session.appendEvent("hook", {
+        event: "PostToolUse",
+        tool: toolName,
+        command: fire.command,
+        exitCode: fire.exitCode,
+      });
+    }
+  };
+
   // Sub-agent spawner for CLI mode — events flow into the print stream so the
   // user can see tool banners from inside any sub-agent.
   const spawnSubagent = makeSpawnSubagent({
@@ -162,6 +218,8 @@ async function runPrintMode(
     parentSessionId: session.sessionId,
     cwd: toolContext.cwd,
     permission: cliPermission,
+    onBeforeTool,
+    onAfterTool,
     onProgress: (ev) => {
       if (ev.kind === "start") {
         process.stdout.write(
@@ -192,6 +250,8 @@ async function runPrintMode(
     tools,
     toolContext: { ...toolContext, depth: 0, spawnSubagent },
     permission: cliPermission,
+    onBeforeTool,
+    onAfterTool,
     onMessage: (m) => session.appendMessage(m),
   })) {
     if (ev.type === "assistant_text") {
@@ -292,13 +352,31 @@ async function main(): Promise<void> {
     );
   }
 
+  const hooks = loadHooks(cwd);
+  const hookCounts = Object.entries(hooks).map(([k, v]) => `${k}=${v.length}`);
+  if (hookCounts.length > 0) {
+    console.error(`\x1b[2mtree: loaded hooks: ${hookCounts.join(", ")}\x1b[0m`);
+  }
+
   const abort = new AbortController();
   process.on("SIGINT", () => abort.abort());
   const toolContext: ToolContext = { cwd, signal: abort.signal, mcpServers };
 
+  const runStopHooks = async () => {
+    const stop = await runMatchingHooks("Stop", hooks, { reason: "exit" });
+    for (const fire of stop.fires) {
+      store.appendEvent("hook", {
+        event: "Stop",
+        command: fire.command,
+        exitCode: fire.exitCode,
+      });
+    }
+  };
+
   try {
     if (args.prompt !== undefined) {
-      await runPrintMode(client, args.prompt, toolContext, allTools, history, store);
+      await runPrintMode(client, args.prompt, toolContext, allTools, history, store, hooks);
+      await runStopHooks();
       return;
     }
 
@@ -317,9 +395,11 @@ async function main(): Promise<void> {
         toolContext={toolContext}
         session={store}
         initialHistory={history}
+        hooks={hooks}
       />,
     );
     await instance.waitUntilExit();
+    await runStopHooks();
   } finally {
     await Promise.all(Array.from(mcpServers.values()).map((s) => s.close()));
   }

@@ -9,7 +9,7 @@ import { subagentSessionPath } from "../session/paths";
 import { SessionStore } from "../session/store";
 import type { AnyTool } from "../tools/registry";
 import type { SpawnSubagent, SpawnSubagentRequest, SpawnSubagentResult } from "../tools/types";
-import { type PermissionCheck, loop } from "./loop";
+import { type AfterToolHook, type BeforeToolHook, type PermissionCheck, loop } from "./loop";
 
 export type SubagentType = "general" | "explore" | "plan";
 
@@ -95,6 +95,10 @@ export interface SpawnDeps {
   parentSessionId: string;
   cwd: string;
   permission?: PermissionCheck;
+  // Hook callbacks inherited by every sub-agent so Pre/PostToolUse fires inside
+  // nested loops too. Parent app wires these to the shell-exec hook runner once.
+  onBeforeTool?: BeforeToolHook;
+  onAfterTool?: AfterToolHook;
   onProgress?: (ev: SubagentProgressEvent) => void;
 }
 
@@ -188,6 +192,8 @@ export function makeSpawnSubagent(deps: SpawnDeps): SpawnSubagent {
           spawnSubagent: spawn,
         },
         permission: deps.permission,
+        onBeforeTool: deps.onBeforeTool,
+        onAfterTool: deps.onAfterTool,
         onMessage: (m) => store.appendMessage(m),
       })) {
         if (ev.type === "assistant_text") {

@@ -1,36 +1,148 @@
 # Tree — Coding-Agent Harness
 
-The harness half of **Tree: Your Rooted Personal Assistant**. Minimal TypeScript coding agent (`tree` CLI) that pairs with the `tree-memory` MCP server in `apps/memory/`.
+The agent half of **Tree: Your Rooted Personal Assistant**. A minimal TypeScript coding agent (`tree` CLI) that pairs with the `tree-memory` MCP server in `apps/memory/`.
 
-This is a walking skeleton at Milestone 1: argv → Gemini streaming → stdout. No tools, no TUI, no MCP yet. See [`../../docs/harness-plan.md`](../../docs/harness-plan.md) for the full architecture and the 7-milestone roadmap; per-milestone task files live under [`../../docs/tasks/`](../../docs/tasks/).
+Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/harness-plan.md`](../../docs/harness-plan.md); per-milestone task files are under [`../../docs/tasks/`](../../docs/tasks/).
+
+## Prerequisites
+
+- [Bun](https://bun.sh) ≥ 1.1 (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
+- `GOOGLE_API_KEY` set in the repo-root `.env` (shared with the memory app)
+- Optional: `ripgrep` (`brew install ripgrep`) for the `grep` tool
+- Optional: MongoDB + `make local-start` when you want `mcp__tree-memory__*` tools
 
 ## Quick start
 
 ```bash
-# Prereqs: Bun installed (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`).
-# And GOOGLE_API_KEY set in the root .env (shared with the memory app).
-
+# install deps
 make harness-install
+
+# one-shot CLI
 PROMPT="what is 2+2?" make harness-run
+
+# interactive Ink REPL (requires a TTY)
+make harness-dev
 ```
 
-Run targets from the repo root via the delegation Makefile: `make harness-install`, `make harness-dev`, `make harness-run`, `make harness-typecheck`, `make harness-lint`, `make harness-format`. Inside this directory, `make help` lists app-local targets.
+## Modes
 
-## Stack
+| Invocation | What it does |
+|---|---|
+| `PROMPT="..." make harness-run` | CLI mode — streams the response to stdout, exits. |
+| `make harness-run` (no PROMPT, TTY) | Interactive Ink REPL. |
+| `ARGS="--resume" make harness-run` | Lists recent sessions for this cwd and exits. |
+| `ARGS="--resume <id-prefix>" PROMPT="..." make harness-run` | Resumes that session, appends a new turn. |
+| `ARGS="--continue" PROMPT="..." make harness-run` | Resumes the most-recent session for this cwd. |
+| `ARGS="--no-mcp" make harness-run` | Skip the MCP bootstrap (useful when infra is down). |
 
-Bun + Biome + `tsc` per [`../../docs/modern-typescript-stack.md`](../../docs/modern-typescript-stack.md). Orchestrator LLM: Gemini via `@google/genai`, reusing the existing `GOOGLE_API_KEY`. The loop is provider-isolated in `src/client.ts` so swapping to Anthropic/OpenAI later is localized.
+`ARGS=` passes flags through; `PROMPT=` is the one-shot prompt. They compose.
+
+## Slash commands (interactive REPL)
+
+| Command | Effect |
+|---|---|
+| `/help` | List all slash commands |
+| `/clear` | Reset the in-memory conversation. The session JSONL file is kept; new turns append to it. |
+| `/resume` | Print recent sessions with prompt hint (restart with `ARGS="--resume <id>"`) |
+
+## Tools
+
+Native tools (always available): `bash`, `read`, `write`, `edit`, `glob`, `grep`, `todo`, `task`.
+
+MCP tools (on startup) are discovered from the root `.mcp.json`. Each shows up as `mcp__<server>__<name>`; for the default config that means the six `tree-memory` tools:
+`query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`.
+
+### Destructive-tool gating
+
+Destructive tools (anything that writes, or that matches the ingest/write/create/delete/… heuristic for MCP tools) go through a permission check. In the Ink REPL a yellow-bordered dialog asks `[y]` once, `[a]` allow this pattern (e.g. `bash:git ` ), `[n]` deny. Patterns last the session. In `--print` mode destructive tools are auto-allowed with `source: "cli-auto"` logged.
+
+## Sessions — JSONL transcripts
+
+Every session writes to `~/.tree/projects/<cwd-hash>/<session-id>.jsonl`. Each line is one of:
+- `{ kind: "meta", ts, cwd, sessionId }`
+- `{ kind: "message", ts, role, content }` — verbatim from the loop
+- `{ kind: "event", ts, name, data }` — permissions, hooks, resumed markers, subagent lifecycle
+
+Sub-agents get nested files at `~/.tree/projects/<cwd-hash>/<parent-id>/<subagent-id>.jsonl`. The `subagent_start` / `subagent_end` events bracket each run with type, description, depth, and final stats.
+
+## Sub-agents
+
+The `task` tool spawns a sub-agent — a recursive call into the same loop with a narrowed tool set and fresh conversation. Three types:
+
+| Type | Tools | Can spawn? |
+|---|---|---|
+| `general` | all | yes (depth ≤ 2) |
+| `explore` | read, glob, grep, todo + read-only MCP tools | no |
+| `plan` | read, glob, grep | no |
+
+Limits per sub-agent: **depth ≤ 2**, **5-minute wall-clock**, **30 tool calls**, plus any parent `AbortSignal` propagates down.
+
+## Hooks — shell extensibility
+
+Tree runs shell-exec hooks at four points, configured via `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse":       [ { "matcher": "bash:rm ",      "command": "./scripts/deny-rm.sh" } ],
+    "PostToolUse":      [ { "matcher": "edit:./src/",   "command": "./scripts/audit-edit.sh" } ],
+    "UserPromptSubmit": [ { "command": "./scripts/rewrite-prompt.sh" } ],
+    "Stop":             [ { "command": "echo 'session ended' >> ~/tree-activity.log" } ]
+  }
+}
+```
+
+### Protocol
+
+- Hook stdin receives a JSON context. For `PreToolUse`: `{ event, tool, input }`. For `PostToolUse`: adds `result`. For `UserPromptSubmit`: `{ event, prompt }`. For `Stop`: `{ event, reason }`.
+- Hook stdout is optionally JSON: `{ "decision": "block", "reason": "..." }` blocks the call; `{ "prompt": "..." }` on `UserPromptSubmit` rewrites the prompt.
+- Non-zero exit = block (same as `"decision": "block"`).
+- Matcher syntax matches the permission-rule DSL: `"toolName"` or `"toolName:prefix"`. Omit the matcher on `UserPromptSubmit` / `Stop`.
+- Each fire is logged as a `{ kind: "event", name: "hook", data: { event, tool, command, exitCode, decision } }` line in the session JSONL.
+
+### Settings merge order
+
+Project (`./.tree/settings.json`) runs first, then user (`~/.tree/settings.json`). Within an event the arrays concatenate, preserving order. No inheritance magic — keep it simple.
+
+### Hook timeout
+
+Each hook has a 5-second wall-clock. Kill signal on timeout; a timed-out hook is treated as a block.
 
 ## Layout
 
 ```
 apps/harness/
   src/
-    index.ts       # CLI entry: argv parse, load env, stream to stdout
-    client.ts      # Gemini SDK wrapper (generator interface)
-    messages.ts    # Role / ContentBlock / Message type vocabulary (reused by every milestone)
-  package.json     # "name": "tree"
-  tsconfig.json    # strict TS, ESNext, Bundler resolution, bun-types
-  biome.json       # 2-space indent, double quotes, recommended rules
-  bunfig.toml      # minimal Bun config
-  Makefile         # app-local targets
+    index.tsx         # bin entry — argv, modes, Ink vs CLI
+    app.tsx           # top-level Ink component
+    agent/
+      loop.ts         # the async-generator agent loop
+      subagents.ts    # task registry + spawner factory
+    tools/
+      types.ts        # Tool + ToolContext + subagent types
+      registry.ts     # built-in tools + Gemini tool-schema bridge
+      bash/read/write/edit/glob/grep/todo/task.ts
+    mcp/
+      config.ts       # load root .mcp.json
+      client.ts       # stdio transport + tool discovery
+      adapter.ts      # wrap MCP tools as harness Tools
+    session/          # paths.ts + store.ts + resume.ts
+    permissions/      # policy.ts + prompt.tsx
+    hooks/            # config.ts + runner.ts
+    ui/               # Message/ToolCall/Input/Spinner/Markdown/AgentProgress + slash.ts
+    messages.ts       # neutral type vocabulary (Role/ContentBlock/Message/StreamEvent)
+    client.ts         # Gemini SDK wrapper (streamText generator)
 ```
+
+## Make targets (from repo root)
+
+| Target | Effect |
+|---|---|
+| `make harness-install` | `bun install` |
+| `make harness-dev` | `bun --watch` with optional `ARGS=` |
+| `make harness-run` | one-shot; set `PROMPT=` and/or `ARGS=` |
+| `make harness-typecheck` | `bun tsc --noEmit` |
+| `make harness-test` | `bun test` (no tests yet — placeholder) |
+| `make harness-format` / `format-check` | Biome format |
+| `make harness-lint` | Biome check |
+| `make harness-build` | single-binary compile to `dist/tree` |
