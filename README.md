@@ -1,6 +1,6 @@
-# Building Agentic Systems — Tree
+# Tree: Your Rooted Personal Assistant
 
-**Tree: Your Rooted Personal Assistant.** Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
+Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
 ## Repo layout
 
