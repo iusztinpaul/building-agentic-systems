@@ -10,9 +10,9 @@ env:
   # MongoDB (used by docker-compose and tests)
   MONGO_HOST: localhost
   MONGO_PORT: "27017"
-  MONGO_INITDB_ROOT_USERNAME: twin
-  MONGO_INITDB_ROOT_PASSWORD: twin
-  MONGO_INITDB_DATABASE: twin
+  MONGO_INITDB_ROOT_USERNAME: tree
+  MONGO_INITDB_ROOT_PASSWORD: tree
+  MONGO_INITDB_DATABASE: tree
   MONGOT_PORT: "27028"
   # Prefect
   PREFECT_PORT: "4200"

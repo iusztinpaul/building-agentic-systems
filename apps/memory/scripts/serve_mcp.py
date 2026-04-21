@@ -1,4 +1,4 @@
-"""Entry point for the Twin Memory MCP server."""
+"""Entry point for the Tree Memory MCP server."""
 
 from tree.logging import init_logger
 

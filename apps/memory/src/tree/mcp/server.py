@@ -44,7 +44,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
 
 
 mcp = FastMCP(
-    "Twin Memory",
+    "Tree Memory",
     instructions=(
         "Query and build a personal knowledge graph of documents, people, tasks, "
         "episodes, and preferences. Use 'query_memory' for flexible natural language "
