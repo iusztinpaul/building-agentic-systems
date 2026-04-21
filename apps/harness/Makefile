@@ -13,11 +13,11 @@ help: # Display harness-app targets.
 install: # Install dependencies via bun.
 	bun install
 
-dev: # Watch mode — re-runs on save. Interactive mode arrives at M3 (Ink).
-	bun --watch run src/index.tsx
+dev: # Watch mode — re-runs on save. Interactive Ink mode (requires a TTY).
+	bun --watch run src/index.tsx $(ARGS)
 
-run: # One-shot run. Pass PROMPT="..." or arguments will be forwarded.
-	bun run src/index.tsx $(if $(PROMPT),--print "$(PROMPT)",)
+run: # Run tree. Pass PROMPT="..." for one-shot; ARGS="..." for flags like --resume, --continue.
+	bun run src/index.tsx $(ARGS) $(if $(PROMPT),--print "$(PROMPT)",)
 
 typecheck: # Run the TypeScript compiler in type-check-only mode.
 	bun tsc --noEmit
