@@ -7,6 +7,7 @@ import { editTool } from "./edit";
 import { globTool } from "./glob";
 import { grepTool } from "./grep";
 import { readTool } from "./read";
+import { taskTool } from "./task";
 import { todoTool } from "./todo";
 import type { Tool } from "./types";
 import { writeTool } from "./write";
@@ -22,6 +23,7 @@ export const builtInTools: AnyTool[] = [
   globTool,
   grepTool,
   todoTool,
+  taskTool,
 ];
 
 export function createRegistry(tools: AnyTool[] = builtInTools): Map<string, AnyTool> {

@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { render } from "ink";
 import { loop } from "./agent/loop";
+import { makeSpawnSubagent } from "./agent/subagents";
 import { App } from "./app";
 import { createClient } from "./client";
 import { mcpServersToTools } from "./mcp/adapter";
@@ -142,22 +143,55 @@ async function runPrintMode(
   const messages: Message[] = [...initialHistory, userMessage];
   session.appendMessage(userMessage);
 
+  const cliPermission = async (toolName: string, input: Record<string, unknown>) => {
+    session.appendEvent("permission", {
+      tool: toolName,
+      input,
+      decision: "allow",
+      source: "cli-auto",
+    });
+    return "allow" as const;
+  };
+
+  // Sub-agent spawner for CLI mode — events flow into the print stream so the
+  // user can see tool banners from inside any sub-agent.
+  const spawnSubagent = makeSpawnSubagent({
+    client,
+    baseSystemPrompt: SYSTEM_PROMPT,
+    allTools: tools,
+    parentSessionId: session.sessionId,
+    cwd: toolContext.cwd,
+    permission: cliPermission,
+    onProgress: (ev) => {
+      if (ev.kind === "start") {
+        process.stdout.write(
+          `\x1b[2m  ↳ task[${ev.type}] ${ev.subagentId}: ${ev.description}\x1b[0m\n`,
+        );
+      } else if (ev.kind === "tool_use") {
+        process.stdout.write(
+          `\x1b[2m    [${ev.name}] ${truncate(JSON.stringify(ev.input))}\x1b[0m\n`,
+        );
+      } else if (ev.kind === "tool_result") {
+        const tag = ev.isError ? "error" : "ok";
+        process.stdout.write(
+          `\x1b[2m      → ${tag}: ${truncate(ev.content.replace(/\n/g, " ⏎ "))}\x1b[0m\n`,
+        );
+      } else if (ev.kind === "end") {
+        process.stdout.write(
+          `\x1b[2m  ↳ ${ev.subagentId} ${ev.result.stopped_reason} · ${ev.result.tool_uses} tools · ${(ev.result.duration_ms / 1000).toFixed(1)}s\x1b[0m\n`,
+        );
+      }
+    },
+  });
+
   let lastEvent: "text" | "tool" | "none" = "none";
   for await (const ev of loop({
     client,
     messages,
     systemPrompt: SYSTEM_PROMPT,
     tools,
-    toolContext,
-    permission: async (toolName, input) => {
-      session.appendEvent("permission", {
-        tool: toolName,
-        input,
-        decision: "allow",
-        source: "cli-auto",
-      });
-      return "allow";
-    },
+    toolContext: { ...toolContext, depth: 0, spawnSubagent },
+    permission: cliPermission,
     onMessage: (m) => session.appendMessage(m),
   })) {
     if (ev.type === "assistant_text") {

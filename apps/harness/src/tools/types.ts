@@ -1,14 +1,44 @@
 import type { z } from "zod";
 import type { McpServer } from "../mcp/client";
 
+// Request/result shapes for spawning a sub-agent. Defined here so ToolContext can
+// reference them without dragging in agent/subagents' runtime dependencies.
+export interface SpawnSubagentRequest {
+  type: "general" | "explore" | "plan";
+  description: string;
+  prompt: string;
+  parentDepth: number;
+  parentSignal: AbortSignal;
+  mcpServers?: Map<string, McpServer>;
+}
+
+export interface SpawnSubagentResult {
+  summary: string;
+  tool_uses: number;
+  duration_ms: number;
+  subagent_id: string;
+  stopped_reason:
+    | "end_turn"
+    | "max_iterations"
+    | "timeout"
+    | "max_tool_calls"
+    | "depth_exceeded"
+    | "error";
+}
+
+export type SpawnSubagent = (req: SpawnSubagentRequest) => Promise<SpawnSubagentResult>;
+
 export interface ToolContext {
   cwd: string;
   signal: AbortSignal;
   // MCP server handles — keyed by the server name from .mcp.json. Threaded through
-  // so sub-agents (M6) can reuse the parent's live subprocesses instead of
-  // respawning them. Absent when no .mcp.json is loaded.
+  // so sub-agents (M6) reuse the parent's live subprocesses instead of respawning.
   mcpServers?: Map<string, McpServer>;
-  // future: permissions state (M4), depth (M6)
+  // 0 at top level; +1 per sub-agent. Capped at 2 by the subagent registry.
+  depth?: number;
+  // Set by the top-level caller. When absent, the task tool returns an error
+  // instead of silently doing nothing.
+  spawnSubagent?: SpawnSubagent;
 }
 
 export interface ToolResult {

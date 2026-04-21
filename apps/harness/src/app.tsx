@@ -4,12 +4,18 @@ import { Box, Static, Text, useApp, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loop } from "./agent/loop";
+import {
+  type SubagentProgressEvent,
+  type SubagentType,
+  makeSpawnSubagent,
+} from "./agent/subagents";
 import type { Message } from "./messages";
 import { type Rule, evaluateRules, suggestPattern } from "./permissions/policy";
 import { PermissionPrompt } from "./permissions/prompt";
 import type { SessionStore } from "./session/store";
 import type { AnyTool } from "./tools/registry";
-import type { ToolContext } from "./tools/types";
+import type { SpawnSubagentResult, ToolContext } from "./tools/types";
+import { AgentProgress, type AgentProgressBlockState } from "./ui/AgentProgress";
 import { Input } from "./ui/Input";
 import { AssistantMessage, ErrorMessage, UserMessage } from "./ui/Message";
 import { Spinner } from "./ui/Spinner";
@@ -28,6 +34,7 @@ type UiMessage =
       result?: string;
       isError?: boolean;
     }
+  | { id: string; kind: "subagent"; state: AgentProgressBlockState }
   | { id: string; kind: "error"; text: string };
 
 interface PendingPermission {
@@ -45,8 +52,7 @@ export interface AppProps {
   // Optional — when provided, every message the loop appends is persisted to disk
   // and permission decisions are logged as events.
   session?: SessionStore;
-  // Prior history to preload (resume/continue). Rendered as opaque context — only
-  // the plain user + assistant text lines are turned back into UI messages.
+  // Prior history to preload (resume/continue).
   initialHistory?: Message[];
 }
 
@@ -57,8 +63,6 @@ function uiMessagesFromHistory(history: Message[]): UiMessage[] {
       if (typeof m.content === "string") {
         out.push({ id: randomUUID(), kind: "user", text: m.content });
       } else {
-        // Array form = tool_result blocks coming back from a previous turn.
-        // Fill in the matching pending tool block (if the tool_use preceded it).
         for (const b of m.content) {
           if (b.type === "tool_result") {
             const target = out.find((u) => u.kind === "tool" && u.id === b.tool_use_id);
@@ -158,9 +162,7 @@ export function App({
     (decision: "allow" | "deny", pattern?: string) => {
       const current = pendingRef.current;
       if (!current) return;
-      if (pattern) {
-        rulesRef.current.push({ pattern, decision: "allow" });
-      }
+      if (pattern) rulesRef.current.push({ pattern, decision: "allow" });
       session?.appendEvent("permission", {
         tool: current.toolName,
         input: current.input,
@@ -174,6 +176,65 @@ export function App({
     },
     [session],
   );
+
+  // Sub-agent event sink — updates the UiMessage that carries live progress.
+  const onSubagentEvent = useCallback((ev: SubagentProgressEvent) => {
+    if (ev.kind === "start") {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: ev.subagentId,
+          kind: "subagent",
+          state: {
+            subagentId: ev.subagentId,
+            subagentType: ev.type as SubagentType,
+            description: ev.description,
+            events: [],
+            assistantText: "",
+            done: false,
+          },
+        },
+      ]);
+      return;
+    }
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.kind !== "subagent" || m.state.subagentId !== ev.subagentId) return m;
+        const state = m.state;
+        if (ev.kind === "assistant_text") {
+          return { ...m, state: { ...state, assistantText: state.assistantText + ev.text } };
+        }
+        if (ev.kind === "tool_use") {
+          return {
+            ...m,
+            state: {
+              ...state,
+              events: [
+                ...state.events,
+                { kind: "tool_use", id: ev.id, name: ev.name, input: ev.input },
+              ],
+            },
+          };
+        }
+        if (ev.kind === "tool_result") {
+          return {
+            ...m,
+            state: {
+              ...state,
+              events: [
+                ...state.events,
+                { kind: "tool_result", id: ev.id, content: ev.content, isError: ev.isError },
+              ],
+            },
+          };
+        }
+        if (ev.kind === "end") {
+          return { ...m, state: { ...state, done: true, result: ev.result } };
+        }
+        return m;
+      }),
+    );
+  }, []);
 
   const submit = useCallback(
     async (text: string) => {
@@ -192,13 +253,25 @@ export function App({
       abortRef.current = abort;
       let currentAssistantId: string | null = null;
 
+      // Build the sub-agent spawner tied to this session's deps. The closure
+      // captures onSubagentEvent so live progress flows to React state.
+      const spawnSubagent = makeSpawnSubagent({
+        client,
+        baseSystemPrompt: systemPrompt,
+        allTools: tools,
+        parentSessionId: session?.sessionId ?? "no-session",
+        cwd: toolContext.cwd,
+        permission: askPermission,
+        onProgress: onSubagentEvent,
+      });
+
       try {
         for await (const ev of loop({
           client,
           messages: historyRef.current,
           systemPrompt,
           tools,
-          toolContext: { ...toolContext, signal: abort.signal },
+          toolContext: { ...toolContext, signal: abort.signal, depth: 0, spawnSubagent },
           permission: askPermission,
           onMessage: (m) => session?.appendMessage(m),
         })) {
@@ -257,8 +330,23 @@ export function App({
         setThinking(false);
       }
     },
-    [client, systemPrompt, tools, toolContext, thinking, askPermission, session],
+    [client, systemPrompt, tools, toolContext, thinking, askPermission, session, onSubagentEvent],
   );
+
+  // Split rendering: <Static /> for settled messages (it only renders on append,
+  // which gives us crisp streaming for append-only events). In-progress messages
+  // (streaming assistant, live subagents) go into a live Box below so their
+  // mutations show up across re-renders.
+  const staticMessages = messages.filter((m) => {
+    if (m.kind === "assistant" && m.inProgress) return false;
+    if (m.kind === "subagent" && !m.state.done) return false;
+    return true;
+  });
+  const liveMessages = messages.filter((m) => {
+    if (m.kind === "assistant" && m.inProgress) return true;
+    if (m.kind === "subagent" && !m.state.done) return true;
+    return false;
+  });
 
   return (
     <Box flexDirection="column">
@@ -271,7 +359,7 @@ export function App({
           {session ? ` session: ${session.sessionId.slice(0, 8)}` : ""}
         </Text>
       </Box>
-      <Static items={messages}>
+      <Static items={staticMessages}>
         {(m) => {
           if (m.kind === "user") return <UserMessage key={m.id} text={m.text} />;
           if (m.kind === "assistant")
@@ -287,9 +375,16 @@ export function App({
                 pending={m.result === undefined}
               />
             );
+          if (m.kind === "subagent") return <AgentProgress key={m.id} state={m.state} />;
           return <ErrorMessage key={m.id} text={m.text} />;
         }}
       </Static>
+      {liveMessages.map((m) => {
+        if (m.kind === "assistant")
+          return <AssistantMessage key={m.id} text={m.text} inProgress={m.inProgress} />;
+        if (m.kind === "subagent") return <AgentProgress key={m.id} state={m.state} />;
+        return null;
+      })}
       {pending && (
         <PermissionPrompt
           toolName={pending.toolName}
@@ -303,3 +398,6 @@ export function App({
     </Box>
   );
 }
+
+// Re-export types used by callers that want to pass props through.
+export type { SpawnSubagentResult };

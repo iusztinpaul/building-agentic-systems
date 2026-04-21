@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 // Layout:
-//   ~/.tree/projects/<cwd-hash>/<session-id>.jsonl
+//   ~/.tree/projects/<cwd-hash>/<session-id>.jsonl                parent session
+//   ~/.tree/projects/<cwd-hash>/<parent-id>/<subagent-id>.jsonl   sub-agent session
 //
 // cwd-hash keeps sessions scoped to the project they were recorded in without
 // exposing the real path in file names; the `meta` entry in each jsonl carries
@@ -23,6 +24,14 @@ export function sessionsDirFor(cwd: string): string {
 
 export function sessionPath(cwd: string, id: string): string {
   return join(sessionsDirFor(cwd), `${id}.jsonl`);
+}
+
+export function subagentSessionPath(
+  cwd: string,
+  parentSessionId: string,
+  subagentId: string,
+): string {
+  return join(sessionsDirFor(cwd), parentSessionId, `${subagentId}.jsonl`);
 }
 
 export function newSessionId(): string {
