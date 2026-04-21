@@ -35,6 +35,7 @@ local-restart: # Restart shared infra.
 
 tests: # Run tests across all apps.
 	$(MAKE) memory-tests
+	$(MAKE) harness-test
 
 pre-commit: # Run pre-commit hooks across the repo.
 	uv run --project apps/memory pre-commit run --all-files
