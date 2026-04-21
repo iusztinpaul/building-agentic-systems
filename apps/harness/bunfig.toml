@@ -1,7 +1,3 @@
 [install]
 # Keep lockfile behaviour predictable across devs.
 frozenLockfile = false
-
-[test]
-# Reserved for M2+ when we add unit tests.
-preload = []

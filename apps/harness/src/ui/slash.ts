@@ -1,4 +1,4 @@
-import { listSessions } from "../session/resume";
+import { type SessionSummary, listSessions as listSessionsImpl } from "../session/resume";
 
 // Slash-command dispatcher — kept as a plain helper (not a component) because
 // each command is a one-shot mutation of App state. The dispatcher returns a
@@ -9,6 +9,9 @@ import { listSessions } from "../session/resume";
 export interface SlashActions {
   clearHistory: () => void;
   cwd: string;
+  // Injection seam for tests — production callers omit it and we fall back to
+  // the real session/resume.listSessions.
+  listSessions?: (cwd: string, limit?: number) => SessionSummary[];
 }
 
 export interface SlashResult {
@@ -41,7 +44,8 @@ export function dispatchSlashCommand(name: string, actions: SlashActions): Slash
     return { info: "(conversation cleared — session file kept)" };
   }
   if (name === "resume") {
-    const sessions = listSessions(actions.cwd, 10);
+    const list = actions.listSessions ?? listSessionsImpl;
+    const sessions = list(actions.cwd, 10);
     if (sessions.length === 0) {
       return { info: "(no sessions recorded for this cwd)" };
     }
