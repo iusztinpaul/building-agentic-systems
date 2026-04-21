@@ -43,12 +43,12 @@ export function toGeminiTools(
   const functionDeclarations: GeminiFunctionDeclaration[] = tools.map((t) => ({
     name: t.name,
     description: t.description,
-    // jsonSchema7 is the default; keep it explicit. OpenAPI 3.0 emits
-    // `exclusiveMinimum: boolean` which Gemini rejects; draft-07 uses a number.
-    parametersJsonSchema: zodToJsonSchema(t.schema, { target: "jsonSchema7" }) as Record<
-      string,
-      unknown
-    >,
+    // MCP tools provide a server-defined JSON Schema already; skip the zod
+    // conversion in that case. For native tools, jsonSchema7 is the default;
+    // OpenAPI 3.0 emits `exclusiveMinimum: boolean` which Gemini rejects.
+    parametersJsonSchema:
+      t.parametersJsonSchema ??
+      (zodToJsonSchema(t.schema, { target: "jsonSchema7" }) as Record<string, unknown>),
   }));
   return [{ functionDeclarations }];
 }

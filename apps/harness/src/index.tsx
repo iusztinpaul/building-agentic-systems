@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Tree — harness entry (Milestone 4 of docs/harness-plan.md).
+// Tree — harness entry (Milestone 5 of docs/harness-plan.md).
 // Modes:
 //   tree --print "<prompt>"           CLI streaming, fresh session
 //   tree "<prompt>"                   same as --print
@@ -7,6 +7,10 @@
 //   tree --resume                     list recent sessions and exit
 //   tree --resume <id> [prompt…]      load <id>; replay into --print or Ink
 //   tree --continue [prompt…]         load most recent for this cwd; ditto
+//
+// On startup the harness reads the root .mcp.json and spawns each server as a
+// stdio subprocess. Discovered MCP tools register alongside the built-in ones
+// under mcp__<server>__<tool> names.
 
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -14,11 +18,14 @@ import { render } from "ink";
 import { loop } from "./agent/loop";
 import { App } from "./app";
 import { createClient } from "./client";
+import { mcpServersToTools } from "./mcp/adapter";
+import { type McpServer, connectMcpServer } from "./mcp/client";
+import { findMcpConfig, loadMcpConfig, resolveSpawn } from "./mcp/config";
 import type { Message } from "./messages";
 import { newSessionId, sessionPath, sessionsDirFor } from "./session/paths";
 import { findMostRecent, listSessions, loadSession } from "./session/resume";
 import { SessionStore } from "./session/store";
-import { builtInTools } from "./tools/registry";
+import { type AnyTool, builtInTools } from "./tools/registry";
 import type { ToolContext } from "./tools/types";
 
 function findRepoRoot(start: string = process.cwd()): string {
@@ -36,8 +43,9 @@ function findRepoRoot(start: string = process.cwd()): string {
 
 const SYSTEM_PROMPT = [
   "You are Tree, a rooted personal assistant running inside a coding-agent harness.",
-  "You have tools available: bash, read, write, edit, glob, grep, todo.",
-  "Use them proactively — prefer tools over speculation. Answer concisely.",
+  "You have native tools (bash, read, write, edit, glob, grep, todo) and MCP tools",
+  "prefixed mcp__<server>__<name> — use them proactively, prefer tools over speculation.",
+  "Answer concisely.",
 ].join(" ");
 
 interface Args {
@@ -45,6 +53,7 @@ interface Args {
   resume?: boolean;
   resumeId?: string;
   continueRecent?: boolean;
+  noMcp?: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -62,6 +71,8 @@ function parseArgs(argv: string[]): Args {
       }
     } else if (a === "--continue") {
       out.continueRecent = true;
+    } else if (a === "--no-mcp") {
+      out.noMcp = true;
     } else if (a !== undefined && !a.startsWith("-")) {
       out.prompt = a;
     }
@@ -90,10 +101,40 @@ function printSessionList(cwd: string): void {
   console.log(`\nrun: ARGS="--resume <id>" PROMPT="…" make harness-run`);
 }
 
+async function bootMcpServers(cwd: string, skip: boolean): Promise<Map<string, McpServer>> {
+  const servers = new Map<string, McpServer>();
+  if (skip) return servers;
+
+  const configPath = findMcpConfig(cwd);
+  if (!configPath) return servers;
+
+  const config = loadMcpConfig(configPath);
+  const configDir = dirname(configPath);
+  const entries = Object.entries(config.mcpServers ?? {});
+  if (entries.length === 0) return servers;
+
+  // Each server independent — one failure doesn't block the rest.
+  await Promise.all(
+    entries.map(async ([name, cfg]) => {
+      try {
+        const spawn = resolveSpawn(cfg, configDir);
+        const server = await connectMcpServer(name, spawn);
+        servers.set(name, server);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`tree: mcp server "${name}" failed to start: ${msg}`);
+      }
+    }),
+  );
+
+  return servers;
+}
+
 async function runPrintMode(
   client: ReturnType<typeof createClient>,
   prompt: string,
   toolContext: ToolContext,
+  tools: AnyTool[],
   initialHistory: Message[],
   session: SessionStore,
 ): Promise<void> {
@@ -106,9 +147,8 @@ async function runPrintMode(
     client,
     messages,
     systemPrompt: SYSTEM_PROMPT,
-    tools: builtInTools,
+    tools,
     toolContext,
-    // CLI mode auto-allows destructive tools — no operator to prompt. Still logged.
     permission: async (toolName, input) => {
       session.appendEvent("permission", {
         tool: toolName,
@@ -152,7 +192,6 @@ interface ResolvedSession {
 }
 
 function resolveSession(args: Args, cwd: string): ResolvedSession | null {
-  // --resume without id → list + exit. Caller handles.
   if (args.resume && !args.resumeId) return null;
 
   if (args.resumeId) {
@@ -177,7 +216,6 @@ function resolveSession(args: Args, cwd: string): ResolvedSession | null {
     return { store, history: messages };
   }
 
-  // Fresh session.
   const id = newSessionId();
   const store = new SessionStore(sessionPath(cwd, id), id, cwd, true);
   return { store, history: [] };
@@ -187,7 +225,6 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const cwd = findRepoRoot();
 
-  // --resume without id → list and exit (works in both CLI and TUI invocations).
   if (args.resume && !args.resumeId) {
     printSessionList(cwd);
     return;
@@ -209,33 +246,49 @@ async function main(): Promise<void> {
   }
   const { store, history } = resolved;
 
+  const mcpServers = await bootMcpServers(cwd, args.noMcp ?? false);
+  const mcpTools = mcpServersToTools(mcpServers.values());
+  const allTools: AnyTool[] = [...builtInTools, ...mcpTools];
+  if (mcpServers.size > 0) {
+    const names = Array.from(mcpServers.values()).flatMap((s) =>
+      s.tools.map((t) => `mcp__${s.name}__${t.name}`),
+    );
+    console.error(
+      `\x1b[2mtree: ${mcpServers.size} mcp server(s) up; ${mcpTools.length} tools: ${names.join(", ")}\x1b[0m`,
+    );
+  }
+
   const abort = new AbortController();
   process.on("SIGINT", () => abort.abort());
-  const toolContext: ToolContext = { cwd, signal: abort.signal };
+  const toolContext: ToolContext = { cwd, signal: abort.signal, mcpServers };
 
-  if (args.prompt !== undefined) {
-    await runPrintMode(client, args.prompt, toolContext, history, store);
-    return;
-  }
+  try {
+    if (args.prompt !== undefined) {
+      await runPrintMode(client, args.prompt, toolContext, allTools, history, store);
+      return;
+    }
 
-  if (!process.stdout.isTTY) {
-    console.error(
-      'tree: interactive mode requires a TTY. Use --print "<prompt>" or pipe a prompt as arg.',
+    if (!process.stdout.isTTY) {
+      console.error(
+        'tree: interactive mode requires a TTY. Use --print "<prompt>" or pipe a prompt as arg.',
+      );
+      process.exit(1);
+    }
+
+    const instance = render(
+      <App
+        client={client}
+        systemPrompt={SYSTEM_PROMPT}
+        tools={allTools}
+        toolContext={toolContext}
+        session={store}
+        initialHistory={history}
+      />,
     );
-    process.exit(1);
+    await instance.waitUntilExit();
+  } finally {
+    await Promise.all(Array.from(mcpServers.values()).map((s) => s.close()));
   }
-
-  const instance = render(
-    <App
-      client={client}
-      systemPrompt={SYSTEM_PROMPT}
-      tools={builtInTools}
-      toolContext={toolContext}
-      session={store}
-      initialHistory={history}
-    />,
-  );
-  await instance.waitUntilExit();
 }
 
 main();

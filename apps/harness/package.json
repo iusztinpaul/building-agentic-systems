@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "ink": "^5.0.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
