@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "twin-memory"
+name = "tree-memory"
 version = "0.1.0"
-description = "Twin memory: ETL pipelines + knowledge-graph memory + FastMCP server."
+description = "Tree memory: ETL pipelines + knowledge-graph memory + FastMCP server for Tree."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/twin"]
+packages = ["src/tree"]
 
 [dependency-groups]
 dev = [

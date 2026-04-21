@@ -1,14 +1,14 @@
 import httpx
 import pytest
 
-from twin.data.substack.substack_article import (
+from tree.data.substack.substack_article import (
     _extract_article_body,
     _extract_meta,
     _parse_article_date,
     extract_document_from_html,
     fetch_article,
 )
-from twin.entities.documents import SourceType
+from tree.entities.documents import SourceType
 
 SAMPLE_HTML = """
 <html>
@@ -151,7 +151,7 @@ class TestFetchArticle:
         mock_client.__aenter__.return_value = mock_client
         mock_client.get.return_value = mock_response
         mocker.patch(
-            "twin.data.substack.substack_article.httpx.AsyncClient",
+            "tree.data.substack.substack_article.httpx.AsyncClient",
             return_value=mock_client,
         )
         return mock_client

@@ -1,6 +1,6 @@
 import textwrap
 
-from twin.config.app_config import AppConfig, load_app_config
+from tree.config.app_config import AppConfig, load_app_config
 
 
 class TestLoadAppConfig:

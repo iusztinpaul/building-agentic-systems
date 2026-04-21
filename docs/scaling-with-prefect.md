@@ -1,6 +1,6 @@
 # Scaling Your GraphRAG Pipelines with Prefect: A Complete Guide
 
-This guide uses the **Digital Twin / Personal Assistant** application as a concrete example — a GraphRAG system that ingests documents, extracts knowledge graphs via LLM, materializes them into a queryable graph, and serves semantic queries. All concepts apply to any Prefect-orchestrated application.
+This guide uses **Tree: Your Rooted Personal Assistant** as a concrete example — a GraphRAG system that ingests documents, extracts knowledge graphs via LLM, materializes them into a queryable graph, and serves semantic queries. All concepts apply to any Prefect-orchestrated application.
 
 ---
 
@@ -53,10 +53,10 @@ The application has three pipelines orchestrated by Prefect:
 
 | Flow | File | Purpose |
 |------|------|---------|
-| `ingest_substack_rss_feed` | `apps/memory/src/twin/data/substack/substack_rss_pipeline.py` | Ingest a single RSS feed |
-| `ingest_substack_rss_feed_batch` | `apps/memory/src/twin/data/substack/substack_rss_pipeline.py` | Ingest multiple feeds via `asyncio.gather()` |
-| `memory_extraction` | `apps/memory/src/twin/memory/extraction/pipeline.py` | Chunk documents, call LLM, build KG log |
-| `memory_materialization` | `apps/memory/src/twin/memory/materialization/pipeline.py` | Aggregate logs, embed, index |
+| `ingest_substack_rss_feed` | `apps/memory/src/tree/data/substack/substack_rss_pipeline.py` | Ingest a single RSS feed |
+| `ingest_substack_rss_feed_batch` | `apps/memory/src/tree/data/substack/substack_rss_pipeline.py` | Ingest multiple feeds via `asyncio.gather()` |
+| `memory_extraction` | `apps/memory/src/tree/memory/extraction/pipeline.py` | Chunk documents, call LLM, build KG log |
+| `memory_materialization` | `apps/memory/src/tree/memory/materialization/pipeline.py` | Aggregate logs, embed, index |
 
 **How jobs are submitted today** (`apps/memory/scripts/run_data_pipeline.py`):
 
@@ -168,7 +168,7 @@ Your App (submit 1000 runs via API)
 
 **Self-hosted vs Cloud:**
 
-- `prefect server start` — you run the server yourself (backed by PostgreSQL or SQLite). This is what `docker-compose.yml` does with the `twin-prefect-server` container.
+- `prefect server start` — you run the server yourself (backed by PostgreSQL or SQLite). This is what `docker-compose.yml` does with the `tree-prefect-server` container.
 - **Prefect Cloud** — hosted by Prefect, adds authentication, RBAC, audit logs, push automations, managed work pools.
 
 In this application, the server runs as a Docker container and workers connect via `PREFECT_API_URL=http://prefect-server:4200/api`.
@@ -185,7 +185,7 @@ Each deployment targets a specific pool:
 ingest_substack_rss_feed.deploy(
     name="ingest-substack-rss-feed-etl",
     work_pool_name="cpu-pool",       # ← targets this pool
-    image="my-registry/twin:latest",
+    image="my-registry/tree:latest",
 )
 ```
 
@@ -372,14 +372,14 @@ You can create as many work pools as you want, each with its own type, concurren
 memory_extraction.deploy(
     name="memory-extraction-etl",
     work_pool_name="gpu-pool",
-    image="my-registry/twin-gpu:latest",
+    image="my-registry/tree-gpu:latest",
 )
 
 # Lightweight data ingestion → goes to CPU pool
 ingest_substack_rss_feed.deploy(
     name="ingest-substack-rss-feed-etl",
     work_pool_name="cpu-pool",
-    image="my-registry/twin:latest",
+    image="my-registry/tree:latest",
 )
 ```
 
@@ -618,7 +618,7 @@ This diagram shows the full path from the application submitting a run to Prefec
 The current `orchestrator.py` uses `serve()`:
 
 ```python
-# apps/memory/src/twin/orchestrator.py
+# apps/memory/src/tree/orchestrator.py
 serve(
     ingest_substack_rss_feed.to_deployment(
         name="ingest-substack-rss-feed-etl",
@@ -670,31 +670,31 @@ Replace `serve()` with `flow.deploy()` targeting a Docker work pool.
 **Updated `orchestrator.py`:**
 
 ```python
-# apps/memory/src/twin/orchestrator.py — deploy mode
+# apps/memory/src/tree/orchestrator.py — deploy mode
 
 if __name__ == "__main__":
     ingest_substack_rss_feed.deploy(
         name="ingest-substack-rss-feed-etl",
         work_pool_name="cpu-pool",
-        image="my-registry/twin:latest",
+        image="my-registry/tree:latest",
         tags=["data-pipeline", "substack"],
     )
     ingest_substack_rss_feed_batch.deploy(
         name="ingest-substack-rss-feed-batch-etl",
         work_pool_name="cpu-pool",
-        image="my-registry/twin:latest",
+        image="my-registry/tree:latest",
         tags=["data-pipeline", "substack"],
     )
     memory_extraction.deploy(
         name="memory-extraction-etl",
         work_pool_name="cpu-pool",
-        image="my-registry/twin:latest",
+        image="my-registry/tree:latest",
         tags=["memory-pipeline", "extraction"],
     )
     memory_materialization.deploy(
         name="memory-materialization-etl",
         work_pool_name="cpu-pool",
-        image="my-registry/twin:latest",
+        image="my-registry/tree:latest",
         tags=["memory-pipeline", "materialization"],
     )
 ```
@@ -755,7 +755,7 @@ prefect worker start --pool "cpu-pool" --type docker --limit 10 \
 memory_extraction.deploy(
     name="memory-extraction-etl",
     work_pool_name="k8s-pool",              # ← changed
-    image="my-registry/twin:latest",
+    image="my-registry/tree:latest",
 )
 ```
 
@@ -772,7 +772,7 @@ One worker, but Kubernetes creates a pod per flow run and the cluster autoscaler
 memory_extraction.deploy(
     name="memory-extraction-etl",
     work_pool_name="cloudrun-pool",          # ← changed
-    image="gcr.io/my-project/twin:latest",
+    image="gcr.io/my-project/tree:latest",
 )
 ```
 
@@ -1079,7 +1079,7 @@ Currently, this application uses the Gemini API (cloud-based) for LLM and embedd
 ingest_substack_rss_feed.deploy(
     name="ingest-substack-rss-feed-etl",
     work_pool_name="cpu-pool",
-    image="my-registry/twin:latest",
+    image="my-registry/tree:latest",
     tags=["data-pipeline"],
 )
 
@@ -1087,7 +1087,7 @@ ingest_substack_rss_feed.deploy(
 memory_extraction.deploy(
     name="memory-extraction-etl",
     work_pool_name="gpu-pool",
-    image="my-registry/twin-gpu:latest",
+    image="my-registry/tree-gpu:latest",
     job_variables={
         "device_requests": [
             {

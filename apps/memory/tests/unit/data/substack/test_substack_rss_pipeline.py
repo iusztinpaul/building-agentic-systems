@@ -2,14 +2,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from twin.data.substack.substack_rss_pipeline import (
+from tree.data.substack.substack_rss_pipeline import (
     extract_document_task,
     fetch_feed_task,
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
     load_document_task,
 )
-from twin.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType
 
 
 def _make_raw_entry(title: str = "Test Post") -> dict:
@@ -37,7 +37,7 @@ class TestFetchFeedTask:
     @pytest.mark.asyncio
     async def test_wraps_fetch_feed(self, mocker) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.fetch_feed",
+            "tree.data.substack.substack_rss_pipeline.fetch_feed",
             new_callable=AsyncMock,
             return_value=[_make_raw_entry()],
         )
@@ -50,7 +50,7 @@ class TestFetchFeedTask:
     @pytest.mark.asyncio
     async def test_returns_empty_list_for_empty_feed(self, mocker) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.fetch_feed",
+            "tree.data.substack.substack_rss_pipeline.fetch_feed",
             new_callable=AsyncMock,
             return_value=[],
         )
@@ -65,7 +65,7 @@ class TestExtractDocumentTask:
     async def test_wraps_extract_document(self, mocker) -> None:
         doc = _make_doc()
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.extract_document",
+            "tree.data.substack.substack_rss_pipeline.extract_document",
             return_value=doc,
         )
 
@@ -81,7 +81,7 @@ class TestLoadDocumentTask:
         doc = _make_doc()
         raw = _make_raw_entry()
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.load_document",
+            "tree.data.substack.substack_rss_pipeline.load_document",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -95,7 +95,7 @@ class TestLoadDocumentTask:
         doc = _make_doc()
         raw = _make_raw_entry()
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.load_document",
+            "tree.data.substack.substack_rss_pipeline.load_document",
             new_callable=AsyncMock,
             return_value=None,
         )
@@ -113,16 +113,16 @@ class TestIngestSubstackRssFeed:
         doc2 = _make_doc("Post 2")
 
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.fetch_feed",
+            "tree.data.substack.substack_rss_pipeline.fetch_feed",
             new_callable=AsyncMock,
             return_value=raw_entries,
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.extract_document",
+            "tree.data.substack.substack_rss_pipeline.extract_document",
             side_effect=[doc1, doc2],
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.load_document",
+            "tree.data.substack.substack_rss_pipeline.load_document",
             new_callable=AsyncMock,
             side_effect=[doc1, doc2],
         )
@@ -138,16 +138,16 @@ class TestIngestSubstackRssFeed:
         doc2 = _make_doc("Post 2")
 
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.fetch_feed",
+            "tree.data.substack.substack_rss_pipeline.fetch_feed",
             new_callable=AsyncMock,
             return_value=raw_entries,
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.extract_document",
+            "tree.data.substack.substack_rss_pipeline.extract_document",
             side_effect=[doc1, doc2],
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.load_document",
+            "tree.data.substack.substack_rss_pipeline.load_document",
             new_callable=AsyncMock,
             side_effect=[doc1, None],
         )
@@ -165,20 +165,20 @@ class TestIngestSubstackRssFeedBatch:
         doc2 = _make_doc("Post 2")
 
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.init_mongodb",
+            "tree.data.substack.substack_rss_pipeline.init_mongodb",
             new_callable=AsyncMock,
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.fetch_feed",
+            "tree.data.substack.substack_rss_pipeline.fetch_feed",
             new_callable=AsyncMock,
             side_effect=[[_make_raw_entry("Post 1")], [_make_raw_entry("Post 2")]],
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.extract_document",
+            "tree.data.substack.substack_rss_pipeline.extract_document",
             side_effect=[doc1, doc2],
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.load_document",
+            "tree.data.substack.substack_rss_pipeline.load_document",
             new_callable=AsyncMock,
             side_effect=[doc1, doc2],
         )

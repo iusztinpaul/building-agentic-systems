@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from twin.entities.knowledge_graph import (
+from tree.entities.knowledge_graph import (
     EdgeType,
     NodeType,
     build_edge_id,

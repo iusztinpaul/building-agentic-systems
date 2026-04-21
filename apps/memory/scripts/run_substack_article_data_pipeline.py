@@ -18,8 +18,8 @@ import sys
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
-from twin.config.app_config import app_config
-from twin.logging import init_logger
+from tree.config.app_config import app_config
+from tree.logging import init_logger
 
 init_logger()
 logger = logging.getLogger(__name__)

@@ -3,8 +3,8 @@
 import json
 
 
-from twin.mcp.tools import query_memory, search_memory
-from twin.models.fake_model import FakeEmbeddingModel, FakeLLM
+from tree.mcp.tools import query_memory, search_memory
+from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +147,9 @@ class TestQueryMemoryTool:
         )
         output_file = tmp_path / "graph.html"
         mocker.patch(
-            "twin.mcp.tools.render_html",
+            "tree.mcp.tools.render_html",
             wraps=lambda g, **kw: __import__(
-                "twin.memory.query.visualize", fromlist=["render_html"]
+                "tree.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
         ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
@@ -215,9 +215,9 @@ class TestSearchMemoryTool:
     ):
         output_file = tmp_path / "graph.html"
         mocker.patch(
-            "twin.mcp.tools.render_html",
+            "tree.mcp.tools.render_html",
             wraps=lambda g, **kw: __import__(
-                "twin.memory.query.visualize", fromlist=["render_html"]
+                "tree.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
         ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())

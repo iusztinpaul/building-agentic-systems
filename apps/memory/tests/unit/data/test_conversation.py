@@ -1,10 +1,10 @@
-"""Unit tests for twin.data.conversation — load_conversation_document."""
+"""Unit tests for tree.data.conversation — load_conversation_document."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from twin.data.conversation import _content_hash, load_conversation_document
+from tree.data.conversation import _content_hash, load_conversation_document
 
 
 class TestContentHash:
@@ -31,11 +31,11 @@ class TestLoadConversationDocument:
 
     async def test_creates_document_for_new_conversation(self, mocker) -> None:
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("twin.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
         doc = await load_conversation_document("Alice likes Python.")
 
@@ -45,11 +45,11 @@ class TestLoadConversationDocument:
 
     async def test_source_uri_is_deterministic(self, mocker) -> None:
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("twin.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
         doc1 = await load_conversation_document("Same text")
         doc2 = await load_conversation_document("Same text")
@@ -59,7 +59,7 @@ class TestLoadConversationDocument:
     async def test_returns_none_for_duplicate(self, mocker) -> None:
         existing = MagicMock()
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=existing,
         )
@@ -69,22 +69,22 @@ class TestLoadConversationDocument:
 
     async def test_custom_title_used(self, mocker) -> None:
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("twin.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
         doc = await load_conversation_document("Text", title="My Title")
         assert doc.title == "My Title"
 
     async def test_default_title_contains_timestamp(self, mocker) -> None:
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("twin.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
         doc = await load_conversation_document("Text")
         assert doc.title.startswith("Conversation ")
@@ -93,12 +93,12 @@ class TestLoadConversationDocument:
         from pymongo.errors import DuplicateKeyError
 
         mocker.patch(
-            "twin.data.conversation.Document.find_one",
+            "tree.data.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
         mocker.patch(
-            "twin.data.conversation.Document.insert",
+            "tree.data.conversation.Document.insert",
             new_callable=AsyncMock,
             side_effect=DuplicateKeyError("duplicate"),
         )

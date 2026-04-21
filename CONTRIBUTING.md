@@ -47,7 +47,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 | Change | Location |
 |---|---|
-| Memory-app business logic | `apps/memory/src/twin/` |
+| Memory-app business logic | `apps/memory/src/tree/` |
 | Memory ETL / pipeline entry scripts | `apps/memory/scripts/` |
 | Memory tests | `apps/memory/tests/{unit,integration}/` |
 | App-level YAML config | `apps/memory/configs/default.yaml` |

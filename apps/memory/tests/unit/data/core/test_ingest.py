@@ -1,10 +1,10 @@
-"""Unit tests for twin.data.core.ingest — URL dispatcher."""
+"""Unit tests for tree.data.core.ingest — URL dispatcher."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from twin.data.core.ingest import (
+from tree.data.core.ingest import (
     _get_configured_substack_domains,
     ingest_url,
 )
@@ -18,7 +18,7 @@ class TestGetConfiguredSubstackDomains:
             "https://newsletter.example.com/feed",
         ]
         mock_config.sources.substack_articles = []
-        mocker.patch("twin.data.core.ingest.app_config", mock_config)
+        mocker.patch("tree.data.core.ingest.app_config", mock_config)
 
         domains = _get_configured_substack_domains()
 
@@ -31,7 +31,7 @@ class TestGetConfiguredSubstackDomains:
         mock_config.sources.substack_articles = [
             "https://www.custom.blog/p/my-post",
         ]
-        mocker.patch("twin.data.core.ingest.app_config", mock_config)
+        mocker.patch("tree.data.core.ingest.app_config", mock_config)
 
         domains = _get_configured_substack_domains()
 
@@ -41,7 +41,7 @@ class TestGetConfiguredSubstackDomains:
         mock_config = MagicMock()
         mock_config.sources.substack = ["https://www.example.com/feed"]
         mock_config.sources.substack_articles = []
-        mocker.patch("twin.data.core.ingest.app_config", mock_config)
+        mocker.patch("tree.data.core.ingest.app_config", mock_config)
 
         domains = _get_configured_substack_domains()
 
@@ -57,7 +57,7 @@ class TestGetConfiguredSubstackDomains:
         mock_config.sources.substack_articles = [
             "https://decodingai.com/p/article",
         ]
-        mocker.patch("twin.data.core.ingest.app_config", mock_config)
+        mocker.patch("tree.data.core.ingest.app_config", mock_config)
 
         domains = _get_configured_substack_domains()
 
@@ -67,7 +67,7 @@ class TestGetConfiguredSubstackDomains:
         mock_config = MagicMock()
         mock_config.sources.substack = []
         mock_config.sources.substack_articles = []
-        mocker.patch("twin.data.core.ingest.app_config", mock_config)
+        mocker.patch("tree.data.core.ingest.app_config", mock_config)
 
         domains = _get_configured_substack_domains()
 
@@ -78,7 +78,7 @@ class TestIngestUrl:
     async def test_routes_substack_url(self, mocker) -> None:
         mock_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "twin.data.core.ingest._URL_HANDLERS",
+            "tree.data.core.ingest._URL_HANDLERS",
             [("substack.com", mock_handler)],
         )
 
@@ -89,21 +89,21 @@ class TestIngestUrl:
         )
 
     async def test_raises_for_unsupported_domain(self, mocker) -> None:
-        mocker.patch("twin.data.core.ingest._URL_HANDLERS", [])
-        mocker.patch("twin.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS", set())
+        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS", set())
 
         with pytest.raises(ValueError, match="No data pipeline registered"):
             await ingest_url("https://unknown-site.com/page")
 
     async def test_routes_custom_substack_domain(self, mocker) -> None:
         mock_handler = AsyncMock(return_value=MagicMock())
-        mocker.patch("twin.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "twin.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
+            "tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
             {"decodingai.com"},
         )
         mocker.patch(
-            "twin.data.core.ingest._ingest_substack_article",
+            "tree.data.core.ingest._ingest_substack_article",
             mock_handler,
         )
 
@@ -114,11 +114,11 @@ class TestIngestUrl:
     async def test_static_registry_takes_precedence(self, mocker) -> None:
         static_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "twin.data.core.ingest._URL_HANDLERS",
+            "tree.data.core.ingest._URL_HANDLERS",
             [("example.com", static_handler)],
         )
         mocker.patch(
-            "twin.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
+            "tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
             {"example.com"},
         )
 

@@ -1,6 +1,6 @@
 # The Why
 
-Build your digital twin through knowledge graphs, ontologies, memory, LLMs and agents.
+**Tree: Your Rooted Personal Assistant.** Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
 # The What 
 
@@ -27,7 +27,7 @@ project-root/
 ├── apps/
 │   ├── memory/                          # Python app: ETL + knowledge graph + MCP server
 │   │   ├── src/
-│   │   │   └── twin/                    # Core Python module
+│   │   │   └── tree/                    # Core Python module
 │   │   │       ├── config/              # Configuration
 │   │   │       ├── entities/            # Key data structures as ODMs
 │   │   │       ├── db.py                # Database connection helpers
@@ -85,7 +85,7 @@ project-root/
 
 ### Writing Scripts
 
-- Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `twin.logging` at module level to configure logging.
+- Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `tree.logging` at module level to configure logging.
 
 ### Writing Tests
 
@@ -131,7 +131,7 @@ which is tested only via integration tests.
 - Tool: Prefect
 - Sitemap: https://docs.prefect.io/llms.txt
 - You can access deployments via `uv run prefect deployment ...` CLI commands. For example, to run a deployment served 
-in @apps/memory/src/twin/orchestrator.py you can run `prefect deployment run [DEPLOYMENT_NAME]` (invoked from within `apps/memory/`).
+in @apps/memory/src/tree/orchestrator.py you can run `prefect deployment run [DEPLOYMENT_NAME]` (invoked from within `apps/memory/`).
 
 ### Access Documentation 
 
@@ -155,13 +155,13 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Write unit and integration tests:
   - Use red/green TDD to first write unit and integration tests for the core functionality before implementing any feature.
   - Run `make memory-unit-tests` frequently during development (after each atomic change) to catch regressions early.
-  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
+  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `tree.data.substack`, run the tests only related to the Substack data pipelines.
   - Run the actual code testing and debugging how the code works on dev machine.
   - In case of errors, write regression tests for the given errors, fix them, and repeat.
   - Only run `make memory-integration-tests` when the feature is considered done and ready for PR. Integration tests can take up to 15 minutes.
 - Implement the feature. Special considerations to always look out for:
   - Add new dependencies to @apps/memory/pyproject.toml
-  - Update @.env.example + @apps/memory/src/twin/config/settings.py with any new required env vars
+  - Update @.env.example + @apps/memory/src/tree/config/settings.py with any new required env vars
   - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git. Always check if the `pre-commit` passes.
 - PR workflow:
   1. Use the `create-pr` skill to open/update the PR.

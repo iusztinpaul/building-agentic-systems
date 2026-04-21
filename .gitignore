@@ -213,8 +213,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Twin working directory (short-term session data)
-.twin/
+# Tree working directory (short-term session data)
+.tree/
 
 # Harness (future TS app) — build artifacts
 apps/harness/node_modules/

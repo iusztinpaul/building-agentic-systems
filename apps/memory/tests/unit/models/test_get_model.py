@@ -2,12 +2,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from twin.models.fake_model import MockEmbeddingModel
-from twin.models.gemini import GeminiEmbeddingModel, GeminiLLM
-from twin.models.get_model import get_embedding_model, get_llm
-from twin.models.modal_embedding import ModalEmbeddingModel
-from twin.models.sentence_transformer import SentenceTransformerEmbeddingModel
-from twin.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
+from tree.models.fake_model import MockEmbeddingModel
+from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
+from tree.models.get_model import get_embedding_model, get_llm
+from tree.models.modal_embedding import ModalEmbeddingModel
+from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +18,7 @@ def _mock_settings(mocker) -> None:
         "fake-modal-key"
     )
     mock_settings.voyage_api_key.get_secret_value.return_value = "fake-voyage-key"
-    mocker.patch("twin.models.get_model.settings", mock_settings)
+    mocker.patch("tree.models.get_model.settings", mock_settings)
 
 
 @pytest.fixture(autouse=True)
@@ -29,7 +29,7 @@ def _mock_app_config(mocker) -> None:
     mock_config.models.embedding.provider = "mock"
     mock_config.models.embedding.model = "text-embedding-004"
     mock_config.models.embedding.dimensions = 256
-    mocker.patch("twin.models.get_model.app_config", mock_config)
+    mocker.patch("tree.models.get_model.app_config", mock_config)
 
 
 class TestGetLLM:
@@ -66,7 +66,7 @@ class TestGetEmbeddingModel:
 
     def test_returns_sentence_transformers(self, mocker) -> None:
         mocker.patch(
-            "twin.models.sentence_transformer.SentenceTransformer",
+            "tree.models.sentence_transformer.SentenceTransformer",
         )
 
         result = get_embedding_model(provider="sentence-transformers")

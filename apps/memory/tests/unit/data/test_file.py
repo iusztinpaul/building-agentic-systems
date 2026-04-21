@@ -1,10 +1,10 @@
-"""Unit tests for twin.data.file — read_file and load_file_document."""
+"""Unit tests for tree.data.file — read_file and load_file_document."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from twin.data.file import _SUPPORTED_EXTENSIONS, read_file
+from tree.data.file import _SUPPORTED_EXTENSIONS, read_file
 
 
 class TestReadFile:
@@ -69,15 +69,15 @@ class TestLoadFileDocument:
         txt.write_text("Some content", encoding="utf-8")
 
         mock_find_one = mocker.patch(
-            "twin.data.file.Document.find_one",
+            "tree.data.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
         mock_insert = mocker.patch(
-            "twin.data.file.Document.insert", new_callable=AsyncMock
+            "tree.data.file.Document.insert", new_callable=AsyncMock
         )
 
-        from twin.data.file import load_file_document
+        from tree.data.file import load_file_document
 
         doc = await load_file_document(str(txt))
 
@@ -92,18 +92,18 @@ class TestLoadFileDocument:
         txt = tmp_path / "dup.txt"
         txt.write_text("content", encoding="utf-8")
 
-        from twin.entities.documents import SourceType
+        from tree.entities.documents import SourceType
 
         existing = MagicMock()
         existing.source_type = SourceType.FILE
 
         mocker.patch(
-            "twin.data.file.Document.find_one",
+            "tree.data.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=existing,
         )
 
-        from twin.data.file import load_file_document
+        from tree.data.file import load_file_document
 
         result = await load_file_document(str(txt))
         assert result is None
@@ -113,13 +113,13 @@ class TestLoadFileDocument:
         txt.write_text("text", encoding="utf-8")
 
         mocker.patch(
-            "twin.data.file.Document.find_one",
+            "tree.data.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("twin.data.file.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.file.Document.insert", new_callable=AsyncMock)
 
-        from twin.data.file import load_file_document
+        from tree.data.file import load_file_document
 
         doc = await load_file_document(str(txt), title="My Custom Title")
         assert doc.title == "My Custom Title"

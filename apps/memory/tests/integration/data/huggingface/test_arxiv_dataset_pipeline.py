@@ -1,7 +1,7 @@
 from prefect import tags as prefect_tags
 
-from twin.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
-from twin.entities.documents import Document, SourceType
+from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
+from tree.entities.documents import Document, SourceType
 
 FAKE_ENTRIES = [
     {
@@ -27,11 +27,11 @@ class TestIngestArxivDatasetFlow:
         self, mongo_client, mocker
     ) -> None:
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(FAKE_ENTRIES),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 
@@ -53,11 +53,11 @@ class TestIngestArxivDatasetFlow:
 
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(FAKE_ENTRIES),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 
@@ -66,7 +66,7 @@ class TestIngestArxivDatasetFlow:
         assert len(first_run) == 5
 
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(FAKE_ENTRIES),
         )
 
@@ -81,15 +81,15 @@ class TestIngestArxivDatasetFlow:
 
     async def test_with_fetch_content(self, mongo_client, mocker) -> None:
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(FAKE_ENTRIES[:2]),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=_make_mock_client(mocker, "Full paper text."),
         )
 
@@ -112,11 +112,11 @@ class TestIngestArxivDatasetFlow:
             for i in range(7)
         ]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(entries),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 
@@ -137,11 +137,11 @@ class TestIngestArxivDatasetFlow:
         await latent.insert()
 
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(FAKE_ENTRIES[:1]),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 

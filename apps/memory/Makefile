@@ -80,7 +80,7 @@ deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
 # --- Orchestration ---
 
 serve-workflows: # Serve Prefect workflow deployments.
-	uv run python -m twin.orchestrator
+	uv run python -m tree.orchestrator
 
 
 # --- Data Pipelines ---

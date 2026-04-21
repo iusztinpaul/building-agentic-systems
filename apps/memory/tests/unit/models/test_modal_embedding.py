@@ -4,8 +4,8 @@ import aiohttp
 import pytest
 from openai import AsyncOpenAI
 
-from twin.models.exceptions import ExtractionError, ModelError
-from twin.models.modal_embedding import ModalEmbeddingModel
+from tree.models.exceptions import ExtractionError, ModelError
+from tree.models.modal_embedding import ModalEmbeddingModel
 
 
 def _make_embedding_response(embeddings: list[list[float]]):
@@ -47,7 +47,7 @@ def mock_modal_function():
     mock_fn.get_web_url.aio = AsyncMock(
         return_value="https://test--vllm-embedding-serve.modal.run"
     )
-    with patch("twin.models.modal_embedding.modal.Function") as mock_cls:
+    with patch("tree.models.modal_embedding.modal.Function") as mock_cls:
         mock_cls.from_name.return_value = mock_fn
         yield mock_cls, mock_fn
 
@@ -123,7 +123,7 @@ class TestModalEmbeddingModelInit:
         assert not base_url.rstrip("/").endswith("/v1/v1")
 
     async def test_raises_model_error_when_modal_lookup_fails(self):
-        with patch("twin.models.modal_embedding.modal.Function") as mock_cls:
+        with patch("tree.models.modal_embedding.modal.Function") as mock_cls:
             mock_cls.from_name.side_effect = RuntimeError("not deployed")
 
             m = ModalEmbeddingModel(api_key="test-key")

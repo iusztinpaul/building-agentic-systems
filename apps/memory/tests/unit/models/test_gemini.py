@@ -3,14 +3,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from twin.models.exceptions import ExtractionError
-from twin.models.gemini import GeminiEmbeddingModel, GeminiLLM
+from tree.models.exceptions import ExtractionError
+from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
 
 
 @pytest.fixture()
 def mock_genai_client(mocker) -> MagicMock:
     mock_client = MagicMock()
-    mocker.patch("twin.models.gemini.genai.Client", return_value=mock_client)
+    mocker.patch("tree.models.gemini.genai.Client", return_value=mock_client)
     return mock_client
 
 

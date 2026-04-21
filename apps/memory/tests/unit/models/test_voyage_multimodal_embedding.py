@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from twin.models.exceptions import ExtractionError, ModelError
-from twin.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
+from tree.models.exceptions import ExtractionError, ModelError
+from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 
 def _mock_aiohttp_response(*, status: int = 200, json_data: dict | None = None):

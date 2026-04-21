@@ -1,15 +1,15 @@
 import pytest
 from pymongo.errors import OperationFailure
 
-from twin.entities.knowledge_graph import EdgeType, NodeType
-from twin.memory.query.nl_query import (
+from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.memory.query.nl_query import (
     _replace_embedding_placeholder,
     build_nl_query_system_prompt,
     execute_nl_query,
     nl_to_pipeline,
     validate_pipeline,
 )
-from twin.models.exceptions import PipelineValidationError
+from tree.models.exceptions import PipelineValidationError
 
 
 class TestValidatePipeline:

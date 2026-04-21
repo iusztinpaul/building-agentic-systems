@@ -17,13 +17,13 @@ import logging
 
 import click
 
-from twin.config.app_config import app_config
-from twin.config.settings import settings
-from twin.db import init_mongodb
-from twin.memory.query.core import query_memory
-from twin.memory.query.visualize import visualize_query_result
-from twin.memory.types import QueryResult
-from twin.models.get_model import get_embedding_model
+from tree.config.app_config import app_config
+from tree.config.settings import settings
+from tree.db import init_mongodb
+from tree.memory.query.core import query_memory
+from tree.memory.query.visualize import visualize_query_result
+from tree.memory.types import QueryResult
+from tree.models.get_model import get_embedding_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

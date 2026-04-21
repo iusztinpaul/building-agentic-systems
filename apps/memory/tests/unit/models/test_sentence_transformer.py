@@ -1,14 +1,14 @@
 import numpy as np
 import pytest
 
-from twin.models.exceptions import ExtractionError
-from twin.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.exceptions import ExtractionError
+from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
 
 
 @pytest.fixture
 def model(mocker):
     mocker.patch(
-        "twin.models.sentence_transformer.SentenceTransformer",
+        "tree.models.sentence_transformer.SentenceTransformer",
     )
     return SentenceTransformerEmbeddingModel(
         model="voyageai/voyage-4-nano",

@@ -3,9 +3,9 @@
 import json
 
 
-from twin.entities.documents import Document, SourceType
-from twin.mcp.tools import ingest_conversation, ingest_file, ingest_url
-from twin.models.fake_model import FakeEmbeddingModel, FakeLLM
+from tree.entities.documents import Document, SourceType
+from tree.mcp.tools import ingest_conversation, ingest_file, ingest_url
+from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 TEST_DATABASE = "integration_tests_twin"
 
@@ -191,7 +191,7 @@ class TestIngestUrl:
         mock_response.raise_for_status = mocker.MagicMock()
 
         mocker.patch(
-            "twin.data.substack.substack_article.httpx.AsyncClient",
+            "tree.data.substack.substack_article.httpx.AsyncClient",
             return_value=mocker.AsyncMock(
                 __aenter__=mocker.AsyncMock(
                     return_value=mocker.MagicMock(
@@ -238,7 +238,7 @@ class TestIngestUrl:
         mock_response.raise_for_status = mocker.MagicMock()
 
         mocker.patch(
-            "twin.data.substack.substack_article.httpx.AsyncClient",
+            "tree.data.substack.substack_article.httpx.AsyncClient",
             return_value=mocker.AsyncMock(
                 __aenter__=mocker.AsyncMock(
                     return_value=mocker.MagicMock(

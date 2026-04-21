@@ -1,5 +1,5 @@
-from twin.entities.knowledge_graph import EdgeType, NodeType
-from twin.entities.ontology import (
+from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
     LLM_EXTRACTABLE_EDGE_TYPES,
     LLM_EXTRACTABLE_NODE_TYPES,

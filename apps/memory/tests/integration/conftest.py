@@ -1,8 +1,8 @@
 import pymongo.errors
 import pytest
 
-from twin.config.settings import settings
-from twin.db import ALL_DOCUMENT_MODELS, init_mongodb
+from tree.config.settings import settings
+from tree.db import ALL_DOCUMENT_MODELS, init_mongodb
 
 TEST_DATABASE = "integration_tests_twin"
 

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from twin.entities.knowledge_graph import (
+from tree.entities.knowledge_graph import (
     EdgeType,
     KnowledgeGraphEntry,
     NodeType,

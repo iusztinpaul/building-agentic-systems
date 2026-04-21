@@ -1,10 +1,10 @@
 from unittest.mock import AsyncMock, MagicMock
 
-from twin.data.pipeline import ingest_all_data
+from tree.data.pipeline import ingest_all_data
 
 
 def _make_mock_pipeline(mocker, name: str) -> AsyncMock:
-    mock = mocker.patch(f"twin.data.pipeline.{name}", new_callable=AsyncMock)
+    mock = mocker.patch(f"tree.data.pipeline.{name}", new_callable=AsyncMock)
     mock.return_value = []
     return mock
 
@@ -20,14 +20,14 @@ def _make_config(
     mock_config.sources.substack = substack_feeds or []
     mock_config.sources.substack_articles = substack_articles or []
     mock_config.sources.huggingface_arxiv_dataset.max_samples = arxiv_max_samples
-    mocker.patch("twin.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.pipeline.app_config", mock_config)
     return mock_config
 
 
 class TestIngestAllData:
     async def test_runs_all_three_pipelines(self, mocker) -> None:
         mock_init = mocker.patch(
-            "twin.data.pipeline.init_mongodb", new_callable=AsyncMock
+            "tree.data.pipeline.init_mongodb", new_callable=AsyncMock
         )
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
@@ -53,7 +53,7 @@ class TestIngestAllData:
         mock_arxiv.assert_awaited_once()
 
     async def test_skips_rss_when_no_feeds(self, mocker) -> None:
-        mocker.patch("twin.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -71,7 +71,7 @@ class TestIngestAllData:
         mock_arxiv.assert_awaited_once()
 
     async def test_skips_articles_when_none_configured(self, mocker) -> None:
-        mocker.patch("twin.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -89,7 +89,7 @@ class TestIngestAllData:
         mock_arxiv.assert_awaited_once()
 
     async def test_skips_all_substack_when_empty(self, mocker) -> None:
-        mocker.patch("twin.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -103,7 +103,7 @@ class TestIngestAllData:
         mock_arxiv.assert_awaited_once()
 
     async def test_always_runs_arxiv(self, mocker) -> None:
-        mocker.patch("twin.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -118,7 +118,7 @@ class TestIngestAllData:
 
     async def test_initializes_mongodb(self, mocker) -> None:
         mock_init = mocker.patch(
-            "twin.data.pipeline.init_mongodb", new_callable=AsyncMock
+            "tree.data.pipeline.init_mongodb", new_callable=AsyncMock
         )
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")

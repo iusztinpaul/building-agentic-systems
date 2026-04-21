@@ -2,10 +2,10 @@
 
 from prefect import tags as prefect_tags
 
-from twin.entities.documents import Document, SourceType
-from twin.entities.knowledge_graph import EdgeType, NodeType
-from twin.memory.extraction.pipeline import memory_extraction
-from twin.models.fake_model import FakeLLM
+from tree.entities.documents import Document, SourceType
+from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.memory.extraction.pipeline import memory_extraction
+from tree.models.fake_model import FakeLLM
 
 
 FAKE_LLM_RESPONSE = {
@@ -66,15 +66,15 @@ class TestMemoryExtractionPipeline:
         doc = await _insert_test_document()
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            "tree.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
             TEST_DATABASE,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
 
@@ -112,15 +112,15 @@ class TestMemoryExtractionPipeline:
         await doc.insert()
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            "tree.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
             TEST_DATABASE,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM(),
         )
 
@@ -148,15 +148,15 @@ class TestMemoryExtractionPipeline:
         )
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            "tree.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
             TEST_DATABASE,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE, FAKE_LLM_RESPONSE]),
         )
 
@@ -175,15 +175,15 @@ class TestMemoryExtractionPipeline:
         doc = await _insert_test_document()
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            "tree.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
             TEST_DATABASE,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
 
@@ -201,15 +201,15 @@ class TestMemoryExtractionPipeline:
         doc = await _insert_test_document()
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.extraction.pipeline.init_mongodb",
             return_value=mongo_client,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
+            "tree.memory.extraction.pipeline.settings.mongo.mongo_initdb_database",
             TEST_DATABASE,
         )
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
 
@@ -221,7 +221,7 @@ class TestMemoryExtractionPipeline:
         assert first_count > 0
 
         mocker.patch(
-            "twin.memory.extraction.pipeline.get_llm",
+            "tree.memory.extraction.pipeline.get_llm",
             return_value=FakeLLM([FAKE_LLM_RESPONSE]),
         )
 

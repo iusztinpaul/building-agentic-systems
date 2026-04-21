@@ -29,7 +29,7 @@ from pyvis.network import Network
 
 load_dotenv()
 
-from twin.config.settings import settings  # noqa: E402
+from tree.config.settings import settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

@@ -3,14 +3,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from twin.data.huggingface.arxiv_dataset_pipeline import (
+from tree.data.huggingface.arxiv_dataset_pipeline import (
     _process_document,
     extract_document,
     fetch_paper_content,
     ingest_arxiv_dataset,
     load_document,
 )
-from twin.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType
 
 
 def _make_doc(arxiv_id: str = "2103.00001") -> Document:
@@ -44,7 +44,7 @@ class TestFetchPaperContentTask:
     @pytest.mark.asyncio
     async def test_sets_content_on_doc(self, mocker) -> None:
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
             new_callable=AsyncMock,
             return_value="Full text",
         )
@@ -57,7 +57,7 @@ class TestFetchPaperContentTask:
     @pytest.mark.asyncio
     async def test_leaves_content_empty_when_not_available(self, mocker) -> None:
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
             new_callable=AsyncMock,
             return_value="",
         )
@@ -73,7 +73,7 @@ class TestLoadDocumentTask:
     async def test_wraps_load_document(self, mocker) -> None:
         doc = _make_doc()
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._load_document",
+            "tree.data.huggingface.arxiv_dataset_pipeline._load_document",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -88,12 +88,12 @@ class TestProcessDocument:
     async def test_with_fetch_content(self, mocker) -> None:
         doc = _make_doc()
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_paper_content",
             new_callable=AsyncMock,
             return_value="Paper text",
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._load_document",
+            "tree.data.huggingface.arxiv_dataset_pipeline._load_document",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -110,7 +110,7 @@ class TestProcessDocument:
     async def test_without_fetch_content(self, mocker) -> None:
         doc = _make_doc()
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._load_document",
+            "tree.data.huggingface.arxiv_dataset_pipeline._load_document",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -126,7 +126,7 @@ class TestProcessDocument:
     async def test_returns_none_for_duplicate(self, mocker) -> None:
         doc = _make_doc()
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._load_document",
+            "tree.data.huggingface.arxiv_dataset_pipeline._load_document",
             new_callable=AsyncMock,
             return_value=None,
         )
@@ -154,11 +154,11 @@ class TestIngestArxivDataset:
         ]
 
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
             return_value=iter([entries[:2], entries[2:]]),
         )
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
             new_callable=AsyncMock,
         )
 
@@ -170,7 +170,7 @@ class TestIngestArxivDataset:
             return doc
 
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset_pipeline._load_document",
+            "tree.data.huggingface.arxiv_dataset_pipeline._load_document",
             side_effect=mock_load,
         )
 

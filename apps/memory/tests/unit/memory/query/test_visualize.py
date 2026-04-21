@@ -1,5 +1,5 @@
-from twin.memory.query.visualize import build_networkx_graph, _truncate
-from twin.memory.types import QueryResult
+from tree.memory.query.visualize import build_networkx_graph, _truncate
+from tree.memory.types import QueryResult
 
 
 class TestBuildNetworkxGraph:

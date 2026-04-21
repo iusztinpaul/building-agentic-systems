@@ -1,6 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
-from twin.memory.indexing.core import _node_to_text, ensure_indexes
+from tree.memory.indexing.core import _node_to_text, ensure_indexes
 
 
 class _AsyncCursorEmpty:

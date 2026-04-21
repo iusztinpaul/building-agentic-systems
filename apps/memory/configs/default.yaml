@@ -1,4 +1,4 @@
-# Application configuration for the digital twin system.
+# Application configuration for Tree (Your Rooted Personal Assistant).
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 
 sources:

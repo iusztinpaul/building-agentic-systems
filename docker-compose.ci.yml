@@ -33,12 +33,12 @@ services:
         const adminDb = db.getSiblingDB("admin");
         try {
           adminDb.createUser({
-            user: "twin",
-            pwd: "twin",
+            user: "tree",
+            pwd: "tree",
             roles: [{ role: "root", db: "admin" }]
           });
-          print("twin user created.");
+          print("tree user created.");
         } catch(e) {
-          print("twin user already exists or error: " + e.message);
+          print("tree user already exists or error: " + e.message);
         }
       '

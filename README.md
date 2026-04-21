@@ -1,6 +1,6 @@
-# Building Agentic Systems
+# Building Agentic Systems — Tree
 
-Build your digital twin through knowledge graphs, ontologies, memory, LLMs and agents.
+**Tree: Your Rooted Personal Assistant.** Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
 ## Repo layout
 
@@ -69,7 +69,7 @@ For just running the pipelines without a local dev setup, everything is containe
 make local-start
 ```
 
-The worker container (`twin-prefect-worker`) automatically registers and serves all deployments. You can trigger runs from the Prefect dashboard or the CLI scripts below.
+The worker container (`tree-prefect-worker`) automatically registers and serves all deployments. You can trigger runs from the Prefect dashboard or the CLI scripts below.
 
 ### Development mode
 
@@ -131,7 +131,7 @@ make memory-query-graph QUERY="Paul Iusztin"
 
 ### Step 5: MCP server
 
-Expose the knowledge graph as an [MCP](https://modelcontextprotocol.io/) server so LLM clients (Claude Code, Claude Desktop, Cursor, etc.) can query your twin's memory with natural language.
+Expose the knowledge graph as an [MCP](https://modelcontextprotocol.io/) server so LLM clients (Claude Code, Claude Desktop, Cursor, etc.) can query Tree's memory with natural language.
 
 **Tools provided:**
 
@@ -173,7 +173,7 @@ uv run prefect dashboard open
 Download [MongoDB Compass](https://www.mongodb.com/products/tools/compass) and connect to your local MongoDB to inspect collections (`documents`, `knowledge_graph`):
 
 ```
-mongodb://twin:twin@localhost:27017/?directConnection=true&authSource=admin
+mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 ```
 
 ## Tests

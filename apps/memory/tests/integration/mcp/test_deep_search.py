@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from twin.config.paths import MEMORY_DIR
-from twin.mcp.deep_search import slugify, write_deep_search_results
-from twin.mcp.tools import deep_search_memory
-from twin.memory.types import QueryResult
-from twin.models.fake_model import FakeEmbeddingModel
+from tree.config.paths import MEMORY_DIR
+from tree.mcp.deep_search import slugify, write_deep_search_results
+from tree.mcp.tools import deep_search_memory
+from tree.memory.types import QueryResult
+from tree.models.fake_model import FakeEmbeddingModel
 
 TEST_DATABASE = "integration_tests_twin"
 
@@ -70,7 +70,7 @@ def sample_results():
 
 @pytest.fixture()
 def memory_dir():
-    """Ensure MEMORY_DIR (.twin/memory/) is cleaned up after tests."""
+    """Ensure MEMORY_DIR (.tree/memory/) is cleaned up after tests."""
 
     yield
     if MEMORY_DIR.exists():

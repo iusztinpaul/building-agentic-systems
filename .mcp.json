@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "twin-memory": {
+    "tree-memory": {
       "command": "uv",
       "args": [
         "--directory",

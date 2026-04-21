@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from twin.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType
 
 
 class TestDocumentModel:

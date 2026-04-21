@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from prefect import tags as prefect_tags
 
-from twin.data.pipeline import ingest_all_data
-from twin.entities.documents import Document, SourceType
+from tree.data.pipeline import ingest_all_data
+from tree.entities.documents import Document, SourceType
 
 
 FAKE_RSS_ENTRIES = [
@@ -106,41 +106,41 @@ def _make_full_config(
     mock_config.sources.huggingface_arxiv_dataset.fetch_content = False
     mock_config.sources.huggingface_arxiv_dataset.batch_size = 50
     mock_config.sources.huggingface_arxiv_dataset.concurrency = 10
-    mocker.patch("twin.data.pipeline.app_config", mock_config)
-    mocker.patch("twin.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
+    mocker.patch("tree.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
     return mock_config
 
 
 def _mock_init_mongodb(mocker, mongo_client) -> None:
-    mocker.patch("twin.data.pipeline.init_mongodb", return_value=mongo_client)
+    mocker.patch("tree.data.pipeline.init_mongodb", return_value=mongo_client)
     mocker.patch(
-        "twin.data.substack.substack_rss_pipeline.init_mongodb",
+        "tree.data.substack.substack_rss_pipeline.init_mongodb",
         return_value=mongo_client,
     )
     mocker.patch(
-        "twin.data.substack.substack_article_pipeline.init_mongodb",
+        "tree.data.substack.substack_article_pipeline.init_mongodb",
         return_value=mongo_client,
     )
     mocker.patch(
-        "twin.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+        "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
         return_value=mongo_client,
     )
 
 
 def _mock_rss_source(mocker) -> None:
     mocker.patch(
-        "twin.data.substack.substack_rss.httpx.AsyncClient",
+        "tree.data.substack.substack_rss.httpx.AsyncClient",
         return_value=_make_mock_rss_client(mocker),
     )
     mocker.patch(
-        "twin.data.substack.substack_rss.feedparser.parse",
+        "tree.data.substack.substack_rss.feedparser.parse",
         return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
     )
 
 
 def _mock_article_source(mocker) -> None:
     mocker.patch(
-        "twin.data.substack.substack_article.httpx.AsyncClient",
+        "tree.data.substack.substack_article.httpx.AsyncClient",
         return_value=_make_mock_article_client(mocker),
     )
 
@@ -150,7 +150,7 @@ def _mock_arxiv_source(mocker) -> None:
         yield FAKE_ARXIV_ENTRIES
 
     mocker.patch(
-        "twin.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+        "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
         side_effect=batch_gen,
     )
 

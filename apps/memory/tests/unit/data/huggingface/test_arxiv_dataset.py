@@ -1,14 +1,14 @@
 import httpx
 import pytest
 
-from twin.data.huggingface.arxiv_dataset import (
+from tree.data.huggingface.arxiv_dataset import (
     extract_document,
     fetch_dataset_batches,
     fetch_paper_content,
     parse_authors,
     parse_update_date,
 )
-from twin.entities.documents import SourceType
+from tree.entities.documents import SourceType
 
 SAMPLE_ENTRY = {
     "id": "2103.12345",
@@ -122,7 +122,7 @@ class TestFetchPaperContent:
         mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=mock_client,
         )
 
@@ -140,7 +140,7 @@ class TestFetchPaperContent:
         mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=mock_client,
         )
 
@@ -160,7 +160,7 @@ class TestFetchPaperContent:
         mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=mock_client,
         )
 
@@ -175,7 +175,7 @@ class TestFetchPaperContent:
         mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=mock_client,
         )
 
@@ -203,7 +203,7 @@ class TestFetchPaperContent:
         mock_client.__aenter__ = mocker.AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = mocker.AsyncMock(return_value=False)
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.httpx.AsyncClient",
+            "tree.data.huggingface.arxiv_dataset.httpx.AsyncClient",
             return_value=mock_client,
         )
 
@@ -216,7 +216,7 @@ class TestFetchDatasetBatches:
     def test_yields_correct_batch_sizes(self, mocker) -> None:
         fake_entries = [{"id": f"2103.{i:05d}"} for i in range(10)]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(fake_entries),
         )
 
@@ -231,7 +231,7 @@ class TestFetchDatasetBatches:
     def test_stops_at_max_samples(self, mocker) -> None:
         fake_entries = [{"id": f"2103.{i:05d}"} for i in range(20)]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(fake_entries),
         )
 
@@ -246,7 +246,7 @@ class TestFetchDatasetBatches:
     def test_returns_all_when_fewer_than_max(self, mocker) -> None:
         fake_entries = [{"id": f"2103.{i:05d}"} for i in range(3)]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(fake_entries),
         )
 
@@ -258,7 +258,7 @@ class TestFetchDatasetBatches:
     def test_returns_empty_for_zero_max(self, mocker) -> None:
         fake_entries = [{"id": "2103.00000"}]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(fake_entries),
         )
 
@@ -269,7 +269,7 @@ class TestFetchDatasetBatches:
     def test_exact_batch_boundary(self, mocker) -> None:
         fake_entries = [{"id": f"2103.{i:05d}"} for i in range(6)]
         mocker.patch(
-            "twin.data.huggingface.arxiv_dataset.load_dataset",
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
             return_value=iter(fake_entries),
         )
 

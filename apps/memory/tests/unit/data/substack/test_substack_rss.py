@@ -1,14 +1,14 @@
 import httpx
 import pytest
 
-from twin.data.substack.substack_rss import (
+from tree.data.substack.substack_rss import (
     extract_document,
     extract_references,
     fetch_feed,
     html_to_plain_text,
     parse_date,
 )
-from twin.entities.documents import SourceType
+from tree.entities.documents import SourceType
 
 SAMPLE_ENTRY = {
     "title": "Test Article",
@@ -124,7 +124,7 @@ class TestFetchFeed:
         mock_client.__aenter__.return_value = mock_client
         mock_client.get.return_value = mock_response
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=mock_client,
         )
         return mock_client
@@ -135,7 +135,7 @@ class TestFetchFeed:
 
         entries = [{"title": "Entry 1"}, {"title": "Entry 2"}]
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=mocker.Mock(bozo=False, entries=entries),
         )
 
@@ -163,7 +163,7 @@ class TestFetchFeed:
         self._mock_httpx(mocker, mock_response)
 
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=mocker.Mock(
                 bozo=True, entries=[], bozo_exception=Exception("bad")
             ),
@@ -178,7 +178,7 @@ class TestFetchFeed:
 
         entries = [{"title": "Recovered Entry"}]
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=mocker.Mock(bozo=True, entries=entries),
         )
 
@@ -191,7 +191,7 @@ class TestFetchFeed:
         self._mock_httpx(mocker, mock_response)
 
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=mocker.Mock(bozo=False, entries=[]),
         )
 

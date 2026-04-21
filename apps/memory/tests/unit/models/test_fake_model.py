@@ -1,4 +1,4 @@
-from twin.models.fake_model import FakeEmbeddingModel, FakeLLM
+from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
 class TestFakeLLM:

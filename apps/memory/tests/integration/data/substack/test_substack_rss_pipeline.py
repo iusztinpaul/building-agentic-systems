@@ -1,10 +1,10 @@
 from prefect import tags as prefect_tags
 
-from twin.data.substack.substack_rss_pipeline import (
+from tree.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
 )
-from twin.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType
 
 FAKE_RSS_ENTRIES = [
     {
@@ -31,11 +31,11 @@ class TestIngestSubstackRssFeedFlow:
         self, mongo_client, mocker
     ) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
@@ -55,11 +55,11 @@ class TestIngestSubstackRssFeedFlow:
 
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
@@ -68,11 +68,11 @@ class TestIngestSubstackRssFeedFlow:
         assert len(first_run) == 3
 
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
@@ -87,11 +87,11 @@ class TestIngestSubstackRssFeedFlow:
 
     async def test_creates_reference_documents(self, mongo_client, mocker) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES[:1]),
         )
 
@@ -116,11 +116,11 @@ class TestIngestSubstackRssFeedFlow:
         await latent.insert()
 
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES[:1]),
         )
 
@@ -136,15 +136,15 @@ class TestIngestSubstackRssFeedFlow:
 class TestIngestSubstackRssFeedBatchFlow:
     async def test_ingests_from_multiple_feeds(self, mongo_client, mocker) -> None:
         mocker.patch(
-            "twin.data.substack.substack_rss.httpx.AsyncClient",
+            "tree.data.substack.substack_rss.httpx.AsyncClient",
             return_value=_make_mock_rss_client(mocker),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss.feedparser.parse",
+            "tree.data.substack.substack_rss.feedparser.parse",
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES[:1]),
         )
         mocker.patch(
-            "twin.data.substack.substack_rss_pipeline.init_mongodb",
+            "tree.data.substack.substack_rss_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 

@@ -1,6 +1,6 @@
 import pytest
 
-from twin.memory.query.core import _rrf_fuse
+from tree.memory.query.core import _rrf_fuse
 
 
 class TestRRFFuse:

@@ -14,7 +14,7 @@ from beanie import Document, init_beanie
 from pydantic import Field
 from pymongo import AsyncMongoClient
 
-from twin.config.settings import settings
+from tree.config.settings import settings
 
 
 # --- Document Model ---

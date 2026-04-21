@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from twin.entities.knowledge_graph import EdgeType, NodeType
-from twin.memory.extraction.core import (
+from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.memory.extraction.core import (
     _MAX_ALIASES,
     _MAX_SOURCES,
     _parse_extraction,
@@ -13,8 +13,8 @@ from twin.memory.extraction.core import (
     normalize_nodes,
     upsert_graph_entries,
 )
-from twin.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
-from twin.models.fake_model import FakeLLM
+from tree.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
+from tree.models.fake_model import FakeLLM
 
 
 # ---------------------------------------------------------------------------
