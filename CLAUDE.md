@@ -20,41 +20,54 @@ Build your digital twin through knowledge graphs, ontologies, memory, LLMs and a
 
 ## Project Structure
 
+This is a monorepo. Each app lives under `apps/` and owns its own build files (`pyproject.toml`, `Makefile`, etc.). Only cross-app concerns live at the repo root.
+
 ```
 project-root/
-├── src/
-│   └── twin/                        # Core Python module
-│       ├── config/                  # Configuration
-│       ├── entities/                # Key data structures as ORMs
-│       ├── db.py                    # Database connection helpers
-│       ├── orchestrator.py          # Orchestrator integration
-│       ├── data/                    # Data ETLs
-│       │   ├── core/                # Core module business logic
-│       │   ├── types.py             # Types used across the data layer
-│       │   └── ...                  # One .py file per ETL served via Prefect
-│       └── memory/                  # Unified memory module
-│           ├── types.py             # Types used across the memory layer
-│           ├── extraction/          # Chunking, graph extraction, embedding
-│           ├── indexing/            # Post-extraction indexing (reverse edges, embeddings, search indexes)
-│           └── query/               # Query interfaces over unified memory
-├── models/                          # Model configuration and utilities
-│   ├── base.py                      # Base interfaces (BaseLLM, BaseEmbeddingModel)
-│   ├── exceptions.py                # Model-related exception types
-│   ├── get_model.py                 # Model factory and loading
-│   ├── gemini.py                    # Gemini LLM and embedding models
-│   ├── modal_embedding.py           # Modal provider: dynamic URL resolution + health check
-│   ├── voyage_multimodal_embedding.py # Voyage AI multimodal embeddings API
-│   ├── sentence_transformer.py      # In-process sentence-transformers embedding
-│   └── fake_model.py                # Fake/mock models for testing
-├── deploy/                          # Cloud deployment scripts
-│   └── modal_vllm_embedding.py      # Modal vLLM embedding server (voyage-4-nano)
-├── configs/                         # App YAML configs
-├── scripts/                         # Entrypoints
-├── tests/                           # Tests
-│   ├── unit/
-│   └── integration/
-└── .env.example                     # All supported env vars
+├── apps/
+│   ├── memory/                          # Python app: ETL + knowledge graph + MCP server
+│   │   ├── src/
+│   │   │   └── twin/                    # Core Python module
+│   │   │       ├── config/              # Configuration
+│   │   │       ├── entities/            # Key data structures as ODMs
+│   │   │       ├── db.py                # Database connection helpers
+│   │   │       ├── orchestrator.py      # Orchestrator integration
+│   │   │       ├── data/                # Data ETLs
+│   │   │       │   ├── core/            # Core module business logic
+│   │   │       │   ├── types.py         # Types used across the data layer
+│   │   │       │   └── ...              # One .py file per ETL served via Prefect
+│   │   │       └── memory/              # Unified memory module
+│   │   │           ├── types.py
+│   │   │           ├── extraction/      # Chunking, graph extraction, embedding
+│   │   │           ├── indexing/        # Post-extraction indexing (reverse edges, embeddings, search indexes)
+│   │   │           └── query/           # Query interfaces over unified memory
+│   │   ├── deploy/                      # Cloud deployment scripts (Modal)
+│   │   ├── configs/                     # App YAML configs (default.yaml)
+│   │   ├── scripts/                     # Entrypoints (serve_mcp.py, run_*.py, ...)
+│   │   ├── tests/                       # unit/ + integration/
+│   │   ├── docker/Dockerfile            # Memory-app image (Prefect worker)
+│   │   ├── pyproject.toml
+│   │   ├── uv.lock
+│   │   ├── .python-version
+│   │   └── Makefile                     # Memory-app targets
+│   └── harness/                         # Future TS/Ink/Bun coding-agent harness — see docs/harness-plan.md
+├── docker/                              # SHARED infra (MongoDB + mongot config files)
+├── docs/                                # Architecture & design docs (incl. harness-plan.md)
+├── models/                              # Shared model interfaces (LLM/embedding abstractions)
+├── .env / .env.example                  # Shared secrets (Mongo creds, API keys)
+├── .mcp.json                            # MCP servers the agents/harness spawn
+├── docker-compose.yml                   # Shared infra orchestration
+└── Makefile                             # Thin root: delegates to apps/*/Makefile; shared infra targets
 ```
+
+### Make command convention
+
+- `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-unit-tests`, `make memory-serve-mcp`).
+- `make harness-<target>` — reserved for the future TS harness at `apps/harness/`.
+- `make local-start` / `make local-stop` / `make local-restart` — shared Docker infra.
+- `make tests` — aggregate: runs all apps' tests.
+- `make pre-commit` — pre-commit across the repo.
+- `make help` — list all root targets.
 
 ## Key Python Design Choices
 
@@ -72,7 +85,7 @@ project-root/
 
 ### Writing Scripts
 
-- Scripts (entry points in `scripts/`) must call `init_logger()` from `twin.logging` at module level to configure logging.
+- Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `twin.logging` at module level to configure logging.
 
 ### Writing Tests
 
@@ -118,7 +131,7 @@ which is tested only via integration tests.
 - Tool: Prefect
 - Sitemap: https://docs.prefect.io/llms.txt
 - You can access deployments via `uv run prefect deployment ...` CLI commands. For example, to run a deployment served 
-in @src/twin/orchestrator/py you can run `prefect deployment run [DEPLOYMENT_NAME]`
+in @apps/memory/src/twin/orchestrator.py you can run `prefect deployment run [DEPLOYMENT_NAME]` (invoked from within `apps/memory/`).
 
 ### Access Documentation 
 
@@ -141,14 +154,14 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 - Plan and ask for user validation
 - Write unit and integration tests:
   - Use red/green TDD to first write unit and integration tests for the core functionality before implementing any feature.
-  - Run `make unit-tests` frequently during development (after each atomic change) to catch regressions early.
+  - Run `make memory-unit-tests` frequently during development (after each atomic change) to catch regressions early.
   - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `twin.data.substack`, run the tests only related to the Substack data pipelines.
   - Run the actual code testing and debugging how the code works on dev machine.
   - In case of errors, write regression tests for the given errors, fix them, and repeat.
-  - Only run `make integration-tests` when the feature is considered done and ready for PR. Integration tests can take up to 15 minutes.
+  - Only run `make memory-integration-tests` when the feature is considered done and ready for PR. Integration tests can take up to 15 minutes.
 - Implement the feature. Special considerations to always look out for:
-  - Add new dependencies to @pyproject.toml
-  - Update @.env.example + @src/twin/config/settings.py with any new required env vars
+  - Add new dependencies to @apps/memory/pyproject.toml
+  - Update @.env.example + @apps/memory/src/twin/config/settings.py with any new required env vars
   - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git. Always check if the `pre-commit` passes.
 - PR workflow:
   1. Use the `create-pr` skill to open/update the PR.
@@ -163,49 +176,49 @@ it branches off from `main`. If it's a feature branch `feat/...`, it branches of
 
 During development, run these steps after every atomic change or before commiting anything to git:
 
- 1. Format and lint: `make format-fix && make lint-fix && make format-check && make lint-check`
+ 1. Format and lint: `make memory-format-fix && make memory-lint-fix && make memory-format-check && make memory-lint-check`
  2. Pre-commit: `make pre-commit`
- 3. Unit tests: `make unit-tests`
+ 3. Unit tests: `make memory-unit-tests`
 
 When the feature is considered done and ready for PR, ALWAYS run:
 
- 4. Integration tests: `make integration-tests` (can take up to 15 minutes)
- 5. Run and verify the code end-to-end. For example, when testing the memory run: `make serve-workflows & `→ `make run-memory-pipeline-extraction` → `make run-memory-pipeline-indexing` → `make query-graph QUERY="test query"` → verify results. Always adapt this e2e example based on the modifications you've made. If necessary you should run multiple tests covering all the modifications you've made in the feature PR you are working on.
+ 4. Integration tests: `make memory-integration-tests` (can take up to 15 minutes)
+ 5. Run and verify the code end-to-end. For example, when testing the memory run: `make memory-serve-workflows & `→ `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results. Always adapt this e2e example based on the modifications you've made. If necessary you should run multiple tests covering all the modifications you've made in the feature PR you are working on.
 
 ## Build
 
 ```
-make build
+make memory-build
 ```
 
 ## Running QA and Tests
 
-We use `ruff` as our formatter and linter. 
+We use `ruff` as our formatter and linter.
 
 First always fix the formatting and linting errors with the fix commands:
 ```
-make format-fix
-make lint-fix
+make memory-format-fix
+make memory-lint-fix
 ```
 
 Then, check if there are any errors that couldn't be fixed automatically and fix them:
 ```
-make format-check
-make lint-check
+make memory-format-check
+make memory-lint-check
 make pre-commit
 ```
 
 Run unit tests frequently during development:
 ```
-make unit-tests
+make memory-unit-tests
 ```
 
 Run integration tests only when the feature is done (can take up to 15 minutes):
 ```
-make integration-tests
+make memory-integration-tests
 ```
 
-Or run all tests together:
+Or run all tests together (aggregate across apps):
 ```
 make tests
 ```
@@ -216,32 +229,32 @@ To test a pipeline after making changes:
 
 1. **Serve the workflows** in a background process to pick up the latest code:
 ```
-make serve-workflows &
+make memory-serve-workflows &
 ```
 If a serve process is already running, kill it first and re-serve to pick up the latest code changes.
 
 2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
 ```
-make run-all-data-pipelines
-make run-substack-rss-data-pipeline
-make run-substack-article-data-pipeline
-make run-arxiv-data-pipeline
-make run-memory-pipeline-extraction
-make run-memory-pipeline-indexing
+make memory-run-all-data-pipelines
+make memory-run-substack-rss-data-pipeline
+make memory-run-substack-article-data-pipeline
+make memory-run-arxiv-data-pipeline
+make memory-run-memory-pipeline-extraction
+make memory-run-memory-pipeline-indexing
 ```
 
-The `make serve-workflows` process must be running for pipeline triggers to be picked up, as it acts as the in-process Prefect worker. Without it, deployments are registered but no worker will execute them.
+The `make memory-serve-workflows` process must be running for pipeline triggers to be picked up, as it acts as the in-process Prefect worker. Without it, deployments are registered but no worker will execute them.
 
 Always use these Make commands instead of `prefect deployment run` directly, as the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
 
 ## Running Custom Commands for Project Level Dependencies
 
-Use `uv` to run any custom command that is not present in the @Makefile, but uses Python or other dependency installed through uv, usually available in @pyproject.toml.
+Use `uv` to run any custom command that is not present in the @Makefile or @apps/memory/Makefile, but uses Python or other dependency installed through uv, usually available in @apps/memory/pyproject.toml.
 
-Run them by prefixing the command with `uv run ...`, such as:
-- `uv run python ...` 
-- `uv run prefect ...`
-- `uv run modal ...`
+Run them from the repo root with `uv --directory apps/memory run ...`, or from `apps/memory/` with `uv run ...`. Examples:
+- `uv --directory apps/memory run python ...`
+- `uv --directory apps/memory run prefect ...`
+- `uv --directory apps/memory run modal ...`
 
 ## Running Custom Commands for Accessing Infrastructure and External Services 
 

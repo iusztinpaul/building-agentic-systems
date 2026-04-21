@@ -213,5 +213,10 @@ __marimo__/
 # Twin working directory (short-term session data)
 .twin/
 
+# Harness (future TS app) — build artifacts
+apps/harness/node_modules/
+apps/harness/dist/
+apps/harness/.bun/
+
 # MacOS
 .DS_Store

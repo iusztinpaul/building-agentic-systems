@@ -36,15 +36,19 @@ jobs:
 
       - name: Install Python
         run: uv python install
+        working-directory: apps/memory
 
       - name: Install dependencies
         run: uv sync
+        working-directory: apps/memory
 
       - name: Format check
         run: uv run ruff format --check src/ tests/ scripts/ deploy/
+        working-directory: apps/memory
 
       - name: Lint check
         run: uv run ruff check src/ tests/ scripts/ deploy/
+        working-directory: apps/memory
 
       - name: Start infrastructure
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init mongot prefect-server
@@ -107,6 +111,7 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+        working-directory: apps/memory
         env:
           PYTHONPATH: ./src/
 

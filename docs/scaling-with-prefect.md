@@ -53,12 +53,12 @@ The application has three pipelines orchestrated by Prefect:
 
 | Flow | File | Purpose |
 |------|------|---------|
-| `ingest_substack_rss_feed` | `src/twin/data/substack/substack_rss_pipeline.py` | Ingest a single RSS feed |
-| `ingest_substack_rss_feed_batch` | `src/twin/data/substack/substack_rss_pipeline.py` | Ingest multiple feeds via `asyncio.gather()` |
-| `memory_extraction` | `src/twin/memory/extraction/pipeline.py` | Chunk documents, call LLM, build KG log |
-| `memory_materialization` | `src/twin/memory/materialization/pipeline.py` | Aggregate logs, embed, index |
+| `ingest_substack_rss_feed` | `apps/memory/src/twin/data/substack/substack_rss_pipeline.py` | Ingest a single RSS feed |
+| `ingest_substack_rss_feed_batch` | `apps/memory/src/twin/data/substack/substack_rss_pipeline.py` | Ingest multiple feeds via `asyncio.gather()` |
+| `memory_extraction` | `apps/memory/src/twin/memory/extraction/pipeline.py` | Chunk documents, call LLM, build KG log |
+| `memory_materialization` | `apps/memory/src/twin/memory/materialization/pipeline.py` | Aggregate logs, embed, index |
 
-**How jobs are submitted today** (`scripts/run_data_pipeline.py`):
+**How jobs are submitted today** (`apps/memory/scripts/run_data_pipeline.py`):
 
 ```python
 async with get_client() as client:
@@ -618,7 +618,7 @@ This diagram shows the full path from the application submitting a run to Prefec
 The current `orchestrator.py` uses `serve()`:
 
 ```python
-# src/twin/orchestrator.py
+# apps/memory/src/twin/orchestrator.py
 serve(
     ingest_substack_rss_feed.to_deployment(
         name="ingest-substack-rss-feed-etl",
@@ -670,7 +670,7 @@ Replace `serve()` with `flow.deploy()` targeting a Docker work pool.
 **Updated `orchestrator.py`:**
 
 ```python
-# src/twin/orchestrator.py — deploy mode
+# apps/memory/src/twin/orchestrator.py — deploy mode
 
 if __name__ == "__main__":
     ingest_substack_rss_feed.deploy(

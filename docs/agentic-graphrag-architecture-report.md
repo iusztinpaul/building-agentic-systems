@@ -10,7 +10,7 @@
 
 ### Architecture
 
-All pipelines inherit from `BaseETL` (`src/twin/data/core/base.py`), which defines the contract:
+All pipelines inherit from `BaseETL` (`apps/memory/src/twin/data/core/base.py`), which defines the contract:
 - `extract_one(raw_entry) -> Document` -- transform raw data
 - `run(source_uri) -> list[Document]` -- fetch, extract, persist
 - `run_batch(source_uris)` -- process multiple sources
@@ -27,7 +27,7 @@ Each pipeline is orchestrated via **Prefect flows** with retry logic and task-le
 | **Local Files** | `data/file.py` | Filesystem read | Supports `.txt`, `.md`, `.html`; HTML auto-converted to plain text |
 | **Conversations** | `data/conversation.py` | Direct text input | UUID-based `source_uri`; always unique (no dedup) |
 
-### Document Data Model (`src/twin/entities/documents.py`)
+### Document Data Model (`apps/memory/src/twin/entities/documents.py`)
 
 ```python
 class Document(BeanieDocument):
@@ -58,8 +58,8 @@ Registry-based dispatcher that routes URLs to the correct pipeline automatically
 
 **Purpose:** Transform raw `documents` into a structured knowledge graph of nodes and edges in the `knowledge_graph` collection.
 
-**File:** `src/twin/memory/extraction/core.py`  
-**Prefect flow:** `src/twin/memory/extraction/pipeline.py`
+**File:** `apps/memory/src/twin/memory/extraction/core.py`  
+**Prefect flow:** `apps/memory/src/twin/memory/extraction/pipeline.py`
 
 ### 5-Stage Pipeline
 
@@ -93,7 +93,7 @@ Document.content
                                  Idempotent: running twice produces the same result
 ```
 
-### Ontology Schema (`src/twin/entities/ontology.py`)
+### Ontology Schema (`apps/memory/src/twin/entities/ontology.py`)
 
 **Node types (6):**
 | Type | Properties | LLM-Extractable? |
@@ -124,7 +124,7 @@ Document.content
 ## 3. Knowledge Graph Data Model
 
 **Collection:** Single `knowledge_graph` MongoDB collection  
-**File:** `src/twin/entities/knowledge_graph.py`
+**File:** `apps/memory/src/twin/entities/knowledge_graph.py`
 
 ### Single-Collection Design
 
@@ -171,8 +171,8 @@ This enables MongoDB's `$graphLookup` for multi-hop traversal within one collect
 ## 4. Indexing Pipeline
 
 **Purpose:** Generate embeddings for all nodes and create search indexes.  
-**File:** `src/twin/memory/indexing/core.py`  
-**Prefect flow:** `src/twin/memory/indexing/pipeline.py`
+**File:** `apps/memory/src/twin/memory/indexing/core.py`  
+**Prefect flow:** `apps/memory/src/twin/memory/indexing/pipeline.py`
 
 ### Step 1: Node Embedding (`embed_nodes()`)
 
@@ -204,7 +204,7 @@ Creates **two indexes** on the `knowledge_graph` collection:
 
 ## 5. Query Logic (3 Strategies)
 
-**Files:** `src/twin/memory/query/core.py`, `src/twin/memory/query/nl_query.py`
+**Files:** `apps/memory/src/twin/memory/query/core.py`, `apps/memory/src/twin/memory/query/nl_query.py`
 
 ### Strategy 1: Hybrid Search + Graph Expansion (`search_memory`)
 
@@ -254,8 +254,8 @@ Creates **two indexes** on the `knowledge_graph` collection:
 ## 6. Building the GraphRAG FastMCP Server
 
 **Framework:** FastMCP  
-**File:** `src/twin/mcp/server.py`  
-**Entry point:** `scripts/serve_mcp.py`
+**File:** `apps/memory/src/twin/mcp/server.py`  
+**Entry point:** `apps/memory/scripts/serve_mcp.py`
 
 ### Why MCP?
 
@@ -268,7 +268,7 @@ This means the same knowledge graph can serve multiple agents, multiple interfac
 The MCP server is a thin orchestration layer. It owns **zero** business logic. Every tool handler delegates to existing business logic modules:
 
 ```
-src/twin/mcp/
+apps/memory/src/twin/mcp/
     server.py          # FastMCP instance + lifespan (DB, models, indexes)
     tools.py           # 6 tool handlers (thin delegation)
     ingest.py          # Inline ingestion orchestrator (extraction + indexing)
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
 ## 7. MCP Tool Design: Search + Write
 
-**File:** `src/twin/mcp/tools.py`
+**File:** `apps/memory/src/twin/mcp/tools.py`
 
 ### Design Principle: Tools as Thin Delegates
 
@@ -507,7 +507,7 @@ async def ingest_conversation(conversation_text: str, ctx: Context, title: str |
 - Each conversation gets a UUID-based `source_uri` (always unique, no dedup)
 - This is the tool that the Stop hook triggers at session end -- it extracts people, tasks, episodes, and preferences from the conversation
 
-### Inline Ingestion Pipeline (`src/twin/mcp/ingest.py`)
+### Inline Ingestion Pipeline (`apps/memory/src/twin/mcp/ingest.py`)
 
 All three write tools call `run_ingestion_pipeline()` after creating the `Document`. This function runs the **full memory pipeline inline** -- not via Prefect:
 
@@ -638,7 +638,7 @@ The harness discovers MCP servers via a `.mcp.json` file at the project root:
 4. The harness calls `tools/list` to discover all 6 tools with their schemas
 5. The harness calls `tools/call` when the model wants to use a tool
 
-**Why stdio?** It's the simplest transport -- no ports, no networking, no auth. The harness owns the server's lifecycle (start on open, kill on close). For remote deployment, FastMCP also supports SSE transport (`mcp.run(transport="sse")`), which the `Makefile` exposes via `make serve-mcp TRANSPORT=sse`.
+**Why stdio?** It's the simplest transport -- no ports, no networking, no auth. The harness owns the server's lifecycle (start on open, kill on close). For remote deployment, FastMCP also supports SSE transport (`mcp.run(transport="sse")`), which the `Makefile` exposes via `make memory-serve-mcp TRANSPORT=sse`.
 
 ### Claude Code Integration (3 Layers)
 
@@ -749,8 +749,8 @@ Both `documents` and `knowledge_graph` collections are now empty. The pipelines 
 ### Step 1: Trigger the Data Pipeline
 
 ```bash
-make serve-workflows &        # Start Prefect worker
-make run-substack-rss-data-pipeline  # Trigger RSS ingestion
+make memory-serve-workflows &        # Start Prefect worker
+make memory-run-substack-rss-data-pipeline  # Trigger RSS ingestion
 ```
 
 Or via MCP: Claude Code calls `ingest_url("https://www.decodingai.com/p/some-article")` which routes through the URL ingestion router.
@@ -798,7 +798,7 @@ Document
 ### Step 5: Memory Extraction
 
 ```bash
-make run-memory-pipeline-extraction
+make memory-run-memory-pipeline-extraction
 ```
 
 For the article "The Role of Feature Stores in ML Systems":
@@ -838,7 +838,7 @@ Document.content (5000 tokens)
 ### Step 6: Indexing
 
 ```bash
-make run-memory-pipeline-indexing
+make memory-run-memory-pipeline-indexing
 ```
 
 ```

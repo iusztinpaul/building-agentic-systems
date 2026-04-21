@@ -1,8 +1,9 @@
 """
-Project-level path constants.
+Memory-app path constants.
 
 ``.twin/`` is the working directory for ephemeral/session data that
 should not be committed to version control (added to ``.gitignore``).
+It lives inside the memory app at ``apps/memory/.twin/``.
 """
 
 from pathlib import Path

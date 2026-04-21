@@ -2,7 +2,7 @@
 
 How this repo models **search/write tools for agentic GraphRAG using FastMCP**, with particular focus on the natural-language-to-MongoDB query tool and the multi-input ingestion tools (URLs, files, conversations).
 
-All code references are to files under `src/twin/`.
+All code references are to files under `apps/memory/src/twin/`.
 
 ---
 
@@ -223,7 +223,7 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
                                │ MCP protocol (stdio / http)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    FastMCP("Twin Memory")  — src/twin/mcp/server.py         │
+│                    FastMCP("Twin Memory")  — apps/memory/src/twin/mcp/server.py         │
 │                                                                             │
 │   ┌──── @lifespan app_lifespan ─────────────────────────────────────────┐   │
 │   │  init_mongodb() ─► client      get_llm() ─► llm                     │   │
@@ -231,7 +231,7 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
 │   │  yields lifespan_context = {client, database, llm, embedding_model} │   │
 │   └──────────────────────────────────────────────────────────────────┬──┘   │
 │                                                                      │      │
-│   Tools (registered via @mcp.tool in src/twin/mcp/tools.py):         │      │
+│   Tools (registered via @mcp.tool in apps/memory/src/twin/mcp/tools.py):         │      │
 │                                                                      ▼      │
 │   ┌─────────── READ ────────────┐   ┌─────────── WRITE ──────────────────┐  │
 │   │  query_memory  (NL→pipe)    │   │  ingest_url          (URL)         │  │
@@ -255,14 +255,14 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
              │                   │ Memory Pipeline (post-ingest)          │
              │                   │   chunk → extract → structural         │
              │                   │   → normalize → upsert → embed         │
-             └───────────────────┤  (src/twin/memory/{extraction,         │
+             └───────────────────┤  (apps/memory/src/twin/memory/{extraction,         │
                                  │   indexing})                           │
                                  └────────────────────────────────────────┘
 ```
 
 ---
 
-## 1. FastMCP Server Skeleton (`src/twin/mcp/server.py`)
+## 1. FastMCP Server Skeleton (`apps/memory/src/twin/mcp/server.py`)
 
 A single `FastMCP` instance with a **lifespan** that initializes heavy dependencies once and injects them into every tool call — avoiding per-call DB connects and model loads.
 
@@ -288,7 +288,7 @@ Key moves:
 
 ---
 
-## 2. Three Search Tools (`src/twin/mcp/tools.py`)
+## 2. Three Search Tools (`apps/memory/src/twin/mcp/tools.py`)
 
 The project deliberately exposes **three complementary search tools** at different levels of abstraction, so the agent can self-select per query shape:
 
@@ -327,7 +327,7 @@ The cleanest pattern in the repo. Instead of returning 100 node/edge docs inline
 3. Build `index.yaml` with top-level `session_id` / `query` / `created_at` / `directory` / `total_nodes` / `total_edges` counts, plus one entry per result doc: `id`, `kind`, `type`, `name`, `file`, and a one-line `context` summary.
 4. **Return only the index YAML** to the agent.
 
-The agent scans the lightweight index, then `Read`s only the files it needs. RAG results become a virtual filesystem rather than a context flood. This is implemented in `src/twin/mcp/deep_search.py`.
+The agent scans the lightweight index, then `Read`s only the files it needs. RAG results become a virtual filesystem rather than a context flood. This is implemented in `apps/memory/src/twin/mcp/deep_search.py`.
 
 ---
 
@@ -546,7 +546,7 @@ Two design moves worth calling out:
 The LLM never sees hand-written field lists. Every invocation of `query_memory` rebuilds the system prompt **from the live Pydantic + Enum registries** — so adding a new node/edge type automatically teaches the LLM how to query it.
 
 ```
-  src/twin/entities/knowledge_graph.py                src/twin/entities/ontology.py
+  apps/memory/src/twin/entities/knowledge_graph.py                apps/memory/src/twin/entities/ontology.py
   ┌──────────────────────────────┐         ┌────────────────────────────────────────┐
   │ class NodeType(StrEnum):     │         │ NODE_PROPERTIES: dict[NodeType, BaseModel] = {
   │   DOCUMENT = "document"      │────┐    │   PERSON:     PersonProperties,
@@ -912,10 +912,10 @@ Prefect provides retries, task-level isolation, deployment-based triggering, and
 ### 7a. Where Prefect Sits in the Write Path
 
 ```
-  MCP ingest_url(url)            (src/twin/mcp/tools.py)
+  MCP ingest_url(url)            (apps/memory/src/twin/mcp/tools.py)
          │
          ▼
-  _ingest_url_dispatch(url)      (src/twin/data/core/ingest.py)
+  _ingest_url_dispatch(url)      (apps/memory/src/twin/data/core/ingest.py)
          │
          ▼
   ingest_substack_article(url)   ◄──── @flow  ───── Prefect-owned
@@ -931,7 +931,7 @@ Prefect provides retries, task-level isolation, deployment-based triggering, and
          │
          ▼
   run_ingestion_pipeline(document, client, db, llm, embedding_model)
-         │                          (src/twin/mcp/ingest.py — NOT Prefect)
+         │                          (apps/memory/src/twin/mcp/ingest.py — NOT Prefect)
          │
          │  extract_and_store(llm, ...)  # chunk → LLM extract → normalize → upsert
          │  embed_nodes(client, db, ...) # incremental: only embedding: {$in: [[], None]}
@@ -982,7 +982,7 @@ Each failure mode below is traced to the Prefect feature that absorbs it.
 
 **Scheduling + deployment decoupling** — `prefect deployment run ingest-all-data-etl`
 - *Without Prefect:* You wire cron, a Bash script that sets env vars, a locking mechanism (to prevent double-runs), log rotation, and a Slack alert on exit code != 0. Then you do it again for `memory-extraction-etl`. And again for `memory-indexing-etl`.
-- *With Prefect:* `to_deployment(name=...)` on each flow, served by `make serve-workflows`. Triggered by the Makefile, by a cron block in the deployment, by a webhook, or from the MCP tool path (`ingest_substack_article` is *the same flow* whether called from MCP or from `prefect deployment run`). One runtime, one UI, one set of retry semantics.
+- *With Prefect:* `to_deployment(name=...)` on each flow, served by `make memory-serve-workflows`. Triggered by the Makefile, by a cron block in the deployment, by a webhook, or from the MCP tool path (`ingest_substack_article` is *the same flow* whether called from MCP or from `prefect deployment run`). One runtime, one UI, one set of retry semantics.
 
 ### 7c. Why Query Tools Don't Need Prefect
 
@@ -999,7 +999,7 @@ Wrapping them would be **cargo-culting the orchestrator**. The rule of thumb in 
 
 ## 8. FastMCP — Why This Framework, and What It Gives Us
 
-The entire MCP surface of this project is **~300 lines** across `src/twin/mcp/server.py`, `tools.py`, `ingest.py`, and `deep_search.py`. The only framework imports are:
+The entire MCP surface of this project is **~300 lines** across `apps/memory/src/twin/mcp/server.py`, `tools.py`, `ingest.py`, and `deep_search.py`. The only framework imports are:
 
 ```python
 from fastmcp import FastMCP, Context
@@ -1019,7 +1019,7 @@ Everything the agent sees — six tools, their schemas, their descriptions, the 
 | **Tool description from docstring** | Every tool | The multi-line docstring in `query_memory`/`search_memory`/etc. becomes what the calling LLM sees when deciding which tool to pick. The `Args:` block is parsed into per-parameter descriptions. |
 | **`Context` parameter injection** | `ctx: Context` on every `@mcp.tool` | `ctx.lifespan_context` is the DI dict yielded by `app_lifespan`. FastMCP **omits `ctx` from the agent-facing schema** — it sees only `query`, `visualize`, etc. |
 | **Return-value auto-serialization** | Tools return `str` (JSON payloads) | FastMCP wraps the return in `TextContent` for the MCP protocol — no manual `types.TextContent(type="text", text=...)` wrapping. |
-| **`mcp.run()` transport** | `scripts/serve_mcp.py` | One line starts the stdio transport. No `asyncio.run(stdio_server(...))` boilerplate, no `InitializationOptions` struct. |
+| **`mcp.run()` transport** | `apps/memory/scripts/serve_mcp.py` | One line starts the stdio transport. No `asyncio.run(stdio_server(...))` boilerplate, no `InitializationOptions` struct. |
 
 ### 8b. Concrete Before/After — Standard `mcp` SDK vs. FastMCP
 

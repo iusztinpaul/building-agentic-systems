@@ -4,9 +4,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+COPY apps/memory/pyproject.toml apps/memory/uv.lock apps/memory/README.md ./
 RUN uv sync --no-dev --frozen
 
-COPY src/ src/
+COPY apps/memory/src/ src/
 
 ENV PYTHONPATH=/app/src

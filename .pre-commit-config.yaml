@@ -13,8 +13,9 @@ repos:
         types_or: [yaml, json5]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff version.
-    rev: v0.12.1
+    # Ruff version. Keep in sync with the ruff dev dep in apps/memory/pyproject.toml
+    # so pre-commit and `make memory-lint-check` use the same parser (needed for Python 3.14 PEP 758 syntax).
+    rev: v0.15.2
     hooks:
       # Run the linter.
       - id: ruff-check

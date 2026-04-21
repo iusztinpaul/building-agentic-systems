@@ -106,7 +106,7 @@ services:
   prefect-worker:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: apps/memory/docker/Dockerfile
     container_name: twin-prefect-worker
     depends_on:
       prefect-server:

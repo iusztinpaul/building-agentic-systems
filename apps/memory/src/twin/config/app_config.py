@@ -6,7 +6,7 @@ from a YAML file.  Infrastructure secrets stay in settings.py / .env.
 
 Resolution order:
     1. Path in APP_CONFIG_PATH env var
-    2. configs/default.yaml (project root)
+    2. configs/default.yaml (memory app root: ``apps/memory/``)
 """
 
 import os
