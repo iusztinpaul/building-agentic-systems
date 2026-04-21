@@ -1,0 +1,6 @@
+# git blame revisions to ignore.
+# Enable once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# refactor: Split repo into monorepo with apps/memory and apps/harness placeholder
+6b23f208fb9fb9be17031d5f38d60bef960bec10
