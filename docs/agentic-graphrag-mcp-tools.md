@@ -2,7 +2,7 @@
 
 How this repo models **search/write tools for agentic GraphRAG using FastMCP**, with particular focus on the natural-language-to-MongoDB query tool and the multi-input ingestion tools (URLs, files, conversations).
 
-All code references are to files under `src/twin/`.
+All code references are to files under `apps/memory/src/tree/`.
 
 ---
 
@@ -10,7 +10,7 @@ All code references are to files under `src/twin/`.
 
 ### The Problem
 
-LLMs forget. Every new conversation starts from scratch. Classic RAG — chunk a document, embed it, do cosine-similarity search — retrieves "things that look similar to your query," but it can't retrieve "things that are *connected* to your query." A digital twin needs both: the chunk where Alice said X, **and** the tasks Alice is working on, the people Alice collaborates with, the episodes Alice lived through that inform her current thinking.
+LLMs forget. Every new conversation starts from scratch. Classic RAG — chunk a document, embed it, do cosine-similarity search — retrieves "things that look similar to your query," but it can't retrieve "things that are *connected* to your query." A personal assistant rooted in your life needs both: the chunk where Alice said X, **and** the tasks Alice is working on, the people Alice collaborates with, the episodes Alice lived through that inform her current thinking.
 
 Vector search alone flattens that graph structure into a list. You lose relationships, provenance, and the ability to walk from "the person I was talking to" to "what they owe me."
 
@@ -148,7 +148,7 @@ The numbered flow below traces one full cycle: ingest a URL, extract knowledge, 
 12. **`query_memory`**: the agent's English question goes to an LLM, which emits a MongoDB aggregation pipeline. A validator enforces allow-listed stages, rewrites unsafe stages, injects a `$limit`, and swaps `"__EMBED__"` placeholders with real vectors. On failure, the validation error is fed back to the LLM for a self-correcting retry.
 13. **`search_memory`**: two parallel searches (vector + `$text`) are fused via Reciprocal Rank Fusion to pick seed nodes, then a bidirectional `$graphLookup` expands the graph `max_hops` deep.
 14. **`deep_search_memory`**: same hybrid engine at higher `top_k`/`max_hops`; results are written to `.memory/{session_id}/*.md` and only a YAML index returns to the agent. The agent reads individual files on demand.
-15. The agent gets back a JSON payload (or a YAML index) of nodes + edges, already filtered and shaped, and continues reasoning — now grounded in the twin's persistent memory.
+15. The agent gets back a JSON payload (or a YAML index) of nodes + edges, already filtered and shaped, and continues reasoning — now grounded in Tree's persistent memory.
 
 ### End-to-End Diagram (Numbered Flow)
 
@@ -223,7 +223,7 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
                                │ MCP protocol (stdio / http)
                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    FastMCP("Twin Memory")  — src/twin/mcp/server.py         │
+│                    FastMCP("Tree Memory")  — apps/memory/src/tree/mcp/server.py         │
 │                                                                             │
 │   ┌──── @lifespan app_lifespan ─────────────────────────────────────────┐   │
 │   │  init_mongodb() ─► client      get_llm() ─► llm                     │   │
@@ -231,7 +231,7 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
 │   │  yields lifespan_context = {client, database, llm, embedding_model} │   │
 │   └──────────────────────────────────────────────────────────────────┬──┘   │
 │                                                                      │      │
-│   Tools (registered via @mcp.tool in src/twin/mcp/tools.py):         │      │
+│   Tools (registered via @mcp.tool in apps/memory/src/tree/mcp/tools.py):         │      │
 │                                                                      ▼      │
 │   ┌─────────── READ ────────────┐   ┌─────────── WRITE ──────────────────┐  │
 │   │  query_memory  (NL→pipe)    │   │  ingest_url          (URL)         │  │
@@ -255,14 +255,14 @@ Bird's-eye view of the MCP server, the six tools it exposes, and what each tool 
              │                   │ Memory Pipeline (post-ingest)          │
              │                   │   chunk → extract → structural         │
              │                   │   → normalize → upsert → embed         │
-             └───────────────────┤  (src/twin/memory/{extraction,         │
+             └───────────────────┤  (apps/memory/src/tree/memory/{extraction,         │
                                  │   indexing})                           │
                                  └────────────────────────────────────────┘
 ```
 
 ---
 
-## 1. FastMCP Server Skeleton (`src/twin/mcp/server.py`)
+## 1. FastMCP Server Skeleton (`apps/memory/src/tree/mcp/server.py`)
 
 A single `FastMCP` instance with a **lifespan** that initializes heavy dependencies once and injects them into every tool call — avoiding per-call DB connects and model loads.
 
@@ -276,8 +276,8 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict, None]:
     yield {"client": client, "database": database, "llm": llm, "embedding_model": embedding_model}
     await client.close()
 
-mcp = FastMCP("Twin Memory", instructions=..., lifespan=app_lifespan)
-import twin.mcp.tools  # side-effect: registers @mcp.tool decorators
+mcp = FastMCP("Tree Memory", instructions=..., lifespan=app_lifespan)
+import tree.mcp.tools  # side-effect: registers @mcp.tool decorators
 ```
 
 Key moves:
@@ -288,7 +288,7 @@ Key moves:
 
 ---
 
-## 2. Three Search Tools (`src/twin/mcp/tools.py`)
+## 2. Three Search Tools (`apps/memory/src/tree/mcp/tools.py`)
 
 The project deliberately exposes **three complementary search tools** at different levels of abstraction, so the agent can self-select per query shape:
 
@@ -327,7 +327,7 @@ The cleanest pattern in the repo. Instead of returning 100 node/edge docs inline
 3. Build `index.yaml` with top-level `session_id` / `query` / `created_at` / `directory` / `total_nodes` / `total_edges` counts, plus one entry per result doc: `id`, `kind`, `type`, `name`, `file`, and a one-line `context` summary.
 4. **Return only the index YAML** to the agent.
 
-The agent scans the lightweight index, then `Read`s only the files it needs. RAG results become a virtual filesystem rather than a context flood. This is implemented in `src/twin/mcp/deep_search.py`.
+The agent scans the lightweight index, then `Read`s only the files it needs. RAG results become a virtual filesystem rather than a context flood. This is implemented in `apps/memory/src/tree/mcp/deep_search.py`.
 
 ---
 
@@ -546,7 +546,7 @@ Two design moves worth calling out:
 The LLM never sees hand-written field lists. Every invocation of `query_memory` rebuilds the system prompt **from the live Pydantic + Enum registries** — so adding a new node/edge type automatically teaches the LLM how to query it.
 
 ```
-  src/twin/entities/knowledge_graph.py                src/twin/entities/ontology.py
+  apps/memory/src/tree/entities/knowledge_graph.py                apps/memory/src/tree/entities/ontology.py
   ┌──────────────────────────────┐         ┌────────────────────────────────────────┐
   │ class NodeType(StrEnum):     │         │ NODE_PROPERTIES: dict[NodeType, BaseModel] = {
   │   DOCUMENT = "document"      │────┐    │   PERSON:     PersonProperties,
@@ -912,10 +912,10 @@ Prefect provides retries, task-level isolation, deployment-based triggering, and
 ### 7a. Where Prefect Sits in the Write Path
 
 ```
-  MCP ingest_url(url)            (src/twin/mcp/tools.py)
+  MCP ingest_url(url)            (apps/memory/src/tree/mcp/tools.py)
          │
          ▼
-  _ingest_url_dispatch(url)      (src/twin/data/core/ingest.py)
+  _ingest_url_dispatch(url)      (apps/memory/src/tree/data/core/ingest.py)
          │
          ▼
   ingest_substack_article(url)   ◄──── @flow  ───── Prefect-owned
@@ -931,7 +931,7 @@ Prefect provides retries, task-level isolation, deployment-based triggering, and
          │
          ▼
   run_ingestion_pipeline(document, client, db, llm, embedding_model)
-         │                          (src/twin/mcp/ingest.py — NOT Prefect)
+         │                          (apps/memory/src/tree/mcp/ingest.py — NOT Prefect)
          │
          │  extract_and_store(llm, ...)  # chunk → LLM extract → normalize → upsert
          │  embed_nodes(client, db, ...) # incremental: only embedding: {$in: [[], None]}
@@ -982,7 +982,7 @@ Each failure mode below is traced to the Prefect feature that absorbs it.
 
 **Scheduling + deployment decoupling** — `prefect deployment run ingest-all-data-etl`
 - *Without Prefect:* You wire cron, a Bash script that sets env vars, a locking mechanism (to prevent double-runs), log rotation, and a Slack alert on exit code != 0. Then you do it again for `memory-extraction-etl`. And again for `memory-indexing-etl`.
-- *With Prefect:* `to_deployment(name=...)` on each flow, served by `make serve-workflows`. Triggered by the Makefile, by a cron block in the deployment, by a webhook, or from the MCP tool path (`ingest_substack_article` is *the same flow* whether called from MCP or from `prefect deployment run`). One runtime, one UI, one set of retry semantics.
+- *With Prefect:* `to_deployment(name=...)` on each flow, served by `make memory-serve-workflows`. Triggered by the Makefile, by a cron block in the deployment, by a webhook, or from the MCP tool path (`ingest_substack_article` is *the same flow* whether called from MCP or from `prefect deployment run`). One runtime, one UI, one set of retry semantics.
 
 ### 7c. Why Query Tools Don't Need Prefect
 
@@ -999,7 +999,7 @@ Wrapping them would be **cargo-culting the orchestrator**. The rule of thumb in 
 
 ## 8. FastMCP — Why This Framework, and What It Gives Us
 
-The entire MCP surface of this project is **~300 lines** across `src/twin/mcp/server.py`, `tools.py`, `ingest.py`, and `deep_search.py`. The only framework imports are:
+The entire MCP surface of this project is **~300 lines** across `apps/memory/src/tree/mcp/server.py`, `tools.py`, `ingest.py`, and `deep_search.py`. The only framework imports are:
 
 ```python
 from fastmcp import FastMCP, Context
@@ -1019,7 +1019,7 @@ Everything the agent sees — six tools, their schemas, their descriptions, the 
 | **Tool description from docstring** | Every tool | The multi-line docstring in `query_memory`/`search_memory`/etc. becomes what the calling LLM sees when deciding which tool to pick. The `Args:` block is parsed into per-parameter descriptions. |
 | **`Context` parameter injection** | `ctx: Context` on every `@mcp.tool` | `ctx.lifespan_context` is the DI dict yielded by `app_lifespan`. FastMCP **omits `ctx` from the agent-facing schema** — it sees only `query`, `visualize`, etc. |
 | **Return-value auto-serialization** | Tools return `str` (JSON payloads) | FastMCP wraps the return in `TextContent` for the MCP protocol — no manual `types.TextContent(type="text", text=...)` wrapping. |
-| **`mcp.run()` transport** | `scripts/serve_mcp.py` | One line starts the stdio transport. No `asyncio.run(stdio_server(...))` boilerplate, no `InitializationOptions` struct. |
+| **`mcp.run()` transport** | `apps/memory/scripts/serve_mcp.py` | One line starts the stdio transport. No `asyncio.run(stdio_server(...))` boilerplate, no `InitializationOptions` struct. |
 
 ### 8b. Concrete Before/After — Standard `mcp` SDK vs. FastMCP
 
@@ -1034,7 +1034,7 @@ from mcp.server.stdio import stdio_server
 from mcp.server.models import InitializationOptions
 import asyncio, json
 
-server = Server("twin-memory")
+server = Server("tree-memory")
 
 # Resources manually tracked outside the framework.
 _state: dict = {}
@@ -1122,7 +1122,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict, None]:
            "llm": llm, "embedding_model": embedding_model}
     await client.close()
 
-mcp = FastMCP("Twin Memory", instructions="...", lifespan=app_lifespan)
+mcp = FastMCP("Tree Memory", instructions="...", lifespan=app_lifespan)
 
 # mcp/tools.py
 @mcp.tool
@@ -1296,16 +1296,16 @@ The **most-used ingestion path**, because most knowledge worth capturing lives o
 
 Why dispatch and not one big URL fetcher? Because "fetching a URL" is a misleadingly abstract operation — Substack articles need author/date extraction, YouTube needs transcript fetching, arXiv needs LaTeX-aware parsing. A registry keeps each source's quirks isolated; adding a new source means writing one handler and registering its domain.
 
-**Why is this the default over `ingest_file`?** Because the typical twin-memory use case is continuous capture from reading, not from local curation. "I just read this article, remember it" >> "I maintain a notes folder and sync it."
+**Why is this the default over `ingest_file`?** Because the typical tree-memory use case is continuous capture from reading, not from local curation. "I just read this article, remember it" >> "I maintain a notes folder and sync it."
 
 **3. `ingest_conversation` — continual learning from the current context**
 
-Used to **feed the conversation I'm currently having back into the twin's memory**. Everything the twin knows about me, my ongoing projects, and recent decisions comes from conversations — not curated documents. Without this tool, the twin would know my published writing but not the live discussion where I actually work things out.
+Used to **feed the conversation I'm currently having back into Tree's memory**. Everything Tree knows about me, my ongoing projects, and recent decisions comes from conversations — not curated documents. Without this tool, Tree would know my published writing but not the live discussion where I actually work things out.
 
 Key design choices:
-- **Content-hash source_uri** (`conversation://<sha256[:16]>`) — so re-ingesting the same conversation is a no-op, and the twin never stores duplicates of the same chat.
+- **Content-hash source_uri** (`conversation://<sha256[:16]>`) — so re-ingesting the same conversation is a no-op, and Tree never stores duplicates of the same chat.
 - **Same extraction pipeline** as files/URLs — conversations become `Document`s with `source_type=CONVERSATION`, and the LLM extracts people, tasks, episodes, preferences from them just like from any other document. No special-cased path.
-- **Agent-invoked, not harness-invoked.** The agent decides when a conversation has reached a "checkpoint worth remembering" and calls this tool mid-session. In this repo a Stop hook + the `twin-memory` skill trigger it automatically at end of session, but it's also callable explicitly ("remember what we just discussed").
+- **Agent-invoked, not harness-invoked.** The agent decides when a conversation has reached a "checkpoint worth remembering" and calls this tool mid-session. In this repo a Stop hook + the `tree-memory` skill trigger it automatically at end of session, but it's also callable explicitly ("remember what we just discussed").
 
 Why a dedicated tool over "just save the conversation to a file and call `ingest_file`"? Two reasons:
 - **Zero-friction capture.** The agent has the conversation text in its context already; writing it to a temp file, calling `ingest_file`, and cleaning up the file is three tool calls when one would do.

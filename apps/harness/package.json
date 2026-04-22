@@ -1,0 +1,38 @@
+{
+  "name": "tree",
+  "version": "0.1.0",
+  "description": "Tree — a minimal coding-agent harness for Tree: Your Rooted Personal Assistant.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "tree": "./src/index.tsx"
+  },
+  "scripts": {
+    "dev": "bun --watch run src/index.tsx",
+    "build": "bun build src/index.tsx --compile --outfile dist/tree",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "biome format --write src tests",
+    "format:check": "biome format src tests",
+    "lint": "biome check src tests"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ink": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.3.0",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "latest",
+    "@types/react": "^18.3.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -1,6 +1,6 @@
 # Agentic GraphRAG Architecture Report
 
-> Comprehensive E2E technical report for blog/LinkedIn content about building a digital twin with knowledge graphs, FastMCP, and Claude Code.
+> Comprehensive E2E technical report for blog/LinkedIn content about building Tree (a rooted personal assistant) with knowledge graphs, FastMCP, and Claude Code.
 
 ---
 
@@ -10,7 +10,7 @@
 
 ### Architecture
 
-All pipelines inherit from `BaseETL` (`src/twin/data/core/base.py`), which defines the contract:
+All pipelines inherit from `BaseETL` (`apps/memory/src/tree/data/core/base.py`), which defines the contract:
 - `extract_one(raw_entry) -> Document` -- transform raw data
 - `run(source_uri) -> list[Document]` -- fetch, extract, persist
 - `run_batch(source_uris)` -- process multiple sources
@@ -27,7 +27,7 @@ Each pipeline is orchestrated via **Prefect flows** with retry logic and task-le
 | **Local Files** | `data/file.py` | Filesystem read | Supports `.txt`, `.md`, `.html`; HTML auto-converted to plain text |
 | **Conversations** | `data/conversation.py` | Direct text input | UUID-based `source_uri`; always unique (no dedup) |
 
-### Document Data Model (`src/twin/entities/documents.py`)
+### Document Data Model (`apps/memory/src/tree/entities/documents.py`)
 
 ```python
 class Document(BeanieDocument):
@@ -58,8 +58,8 @@ Registry-based dispatcher that routes URLs to the correct pipeline automatically
 
 **Purpose:** Transform raw `documents` into a structured knowledge graph of nodes and edges in the `knowledge_graph` collection.
 
-**File:** `src/twin/memory/extraction/core.py`  
-**Prefect flow:** `src/twin/memory/extraction/pipeline.py`
+**File:** `apps/memory/src/tree/memory/extraction/core.py`  
+**Prefect flow:** `apps/memory/src/tree/memory/extraction/pipeline.py`
 
 ### 5-Stage Pipeline
 
@@ -93,7 +93,7 @@ Document.content
                                  Idempotent: running twice produces the same result
 ```
 
-### Ontology Schema (`src/twin/entities/ontology.py`)
+### Ontology Schema (`apps/memory/src/tree/entities/ontology.py`)
 
 **Node types (6):**
 | Type | Properties | LLM-Extractable? |
@@ -124,7 +124,7 @@ Document.content
 ## 3. Knowledge Graph Data Model
 
 **Collection:** Single `knowledge_graph` MongoDB collection  
-**File:** `src/twin/entities/knowledge_graph.py`
+**File:** `apps/memory/src/tree/entities/knowledge_graph.py`
 
 ### Single-Collection Design
 
@@ -171,8 +171,8 @@ This enables MongoDB's `$graphLookup` for multi-hop traversal within one collect
 ## 4. Indexing Pipeline
 
 **Purpose:** Generate embeddings for all nodes and create search indexes.  
-**File:** `src/twin/memory/indexing/core.py`  
-**Prefect flow:** `src/twin/memory/indexing/pipeline.py`
+**File:** `apps/memory/src/tree/memory/indexing/core.py`  
+**Prefect flow:** `apps/memory/src/tree/memory/indexing/pipeline.py`
 
 ### Step 1: Node Embedding (`embed_nodes()`)
 
@@ -204,7 +204,7 @@ Creates **two indexes** on the `knowledge_graph` collection:
 
 ## 5. Query Logic (3 Strategies)
 
-**Files:** `src/twin/memory/query/core.py`, `src/twin/memory/query/nl_query.py`
+**Files:** `apps/memory/src/tree/memory/query/core.py`, `apps/memory/src/tree/memory/query/nl_query.py`
 
 ### Strategy 1: Hybrid Search + Graph Expansion (`search_memory`)
 
@@ -245,7 +245,7 @@ Creates **two indexes** on the `knowledge_graph` collection:
 ### Strategy 3: Deep Search (`deep_search_memory`)
 
 - Broad exploration with larger defaults (`top_k=50`, `max_hops=3`)
-- **Progressive disclosure**: Writes individual markdown files per node/edge to `.twin/{session_id}/`
+- **Progressive disclosure**: Writes individual markdown files per node/edge to `.tree/{session_id}/`
 - Returns a lightweight **YAML index** with one-line summaries
 - Claude Code reads individual files on-demand based on the index
 
@@ -254,8 +254,8 @@ Creates **two indexes** on the `knowledge_graph` collection:
 ## 6. Building the GraphRAG FastMCP Server
 
 **Framework:** FastMCP  
-**File:** `src/twin/mcp/server.py`  
-**Entry point:** `scripts/serve_mcp.py`
+**File:** `apps/memory/src/tree/mcp/server.py`  
+**Entry point:** `apps/memory/scripts/serve_mcp.py`
 
 ### Why MCP?
 
@@ -268,7 +268,7 @@ This means the same knowledge graph can serve multiple agents, multiple interfac
 The MCP server is a thin orchestration layer. It owns **zero** business logic. Every tool handler delegates to existing business logic modules:
 
 ```
-src/twin/mcp/
+apps/memory/src/tree/mcp/
     server.py          # FastMCP instance + lifespan (DB, models, indexes)
     tools.py           # 6 tool handlers (thin delegation)
     ingest.py          # Inline ingestion orchestrator (extraction + indexing)
@@ -321,7 +321,7 @@ The `FastMCP` constructor takes an `instructions` string -- a natural language d
 
 ```python
 mcp = FastMCP(
-    "Twin Memory",
+    "Tree Memory",
     instructions=(
         "Query and build a personal knowledge graph of documents, people, tasks, "
         "episodes, and preferences. Use 'query_memory' for flexible natural language "
@@ -341,7 +341,7 @@ Tools are registered via the `@mcp.tool` decorator in a separate `tools.py` file
 
 ```python
 # server.py — bottom of file
-import twin.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
+import tree.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
 ```
 
 This import side-effect pattern keeps `server.py` focused on infrastructure (lifespan, config) while `tools.py` owns all tool definitions. FastMCP reads each tool's **function signature** (parameter names, types, defaults) and **docstring** (description, arg docs) to auto-generate the MCP tool schema that the harness sees.
@@ -352,10 +352,10 @@ The entry point is minimal -- just logging setup and `mcp.run()`:
 
 ```python
 # scripts/serve_mcp.py
-from twin.logging import init_logger
+from tree.logging import init_logger
 init_logger()
 
-from twin.mcp.server import mcp
+from tree.mcp.server import mcp
 
 if __name__ == "__main__":
     mcp.run()
@@ -367,7 +367,7 @@ if __name__ == "__main__":
 
 ## 7. MCP Tool Design: Search + Write
 
-**File:** `src/twin/mcp/tools.py`
+**File:** `apps/memory/src/tree/mcp/tools.py`
 
 ### Design Principle: Tools as Thin Delegates
 
@@ -435,7 +435,7 @@ async def deep_search_memory(
 **Why it exists:** Large knowledge graphs can return hundreds of nodes and edges for a broad query. Dumping all of that into the harness context window wastes tokens and confuses the model. Deep search solves this with **progressive disclosure**:
 
 1. Runs an expanded search (50 seeds, 3 hops -- much wider than `search_memory`)
-2. Writes **individual markdown files** per node/edge to `.twin/{session_id}/`
+2. Writes **individual markdown files** per node/edge to `.tree/{session_id}/`
 3. Returns a **YAML index** with one-line summaries:
    ```yaml
    results:
@@ -507,7 +507,7 @@ async def ingest_conversation(conversation_text: str, ctx: Context, title: str |
 - Each conversation gets a UUID-based `source_uri` (always unique, no dedup)
 - This is the tool that the Stop hook triggers at session end -- it extracts people, tasks, episodes, and preferences from the conversation
 
-### Inline Ingestion Pipeline (`src/twin/mcp/ingest.py`)
+### Inline Ingestion Pipeline (`apps/memory/src/tree/mcp/ingest.py`)
 
 All three write tools call `run_ingestion_pipeline()` after creating the `Document`. This function runs the **full memory pipeline inline** -- not via Prefect:
 
@@ -548,11 +548,11 @@ def _visualize(docs: list[dict]) -> str:
 
 ## 8. Skills: Teaching the Harness When to Use Each Tool
 
-**File:** `.claude/skills/twin-memory/SKILL.md`
+**File:** `.claude/skills/tree-memory/SKILL.md`
 
 ### What is a Skill?
 
-A skill is a markdown file that provides **structured guidance** to the AI model inside the harness. When the user invokes `/twin-memory <query>`, the skill content is injected into the model's context alongside the MCP tool schemas. Skills bridge the gap between "the tool exists" and "the model knows when and how to use it well."
+A skill is a markdown file that provides **structured guidance** to the AI model inside the harness. When the user invokes `/tree-memory <query>`, the skill content is injected into the model's context alongside the MCP tool schemas. Skills bridge the gap between "the tool exists" and "the model knows when and how to use it well."
 
 Without skills, the model relies only on tool docstrings -- which describe **what** each tool does, but not **when** to pick one over another, or **how** to present results to the user.
 
@@ -622,7 +622,7 @@ The harness discovers MCP servers via a `.mcp.json` file at the project root:
 ```json
 {
   "mcpServers": {
-    "twin-memory": {
+    "tree-memory": {
       "command": "uv",
       "args": ["run", "python", "scripts/serve_mcp.py"],
       "env": { "ENV_FILE_PATH": ".env" }
@@ -638,7 +638,7 @@ The harness discovers MCP servers via a `.mcp.json` file at the project root:
 4. The harness calls `tools/list` to discover all 6 tools with their schemas
 5. The harness calls `tools/call` when the model wants to use a tool
 
-**Why stdio?** It's the simplest transport -- no ports, no networking, no auth. The harness owns the server's lifecycle (start on open, kill on close). For remote deployment, FastMCP also supports SSE transport (`mcp.run(transport="sse")`), which the `Makefile` exposes via `make serve-mcp TRANSPORT=sse`.
+**Why stdio?** It's the simplest transport -- no ports, no networking, no auth. The harness owns the server's lifecycle (start on open, kill on close). For remote deployment, FastMCP also supports SSE transport (`mcp.run(transport="sse")`), which the `Makefile` exposes via `make memory-serve-mcp TRANSPORT=sse`.
 
 ### Claude Code Integration (3 Layers)
 
@@ -648,9 +648,9 @@ Claude Code connects to the MCP server through three complementary layers:
 
 The base connection. Claude Code spawns the server, discovers 6 tools, and can call them during conversation. This works out-of-the-box with zero additional config.
 
-#### Layer 2: Skills (`.claude/skills/twin-memory/SKILL.md`)
+#### Layer 2: Skills (`.claude/skills/tree-memory/SKILL.md`)
 
-Skills are a **Claude Code-specific** feature (not part of the MCP protocol). When the user types `/twin-memory <query>`, the skill content is injected into the model's context. The skill teaches the model:
+Skills are a **Claude Code-specific** feature (not part of the MCP protocol). When the user types `/tree-memory <query>`, the skill content is injected into the model's context. The skill teaches the model:
 - Which tool to pick for which query type
 - How to present results to the user
 - The progressive disclosure workflow for deep search
@@ -667,7 +667,7 @@ Hooks are another **Claude Code-specific** feature. They run shell commands in r
     "Stop": [{
       "hooks": [{
         "type": "command",
-        "command": "SESSION_ID=$(jq -r '.session_id // empty'); SENTINEL=\"/tmp/.claude-twin-ingested-${SESSION_ID}\"; if [ -f \"$SENTINEL\" ]; then echo '{}'; else touch \"$SENTINEL\"; echo '{\"decision\":\"block\",\"reason\":\"Please run: /twin-memory extract current conversation\"}'; fi",
+        "command": "SESSION_ID=$(jq -r '.session_id // empty'); SENTINEL=\"/tmp/.claude-tree-ingested-${SESSION_ID}\"; if [ -f \"$SENTINEL\" ]; then echo '{}'; else touch \"$SENTINEL\"; echo '{\"decision\":\"block\",\"reason\":\"Please run: /tree-memory extract current conversation\"}'; fi",
         "timeout": 5
       }]
     }]
@@ -677,8 +677,8 @@ Hooks are another **Claude Code-specific** feature. They run shell commands in r
 
 **How it works:**
 1. Claude Code fires the Stop hook when the model finishes a response
-2. The hook checks for a sentinel file at `/tmp/.claude-twin-ingested-{SESSION_ID}`
-3. **First time this session:** No sentinel file exists -> hook returns `"decision": "block"` with the message "Please run: /twin-memory extract current conversation"
+2. The hook checks for a sentinel file at `/tmp/.claude-tree-ingested-{SESSION_ID}`
+3. **First time this session:** No sentinel file exists -> hook returns `"decision": "block"` with the message "Please run: /tree-memory extract current conversation"
 4. Claude Code shows this message to the model, which then invokes the `ingest_conversation` tool
 5. **Subsequent turns:** Sentinel file exists -> hook passes through silently
 
@@ -740,7 +740,7 @@ Here's the complete flow when the configured RSS feed `https://www.decodingai.co
 ### Step 0: Start Fresh (Empty Collections)
 
 ```bash
-mongosh -u twin -p twin --authenticationDatabase admin twin \
+mongosh -u tree -p tree --authenticationDatabase admin tree \
   --eval 'db.documents.drop(); db.knowledge_graph.drop(); print("Collections cleared.")'
 ```
 
@@ -749,8 +749,8 @@ Both `documents` and `knowledge_graph` collections are now empty. The pipelines 
 ### Step 1: Trigger the Data Pipeline
 
 ```bash
-make serve-workflows &        # Start Prefect worker
-make run-substack-rss-data-pipeline  # Trigger RSS ingestion
+make memory-serve-workflows &        # Start Prefect worker
+make memory-run-substack-rss-data-pipeline  # Trigger RSS ingestion
 ```
 
 Or via MCP: Claude Code calls `ingest_url("https://www.decodingai.com/p/some-article")` which routes through the URL ingestion router.
@@ -798,7 +798,7 @@ Document
 ### Step 5: Memory Extraction
 
 ```bash
-make run-memory-pipeline-extraction
+make memory-run-memory-pipeline-extraction
 ```
 
 For the article "The Role of Feature Stores in ML Systems":
@@ -838,7 +838,7 @@ Document.content (5000 tokens)
 ### Step 6: Indexing
 
 ```bash
-make run-memory-pipeline-indexing
+make memory-run-memory-pipeline-indexing
 ```
 
 ```
@@ -860,7 +860,7 @@ Ensure indexes:
 
 User in Claude Code: "What does Paul Iusztin think about harness engineering?"
 
-Claude Code invokes the `twin-memory` skill, which calls `search_memory`:
+Claude Code invokes the `tree-memory` skill, which calls `search_memory`:
 
 ```
 query: "What does Paul Iusztin think about harness engineering?"
@@ -911,8 +911,8 @@ Claude: "Ingested 'The Role of Feature Stores in ML Systems' - extracted 15 node
 At the end of every Claude Code session:
 ```
 Stop hook fires -> checks sentinel file
-    |-- First time this session? -> Block: "Please run: /twin-memory extract current conversation"
-    |-- User runs: /twin-memory extract current conversation
+    |-- First time this session? -> Block: "Please run: /tree-memory extract current conversation"
+    |-- User runs: /tree-memory extract current conversation
     |-- Claude calls ingest_conversation(conversation_text)
     |-- Extracts people, tasks, episodes, preferences from the conversation
     |-- Knowledge graph grows with every conversation
@@ -927,13 +927,13 @@ Stop hook fires -> checks sentinel file
                     ┌──────────────────────────────────────────────────┐
                     │              Claude Code (CLI / IDE)             │
                     │                                                  │
-                    │  Skills: /twin-memory                           │
+                    │  Skills: /tree-memory                           │
                     │  Hooks: Stop -> auto-ingest conversations       │
                     └─────────────────┬────────────────────────────────┘
                                       │ stdio (JSON-RPC)
                                       │
                     ┌─────────────────▼────────────────────────────────┐
-                    │           FastMCP Server ("Twin Memory")         │
+                    │           FastMCP Server ("Tree Memory")         │
                     │                                                  │
                     │  Search:   query_memory | search_memory          │
                     │            deep_search_memory                    │

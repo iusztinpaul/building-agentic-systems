@@ -4,5 +4,11 @@ __pycache__/
 .git/
 .env
 .pytest_cache/
-tests/
+apps/memory/.venv/
+apps/memory/.pytest_cache/
+apps/memory/.ruff_cache/
+apps/memory/.twin/
+apps/memory/tests/
+apps/harness/node_modules/
+apps/harness/dist/
 docker/

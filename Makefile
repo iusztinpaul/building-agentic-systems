@@ -5,122 +5,56 @@ endif
 include .env
 export
 
-export UV_PROJECT_ENVIRONMENT=.venv
-export VIRTUAL_ENV=.venv
-export PYTHONPATH = ./src/
-
-.PHONY: tests
-
-# --- Default Values ---
-
-QA_FOLDERS := src/ tests/ scripts/ deploy/
-DIR_PATH ?= inputs/tests/00_debug
-HUMAN_FEEDBACK ?=
-TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
+.PHONY: help tests unit-tests integration-tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
 
 # --- Utilities ---
 
 help: # Display this help message with a list of available commands.
-	@grep -E '^[a-zA-Z0-9 -]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m$$(echo $$l | cut -f 1 -d':')\033[00m:$$(echo $$l | cut -f 2- -d'#')\n"; done
+	@grep -E '^[a-zA-Z0-9 _%-]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m%s\033[00m:%s\n" "$$(echo $$l | cut -f 1 -d':')" "$$(echo $$l | cut -f 2- -d'#')"; done
 
-build: # Build the project.
-	uv sync
+# --- Delegation to per-app Makefiles ---
 
-generate-secret-key: # Generate a random secret key (e.g. for MODAL_EMBEDDING_API_KEY).
-	@uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+memory-%: # Run <target> inside apps/memory. Example: make memory-tests, make memory-serve-mcp.
+	$(MAKE) -C apps/memory $*
 
+harness-%: # Run <target> inside apps/harness. Example: make harness-tests, make harness-run PROMPT="hi".
+	$(MAKE) -C apps/harness $*
 
-# --- Tests & QA ---
+# --- Shared infrastructure (MongoDB + mongot) ---
 
-tests: # Run all tests (unit + integration).
-	uv run pytest
-
-unit-tests: # Run unit tests only.
-	uv run pytest tests/unit
-
-integration-tests: # Run integration tests only (can take up to 15 minutes).
-	uv run pytest tests/integration
-
-pre-commit: # Run pre-commit hooks.
-	uv run pre-commit run --all-files
-
-format-fix: # Auto-format Python code using ruff formatter.
-	uv run ruff format $(QA_FOLDERS)
-
-lint-fix: # Auto-fix linting issues using ruff linter.
-	uv run ruff check --fix $(QA_FOLDERS)
-
-format-check: # Check code formatting without making changes using ruff formatter.
-	uv run ruff format --check $(QA_FOLDERS) 
-
-lint-check: # Check code for linting issues without fixing them using ruff linter.
-	uv run ruff check $(QA_FOLDERS)
-
-
-# --- Infrastructure ---
-
-local-start: # Start local infrastructure (MongoDB + mongot) via Docker Compose.
+local-start: # Start shared infra (MongoDB + mongot) via Docker Compose.
 	docker compose up -d
 
-local-stop: # Stop local infrastructure.
+local-stop: # Stop shared infra.
 	docker compose down
 
-local-restart: # Restart local infrastructure.
+local-restart: # Restart shared infra.
 	docker compose down && docker compose up -d
 
-local-test: # Validate MongoDB setup (text, vector, graph search).
-	uv run python scripts/test_mongodb_setup.py
+# --- Convenience aggregates ---
 
+tests: # Run all tests (unit + integration) across all apps.
+	$(MAKE) memory-tests
+	$(MAKE) harness-tests
 
-# --- Deployment ---
+unit-tests: # Run unit tests across all apps.
+	$(MAKE) memory-unit-tests
+	$(MAKE) harness-unit-tests
 
-deploy-embedding-model: # Deploy vLLM embedding server (voyage-4-nano) to Modal. Creates the API key secret if missing.
-	@uv run modal secret list 2>/dev/null | grep -q "vllm-embedding-api" || \
-		uv run modal secret create vllm-embedding-api-key MODAL_EMBEDDING_API_KEY="$(MODAL_EMBEDDING_API_KEY)"
-	uv run modal deploy deploy/modal_vllm_embedding.py
+integration-tests: # Run integration tests across all apps.
+	$(MAKE) memory-integration-tests
+	$(MAKE) harness-integration-tests
 
-deploy-embedding-model-test: # Test the deployed vLLM embedding server on Modal.
-	uv run modal run deploy/modal_vllm_embedding.py
+format-check: # Run formatter checks across all apps.
+	$(MAKE) memory-format-check
+	$(MAKE) harness-format-check
 
-deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
-	uv run modal app stop vllm-embedding-models
+lint-check: # Run linter checks across all apps.
+	$(MAKE) memory-lint-check
+	$(MAKE) harness-lint-check
 
+typecheck: # Run static type-checks across all apps (harness/TS only — memory is dynamically typed).
+	$(MAKE) harness-typecheck
 
-# --- Orchestration ---
-
-serve-workflows: # Serve Prefect workflow deployments.
-	uv run python -m src.twin.orchestrator
-
-
-# --- Data Pipelines ---
-# Pattern: run-<data-pipeline-name>-data-pipeline
-
-run-all-data-pipelines: # Trigger all data pipelines (Substack RSS, articles, arxiv) via Prefect.
-	uv run python scripts/run_all_data_pipelines.py
-
-run-substack-rss-data-pipeline: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
-	uv run python scripts/run_substack_data_pipeline.py
-
-run-substack-article-data-pipeline: # Trigger Substack article ETL via Prefect. Reads article URLs from configs/default.yaml.
-	uv run python scripts/run_substack_article_data_pipeline.py
-
-run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samples from configs/default.yaml.
-	uv run python scripts/run_arxiv_data_pipeline.py
-
-
-# --- Memory Pipelines ---
-# Pattern: run-<memory-pipeline-name>-memory-pipeline
-
-run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Optionally pass DOC_IDS="id1 id2".
-	uv run python scripts/run_memory_pipeline.py $(DOC_IDS)
-
-run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes).
-	uv run python scripts/run_indexing_pipeline.py
-
-# --- Querying ---
-
-query-graph: # Query and visualize the knowledge graph. Pass QUERY="your query" for search, omit for full graph.
-	uv run python scripts/query_graph.py $(if $(QUERY),--query "$(QUERY)",)
-
-serve-mcp: # Serve the MCP server for knowledge graph queries.
-	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
+pre-commit: # Run pre-commit hooks across the repo (covers memory + harness via local hooks).
+	uv run --project apps/memory pre-commit run --all-files

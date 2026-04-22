@@ -1,14 +1,16 @@
 {
   "mcpServers": {
-    "twin-memory": {
+    "tree-memory": {
       "command": "uv",
       "args": [
+        "--directory",
+        "apps/memory",
         "run",
         "python",
         "scripts/serve_mcp.py"
       ],
       "env": {
-        "ENV_FILE_PATH": ".env"
+        "ENV_FILE_PATH": "../../.env"
       }
     }
   }

@@ -1,0 +1,20 @@
+# Default to LF line endings, auto-detect text vs binary.
+* text=auto eol=lf
+
+# Binary assets (never convert).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+
+# Generated HTML (pyvis graph renders are self-contained; don't let GitHub
+# split their diffs line-by-line and call it reviewable).
+*.html binary
+
+# Generated lockfiles — collapse in GitHub PR diffs.
+apps/memory/uv.lock linguist-generated=true
+apps/harness/bun.lock linguist-generated=true
+apps/harness/package-lock.json linguist-generated=true
