@@ -142,7 +142,7 @@ apps/harness/
 | `make harness-dev` | `bun --watch` with optional `ARGS=` |
 | `make harness-run` | one-shot; set `PROMPT=` and/or `ARGS=` |
 | `make harness-typecheck` | `bun tsc --noEmit` |
-| `make harness-test` | `bun test` (no tests yet — placeholder) |
-| `make harness-format` / `format-check` | Biome format |
-| `make harness-lint` | Biome check |
+| `make harness-tests` / `unit-tests` / `integration-tests` | `bun test` across unit + integration suites (128 tests) |
+| `make harness-format-fix` / `format-check` | Biome format |
+| `make harness-lint-fix` / `lint-check` | Biome check (format + lint + organize-imports) |
 | `make harness-build` | single-binary compile to `dist/tree` |

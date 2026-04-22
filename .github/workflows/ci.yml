@@ -23,7 +23,8 @@ env:
   MODAL_EMBEDDING_API_KEY: mock-modal-embedding-api-key
 
 jobs:
-  ci:
+  memory:
+    name: memory (python)
     runs-on: ubuntu-latest
 
     steps:
@@ -118,3 +119,35 @@ jobs:
       - name: Stop infrastructure
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down
+
+  harness:
+    name: harness (typescript)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: apps/harness
+
+      - name: Biome check (format + lint + organize-imports)
+        run: bunx biome check src tests
+        working-directory: apps/harness
+
+      - name: Typecheck
+        run: bun tsc --noEmit
+        working-directory: apps/harness
+
+      - name: Unit tests
+        run: bun test tests/unit
+        working-directory: apps/harness
+
+      - name: Integration tests
+        run: bun test tests/integration
+        working-directory: apps/harness

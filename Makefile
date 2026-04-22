@@ -5,7 +5,7 @@ endif
 include .env
 export
 
-.PHONY: help tests pre-commit local-start local-stop local-restart
+.PHONY: help tests unit-tests integration-tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
 
 # --- Utilities ---
 
@@ -17,7 +17,7 @@ help: # Display this help message with a list of available commands.
 memory-%: # Run <target> inside apps/memory. Example: make memory-tests, make memory-serve-mcp.
 	$(MAKE) -C apps/memory $*
 
-harness-%: # Run <target> inside apps/harness. (Harness is a planned TS app; see docs/harness-plan.md.)
+harness-%: # Run <target> inside apps/harness. Example: make harness-tests, make harness-run PROMPT="hi".
 	$(MAKE) -C apps/harness $*
 
 # --- Shared infrastructure (MongoDB + mongot) ---
@@ -33,9 +33,28 @@ local-restart: # Restart shared infra.
 
 # --- Convenience aggregates ---
 
-tests: # Run tests across all apps.
+tests: # Run all tests (unit + integration) across all apps.
 	$(MAKE) memory-tests
-	$(MAKE) harness-test
+	$(MAKE) harness-tests
 
-pre-commit: # Run pre-commit hooks across the repo.
+unit-tests: # Run unit tests across all apps.
+	$(MAKE) memory-unit-tests
+	$(MAKE) harness-unit-tests
+
+integration-tests: # Run integration tests across all apps.
+	$(MAKE) memory-integration-tests
+	$(MAKE) harness-integration-tests
+
+format-check: # Run formatter checks across all apps.
+	$(MAKE) memory-format-check
+	$(MAKE) harness-format-check
+
+lint-check: # Run linter checks across all apps.
+	$(MAKE) memory-lint-check
+	$(MAKE) harness-lint-check
+
+typecheck: # Run static type-checks across all apps (harness/TS only — memory is dynamically typed).
+	$(MAKE) harness-typecheck
+
+pre-commit: # Run pre-commit hooks across the repo (covers memory + harness via local hooks).
 	uv run --project apps/memory pre-commit run --all-files

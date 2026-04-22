@@ -22,3 +22,14 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       # Run the formatter.
       - id: ruff-format
+
+  # Harness (TypeScript/Bun) — Biome covers format + lint + organize-imports in one pass.
+  # Uses the harness's local biome.json via `bunx biome`; requires Bun to be installed locally.
+  - repo: local
+    hooks:
+      - id: biome-check-harness
+        name: biome check (harness)
+        language: system
+        entry: bash -c 'cd apps/harness && bunx biome check --write src tests'
+        pass_filenames: false
+        files: ^apps/harness/.*\.(ts|tsx|js|jsx|json)$

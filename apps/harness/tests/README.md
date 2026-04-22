@@ -60,8 +60,8 @@ Prefer dependency injection (`SlashActions.listSessions`, `McpConnectDeps`) over
 
 ```bash
 make harness-unit-tests          # fast — default during development
-make harness-integration-tests   # slow, needs infra
-make harness-test                # everything
+make harness-integration-tests   # spawns a bun subprocess for the stub MCP server; no external infra
+make harness-tests               # everything
 
 bun test --watch tests/unit/                         # TDD loop
 bun test tests/unit/permissions/policy.test.ts       # single file
