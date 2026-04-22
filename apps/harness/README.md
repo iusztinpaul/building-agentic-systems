@@ -7,9 +7,13 @@ Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/ha
 ## Prerequisites
 
 - [Bun](https://bun.sh) ≥ 1.1 (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
-- `GOOGLE_API_KEY` set in the repo-root `.env` (shared with the memory app)
+- `GOOGLE_API_KEY` set in the repo-root `.env` — shared with the memory app
 - Optional: `ripgrep` (`brew install ripgrep`) for the `grep` tool
-- Optional: MongoDB + `make local-start` when you want `mcp__tree-memory__*` tools
+- Optional (for memory tools): `make local-start` + `make memory-build` at the repo root. Without these, the `mcp__tree-memory__*` tools won't be available, but native tools (bash/read/write/edit/...) still work.
+
+### Shared environment
+
+The harness reads the repo-root `.env` (only `GOOGLE_API_KEY` is required) and loads MCP servers from the repo-root `.mcp.json`. The default config ships one server, `tree-memory`, spawned on demand via `uv --directory apps/memory run python scripts/serve_mcp.py`. Add more servers to `.mcp.json` and the harness will pick them up on the next run.
 
 ## Quick start
 
@@ -17,12 +21,21 @@ Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/ha
 # install deps
 make harness-install
 
-# one-shot CLI
+# one-shot CLI (answer comes from the model alone)
 PROMPT="what is 2+2?" make harness-run
 
 # interactive Ink REPL (requires a TTY)
 make harness-dev
+
+# end-to-end: memory + harness
+make local-start                                       # shared infra (from repo root)
+make memory-run-all-data-pipelines                     # ingest some data
+make memory-run-memory-pipeline-extraction             # extract the graph
+make memory-run-memory-pipeline-indexing               # index it
+PROMPT="search my memory for knowledge-graph notes" make harness-run
 ```
+
+In the last command the harness auto-spawns the `tree-memory` MCP server from `.mcp.json` and exposes its six tools (`query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`) to the model.
 
 ## Modes
 

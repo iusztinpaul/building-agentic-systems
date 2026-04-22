@@ -2,187 +2,139 @@
 
 Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
+## What Tree is
+
+Tree has two halves, wired together by [MCP](https://modelcontextprotocol.io/):
+
+- **Memory** (`apps/memory/`) — a Python app that ingests documents from multiple sources (Substack, arXiv, files, conversations), extracts a knowledge graph with an LLM, indexes it for hybrid text + vector + graph search on MongoDB, and exposes the whole thing over a FastMCP server.
+- **Harness** (`apps/harness/`) — a minimal TypeScript coding-agent (`tree` CLI, Bun + Ink) that spawns the memory's MCP server automatically and lets you query, explore, and write to the graph in natural language.
+
+The goal: a personal assistant whose memory is a graph you own, queryable by any MCP-aware client (the bundled harness, Claude Code, Claude Desktop, Cursor, …).
+
 ## Repo layout
 
-This is a monorepo. Each app owns its own build files:
+This is a monorepo. Each app owns its own build files; cross-app concerns stay at the root.
 
-- `apps/memory/` — Python app: ETL pipelines, knowledge-graph memory (MongoDB), and the FastMCP server. See [`apps/memory/README.md`](apps/memory/README.md).
-- `apps/harness/` — planned TypeScript/Ink/Bun coding-agent harness. Design parked in [`docs/harness-plan.md`](docs/harness-plan.md).
-
-Root-level files handle cross-app concerns: shared `.env`, MongoDB infra under `docker/`, `docker-compose.yml`, a thin root `Makefile` that delegates to each app (`make memory-<target>`), and the `.mcp.json` that defines which MCP servers agents spawn.
+- `apps/memory/` — Python app (uv + Prefect + FastMCP). See [`apps/memory/README.md`](apps/memory/README.md).
+- `apps/harness/` — TypeScript agent (Bun + Ink). See [`apps/harness/README.md`](apps/harness/README.md).
+- `docker/` — shared infra (MongoDB replica-set config, `mongot` search config).
+- `docker-compose.yml` — spins up MongoDB + mongot + Prefect server + a Prefect worker.
+- `.mcp.json` — declares the `tree-memory` MCP server so the harness (and any other MCP client) can spawn it.
+- `.env` — shared secrets and infra settings (see `.env.example`).
+- `Makefile` — thin root that delegates per-app (`make memory-<t>` / `make harness-<t>`) and owns infra + aggregate targets.
 
 ## Prerequisites
 
+**Required**
+
 - [Python 3.14+](https://www.python.org/)
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
+- [uv](https://docs.astral.sh/uv/) — Python package manager
+- [Bun](https://bun.sh/) ≥ 1.1 — runtime for the harness (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
 - [Docker](https://www.docker.com/) and Docker Compose
 - [GNU Make](https://www.gnu.org/software/make/)
-
 - [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/)
-- [MongoDB Compass](https://www.mongodb.com/products/tools/compass)
+- A [Google AI API key](https://aistudio.google.com/apikey) (Gemini, used by both apps)
 
-- A [Google AI API key](https://aistudio.google.com/apikey) (for Gemini LLM extraction)
+**Optional**
+
+- [MongoDB Compass](https://www.mongodb.com/products/tools/compass) — GUI for inspecting collections.
+- [`ripgrep`](https://github.com/BurntSushi/ripgrep) — enables the harness's `grep` tool.
+- [Voyage AI](https://www.voyageai.com/) key — only if you want Voyage embeddings.
+- [Modal](https://modal.com/) account + API key — only if you want to swap the local embedding model for a Modal-hosted vLLM server.
 
 ## Installation
 
 ```bash
-# Clone the repository
+# Clone
 git clone <repo-url> && cd building-agentic-systems
 
-# Install dependencies for the memory app
+# Shared .env — fill in GOOGLE_API_KEY at minimum
+cp .env.example .env
+
+# Memory app (Python)
 make memory-build
 
-# Create your environment file
-cp .env.example .env
-# Edit .env and set your GOOGLE_API_KEY
+# Harness (TypeScript)
+make harness-install
 ```
 
-## Setup
+## End-to-end quick start
 
-### Start infrastructure
+Run everything from the repo root.
 
-This spins up MongoDB (with replica set + mongot for vector search) and Prefect server:
+**1. Start shared infra.** MongoDB (replica set), mongot (Atlas Search locally), Prefect server + worker.
 
 ```bash
 make local-start
 ```
 
-Validate that MongoDB text, vector, and graph search all work:
+**2. Validate the stack.** Confirms text, vector, and graph search all round-trip.
 
 ```bash
 make memory-local-test
 ```
 
-### App configuration
-
-App-level tuning (model names, chunk sizes, concurrency) lives in `apps/memory/configs/default.yaml`. Infrastructure secrets (API keys, DB credentials) stay in the shared root `.env`.
-
-To override the config path, set `APP_CONFIG_PATH` in your `.env`.
-
-## Running
-
-### Quick start (Docker only)
-
-For just running the pipelines without a local dev setup, everything is containerized. Docker Compose starts MongoDB, Prefect server, and a Prefect worker that serves all workflow deployments:
+**3. Ingest → extract → index → query.**
 
 ```bash
-make local-start
+make memory-run-all-data-pipelines        # Substack RSS + articles + arXiv (see configs/default.yaml)
+make memory-run-memory-pipeline-extraction # LLM → nodes + edges → knowledge_graph collection
+make memory-run-memory-pipeline-indexing   # reverse edges, embeddings, search indexes
+make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
 ```
 
-The worker container (`tree-prefect-worker`) automatically registers and serves all deployments. You can trigger runs from the Prefect dashboard or the CLI scripts below.
+The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
-### Development mode
-
-For development, run the infrastructure via Docker but serve workflows locally so you can iterate without rebuilding the container:
+**4. Drive memory with the agent.**
 
 ```bash
-# Start infra only
-make local-start
+# Interactive Ink REPL
+make harness-dev
 
-# Serve workflow deployments locally
-make memory-serve-workflows
+# One-shot
+PROMPT="what do I have on AI agents in memory?" make harness-run
 ```
 
-### Step 1: Data pipelines
+The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its six memory tools (`mcp__tree-memory__query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`) are available from the first prompt.
 
-Ingest documents from multiple sources into the `documents` collection. Sources are configured in `apps/memory/configs/default.yaml`:
+## App guides
 
-```bash
-# Run all data pipelines (Substack RSS, articles, arxiv)
-make memory-run-all-data-pipelines
-
-# Or run individual pipelines
-make memory-run-substack-rss-data-pipeline
-make memory-run-substack-article-data-pipeline
-make memory-run-arxiv-data-pipeline
-```
-
-### Step 2: Memory extraction
-
-Extract knowledge graph entities (nodes + edges) from documents and upsert them directly into the `knowledge_graph` collection:
-
-```bash
-# Process all unprocessed documents
-make memory-run-memory-pipeline-extraction
-
-# Process specific documents by ID
-make memory-run-memory-pipeline-extraction DOC_IDS="507f1f77bcf86cd799439011"
-```
-
-### Step 3: Indexing
-
-Create reverse edges for bidirectional traversal, compute embeddings, and ensure search indexes on the `knowledge_graph` collection:
-
-```bash
-make memory-run-memory-pipeline-indexing
-```
-
-### Step 4: Query and visualize
-
-Query the knowledge graph and generate an interactive HTML visualization:
-
-```bash
-# Visualize the full graph
-make memory-query-graph
-
-# Query a specific topic
-make memory-query-graph QUERY="Paul Iusztin"
-```
-
-### Step 5: MCP server
-
-Expose the knowledge graph as an [MCP](https://modelcontextprotocol.io/) server so LLM clients (Claude Code, Claude Desktop, Cursor, etc.) can query Tree's memory with natural language.
-
-**Tools provided:**
-
-| Tool | Description |
-|------|-------------|
-| `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, and filters. |
-| `search_memory` | Semantic + text search with graph expansion. Best for open-ended or exploratory queries. |
-
-Both tools accept a `visualize` flag that renders an interactive HTML graph and opens it in the browser.
-
-**Run standalone:**
-
-```bash
-make memory-serve-mcp
-```
-
-**Use with Claude Code:**
-
-The `.mcp.json` at the project root auto-configures the server. Claude Code picks it up automatically — no extra setup needed.
+- **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`configs/default.yaml`), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
+- **Harness app** → [`apps/harness/README.md`](apps/harness/README.md). Modes (CLI vs Ink), native tools, permissions, sub-agents, shell hooks, JSONL sessions.
 
 ## Monitoring
 
-### Prefect dashboard
-
-Track pipeline runs, inspect task states, and trigger deployments from the UI:
+**Prefect dashboard** — track pipeline runs, inspect task states, trigger deployments:
 
 ```
 http://127.0.0.1:4200/dashboard
 ```
 
-Or open it directly:
-
-```bash
-uv run prefect dashboard open
-```
-
-### MongoDB Compass
-
-Download [MongoDB Compass](https://www.mongodb.com/products/tools/compass) and connect to your local MongoDB to inspect collections (`documents`, `knowledge_graph`):
+**MongoDB Compass** — inspect the `documents` and `knowledge_graph` collections:
 
 ```
 mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 ```
 
-## Tests
+## QA and tests
+
+Aggregate targets at the root run across both apps:
 
 ```bash
-make memory-format-fix    # Auto-format
-make memory-lint-fix      # Auto-fix lint issues
-make memory-format-check  # Check formatting
-make memory-lint-check    # Check linting
-make pre-commit           # Run pre-commit hooks
-make tests                # Run all test suites (aggregates across apps)
+make format-check    # ruff (memory) + biome (harness)
+make lint-check      # ruff (memory) + biome (harness)
+make typecheck       # TypeScript (harness only — memory is dynamically typed)
+make pre-commit      # repo-wide pre-commit
+make unit-tests      # memory + harness unit suites
+make integration-tests  # memory + harness integration suites (up to 15 min for memory)
+make tests           # unit + integration across all apps
 ```
+
+Per-app variants are available under `make memory-*` and `make harness-*` (e.g. `make memory-unit-tests`). Run `make help` to list all root targets.
+
+## CI
+
+GitHub Actions runs two parallel jobs on push / PR to `main`:
+
+- **memory** — uv sync, ruff format/lint check, Docker infra up, pytest (unit + integration).
+- **harness** — bun install, biome check, TypeScript typecheck, bun test.
