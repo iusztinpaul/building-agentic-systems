@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "bright-data-best-practices": {
+      "source": "brightdata/skills",
+      "sourceType": "github",
+      "skillPath": "skills/bright-data-best-practices/SKILL.md",
+      "computedHash": "edc3b5c70b60b0b9448e86139bacb33a635f6dfc260d72c9cbd7803cce873ae0"
+    },
+    "bright-data-mcp": {
+      "source": "brightdata/skills",
+      "sourceType": "github",
+      "skillPath": "skills/bright-data-mcp/SKILL.md",
+      "computedHash": "4c8bae0bae93b5b062633f06f9fb919ab6d31287a43ce844d8717c4bd6bd6759"
+    },
+    "scrape": {
+      "source": "brightdata/skills",
+      "sourceType": "github",
+      "skillPath": "skills/scrape/SKILL.md",
+      "computedHash": "265712feebdd22275af2a22e98a6636ea496464a8d3e0db081a439966db3067b"
+    },
+    "search": {
+      "source": "brightdata/skills",
+      "sourceType": "github",
+      "skillPath": "skills/search/SKILL.md",
+      "computedHash": "4d1592e91da2f71b22ea814f39d9de05776309cd88d0b8f7c1ae2122efdf85da"
+    }
+  }
+}
