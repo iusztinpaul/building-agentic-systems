@@ -11,6 +11,10 @@ from fastmcp import Context
 from tree.data.conversation_pipeline import ingest_conversation as _ingest_conversation
 from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.file_pipeline import ingest_file as _ingest_file
+from tree.data.web.web_unlocker import (
+    BrightDataConfigurationError,
+    BrightDataRequestError,
+)
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.ingest import run_ingestion_pipeline
 from tree.mcp.server import mcp
@@ -193,6 +197,10 @@ async def ingest_url(url: str, ctx: Context) -> str:
         document = await _ingest_url_dispatch(url)
     except ValueError as exc:
         return json.dumps({"error": "unsupported_url", "detail": str(exc)})
+    except BrightDataConfigurationError as exc:
+        return json.dumps({"error": "configuration_error", "detail": str(exc)})
+    except BrightDataRequestError as exc:
+        return json.dumps({"error": "fetch_failed", "detail": str(exc)})
     except httpx.HTTPStatusError as exc:
         return json.dumps(
             {"error": "http_error", "detail": f"HTTP {exc.response.status_code}: {url}"}

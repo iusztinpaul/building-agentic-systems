@@ -65,6 +65,7 @@ class SourcesConfig(BaseModel):
     huggingface_arxiv_dataset: HuggingFaceArxivDatasetConfig = (
         HuggingFaceArxivDatasetConfig()
     )
+    urls: list[str] = []
 
 
 class MCPConfig(BaseModel):

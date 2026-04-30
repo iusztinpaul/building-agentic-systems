@@ -214,13 +214,37 @@ class TestIngestUrl:
         assert doc is not None
         assert doc.source_type == SourceType.SUBSTACK
 
-    async def test_unsupported_url_returns_error(self, make_mcp_ctx):
+    async def test_unsupported_scheme_returns_error(self, make_mcp_ctx):
+        ctx = make_mcp_ctx(llm=FakeLLM(), embedding_model=FakeEmbeddingModel())
+
+        result = await ingest_url("ftp://example.com/file.tar", ctx)
+
+        parsed = json.loads(result)
+        assert parsed["error"] == "unsupported_url"
+
+    async def test_fallthrough_without_brightdata_credentials_returns_config_error(
+        self, make_mcp_ctx, mocker
+    ):
+        """Unmatched http(s) URLs now fall through to the Bright Data web pipeline.
+
+        With no `BRIGHTDATA_API_KEY` configured, the wrapper must translate the
+        resulting `BrightDataConfigurationError` into a clean MCP error response
+        instead of letting the exception escape.
+        """
+
+        # Force credentials empty for this test regardless of test env.
+        mocker.patch(
+            "tree.data.web.web_unlocker.settings.brightdata_api_key",
+            mocker.MagicMock(get_secret_value=mocker.MagicMock(return_value="")),
+        )
+
         ctx = make_mcp_ctx(llm=FakeLLM(), embedding_model=FakeEmbeddingModel())
 
         result = await ingest_url("https://example.com/some-page", ctx)
 
         parsed = json.loads(result)
-        assert parsed["error"] == "unsupported_url"
+        assert parsed["error"] == "configuration_error"
+        assert "BRIGHTDATA_API_KEY" in parsed["detail"]
 
     async def test_duplicate_url_skipped(self, make_mcp_ctx, mocker):
         llm = _make_fake_llm()

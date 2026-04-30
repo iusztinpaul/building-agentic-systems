@@ -57,3 +57,23 @@ class TestLoadAppConfig:
         config = load_app_config()
 
         assert config.extraction.chunk_size == 1024
+
+    def test_urls_default_is_empty(self):
+        config = AppConfig()
+
+        assert config.sources.urls == []
+
+    def test_urls_round_trip_from_yaml(self, tmp_path):
+        custom = tmp_path / "urls.yaml"
+        custom.write_text(
+            textwrap.dedent("""\
+                sources:
+                  urls:
+                    - https://x.com
+                    - https://y.com
+            """)
+        )
+
+        config = load_app_config(custom)
+
+        assert config.sources.urls == ["https://x.com", "https://y.com"]

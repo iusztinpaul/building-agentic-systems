@@ -16,6 +16,7 @@ export PYTHONPATH = ./src/
 QA_FOLDERS := src/ tests/ scripts/ deploy/
 DIR_PATH ?= inputs/tests/00_debug
 HUMAN_FEEDBACK ?=
+URL ?=
 TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
 
 # --- Utilities ---
@@ -97,6 +98,10 @@ run-substack-article-data-pipeline: # Trigger Substack article ETL via Prefect. 
 
 run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samples from configs/default.yaml.
 	uv run python scripts/run_arxiv_data_pipeline.py
+
+run-url-data-pipeline: # Trigger web URL ingestion via Bright Data Web Unlocker. Pass URL="https://...".
+	@if [ -z "$(URL)" ]; then echo "USAGE: make run-url-data-pipeline URL=https://..."; exit 1; fi
+	uv run python scripts/run_url_data_pipeline.py "$(URL)"
 
 
 # --- Memory Pipelines ---

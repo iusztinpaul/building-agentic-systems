@@ -23,6 +23,7 @@ from tree.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed,
     ingest_substack_rss_feed_batch,
 )
+from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.memory.indexing.pipeline import memory_indexing
 
@@ -67,5 +68,13 @@ if __name__ == "__main__":
         ingest_conversation.to_deployment(
             name="ingest-conversation-etl",
             tags=["data-pipeline", "conversation"],
+        ),
+        ingest_web_url.to_deployment(
+            name="ingest-web-url-etl",
+            tags=["data-pipeline", "web"],
+        ),
+        ingest_web_url_batch.to_deployment(
+            name="ingest-web-url-batch-etl",
+            tags=["data-pipeline", "web"],
         ),
     )

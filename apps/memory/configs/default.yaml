@@ -24,6 +24,10 @@ sources:
     fetch_content: false
     batch_size: 50
     concurrency: 10
+  # Arbitrary URLs (blogs, news, repos, profiles) ingested via the URL
+  # dispatcher; specialized pipelines (e.g. Substack) win when they match,
+  # otherwise the URL falls back to Bright Data Web Unlocker.
+  urls: []
 
 models:
   llm:

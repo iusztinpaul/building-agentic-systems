@@ -12,6 +12,7 @@ class SourceType(StrEnum):
     LATENT = "latent"
     FILE = "file"
     CONVERSATION = "conversation"
+    WEB = "web"
 
 
 class Document(BeanieDocument):
