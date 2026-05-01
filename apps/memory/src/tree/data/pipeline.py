@@ -34,6 +34,8 @@ from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
+    YouTubeRssSource,
+    YouTubeVideoSource,
     app_config,
 )
 from tree.config.settings import settings
@@ -41,6 +43,8 @@ from tree.data.core.ingest import ingest_url
 from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from tree.data.substack.substack_article_pipeline import ingest_substack_article_batch
 from tree.data.substack.substack_rss_pipeline import ingest_substack_rss_feed_batch
+from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
+from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 
@@ -107,6 +111,30 @@ async def data_pipeline() -> list[Document]:
     else:
         logger.info(
             "Substack article pipeline skipped: no substack_article entries configured"
+        )
+
+    # --- YouTube RSS (batched into one call) ---
+    yt_rss_entries = [s for s in sources if isinstance(s, YouTubeRssSource)]
+    if yt_rss_entries:
+        yt_rss_urls = [s.uri for s in yt_rss_entries]
+        logger.info("Starting YouTube RSS pipeline with %d feeds", len(yt_rss_urls))
+        yt_rss_docs = await ingest_youtube_rss_feed_batch(yt_rss_urls)
+        all_ingested.extend(yt_rss_docs)
+        logger.info("YouTube RSS pipeline ingested %d documents", len(yt_rss_docs))
+    else:
+        logger.info("YouTube RSS pipeline skipped: no youtube_rss entries configured")
+
+    # --- YouTube videos (batched into one call) ---
+    yt_video_entries = [s for s in sources if isinstance(s, YouTubeVideoSource)]
+    if yt_video_entries:
+        yt_video_urls = [s.uri for s in yt_video_entries]
+        logger.info("Starting YouTube video pipeline with %d URLs", len(yt_video_urls))
+        yt_video_docs = await ingest_youtube_video_batch(yt_video_urls)
+        all_ingested.extend(yt_video_docs)
+        logger.info("YouTube video pipeline ingested %d documents", len(yt_video_docs))
+    else:
+        logger.info(
+            "YouTube video pipeline skipped: no youtube_video entries configured"
         )
 
     # --- HuggingFace datasets (one call per entry, dispatched by dataset id) ---

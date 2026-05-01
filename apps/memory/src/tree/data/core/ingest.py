@@ -39,6 +39,19 @@ async def _ingest_substack_article(url: str) -> Document | None:
     return await ingest_substack_article(url)
 
 
+async def _ingest_youtube_video(url: str) -> Document | None:
+    """Ingest a single YouTube video URL via the YouTube video pipeline.
+
+    Note: ``ingest_url`` is single-document by contract, so YouTube channel
+    RSS feeds (which yield many documents) are NOT routed here — they are
+    rejected up-front in :func:`ingest_url` with a clear ``ValueError``.
+    """
+
+    from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video
+
+    return await ingest_youtube_video(url)
+
+
 async def _ingest_web_url(url: str) -> Document | None:
     """Ingest an arbitrary URL via the generic web (Bright Data) pipeline."""
 
@@ -48,8 +61,12 @@ async def _ingest_web_url(url: str) -> Document | None:
 
 
 # Registry: (domain_substring, handler).
-# Order matters — first match wins.
+# Order matters — first match wins. YouTube hosts are listed before
+# ``substack.com`` (and therefore before the custom-Substack-domain
+# fallback below) so YouTube URLs always route to the YouTube handler.
 _URL_HANDLERS: list[tuple[str, Callable[[str], Awaitable[Document | None]]]] = [
+    ("youtube.com", _ingest_youtube_video),
+    ("youtu.be", _ingest_youtube_video),
     ("substack.com", _ingest_substack_article),
 ]
 
@@ -105,6 +122,18 @@ async def ingest_url(url: str) -> Document | None:
         raise ValueError(f"URL is missing a host: {url!r}")
 
     domain = parsed.netloc.lower()
+    bare_domain_for_guard = domain.removeprefix("www.")
+
+    # Guard: a YouTube channel RSS feed is feed-shaped (many docs), but
+    # ``ingest_url`` returns a single Document. Reject up-front with a
+    # message that points the user at the right config knob.
+    if bare_domain_for_guard in {"youtube.com", "m.youtube.com"} and (
+        parsed.path == "/feeds/videos.xml"
+    ):
+        raise ValueError(
+            "RSS feed URLs are not supported by ingest_url; configure them as "
+            "'youtube_rss' in app config."
+        )
 
     # Static registry match.
     for pattern, handler in _URL_HANDLERS:

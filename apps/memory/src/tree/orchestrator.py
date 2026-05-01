@@ -14,6 +14,8 @@ from prefect import serve
 from tree.data.conversation_pipeline import ingest_conversation
 from tree.data.file_pipeline import ingest_file
 from tree.data.pipeline import data_pipeline
+from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
+from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.memory.indexing.pipeline import memory_indexing
 
@@ -38,5 +40,13 @@ if __name__ == "__main__":
         ingest_conversation.to_deployment(
             name="ingest-conversation-etl",
             tags=["data-pipeline", "conversation"],
+        ),
+        ingest_youtube_video_batch.to_deployment(
+            name="ingest-youtube-video-batch-etl",
+            tags=["data-pipeline", "youtube"],
+        ),
+        ingest_youtube_rss_feed_batch.to_deployment(
+            name="ingest-youtube-rss-feed-batch-etl",
+            tags=["data-pipeline", "youtube"],
         ),
     )

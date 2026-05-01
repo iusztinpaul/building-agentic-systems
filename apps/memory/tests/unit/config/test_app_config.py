@@ -7,6 +7,8 @@ from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
+    YouTubeRssSource,
+    YouTubeVideoSource,
     load_app_config,
 )
 
@@ -37,8 +39,10 @@ class TestLoadAppConfig:
             "SubstackArticleSource": 10,
             "HuggingFaceDatasetSource": 1,
             "WebSource": 2,
+            "YouTubeRssSource": 1,
+            "YouTubeVideoSource": 1,
         }
-        assert sum(counts.values()) == 18
+        assert sum(counts.values()) == 20
 
     def test_loads_default_yaml_huggingface_dataset_entry(self):
         """The HF arxiv entry preserves the parameters from the legacy YAML."""
@@ -80,6 +84,8 @@ class TestLoadAppConfig:
                     SubstackArticleSource,
                     HuggingFaceDatasetSource,
                     WebSource,
+                    YouTubeRssSource,
+                    YouTubeVideoSource,
                 ),
             )
             for s in config.sources.sources

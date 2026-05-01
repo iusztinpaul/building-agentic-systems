@@ -11,6 +11,8 @@ from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
+    YouTubeRssSource,
+    YouTubeVideoSource,
     load_app_config,
 )
 
@@ -61,6 +63,41 @@ class TestVariantValidation:
 
         assert isinstance(config.sources[0], WebSource)
         assert config.sources[0].uri == "https://news.ycombinator.com"
+
+    def test_youtube_video_validates(self):
+        config = SourcesConfig.model_validate(
+            {
+                "sources": [
+                    {
+                        "type": "youtube_video",
+                        "uri": "https://www.youtube.com/watch?v=eYaWxljC4sA",
+                    },
+                ],
+            }
+        )
+
+        assert isinstance(config.sources[0], YouTubeVideoSource)
+        assert config.sources[0].type == "youtube_video"
+        assert config.sources[0].uri == "https://www.youtube.com/watch?v=eYaWxljC4sA"
+
+    def test_youtube_rss_validates(self):
+        config = SourcesConfig.model_validate(
+            {
+                "sources": [
+                    {
+                        "type": "youtube_rss",
+                        "uri": "https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw",
+                    },
+                ],
+            }
+        )
+
+        assert isinstance(config.sources[0], YouTubeRssSource)
+        assert config.sources[0].type == "youtube_rss"
+        assert (
+            config.sources[0].uri
+            == "https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw"
+        )
 
     def test_huggingface_dataset_validates(self):
         config = SourcesConfig.model_validate(
@@ -137,7 +174,14 @@ class TestValidationErrors:
 
     @pytest.mark.parametrize(
         "source_type",
-        ["substack_rss", "substack_article", "huggingface_dataset", "web"],
+        [
+            "substack_rss",
+            "substack_article",
+            "huggingface_dataset",
+            "youtube_video",
+            "youtube_rss",
+            "web",
+        ],
     )
     def test_missing_uri_raises_validation_error(self, source_type: str):
         with pytest.raises(ValidationError) as exc_info:
@@ -188,6 +232,33 @@ class TestUntypedEntryNormalization:
         assert isinstance(second, SubstackArticleSource)
         assert second.uri == "https://customblog.com/p/some-article"
 
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "https://www.youtube.com/watch?v=eYaWxljC4sA",
+            "https://youtube.com/watch?v=eYaWxljC4sA",
+            "https://m.youtube.com/watch?v=eYaWxljC4sA",
+            "https://youtu.be/eYaWxljC4sA",
+            "https://www.youtube.com/shorts/abc123XYZ45",
+        ],
+    )
+    def test_untyped_entry_with_youtube_video_url_normalizes_to_youtube_video(
+        self, uri: str
+    ):
+        config = SourcesConfig.model_validate({"sources": [{"uri": uri}]})
+
+        entry = config.sources[0]
+        assert isinstance(entry, YouTubeVideoSource)
+        assert entry.uri == uri
+
+    def test_untyped_entry_with_youtube_rss_feed_normalizes_to_youtube_rss(self):
+        uri = "https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw"
+        config = SourcesConfig.model_validate({"sources": [{"uri": uri}]})
+
+        entry = config.sources[0]
+        assert isinstance(entry, YouTubeRssSource)
+        assert entry.uri == uri
+
     def test_untyped_entry_on_bare_substack_com_normalizes_to_article(self):
         config = SourcesConfig.model_validate(
             {
@@ -234,6 +305,8 @@ class TestYamlRoundTrip:
                     SubstackArticleSource,
                     HuggingFaceDatasetSource,
                     WebSource,
+                    YouTubeVideoSource,
+                    YouTubeRssSource,
                 ),
             )
             for s in sources

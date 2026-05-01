@@ -13,6 +13,7 @@ class SourceType(StrEnum):
     FILE = "file"
     CONVERSATION = "conversation"
     WEB = "web"
+    YOUTUBE = "youtube"
 
 
 class Document(BeanieDocument):

@@ -43,6 +43,18 @@ sources:
   # otherwise the URL falls back to Bright Data Web Unlocker.
   - uri: https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
   - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
+  # YouTube channel feed (Atom). Recent videos on the channel are ingested
+  # one by one via a chained transcript fetcher: the free `youtube-transcript-api`
+  # primary, then a paid Gemini 2.5 Flash fallback for videos the primary
+  # cannot transcribe (CC disabled, age-gated, region-locked). A WARNING is
+  # logged when the chain advances to Gemini, and a final WARNING is logged
+  # only if BOTH backends fail (the video is then skipped, not retried).
+  - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw
+    type: youtube_rss
+  # Single YouTube video (transcript via the same chained fetcher;
+  # best-effort metadata via oEmbed).
+  - uri: https://www.youtube.com/watch?v=eYaWxljC4sA
+    type: youtube_video
 
 models:
   llm:
