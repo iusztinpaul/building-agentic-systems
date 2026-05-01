@@ -163,6 +163,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 | `search_memory` | Semantic + text search with graph expansion. Best for open-ended queries. |
 | `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
 | `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget. |
+| `scrape_web` | On-demand scrape of one or more URLs via Bright Data Web Unlocker. **Does NOT touch memory.** Returns markdown (or HTML) inline for exploration; pair with `search_web` to read SERP results, then call `ingest_url` on whichever URLs are worth keeping. Max 5 URLs per call. |
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
@@ -196,6 +197,40 @@ Equivalent MCP-tool invocation (JSON `arguments` an MCP client would send):
 ```
 
 Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_SERP_ZONE`.
+
+#### `scrape_web` example
+
+```bash
+# Scrape a couple of URLs; markdown returned inline. NO writes to MongoDB.
+make memory-scrape-web URLS="https://example.com,https://www.iana.org/help/example-domains"
+
+# Bound the per-URL payload (default 30000 chars). Set MAX_CHARS=0 to disable.
+make memory-scrape-web URLS="https://en.wikipedia.org/wiki/Knowledge_graph" MAX_CHARS=2000
+
+# Raw HTML instead of markdown.
+make memory-scrape-web URLS="https://example.com" DATA_FORMAT=html
+```
+
+Equivalent MCP-tool invocation:
+
+```json
+{
+  "name": "scrape_web",
+  "arguments": {
+    "urls": ["https://example.com", "https://www.iana.org/help/example-domains"],
+    "data_format": "markdown",
+    "max_chars": 30000
+  }
+}
+```
+
+Each result includes `url`, `success`, `content`, `length`, `truncated`, plus
+`error` / `error_type` (`invalid_input` / `configuration_error` /
+`fetch_failed` / `http_error` / `network_error`) on failure. One bad URL
+does not kill the batch; order of results matches input order.
+
+Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_UNLOCKER_ZONE` (the
+*Unlocker* zone, distinct from the SERP zone used by `search_web`).
 
 ## Modal embedding deployment (optional)
 

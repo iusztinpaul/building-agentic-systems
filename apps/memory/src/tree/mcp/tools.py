@@ -1,5 +1,6 @@
 """MCP tool handlers — thin delegation to business logic."""
 
+import asyncio
 import json
 import logging
 from typing import Any, Literal
@@ -13,6 +14,15 @@ from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.file_pipeline import ingest_file as _ingest_file
 from tree.data.web.web_search_ingest import (
     trigger_url_batch_ingest as _trigger_url_batch_ingest,
+)
+from tree.data.web.web_scrape import (
+    DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
+)
+from tree.data.web.web_scrape import (
+    MAX_URLS_PER_CALL as _SCRAPE_MAX_URLS_PER_CALL,
+)
+from tree.data.web.web_scrape import (
+    scrape_one as _scrape_one,
 )
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
@@ -409,6 +419,75 @@ async def _build_ingest_block(
         "flow_run_id": trigger["flow_run_id"],
         "tracking_url": trigger["tracking_url"],
     }
+
+
+@mcp.tool
+async def scrape_web(
+    urls: list[str],
+    ctx: Context,
+    data_format: Literal["markdown", "html"] = "markdown",
+    max_chars: int | None = _SCRAPE_DEFAULT_MAX_CHARS,
+    timeout_seconds: float = 60.0,
+) -> str:
+    """Fetch the rendered content of one or more URLs without ingesting.
+
+    Returns markdown (or HTML) for each URL directly to the caller. Does NOT
+    write to MongoDB and does NOT trigger memory extraction. Pair with
+    ``search_web`` to read SERP results inline; call ``ingest_url``
+    afterwards on whichever URLs are worth keeping.
+
+    Args:
+        urls: List of absolute http:// or https:// URLs. Max 5 per call.
+        data_format: ``"markdown"`` (default, best for LLM input) or
+            ``"html"``.
+        max_chars: Per-URL truncation cap. Default 30000 (~7-8K tokens).
+            Pass ``None`` to disable truncation.
+        timeout_seconds: Per-URL HTTP timeout passed to httpx.
+    """
+
+    if not urls:
+        return json.dumps({"error": "invalid_input", "detail": "urls is empty"})
+
+    if len(urls) > _SCRAPE_MAX_URLS_PER_CALL:
+        return json.dumps(
+            {
+                "error": "invalid_input",
+                "detail": (
+                    f"max {_SCRAPE_MAX_URLS_PER_CALL} urls per call (got {len(urls)})"
+                ),
+            }
+        )
+
+    if max_chars is not None and max_chars < 1:
+        return json.dumps(
+            {
+                "error": "invalid_input",
+                "detail": "max_chars must be >= 1 or None",
+            }
+        )
+
+    results = await asyncio.gather(
+        *[
+            _scrape_one(
+                u,
+                data_format=data_format,
+                max_chars=max_chars,
+                timeout_seconds=timeout_seconds,
+            )
+            for u in urls
+        ]
+    )
+
+    succeeded = sum(1 for r in results if r["success"])
+
+    payload: dict[str, Any] = {
+        "requested": len(urls),
+        "succeeded": succeeded,
+        "failed": len(urls) - succeeded,
+        "results": results,
+    }
+
+    return json.dumps(payload, indent=2)
 
 
 @mcp.tool
