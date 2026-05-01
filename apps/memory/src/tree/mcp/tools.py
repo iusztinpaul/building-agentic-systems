@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from bson import json_util
@@ -11,6 +11,7 @@ from fastmcp import Context
 from tree.data.conversation_pipeline import ingest_conversation as _ingest_conversation
 from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.file_pipeline import ingest_file as _ingest_file
+from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
@@ -263,6 +264,68 @@ async def ingest_file(
         embedding_model=lc["embedding_model"],
     )
     return json.dumps(summary)
+
+
+@mcp.tool
+async def search_web(
+    query: str,
+    ctx: Context,
+    engine: Literal["google", "bing", "yandex"] = "google",
+    num_results: int = 10,
+    country: str | None = None,
+    language: str | None = None,
+) -> str:
+    """Run an on-demand web search via Bright Data's SERP API.
+
+    Returns SERP results (rank, title, URL, snippet) directly to the caller.
+    Does NOT ingest anything into the knowledge graph — call `ingest_url`
+    afterwards on URLs you want to keep.
+
+    Args:
+        query: The search query.
+        engine: Search engine to query. Defaults to "google".
+        num_results: Maximum number of organic results to return (default 10).
+        country: Optional 2-letter ISO country code for geo-targeting (e.g. "us").
+        language: Optional 2-letter language code (e.g. "en").
+    """
+
+    try:
+        results = await web_search(
+            query,
+            engine=engine,
+            num_results=num_results,
+            country=country,
+            language=language,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+    except BrightDataConfigurationError as exc:
+        return json.dumps({"error": "configuration_error", "detail": str(exc)})
+    except BrightDataRequestError as exc:
+        return json.dumps({"error": "fetch_failed", "detail": str(exc)})
+    except httpx.HTTPStatusError as exc:
+        return json.dumps(
+            {
+                "error": "http_error",
+                "detail": f"HTTP {exc.response.status_code} from Bright Data SERP API",
+            }
+        )
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        return json.dumps(
+            {
+                "error": "network_error",
+                "detail": f"Could not reach Bright Data SERP API: {exc}",
+            }
+        )
+
+    return json.dumps(
+        {
+            "query": query,
+            "engine": engine,
+            "results": [r.model_dump() for r in results],
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
