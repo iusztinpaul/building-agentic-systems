@@ -69,3 +69,30 @@ class TestLiveSerpSearch:
         )
 
         assert results == []
+
+    async def test_common_query_returns_at_least_one_organic_result(self) -> None:
+        """Regression for the search_web empty-results bug.
+
+        Prior to the #012 fix, ``search("pizza")`` against the configured
+        Bright Data SERP zone returned ``[]`` despite the same zone+key+URL
+        succeeding via direct ``curl``. This test asserts the fix sticks: a
+        common, stable query must return >= 1 organic result.
+
+        The query is intentionally generic so SERP drift over time does not
+        flake the test. ``pizza`` matches the user's working curl exactly, so
+        if it returns ``[]`` we have a real regression — not a deflated SERP.
+        """
+
+        results = await search("pizza", engine="google", num_results=10)
+
+        assert len(results) >= 1, (
+            "Expected >= 1 organic result for the stable query 'pizza'; got 0. "
+            "This is the regression the fix in #012 must close — the user's "
+            "curl with the same zone+key returns a populated SERP."
+        )
+        # Shape assertions stay loose: SERP content drifts.
+        first = results[0]
+        assert first.title.strip(), f"empty title at rank {first.rank}: {first}"
+        assert first.url.startswith("http"), (
+            f"non-http url at rank {first.rank}: {first.url}"
+        )
