@@ -36,16 +36,11 @@ def _patch_settings(
 def _build_response(
     *,
     status_code: int,
-    json_payload: dict | None = None,
     text: str = "",
 ) -> httpx.Response:
     """Build an httpx.Response object suitable as an AsyncClient.post return value."""
 
     request = httpx.Request("POST", "https://api.brightdata.com/request")
-    if json_payload is not None:
-        return httpx.Response(
-            status_code=status_code, json=json_payload, request=request
-        )
     return httpx.Response(status_code=status_code, text=text, request=request)
 
 
@@ -69,15 +64,61 @@ def _patch_async_client(mocker, responses: list[httpx.Response]) -> AsyncMock:
     return mock_client
 
 
+def _serp_html(entries: list[dict]) -> str:
+    """Render a stub SERP HTML body with one ``<a><h3>`` per entry.
+
+    Each entry is a dict with keys:
+      - ``title``: the visible title text inside ``<h3>``.
+      - ``link``: the destination URL on the wrapping ``<a>``. Empty / falsy
+        means the anchor has no ``href`` (mirrors Google's UI chrome where a
+        non-organic block has no destination — exercised by the
+        "skip without link" test).
+      - ``description``: optional snippet text rendered as a sibling block
+        inside the result container.
+
+    The structure mirrors Google's organic block: a ``<div>`` containing an
+    ``<a href="...">`` whose first child is the title ``<h3>``, followed by a
+    sibling ``<span>`` carrying the snippet. The parser keys off
+    "h3 with an ancestor anchor whose href is an organic external URL", so
+    this layout is sufficient.
+    """
+
+    parts: list[str] = ["<!doctype html><html><body><div id='search'>"]
+    for entry in entries:
+        link = entry.get("link") or ""
+        title = entry.get("title", "")
+        snippet = entry.get("description", "")
+        href_attr = f' href="{link}"' if link else ""
+        # Snippet padding ensures the extracted text crosses the parser's
+        # 20-char minimum threshold for non-empty snippets when the test
+        # expects a populated snippet.
+        snippet_text = snippet if not snippet else snippet
+        parts.append(
+            f"<div class='g'>"
+            f"<a{href_attr}><h3>{title}</h3></a>"
+            f"<span>{snippet_text}</span>"
+            f"</div>"
+        )
+    parts.append("</div></body></html>")
+    return "".join(parts)
+
+
 def _organic_entry(
     *,
     rank: int,
     title: str = "Title",
     link: str = "https://example.com",
-    description: str = "Snippet",
+    description: str = "Snippet that is long enough to survive the parser threshold.",
 ) -> dict:
+    """Build an entry dict consumed by ``_serp_html``.
+
+    ``rank`` is unused at the HTML layer (the parser assigns rank by document
+    order) but kept in the signature so existing test call-sites that pass
+    ``rank=...`` for clarity still compile.
+    """
+
+    _ = rank  # documentation aid only; parser assigns positional rank
     return {
-        "rank": rank,
         "title": title,
         "link": link,
         "description": description,
@@ -161,26 +202,29 @@ class TestSearchHttpBehavior:
     async def test_returns_search_results_on_200(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        payload = {
-            "general": {"search_engine": "google", "query": "python"},
-            "organic": [
+        html = _serp_html(
+            [
                 _organic_entry(
                     rank=1,
                     title="Python.org",
                     link="https://python.org",
-                    description="Official site",
+                    description=(
+                        "Official site for the Python programming language "
+                        "with downloads, docs, and news."
+                    ),
                 ),
                 _organic_entry(
                     rank=2,
                     title="Docs",
                     link="https://docs.python.org",
-                    description="Docs site",
+                    description=(
+                        "The official Python documentation, covering tutorial, "
+                        "library, and language reference."
+                    ),
                 ),
-            ],
-        }
-        _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+            ]
         )
+        _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
         # Act
         results = await search("python", engine="google", num_results=10)
@@ -191,19 +235,22 @@ class TestSearchHttpBehavior:
         assert results[0].rank == 1
         assert results[0].title == "Python.org"
         assert results[0].url == "https://python.org"
-        assert results[0].snippet == "Official site"
+        assert "Official site" in results[0].snippet
         assert results[1].rank == 2
         assert results[1].title == "Docs"
         assert results[1].url == "https://docs.python.org"
-        assert results[1].snippet == "Docs site"
+        assert "official Python documentation" in results[1].snippet
 
     async def test_returns_empty_list_when_no_organic_entries(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        _patch_async_client(
-            mocker,
-            [_build_response(status_code=200, json_payload={"organic": []})],
+        # SERP HTML with no organic blocks (e.g. the "no results" page).
+        empty_html = (
+            "<!doctype html><html><body>"
+            "<p>Your search did not match any documents.</p>"
+            "</body></html>"
         )
+        _patch_async_client(mocker, [_build_response(status_code=200, text=empty_html)])
 
         # Act
         results = await search("python")
@@ -214,7 +261,11 @@ class TestSearchHttpBehavior:
     async def test_returns_empty_list_when_organic_key_missing(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        _patch_async_client(mocker, [_build_response(status_code=200, json_payload={})])
+        # SERP HTML where the body has no h3 / anchor structure at all —
+        # equivalent to the old "JSON missing the organic key" case: nothing
+        # for the parser to anchor on.
+        bare_html = "<!doctype html><html><body></body></html>"
+        _patch_async_client(mocker, [_build_response(status_code=200, text=bare_html)])
 
         # Act
         results = await search("python")
@@ -225,15 +276,23 @@ class TestSearchHttpBehavior:
     async def test_skips_entries_without_link(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        payload = {
-            "organic": [
-                {"rank": 1, "title": "No link"},
-                _organic_entry(rank=2, title="Has link", link="https://a.com"),
-            ],
-        }
-        _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+        html = _serp_html(
+            [
+                # First entry has no link — parser must skip.
+                {
+                    "title": "No link",
+                    "link": "",
+                    "description": "Some description that is long enough.",
+                },
+                _organic_entry(
+                    rank=2,
+                    title="Has link",
+                    link="https://a.com",
+                    description="Has a link and a description that is long enough.",
+                ),
+            ]
         )
+        _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
         # Act
         results = await search("python")
@@ -245,15 +304,25 @@ class TestSearchHttpBehavior:
     async def test_assigns_positional_rank_when_entry_lacks_rank(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        payload = {
-            "organic": [
-                {"title": "A", "link": "https://a.com", "description": ""},
-                {"title": "B", "link": "https://b.com", "description": ""},
-            ],
-        }
-        _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+        # The HTML parser always assigns positional rank — there is no
+        # upstream "rank" field to read. This test pins that contract.
+        html = _serp_html(
+            [
+                _organic_entry(
+                    rank=99,  # ignored by the parser
+                    title="A",
+                    link="https://a.com",
+                    description="A description that is long enough to survive.",
+                ),
+                _organic_entry(
+                    rank=99,
+                    title="B",
+                    link="https://b.com",
+                    description="Another description that is long enough to survive.",
+                ),
+            ]
         )
+        _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
         # Act
         results = await search("python")
@@ -266,9 +335,10 @@ class TestSearchRequestShape:
     async def test_posts_expected_body_and_headers(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker, api_key="my-key", zone="my-serp-zone")
-        payload = {"organic": []}
+        # Empty SERP body — we only care about the outbound request shape.
         mock_client = _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+            mocker,
+            [_build_response(status_code=200, text="<html></html>")],
         )
 
         # Act
@@ -281,6 +351,10 @@ class TestSearchRequestShape:
         body = call.kwargs["json"]
         assert body["zone"] == "my-serp-zone"
         assert body["format"] == "raw"
+        # data_format=html is required: the configured SERP zone returns a
+        # 226-byte metadata stub for the JSON shortcut, so we must request
+        # the rendered HTML and parse it ourselves (tracker #010 / #012).
+        assert body["data_format"] == "html"
         assert "https://www.google.com/search?" in body["url"]
         headers = call.kwargs["headers"]
         assert headers["Authorization"] == "Bearer my-key"
@@ -303,7 +377,7 @@ class TestSearchRequestShape:
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
-            [_build_response(status_code=200, json_payload={"organic": []})],
+            [_build_response(status_code=200, text="<html></html>")],
         )
 
         # Act
@@ -322,7 +396,9 @@ class TestSearchRequestShape:
         assert parsed.netloc == "www.google.com"
         assert parsed.path == "/search"
         assert qs["q"] == ["best laptops 2025"]
-        assert qs["brd_json"] == ["1"]
+        # brd_json must NOT be present — the configured SERP zone (cli_serp)
+        # returns only a metadata stub when this flag is set (tracker #010).
+        assert "brd_json" not in qs
         # offset=0 should NOT include start
         assert "start" not in qs
 
@@ -341,21 +417,23 @@ class TestSearchPagination:
     async def test_paginates_when_num_results_exceeds_page_size(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        page1 = {
-            "organic": [
-                _organic_entry(rank=i, link=f"https://a.com/{i}") for i in range(1, 11)
+        page1_html = _serp_html(
+            [
+                _organic_entry(rank=i, link=f"https://a.com/{i}", title=f"T{i}")
+                for i in range(1, 11)
             ]
-        }
-        page2 = {
-            "organic": [
-                _organic_entry(rank=i, link=f"https://a.com/{i}") for i in range(11, 21)
+        )
+        page2_html = _serp_html(
+            [
+                _organic_entry(rank=i, link=f"https://a.com/{i}", title=f"T{i}")
+                for i in range(11, 21)
             ]
-        }
+        )
         mock_client = _patch_async_client(
             mocker,
             [
-                _build_response(status_code=200, json_payload=page1),
-                _build_response(status_code=200, json_payload=page2),
+                _build_response(status_code=200, text=page1_html),
+                _build_response(status_code=200, text=page2_html),
             ],
         )
 
@@ -383,13 +461,14 @@ class TestSearchPagination:
         _patch_settings(mocker)
         # Only 3 entries on the only page — caller wants 50 but we should
         # stop after one fetch and return what we got.
-        payload = {
-            "organic": [
-                _organic_entry(rank=i, link=f"https://a.com/{i}") for i in range(1, 4)
+        html = _serp_html(
+            [
+                _organic_entry(rank=i, link=f"https://a.com/{i}", title=f"T{i}")
+                for i in range(1, 4)
             ]
-        }
+        )
         mock_client = _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+            mocker, [_build_response(status_code=200, text=html)]
         )
 
         # Act
@@ -402,13 +481,14 @@ class TestSearchPagination:
     async def test_truncates_to_num_results(self, mocker) -> None:
         # Arrange
         _patch_settings(mocker)
-        payload = {
-            "organic": [
-                _organic_entry(rank=i, link=f"https://a.com/{i}") for i in range(1, 11)
+        html = _serp_html(
+            [
+                _organic_entry(rank=i, link=f"https://a.com/{i}", title=f"T{i}")
+                for i in range(1, 11)
             ]
-        }
+        )
         mock_client = _patch_async_client(
-            mocker, [_build_response(status_code=200, json_payload=payload)]
+            mocker, [_build_response(status_code=200, text=html)]
         )
 
         # Act
@@ -427,7 +507,7 @@ class TestSearchEngines:
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
-            [_build_response(status_code=200, json_payload={"organic": []})],
+            [_build_response(status_code=200, text="<html></html>")],
         )
 
         # Act
@@ -439,7 +519,8 @@ class TestSearchEngines:
         qs = parse_qs(parsed.query)
         assert parsed.netloc == "www.bing.com"
         assert qs["q"] == ["python"]
-        assert qs["brd_json"] == ["1"]
+        # brd_json is NOT sent on any engine post-#012.
+        assert "brd_json" not in qs
         assert qs["cc"] == ["us"]
         assert qs["setLang"] == ["en-US"]
         assert qs["first"] == ["1"]
@@ -449,7 +530,7 @@ class TestSearchEngines:
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
-            [_build_response(status_code=200, json_payload={"organic": []})],
+            [_build_response(status_code=200, text="<html></html>")],
         )
 
         # Act
@@ -462,5 +543,5 @@ class TestSearchEngines:
         assert parsed.netloc == "yandex.com"
         assert parsed.path == "/search/"
         assert qs["text"] == ["python"]
-        assert qs["brd_json"] == ["1"]
+        assert "brd_json" not in qs
         assert qs["lr"] == ["ru"]

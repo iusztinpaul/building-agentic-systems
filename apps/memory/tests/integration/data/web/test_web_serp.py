@@ -60,10 +60,17 @@ class TestLiveSerpSearch:
         )
 
     async def test_empty_query_returns_empty_list(self) -> None:
-        """A nonsense query returns ``[]`` — never raises."""
+        """A nonsense query returns ``[]`` — never raises.
+
+        Uses a quoted phrase of random alphanumerics to suppress Google's
+        "did you mean" near-match expansion. Without quotes, Google's HTML
+        SERP surfaces tangentially-related content (videos, "missing X"
+        suggestions) which the parser would correctly extract as organic
+        results — defeating the empty-result contract.
+        """
 
         results = await search(
-            "asdfqwerzxcvuiop1234567890nope",
+            '"qzxcvbnm1234567890zxcvbnmqwerty asdfgh poiuyt"',
             engine="google",
             num_results=5,
         )
