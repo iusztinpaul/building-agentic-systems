@@ -316,3 +316,8 @@ prettier ... Passed; ruff check ... Passed; ruff format ... Passed; biome check 
 
 **VERDICT: PASS**
 
+### [PM] 2026-05-01 16:23 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed Tester evidence and all 8 ACs from the user's perspective. Diagnostic script exists at `apps/memory/scripts/diagnose_search_web.py`, runs three probes against the live API, never logs the raw API key (only length), and the diagnosis correctly identifies failure mode (c): the `cli_serp` zone returns a 226-byte metadata stub when `brd_json=1` is passed, and a 28 KB markdown body when it isn't. The recommended fix vector ("drop `brd_json=1`, parse HTML/markdown with `bs4`") is exactly what #012 implemented. Investigation goal achieved: subsequent tasks #011/#012/#013 had a binding diagnosis to work from. SWE may commit (already committed at 7efe2a6 with `Closes-tracker: 010-...`).

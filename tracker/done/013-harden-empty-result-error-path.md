@@ -302,3 +302,8 @@ API-key leak check (across all live runs above): `BRIGHTDATA_API_KEY` value (mas
 
 **VERDICT: PASS**
 
+### [PM] 2026-05-01 16:23 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed Tester evidence and all 13 ACs. The three-condition log path (success / legitimate-empty INFO / unexpected-shape WARNING) is correctly implemented in `_parse_organic_or_warn`. New tests `TestSearchEmptyResultLogging::test_logs_info_on_legitimate_empty_serp` and `test_logs_warning_on_unexpected_response_shape` (3 parametrized cases) all GREEN; widened `test_returns_empty_list_when_no_organic_entries` now also asserts no WARNING is emitted on legitimate-empty. The api-key non-leak assertion (`"Bearer" not in record.message`) is stronger than spec required. From the user/operator perspective: a future Bright Data response-shape regression will surface as a grep-able WARNING with engine/status/content_type/body_preview within minutes — replacing the silent `[]` that hid the original bug for weeks. SWE may commit (already committed at 4c12937 with `Closes-tracker: 013-...`).

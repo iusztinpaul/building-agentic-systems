@@ -302,3 +302,15 @@ Direct call: `tree.mcp.tools.search_web("Harness Engineering", ctx, engine="goog
 **VERDICT: PASS**
 
 The bug from the user's original report ("`search_web("Harness Engineering")` returns empty") is fixed: the MCP tool path returns 5+ organic results for "Harness Engineering" with valid titles and http URLs.
+
+### [PM] 2026-05-01 16:23 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Independently reproduced the user-perspective walk:
+- `make memory-search-web QUERY="Harness Engineering"` → 10 organic results, top 3 = `martinfowler.com/articles/harness-engineering.html`, `openai.com/index/harness-engineering/`, `addyosmani.com/blog/agent-harness-engineering/` — exactly the kind of authoritative results a real user expects. Results 4–10 are youtube.com (legitimate watch URL), langchain.com, harness.io (the company), medium, redhat, reddit, linkedin. JSON envelope `{"query","engine","results":[...]}` is well-formed with `rank`, `title`, `url`, `snippet` per result.
+- URL infra-leak grep across the full output: zero `google.com` / `googleusercontent` / `gstatic` URLs leaked. The exclusion list works.
+- `make memory-unit-tests` → 442 passed in 22.01s, 0 warnings.
+- Public surface (signature, `SearchResult`, exception types, `__all__`) byte-identical to pre-fix.
+
+The user who originally typed `"use the tree mcp to search the web for 'Harness Engineering'"` will now get exactly what they expected. SWE may commit (already committed at 647f512 with `Closes-tracker: 012-...`).

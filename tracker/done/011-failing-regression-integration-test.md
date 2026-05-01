@@ -319,3 +319,9 @@ $ git diff <merge-base 35d7271> -- apps/memory/src/
 - None. The test follows the inherited module skip-mark pattern correctly, uses `_is_real` (which the existing helper already handles), and the assertion message names #012 explicitly so the future-regression story is intact.
 
 **VERDICT: PASS**
+
+### [PM] 2026-05-01 16:23 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed Tester evidence and all ACs. The TDD red/green contract for a known bug is satisfied: the test was RED on pre-#012 code (`assert 0 >= 1` — exactly the user's symptom) and is now GREEN (verified inline by my own `make memory-integration-tests` run: `tests/integration/data/web/test_web_serp.py ...` 3/3 passed). Headline user story ("search_web returns ≥1 result for queries that work via curl") is now bound to a concrete test that runs in every integration suite invocation. Gating works correctly under placeholder env vars (SKIPPED, not failed). SWE may commit (already committed at e0d02fe with `Closes-tracker: 011-...`).
