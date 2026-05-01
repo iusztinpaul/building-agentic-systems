@@ -11,6 +11,9 @@ from fastmcp import Context
 from tree.data.conversation_pipeline import ingest_conversation as _ingest_conversation
 from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.file_pipeline import ingest_file as _ingest_file
+from tree.data.web.web_search_ingest import (
+    trigger_url_batch_ingest as _trigger_url_batch_ingest,
+)
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
@@ -274,12 +277,16 @@ async def search_web(
     num_results: int = 10,
     country: str | None = None,
     language: str | None = None,
+    ingest: bool = False,
+    ingest_top_k: int | None = None,
+    ingest_urls: list[str] | None = None,
 ) -> str:
     """Run an on-demand web search via Bright Data's SERP API.
 
     Returns SERP results (rank, title, URL, snippet) directly to the caller.
-    Does NOT ingest anything into the knowledge graph — call `ingest_url`
-    afterwards on URLs you want to keep.
+    By default, does NOT ingest anything into the knowledge graph — call
+    `ingest_url` afterwards on URLs you want to keep, or call `search_web`
+    with `ingest=true` for ingestion.
 
     Args:
         query: The search query.
@@ -287,7 +294,26 @@ async def search_web(
         num_results: Maximum number of organic results to return (default 10).
         country: Optional 2-letter ISO country code for geo-targeting (e.g. "us").
         language: Optional 2-letter language code (e.g. "en").
+        ingest: If true, fire-and-forget the `ingest-web-url-batch-etl`
+            Prefect deployment with the selected URLs. Default false.
+        ingest_top_k: When `ingest=true`, ingest only the first K URLs from
+            the SERP results. Ignored if `ingest_urls` is provided.
+        ingest_urls: When `ingest=true`, ingest exactly these URLs (overrides
+            `ingest_top_k` and the SERP results).
     """
+
+    # Validate ingestion flags BEFORE the SERP call. Misuse is a user error;
+    # don't burn a SERP credit just to reject the request.
+    if not ingest and (ingest_top_k is not None or ingest_urls is not None):
+        return json.dumps(
+            {
+                "error": "invalid_input",
+                "detail": "ingest_urls/ingest_top_k passed but ingest=false",
+            }
+        )
+
+    if ingest and ingest_urls is not None and len(ingest_urls) == 0:
+        return json.dumps({"error": "invalid_input", "detail": "ingest_urls is empty"})
 
     try:
         results = await web_search(
@@ -318,14 +344,59 @@ async def search_web(
             }
         )
 
-    return json.dumps(
-        {
-            "query": query,
-            "engine": engine,
-            "results": [r.model_dump() for r in results],
-        },
-        indent=2,
-    )
+    payload: dict[str, Any] = {
+        "query": query,
+        "engine": engine,
+        "results": [r.model_dump() for r in results],
+    }
+
+    if ingest:
+        payload["ingest"] = await _build_ingest_block(
+            results, ingest_top_k, ingest_urls
+        )
+
+    return json.dumps(payload, indent=2)
+
+
+async def _build_ingest_block(
+    results: list[Any],
+    ingest_top_k: int | None,
+    ingest_urls: list[str] | None,
+) -> dict[str, Any]:
+    """Select URLs and trigger the batch ingest deployment. Always returns a dict."""
+
+    # URL selection. ingest_urls (explicit) wins; else top-k of SERP; else all SERP URLs.
+    if ingest_urls is not None:
+        selected: list[str] = list(ingest_urls)
+    elif ingest_top_k is not None:
+        selected = [r.url for r in results[:ingest_top_k]]
+    else:
+        selected = [r.url for r in results]
+
+    if not selected:
+        # Empty SERP + no explicit URLs → nothing to ingest, but search itself succeeded.
+        return {
+            "triggered": False,
+            "urls": [],
+            "detail": "no urls to ingest (empty SERP results)",
+        }
+
+    try:
+        trigger = await _trigger_url_batch_ingest(selected)
+    except Exception as exc:  # noqa: BLE001 — best-effort: never propagate.
+        logger.warning("Failed to trigger ingest-web-url-batch-etl: %s", exc)
+        return {
+            "triggered": False,
+            "urls": selected,
+            "error": str(exc),
+        }
+
+    return {
+        "triggered": True,
+        "urls": selected,
+        "flow_run_id": trigger["flow_run_id"],
+        "tracking_url": trigger["tracking_url"],
+    }
 
 
 @mcp.tool

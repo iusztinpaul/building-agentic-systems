@@ -247,6 +247,214 @@ class TestSearchWebMcpTool:
 
 
 # ---------------------------------------------------------------------------
+# MCP tool tests — optional ingestion path (`ingest=True`).
+# ---------------------------------------------------------------------------
+
+
+class TestSearchWebIngestPath:
+    """Cover the opt-in ingest path added in #008."""
+
+    async def test_default_does_not_emit_ingest_field_or_call_trigger(
+        self, mocker
+    ) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx)
+
+        # Assert
+        payload = json.loads(raw)
+        assert "ingest" not in payload
+        mock_trigger.assert_not_awaited()
+
+    async def test_ingest_true_fires_deployment_with_all_urls(self, mocker) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = AsyncMock(
+            return_value={
+                "flow_run_id": "fr-1",
+                "tracking_url": "http://127.0.0.1:4200/runs/flow-run/fr-1",
+            }
+        )
+        mocker.patch("tree.mcp.tools._trigger_url_batch_ingest", mock_trigger)
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx, ingest=True)
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["ingest"]["triggered"] is True
+        assert payload["ingest"]["flow_run_id"] == "fr-1"
+        assert payload["ingest"]["tracking_url"].startswith("http")
+        assert payload["ingest"]["urls"] == [
+            "https://example.com/kg",
+            "https://example.com/graphdb",
+        ]
+        mock_trigger.assert_awaited_once_with(
+            ["https://example.com/kg", "https://example.com/graphdb"]
+        )
+
+    async def test_ingest_top_k_truncates_to_first_k_urls(self, mocker) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = AsyncMock(
+            return_value={
+                "flow_run_id": "fr-2",
+                "tracking_url": "http://x/runs/flow-run/fr-2",
+            }
+        )
+        mocker.patch("tree.mcp.tools._trigger_url_batch_ingest", mock_trigger)
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx, ingest=True, ingest_top_k=1)
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["ingest"]["urls"] == ["https://example.com/kg"]
+        mock_trigger.assert_awaited_once_with(["https://example.com/kg"])
+
+    async def test_ingest_urls_overrides_ingest_top_k_and_serp(self, mocker) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = AsyncMock(
+            return_value={
+                "flow_run_id": "fr-3",
+                "tracking_url": "http://x/runs/flow-run/fr-3",
+            }
+        )
+        mocker.patch("tree.mcp.tools._trigger_url_batch_ingest", mock_trigger)
+        ctx = _make_ctx()
+        custom_urls = ["https://custom-a", "https://custom-b"]
+
+        # Act
+        raw = await _get_tool_callable()(
+            "k graphs",
+            ctx,
+            ingest=True,
+            ingest_top_k=99,  # Should be ignored.
+            ingest_urls=custom_urls,
+        )
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["ingest"]["urls"] == custom_urls
+        mock_trigger.assert_awaited_once_with(custom_urls)
+
+    async def test_ingest_false_with_top_k_returns_invalid_input(self, mocker) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx, ingest=False, ingest_top_k=3)
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["error"] == "invalid_input"
+        assert "ingest=false" in payload["detail"].lower()
+        mock_trigger.assert_not_awaited()
+        # SERP call should also be skipped — fail fast on misuse.
+        mock_search.assert_not_awaited()
+
+    async def test_ingest_false_with_urls_returns_invalid_input(self, mocker) -> None:
+        # Arrange
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()(
+            "k graphs", ctx, ingest=False, ingest_urls=["https://a"]
+        )
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["error"] == "invalid_input"
+        mock_trigger.assert_not_awaited()
+
+    async def test_ingest_true_with_explicit_empty_urls_returns_invalid_input(
+        self, mocker
+    ) -> None:
+        # Arrange
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx, ingest=True, ingest_urls=[])
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["error"] == "invalid_input"
+        assert "ingest_urls is empty" in payload["detail"]
+        mock_trigger.assert_not_awaited()
+
+    async def test_ingest_true_with_empty_serp_results_does_not_fire(
+        self, mocker
+    ) -> None:
+        """Empty SERP + ingest=True → search succeeds, ingest is a no-op."""
+
+        # Arrange
+        mock_search = AsyncMock(return_value=[])
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("zzz", ctx, ingest=True)
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["results"] == []
+        assert payload["ingest"]["triggered"] is False
+        assert payload["ingest"]["urls"] == []
+        mock_trigger.assert_not_awaited()
+
+    async def test_trigger_failure_degrades_to_search_only_payload(
+        self, mocker
+    ) -> None:
+        """If Prefect lookup raises, return SERP results with `triggered=false`."""
+
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest",
+            AsyncMock(side_effect=RuntimeError("deployment not found")),
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()("k graphs", ctx, ingest=True)
+
+        # Assert
+        payload = json.loads(raw)
+        assert len(payload["results"]) == 2  # SERP results preserved.
+        assert payload["ingest"]["triggered"] is False
+        assert "deployment not found" in payload["ingest"]["error"]
+        assert "flow_run_id" not in payload["ingest"]
+
+
+# ---------------------------------------------------------------------------
 # CLI tests — exercise scripts/search_web.py wiring with the SERP call mocked.
 # ---------------------------------------------------------------------------
 
@@ -270,7 +478,16 @@ class TestSearchWebCli:
 
         # Assert
         assert result.exit_code == 0
-        for opt in ("--query", "--engine", "--num-results", "--country", "--language"):
+        for opt in (
+            "--query",
+            "--engine",
+            "--num-results",
+            "--country",
+            "--language",
+            "--ingest",
+            "--ingest-top-k",
+            "--ingest-urls",
+        ):
             assert opt in result.output
 
     def test_runs_search_and_exits_zero_on_success(self, mocker, cli_main) -> None:
@@ -370,3 +587,98 @@ class TestSearchWebCli:
 
         # Assert
         assert result.exit_code != 0
+
+    def test_ingest_flag_fires_trigger_with_top_k(self, mocker, cli_main) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        mock_trigger = AsyncMock(
+            return_value={
+                "flow_run_id": "fr-cli",
+                "tracking_url": "http://127.0.0.1:4200/runs/flow-run/fr-cli",
+            }
+        )
+        mocker.patch("scripts.search_web.trigger_url_batch_ingest", mock_trigger)
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(
+            cli_main,
+            ["--query", "k graphs", "--ingest", "--ingest-top-k", "1"],
+        )
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        mock_trigger.assert_awaited_once_with(["https://example.com/kg"])
+
+    def test_ingest_urls_overrides_top_k(self, mocker, cli_main) -> None:
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        mock_trigger = AsyncMock(
+            return_value={
+                "flow_run_id": "fr-cli",
+                "tracking_url": "http://x/runs/flow-run/fr-cli",
+            }
+        )
+        mocker.patch("scripts.search_web.trigger_url_batch_ingest", mock_trigger)
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(
+            cli_main,
+            [
+                "--query",
+                "k graphs",
+                "--ingest",
+                "--ingest-top-k",
+                "99",
+                "--ingest-urls",
+                "https://a, https://b",
+            ],
+        )
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        mock_trigger.assert_awaited_once_with(["https://a", "https://b"])
+
+    def test_ingest_top_k_without_ingest_flag_exits_one(self, mocker, cli_main) -> None:
+        # Arrange — search must NOT be called when validation fails.
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "scripts.search_web.trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(
+            cli_main,
+            ["--query", "k graphs", "--ingest-top-k", "1"],
+        )
+
+        # Assert
+        assert result.exit_code == 1
+        mock_trigger.assert_not_awaited()
+        mock_search.assert_not_awaited()
+
+    def test_ingest_trigger_failure_still_exits_zero(self, mocker, cli_main) -> None:
+        """Search succeeded; ingestion is best-effort — never fail the CLI for it."""
+
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        mocker.patch(
+            "scripts.search_web.trigger_url_batch_ingest",
+            AsyncMock(side_effect=RuntimeError("workflows not served")),
+        )
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(
+            cli_main,
+            ["--query", "k graphs", "--ingest"],
+        )
+
+        # Assert
+        assert result.exit_code == 0, result.output

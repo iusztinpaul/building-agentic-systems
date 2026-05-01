@@ -118,13 +118,16 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 query-graph: # Query and visualize the knowledge graph. Pass QUERY="your query" for search, omit for full graph.
 	uv run python scripts/query_graph.py $(if $(QUERY),--query "$(QUERY)",)
 
-search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en].
+search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi
 	uv run python scripts/search_web.py --query "$(QUERY)" \
 		$(if $(ENGINE),--engine $(ENGINE),) \
 		$(if $(NUM_RESULTS),--num-results $(NUM_RESULTS),) \
 		$(if $(COUNTRY),--country $(COUNTRY),) \
-		$(if $(LANGUAGE),--language $(LANGUAGE),)
+		$(if $(LANGUAGE),--language $(LANGUAGE),) \
+		$(if $(filter true,$(INGEST)),--ingest,) \
+		$(if $(INGEST_TOP_K),--ingest-top-k $(INGEST_TOP_K),) \
+		$(if $(INGEST_URLS),--ingest-urls "$(INGEST_URLS)",)
 
 serve-mcp: # Serve the MCP server for knowledge graph queries.
 	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
