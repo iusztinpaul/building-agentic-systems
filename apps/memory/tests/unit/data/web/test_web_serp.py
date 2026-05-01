@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
@@ -241,7 +242,9 @@ class TestSearchHttpBehavior:
         assert results[1].url == "https://docs.python.org"
         assert "official Python documentation" in results[1].snippet
 
-    async def test_returns_empty_list_when_no_organic_entries(self, mocker) -> None:
+    async def test_returns_empty_list_when_no_organic_entries(
+        self, mocker, caplog
+    ) -> None:
         # Arrange
         _patch_settings(mocker)
         # SERP HTML with no organic blocks (e.g. the "no results" page).
@@ -253,10 +256,16 @@ class TestSearchHttpBehavior:
         _patch_async_client(mocker, [_build_response(status_code=200, text=empty_html)])
 
         # Act
-        results = await search("python")
+        with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
+            results = await search("python")
 
         # Assert
         assert results == []
+        # Tighten the contract: a recognized "no-results" SERP must NOT emit
+        # a WARNING. WARNING is reserved for unexpected response shapes
+        # (regression signal). See TestSearchEmptyResultLogging below.
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records == []
 
     async def test_returns_empty_list_when_organic_key_missing(self, mocker) -> None:
         # Arrange
@@ -329,6 +338,111 @@ class TestSearchHttpBehavior:
 
         # Assert
         assert [r.rank for r in results] == [1, 2]
+
+
+class TestSearchEmptyResultLogging:
+    """Verify the empty-result branching: legitimate-empty → INFO,
+    unexpected-shape → WARNING. Both paths return ``[]`` (public contract
+    unchanged); only the log signal distinguishes them.
+    """
+
+    async def test_logs_info_on_legitimate_empty_serp(self, mocker, caplog) -> None:
+        # Arrange
+        _patch_settings(mocker)
+        # Well-formed SERP HTML carrying Google's "no results" indicator —
+        # the structural anchor that says "this is a real SERP, just empty".
+        empty_html = (
+            "<!doctype html><html><body>"
+            "<p>Your search did not match any documents.</p>"
+            "</body></html>"
+        )
+        _patch_async_client(mocker, [_build_response(status_code=200, text=empty_html)])
+
+        # Act
+        with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
+            results = await search("asdfqwerzxcvuiop1234567890nope", engine="google")
+
+        # Assert: returns [] AND emits exactly one INFO line about 0 organic.
+        assert results == []
+        info_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "0 organic" in r.getMessage()
+        ]
+        assert len(info_records) == 1, (
+            f"expected exactly one '0 organic' INFO record, got "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        message = info_records[0].getMessage()
+        assert "engine=google" in message
+        # No WARNING — this is a legitimate empty, not a regression.
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warning_records == []
+
+    @pytest.mark.parametrize(
+        "body, content_type",
+        [
+            pytest.param("", "text/html", id="empty-body"),
+            pytest.param(
+                "<html><body>Sorry, an error occurred</body></html>",
+                "text/html",
+                id="error-page-no-anchors",
+            ),
+            pytest.param(
+                '{"organic": [], "_unexpected_root": true}',
+                "application/json",
+                id="json-instead-of-html",
+            ),
+        ],
+    )
+    async def test_logs_warning_on_unexpected_response_shape(
+        self, mocker, caplog, body: str, content_type: str
+    ) -> None:
+        # Arrange
+        api_key = "secret-test-api-key-do-not-leak"
+        _patch_settings(mocker, api_key=api_key)
+        response = httpx.Response(
+            status_code=200,
+            text=body,
+            headers={"content-type": content_type},
+            request=httpx.Request("POST", "https://api.brightdata.com/request"),
+        )
+        _patch_async_client(mocker, [response])
+
+        # Act
+        with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
+            results = await search("python", engine="google")
+
+        # Assert: returns [] without raising.
+        assert results == []
+        # Exactly one WARNING from the SERP module on this branch.
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warning_records) == 1, (
+            f"expected exactly one WARNING record, got "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        message = warning_records[0].getMessage()
+        # Required diagnostic fields.
+        assert "engine=google" in message
+        assert "status=200" in message
+        assert f"content_type={content_type}" in message
+        assert "body_preview=" in message
+        # Body preview must be truncated to <= 200 chars. Extract it from
+        # the message and check.
+        preview_marker = "body_preview="
+        idx = message.index(preview_marker) + len(preview_marker)
+        preview = message[idx:].rstrip(")").rstrip()
+        assert len(preview) <= 200
+
+        # API key never appears anywhere in any log record's message.
+        for record in caplog.records:
+            rendered = record.getMessage()
+            assert api_key not in rendered, (
+                f"API key leaked into log record: {rendered!r}"
+            )
+            assert "Bearer" not in rendered, (
+                f"Authorization header leaked into log record: {rendered!r}"
+            )
 
 
 class TestSearchRequestShape:

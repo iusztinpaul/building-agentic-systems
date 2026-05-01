@@ -37,6 +37,18 @@ _BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 _PAGE_SIZE = 10
 _QUERY_LOG_MAX_CHARS = 100
 _SNIPPET_MAX_CHARS = 300
+_BODY_PREVIEW_MAX_CHARS = 200
+
+# Substrings that indicate a well-formed SERP page that legitimately has no
+# organic results (vs. a malformed / regression-shaped response). Matched
+# case-insensitively. The list is intentionally small — we only need a single
+# anchor to confirm "this is a real SERP, just empty".
+_NO_RESULTS_INDICATORS = (
+    "did not match any documents",
+    "did not match any",
+    "no results found",
+    "ничего не нашлось",  # yandex
+)
 
 # Hosts whose links represent Google's own UI chrome (sign-in, account,
 # webcache, image proxy, AMP redirector) rather than organic results.
@@ -224,6 +236,74 @@ def _parse_serp_html(
     return results
 
 
+def _looks_like_legitimate_empty_serp(body: str) -> bool:
+    """Return True if ``body`` looks like a real SERP page with no results.
+
+    The heuristic is: the body either contains a known "no results"
+    indicator string, OR it has SERP-shaped HTML structure (an ``h3``
+    element anywhere, even one we didn't classify as organic) that the
+    parser inspected and found empty of organic links. The first signal is
+    the strong one — Google / Bing / Yandex all render explicit "no
+    results" copy on a successful empty SERP.
+    """
+
+    if not body:
+        return False
+
+    lowered = body.lower()
+    return any(indicator in lowered for indicator in _NO_RESULTS_INDICATORS)
+
+
+def _parse_organic_or_warn(
+    body: str,
+    *,
+    engine: SearchEngine,
+    status: int,
+    content_type: str,
+    starting_rank: int,
+    query_for_log: str,
+) -> list[SearchResult]:
+    """Parse organic results, classifying empty-result responses.
+
+    Three branches:
+
+    1. Parser returned ≥ 1 result → return them; no extra log line on the
+       hot path (the function-level INFO at the start of ``search`` is
+       enough on the success path).
+    2. Parser returned 0 results AND the body carries a known "no results"
+       indicator → INFO log, return ``[]``.
+    3. Parser returned 0 results AND the body does NOT look like a SERP →
+       WARNING log with diagnostic fields (engine, status, content type,
+       200-char body preview), return ``[]``.
+
+    Never raises. The public contract of ``search`` (return ``[]`` on
+    empty, raise only on credential / input / non-2xx) is preserved.
+    """
+
+    parsed = _parse_serp_html(body, starting_rank=starting_rank)
+    if parsed:
+        return parsed
+
+    if _looks_like_legitimate_empty_serp(body):
+        logger.info(
+            "SERP returned 0 organic results for query (engine=%s, query=%s)",
+            engine,
+            query_for_log,
+        )
+        return []
+
+    body_preview = body[:_BODY_PREVIEW_MAX_CHARS]
+    logger.warning(
+        "SERP response had unexpected shape; returning [] "
+        "(engine=%s, status=%d, content_type=%s, body_preview=%s)",
+        engine,
+        status,
+        content_type,
+        body_preview,
+    )
+    return []
+
+
 async def search(
     query: str,
     *,
@@ -324,9 +404,13 @@ async def search(
                     f"{response.text}"
                 )
 
-            page_results = _parse_serp_html(
+            page_results = _parse_organic_or_warn(
                 response.text,
+                engine=engine,
+                status=response.status_code,
+                content_type=response.headers.get("content-type", ""),
                 starting_rank=len(aggregated) + 1,
+                query_for_log=truncated_query,
             )
             aggregated.extend(page_results)
 
