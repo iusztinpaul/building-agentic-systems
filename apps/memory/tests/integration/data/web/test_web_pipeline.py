@@ -22,12 +22,24 @@ from tree.data.pipeline import ingest_all_data
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
 
-_BRIGHTDATA_REASON = "Bright Data credentials not configured"
+_BRIGHTDATA_REASON = (
+    "Bright Data credentials not configured (or set to .env.example placeholder)"
+)
+_PLACEHOLDER_VALUES = {
+    "",
+    "your-brightdata-api-key",
+    "your-brightdata-unlocker-zone",
+}
+
+
+def _is_real(value: str | None) -> bool:
+    return bool(value) and value not in _PLACEHOLDER_VALUES
+
 
 pytestmark = pytest.mark.skipif(
     not (
-        os.environ.get("BRIGHTDATA_API_KEY")
-        and os.environ.get("BRIGHTDATA_UNLOCKER_ZONE")
+        _is_real(os.environ.get("BRIGHTDATA_API_KEY"))
+        and _is_real(os.environ.get("BRIGHTDATA_UNLOCKER_ZONE"))
     ),
     reason=_BRIGHTDATA_REASON,
 )

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     modal_embedding_api_key: SecretStr = SecretStr("")
     brightdata_api_key: SecretStr = SecretStr("")
     brightdata_unlocker_zone: str = ""
+    brightdata_serp_zone: str = ""
 
 
 settings = Settings()

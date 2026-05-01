@@ -51,6 +51,7 @@ mcp = FastMCP(
         "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
         "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
         "returns a lightweight index; read individual files for details. "
+        "Use 'search_web' for on-demand web searches that don't write to memory. "
         "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
         "and 'ingest_conversation' to extract knowledge from conversations."
     ),

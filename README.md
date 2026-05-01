@@ -95,7 +95,18 @@ make harness-dev
 PROMPT="what do I have on AI agents in memory?" make harness-run
 ```
 
-The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its six memory tools (`mcp__tree-memory__query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`) are available from the first prompt.
+The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its seven memory tools (`mcp__tree-memory__query_memory`, `search_memory`, `deep_search_memory`, `search_web`, `ingest_url`, `ingest_file`, `ingest_conversation`) are available from the first prompt.
+
+**On-demand web search via `search_web`** — search the live web (Google / Bing / Yandex via Bright Data's SERP API) without polluting memory. By default `search_web` returns SERP results only; pass `ingest=True` (or `INGEST=true` on the CLI) to opt into batching the URLs through the same `ingest-web-url-batch-etl` flow that backs `ingest_url`. Requires `BRIGHTDATA_API_KEY` and `BRIGHTDATA_SERP_ZONE` in `.env`.
+
+```bash
+# Search-only — no side effects on memory.
+make memory-search-web QUERY="anthropic claude api" NUM_RESULTS=5
+
+# Search + opt-in fire-and-forget ingest of the top 1 result.
+make memory-serve-workflows &   # workflows must be served for the ingest path
+make memory-search-web QUERY="anthropic claude api" NUM_RESULTS=5 INGEST=true INGEST_TOP_K=1
+```
 
 ## App guides
 
