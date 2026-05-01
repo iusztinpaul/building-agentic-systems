@@ -114,5 +114,12 @@ search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query"
 		$(if $(INGEST_TOP_K),--ingest-top-k $(INGEST_TOP_K),) \
 		$(if $(INGEST_URLS),--ingest-urls "$(INGEST_URLS)",)
 
+scrape-web: # On-demand scrape of one or more URLs via Bright Data Web Unlocker (no ingestion). Pass URLS="a,b,c" [DATA_FORMAT=markdown|html] [MAX_CHARS=30000] [TIMEOUT=60].
+	@if [ -z "$(URLS)" ]; then echo 'USAGE: make scrape-web URLS="https://a,https://b"'; exit 1; fi
+	uv run python scripts/scrape_web.py --urls "$(URLS)" \
+		$(if $(DATA_FORMAT),--data-format $(DATA_FORMAT),) \
+		$(if $(MAX_CHARS),--max-chars $(MAX_CHARS),) \
+		$(if $(TIMEOUT),--timeout $(TIMEOUT),)
+
 serve-mcp: # Serve the MCP server for knowledge graph queries.
 	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
