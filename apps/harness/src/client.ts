@@ -1,8 +1,11 @@
 import { GoogleGenAI } from "@google/genai";
+import { DEFAULT_MODEL } from "./constants";
 import type { Message, StreamEvent } from "./messages";
 import { type AnyTool, toGeminiTools } from "./tools/registry";
 
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+// Re-export for backwards compatibility with anything importing DEFAULT_MODEL
+// from "./client". The canonical home is ./constants — see that file for why.
+export { DEFAULT_MODEL };
 
 export function createClient(): GoogleGenAI {
   const apiKey = process.env.GOOGLE_API_KEY;
