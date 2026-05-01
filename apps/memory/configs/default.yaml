@@ -27,7 +27,9 @@ sources:
   # Arbitrary URLs (blogs, news, repos, profiles) ingested via the URL
   # dispatcher; specialized pipelines (e.g. Substack) win when they match,
   # otherwise the URL falls back to Bright Data Web Unlocker.
-  urls: []
+  urls:
+    - https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
+    - https://www.anthropic.com/engineering/harness-design-long-running-apps
 
 models:
   llm:
