@@ -87,6 +87,20 @@ class HuggingFaceDatasetSource(BaseModel):
     concurrency: int = 10
 
 
+class YouTubeVideoSource(BaseModel):
+    """A YouTube video URL (or 11-char video id)."""
+
+    type: Literal["youtube_video"] = "youtube_video"
+    uri: str = Field(min_length=1)
+
+
+class YouTubeRssSource(BaseModel):
+    """A YouTube channel feed: ``youtube.com/feeds/videos.xml?channel_id=…``."""
+
+    type: Literal["youtube_rss"] = "youtube_rss"
+    uri: str = Field(min_length=1)
+
+
 class WebSource(BaseModel):
     """A generic web URL ingested via the URL dispatcher."""
 
@@ -99,10 +113,21 @@ SourceEntry = Annotated[
         SubstackRssSource,
         SubstackArticleSource,
         HuggingFaceDatasetSource,
+        YouTubeVideoSource,
+        YouTubeRssSource,
         WebSource,
     ],
     Field(discriminator="type"),
 ]
+
+
+_YOUTUBE_HOSTS: frozenset[str] = frozenset({"youtube.com", "m.youtube.com", "youtu.be"})
+
+
+def _is_youtube_host(host: str) -> bool:
+    """True iff ``host`` is a recognized YouTube host (``www.`` already stripped)."""
+
+    return host in _YOUTUBE_HOSTS
 
 
 def _is_substack_subdomain(host: str) -> bool:
@@ -160,6 +185,10 @@ def _normalize_untyped_entry(
     """Add a ``type`` to an entry that has none, based on its ``uri``.
 
     Rules:
+        - URL on a YouTube host AND path is ``/feeds/videos.xml`` AND query has
+          ``channel_id`` → ``youtube_rss``.
+        - URL on a YouTube host that looks like a video URL (``/watch``,
+          ``/shorts/...``, or ``youtu.be/<id>``) → ``youtube_video``.
         - URL on ``*.substack.com`` (or ``substack.com``) → ``substack_article``.
         - URL whose host matches another typed Substack source's host → ``substack_article``.
         - Anything else (HTTP/HTTPS URL or otherwise) → ``web``.
@@ -170,7 +199,17 @@ def _normalize_untyped_entry(
         # Let Pydantic raise the proper validation error downstream.
         return entry
 
+    parsed = urlparse(uri)
     host = _host_of(uri)
+    path = parsed.path or ""
+    query = parsed.query or ""
+
+    if _is_youtube_host(host):
+        if path == "/feeds/videos.xml" and "channel_id=" in query:
+            return {**entry, "type": "youtube_rss"}
+        if host == "youtu.be" or path == "/watch" or path.startswith("/shorts/"):
+            return {**entry, "type": "youtube_video"}
+
     if _is_substack_subdomain(host) or (host and host in substack_hosts):
         inferred_type = "substack_article"
     else:

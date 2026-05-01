@@ -8,6 +8,8 @@ from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
+    YouTubeRssSource,
+    YouTubeVideoSource,
 )
 from tree.data.pipeline import data_pipeline
 
@@ -301,6 +303,86 @@ class TestDataPipeline:
         await data_pipeline()
 
         mock_arxiv.assert_awaited_once_with(max_samples=42, fetch_content=True)
+
+    async def test_dispatches_youtube_rss_entries(self, mocker) -> None:
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+        mock_yt_rss = _make_mock_pipeline(mocker, "ingest_youtube_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_youtube_video_batch")
+
+        doc = MagicMock()
+        mock_yt_rss.return_value = [doc]
+
+        feeds = [
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC1",
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC2",
+        ]
+        _make_config(
+            mocker,
+            sources=[YouTubeRssSource(uri=uri) for uri in feeds],
+        )
+
+        result = await data_pipeline()
+
+        mock_yt_rss.assert_awaited_once_with(feeds)
+        assert doc in result
+
+    async def test_dispatches_youtube_video_entries(self, mocker) -> None:
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+        _make_mock_pipeline(mocker, "ingest_youtube_rss_feed_batch")
+        mock_yt_video = _make_mock_pipeline(mocker, "ingest_youtube_video_batch")
+
+        doc = MagicMock()
+        mock_yt_video.return_value = [doc]
+
+        urls = [
+            "https://www.youtube.com/watch?v=eYaWxljC4sA",
+            "https://youtu.be/eYaWxljC4sA",
+        ]
+        _make_config(
+            mocker,
+            sources=[YouTubeVideoSource(uri=uri) for uri in urls],
+        )
+
+        result = await data_pipeline()
+
+        mock_yt_video.assert_awaited_once_with(urls)
+        assert doc in result
+
+    async def test_skips_youtube_branches_when_absent(self, mocker, caplog) -> None:
+        import logging
+
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+        mock_yt_rss = _make_mock_pipeline(mocker, "ingest_youtube_rss_feed_batch")
+        mock_yt_video = _make_mock_pipeline(mocker, "ingest_youtube_video_batch")
+
+        _make_config(
+            mocker,
+            sources=[SubstackRssSource(uri="https://example.com/feed")],
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.data.pipeline"):
+            await data_pipeline()
+
+        mock_yt_rss.assert_not_awaited()
+        mock_yt_video.assert_not_awaited()
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "YouTube RSS pipeline skipped: no youtube_rss entries configured" in m
+            for m in messages
+        )
+        assert any(
+            "YouTube video pipeline skipped: no youtube_video entries configured" in m
+            for m in messages
+        )
 
     async def test_raises_for_unknown_huggingface_dataset_id(self, mocker) -> None:
         # Unknown HF dataset ids must fail loudly so an operator notices the

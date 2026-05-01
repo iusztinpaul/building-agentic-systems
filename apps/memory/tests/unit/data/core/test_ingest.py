@@ -267,6 +267,66 @@ class TestIngestUrl:
     @pytest.mark.parametrize(
         "url",
         [
+            "https://www.youtube.com/watch?v=eYaWxljC4sA",
+            "https://youtube.com/watch?v=eYaWxljC4sA",
+            "https://m.youtube.com/watch?v=eYaWxljC4sA",
+            "https://youtu.be/eYaWxljC4sA",
+        ],
+    )
+    async def test_routes_youtube_video_url(self, mocker, url: str) -> None:
+        mock_youtube = AsyncMock(return_value=MagicMock())
+        mock_substack = AsyncMock()
+        mock_fallback = AsyncMock()
+        # The static registry captures handler references at module load,
+        # so we replace it wholesale to inject the mocked YouTube handler.
+        mocker.patch(
+            "tree.data.core.ingest._URL_HANDLERS",
+            [
+                ("youtube.com", mock_youtube),
+                ("youtu.be", mock_youtube),
+                ("substack.com", mock_substack),
+            ],
+        )
+        mocker.patch(
+            "tree.data.core.ingest._ingest_web_url",
+            mock_fallback,
+        )
+
+        await ingest_url(url)
+
+        mock_youtube.assert_awaited_once_with(url)
+        mock_substack.assert_not_awaited()
+        mock_fallback.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw",
+            "https://youtube.com/feeds/videos.xml?channel_id=UC1",
+            "https://m.youtube.com/feeds/videos.xml?channel_id=UC2",
+        ],
+    )
+    async def test_rejects_youtube_rss_feed_url(self, mocker, url: str) -> None:
+        mock_youtube = AsyncMock()
+        mock_fallback = AsyncMock()
+        mocker.patch(
+            "tree.data.core.ingest._ingest_youtube_video",
+            mock_youtube,
+        )
+        mocker.patch(
+            "tree.data.core.ingest._ingest_web_url",
+            mock_fallback,
+        )
+
+        with pytest.raises(ValueError, match="youtube_rss"):
+            await ingest_url(url)
+
+        mock_youtube.assert_not_awaited()
+        mock_fallback.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
             "https://",
             "http://",
         ],
