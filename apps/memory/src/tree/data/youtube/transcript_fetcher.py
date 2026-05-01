@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
@@ -49,6 +49,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
 class TranscriptFetcher(Protocol):
     """Swappable backend interface for fetching YouTube transcripts.
 
