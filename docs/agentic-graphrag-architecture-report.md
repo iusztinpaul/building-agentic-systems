@@ -750,7 +750,7 @@ Both `documents` and `knowledge_graph` collections are now empty. The pipelines 
 
 ```bash
 make memory-serve-workflows &        # Start Prefect worker
-make memory-run-substack-rss-data-pipeline  # Trigger RSS ingestion
+make memory-run-data-pipeline  # Trigger ingestion
 ```
 
 Or via MCP: Claude Code calls `ingest_url("https://www.decodingai.com/p/some-article")` which routes through the URL ingestion router.
@@ -982,7 +982,7 @@ Stop hook fires -> checks sentinel file
 | **Embeddings** | Sentence Transformers all-MiniLM-L6-v2 (384d, local) |
 | **Database** | MongoDB (single instance with mongot for vector search) |
 | **ODM** | Beanie (async Pydantic ODM for MongoDB) |
-| **Orchestration** | Prefect (10 deployments for batch pipelines) |
+| **Orchestration** | Prefect (5 deployments for batch pipelines) |
 | **Agent Platform** | Claude Code (CLI + IDE extensions) |
 | **Search** | Hybrid: text index + vector search + RRF fusion + $graphLookup |
 | **Config** | Pydantic Settings (.env) + YAML app config |

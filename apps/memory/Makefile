@@ -16,7 +16,6 @@ export PYTHONPATH = ./src/
 QA_FOLDERS := src/ tests/ scripts/ deploy/
 DIR_PATH ?= inputs/tests/00_debug
 HUMAN_FEEDBACK ?=
-URL ?=
 TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
 
 # --- Utilities ---
@@ -85,23 +84,9 @@ serve-workflows: # Serve Prefect workflow deployments.
 
 
 # --- Data Pipelines ---
-# Pattern: run-<data-pipeline-name>-data-pipeline
 
-run-all-data-pipelines: # Trigger all data pipelines (Substack RSS, articles, arxiv) via Prefect.
-	uv run python scripts/run_all_data_pipelines.py
-
-run-substack-rss-data-pipeline: # Trigger Substack RSS ETL via Prefect. Reads feeds from configs/default.yaml.
-	uv run python scripts/run_substack_data_pipeline.py
-
-run-substack-article-data-pipeline: # Trigger Substack article ETL via Prefect. Reads article URLs from configs/default.yaml.
-	uv run python scripts/run_substack_article_data_pipeline.py
-
-run-arxiv-data-pipeline: # Trigger arxiv dataset ETL via Prefect. Reads max_samples from configs/default.yaml.
-	uv run python scripts/run_arxiv_data_pipeline.py
-
-run-url-data-pipeline: # Trigger web URL ingestion via Bright Data Web Unlocker. Pass URL="https://...".
-	@if [ -z "$(URL)" ]; then echo "USAGE: make run-url-data-pipeline URL=https://..."; exit 1; fi
-	uv run python scripts/run_url_data_pipeline.py "$(URL)"
+run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks all entries in configs/default.yaml sources.
+	uv run python scripts/run_data_pipeline.py
 
 
 # --- Memory Pipelines ---

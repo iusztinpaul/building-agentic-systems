@@ -11,11 +11,16 @@ Match order:
 3. Fallback: the generic web pipeline backed by Bright Data Web Unlocker.
 """
 
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
 
-from tree.config.app_config import app_config
+from tree.config.app_config import (
+    SubstackArticleSource,
+    SubstackRssSource,
+    app_config,
+)
 from tree.entities.documents import Document
 
 logger = logging.getLogger(__name__)
@@ -49,23 +54,28 @@ _URL_HANDLERS: list[tuple[str, Callable[[str], Awaitable[Document | None]]]] = [
 ]
 
 
+@functools.cache
 def _get_configured_substack_domains() -> set[str]:
-    """Extract unique domains from configured Substack sources."""
+    """Extract unique bare domains from configured Substack sources.
+
+    Walks the flat ``app_config.sources.sources`` list and collects the host
+    (lower-cased, ``www.`` stripped) of every entry typed as
+    ``substack_rss`` or ``substack_article``. Entries of any other type
+    (``web``, ``huggingface_arxiv``, ...) are ignored — even if their
+    ``uri`` happens to look like a Substack custom domain.
+
+    Entries whose ``uri`` does not parse to a host (e.g. a HuggingFace
+    dataset id) contribute nothing to the set.
+    """
 
     domains: set[str] = set()
-    for feed_url in app_config.sources.substack:
-        parsed = urlparse(feed_url)
-        if parsed.netloc:
-            domains.add(parsed.netloc.lower().removeprefix("www."))
-    for article_url in app_config.sources.substack_articles:
-        parsed = urlparse(article_url)
+    for entry in app_config.sources.sources:
+        if not isinstance(entry, (SubstackRssSource, SubstackArticleSource)):
+            continue
+        parsed = urlparse(entry.uri)
         if parsed.netloc:
             domains.add(parsed.netloc.lower().removeprefix("www."))
     return domains
-
-
-# Custom Substack domains (e.g. decodingai.com) derived from config.
-_SUBSTACK_CUSTOM_DOMAINS: set[str] = _get_configured_substack_domains()
 
 
 async def ingest_url(url: str) -> Document | None:
@@ -104,7 +114,7 @@ async def ingest_url(url: str) -> Document | None:
 
     # Custom Substack domain match.
     bare_domain = domain.removeprefix("www.")
-    if bare_domain in _SUBSTACK_CUSTOM_DOMAINS:
+    if bare_domain in _get_configured_substack_domains():
         logger.info("Routing URL to 'substack (custom domain)' pipeline: %s", url)
         return await _ingest_substack_article(url)
 

@@ -77,7 +77,7 @@ make memory-local-test
 **3. Ingest → extract → index → query.**
 
 ```bash
-make memory-run-all-data-pipelines        # Substack RSS + articles + arXiv (see configs/default.yaml)
+make memory-run-data-pipeline             # walks sources.sources in configs/default.yaml (Substack RSS + articles + arXiv + web)
 make memory-run-memory-pipeline-extraction # LLM → nodes + edges → knowledge_graph collection
 make memory-run-memory-pipeline-indexing   # reverse edges, embeddings, search indexes
 make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result

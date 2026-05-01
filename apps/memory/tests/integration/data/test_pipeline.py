@@ -2,7 +2,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 from prefect import tags as prefect_tags
 
-from tree.data.pipeline import ingest_all_data
+from tree.config.app_config import (
+    HuggingFaceArxivSource,
+    SourceEntry,
+    SubstackArticleSource,
+    SubstackRssSource,
+    load_app_config,
+)
+from tree.data.pipeline import data_pipeline
 from tree.entities.documents import Document, SourceType
 
 
@@ -99,13 +106,30 @@ def _make_full_config(
     substack_articles: list[str] | None = None,
     arxiv_max_samples: int = 2,
 ) -> MagicMock:
+    """Patch ``app_config`` with a flat list of typed source entries.
+
+    ``data_pipeline`` walks ``app_config.sources.sources`` and dispatches
+    by variant; the arxiv connector also reads its defaults from the same
+    flat list. Both modules patched so they see the same view.
+    """
+
+    sources: list[SourceEntry] = []
+    for feed_url in substack_feeds or []:
+        sources.append(SubstackRssSource(uri=feed_url))
+    for article_url in substack_articles or []:
+        sources.append(SubstackArticleSource(uri=article_url))
+    sources.append(
+        HuggingFaceArxivSource(
+            uri="librarian-bots/arxiv-metadata-snapshot",
+            max_samples=arxiv_max_samples,
+            fetch_content=False,
+            batch_size=50,
+            concurrency=10,
+        )
+    )
+
     mock_config = MagicMock()
-    mock_config.sources.substack = substack_feeds or []
-    mock_config.sources.substack_articles = substack_articles or []
-    mock_config.sources.huggingface_arxiv_dataset.max_samples = arxiv_max_samples
-    mock_config.sources.huggingface_arxiv_dataset.fetch_content = False
-    mock_config.sources.huggingface_arxiv_dataset.batch_size = 50
-    mock_config.sources.huggingface_arxiv_dataset.concurrency = 10
+    mock_config.sources.sources = sources
     mocker.patch("tree.data.pipeline.app_config", mock_config)
     mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
     return mock_config
@@ -155,7 +179,7 @@ def _mock_arxiv_source(mocker) -> None:
     )
 
 
-class TestIngestAllData:
+class TestDataPipeline:
     async def test_runs_all_three_pipelines(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_rss_source(mocker)
@@ -171,7 +195,7 @@ class TestIngestAllData:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_all_data()
+            result = await data_pipeline()
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -195,7 +219,7 @@ class TestIngestAllData:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_all_data()
+            result = await data_pipeline()
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -215,7 +239,7 @@ class TestIngestAllData:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_all_data()
+            result = await data_pipeline()
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -232,7 +256,162 @@ class TestIngestAllData:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_all_data()
+            result = await data_pipeline()
 
         assert all(d.source_type == SourceType.HUGGINGFACE for d in result)
         assert len(result) == 2
+
+    async def test_dispatches_all_five_source_variants(
+        self, mongo_client, mocker, tmp_path
+    ) -> None:
+        """Single ``data_pipeline()`` invocation against a YAML fixture covering
+        all five ``SourceEntry`` variants (substack_rss, substack_article,
+        huggingface_arxiv, explicit web, untyped → web fallback).
+
+        Verifies:
+            - The Substack RSS sub-flow is invoked once with the single feed.
+            - The Substack article sub-flow is invoked once with the single
+              article URL.
+            - The arxiv sub-flow is invoked once with the YAML's
+              ``max_samples`` / ``fetch_content`` values.
+            - The URL dispatcher is invoked twice (once for the explicit
+              ``web`` entry, once for the untyped Reddit entry which the
+              load-time validator normalizes to ``WebSource``).
+        """
+
+        # --- YAML fixture with all 5 variants ---
+        config_yaml = tmp_path / "all_variants.yaml"
+        config_yaml.write_text(
+            """
+sources:
+  - uri: https://blog.example.com/feed
+    type: substack_rss
+  - uri: https://blog.example.com/p/test-post
+    type: substack_article
+  - uri: librarian-bots/arxiv-metadata-snapshot
+    type: huggingface_arxiv
+    max_samples: 2
+    fetch_content: false
+  - uri: https://www.anthropic.com/engineering/some-page
+    type: web
+  - uri: https://www.reddit.com/r/AI_Agents/comments/example
+"""
+        )
+
+        loaded = load_app_config(config_yaml)
+        # Sanity: the load-time validator normalized the untyped Reddit
+        # entry into a WebSource, leaving us with exactly 5 entries.
+        from tree.config.app_config import (
+            HuggingFaceArxivSource as _Hf,
+            SubstackArticleSource as _SubArt,
+            SubstackRssSource as _SubRss,
+            WebSource as _Web,
+        )
+
+        types = [type(s) for s in loaded.sources.sources]
+        assert types == [_SubRss, _SubArt, _Hf, _Web, _Web], types
+        # The reddit entry must be a WebSource (untyped → web fallback).
+        reddit_entry = loaded.sources.sources[4]
+        assert isinstance(reddit_entry, _Web)
+        assert "reddit.com" in reddit_entry.uri
+
+        # --- Mock the four sub-flows the unified pipeline dispatches to ---
+
+        rss_doc = Document(
+            source_type=SourceType.SUBSTACK,
+            source_uri="https://blog.example.com/p/test-post-from-rss",
+            title="RSS-fetched post",
+            content="RSS content",
+        )
+        article_doc = Document(
+            source_type=SourceType.SUBSTACK,
+            source_uri="https://blog.example.com/p/test-post",
+            title="Article post",
+            content="Article content",
+        )
+        arxiv_doc = Document(
+            source_type=SourceType.HUGGINGFACE,
+            source_uri="arxiv://2401.00001",
+            title="Arxiv Paper",
+            content="Arxiv abstract",
+        )
+        web_doc_anthropic = Document(
+            source_type=SourceType.WEB,
+            source_uri="https://www.anthropic.com/engineering/some-page",
+            title="Anthropic page",
+            content="Anthropic content",
+        )
+        web_doc_reddit = Document(
+            source_type=SourceType.WEB,
+            source_uri="https://www.reddit.com/r/AI_Agents/comments/example",
+            title="Reddit thread",
+            content="Reddit content",
+        )
+
+        rss_mock = mocker.patch(
+            "tree.data.pipeline.ingest_substack_rss_feed_batch",
+            new=AsyncMock(return_value=[rss_doc]),
+        )
+        article_mock = mocker.patch(
+            "tree.data.pipeline.ingest_substack_article_batch",
+            new=AsyncMock(return_value=[article_doc]),
+        )
+        arxiv_mock = mocker.patch(
+            "tree.data.pipeline.ingest_arxiv_dataset",
+            new=AsyncMock(return_value=[arxiv_doc]),
+        )
+
+        async def _fake_ingest_url(url: str) -> Document:
+            if "anthropic.com" in url:
+                return web_doc_anthropic
+            if "reddit.com" in url:
+                return web_doc_reddit
+            raise AssertionError(f"Unexpected URL routed to ingest_url: {url}")
+
+        ingest_url_mock = mocker.patch(
+            "tree.data.pipeline.ingest_url",
+            side_effect=_fake_ingest_url,
+        )
+
+        # Point ``app_config.sources.sources`` (read at flow-time by
+        # ``data_pipeline``) at the freshly-loaded fixture.
+        mock_app_config = MagicMock()
+        mock_app_config.sources.sources = loaded.sources.sources
+        mocker.patch("tree.data.pipeline.app_config", mock_app_config)
+
+        # Skip the real Mongo init.
+        mocker.patch(
+            "tree.data.pipeline.init_mongodb", new=AsyncMock(return_value=mongo_client)
+        )
+
+        # --- Run the pipeline ---
+        with prefect_tags("tests"):
+            result = await data_pipeline()
+
+        # --- Assert each sub-flow was dispatched exactly as expected ---
+
+        rss_mock.assert_awaited_once_with(["https://blog.example.com/feed"])
+        article_mock.assert_awaited_once_with(["https://blog.example.com/p/test-post"])
+        arxiv_mock.assert_awaited_once_with(max_samples=2, fetch_content=False)
+        # Two web URLs dispatched in parallel: one explicit, one untyped→web.
+        assert ingest_url_mock.await_count == 2
+        called_urls = sorted(c.args[0] for c in ingest_url_mock.await_args_list)
+        assert called_urls == sorted(
+            [
+                "https://www.anthropic.com/engineering/some-page",
+                "https://www.reddit.com/r/AI_Agents/comments/example",
+            ]
+        )
+
+        # --- Aggregated result holds one doc per dispatched call ---
+        assert len(result) == 5
+        source_types = sorted(d.source_type.value for d in result)
+        assert source_types == sorted(
+            [
+                SourceType.SUBSTACK.value,
+                SourceType.SUBSTACK.value,
+                SourceType.HUGGINGFACE.value,
+                SourceType.WEB.value,
+                SourceType.WEB.value,
+            ]
+        )

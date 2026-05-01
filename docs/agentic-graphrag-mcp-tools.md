@@ -95,7 +95,7 @@ The work that happens *inside* an ingest tool — fetch a URL, parse HTML, call 
 Prefect is used **asymmetrically on purpose**:
 
 - ✅ **Write paths are Prefect-wrapped.** Every ingestion tool (`ingest_url`, `ingest_file`, `ingest_conversation`) dispatches to a `@flow` made of `@task`s with retries, delays, and per-task isolation. A flaky HTTP 503 from a source site or a Gemini 429 no longer crashes the agent's turn — Prefect absorbs it and retries server-side.
-- ✅ **Backlog and batch work is Prefect-orchestrated.** Full memory rebuilds (`memory-extraction-etl`, `memory-indexing-etl`, `ingest-all-data-etl`) are deployments that can be triggered from the CLI, a cron schedule, or a webhook. If a batch of 1,000 documents crashes at document 450, you resume from there — you don't re-pay the LLM/embedding cost for the 449 already done.
+- ✅ **Backlog and batch work is Prefect-orchestrated.** Full memory rebuilds (`memory-extraction-etl`, `memory-indexing-etl`, `data-pipeline-etl`) are deployments that can be triggered from the CLI, a cron schedule, or a webhook. If a batch of 1,000 documents crashes at document 450, you resume from there — you don't re-pay the LLM/embedding cost for the 449 already done.
 - ❌ **Read paths (query tools) are *not* Prefect-wrapped.** Queries are cheap, read-only, idempotent, and the agent is already in its own retry loop. Wrapping them in Prefect would add latency for zero durability gain — a deliberate choice, not an oversight.
 
 **Why you need an orchestrator in an MCP server specifically:**
@@ -121,7 +121,7 @@ FastMCP keeps the MCP tool definitions minimal — typically 10–15 lines each.
     Prefect handles HOW RELIABLY it actually gets done.
 ```
 
-One concrete win: the *same* Prefect flow (`ingest_substack_article`) is reused by the MCP `ingest_url` tool *and* the scheduled `ingest-all-data-etl` batch job. Write the flow once, get both an agent-facing entry point and a cron-schedulable batch job — because FastMCP and Prefect each own a different axis (protocol vs. execution) and don't fight each other.
+One concrete win: the *same* Prefect flow (`ingest_substack_article`) is reused by the MCP `ingest_url` tool *and* the scheduled `data-pipeline-etl` batch job. Write the flow once, get both an agent-facing entry point and a cron-schedulable batch job — because FastMCP and Prefect each own a different axis (protocol vs. execution) and don't fight each other.
 
 **Rule of thumb this repo follows:** *Prefect-wrap anything that writes or anything that costs money if it crashes halfway. Everything else stays direct.* That keeps query tools snappy, write tools durable, and the MCP server itself a thin translation layer between the two.
 
@@ -411,7 +411,7 @@ Every input type collapses to a `Document` with a distinct `source_uri` scheme �
 
 ```python
 _URL_HANDLERS = [("substack.com", _ingest_substack_article)]
-# Plus domains derived from app_config.sources.substack(_articles)
+# Plus domains derived from app_config.sources entries typed as substack_rss / substack_article
 ```
 
 Extending to a new source (e.g. YouTube) means adding one tuple. The MCP tool itself stays identical.
@@ -980,7 +980,7 @@ Each failure mode below is traced to the Prefect feature that absorbs it.
 - *Without Prefect:* You tail a 3000-line log looking for "ERROR". The failure might be at extraction (LLM JSON parse), normalization (fuzzy match), or indexing (vector index not ready). Hard to even tell which stage broke.
 - *With Prefect UI:* Each `@task` is a row. You see *which* document failed, at *which* stage, with the full stack trace attached. Green = good, red = the exact task to rerun.
 
-**Scheduling + deployment decoupling** — `prefect deployment run ingest-all-data-etl`
+**Scheduling + deployment decoupling** — `prefect deployment run data-pipeline-etl`
 - *Without Prefect:* You wire cron, a Bash script that sets env vars, a locking mechanism (to prevent double-runs), log rotation, and a Slack alert on exit code != 0. Then you do it again for `memory-extraction-etl`. And again for `memory-indexing-etl`.
 - *With Prefect:* `to_deployment(name=...)` on each flow, served by `make memory-serve-workflows`. Triggered by the Makefile, by a cron block in the deployment, by a webhook, or from the MCP tool path (`ingest_substack_article` is *the same flow* whether called from MCP or from `prefect deployment run`). One runtime, one UI, one set of retry semantics.
 

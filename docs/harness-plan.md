@@ -223,7 +223,7 @@ Per milestone:
 2. **Tools:** `PROMPT="list files in apps/memory/src/tree" make harness-run` uses `glob` and returns a list.
 3. **Ink TUI:** `make harness-dev` — type a prompt, see message history.
 4. **Permissions + sessions:** destructive bash fires permission dialog; `~/.tree/projects/*/*.jsonl` exists; `--resume` lists the session.
-5. **MCP:** `make local-start` (MongoDB + mongot + Prefect), populate the graph (`make memory-run-arxiv-data-pipeline` → `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing`), then `make harness-dev` → ask a memory question → verify a `mcp__tree-memory__*` tool is called.
+5. **MCP:** `make local-start` (MongoDB + mongot + Prefect), populate the graph (`make memory-run-data-pipeline` → `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing`), then `make harness-dev` → ask a memory question → verify a `mcp__tree-memory__*` tool is called.
 6. **Sub-agents:** parent asked to "use an `explore` sub-agent to summarize `apps/memory/src/tree/memory/`" — verify nested UI block, fresh sub-agent transcript file, final summary stitched into parent.
 7. **Hooks:** add a `PreToolUse` hook in `./.tree/settings.json` that blocks `bash(rm:*)`; verify denial.
 

@@ -5,70 +5,126 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tree.config.app_config import (
+    HuggingFaceArxivSource,
+    SourcesConfig,
+    SubstackArticleSource,
+    SubstackRssSource,
+    WebSource,
+)
 from tree.data.core.ingest import (
     _get_configured_substack_domains,
     ingest_url,
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_substack_domain_cache() -> None:
+    """Reset the cached helper between tests so mocked configs are observed."""
+
+    _get_configured_substack_domains.cache_clear()
+    yield
+    _get_configured_substack_domains.cache_clear()
+
+
+def _patch_sources(mocker, entries: list) -> None:
+    """Replace ``app_config.sources`` with a real ``SourcesConfig``."""
+
+    mock_config = MagicMock()
+    mock_config.sources = SourcesConfig(sources=entries)
+    mocker.patch("tree.data.core.ingest.app_config", mock_config)
+
+
 class TestGetConfiguredSubstackDomains:
-    def test_extracts_domains_from_feeds(self, mocker) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.substack = [
-            "https://www.decodingai.com/feed",
-            "https://newsletter.example.com/feed",
-        ]
-        mock_config.sources.substack_articles = []
-        mocker.patch("tree.data.core.ingest.app_config", mock_config)
+    def test_extracts_domains_from_substack_rss_entries(self, mocker) -> None:
+        _patch_sources(
+            mocker,
+            [
+                SubstackRssSource(uri="https://www.decodingai.com/feed"),
+                SubstackRssSource(uri="https://newsletter.example.com/feed"),
+            ],
+        )
 
         domains = _get_configured_substack_domains()
 
         assert "decodingai.com" in domains
         assert "newsletter.example.com" in domains
 
-    def test_extracts_domains_from_articles(self, mocker) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.substack = []
-        mock_config.sources.substack_articles = [
-            "https://www.custom.blog/p/my-post",
-        ]
-        mocker.patch("tree.data.core.ingest.app_config", mock_config)
+    def test_extracts_domains_from_substack_article_entries(self, mocker) -> None:
+        _patch_sources(
+            mocker,
+            [
+                SubstackArticleSource(uri="https://www.custom.blog/p/my-post"),
+            ],
+        )
 
         domains = _get_configured_substack_domains()
 
         assert "custom.blog" in domains
 
     def test_strips_www_prefix(self, mocker) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.substack = ["https://www.example.com/feed"]
-        mock_config.sources.substack_articles = []
-        mocker.patch("tree.data.core.ingest.app_config", mock_config)
+        _patch_sources(
+            mocker,
+            [SubstackRssSource(uri="https://www.example.com/feed")],
+        )
 
         domains = _get_configured_substack_domains()
 
         assert "example.com" in domains
         assert "www.example.com" not in domains
 
-    def test_deduplicates_domains(self, mocker) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.substack = [
-            "https://decodingai.com/feed",
-            "https://www.decodingai.com/feed",
-        ]
-        mock_config.sources.substack_articles = [
-            "https://decodingai.com/p/article",
-        ]
-        mocker.patch("tree.data.core.ingest.app_config", mock_config)
+    def test_deduplicates_domains_across_rss_and_article(self, mocker) -> None:
+        _patch_sources(
+            mocker,
+            [
+                SubstackRssSource(uri="https://decodingai.com/feed"),
+                SubstackRssSource(uri="https://www.decodingai.com/feed"),
+                SubstackArticleSource(uri="https://decodingai.com/p/article"),
+            ],
+        )
 
         domains = _get_configured_substack_domains()
 
         assert len([d for d in domains if "decodingai" in d]) == 1
 
-    def test_empty_config_returns_empty_set(self, mocker) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.substack = []
-        mock_config.sources.substack_articles = []
-        mocker.patch("tree.data.core.ingest.app_config", mock_config)
+    def test_excludes_web_source_entries(self, mocker) -> None:
+        """A WebSource on a Substack-looking domain must NOT be registered."""
+
+        _patch_sources(
+            mocker,
+            [
+                SubstackRssSource(uri="https://decodingai.com/feed"),
+                WebSource(uri="https://anthropic.com/some-article"),
+                # Even a WebSource whose host *looks* like a custom Substack
+                # blog must be excluded — the type discriminates, not the URL.
+                WebSource(uri="https://web-only.blog/post"),
+            ],
+        )
+
+        domains = _get_configured_substack_domains()
+
+        assert domains == {"decodingai.com"}
+        assert "anthropic.com" not in domains
+        assert "web-only.blog" not in domains
+
+    def test_ignores_huggingface_arxiv_entries(self, mocker) -> None:
+        """A HuggingFace dataset id has no host — must not crash or be added."""
+
+        _patch_sources(
+            mocker,
+            [
+                HuggingFaceArxivSource(uri="arxiv-community/arxiv_dataset"),
+                SubstackRssSource(uri="https://decodingai.com/feed"),
+            ],
+        )
+
+        domains = _get_configured_substack_domains()
+
+        assert domains == {"decodingai.com"}
+        assert "arxiv-community/arxiv_dataset" not in domains
+
+    def test_empty_sources_returns_empty_set(self, mocker) -> None:
+        _patch_sources(mocker, [])
 
         domains = _get_configured_substack_domains()
 
@@ -94,8 +150,8 @@ class TestIngestUrl:
         mock_fallback = AsyncMock(return_value=MagicMock())
         mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
-            {"decodingai.com"},
+            "tree.data.core.ingest._get_configured_substack_domains",
+            return_value={"decodingai.com"},
         )
         mocker.patch(
             "tree.data.core.ingest._ingest_substack_article",
@@ -118,8 +174,8 @@ class TestIngestUrl:
             [("example.com", static_handler)],
         )
         mocker.patch(
-            "tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS",
-            {"example.com"},
+            "tree.data.core.ingest._get_configured_substack_domains",
+            return_value={"example.com"},
         )
 
         await ingest_url("https://example.com/p/article")
@@ -129,7 +185,10 @@ class TestIngestUrl:
     async def test_falls_through_to_web_for_unmatched_http_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
         mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
-        mocker.patch("tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS", set())
+        mocker.patch(
+            "tree.data.core.ingest._get_configured_substack_domains",
+            return_value=set(),
+        )
         mocker.patch(
             "tree.data.core.ingest._ingest_web_url",
             mock_fallback,
@@ -144,7 +203,10 @@ class TestIngestUrl:
     async def test_falls_through_to_web_for_github_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
         mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
-        mocker.patch("tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS", set())
+        mocker.patch(
+            "tree.data.core.ingest._get_configured_substack_domains",
+            return_value=set(),
+        )
         mocker.patch(
             "tree.data.core.ingest._ingest_web_url",
             mock_fallback,
@@ -159,7 +221,10 @@ class TestIngestUrl:
     async def test_fallback_emits_info_log(self, mocker, caplog) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
         mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
-        mocker.patch("tree.data.core.ingest._SUBSTACK_CUSTOM_DOMAINS", set())
+        mocker.patch(
+            "tree.data.core.ingest._get_configured_substack_domains",
+            return_value=set(),
+        )
         mocker.patch(
             "tree.data.core.ingest._ingest_web_url",
             mock_fallback,

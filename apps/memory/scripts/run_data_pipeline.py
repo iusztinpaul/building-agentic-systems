@@ -1,16 +1,16 @@
 """
-Trigger the Substack RSS ETL pipeline via Prefect.
+Trigger the unified data pipeline ETL via Prefect.
+
+Walks every entry in ``configs/default.yaml`` ``sources.sources`` and
+dispatches each one to the appropriate sub-flow (Substack RSS / article
+batches, HuggingFace arxiv, web URLs).
 
 Requires:
-    - Prefect server running (make prefect-server)
-    - Workflows served (make serve-workflows)
+    - Prefect server running (make local-start)
+    - Workflows served (make memory-serve-workflows)
 
 Usage:
     uv run python scripts/run_data_pipeline.py
-    uv run python scripts/run_data_pipeline.py https://www.decodingai.com/feed https://other.substack.com/feed
-
-Reads feed URLs from configs/default.yaml (sources.substack) by default.
-CLI arguments override the config.
 """
 
 import asyncio
@@ -20,25 +20,22 @@ import sys
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
-from tree.config.app_config import app_config
 from tree.logging import init_logger
 
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = (
-    "ingest-substack-rss-feed-batch-etl/ingest-substack-rss-feed-batch-etl"
-)
+DEPLOYMENT_NAME = "data-pipeline-etl/data-pipeline-etl"
 POLL_INTERVAL_SECONDS = 2
 
 
-async def main(feed_urls: list[str]) -> None:
+async def main() -> None:
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
-            parameters={"feed_urls": feed_urls},
+            parameters={},
         )
         logger.info("Flow run created: %s", flow_run.id)
         base_url = str(client.api_url).rstrip("/").removesuffix("/api")
@@ -72,13 +69,4 @@ async def main(feed_urls: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    feed_urls = sys.argv[1:] or app_config.sources.substack
-
-    if not feed_urls:
-        logger.error(
-            "Usage: uv run python scripts/run_data_pipeline.py [feed_url ...]\n"
-            "       Or configure sources.substack in configs/default.yaml"
-        )
-        sys.exit(1)
-
-    asyncio.run(main(feed_urls))
+    asyncio.run(main())

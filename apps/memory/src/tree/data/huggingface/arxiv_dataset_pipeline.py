@@ -3,7 +3,7 @@ import logging
 
 from prefect import flow, task
 
-from tree.config.app_config import app_config
+from tree.config.app_config import HuggingFaceArxivSource, app_config
 from tree.config.settings import settings
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -48,19 +48,47 @@ async def _process_document(
         return await load_document(doc)
 
 
+def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
+    """Return (max_samples, fetch_content, batch_size, concurrency) for HF arxiv.
+
+    Walks the flat ``app_config.sources.sources`` list and picks the first
+    ``HuggingFaceArxivSource`` entry. Falls back to ``HuggingFaceArxivSource()``
+    defaults if no such entry exists.
+    """
+
+    for entry in app_config.sources.sources:
+        if isinstance(entry, HuggingFaceArxivSource):
+            return (
+                entry.max_samples,
+                entry.fetch_content,
+                entry.batch_size,
+                entry.concurrency,
+            )
+
+    fallback = HuggingFaceArxivSource(uri="librarian-bots/arxiv-metadata-snapshot")
+    return (
+        fallback.max_samples,
+        fallback.fetch_content,
+        fallback.batch_size,
+        fallback.concurrency,
+    )
+
+
 @flow(name="ingest-arxiv-dataset-etl", log_prints=True)
 async def ingest_arxiv_dataset(
     max_samples: int | None = None,
     fetch_content: bool | None = None,
 ) -> list[Document]:
-    hf_config = app_config.sources.huggingface_arxiv_dataset
+    (
+        default_max_samples,
+        default_fetch_content,
+        batch_size,
+        concurrency,
+    ) = _get_huggingface_arxiv_defaults()
     if max_samples is None:
-        max_samples = hf_config.max_samples
+        max_samples = default_max_samples
     if fetch_content is None:
-        fetch_content = hf_config.fetch_content
-
-    batch_size = hf_config.batch_size
-    concurrency = hf_config.concurrency
+        fetch_content = default_fetch_content
 
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),

@@ -45,9 +45,7 @@ Two sources of configuration, split by concern:
 
 ### `default.yaml` sections
 
-- `sources.substack` — Substack RSS feed URLs.
-- `sources.substack_articles` — individual Substack article URLs.
-- `sources.huggingface_arxiv_dataset` — `max_samples`, `batch_size`, `concurrency`, `fetch_content` for the arXiv HF dataset ingestor.
+- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `huggingface_arxiv`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). `huggingface_arxiv` entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the arXiv HF dataset ingestor.
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
 - `models.embedding` — provider + model + dimensions (default: `sentence-transformers` / `all-MiniLM-L6-v2` / 384).
 - `extraction` — `chunk_size`, `chunk_overlap`, `llm_concurrency`, `similarity_threshold`.
@@ -91,7 +89,7 @@ make memory-local-test
 
 ### Serving workflows
 
-The Dockerized `prefect-worker` container (started by `make local-start`) runs `python -m tree.orchestrator`, which serves all 10 deployments. If you're iterating on pipeline code and want live reloads without rebuilding the container, run the orchestrator locally instead:
+The Dockerized `prefect-worker` container (started by `make local-start`) runs `python -m tree.orchestrator`, which serves all 5 deployments. If you're iterating on pipeline code and want live reloads without rebuilding the container, run the orchestrator locally instead:
 
 ```bash
 make memory-serve-workflows
@@ -99,12 +97,9 @@ make memory-serve-workflows
 
 **Pick one — don't run both.** Running both serves duplicate workers that race for the same deployments.
 
-The 10 deployments registered by `src/tree/orchestrator.py`:
+The 5 deployments registered by `src/tree/orchestrator.py`:
 
-- `ingest-substack-rss-feed-etl`, `ingest-substack-rss-feed-batch-etl`
-- `ingest-substack-article-etl`, `ingest-substack-article-batch-etl`
-- `ingest-arxiv-dataset-etl`
-- `ingest-all-data-etl`
+- `data-pipeline-etl`
 - `ingest-file-etl`, `ingest-conversation-etl`
 - `memory-extraction-etl`, `memory-indexing-etl`
 
@@ -114,10 +109,7 @@ Each target streams logs from the local `make memory-serve-workflows` (or the Do
 
 | Target | What it does | Reads from `default.yaml` |
 |---|---|---|
-| `make memory-run-all-data-pipelines` | Substack RSS + articles + arXiv in sequence | all `sources.*` |
-| `make memory-run-substack-rss-data-pipeline` | Substack RSS feeds | `sources.substack` |
-| `make memory-run-substack-article-data-pipeline` | Individual Substack articles | `sources.substack_articles` |
-| `make memory-run-arxiv-data-pipeline` | HuggingFace arXiv dataset | `sources.huggingface_arxiv_dataset` |
+| `make memory-run-data-pipeline` | Walks every entry in `sources.sources` and dispatches each to the right sub-flow (Substack RSS / article batches, HuggingFace arXiv, web URLs) | `sources.sources` |
 
 ### Memory extraction
 
@@ -220,7 +212,7 @@ apps/memory/
       huggingface/      # arxiv_dataset_pipeline.py
       conversation.py   # conversation ingestion
       file.py           # local file ingestion
-      pipeline.py       # ingest_all_data
+      pipeline.py       # data_pipeline (dispatcher over sources.sources)
     memory/
       extraction/       # chunk + LLM extract → nodes + edges
       indexing/         # reverse edges, embeddings, indexes
