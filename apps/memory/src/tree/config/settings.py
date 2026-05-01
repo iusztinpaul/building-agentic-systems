@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     google_api_key: SecretStr = SecretStr("")
     voyage_api_key: SecretStr = SecretStr("")
     modal_embedding_api_key: SecretStr = SecretStr("")
+    brightdata_api_key: SecretStr = SecretStr("")
+    brightdata_unlocker_zone: str = ""
 
 
 settings = Settings()

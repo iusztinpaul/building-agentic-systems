@@ -4,6 +4,11 @@ URL dispatcher for data ingestion.
 Routes a URL to the appropriate data pipeline based on domain matching.
 New pipelines register their URL pattern here to be automatically
 available via the MCP ``ingest_url`` tool.
+
+Match order:
+1. Static registry ``_URL_HANDLERS`` (e.g. ``substack.com``).
+2. Custom Substack domains derived from ``app_config.sources``.
+3. Fallback: the generic web pipeline backed by Bright Data Web Unlocker.
 """
 
 import logging
@@ -16,6 +21,9 @@ from tree.entities.documents import Document
 logger = logging.getLogger(__name__)
 
 
+_SUPPORTED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+
 async def _ingest_substack_article(url: str) -> Document | None:
     """Ingest a Substack article via the Substack article pipeline."""
 
@@ -24,6 +32,14 @@ async def _ingest_substack_article(url: str) -> Document | None:
     )
 
     return await ingest_substack_article(url)
+
+
+async def _ingest_web_url(url: str) -> Document | None:
+    """Ingest an arbitrary URL via the generic web (Bright Data) pipeline."""
+
+    from tree.data.web.web_pipeline import ingest_web_url
+
+    return await ingest_web_url(url)
 
 
 # Registry: (domain_substring, handler).
@@ -58,14 +74,26 @@ async def ingest_url(url: str) -> Document | None:
     Matches against:
     1. Static registry patterns (e.g. ``substack.com``).
     2. Custom Substack domains derived from ``app_config.sources``.
+    3. Fallback: the generic web pipeline (Bright Data Web Unlocker).
 
     Returns the persisted Document, or None if the URL was a duplicate.
 
     Raises:
-        ValueError: If no data pipeline is registered for the URL's domain.
+        ValueError: If ``url`` is empty, its scheme is not ``http``/``https``,
+            or it is missing a host component.
     """
 
     parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in _SUPPORTED_SCHEMES:
+        raise ValueError(
+            f"Unsupported URL scheme '{scheme}': only http and https are accepted "
+            f"(got {url!r})."
+        )
+
+    if not parsed.netloc:
+        raise ValueError(f"URL is missing a host: {url!r}")
+
     domain = parsed.netloc.lower()
 
     # Static registry match.
@@ -80,9 +108,6 @@ async def ingest_url(url: str) -> Document | None:
         logger.info("Routing URL to 'substack (custom domain)' pipeline: %s", url)
         return await _ingest_substack_article(url)
 
-    supported = [p for p, _ in _URL_HANDLERS]
-    supported.extend(sorted(_SUBSTACK_CUSTOM_DOMAINS))
-    raise ValueError(
-        f"No data pipeline registered for domain '{domain}'. "
-        f"Supported domains: {', '.join(supported)}"
-    )
+    # Fallback: generic web pipeline (Bright Data Web Unlocker).
+    logger.info("Routing URL to 'web (Bright Data fallback)' pipeline: %s", url)
+    return await _ingest_web_url(url)

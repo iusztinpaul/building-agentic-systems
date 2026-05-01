@@ -1,8 +1,15 @@
 import { GoogleGenAI } from "@google/genai";
+import { DEFAULT_MODEL } from "./constants";
 import type { Message, StreamEvent } from "./messages";
-import { type AnyTool, toGeminiTools } from "./tools/registry";
+// Import from the leaf "./tools/gemini" rather than "./tools/registry" — the
+// registry pulls in every concrete tool, which closes the import cycle
+// (registry → task → agent/subagents → agent/loop → client) that triggers TDZ
+// errors on Bun + Linux. The leaf only depends on zod and tools/types.
+import { type AnyTool, toGeminiTools } from "./tools/gemini";
 
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+// Re-export for backwards compatibility with anything importing DEFAULT_MODEL
+// from "./client". The canonical home is ./constants — see that file for why.
+export { DEFAULT_MODEL };
 
 export function createClient(): GoogleGenAI {
   const apiKey = process.env.GOOGLE_API_KEY;

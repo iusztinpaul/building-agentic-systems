@@ -9,12 +9,14 @@ Usage:
     Triggered via: make run-all-data-pipelines
 """
 
+import asyncio
 import logging
 
 from prefect import flow
 
 from tree.config.app_config import app_config
 from tree.config.settings import settings
+from tree.data.core.ingest import ingest_url
 from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from tree.data.substack.substack_article_pipeline import ingest_substack_article_batch
 from tree.data.substack.substack_rss_pipeline import ingest_substack_rss_feed_batch
@@ -64,6 +66,16 @@ async def ingest_all_data() -> list[Document]:
     arxiv_docs = await ingest_arxiv_dataset()
     all_ingested.extend(arxiv_docs)
     logger.info("Arxiv pipeline ingested %d documents", len(arxiv_docs))
+
+    urls = app_config.sources.urls
+    if urls:
+        logger.info("Starting URL pipeline (dispatcher) with %d URLs", len(urls))
+        url_results = await asyncio.gather(*[ingest_url(u) for u in urls])
+        url_docs = [d for d in url_results if d is not None]
+        all_ingested.extend(url_docs)
+        logger.info("URL pipeline ingested %d documents", len(url_docs))
+    else:
+        logger.info("URL pipeline skipped: no URLs configured")
 
     logger.info("All data pipelines complete. Total ingested: %d", len(all_ingested))
 

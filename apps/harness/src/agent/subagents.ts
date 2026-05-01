@@ -7,7 +7,7 @@ import type { GoogleGenAI } from "@google/genai";
 import type { Message } from "../messages";
 import { subagentSessionPath } from "../session/paths";
 import { SessionStore } from "../session/store";
-import type { AnyTool } from "../tools/registry";
+import type { AnyTool } from "../tools/gemini";
 import type { SpawnSubagent, SpawnSubagentRequest, SpawnSubagentResult } from "../tools/types";
 import { type AfterToolHook, type BeforeToolHook, type PermissionCheck, loop } from "./loop";
 
