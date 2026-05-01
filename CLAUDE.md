@@ -183,7 +183,7 @@ During development, run these steps after every atomic change or before commitin
 When the feature is considered done and ready for PR, ALWAYS run:
 
  4. Integration tests: `make memory-integration-tests` (can take up to 15 minutes)
- 5. Run and verify the code end-to-end. For example, when testing the memory run: `make memory-serve-workflows & `→ `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results. Always adapt this e2e example based on the modifications you've made. If necessary you should run multiple tests covering all the modifications you've made in the feature PR you are working on.
+ 5. Run and verify the code end-to-end. For example, when testing the memory run: `make memory-serve-workflows & `→ `make memory-run-data-pipeline` → `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results. Always adapt this e2e example based on the modifications you've made. If necessary you should run multiple tests covering all the modifications you've made in the feature PR you are working on.
 
 ## Build
 
@@ -235,10 +235,7 @@ If a serve process is already running, kill it first and re-serve to pick up the
 
 2. **Run the pipeline** via the corresponding Make command (which streams logs to the terminal), such as:
 ```
-make memory-run-all-data-pipelines
-make memory-run-substack-rss-data-pipeline
-make memory-run-substack-article-data-pipeline
-make memory-run-arxiv-data-pipeline
+make memory-run-data-pipeline
 make memory-run-memory-pipeline-extraction
 make memory-run-memory-pipeline-indexing
 ```

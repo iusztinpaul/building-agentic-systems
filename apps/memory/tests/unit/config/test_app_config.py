@@ -1,6 +1,14 @@
 import textwrap
+from collections import Counter
 
-from tree.config.app_config import AppConfig, load_app_config
+from tree.config.app_config import (
+    AppConfig,
+    HuggingFaceDatasetSource,
+    SubstackArticleSource,
+    SubstackRssSource,
+    WebSource,
+    load_app_config,
+)
 
 
 class TestLoadAppConfig:
@@ -12,6 +20,70 @@ class TestLoadAppConfig:
         assert config.models.embedding.dimensions == 384
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
+
+    def test_loads_default_yaml_sources_flat_shape(self):
+        """default.yaml uses the flat ``sources:`` list shape (post-#007).
+
+        Counts each variant; deeper per-variant assertions live in
+        ``test_sources_config.py``.
+        """
+
+        config = load_app_config()
+
+        counts = Counter(type(e).__name__ for e in config.sources.sources)
+
+        assert counts == {
+            "SubstackRssSource": 5,
+            "SubstackArticleSource": 10,
+            "HuggingFaceDatasetSource": 1,
+            "WebSource": 2,
+        }
+        assert sum(counts.values()) == 18
+
+    def test_loads_default_yaml_huggingface_dataset_entry(self):
+        """The HF arxiv entry preserves the parameters from the legacy YAML."""
+
+        config = load_app_config()
+
+        hf_entries = [
+            e for e in config.sources.sources if isinstance(e, HuggingFaceDatasetSource)
+        ]
+        assert len(hf_entries) == 1
+        entry = hf_entries[0]
+        assert entry.uri == "librarian-bots/arxiv-metadata-snapshot"
+        assert entry.max_samples == 10
+        assert entry.fetch_content is False
+        assert entry.batch_size == 50
+        assert entry.concurrency == 10
+
+    def test_loads_default_yaml_normalizes_untyped_to_web(self):
+        """The two bare ``- uri:`` entries (Reddit, Anthropic) load as WebSource."""
+
+        config = load_app_config()
+
+        web_entries = [e for e in config.sources.sources if isinstance(e, WebSource)]
+        assert len(web_entries) == 2
+        web_uris = {e.uri for e in web_entries}
+        assert any("reddit.com" in u for u in web_uris)
+        assert any("anthropic.com" in u for u in web_uris)
+
+    def test_default_yaml_round_trip_preserves_typed_variants(self):
+        """Round-trip the default YAML: every entry is a typed Pydantic variant."""
+
+        config = load_app_config()
+
+        assert all(
+            isinstance(
+                s,
+                (
+                    SubstackRssSource,
+                    SubstackArticleSource,
+                    HuggingFaceDatasetSource,
+                    WebSource,
+                ),
+            )
+            for s in config.sources.sources
+        )
 
     def test_loads_custom_yaml(self, tmp_path):
         custom = tmp_path / "custom.yaml"
@@ -57,23 +129,3 @@ class TestLoadAppConfig:
         config = load_app_config()
 
         assert config.extraction.chunk_size == 1024
-
-    def test_urls_default_is_empty(self):
-        config = AppConfig()
-
-        assert config.sources.urls == []
-
-    def test_urls_round_trip_from_yaml(self, tmp_path):
-        custom = tmp_path / "urls.yaml"
-        custom.write_text(
-            textwrap.dedent("""\
-                sources:
-                  urls:
-                    - https://x.com
-                    - https://y.com
-            """)
-        )
-
-        config = load_app_config(custom)
-
-        assert config.sources.urls == ["https://x.com", "https://y.com"]

@@ -11,9 +11,11 @@ Resolution order:
 
 import os
 from pathlib import Path
+from typing import Annotated, Any, Literal, Union
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
@@ -52,20 +54,169 @@ class QueryConfig(BaseModel):
     embedding_batch_size: int = 64
 
 
-class HuggingFaceArxivDatasetConfig(BaseModel):
+# --- Source variants (discriminated union) ---
+
+
+class SubstackRssSource(BaseModel):
+    """A Substack RSS feed URL."""
+
+    type: Literal["substack_rss"] = "substack_rss"
+    uri: str = Field(min_length=1)
+
+
+class SubstackArticleSource(BaseModel):
+    """A Substack article URL (may live on a custom domain)."""
+
+    type: Literal["substack_article"] = "substack_article"
+    uri: str = Field(min_length=1)
+
+
+class HuggingFaceDatasetSource(BaseModel):
+    """A HuggingFace dataset id (NOT a URL).
+
+    The ``uri`` is the dataset id (``namespace/name``) and is used to
+    dispatch to a per-dataset ETL pipeline registered in
+    ``tree.data.pipeline``. Unknown dataset ids raise at dispatch time.
+    """
+
+    type: Literal["huggingface_dataset"] = "huggingface_dataset"
+    uri: str = Field(min_length=1)
     max_samples: int = 10
     fetch_content: bool = False
     batch_size: int = 50
     concurrency: int = 10
 
 
+class WebSource(BaseModel):
+    """A generic web URL ingested via the URL dispatcher."""
+
+    type: Literal["web"] = "web"
+    uri: str = Field(min_length=1)
+
+
+SourceEntry = Annotated[
+    Union[
+        SubstackRssSource,
+        SubstackArticleSource,
+        HuggingFaceDatasetSource,
+        WebSource,
+    ],
+    Field(discriminator="type"),
+]
+
+
+def _is_substack_subdomain(host: str) -> bool:
+    """True iff ``host`` is ``substack.com`` or any ``*.substack.com`` subdomain.
+
+    Strips a leading ``www.`` for tolerance.
+    """
+
+    if not host:
+        return False
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "substack.com" or host.endswith(".substack.com")
+
+
+def _host_of(uri: str) -> str:
+    """Lower-cased ``netloc`` of ``uri`` with any ``www.`` prefix stripped.
+
+    Returns an empty string if ``uri`` has no parseable host (e.g. a
+    HuggingFace dataset id).
+    """
+
+    host = (urlparse(uri).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _collect_typed_substack_hosts(raw_entries: list[Any]) -> set[str]:
+    """Hosts of entries explicitly typed as a Substack variant.
+
+    Used to coerce later untyped entries on the same custom domain.
+    """
+
+    hosts: set[str] = set()
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_type = entry.get("type")
+        if entry_type not in ("substack_rss", "substack_article"):
+            continue
+        uri = entry.get("uri")
+        if not isinstance(uri, str):
+            continue
+        host = _host_of(uri)
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _normalize_untyped_entry(
+    entry: dict[str, Any], substack_hosts: set[str]
+) -> dict[str, Any]:
+    """Add a ``type`` to an entry that has none, based on its ``uri``.
+
+    Rules:
+        - URL on ``*.substack.com`` (or ``substack.com``) → ``substack_article``.
+        - URL whose host matches another typed Substack source's host → ``substack_article``.
+        - Anything else (HTTP/HTTPS URL or otherwise) → ``web``.
+    """
+
+    uri = entry.get("uri")
+    if not isinstance(uri, str):
+        # Let Pydantic raise the proper validation error downstream.
+        return entry
+
+    host = _host_of(uri)
+    if _is_substack_subdomain(host) or (host and host in substack_hosts):
+        inferred_type = "substack_article"
+    else:
+        inferred_type = "web"
+
+    return {**entry, "type": inferred_type}
+
+
 class SourcesConfig(BaseModel):
-    substack: list[str] = []
-    substack_articles: list[str] = []
-    huggingface_arxiv_dataset: HuggingFaceArxivDatasetConfig = (
-        HuggingFaceArxivDatasetConfig()
-    )
-    urls: list[str] = []
+    """Flat list of typed data sources for the ingestion pipelines."""
+
+    sources: list[SourceEntry] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_untyped_sources(cls, data: Any) -> Any:
+        """Pre-validation hook: infer ``type`` for entries that lack one.
+
+        Runs before discriminated-union validation so untyped raw dicts can
+        be coerced into a typed variant. Also coerces a bare list of source
+        entries into ``{"sources": <list>}`` so the YAML can write the flat
+        shape directly under ``AppConfig.sources``. See module-level helpers
+        for the inference rules.
+        """
+
+        # Accept the flat YAML shape (``sources: [...]`` at the AppConfig
+        # level) by wrapping a bare list as ``{"sources": <list>}``.
+        if isinstance(data, list):
+            data = {"sources": data}
+
+        if not isinstance(data, dict):
+            return data
+        raw_sources = data.get("sources")
+        if not isinstance(raw_sources, list):
+            return data
+
+        substack_hosts = _collect_typed_substack_hosts(raw_sources)
+
+        normalized: list[Any] = []
+        for entry in raw_sources:
+            if isinstance(entry, dict) and "type" not in entry:
+                normalized.append(_normalize_untyped_entry(entry, substack_hosts))
+            else:
+                normalized.append(entry)
+
+        return {**data, "sources": normalized}
 
 
 class MCPConfig(BaseModel):

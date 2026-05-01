@@ -29,7 +29,7 @@ make harness-dev
 
 # end-to-end: memory + harness
 make local-start                                       # shared infra (from repo root)
-make memory-run-all-data-pipelines                     # ingest some data
+make memory-run-data-pipeline                          # ingest some data
 make memory-run-memory-pipeline-extraction             # extract the graph
 make memory-run-memory-pipeline-indexing               # index it
 PROMPT="search my memory for knowledge-graph notes" make harness-run

@@ -3,7 +3,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tree.config.app_config import (
+    HuggingFaceDatasetSource,
+    SourcesConfig,
+    SubstackRssSource,
+)
 from tree.data.huggingface.arxiv_dataset_pipeline import (
+    _get_huggingface_arxiv_defaults,
     _process_document,
     extract_document,
     fetch_paper_content,
@@ -22,6 +28,56 @@ def _make_doc(arxiv_id: str = "2103.00001") -> Document:
         content="",
         authors=["Author"],
     )
+
+
+class TestGetHuggingfaceArxivDefaults:
+    """The helper now walks the flat ``app_config.sources.sources`` list."""
+
+    def test_picks_first_huggingface_arxiv_source(self, mocker) -> None:
+        sources = SourcesConfig(
+            sources=[
+                SubstackRssSource(uri="https://example.substack.com/feed"),
+                HuggingFaceDatasetSource(
+                    uri="librarian-bots/arxiv-metadata-snapshot",
+                    max_samples=42,
+                    fetch_content=True,
+                    batch_size=25,
+                    concurrency=4,
+                ),
+            ]
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.app_config.sources",
+            sources,
+        )
+
+        max_samples, fetch_content, batch_size, concurrency = (
+            _get_huggingface_arxiv_defaults()
+        )
+
+        assert max_samples == 42
+        assert fetch_content is True
+        assert batch_size == 25
+        assert concurrency == 4
+
+    def test_falls_back_to_huggingface_arxiv_source_defaults(self, mocker) -> None:
+        sources = SourcesConfig(
+            sources=[SubstackRssSource(uri="https://example.substack.com/feed")]
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.app_config.sources",
+            sources,
+        )
+
+        max_samples, fetch_content, batch_size, concurrency = (
+            _get_huggingface_arxiv_defaults()
+        )
+
+        # Mirror HuggingFaceDatasetSource() field defaults.
+        assert max_samples == 10
+        assert fetch_content is False
+        assert batch_size == 50
+        assert concurrency == 10
 
 
 class TestExtractDocumentTask:

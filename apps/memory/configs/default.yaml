@@ -2,24 +2,38 @@
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 
 sources:
-  substack:
-    - https://www.decodingai.com/feed
-    - https://maximelabonne.substack.com/feed
-    - https://modelcraft.substack.com/feed
-    - https://www.latent.space/feed
-    - https://alexeyondata.substack.com/feed
-  substack_articles:
-    - https://www.decodingai.com/p/ai-agents-foundations-course
-    - https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
-    - https://www.decodingai.com/p/context-engineering-2025s-1-skill
-    - https://www.decodingai.com/p/llm-structured-outputs-the-only-way
-    - https://www.decodingai.com/p/stop-building-ai-agents-use-these
-    - https://www.decodingai.com/p/tool-calling-from-scratch-to-production
-    - https://www.decodingai.com/p/ai-agents-planning
-    - https://www.decodingai.com/p/building-production-react-agents
-    - https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
-    - https://www.decodingai.com/p/stop-converting-documents-to-text
-  huggingface_arxiv_dataset:
+  - uri: https://www.decodingai.com/feed
+    type: substack_rss
+  - uri: https://maximelabonne.substack.com/feed
+    type: substack_rss
+  - uri: https://modelcraft.substack.com/feed
+    type: substack_rss
+  - uri: https://www.latent.space/feed
+    type: substack_rss
+  - uri: https://alexeyondata.substack.com/feed
+    type: substack_rss
+  - uri: https://www.decodingai.com/p/ai-agents-foundations-course
+    type: substack_article
+  - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
+    type: substack_article
+  - uri: https://www.decodingai.com/p/context-engineering-2025s-1-skill
+    type: substack_article
+  - uri: https://www.decodingai.com/p/llm-structured-outputs-the-only-way
+    type: substack_article
+  - uri: https://www.decodingai.com/p/stop-building-ai-agents-use-these
+    type: substack_article
+  - uri: https://www.decodingai.com/p/tool-calling-from-scratch-to-production
+    type: substack_article
+  - uri: https://www.decodingai.com/p/ai-agents-planning
+    type: substack_article
+  - uri: https://www.decodingai.com/p/building-production-react-agents
+    type: substack_article
+  - uri: https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
+    type: substack_article
+  - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
+    type: substack_article
+  - uri: librarian-bots/arxiv-metadata-snapshot
+    type: huggingface_dataset
     max_samples: 10
     fetch_content: false
     batch_size: 50
@@ -27,9 +41,8 @@ sources:
   # Arbitrary URLs (blogs, news, repos, profiles) ingested via the URL
   # dispatcher; specialized pipelines (e.g. Substack) win when they match,
   # otherwise the URL falls back to Bright Data Web Unlocker.
-  urls:
-    - https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
-    - https://www.anthropic.com/engineering/harness-design-long-running-apps
+  - uri: https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
+  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
 
 models:
   llm:

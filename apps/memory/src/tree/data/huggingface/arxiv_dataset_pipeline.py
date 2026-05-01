@@ -3,7 +3,7 @@ import logging
 
 from prefect import flow, task
 
-from tree.config.app_config import app_config
+from tree.config.app_config import HuggingFaceDatasetSource, app_config
 from tree.config.settings import settings
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -15,6 +15,8 @@ from tree.db import init_mongodb
 from tree.entities.documents import Document
 
 logger = logging.getLogger(__name__)
+
+ARXIV_DATASET_ID = "librarian-bots/arxiv-metadata-snapshot"
 
 
 @task(name="extract-arxiv-document")
@@ -48,19 +50,51 @@ async def _process_document(
         return await load_document(doc)
 
 
+def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
+    """Return (max_samples, fetch_content, batch_size, concurrency) for HF arxiv.
+
+    Walks the flat ``app_config.sources.sources`` list and picks the first
+    ``HuggingFaceDatasetSource`` entry whose ``uri`` matches the arxiv dataset
+    id. Falls back to ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)``
+    defaults if no such entry exists.
+    """
+
+    for entry in app_config.sources.sources:
+        if (
+            isinstance(entry, HuggingFaceDatasetSource)
+            and entry.uri == ARXIV_DATASET_ID
+        ):
+            return (
+                entry.max_samples,
+                entry.fetch_content,
+                entry.batch_size,
+                entry.concurrency,
+            )
+
+    fallback = HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)
+    return (
+        fallback.max_samples,
+        fallback.fetch_content,
+        fallback.batch_size,
+        fallback.concurrency,
+    )
+
+
 @flow(name="ingest-arxiv-dataset-etl", log_prints=True)
 async def ingest_arxiv_dataset(
     max_samples: int | None = None,
     fetch_content: bool | None = None,
 ) -> list[Document]:
-    hf_config = app_config.sources.huggingface_arxiv_dataset
+    (
+        default_max_samples,
+        default_fetch_content,
+        batch_size,
+        concurrency,
+    ) = _get_huggingface_arxiv_defaults()
     if max_samples is None:
-        max_samples = hf_config.max_samples
+        max_samples = default_max_samples
     if fetch_content is None:
-        fetch_content = hf_config.fetch_content
-
-    batch_size = hf_config.batch_size
-    concurrency = hf_config.concurrency
+        fetch_content = default_fetch_content
 
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),

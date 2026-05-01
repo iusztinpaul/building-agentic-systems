@@ -17,8 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 from prefect import tags as prefect_tags
 
+from tree.config.app_config import HuggingFaceDatasetSource, WebSource
 from tree.data.core.ingest import ingest_url
-from tree.data.pipeline import ingest_all_data
+from tree.data.pipeline import data_pipeline
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
 
@@ -50,7 +51,8 @@ _EXAMPLE_ORG_URL = "https://example.org"
 _EXAMPLE_NET_URL = "https://example.net"
 _FALLBACK_URL = "https://martinfowler.com/bliki/CQRS.html"
 # A long-stable Substack article that is also present in
-# ``configs/default.yaml`` under ``sources.substack_articles``.
+# ``configs/default.yaml`` as a ``type: substack_article`` entry under the
+# top-level ``sources`` list.
 _SUBSTACK_URL = "https://www.decodingai.com/p/ai-agents-foundations-course"
 
 
@@ -161,18 +163,21 @@ class TestDispatcherFallback:
             await _delete_by_source_uri(_SUBSTACK_URL)
 
 
-class TestIngestAllDataPicksUpUrls:
-    async def test_ingest_all_data_picks_up_urls_config(
+class TestDataPipelinePicksUpWebEntries:
+    async def test_data_pipeline_picks_up_web_entries_config(
         self, mongo_client, mocker
     ) -> None:
         mock_config = MagicMock()
-        mock_config.sources.substack = []
-        mock_config.sources.substack_articles = []
-        mock_config.sources.huggingface_arxiv_dataset.max_samples = 0
-        mock_config.sources.huggingface_arxiv_dataset.fetch_content = False
-        mock_config.sources.huggingface_arxiv_dataset.batch_size = 50
-        mock_config.sources.huggingface_arxiv_dataset.concurrency = 10
-        mock_config.sources.urls = [_EXAMPLE_URL]
+        mock_config.sources.sources = [
+            WebSource(uri=_EXAMPLE_URL),
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot",
+                max_samples=0,
+                fetch_content=False,
+                batch_size=50,
+                concurrency=10,
+            ),
+        ]
         mocker.patch("tree.data.pipeline.app_config", mock_config)
         mocker.patch(
             "tree.data.huggingface.arxiv_dataset_pipeline.app_config",
@@ -187,7 +192,7 @@ class TestIngestAllDataPicksUpUrls:
             return_value=mongo_client,
         )
 
-        # Stub the arxiv batch generator so ``ingest_all_data`` doesn't
+        # Stub the arxiv batch generator so ``data_pipeline`` doesn't
         # touch the real HuggingFace dataset during this test.
         def _empty_batches(max_samples, batch_size):
             return
@@ -200,7 +205,7 @@ class TestIngestAllDataPicksUpUrls:
 
         try:
             with prefect_tags("tests"):
-                result = await ingest_all_data()
+                result = await data_pipeline()
 
             web_docs = [d for d in result if d.source_type == SourceType.WEB]
             assert len(web_docs) == 1
