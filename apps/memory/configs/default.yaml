@@ -33,7 +33,7 @@ sources:
   - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
     type: substack_article
   - uri: librarian-bots/arxiv-metadata-snapshot
-    type: huggingface_arxiv
+    type: huggingface_dataset
     max_samples: 10
     fetch_content: false
     batch_size: 50

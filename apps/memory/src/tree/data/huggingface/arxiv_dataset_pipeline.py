@@ -3,7 +3,7 @@ import logging
 
 from prefect import flow, task
 
-from tree.config.app_config import HuggingFaceArxivSource, app_config
+from tree.config.app_config import HuggingFaceDatasetSource, app_config
 from tree.config.settings import settings
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -15,6 +15,8 @@ from tree.db import init_mongodb
 from tree.entities.documents import Document
 
 logger = logging.getLogger(__name__)
+
+ARXIV_DATASET_ID = "librarian-bots/arxiv-metadata-snapshot"
 
 
 @task(name="extract-arxiv-document")
@@ -52,12 +54,16 @@ def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
     """Return (max_samples, fetch_content, batch_size, concurrency) for HF arxiv.
 
     Walks the flat ``app_config.sources.sources`` list and picks the first
-    ``HuggingFaceArxivSource`` entry. Falls back to ``HuggingFaceArxivSource()``
+    ``HuggingFaceDatasetSource`` entry whose ``uri`` matches the arxiv dataset
+    id. Falls back to ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)``
     defaults if no such entry exists.
     """
 
     for entry in app_config.sources.sources:
-        if isinstance(entry, HuggingFaceArxivSource):
+        if (
+            isinstance(entry, HuggingFaceDatasetSource)
+            and entry.uri == ARXIV_DATASET_ID
+        ):
             return (
                 entry.max_samples,
                 entry.fetch_content,
@@ -65,7 +71,7 @@ def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
                 entry.concurrency,
             )
 
-    fallback = HuggingFaceArxivSource(uri="librarian-bots/arxiv-metadata-snapshot")
+    fallback = HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)
     return (
         fallback.max_samples,
         fallback.fetch_content,

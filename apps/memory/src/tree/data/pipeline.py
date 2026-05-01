@@ -9,8 +9,9 @@ its discriminated-union variant:
   ``ingest_substack_rss_feed_batch``.
 - ``SubstackArticleSource`` entries are batched into a single call to
   ``ingest_substack_article_batch``.
-- ``HuggingFaceArxivSource`` entries are dispatched one-by-one to
-  ``ingest_arxiv_dataset`` (typically only one such entry).
+- ``HuggingFaceDatasetSource`` entries are dispatched per-entry through
+  ``_HUGGINGFACE_DATASET_HANDLERS``, keyed on the dataset id (``uri``).
+  Unknown dataset ids raise ``ValueError``.
 - ``WebSource`` entries are dispatched in parallel via the ``ingest_url``
   router, which handles substack-domain matching and the generic web
   fallback.
@@ -24,11 +25,12 @@ Usage:
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from prefect import flow
 
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
@@ -43,6 +45,25 @@ from tree.db import init_mongodb
 from tree.entities.documents import Document
 
 logger = logging.getLogger(__name__)
+
+
+async def _ingest_arxiv_dataset_entry(
+    entry: HuggingFaceDatasetSource,
+) -> list[Document]:
+    return await ingest_arxiv_dataset(
+        max_samples=entry.max_samples,
+        fetch_content=entry.fetch_content,
+    )
+
+
+# Registry: HuggingFace dataset id → ETL handler.
+# Add a new dataset by registering its id alongside a handler that maps
+# the source entry to the right ingestion flow.
+_HUGGINGFACE_DATASET_HANDLERS: dict[
+    str, Callable[[HuggingFaceDatasetSource], Awaitable[list[Document]]]
+] = {
+    "librarian-bots/arxiv-metadata-snapshot": _ingest_arxiv_dataset_entry,
+}
 
 
 @flow(name="data-pipeline-etl", log_prints=True)
@@ -88,23 +109,28 @@ async def data_pipeline() -> list[Document]:
             "Substack article pipeline skipped: no substack_article entries configured"
         )
 
-    # --- HuggingFace arxiv (one call per entry; typically only one) ---
-    arxiv_entries = [s for s in sources if isinstance(s, HuggingFaceArxivSource)]
-    if arxiv_entries:
-        for entry in arxiv_entries:
+    # --- HuggingFace datasets (one call per entry, dispatched by dataset id) ---
+    hf_entries = [s for s in sources if isinstance(s, HuggingFaceDatasetSource)]
+    if hf_entries:
+        for entry in hf_entries:
+            handler = _HUGGINGFACE_DATASET_HANDLERS.get(entry.uri)
+            if handler is None:
+                raise ValueError(
+                    f"No ETL registered for HuggingFace dataset id {entry.uri!r}. "
+                    f"Register a handler in {__name__}._HUGGINGFACE_DATASET_HANDLERS."
+                )
+            logger.info("Starting HuggingFace dataset pipeline for %s", entry.uri)
+            hf_docs = await handler(entry)
+            all_ingested.extend(hf_docs)
             logger.info(
-                "Starting arxiv dataset pipeline (max_samples=%d, fetch_content=%s)",
-                entry.max_samples,
-                entry.fetch_content,
+                "HuggingFace dataset pipeline for %s ingested %d documents",
+                entry.uri,
+                len(hf_docs),
             )
-            arxiv_docs = await ingest_arxiv_dataset(
-                max_samples=entry.max_samples,
-                fetch_content=entry.fetch_content,
-            )
-            all_ingested.extend(arxiv_docs)
-            logger.info("Arxiv pipeline ingested %d documents", len(arxiv_docs))
     else:
-        logger.info("Arxiv pipeline skipped: no huggingface_arxiv entries configured")
+        logger.info(
+            "HuggingFace dataset pipeline skipped: no huggingface_dataset entries configured"
+        )
 
     # --- Generic web URLs (parallel dispatch via the URL router) ---
     web_entries = [s for s in sources if isinstance(s, WebSource)]

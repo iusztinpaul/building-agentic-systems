@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SourcesConfig,
     SubstackArticleSource,
     SubstackRssSource,
@@ -107,13 +107,13 @@ class TestGetConfiguredSubstackDomains:
         assert "anthropic.com" not in domains
         assert "web-only.blog" not in domains
 
-    def test_ignores_huggingface_arxiv_entries(self, mocker) -> None:
+    def test_ignores_huggingface_dataset_entries(self, mocker) -> None:
         """A HuggingFace dataset id has no host — must not crash or be added."""
 
         _patch_sources(
             mocker,
             [
-                HuggingFaceArxivSource(uri="arxiv-community/arxiv_dataset"),
+                HuggingFaceDatasetSource(uri="arxiv-community/arxiv_dataset"),
                 SubstackRssSource(uri="https://decodingai.com/feed"),
             ],
         )

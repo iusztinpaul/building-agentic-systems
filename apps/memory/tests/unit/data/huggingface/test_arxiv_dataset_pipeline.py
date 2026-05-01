@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SourcesConfig,
     SubstackRssSource,
 )
@@ -37,7 +37,7 @@ class TestGetHuggingfaceArxivDefaults:
         sources = SourcesConfig(
             sources=[
                 SubstackRssSource(uri="https://example.substack.com/feed"),
-                HuggingFaceArxivSource(
+                HuggingFaceDatasetSource(
                     uri="librarian-bots/arxiv-metadata-snapshot",
                     max_samples=42,
                     fetch_content=True,
@@ -73,7 +73,7 @@ class TestGetHuggingfaceArxivDefaults:
             _get_huggingface_arxiv_defaults()
         )
 
-        # Mirror HuggingFaceArxivSource() field defaults.
+        # Mirror HuggingFaceDatasetSource() field defaults.
         assert max_samples == 10
         assert fetch_content is False
         assert batch_size == 50

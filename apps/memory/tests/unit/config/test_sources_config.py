@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SourcesConfig,
     SubstackArticleSource,
     SubstackRssSource,
@@ -62,12 +62,12 @@ class TestVariantValidation:
         assert isinstance(config.sources[0], WebSource)
         assert config.sources[0].uri == "https://news.ycombinator.com"
 
-    def test_huggingface_arxiv_validates(self):
+    def test_huggingface_dataset_validates(self):
         config = SourcesConfig.model_validate(
             {
                 "sources": [
                     {
-                        "type": "huggingface_arxiv",
+                        "type": "huggingface_dataset",
                         "uri": "librarian-bots/arxiv-metadata-snapshot",
                         "max_samples": 100,
                         "fetch_content": True,
@@ -77,7 +77,7 @@ class TestVariantValidation:
         )
 
         entry = config.sources[0]
-        assert isinstance(entry, HuggingFaceArxivSource)
+        assert isinstance(entry, HuggingFaceDatasetSource)
         assert entry.uri == "librarian-bots/arxiv-metadata-snapshot"
         assert entry.max_samples == 100
         assert entry.fetch_content is True
@@ -87,12 +87,12 @@ class TestVariantValidation:
 
 
 class TestVariantDefaults:
-    def test_huggingface_arxiv_defaults(self):
+    def test_huggingface_dataset_defaults(self):
         config = SourcesConfig.model_validate(
             {
                 "sources": [
                     {
-                        "type": "huggingface_arxiv",
+                        "type": "huggingface_dataset",
                         "uri": "librarian-bots/arxiv-metadata-snapshot",
                     },
                 ],
@@ -100,19 +100,19 @@ class TestVariantDefaults:
         )
 
         entry = config.sources[0]
-        assert isinstance(entry, HuggingFaceArxivSource)
+        assert isinstance(entry, HuggingFaceDatasetSource)
         assert entry.max_samples == 10
         assert entry.fetch_content is False
         assert entry.batch_size == 50
         assert entry.concurrency == 10
 
-    def test_huggingface_arxiv_uri_is_dataset_id(self):
+    def test_huggingface_dataset_uri_is_dataset_id(self):
         # Dataset id is NOT a URL; should still validate as long as it's non-empty.
         config = SourcesConfig.model_validate(
             {
                 "sources": [
                     {
-                        "type": "huggingface_arxiv",
+                        "type": "huggingface_dataset",
                         "uri": "librarian-bots/arxiv-metadata-snapshot",
                     },
                 ],
@@ -137,7 +137,7 @@ class TestValidationErrors:
 
     @pytest.mark.parametrize(
         "source_type",
-        ["substack_rss", "substack_article", "huggingface_arxiv", "web"],
+        ["substack_rss", "substack_article", "huggingface_dataset", "web"],
     )
     def test_missing_uri_raises_validation_error(self, source_type: str):
         with pytest.raises(ValidationError) as exc_info:
@@ -211,7 +211,7 @@ class TestYamlRoundTrip:
                       uri: https://www.decodingai.com/feed
                     - type: substack_article
                       uri: https://www.decodingai.com/p/some-article
-                    - type: huggingface_arxiv
+                    - type: huggingface_dataset
                       uri: librarian-bots/arxiv-metadata-snapshot
                       max_samples: 25
                     - type: web
@@ -232,7 +232,7 @@ class TestYamlRoundTrip:
                 (
                     SubstackRssSource,
                     SubstackArticleSource,
-                    HuggingFaceArxivSource,
+                    HuggingFaceDatasetSource,
                     WebSource,
                 ),
             )
@@ -241,7 +241,7 @@ class TestYamlRoundTrip:
 
         assert isinstance(sources[0], SubstackRssSource)
         assert isinstance(sources[1], SubstackArticleSource)
-        assert isinstance(sources[2], HuggingFaceArxivSource)
+        assert isinstance(sources[2], HuggingFaceDatasetSource)
         assert sources[2].max_samples == 25
         assert sources[2].batch_size == 50  # default preserved
         assert isinstance(sources[3], WebSource)

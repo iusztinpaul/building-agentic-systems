@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 from prefect import tags as prefect_tags
 
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,
     SubstackRssSource,
@@ -119,7 +119,7 @@ def _make_full_config(
     for article_url in substack_articles or []:
         sources.append(SubstackArticleSource(uri=article_url))
     sources.append(
-        HuggingFaceArxivSource(
+        HuggingFaceDatasetSource(
             uri="librarian-bots/arxiv-metadata-snapshot",
             max_samples=arxiv_max_samples,
             fetch_content=False,
@@ -266,7 +266,7 @@ class TestDataPipeline:
     ) -> None:
         """Single ``data_pipeline()`` invocation against a YAML fixture covering
         all five ``SourceEntry`` variants (substack_rss, substack_article,
-        huggingface_arxiv, explicit web, untyped → web fallback).
+        huggingface_dataset, explicit web, untyped → web fallback).
 
         Verifies:
             - The Substack RSS sub-flow is invoked once with the single feed.
@@ -289,7 +289,7 @@ sources:
   - uri: https://blog.example.com/p/test-post
     type: substack_article
   - uri: librarian-bots/arxiv-metadata-snapshot
-    type: huggingface_arxiv
+    type: huggingface_dataset
     max_samples: 2
     fetch_content: false
   - uri: https://www.anthropic.com/engineering/some-page
@@ -302,7 +302,7 @@ sources:
         # Sanity: the load-time validator normalized the untyped Reddit
         # entry into a WebSource, leaving us with exactly 5 entries.
         from tree.config.app_config import (
-            HuggingFaceArxivSource as _Hf,
+            HuggingFaceDatasetSource as _Hf,
             SubstackArticleSource as _SubArt,
             SubstackRssSource as _SubRss,
             WebSource as _Web,

@@ -45,7 +45,7 @@ Two sources of configuration, split by concern:
 
 ### `default.yaml` sections
 
-- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `huggingface_arxiv`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). `huggingface_arxiv` entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the arXiv HF dataset ingestor.
+- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the dataset ingestor.
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
 - `models.embedding` — provider + model + dimensions (default: `sentence-transformers` / `all-MiniLM-L6-v2` / 384).
 - `extraction` — `chunk_size`, `chunk_overlap`, `llm_concurrency`, `similarity_threshold`.

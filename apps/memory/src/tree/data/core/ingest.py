@@ -61,7 +61,7 @@ def _get_configured_substack_domains() -> set[str]:
     Walks the flat ``app_config.sources.sources`` list and collects the host
     (lower-cased, ``www.`` stripped) of every entry typed as
     ``substack_rss`` or ``substack_article``. Entries of any other type
-    (``web``, ``huggingface_arxiv``, ...) are ignored — even if their
+    (``web``, ``huggingface_dataset``, ...) are ignored — even if their
     ``uri`` happens to look like a Substack custom domain.
 
     Entries whose ``uri`` does not parse to a host (e.g. a HuggingFace

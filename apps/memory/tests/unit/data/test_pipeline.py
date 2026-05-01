@@ -1,7 +1,9 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from tree.config.app_config import (
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,
     SubstackRssSource,
@@ -51,7 +53,7 @@ class TestDataPipeline:
             sources=[
                 SubstackRssSource(uri="https://example.com/feed"),
                 SubstackArticleSource(uri="https://example.com/p/article"),
-                HuggingFaceArxivSource(
+                HuggingFaceDatasetSource(
                     uri="librarian-bots/arxiv-metadata-snapshot",
                     max_samples=5,
                     fetch_content=True,
@@ -81,7 +83,7 @@ class TestDataPipeline:
             mocker,
             sources=[
                 SubstackArticleSource(uri="https://example.com/p/article"),
-                HuggingFaceArxivSource(uri="librarian-bots/arxiv-metadata-snapshot"),
+                HuggingFaceDatasetSource(uri="librarian-bots/arxiv-metadata-snapshot"),
             ],
         )
 
@@ -103,7 +105,7 @@ class TestDataPipeline:
             mocker,
             sources=[
                 SubstackRssSource(uri="https://example.com/feed"),
-                HuggingFaceArxivSource(uri="librarian-bots/arxiv-metadata-snapshot"),
+                HuggingFaceDatasetSource(uri="librarian-bots/arxiv-metadata-snapshot"),
             ],
         )
 
@@ -122,7 +124,7 @@ class TestDataPipeline:
         _make_config(
             mocker,
             sources=[
-                HuggingFaceArxivSource(uri="librarian-bots/arxiv-metadata-snapshot"),
+                HuggingFaceDatasetSource(uri="librarian-bots/arxiv-metadata-snapshot"),
             ],
         )
 
@@ -132,10 +134,12 @@ class TestDataPipeline:
         mock_articles.assert_not_awaited()
         mock_arxiv.assert_awaited_once()
 
-    async def test_skips_arxiv_when_no_huggingface_arxiv_entries(self, mocker) -> None:
+    async def test_skips_arxiv_when_no_huggingface_dataset_entries(
+        self, mocker
+    ) -> None:
         # Behaviour change vs. the legacy ``ingest_all_data``: the new flow
         # runs the arxiv connector iff the flat sources list contains at
-        # least one ``HuggingFaceArxivSource``. With none configured, arxiv
+        # least one ``HuggingFaceDatasetSource``. With none configured, arxiv
         # is skipped entirely.
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
@@ -275,7 +279,7 @@ class TestDataPipeline:
 
         mock_articles.assert_awaited_once_with(articles)
 
-    async def test_passes_huggingface_arxiv_overrides(self, mocker) -> None:
+    async def test_passes_huggingface_dataset_overrides(self, mocker) -> None:
         # Per-entry ``max_samples`` and ``fetch_content`` must be forwarded
         # to ``ingest_arxiv_dataset``.
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
@@ -286,7 +290,7 @@ class TestDataPipeline:
         _make_config(
             mocker,
             sources=[
-                HuggingFaceArxivSource(
+                HuggingFaceDatasetSource(
                     uri="librarian-bots/arxiv-metadata-snapshot",
                     max_samples=42,
                     fetch_content=True,
@@ -297,3 +301,21 @@ class TestDataPipeline:
         await data_pipeline()
 
         mock_arxiv.assert_awaited_once_with(max_samples=42, fetch_content=True)
+
+    async def test_raises_for_unknown_huggingface_dataset_id(self, mocker) -> None:
+        # Unknown HF dataset ids must fail loudly so an operator notices the
+        # missing registration rather than silently skipping ingestion.
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+
+        _make_config(
+            mocker,
+            sources=[
+                HuggingFaceDatasetSource(uri="someone/unregistered-dataset"),
+            ],
+        )
+
+        with pytest.raises(ValueError, match="someone/unregistered-dataset"):
+            await data_pipeline()

@@ -3,7 +3,7 @@ from collections import Counter
 
 from tree.config.app_config import (
     AppConfig,
-    HuggingFaceArxivSource,
+    HuggingFaceDatasetSource,
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
@@ -35,18 +35,18 @@ class TestLoadAppConfig:
         assert counts == {
             "SubstackRssSource": 5,
             "SubstackArticleSource": 10,
-            "HuggingFaceArxivSource": 1,
+            "HuggingFaceDatasetSource": 1,
             "WebSource": 2,
         }
         assert sum(counts.values()) == 18
 
-    def test_loads_default_yaml_huggingface_arxiv_entry(self):
+    def test_loads_default_yaml_huggingface_dataset_entry(self):
         """The HF arxiv entry preserves the parameters from the legacy YAML."""
 
         config = load_app_config()
 
         hf_entries = [
-            e for e in config.sources.sources if isinstance(e, HuggingFaceArxivSource)
+            e for e in config.sources.sources if isinstance(e, HuggingFaceDatasetSource)
         ]
         assert len(hf_entries) == 1
         entry = hf_entries[0]
@@ -78,7 +78,7 @@ class TestLoadAppConfig:
                 (
                     SubstackRssSource,
                     SubstackArticleSource,
-                    HuggingFaceArxivSource,
+                    HuggingFaceDatasetSource,
                     WebSource,
                 ),
             )

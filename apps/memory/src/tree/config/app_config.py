@@ -71,10 +71,15 @@ class SubstackArticleSource(BaseModel):
     uri: str = Field(min_length=1)
 
 
-class HuggingFaceArxivSource(BaseModel):
-    """A HuggingFace arxiv-metadata dataset id (NOT a URL)."""
+class HuggingFaceDatasetSource(BaseModel):
+    """A HuggingFace dataset id (NOT a URL).
 
-    type: Literal["huggingface_arxiv"] = "huggingface_arxiv"
+    The ``uri`` is the dataset id (``namespace/name``) and is used to
+    dispatch to a per-dataset ETL pipeline registered in
+    ``tree.data.pipeline``. Unknown dataset ids raise at dispatch time.
+    """
+
+    type: Literal["huggingface_dataset"] = "huggingface_dataset"
     uri: str = Field(min_length=1)
     max_samples: int = 10
     fetch_content: bool = False
@@ -93,7 +98,7 @@ SourceEntry = Annotated[
     Union[
         SubstackRssSource,
         SubstackArticleSource,
-        HuggingFaceArxivSource,
+        HuggingFaceDatasetSource,
         WebSource,
     ],
     Field(discriminator="type"),
