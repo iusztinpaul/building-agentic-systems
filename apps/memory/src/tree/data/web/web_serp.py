@@ -5,6 +5,12 @@ Thin async wrapper around the Bright Data SERP REST endpoint
 ``tree.data.web.web_unlocker``: pure HTTP — no MongoDB, no Prefect, no
 ``Document``. Persistence and orchestration live elsewhere.
 
+The SERP zone configured for this project (``cli_serp``) does NOT support
+the ``brd_json=1`` parsed-JSON shortcut — when set, the response collapses
+to a 226-byte metadata stub with no organic results (see tracker #010
+diagnosis). We therefore request the rendered HTML SERP via
+``data_format: "html"`` and extract organic results with BeautifulSoup.
+
 Reference:
     .claude/skills/bright-data-best-practices/references/serp-api.md
 """
@@ -13,9 +19,10 @@ from __future__ import annotations
 
 import logging
 from typing import Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 
 from tree.config.settings import settings
 from tree.data.web.types import SearchResult
@@ -29,6 +36,28 @@ logger = logging.getLogger(__name__)
 _BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 _PAGE_SIZE = 10
 _QUERY_LOG_MAX_CHARS = 100
+_SNIPPET_MAX_CHARS = 300
+_BODY_PREVIEW_MAX_CHARS = 200
+
+# Substrings that indicate a well-formed SERP page that legitimately has no
+# organic results (vs. a malformed / regression-shaped response). Matched
+# case-insensitively. The list is intentionally small — we only need a single
+# anchor to confirm "this is a real SERP, just empty".
+_NO_RESULTS_INDICATORS = (
+    "did not match any documents",
+    "did not match any",
+    "no results found",
+    "ничего не нашлось",  # yandex
+)
+
+# Hosts whose links represent Google's own UI chrome (sign-in, account,
+# webcache, image proxy, AMP redirector) rather than organic results.
+_NON_ORGANIC_HOST_SUFFIXES = (
+    "google.com",
+    "googleusercontent.com",
+    "gstatic.com",
+    "youtube.com/redirect",
+)
 
 SearchEngine = Literal["google", "bing", "yandex"]
 
@@ -57,12 +86,12 @@ def _build_serp_url(
 ) -> str:
     """Build the SERP URL Bright Data should fetch on our behalf.
 
-    Always passes ``brd_json=1`` so Bright Data returns parsed JSON instead
-    of raw HTML.
+    The URL is the public engine URL — no Bright Data-specific flags. The
+    rendered HTML is what we parse downstream.
     """
 
     if engine == "google":
-        params: list[tuple[str, str]] = [("q", query), ("brd_json", "1")]
+        params: list[tuple[str, str]] = [("q", query)]
         if country:
             params.append(("gl", country))
         if language:
@@ -72,7 +101,7 @@ def _build_serp_url(
         return f"https://www.google.com/search?{urlencode(params)}"
 
     if engine == "bing":
-        params = [("q", query), ("brd_json", "1")]
+        params = [("q", query)]
         if country:
             params.append(("cc", country))
         if language:
@@ -82,7 +111,7 @@ def _build_serp_url(
         return f"https://www.bing.com/search?{urlencode(params)}"
 
     if engine == "yandex":
-        params = [("text", query), ("brd_json", "1")]
+        params = [("text", query)]
         if country:
             params.append(("lr", country))
         return f"https://yandex.com/search/?{urlencode(params)}"
@@ -92,39 +121,187 @@ def _build_serp_url(
     raise ValueError(f"Unsupported search engine: {engine!r}")
 
 
-def _parse_organic(
-    organic: list[dict],
+def _is_organic_url(url: str) -> bool:
+    """Return True if ``url`` looks like an external organic result link.
+
+    We exclude the engine's own infrastructure (sign-in, account, webcache,
+    image proxy) so we don't surface Google's UI chrome as a "result".
+    """
+
+    if not url.startswith(("http://", "https://")):
+        return False
+
+    host = urlparse(url).hostname or ""
+    host = host.lower()
+
+    for suffix in _NON_ORGANIC_HOST_SUFFIXES:
+        # Suffix may itself contain a path segment (e.g. youtube.com/redirect),
+        # in which case match against host+path.
+        if "/" in suffix:
+            target = f"{host}{urlparse(url).path}"
+            if target.startswith(suffix):
+                return False
+        elif host == suffix or host.endswith("." + suffix):
+            return False
+
+    return True
+
+
+def _extract_snippet(anchor_tag, title: str) -> str:
+    """Best-effort snippet extraction.
+
+    Walk a few levels up from the title's anchor tag to find the result
+    container, then return the visible text minus the title. Snippet is
+    capped at ``_SNIPPET_MAX_CHARS`` to keep payloads small. Returns ``""``
+    when the surrounding text is too short to plausibly be a snippet.
+    """
+
+    container = anchor_tag
+    for _ in range(6):
+        if container.parent is None:
+            break
+        container = container.parent
+
+    text = container.get_text(" ", strip=True)
+    if title and text.startswith(title):
+        text = text[len(title) :].lstrip()
+
+    # Drop runs of whitespace; bs4 ' ' separator already collapses, but
+    # newlines from nested blocks can leak through on some Google variants.
+    text = " ".join(text.split())
+
+    if len(text) < 20:
+        return ""
+
+    if len(text) > _SNIPPET_MAX_CHARS:
+        text = text[:_SNIPPET_MAX_CHARS].rstrip() + "..."
+
+    return text
+
+
+def _parse_serp_html(
+    html: str,
     *,
     starting_rank: int,
 ) -> list[SearchResult]:
-    """Map a SERP API ``organic`` payload to ``SearchResult`` instances.
+    """Extract organic results from a rendered SERP HTML body.
 
-    Entries with no ``link`` are skipped defensively. ``starting_rank`` is the
-    1-indexed rank to assign to the first kept entry when the upstream entry
-    lacks an explicit ``rank`` field.
+    Strategy: every ``<h3>`` that is the descendant of an ``<a href=...>``
+    pointing to a non-engine external URL is an organic result. This is the
+    most stable structural anchor across Google's frequent layout drift —
+    Google's organic blocks consistently render the result title inside an
+    ``h3`` wrapped in the destination link, while UI chrome links never
+    wrap an ``h3``. The same pattern holds for Bing and Yandex, so the
+    parser is engine-agnostic.
+
+    Duplicates (same URL appearing twice — e.g. an ``h3`` plus a sitelink
+    pointing to the same page) are dropped, keeping the first occurrence.
     """
 
+    soup = BeautifulSoup(html, "html.parser")
+
+    seen_urls: set[str] = set()
     results: list[SearchResult] = []
     next_rank = starting_rank
-    for entry in organic:
-        link = entry.get("link") or ""
-        if not link:
+
+    for h3 in soup.find_all("h3"):
+        anchor = h3.find_parent("a")
+        if anchor is None:
             continue
 
-        rank_value = entry.get("rank")
-        rank = int(rank_value) if isinstance(rank_value, int) else next_rank
+        href = anchor.get("href") or ""
+        if not _is_organic_url(href):
+            continue
+
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+
+        title = h3.get_text(strip=True)
+        if not title:
+            continue
+
+        snippet = _extract_snippet(anchor, title)
 
         results.append(
             SearchResult(
-                rank=rank,
-                title=entry.get("title") or "",
-                url=link,
-                snippet=entry.get("description") or "",
+                rank=next_rank,
+                title=title,
+                url=href,
+                snippet=snippet,
             )
         )
         next_rank += 1
 
     return results
+
+
+def _looks_like_legitimate_empty_serp(body: str) -> bool:
+    """Return True if ``body`` looks like a real SERP page with no results.
+
+    The heuristic is: the body either contains a known "no results"
+    indicator string, OR it has SERP-shaped HTML structure (an ``h3``
+    element anywhere, even one we didn't classify as organic) that the
+    parser inspected and found empty of organic links. The first signal is
+    the strong one — Google / Bing / Yandex all render explicit "no
+    results" copy on a successful empty SERP.
+    """
+
+    if not body:
+        return False
+
+    lowered = body.lower()
+    return any(indicator in lowered for indicator in _NO_RESULTS_INDICATORS)
+
+
+def _parse_organic_or_warn(
+    body: str,
+    *,
+    engine: SearchEngine,
+    status: int,
+    content_type: str,
+    starting_rank: int,
+    query_for_log: str,
+) -> list[SearchResult]:
+    """Parse organic results, classifying empty-result responses.
+
+    Three branches:
+
+    1. Parser returned ≥ 1 result → return them; no extra log line on the
+       hot path (the function-level INFO at the start of ``search`` is
+       enough on the success path).
+    2. Parser returned 0 results AND the body carries a known "no results"
+       indicator → INFO log, return ``[]``.
+    3. Parser returned 0 results AND the body does NOT look like a SERP →
+       WARNING log with diagnostic fields (engine, status, content type,
+       200-char body preview), return ``[]``.
+
+    Never raises. The public contract of ``search`` (return ``[]`` on
+    empty, raise only on credential / input / non-2xx) is preserved.
+    """
+
+    parsed = _parse_serp_html(body, starting_rank=starting_rank)
+    if parsed:
+        return parsed
+
+    if _looks_like_legitimate_empty_serp(body):
+        logger.info(
+            "SERP returned 0 organic results for query (engine=%s, query=%s)",
+            engine,
+            query_for_log,
+        )
+        return []
+
+    body_preview = body[:_BODY_PREVIEW_MAX_CHARS]
+    logger.warning(
+        "SERP response had unexpected shape; returning [] "
+        "(engine=%s, status=%d, content_type=%s, body_preview=%s)",
+        engine,
+        status,
+        content_type,
+        body_preview,
+    )
+    return []
 
 
 async def search(
@@ -143,8 +320,9 @@ async def search(
         Authorization: Bearer <BRIGHTDATA_API_KEY>
         json={
             "zone": <BRIGHTDATA_SERP_ZONE>,
-            "url": <built SERP URL with brd_json=1 + locale + start>,
+            "url": <built SERP URL with locale + start>,
             "format": "raw",
+            "data_format": "html",
         }
 
     Returns up to ``num_results`` organic entries. Pagination is handled
@@ -211,6 +389,7 @@ async def search(
                 "zone": zone,
                 "url": serp_url,
                 "format": "raw",
+                "data_format": "html",
             }
 
             response = await client.post(
@@ -225,15 +404,19 @@ async def search(
                     f"{response.text}"
                 )
 
-            data = response.json()
-            organic = data.get("organic") or []
-
-            page_results = _parse_organic(organic, starting_rank=len(aggregated) + 1)
+            page_results = _parse_organic_or_warn(
+                response.text,
+                engine=engine,
+                status=response.status_code,
+                content_type=response.headers.get("content-type", ""),
+                starting_rank=len(aggregated) + 1,
+                query_for_log=truncated_query,
+            )
             aggregated.extend(page_results)
 
             # Stop when the engine returned fewer entries than a full page —
             # there are no more results to fetch.
-            if len(organic) < _PAGE_SIZE:
+            if len(page_results) < _PAGE_SIZE:
                 break
 
             offset += _PAGE_SIZE
