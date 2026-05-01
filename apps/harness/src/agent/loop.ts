@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import type { GoogleGenAI } from "@google/genai";
 import { streamText } from "../client";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../messages";
-import type { AnyTool } from "../tools/registry";
+import type { AnyTool } from "../tools/gemini";
 import type { ToolContext } from "../tools/types";
 
 export type LoopEvent =
