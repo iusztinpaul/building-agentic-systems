@@ -31,12 +31,20 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
+from tree.data.youtube.gemini_transcript_fetcher import GeminiTranscriptFetcher
 from tree.data.youtube.types import (
     FetchedTranscript,
     TranscriptSegment,
     VideoMetadata,
 )
 from tree.data.youtube.urls import canonical_video_url, extract_video_id
+
+__all__ = [
+    "ChainedTranscriptFetcher",
+    "GeminiTranscriptFetcher",
+    "TranscriptFetcher",
+    "YoutubeTranscriptApiFetcher",
+]
 
 logger = logging.getLogger(__name__)
 
