@@ -427,6 +427,36 @@ class TestSearchWebIngestPath:
         assert payload["results"] == []
         assert payload["ingest"]["triggered"] is False
         assert payload["ingest"]["urls"] == []
+        # Detail should NOT pretend SERP failed when SERP wasn't even
+        # consulted with this code path; the wording is generic.
+        assert "empty SERP" not in payload["ingest"]["detail"]
+        mock_trigger.assert_not_awaited()
+
+    @pytest.mark.parametrize("bad_top_k", [0, -1, -5])
+    async def test_ingest_top_k_below_one_returns_invalid_input(
+        self, mocker, bad_top_k: int
+    ) -> None:
+        """``ingest_top_k <= 0`` is a user error; reject before SERP call."""
+
+        # Arrange
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        ctx = _make_ctx()
+
+        # Act
+        raw = await _get_tool_callable()(
+            "k graphs", ctx, ingest=True, ingest_top_k=bad_top_k
+        )
+
+        # Assert
+        payload = json.loads(raw)
+        assert payload["error"] == "invalid_input"
+        assert "ingest_top_k" in payload["detail"]
+        # Don't burn a SERP credit on a misuse.
+        mock_search.assert_not_awaited()
         mock_trigger.assert_not_awaited()
 
     async def test_trigger_failure_degrades_to_search_only_payload(
@@ -655,6 +685,31 @@ class TestSearchWebCli:
         result = runner.invoke(
             cli_main,
             ["--query", "k graphs", "--ingest-top-k", "1"],
+        )
+
+        # Assert
+        assert result.exit_code == 1
+        mock_trigger.assert_not_awaited()
+        mock_search.assert_not_awaited()
+
+    @pytest.mark.parametrize("bad_top_k", ["0", "-1"])
+    def test_ingest_top_k_below_one_exits_one(
+        self, mocker, cli_main, bad_top_k: str
+    ) -> None:
+        """``--ingest-top-k 0`` (or negative) is a user error."""
+
+        # Arrange — search/trigger must not run when validation fails.
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        mock_trigger = mocker.patch(
+            "scripts.search_web.trigger_url_batch_ingest", new_callable=AsyncMock
+        )
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(
+            cli_main,
+            ["--query", "k graphs", "--ingest", "--ingest-top-k", bad_top_k],
         )
 
         # Assert

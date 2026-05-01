@@ -315,6 +315,17 @@ async def search_web(
     if ingest and ingest_urls is not None and len(ingest_urls) == 0:
         return json.dumps({"error": "invalid_input", "detail": "ingest_urls is empty"})
 
+    if ingest_top_k is not None and ingest_top_k < 1:
+        return json.dumps(
+            {
+                "error": "invalid_input",
+                "detail": (
+                    f"ingest_top_k must be >= 1 (got {ingest_top_k}); omit it to "
+                    "ingest all SERP results"
+                ),
+            }
+        )
+
     try:
         results = await web_search(
             query,
@@ -374,11 +385,12 @@ async def _build_ingest_block(
         selected = [r.url for r in results]
 
     if not selected:
-        # Empty SERP + no explicit URLs → nothing to ingest, but search itself succeeded.
+        # No URLs to ingest (e.g. empty SERP, or top-k slice of an empty list).
+        # The search itself still succeeded.
         return {
             "triggered": False,
             "urls": [],
-            "detail": "no urls to ingest (empty SERP results)",
+            "detail": "no urls to ingest",
         }
 
     try:

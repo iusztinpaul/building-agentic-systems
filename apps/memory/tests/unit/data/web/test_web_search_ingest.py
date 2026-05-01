@@ -142,3 +142,46 @@ class TestTriggerUrlBatchIngest:
 
         # Assert
         assert result["tracking_url"] == "http://prefect.local:4200/runs/flow-run/run-1"
+
+    async def test_prefect_ui_url_env_overrides_api_derivation(
+        self, mocker, monkeypatch
+    ) -> None:
+        """``PREFECT_UI_URL`` is honored verbatim (Prefect Cloud convention)."""
+
+        # Arrange
+        monkeypatch.setenv("PREFECT_UI_URL", "https://app.prefect.cloud/account/abc")
+        client = _make_mock_client(
+            flow_run_id="run-cloud-1",
+            api_url="https://api.prefect.cloud/api/accounts/abc/workspaces/xyz",
+        )
+        _patch_get_client(mocker, client)
+
+        # Act
+        result = await trigger_url_batch_ingest(["https://a"])
+
+        # Assert
+        assert (
+            result["tracking_url"]
+            == "https://app.prefect.cloud/account/abc/runs/flow-run/run-cloud-1"
+        )
+
+    async def test_unknown_api_url_shape_returns_none_tracking(
+        self, mocker, monkeypatch
+    ) -> None:
+        """Without ``PREFECT_UI_URL`` and with an API URL not ending in /api,
+        we don't fabricate a (likely-wrong) tracking URL."""
+
+        # Arrange — clear any inherited PREFECT_UI_URL.
+        monkeypatch.delenv("PREFECT_UI_URL", raising=False)
+        client = _make_mock_client(
+            flow_run_id="run-unk",
+            api_url="https://api.prefect.cloud/api/accounts/abc/workspaces/xyz",
+        )
+        _patch_get_client(mocker, client)
+
+        # Act
+        result = await trigger_url_batch_ingest(["https://a"])
+
+        # Assert
+        assert result["flow_run_id"] == "run-unk"
+        assert result["tracking_url"] is None

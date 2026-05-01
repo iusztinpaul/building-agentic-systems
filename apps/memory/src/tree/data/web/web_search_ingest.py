@@ -13,6 +13,7 @@ trigger to succeed.
 from __future__ import annotations
 
 import logging
+import os
 
 from prefect.client.orchestration import get_client
 
@@ -21,7 +22,29 @@ logger = logging.getLogger(__name__)
 DEPLOYMENT_NAME = "ingest-web-url-batch-etl/ingest-web-url-batch-etl"
 
 
-async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str]:
+def _build_tracking_url(api_url: str, flow_run_id: str) -> str | None:
+    """Construct a human-readable Prefect UI URL for a flow run.
+
+    Strategy:
+        1. If ``PREFECT_UI_URL`` is set, use it as-is (Prefect Cloud honors this).
+        2. Otherwise, derive a local UI URL from ``api_url`` by stripping a
+           trailing ``/api`` (the local Prefect server convention).
+        3. If neither shape applies (e.g. a Cloud API URL we don't recognize),
+           return ``None`` — search results stay useful even without a link.
+    """
+
+    ui_base = os.environ.get("PREFECT_UI_URL")
+    if ui_base:
+        return f"{ui_base.rstrip('/')}/runs/flow-run/{flow_run_id}"
+
+    cleaned = api_url.rstrip("/")
+    if cleaned.endswith("/api"):
+        return f"{cleaned.removesuffix('/api')}/runs/flow-run/{flow_run_id}"
+
+    return None
+
+
+async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str | None]:
     """Fire the ``ingest-web-url-batch-etl`` deployment with the given URLs.
 
     Looks up the deployment by name, creates a flow run with
@@ -33,10 +56,12 @@ async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str]:
             URL strings itself; this helper does not.
 
     Returns:
-        A dict with two string keys:
-            - ``flow_run_id`` — the Prefect flow-run UUID as a string.
-            - ``tracking_url`` — a human-readable URL the caller can open to
-              follow the run in the Prefect UI.
+        A dict with two keys:
+            - ``flow_run_id`` (str) — the Prefect flow-run UUID.
+            - ``tracking_url`` (str | None) — a human-readable URL the caller
+              can open to follow the run in the Prefect UI. ``None`` if we
+              can't derive one (e.g. unfamiliar API URL shape and no
+              ``PREFECT_UI_URL`` env var set).
 
     Raises:
         ValueError: If ``urls`` is empty.
@@ -56,8 +81,7 @@ async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str]:
             parameters={"urls": urls},
         )
         flow_run_id = str(flow_run.id)
-        base_url = str(client.api_url).rstrip("/").removesuffix("/api")
-        tracking_url = f"{base_url}/runs/flow-run/{flow_run_id}"
+        tracking_url = _build_tracking_url(str(client.api_url), flow_run_id)
 
         logger.info(
             "Triggered ingest-web-url-batch-etl flow run %s for %d URL(s)",

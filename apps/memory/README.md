@@ -69,6 +69,9 @@ Two sources of configuration, split by concern:
 | `GOOGLE_API_KEY` | **yes** | — | Gemini (LLM extraction + NL query) |
 | `VOYAGE_API_KEY` | no | — | Voyage AI embeddings (alternative embedder) |
 | `MODAL_EMBEDDING_API_KEY` | no | — | Auth for the Modal-hosted vLLM embedding server |
+| `BRIGHTDATA_API_KEY` | no | — | Bright Data API key (Web Unlocker fallback + SERP API) |
+| `BRIGHTDATA_UNLOCKER_ZONE` | no | — | Bright Data Web Unlocker zone (used by the web fallback ingest pipeline) |
+| `BRIGHTDATA_SERP_ZONE` | no | — | Bright Data SERP zone (used by `search_web`) |
 | `APP_CONFIG_PATH` | no | `apps/memory/configs/default.yaml` | Override the YAML config path |
 
 ## Running the components
@@ -167,11 +170,40 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 | `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
 | `search_memory` | Semantic + text search with graph expansion. Best for open-ended queries. |
 | `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
+| `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget. |
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 
 `query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
+
+#### `search_web` example
+
+```bash
+# Pure search — NO writes to MongoDB.
+make memory-search-web QUERY="MongoDB Atlas vector search" NUM_RESULTS=5
+
+# Optional opt-in ingest of the top K results. Requires the Prefect workflow
+# server to be up (Dockerized worker via `make local-start`, or
+# `make memory-serve-workflows` if you're iterating).
+make memory-search-web QUERY="MongoDB Atlas vector search" NUM_RESULTS=5 INGEST=true INGEST_TOP_K=2
+```
+
+Equivalent MCP-tool invocation (JSON `arguments` an MCP client would send):
+
+```json
+{
+  "name": "search_web",
+  "arguments": {
+    "query": "MongoDB Atlas vector search",
+    "engine": "google",
+    "num_results": 5,
+    "ingest": false
+  }
+}
+```
+
+Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_SERP_ZONE`.
 
 ## Modal embedding deployment (optional)
 

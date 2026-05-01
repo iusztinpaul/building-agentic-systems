@@ -66,6 +66,14 @@ async def _run(
         logger.error("Invalid input: --ingest-urls is empty")
         return 1
 
+    if ingest_top_k is not None and ingest_top_k < 1:
+        logger.error(
+            "Invalid input: --ingest-top-k must be >= 1 (got %d); omit it to ingest "
+            "all SERP results",
+            ingest_top_k,
+        )
+        return 1
+
     try:
         results = await web_search(
             query,
@@ -125,11 +133,11 @@ async def _maybe_ingest(
         selected = [r.url for r in results]
 
     if not selected:
-        logger.info("No URLs to ingest (empty SERP results).")
+        logger.info("No URLs to ingest.")
         return {
             "triggered": False,
             "urls": [],
-            "detail": "no urls to ingest (empty SERP results)",
+            "detail": "no urls to ingest",
         }
 
     try:

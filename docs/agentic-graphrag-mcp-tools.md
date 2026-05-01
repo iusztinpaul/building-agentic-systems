@@ -447,6 +447,65 @@ All three tools return JSON strings so the calling agent gets structured feedbac
 
 The agent can decide to retry, fall back, or report to the user based on the status code.
 
+### 4f. On-Demand Web Search via `search_web`
+
+`search_web` (registered alongside the write tools in `apps/memory/src/tree/mcp/tools.py`) is a **read-by-default, opt-in-write** companion to `ingest_url`. It runs a SERP query against Bright Data's SERP API and returns the parsed organic results directly to the caller — without writing anything to MongoDB.
+
+**Headline behavior: the default path does NOT touch memory.** A pure `search_web(query="…")` call is observationally identical to running a Google search by hand: the agent gets back a JSON list of `(rank, title, url, snippet)` tuples. No `Document` is created. No `knowledge_graph` node is upserted. The same call repeated twice produces zero side effects either time.
+
+This split — search vs. ingest — is deliberate. Most exploratory queries should not pollute memory: the agent is fishing for context, not curating it. When the agent does decide a result is worth keeping, it opts in:
+
+```python
+search_web(query="latest agent-tool-use papers", ingest=True, ingest_top_k=3)
+```
+
+When `ingest=True`, the tool selects URLs (top-K of SERP, or an explicit `ingest_urls=[…]` override) and **fires the existing `ingest-web-url-batch-etl` Prefect deployment** — the same flow `ingest_url` would dispatch to for a generic web URL. The ingestion is **fire-and-forget**: `search_web` returns the SERP results plus a `flow_run_id` and tracking URL the caller can poll if they want, but does not block on flow completion. SERP is sub-5-second; the batch ingest can take minutes for a few URLs (fetch + chunk + LLM extract + embed) — blocking would defeat the "on-demand exploratory" use case.
+
+Parameters:
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `query` | `str` | required | Non-empty SERP query. |
+| `engine` | `"google" \| "bing" \| "yandex"` | `"google"` | Backend search engine. |
+| `num_results` | `int` | `10` | Max organic results returned (paginated internally in pages of 10). |
+| `country` | `str \| None` | `None` | 2-letter ISO geo (`gl` for Google, `cc` for Bing, `lr` for Yandex). |
+| `language` | `str \| None` | `None` | 2-letter language code (`hl` for Google, `setLang` for Bing). |
+| `ingest` | `bool` | `False` | If `True`, fire the `ingest-web-url-batch-etl` deployment. |
+| `ingest_top_k` | `int \| None` | `None` | When `ingest=True`, ingest only the first K SERP URLs. Must be `>= 1`. |
+| `ingest_urls` | `list[str] \| None` | `None` | When `ingest=True`, ingest exactly these URLs (overrides `ingest_top_k`). |
+
+Example default-path response:
+
+```json
+{
+  "query": "anthropic claude api",
+  "engine": "google",
+  "results": [
+    {"rank": 1, "title": "Claude API – Anthropic", "url": "https://www.anthropic.com/api", "snippet": "Build with Claude…"},
+    {"rank": 2, "title": "API Reference", "url": "https://docs.anthropic.com/en/api", "snippet": "…"}
+  ]
+}
+```
+
+When `ingest=True` and the trigger succeeds, an `ingest` block is appended:
+
+```json
+{
+  "ingest": {
+    "triggered": true,
+    "urls": ["https://www.anthropic.com/api"],
+    "flow_run_id": "abcd-1234-...",
+    "tracking_url": "http://127.0.0.1:4200/runs/flow-run/abcd-1234-..."
+  }
+}
+```
+
+If the deployment isn't registered (e.g. workflows not served), the SERP results are still returned and the `ingest` block degrades to `triggered=false` with an `error` string — search succeeded; only the optional ingest didn't.
+
+**Why this composition matters.** `search_web` doesn't introduce a new ingestion pipeline; it leverages the same `ingest-web-url-batch-etl` flow that backs `ingest_url`. One flow, two entry points: agents that already ingested a URL by hand and agents that discovered URLs via SERP both end up writing the same `Document` rows, going through the same chunk/extract/embed pipeline, and producing the same `knowledge_graph` nodes. No duplicate code, no diverging schemas.
+
+Required environment: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_SERP_ZONE` for the SERP call; the Prefect server only needs to be reachable when `ingest=True`.
+
 ---
 
 ## 5. Shared Post-Ingest Pipeline (`mcp/ingest.py`)
