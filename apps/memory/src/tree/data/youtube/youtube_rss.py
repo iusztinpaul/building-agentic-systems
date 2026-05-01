@@ -106,15 +106,13 @@ def _parse_published(entry: dict) -> datetime | None:
     if not published:
         return None
 
-    # fmt: off
     try:
         dt = datetime.fromisoformat(published)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         try:
             dt = parsedate_to_datetime(published)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
-    # fmt: on
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
