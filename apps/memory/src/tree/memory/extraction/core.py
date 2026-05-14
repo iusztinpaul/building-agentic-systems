@@ -5,17 +5,19 @@ Pure functions (aside from the LLM call and DB writes) that:
 1. Chunk a document into token-bounded pieces.
 2. Ask an LLM to extract nodes & edges per chunk.
 3. Build structural entries (PART_OF, NEXT, MENTIONS) deterministically.
-4. Normalise duplicate nodes via fuzzy matching, alias resolution, and
-   cross-document deduplication against the existing knowledge graph.
-5. Upsert the result to the knowledge_graph collection.
+4. Upsert the result to the ``knowledge_graph`` collection.
+
+Resolution + deduplication used to live here (``normalize_nodes`` and four
+helpers); those have moved to :mod:`tree.memory.resolution` (composite chain),
+:mod:`tree.memory.extraction.dedup` (vector-search decision), and
+:mod:`tree.memory.extraction.add_entity` (write-side orchestrator). The
+pipeline in :mod:`tree.memory.extraction.pipeline` is the single caller that
+ties them together.
 """
 
-import asyncio
 import json
 import logging
-from collections import defaultdict
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 
@@ -319,257 +321,13 @@ def build_structural_entries(
 
 
 # ---------------------------------------------------------------------------
-# 4. Normalisation (fuzzy dedup + alias resolution + cross-document)
+# 4. Persistence (upsert to knowledge_graph)
 # ---------------------------------------------------------------------------
-
-
-def _get_node_aliases(node: ExtractedNode) -> list[str]:
-    """Extract the aliases list from a node's properties."""
-    return node.properties.get("aliases", [])
-
-
-def _merge_into_canonical(
-    canonical: ExtractedNode,
-    incoming: ExtractedNode,
-    canonical_map: dict[tuple[NodeType, str], str],
-) -> None:
-    """Merge an incoming node into a canonical node.
-
-    - Properties merged (canonical wins on conflicts).
-    - Aliases accumulated as a union, including the non-canonical name.
-    - canonical_map updated.
-    """
-    key = (incoming.type, incoming.name)
-    canonical_map[key] = canonical.name
-
-    # Collect aliases from BOTH nodes BEFORE merging properties.
-    existing_aliases = set(canonical.properties.get("aliases", []))
-    incoming_aliases = set(incoming.properties.get("aliases", []))
-
-    # Merge properties (canonical wins on conflicts).
-    canonical.properties = {**incoming.properties, **canonical.properties}
-
-    # Union all aliases, adding the non-canonical name.
-    all_aliases = existing_aliases | incoming_aliases
-    if incoming.name != canonical.name:
-        all_aliases.add(incoming.name)
-    all_aliases.discard(canonical.name)
-    if all_aliases:
-        canonical.properties["aliases"] = sorted(all_aliases)
-
-
-def _matches_node(
-    node: ExtractedNode,
-    candidate_name: str,
-    candidate_aliases: list[str],
-    threshold: float,
-) -> bool:
-    """Check if a node matches a candidate by name or alias."""
-    # Fuzzy name match.
-    if SequenceMatcher(None, node.name, candidate_name).ratio() >= threshold:
-        return True
-    # Node's name in candidate's aliases (exact).
-    if node.name in candidate_aliases:
-        return True
-    # Node's aliases contain candidate's name (exact).
-    if candidate_name in _get_node_aliases(node):
-        return True
-    return False
-
-
-async def _fetch_candidate_nodes(
-    names_by_type: dict[NodeType, set[str]],
-    collection: Any,
-) -> dict[NodeType, list[dict[str, Any]]]:
-    """Batch-query MongoDB for existing nodes that might match new names.
-
-    Uses ``$text`` search (on the text index covering ``name``,
-    ``properties.content``, and ``properties.aliases``) to find candidates,
-    then falls back to exact ``$in`` matching if the text index is
-    unavailable.  The ``$text`` approach retrieves a broader candidate pool
-    (tokenised, stemmed word matching) so that the downstream
-    ``_matches_node()`` check can apply fuzzy SequenceMatcher scoring.
-
-    Issues one query per node type.
-    Returns candidates grouped by node type.
-    """
-    candidates: dict[NodeType, list[dict[str, Any]]] = {}
-    for node_type, names in names_by_type.items():
-        if not names:
-            continue
-        name_list = list(names)
-        search_text = " ".join(name_list)
-
-        # Try $text search first (broader: word-level, stemmed).
-        try:
-            query: dict[str, Any] = {
-                "kind": "node",
-                "type": node_type.value,
-                "$text": {"$search": search_text},
-            }
-            docs = await collection.find(query).to_list()
-        except Exception:
-            # Text index unavailable — fall back to exact $in matching.
-            logger.debug("Text search unavailable, falling back to $in query")
-            query = {
-                "kind": "node",
-                "type": node_type.value,
-                "$or": [
-                    {"name": {"$in": name_list}},
-                    {"properties.aliases": {"$in": name_list}},
-                ],
-            }
-            docs = await collection.find(query).to_list()
-
-        if docs:
-            candidates[node_type] = docs
-    return candidates
-
-
-async def normalize_nodes(
-    result: ExtractionResult,
-    *,
-    client: Any | None = None,
-    database: str | None = None,
-) -> ExtractionResult:
-    """Merge duplicate nodes by fuzzy-matching, alias resolution, and
-    cross-document deduplication against the existing knowledge graph.
-
-    When *client* and *database* are provided, queries MongoDB for existing
-    nodes that may match the newly extracted ones. Without DB context, falls
-    back to in-memory dedup only.
-    """
-
-    threshold = app_config.extraction.similarity_threshold
-
-    # Map (type, original_name) → canonical_name
-    canonical_map: dict[tuple[NodeType, str], str] = {}
-    kept_nodes: list[ExtractedNode] = []
-
-    # --- Phase A: In-memory dedup (enhanced with alias matching) ---
-    for node in result.nodes:
-        key = (node.type, node.name)
-        if key in canonical_map:
-            # Exact name already seen — still merge properties/aliases.
-            canonical_name = canonical_map[key]
-            for kept in kept_nodes:
-                if kept.type == node.type and kept.name == canonical_name:
-                    _merge_into_canonical(kept, node, canonical_map)
-                    break
-            continue
-
-        matched = False
-        if node.type in LLM_EXTRACTABLE_NODE_TYPES:
-            for kept in kept_nodes:
-                if kept.type != node.type:
-                    continue
-                if _matches_node(node, kept.name, _get_node_aliases(kept), threshold):
-                    _merge_into_canonical(kept, node, canonical_map)
-                    matched = True
-                    break
-
-        if not matched:
-            canonical_map[key] = node.name
-            kept_nodes.append(node)
-
-    # --- Phase B: Cross-document resolution against MongoDB ---
-    if client is not None and database is not None:
-        collection = client[database][_KG_COLLECTION]
-
-        # Collect names to query (only LLM-extractable types).
-        names_by_type: dict[NodeType, set[str]] = defaultdict(set)
-        for node in kept_nodes:
-            if node.type in LLM_EXTRACTABLE_NODE_TYPES:
-                names_by_type[node.type].add(node.name)
-                for alias in _get_node_aliases(node):
-                    names_by_type[node.type].add(alias)
-
-        db_candidates = await _fetch_candidate_nodes(names_by_type, collection)
-
-        for node in list(kept_nodes):
-            candidates = db_candidates.get(node.type, [])
-            for db_node in candidates:
-                db_name = db_node.get("name", "")
-                db_aliases = db_node.get("properties", {}).get("aliases", [])
-
-                if db_name == node.name:
-                    # Exact match on name — already handled by upsert.
-                    continue
-
-                if _matches_node(node, db_name, db_aliases, threshold):
-                    # DB node's name becomes canonical (preserves existing edges).
-                    old_name = node.name
-                    old_key = (node.type, old_name)
-
-                    # Create a synthetic canonical node with the DB name.
-                    db_extracted = ExtractedNode(
-                        name=db_name,
-                        type=node.type,
-                        properties=db_node.get("properties", {}),
-                    )
-                    _merge_into_canonical(db_extracted, node, canonical_map)
-
-                    # Replace the kept node with the DB-canonical version.
-                    idx = kept_nodes.index(node)
-                    kept_nodes[idx] = db_extracted
-
-                    # Also map the old canonical name.
-                    canonical_map[old_key] = db_name
-
-                    # Flatten the chain: update any Phase A entry that
-                    # still points to the old intermediate name so edge
-                    # remapping resolves in a single hop.
-                    for k, v in canonical_map.items():
-                        if v == old_name and k != old_key:
-                            canonical_map[k] = db_name
-
-                    logger.info(
-                        "Resolved '%s' → '%s' (cross-document, type=%s)",
-                        old_name,
-                        db_name,
-                        node.type,
-                    )
-                    break
-
-    # --- Remap edge endpoints and deduplicate edges ---
-    remapped_edges: list[ExtractedEdge] = []
-    for edge in result.edges:
-        src_key = (edge.source_type, edge.source_node_id)
-        tgt_key = (edge.target_type, edge.target_node_id)
-        remapped_edges.append(
-            edge.model_copy(
-                update={
-                    "source_node_id": canonical_map.get(src_key, edge.source_node_id),
-                    "target_node_id": canonical_map.get(tgt_key, edge.target_node_id),
-                }
-            )
-        )
-
-    # Deduplicate edges that became identical after node resolution.
-    seen_edges: dict[tuple, ExtractedEdge] = {}
-    for edge in remapped_edges:
-        edge_key = (
-            edge.source_type,
-            edge.source_node_id,
-            edge.type,
-            edge.target_type,
-            edge.target_node_id,
-        )
-        if edge_key in seen_edges:
-            seen_edges[edge_key].properties = {
-                **edge.properties,
-                **seen_edges[edge_key].properties,
-            }
-        else:
-            seen_edges[edge_key] = edge
-    deduped_edges = list(seen_edges.values())
-
-    return ExtractionResult(nodes=kept_nodes, edges=deduped_edges)
-
-
-# ---------------------------------------------------------------------------
-# 5. Persistence (upsert to knowledge_graph)
-# ---------------------------------------------------------------------------
+#
+# Resolution + dedup live in dedicated modules (``tree.memory.resolution``,
+# ``tree.memory.extraction.dedup``, ``tree.memory.extraction.add_entity``).
+# The pipeline in ``tree.memory.extraction.pipeline`` is the single caller
+# that wires them together.
 
 
 async def upsert_graph_entries(
@@ -708,73 +466,3 @@ async def upsert_graph_entries(
     )
 
     return len(ops)
-
-
-# ---------------------------------------------------------------------------
-# 6. Orchestration helper
-# ---------------------------------------------------------------------------
-
-
-async def extract_and_store(
-    llm: BaseLLM,
-    *,
-    document_id: PydanticObjectId,
-    content: str,
-    source_type: str,
-    source_uri: str,
-    date: str | None = None,
-    reference_uris: list[str] | None = None,
-    database: str,
-    client: Any,
-) -> ExtractionResult:
-    """End-to-end: chunk → extract → structural → normalise → upsert."""
-
-    # 1. Chunk
-    chunks = chunk_document(content)
-    if not chunks:
-        logger.warning("No chunks produced for document %s", document_id)
-        return ExtractionResult()
-
-    # Assign a unique id per chunk for provenance tracking.
-    chunk_ids = [str(uuid4()) for _ in chunks]
-
-    # 2. LLM extraction per chunk (parallel, capped by semaphore).
-    semaphore = asyncio.Semaphore(app_config.extraction.llm_concurrency)
-
-    async def _extract(chunk: str, chunk_id: str) -> ExtractionResult:
-        async with semaphore:
-            return await extract_entities(llm, chunk, chunk_id=chunk_id)
-
-    results = await asyncio.gather(
-        *[_extract(chunk, cid) for chunk, cid in zip(chunks, chunk_ids)]
-    )
-
-    llm_result = ExtractionResult()
-    for r in results:
-        llm_result = llm_result.merge(r)
-
-    # 3. Structural entries
-    structural = build_structural_entries(
-        document_id=document_id,
-        source_type=source_type,
-        source_uri=source_uri,
-        date=date,
-        chunk_texts=chunks,
-        chunk_ids=chunk_ids,
-        extracted=llm_result,
-        reference_uris=reference_uris,
-    )
-
-    # 4. Combine and normalise (with cross-document resolution)
-    combined = llm_result.merge(structural)
-    normalised = await normalize_nodes(combined, client=client, database=database)
-
-    # 5. Upsert to knowledge_graph
-    await upsert_graph_entries(
-        normalised,
-        source_document_id=document_id,
-        database=database,
-        client=client,
-    )
-
-    return normalised

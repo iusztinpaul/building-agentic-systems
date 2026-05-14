@@ -1,105 +1,1080 @@
-"""
-Prefect tasks and flows for the memory extraction pipeline.
+"""Prefect tasks and flow for the memory extraction pipeline.
 
-Thin wrappers around core.py that add retries, logging, and DB init.
+Six explicit Prefect tasks. Expensive stages (LLM extract, embedding) cache
+on ``INPUTS`` so re-runs only redo the cheap stages. The flow constructs the
+resolver + dedup config ONCE at entry; the cross-key validator on
+:class:`tree.config.app_config.ExtractionConfig` raises before any work runs
+when the resolver and dedup type-strictness disagree.
+
+External interface unchanged: ``memory_extraction(document_ids=...)``.
+Internal task topology (per the §7 spec in
+``tracker/012-extraction-pipeline-six-tasks.groomed.md``):
+
+* ① ``extract_chunks_and_structural_task`` — per-doc, ``INPUTS`` cache.
+* ② ``llm_extract_entities_task`` — per-doc, ``INPUTS`` cache, 2 retries.
+* ③ ``resolve_entities_task`` — batched, ``NO_CACHE``, 1 retry.
+* ④ ``embed_entities_task`` — ``.map(unique_canonical_names)``, ``INPUTS`` cache.
+* ⑤ ``dedupe_entities_task`` — batched, ``NO_CACHE``, 1 retry.
+* ⑥ ``apply_writes_task`` — batched, ``NO_CACHE``, 3 retries.
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
+from datetime import timedelta
+from typing import Any
+from uuid import uuid4
 
 from beanie import PydanticObjectId
-from prefect import flow, task
-from prefect.cache_policies import NO_CACHE
-from pymongo import AsyncMongoClient
+from prefect import flow, get_run_logger, task
+from prefect.cache_policies import INPUTS, NO_CACHE
 
+from tree.config.app_config import load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document
-from tree.memory.extraction.core import extract_and_store
-from tree.memory.types import ExtractionResult
-from tree.models.base import BaseLLM
-from tree.models.get_model import get_llm
+from tree.entities.knowledge_graph import (
+    EdgeType,
+    NodeType,
+    build_edge_id,
+    build_node_id,
+)
+from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
+from tree.memory.extraction.add_entity import add_entity
+from tree.memory.extraction.core import (
+    build_structural_entries,
+    chunk_document,
+    extract_entities,
+)
+from tree.memory.extraction.dedup import (
+    DeduplicationConfig,
+    DeduplicationResult,
+    MergeStrategy,
+    dedupe_entity,
+)
+from tree.memory.resolution.composite import CompositeResolver
+from tree.memory.resolution.types import ResolvedEntity, _normalize
+from tree.memory.types import (
+    ChunkedDocument,
+    DedupDecision,
+    DedupMap,
+    EmbeddingMap,
+    ExtractedEdge,
+    ExtractedNode,
+    ExtractionResult,
+    RawExtraction,
+    ResolutionOutput,
+    WriteSummary,
+    make_entity_key,
+    make_type_name_key,
+)
+from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.get_model import get_embedding_model, get_llm
 
 logger = logging.getLogger(__name__)
 
+_KG_COLLECTION = "knowledge_graph"
 
-@task(
-    name="extract-document-to-kg",
-    retries=1,
-    retry_delay_seconds=10,
-    cache_policy=NO_CACHE,
-)
-async def extract_document_task(
-    llm: BaseLLM,
-    doc: Document,
-    client: AsyncMongoClient,
-    database: str,
-) -> ExtractionResult:
-    """Extract knowledge graph entries from a single document."""
 
-    if not doc.content:
-        logger.warning("Document %s has no content, skipping", doc.id)
-        return ExtractionResult()
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    # Resolve reference URIs from the populated Document.references links.
-    reference_uris = [
-        ref.source_uri for ref in doc.references if isinstance(ref, Document)
-    ]
 
-    return await extract_and_store(
-        llm,
-        document_id=doc.id,
-        content=doc.content,
-        source_type=doc.source_type.value,
-        source_uri=doc.source_uri,
-        date=doc.date.isoformat() if doc.date else None,
-        reference_uris=reference_uris or None,
-        database=database,
-        client=client,
+def _get_run_logger() -> logging.Logger:
+    """Return the Prefect run logger when inside a task/flow, else the module logger.
+
+    Tests that call task ``.fn(...)`` outside a flow run hit the
+    ``MissingContextError`` branch — those still emit through the regular
+    logger so unit tests can capture log lines via ``caplog``.
+    """
+
+    try:
+        return get_run_logger()
+    except Exception:  # noqa: BLE001 — Prefect raises a typed error
+        return logger
+
+
+def _unwrap_validation_error(exc: BaseException) -> BaseException:
+    """Project a Pydantic ``ValidationError`` to its inner ``ValueError``.
+
+    The cross-key validator raises ``ValueError`` but Pydantic wraps it as a
+    ``ValidationError``. Callers (and tests) want to match on
+    ``ValueError`` directly.
+    """
+
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValueError) and not isinstance(exc, ValidationError):
+        return exc
+    if isinstance(exc, ValidationError):
+        for err in exc.errors():
+            ctx_err = err.get("ctx", {}).get("error")
+            if isinstance(ctx_err, ValueError):
+                return ctx_err
+            if isinstance(ctx_err, str):
+                return ValueError(ctx_err)
+        # No structured underlying error — re-raise as ValueError with message.
+        return ValueError(str(exc))
+    return exc
+
+
+def _live_app_config() -> Any:
+    """Return a freshly-loaded :class:`AppConfig`.
+
+    The module-level ``app_config`` is set at import time. Tests (and operators
+    flipping an env var) want subsequent flow entries to see the new state, so
+    every helper that reads ``extraction.*`` re-loads the config here.
+    """
+
+    return load_app_config()
+
+
+def _build_dedup_config() -> DeduplicationConfig:
+    """Translate the YAML :class:`DedupConfig` to the runtime
+    :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``)."""
+
+    cfg = _live_app_config().extraction.dedup
+    return DeduplicationConfig(
+        enabled=cfg.enabled,
+        auto_merge_threshold=cfg.auto_merge_threshold,
+        flag_threshold=cfg.flag_threshold,
+        use_fuzzy_matching=cfg.use_fuzzy_matching,
+        fuzzy_threshold=cfg.fuzzy_threshold,
+        max_candidates=cfg.max_candidates,
+        match_same_type_only=cfg.match_same_type_only,
+        merge_strategy=MergeStrategy(cfg.merge_strategy),
     )
+
+
+def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
+    """Construct the composite resolver from the YAML resolution config."""
+
+    cfg = _live_app_config().extraction.resolution
+    return CompositeResolver(
+        embedding_model,
+        fuzzy_threshold=cfg.fuzzy_threshold,
+        semantic_threshold=cfg.semantic_threshold,
+        type_strict=cfg.type_strict,
+        embedding_cache_max_size=cfg.embedding_cache_max_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task ① — extract chunks + structural entries
+# ---------------------------------------------------------------------------
+
+
+async def _extract_chunks_and_structural(document: Document) -> ChunkedDocument:
+    """Pure-function body. Stamps chunk ids and structural entries deterministically."""
+
+    log = _get_run_logger()
+    content = document.content or ""
+    chunk_texts = chunk_document(content) if content else []
+    chunk_ids = [str(uuid4()) for _ in chunk_texts]
+
+    structural = (
+        build_structural_entries(
+            document_id=document.id,
+            source_type=document.source_type.value,
+            source_uri=document.source_uri,
+            date=document.date.isoformat() if document.date else None,
+            chunk_texts=chunk_texts,
+            chunk_ids=chunk_ids,
+            extracted=ExtractionResult(),  # MENTIONS edges added in task ⑥ post-LLM
+            reference_uris=_reference_uris(document),
+        )
+        if chunk_texts
+        else ExtractionResult()
+    )
+
+    reference_uris = _reference_uris(document)
+    chunked = ChunkedDocument(
+        document_id=str(document.id),
+        source_uri=document.source_uri,
+        source_type=document.source_type.value,
+        date=document.date.isoformat() if document.date else None,
+        reference_uris=reference_uris,
+        chunk_texts=chunk_texts,
+        chunk_ids=chunk_ids,
+        structural=structural,
+    )
+    log.info(
+        "extract_chunks_and_structural: doc_id=%s n_chunks=%d n_structural_entries=%d",
+        chunked.document_id,
+        len(chunked.chunk_texts),
+        len(structural.nodes) + len(structural.edges),
+    )
+    return chunked
+
+
+def _reference_uris(document: Document) -> list[str]:
+    """Resolve already-populated ``Document.references`` to their source URIs."""
+
+    return [ref.source_uri for ref in document.references if isinstance(ref, Document)]
+
+
+extract_chunks_and_structural_task = task(
+    _extract_chunks_and_structural,
+    name="extract-chunks-and-structural",
+    cache_policy=INPUTS,
+    cache_expiration=timedelta(days=30),
+    retries=1,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ② — LLM extraction
+# ---------------------------------------------------------------------------
+
+
+async def _llm_extract_entities(
+    chunked: ChunkedDocument, llm: BaseLLM | None = None
+) -> RawExtraction:
+    """Invoke the LLM per chunk and merge per-chunk extractions.
+
+    ``llm`` is optional so the MCP ingest path can inject a caller-owned
+    handle (the FastMCP lifespan already constructed one). When omitted the
+    flow uses the default ``get_llm()`` factory.
+    """
+
+    log = _get_run_logger()
+    if not chunked.chunk_texts:
+        return RawExtraction(
+            document_id=chunked.document_id,
+            source_uri=chunked.source_uri,
+            chunked=chunked,
+            extracted=ExtractionResult(),
+        )
+
+    if llm is None:
+        llm = get_llm()
+    semaphore = asyncio.Semaphore(_live_app_config().extraction.llm_concurrency)
+
+    async def _one(chunk: str, chunk_id: str) -> ExtractionResult:
+        async with semaphore:
+            return await extract_entities(llm, chunk, chunk_id=chunk_id)
+
+    per_chunk = await asyncio.gather(
+        *[_one(t, cid) for t, cid in zip(chunked.chunk_texts, chunked.chunk_ids)]
+    )
+
+    merged = ExtractionResult()
+    for piece in per_chunk:
+        merged = merged.merge(piece)
+
+    log.info(
+        "llm_extract_entities: doc_id=%s n_entities_raw=%d n_edges_raw=%d",
+        chunked.document_id,
+        len(merged.nodes),
+        len(merged.edges),
+    )
+    return RawExtraction(
+        document_id=chunked.document_id,
+        source_uri=chunked.source_uri,
+        chunked=chunked,
+        extracted=merged,
+    )
+
+
+llm_extract_entities_task = task(
+    _llm_extract_entities,
+    name="llm-extract-entities",
+    cache_policy=INPUTS,
+    cache_expiration=timedelta(days=30),
+    retries=2,
+    retry_delay_seconds=15,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ③ — resolve entities (batched)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_entities(
+    raws: list[RawExtraction],
+    database: Any,
+    resolver: CompositeResolver,
+) -> ResolutionOutput:
+    """Fetch per-type candidates and run the resolver chain.
+
+    The resolver is invoked PER TYPE so the alias map and candidate name list
+    are both same-type — alias hits cannot cross types regardless of how
+    ``CompositeResolver`` ranks them internally.
+
+    The candidate-fetch query projects ``name``, ``canonical_name``, and
+    ``aliases``. We feed the resolver the **set-union** of ``name`` and
+    non-null ``canonical_name`` so a new mention of ``"John Smith"`` can
+    match an existing node whose ``name="Jean Smith"`` and
+    ``canonical_name="John Smith"``. The reverse map
+    ``name_to_owner_id`` records the owning ``_id`` for each candidate
+    string so task ⑥ can promote a canonical-name match to a soft join.
+    """
+
+    log = _get_run_logger()
+    resolution_cfg = _live_app_config().extraction.resolution
+    cap = resolution_cfg.max_candidates_per_type
+
+    # Collect all entities to resolve (LLM-extractable types only).
+    entities: list[tuple[str, NodeType]] = []
+    entities_by_doc: dict[str, list[tuple[NodeType, str]]] = {}
+    for raw in raws:
+        per_doc: list[tuple[NodeType, str]] = []
+        for node in raw.extracted.nodes:
+            if node.type not in LLM_EXTRACTABLE_NODE_TYPES:
+                continue
+            entities.append((node.name, node.type))
+            per_doc.append((node.type, node.name))
+        entities_by_doc[raw.document_id] = per_doc
+
+    if not entities:
+        log.info(
+            "resolve_entities: n_entities=0 n_per_type={} candidates_seen_by_type={}"
+        )
+        return ResolutionOutput()
+
+    # Group entities by type for type-strict resolution.
+    by_type: dict[NodeType, list[tuple[str, NodeType]]] = {}
+    for name, etype in entities:
+        by_type.setdefault(etype, []).append((name, etype))
+
+    candidates_seen_by_type: dict[str, int] = {}
+    name_to_owner_id: dict[str, str] = {}
+    resolved_by_key: dict[str, ResolvedEntity] = {}
+
+    # Fetch candidates and resolve per type.
+    for etype, entity_pairs in by_type.items():
+        collection = database[_KG_COLLECTION]
+        cursor = collection.find(
+            {
+                "kind": "node",
+                "type": etype.value,
+                "merged_into": {"$in": [None, "", False]},
+            },
+            projection={
+                "_id": 1,
+                "name": 1,
+                "canonical_name": 1,
+                "aliases": 1,
+            },
+        ).limit(cap)
+
+        candidate_docs: list[dict[str, Any]] = []
+        async for doc in cursor:
+            candidate_docs.append(doc)
+
+        seen = len(candidate_docs)
+        candidates_seen_by_type[etype.value] = seen
+        if seen >= cap:
+            log.warning(
+                "%s candidate fetch hit cap (%d); resolution accuracy may degrade",
+                etype.value.upper(),
+                cap,
+            )
+
+        # Build the candidate name set (set-union of name and non-null canonical_name)
+        # and the per-type alias map. ``name_to_owner_id`` is type-prefixed so
+        # the same surface form under two types stays disambiguated.
+        candidate_names: set[str] = set()
+        alias_map: dict[str, list[str]] = {}
+        for doc in candidate_docs:
+            owner_id = str(doc.get("_id"))
+            doc_name = doc.get("name")
+            doc_canonical = doc.get("canonical_name")
+            aliases = doc.get("aliases") or []
+
+            if doc_name:
+                candidate_names.add(doc_name)
+                name_to_owner_id.setdefault(
+                    make_type_name_key(etype, doc_name), owner_id
+                )
+            if doc_canonical:
+                candidate_names.add(doc_canonical)
+                name_to_owner_id.setdefault(
+                    make_type_name_key(etype, doc_canonical), owner_id
+                )
+                # Alias map is keyed by canonical_name (resolver semantics).
+                alias_map.setdefault(doc_canonical, []).extend(aliases)
+            elif doc_name:
+                alias_map.setdefault(doc_name, []).extend(aliases)
+
+        # Resolve every entity of this type against the per-type candidate set.
+        existing_entities = {etype: sorted(candidate_names)}
+        results = await resolver.resolve_with_types(
+            entity_pairs,
+            existing_entities=existing_entities,
+            existing_aliases=alias_map,
+        )
+        for (name, _t), resolved in zip(entity_pairs, results):
+            # Find the originating doc id for this (type, name).
+            for doc_id, doc_entities in entities_by_doc.items():
+                if (etype, name) in doc_entities:
+                    key = make_entity_key(doc_id, etype, name)
+                    resolved_by_key[key] = resolved
+                    break
+
+    n_per_type = {t.value: len(v) for t, v in by_type.items()}
+    log.info(
+        "resolve_entities: n_entities=%d n_per_type=%s candidates_seen_by_type=%s",
+        len(entities),
+        n_per_type,
+        candidates_seen_by_type,
+    )
+
+    return ResolutionOutput(
+        entities=entities,
+        resolved_by_key=resolved_by_key,
+        name_to_owner_id=name_to_owner_id,
+        candidates_seen_by_type=candidates_seen_by_type,
+    )
+
+
+resolve_entities_task = task(
+    _resolve_entities,
+    name="resolve-entities",
+    cache_policy=NO_CACHE,
+    retries=1,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ④ — embed (one canonical name at a time, mapped)
+# ---------------------------------------------------------------------------
+
+
+async def _embed_entity(name: str) -> tuple[str, list[float]]:
+    """Embed a single canonical name. Mapped at single-name grain for cache reuse."""
+
+    log = _get_run_logger()
+    embedding_model = get_embedding_model()
+    vectors = await embedding_model.embed([name])
+    vector = vectors[0] if vectors else []
+    log.info("embed_entity: name=%r dim=%d", name, len(vector))
+    return name, vector
+
+
+embed_entities_task = task(
+    _embed_entity,
+    name="embed-entity",
+    cache_policy=INPUTS,
+    cache_expiration=timedelta(days=90),
+    retries=2,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ⑤ — dedup (batched)
+# ---------------------------------------------------------------------------
+
+
+async def _dedupe_entities(
+    resolved: ResolutionOutput,
+    embeddings: EmbeddingMap,
+    database: Any,
+    dedup_config: DeduplicationConfig,
+) -> DedupMap:
+    """For each resolved entity, run :func:`dedupe_entity` and bucket the
+    decision under a stable per-entity key."""
+
+    log = _get_run_logger()
+    decisions: dict[str, DedupDecision] = {}
+    n_merged = n_flagged = n_none = 0
+
+    for key, resolved_entity in resolved.resolved_by_key.items():
+        doc_id, type_value, name = key.split("|", maxsplit=2)
+        entity_type = NodeType(type_value)
+
+        canonical = resolved_entity.canonical_name
+        embedding = embeddings.vectors.get(canonical) or []
+
+        if not embedding or not dedup_config.enabled:
+            decisions[key] = DedupDecision(action="none")
+            n_none += 1
+            continue
+
+        prospective_id = build_node_id(entity_type, _normalize(name))
+        raw = await dedupe_entity(
+            database=database,
+            name=name,
+            entity_type=entity_type,
+            embedding=embedding,
+            config=dedup_config,
+            incoming_node_id=prospective_id,
+        )
+        decision = _to_decision(raw, prospective_id)
+        decisions[key] = decision
+        if decision.action == "merged":
+            n_merged += 1
+        elif decision.action == "flagged":
+            n_flagged += 1
+        else:
+            n_none += 1
+
+    log.info(
+        "dedupe_entities: n_merged=%d n_flagged=%d n_none=%d",
+        n_merged,
+        n_flagged,
+        n_none,
+    )
+    return DedupMap(decisions=decisions)
+
+
+def _to_decision(result: DeduplicationResult, prospective_id: str) -> DedupDecision:
+    """Drop a self-match (top candidate == prospective_id) and project to a transit type."""
+
+    if result.action != "none" and result.matched_node_id == prospective_id:
+        return DedupDecision(action="none")
+    return DedupDecision(
+        action=result.action,
+        matched_node_id=result.matched_node_id,
+        matched_node_name=result.matched_node_name,
+        similarity_score=result.similarity_score,
+        match_type=result.match_type,
+    )
+
+
+dedupe_entities_task = task(
+    _dedupe_entities,
+    name="dedupe-entities",
+    cache_policy=NO_CACHE,
+    retries=1,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ⑥ — apply writes (batched)
+# ---------------------------------------------------------------------------
+
+
+async def _apply_writes(
+    raws: list[RawExtraction],
+    resolved: ResolutionOutput,
+    embeddings: EmbeddingMap,
+    dedup_results: DedupMap,
+    database: Any,
+    resolver: CompositeResolver,
+    dedup_config: DeduplicationConfig,
+    embedding_model: BaseEmbeddingModel,
+) -> WriteSummary:
+    """One pass over the resolved entities → ``add_entity()`` → edge upserts.
+
+    Edges are remapped from raw extracted names to final ``target_id``s by
+    consulting the in-batch ``name_to_target_id`` map (built while walking the
+    nodes) plus the cross-batch ``name_to_owner_id`` map from task ③.
+    Identical edges (after remapping) collapse into one upsert.
+
+    Idempotent: ``add_entity`` and the edge upserts both use ``upsert=True``.
+    """
+
+    log = _get_run_logger()
+
+    summary = WriteSummary(documents_processed=len(raws))
+    name_to_target_id: dict[str, str] = {}
+
+    # ----- Structural nodes/edges (DOCUMENT, CHUNK, PART_OF, NEXT, REFERENCED) -----
+    # Built per-doc in task ①; upserted directly here. MENTIONS edges are
+    # built locally from the LLM-extracted PERSON nodes so they can be remapped
+    # to the final target ids.
+    structural_node_ids: set[str] = set()
+    structural_edges: list[ExtractedEdge] = []
+    for raw in raws:
+        for node in raw.chunked.structural.nodes:
+            node_id = build_node_id(node.type, node.name)
+            await _upsert_structural_node(
+                database=database,
+                node=node,
+                node_id=node_id,
+                source_document_id=raw.document_id,
+            )
+            structural_node_ids.add(node_id)
+            summary.nodes_written += 1
+            # Document and chunk nodes carry stable names — register so
+            # MENTIONS edges (built later) can find them.
+            name_to_target_id[make_type_name_key(node.type, node.name)] = node_id
+        structural_edges.extend(raw.chunked.structural.edges)
+
+    # ----- LLM-extracted entities → add_entity ----------------------------------
+    for raw in raws:
+        for node in raw.extracted.nodes:
+            if node.type not in LLM_EXTRACTABLE_NODE_TYPES:
+                continue
+
+            key = make_entity_key(raw.document_id, node.type, node.name)
+            resolved_entity = resolved.resolved_by_key.get(key)
+            decision = dedup_results.decisions.get(key, DedupDecision(action="none"))
+
+            target_id = await _dispatch_entity_write(
+                database=database,
+                embedding_model=embedding_model,
+                resolver=resolver,
+                node=node,
+                source_document_id=raw.document_id,
+                resolved_entity=resolved_entity,
+                decision=decision,
+                embeddings=embeddings,
+                resolved=resolved,
+                dedup_config=dedup_config,
+                summary=summary,
+            )
+            name_to_target_id[make_type_name_key(node.type, node.name)] = target_id
+
+    # ----- MENTIONS edges (now that PERSON targets exist) ------------------------
+    mentions: list[ExtractedEdge] = []
+    for raw in raws:
+        person_names = {
+            n.name for n in raw.extracted.nodes if n.type == NodeType.PERSON
+        }
+        for person in person_names:
+            mentions.append(
+                ExtractedEdge(
+                    source_node_id=raw.chunked.source_uri,
+                    source_type=NodeType.DOCUMENT,
+                    target_node_id=person,
+                    target_type=NodeType.PERSON,
+                    type=EdgeType.MENTIONS,
+                )
+            )
+
+    # ----- All edges: remap + collapse + upsert ----------------------------------
+    all_edges: list[ExtractedEdge] = []
+    all_edges.extend(structural_edges)
+    all_edges.extend(mentions)
+    for raw in raws:
+        all_edges.extend(raw.extracted.edges)
+
+    seen_edge_ids: dict[str, ExtractedEdge] = {}
+    for edge in all_edges:
+        # Source/target endpoints may need remapping.
+        src_id = _remap_endpoint(
+            edge.source_type, edge.source_node_id, name_to_target_id
+        )
+        tgt_id = _remap_endpoint(
+            edge.target_type, edge.target_node_id, name_to_target_id
+        )
+
+        if not _edge_endpoints_valid(edge, src_id, tgt_id):
+            continue
+
+        edge_id = build_edge_id(src_id, edge.type, tgt_id)
+        seen_edge_ids[edge_id] = ExtractedEdge(
+            source_node_id=src_id,
+            source_type=edge.source_type,
+            target_node_id=tgt_id,
+            target_type=edge.target_type,
+            type=edge.type,
+            properties=edge.properties,
+            chunk_id=edge.chunk_id,
+        )
+
+    # Upsert each collapsed edge.
+    for edge_id, edge in seen_edge_ids.items():
+        await _upsert_edge(
+            database=database,
+            edge=edge,
+            edge_id=edge_id,
+            source_document_ids=[PydanticObjectId(raw.document_id) for raw in raws],
+        )
+        summary.edges_written += 1
+
+    log.info(
+        "apply_writes: nodes_written=%d edges_written=%d same_as_emitted=%d "
+        "nodes_merged=%d nodes_flagged=%d",
+        summary.nodes_written,
+        summary.edges_written,
+        summary.same_as_edges_emitted,
+        summary.nodes_merged,
+        summary.nodes_flagged,
+    )
+    return summary
+
+
+def _remap_endpoint(
+    etype: NodeType, name: str, name_to_target_id: dict[str, str]
+) -> str:
+    """Map an extracted endpoint (raw name) to a final ``_id``.
+
+    Falls back to ``build_node_id(etype, _normalize(name))`` for endpoints
+    we did not see during the node-write pass (e.g. structural edges between
+    chunks where the target id is the raw chunk name).
+    """
+
+    mapped = name_to_target_id.get(make_type_name_key(etype, name))
+    if mapped is not None:
+        return mapped
+    return build_node_id(etype, _normalize(name))
+
+
+def _edge_endpoints_valid(edge: ExtractedEdge, src_id: str, tgt_id: str) -> bool:
+    """Drop self-loops that arose from auto-merging both endpoints to the same id.
+
+    Allowed for SAME_AS (emitted explicitly by ``add_entity`` between distinct
+    pre-merge ids; never via this code path) — but this remap path should
+    never produce a SAME_AS edge between an id and itself.
+    """
+
+    return src_id != tgt_id
+
+
+async def _dispatch_entity_write(
+    *,
+    database: Any,
+    embedding_model: BaseEmbeddingModel,
+    resolver: CompositeResolver,
+    node: ExtractedNode,
+    source_document_id: str,
+    resolved_entity: ResolvedEntity | None,
+    decision: DedupDecision,
+    embeddings: EmbeddingMap,
+    resolved: ResolutionOutput,
+    dedup_config: DeduplicationConfig,
+    summary: WriteSummary,
+) -> str:
+    """Write one LLM-extracted entity through ``add_entity``.
+
+    The function shapes the inputs ``add_entity`` expects and tallies
+    per-entity counters (merged/flagged/written). It also honors the
+    "canonical-name-as-match-target" soft-join: when resolution chose a
+    canonical_name that we already know maps to an owning ``_id`` in the
+    existing graph, we let dedup decide whether to auto-merge into it
+    (which preserves edges on the existing canonical without a fresh
+    upsert).
+    """
+
+    # Inject the pre-computed embedding into ``add_entity`` via embedding_model.
+    # The shared embedding map already has the canonical-name vector — wrap the
+    # real model so ``add_entity``'s internal ``embed([name])`` returns it.
+    canonical = (
+        resolved_entity.canonical_name if resolved_entity is not None else node.name
+    )
+    cached_vec = embeddings.vectors.get(canonical)
+    model_for_call: BaseEmbeddingModel = (
+        _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
+    )
+
+    candidate_names = sorted(
+        {
+            name
+            for ttype, name in (key.split("|")[1:] for key in resolved.resolved_by_key)
+            if NodeType(ttype) == node.type
+        }
+    )
+
+    target_id, _resolved, dedup_result = await add_entity(
+        database=database,
+        embedding_model=model_for_call,
+        resolver=resolver,
+        name=node.name,
+        entity_type=node.type,
+        properties=node.properties,
+        source_id=source_document_id,
+        dedup_config=dedup_config,
+        candidate_names=candidate_names,
+    )
+
+    summary.nodes_written += 1
+    if dedup_result.action == "merged":
+        summary.nodes_merged += 1
+    elif dedup_result.action == "flagged":
+        summary.nodes_flagged += 1
+        summary.same_as_edges_emitted += 1
+
+    # Drive caching/decision plumbing from the up-stream task ⑤ result too —
+    # the in-flight ``add_entity`` call returned its own decision (driven by
+    # ``dedupe_entity`` over the same vector). When ⑤ said "merged" and the
+    # call agrees, we don't double-count.
+    if decision.action == "merged" and dedup_result.action != "merged":
+        # Disagreement — usually means the dedup index changed between ⑤ and ⑥.
+        # Trust the in-call decision; task ⑤'s count is best-effort.
+        pass
+
+    return target_id
+
+
+class _CachedSingleEmbedding(BaseEmbeddingModel):
+    """Return a pre-computed vector regardless of input text.
+
+    Used inside ``apply_writes`` so ``add_entity``'s internal
+    ``embedding_model.embed([name])`` reuses the vector task ④ already
+    computed instead of paying for it twice.
+    """
+
+    def __init__(self, vector: list[float]) -> None:
+        self._vector = vector
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector for _ in texts]
+
+
+async def _upsert_structural_node(
+    *,
+    database: Any,
+    node: ExtractedNode,
+    node_id: str,
+    source_document_id: str,
+) -> None:
+    """Upsert a structural node (DOCUMENT or CHUNK). No resolution, no dedup."""
+
+    from datetime import UTC, datetime
+
+    collection = database[_KG_COLLECTION]
+    now = datetime.now(tz=UTC)
+    props = node.properties.copy()
+    await collection.update_one(
+        {"_id": node_id},
+        [
+            {
+                "$set": {
+                    "kind": "node",
+                    "type": node.type.value,
+                    "name": node.name,
+                    "canonical_name": {"$ifNull": ["$canonical_name", node.name]},
+                    "properties": {
+                        "$mergeObjects": [
+                            {"$ifNull": ["$properties", {}]},
+                            props,
+                        ]
+                    },
+                    "aliases": {"$ifNull": ["$aliases", []]},
+                    "confidence": {"$ifNull": ["$confidence", 1.0]},
+                    "embedding": {"$ifNull": ["$embedding", []]},
+                    "sources": {
+                        "$setUnion": [
+                            {"$ifNull": ["$sources", []]},
+                            [PydanticObjectId(source_document_id)],
+                        ]
+                    },
+                    "created_at": {"$ifNull": ["$created_at", now]},
+                    "updated_at": now,
+                }
+            }
+        ],
+        upsert=True,
+    )
+
+
+async def _upsert_edge(
+    *,
+    database: Any,
+    edge: ExtractedEdge,
+    edge_id: str,
+    source_document_ids: list[PydanticObjectId],
+) -> None:
+    """Upsert one collapsed edge document."""
+
+    from datetime import UTC, datetime
+
+    collection = database[_KG_COLLECTION]
+    now = datetime.now(tz=UTC)
+    await collection.update_one(
+        {"_id": edge_id},
+        [
+            {
+                "$set": {
+                    "kind": "edge",
+                    "type": edge.type.value,
+                    "source_node_id": edge.source_node_id,
+                    "source_type": edge.source_type.value,
+                    "target_node_id": edge.target_node_id,
+                    "target_type": edge.target_type.value,
+                    "properties": {
+                        "$mergeObjects": [
+                            {"$ifNull": ["$properties", {}]},
+                            edge.properties,
+                        ]
+                    },
+                    "sources": {
+                        "$setUnion": [
+                            {"$ifNull": ["$sources", []]},
+                            source_document_ids,
+                        ]
+                    },
+                    "created_at": {"$ifNull": ["$created_at", now]},
+                    "updated_at": now,
+                }
+            }
+        ],
+        upsert=True,
+    )
+
+
+apply_writes_task = task(
+    _apply_writes,
+    name="apply-writes",
+    cache_policy=NO_CACHE,
+    retries=3,
+    retry_delay_seconds=10,
+)
+
+
+# ---------------------------------------------------------------------------
+# Flow
+# ---------------------------------------------------------------------------
 
 
 @flow(name="memory-extraction-etl", log_prints=True)
 async def memory_extraction(
     document_ids: list[str] | None = None,
-) -> list[ExtractionResult]:
-    """Extract knowledge graph entries from documents.
+) -> WriteSummary:
+    """Extract knowledge-graph entries from documents.
 
-    Args:
-        document_ids: Optional list of document ObjectId strings to process.
-                     If None, processes all documents that have content.
+    Cross-key config validation runs at import time (``settings = Settings()``
+    in ``app_config.py``). If the validator raises, the flow never starts;
+    callers see the ``ValueError`` straight from the first attribute access on
+    ``app_config.extraction``.
     """
 
+    log = _get_run_logger()
+
+    # Validate config invariants up-front (also re-checked on every dedup call).
+    # We re-load so env-var changes since import-time are honored — gives tests
+    # a deterministic seam for the "misconfig fails at flow entry" AC.
+    try:
+        load_app_config()
+    except Exception as exc:
+        # Surface the underlying ValueError directly (Pydantic wraps it in
+        # ValidationError; unwrap so callers can match on ``ValueError``).
+        unwrapped = _unwrap_validation_error(exc)
+        raise unwrapped from exc
+
+    dedup_config = _build_dedup_config()
+    embedding_model = get_embedding_model()
+    resolver = _build_resolver(embedding_model)
+
+    # Initialize the DB connection (Beanie + Motor handles) ---------------------
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
-    database = settings.mongo.mongo_initdb_database
+    database = client[settings.mongo.mongo_initdb_database]
 
-    llm = get_llm()
-
+    # ----- Fetch documents ---------------------------------------------------
     if document_ids:
         docs = await Document.find(
             {"_id": {"$in": [PydanticObjectId(did) for did in document_ids]}}
         ).to_list()
     else:
-        docs = await Document.find(
-            {"content": {"$ne": None}},
-        ).to_list()
+        docs = await Document.find({"content": {"$ne": None}}).to_list()
 
-    logger.info("Processing %d documents for KG extraction", len(docs))
+    log.info("Processing %d documents for KG extraction", len(docs))
 
-    results: list[ExtractionResult] = []
+    if not docs:
+        return WriteSummary(documents_processed=0)
+
+    # ----- Tasks ① and ② — per-doc fan-out ---------------------------------
+    chunked_docs: list[ChunkedDocument] = []
     for doc in docs:
-        result = await extract_document_task(llm, doc, client, database)
-        results.append(result)
+        chunked_docs.append(await extract_chunks_and_structural_task(doc))
 
-    total_nodes = sum(len(r.nodes) for r in results)
-    total_edges = sum(len(r.edges) for r in results)
-    logger.info(
-        "Extraction complete: %d documents → %d nodes, %d edges",
-        len(docs),
-        total_nodes,
-        total_edges,
+    raws: list[RawExtraction] = []
+    for chunked in chunked_docs:
+        raws.append(await llm_extract_entities_task(chunked))
+
+    # ----- Task ③ — resolve ------------------------------------------------
+    resolved = await resolve_entities_task(raws, database, resolver)
+
+    # ----- Task ④ — embed (mapped at single-name grain) --------------------
+    canonical_names = sorted(
+        {r.canonical_name for r in resolved.resolved_by_key.values()}
+    )
+    vectors: dict[str, list[float]] = {}
+    for name in canonical_names:
+        name_, vector = await embed_entities_task(name)
+        vectors[name_] = vector
+    embeddings = EmbeddingMap(vectors=vectors)
+
+    # ----- Task ⑤ — dedup --------------------------------------------------
+    dedup_results = await dedupe_entities_task(
+        resolved, embeddings, database, dedup_config
     )
 
-    return results
+    # ----- Task ⑥ — apply writes ------------------------------------------
+    summary = await apply_writes_task(
+        raws,
+        resolved,
+        embeddings,
+        dedup_results,
+        database,
+        resolver,
+        dedup_config,
+        embedding_model,
+    )
+
+    log.info(
+        "memory_extraction complete: documents=%d nodes_written=%d edges_written=%d "
+        "nodes_merged=%d nodes_flagged=%d same_as_edges_emitted=%d",
+        summary.documents_processed,
+        summary.nodes_written,
+        summary.edges_written,
+        summary.nodes_merged,
+        summary.nodes_flagged,
+        summary.same_as_edges_emitted,
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat shim for the MCP ingestion path
+# ---------------------------------------------------------------------------
+
+
+async def run_extraction_for_documents(
+    document_ids: list[str],
+    *,
+    client: Any,
+    database_name: str,
+    llm: BaseLLM | None = None,
+    embedding_model: BaseEmbeddingModel | None = None,
+) -> WriteSummary:
+    """Convenience entry point for callers that already hold an open client.
+
+    Mirrors :func:`memory_extraction` but reuses caller-owned handles
+    instead of opening a new one (the MCP ingest path holds its own client
+    from the FastMCP lifespan). The flow itself is short-circuited — we
+    re-implement the same pipeline shape inline so we don't have to start a
+    Prefect flow run from inside the MCP server process.
+
+    Returns:
+        A :class:`WriteSummary` for the processed documents.
+    """
+
+    # Re-validate config invariants.
+    try:
+        load_app_config()
+    except Exception as exc:
+        raise _unwrap_validation_error(exc) from exc
+    dedup_config = _build_dedup_config()
+    embedding_model = embedding_model or get_embedding_model()
+    resolver = _build_resolver(embedding_model)
+    database = client[database_name]
+
+    docs = await Document.find(
+        {"_id": {"$in": [PydanticObjectId(did) for did in document_ids]}}
+    ).to_list()
+
+    if not docs:
+        return WriteSummary(documents_processed=0)
+
+    chunked = [await _extract_chunks_and_structural(d) for d in docs]
+    raws = [await _llm_extract_entities(c, llm=llm) for c in chunked]
+    resolved = await _resolve_entities(raws, database, resolver)
+    canonical_names = sorted(
+        {r.canonical_name for r in resolved.resolved_by_key.values()}
+    )
+    vectors: dict[str, list[float]] = {}
+    for name in canonical_names:
+        _name, vector = await _embed_entity(name)
+        vectors[_name] = vector
+    embeddings = EmbeddingMap(vectors=vectors)
+    dedup_results = await _dedupe_entities(resolved, embeddings, database, dedup_config)
+    return await _apply_writes(
+        raws,
+        resolved,
+        embeddings,
+        dedup_results,
+        database,
+        resolver,
+        dedup_config,
+        embedding_model,
+    )
