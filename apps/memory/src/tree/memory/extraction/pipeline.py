@@ -803,6 +803,10 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     def __init__(self, vector: list[float]) -> None:
         self._vector = vector
 
+    @property
+    def dimensions(self) -> int:
+        return len(self._vector)
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._vector for _ in texts]
 

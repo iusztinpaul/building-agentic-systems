@@ -37,6 +37,7 @@ from tree.memory.extraction.dedup import (
     dedupe_entity,
 )
 from tree.memory.indexing.core import ensure_indexes
+from tree.models.fake_model import FakeEmbeddingModel
 
 TEST_DATABASE = "integration_tests_twin"
 _DIMS = 8
@@ -186,7 +187,11 @@ async def _kg_collection(mongo_client):
 
     db = mongo_client[TEST_DATABASE]
     col = db["knowledge_graph"]
-    await ensure_indexes(mongo_client, TEST_DATABASE)
+    await ensure_indexes(
+        mongo_client,
+        TEST_DATABASE,
+        embedding_model=FakeEmbeddingModel(dimensions=_DIMS),
+    )
     yield col
     await db.drop_collection("knowledge_graph")
 

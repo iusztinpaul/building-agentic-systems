@@ -26,6 +26,20 @@ class SentenceTransformerEmbeddingModel(BaseEmbeddingModel):
         )
         logger.info("Loaded sentence-transformer model: %s on %s", model, device)
 
+    @property
+    def dimensions(self) -> int:
+        """Truncated output size (Matryoshka via ``truncate_dim``).
+
+        ``self._dimensions`` reflects the runtime truncation that
+        ``embed`` actually returns. Falls back to the model's native
+        dimensionality from ``get_sentence_embedding_dimension()`` only
+        if no truncation was configured.
+        """
+
+        if self._dimensions is not None:
+            return self._dimensions
+        return int(self._model.get_sentence_embedding_dimension())
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []

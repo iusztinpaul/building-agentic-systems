@@ -28,7 +28,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
 
     from tree.memory.indexing.core import ensure_indexes
 
-    await ensure_indexes(client, database)
+    await ensure_indexes(client, database, embedding_model=embedding_model)
 
     logger.info("MCP server ready (database=%s)", database)
     try:

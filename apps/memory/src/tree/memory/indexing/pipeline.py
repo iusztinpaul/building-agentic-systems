@@ -28,7 +28,8 @@ async def embed_nodes_task(client, database: str) -> int:
 
 @task(name="ensure-kg-indexes", retries=1, retry_delay_seconds=5, cache_policy=NO_CACHE)
 async def ensure_indexes_task(client, database: str) -> None:
-    await ensure_indexes(client, database)
+    embedding_model = get_embedding_model()
+    await ensure_indexes(client, database, embedding_model=embedding_model)
 
 
 @flow(name="memory-indexing-etl", log_prints=True)

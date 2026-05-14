@@ -1,11 +1,18 @@
 """Integration tests for the memory indexing pipeline."""
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 
 import pytest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
+from tree.memory.indexing.core import (
+    _CANONICAL_NAME_INDEX,
+    _VECTOR_INDEX_NAME,
+    ensure_indexes,
+)
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.models.fake_model import FakeEmbeddingModel
 
@@ -176,3 +183,144 @@ class TestMemoryIndexingPipeline:
 
         second_count = await kg.count_documents({})
         assert first_count == second_count
+
+
+async def _wait_for_search_index_definition(
+    collection,
+    *,
+    expected_dimensions: int,
+    timeout: float = 30.0,
+) -> dict:
+    """Block until ``vector_index`` reports the expected ``numDimensions``.
+
+    mongot is eventually-consistent for index DDL; polling avoids flakes
+    on the drop+recreate path.
+    """
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    last_seen: dict = {}
+    while asyncio.get_event_loop().time() < deadline:
+        cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
+        indexes = await cursor.to_list()
+        if indexes:
+            last_seen = indexes[0]
+            fields = (
+                last_seen.get("latestDefinition", {}).get("fields")
+                or last_seen.get("definition", {}).get("fields")
+                or []
+            )
+            for field in fields:
+                if (
+                    field.get("type") == "vector"
+                    and field.get("numDimensions") == expected_dimensions
+                ):
+                    return last_seen
+        await asyncio.sleep(1.0)
+    raise AssertionError(
+        f"vector_index did not converge to numDimensions={expected_dimensions} "
+        f"within {timeout}s. Last seen: {last_seen}"
+    )
+
+
+@pytest.mark.usefixtures("_skip_without_mongot")
+class TestEnsureIndexesReconcile:
+    async def test_dimension_mismatch_drops_and_recreates_with_warning(
+        self, mongo_client, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Start with a 16-dim vector index, then reconcile against an
+        8-dim model — expect a WARNING + the live index reports 8 dims."""
+
+        # Arrange: seed the 16-dim index.
+        await ensure_indexes(
+            mongo_client,
+            TEST_DATABASE,
+            embedding_model=FakeEmbeddingModel(dimensions=16),
+        )
+        kg = mongo_client[TEST_DATABASE]["knowledge_graph"]
+        await _wait_for_search_index_definition(kg, expected_dimensions=16)
+
+        # Act: reconcile against 8 dims.
+        with caplog.at_level(logging.WARNING, logger="tree.memory.indexing.core"):
+            await ensure_indexes(
+                mongo_client,
+                TEST_DATABASE,
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+            )
+
+        # Assert: warning mentions both numbers; live index reports 8 dims.
+        warning_text = " ".join(
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        )
+        assert "16" in warning_text
+        assert "8" in warning_text
+
+        live = await _wait_for_search_index_definition(kg, expected_dimensions=8)
+        fields = (
+            live.get("latestDefinition", {}).get("fields")
+            or live.get("definition", {}).get("fields")
+            or []
+        )
+        filter_paths = {f["path"] for f in fields if f.get("type") == "filter"}
+        assert "merged_into" in filter_paths
+
+        # Drop the collection so the cleanup fixture sees a clean slate.
+        await mongo_client[TEST_DATABASE].drop_collection("knowledge_graph")
+
+    async def test_canonical_name_and_alias_text_index_created(
+        self, mongo_client
+    ) -> None:
+        """``ensure_indexes`` must create the canonical_name index and
+        ensure the text index covers the top-level ``aliases`` field."""
+
+        await ensure_indexes(
+            mongo_client,
+            TEST_DATABASE,
+            embedding_model=FakeEmbeddingModel(dimensions=8),
+        )
+
+        kg = mongo_client[TEST_DATABASE]["knowledge_graph"]
+        indexes = await kg.index_information()
+
+        # canonical_name index — non-unique, sparse.
+        assert _CANONICAL_NAME_INDEX in indexes
+        canonical = indexes[_CANONICAL_NAME_INDEX]
+        assert canonical.get("sparse") is True
+        assert canonical.get("unique") is not True
+        # Key shape: [("canonical_name", 1)].
+        assert canonical["key"][0][0] == "canonical_name"
+
+        # Text index — must include ``aliases`` (top-level) in its weights.
+        assert "text_index" in indexes
+        text_index = indexes["text_index"]
+        # MongoDB exposes covered text-index fields under ``weights``.
+        weights = text_index.get("weights", {})
+        assert "aliases" in weights
+
+        await mongo_client[TEST_DATABASE].drop_collection("knowledge_graph")
+
+    async def test_idempotent_reconcile_no_warning_on_second_call(
+        self, mongo_client, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Two back-to-back calls with the same model produce zero
+        WARNINGs the second time around (live state already matches)."""
+
+        await ensure_indexes(
+            mongo_client,
+            TEST_DATABASE,
+            embedding_model=FakeEmbeddingModel(dimensions=8),
+        )
+        kg = mongo_client[TEST_DATABASE]["knowledge_graph"]
+        await _wait_for_search_index_definition(kg, expected_dimensions=8)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tree.memory.indexing.core"):
+            await ensure_indexes(
+                mongo_client,
+                TEST_DATABASE,
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+            )
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings == []
+
+        await mongo_client[TEST_DATABASE].drop_collection("knowledge_graph")

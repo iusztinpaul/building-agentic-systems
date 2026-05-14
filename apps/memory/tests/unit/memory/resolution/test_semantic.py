@@ -19,6 +19,10 @@ class _ScriptedEmbeddingModel(BaseEmbeddingModel):
         self._scripted = scripted
         self.embed_call_count = 0
 
+    @property
+    def dimensions(self) -> int:
+        return next(iter(self._scripted.values())).__len__() if self._scripted else 2
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.embed_call_count += 1
         out: list[list[float]] = []
@@ -39,6 +43,10 @@ class _CountingEmbeddingModel(BaseEmbeddingModel):
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 2
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(list(texts))

@@ -65,6 +65,15 @@ class GeminiEmbeddingModel(BaseEmbeddingModel):
         self._model = model
         self._dimensions = dimensions
 
+    @property
+    def dimensions(self) -> int:
+        """Configured output dimensionality (passed to the API as
+        ``output_dimensionality``). Gemini text-embedding models support
+        Matryoshka truncation, so the wire vector exactly matches the
+        value supplied at construction time."""
+
+        return self._dimensions
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         try:
             response = await self._client.aio.models.embed_content(

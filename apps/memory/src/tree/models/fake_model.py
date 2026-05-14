@@ -34,6 +34,12 @@ class FakeEmbeddingModel(BaseEmbeddingModel):
         dimensions = dimensions or app_config.models.embedding.dimensions
         self._dimensions = dimensions
 
+    @property
+    def dimensions(self) -> int:
+        """Configured output dimensionality."""
+
+        return self._dimensions
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[0.0] * self._dimensions for _ in texts]
 
@@ -44,6 +50,12 @@ class MockEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int | None = None) -> None:
         dimensions = dimensions or app_config.models.embedding.dimensions
         self._dimensions = dimensions
+
+    @property
+    def dimensions(self) -> int:
+        """Configured output dimensionality."""
+
+        return self._dimensions
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[random.random() for _ in range(self._dimensions)] for _ in texts]

@@ -15,6 +15,17 @@ class BaseLLM(abc.ABC):
 class BaseEmbeddingModel(abc.ABC):
     """Async embedding model."""
 
+    @property
+    @abc.abstractmethod
+    def dimensions(self) -> int:
+        """Size of the vector each ``embed(...)[i]`` call yields.
+
+        Surfaces the contract every downstream component depends on
+        (vector-index ``numDimensions``, schema validation, dedup
+        thresholds). Implementations return a positive integer matching
+        the model's wire output.
+        """
+
     @abc.abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Return one embedding vector per input text."""
