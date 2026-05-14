@@ -345,3 +345,49 @@ probe='rob downey'                   cos=0.801 action=none     score=0.0 match_t
 
 The deliverable meets every AC for the closing task. The smoke script is robust, the three strategies are independently reproducible, the soft-join contract is asserted end-to-end, and the human-review CLI is exercised in the loop. The SWE's headline claim ("FLAG unreachable under realistic resolver thresholds") is independently verified as a property of the default config — not a code defect. The two #015-discovered issues (Prefect cache, IndexOptionsConflict) are real operator hazards but ship-worthy as documented follow-ups. The PR description draft needs three additions before `/night` Step 7 invokes `create-pr` (FLAG-path masking, cache contamination, index upgrade conflict).
 
+### [PM] 2026-05-14 23:15 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed evidence from Tester logs across #007–#015. All acceptance criteria verified from user POV. The four user-facing capabilities the human asked for land cleanly:
+
+- **Two-document Alice/A.Smith canonical collapse.** End-to-end soft-join contract proven via the three strategy smokes (`tracker/015-e2e-verification-and-pr.groomed.md` log: `soft_join rows: [{'_id': 'smoke soft-join canonical', 'ids': ['person:smoke-soft-join-winner', 'person:smoke-soft-join-loser'], 'n': 2}]` per strategy) and at unit level by `tests/unit/entities/test_knowledge_graph.py::TestResolutionDedupFields::test_soft_join_two_node_ids_share_canonical_name` (#007).
+
+- **FLAG path for distinct-but-similar pair.** Dedup engine emits `flagged` at raw cos 0.88 (`tests/integration/memory/test_dedup.py::test_three_tier_decision_flagged`, spot-checked at line 248 — uses `_vector_with_raw_cosine(0.88)` per spec text, asserts `action == "flagged"`). The "FLAG-masked under default config" interaction is honestly documented in PR description §"Follow-ups" — not silently dropped.
+
+- **Three merge strategies switchable via `TREE_EXTRACTION__DEDUP__MERGE_STRATEGY`.** All three smokes independently re-run by Tester (final log entry) with 4 assertions each: KEEP_PRIMARY leaves `description='pre-seeded soft-join WINNER node'`, MERGE_PROPERTIES picks up loser's longer `description='pre-seeded soft-join LOSER node (longer)'`, KEEP_ALIASES leaves description unchanged but appends alias.
+
+- **Human-review CLI (`scripts/review_duplicates.py`) lists/confirms/rejects.** Interactive walk verified live (#014 Tester transcript: `c/r/s/q` flow + invalid-input re-prompt + `Quitting.` + summary line). MCP wrappers ship with structured-JSON errors. Confirm path imports `_apply_merge` from `tree.memory.extraction.add_entity` (verified at `apps/memory/src/tree/memory/review/core.py:49`) so auto-merge and human-merge cannot drift.
+
+- **Six-task Prefect pipeline.** `apps/memory/src/tree/orchestrator.py` registers `memory_extraction.to_deployment(name="memory-extraction-etl")`; six `@task` exports verified by `TestPipelineExports`; legacy `normalize_nodes` + 4 helpers deleted (live grep returns zero live references — only a docstring breadcrumb at `extraction/core.py:10`).
+
+**AC spot-checks** (3 picked by reading actual test code, not just Tester claims):
+
+1. `test_three_tier_decision_merged` / `_flagged` / `_none` (#010): tests at `tests/integration/memory/test_dedup.py:206-300` seed at the spec-literal raw cosines 0.97 / 0.88 / 0.70 using `_vector_with_raw_cosine` (the renamed helper, line 59) and assert tier outcomes directly. The threshold-scale FAIL → fix → re-PASS round was real and properly closed. PASS verified.
+
+2. `test_three_tier_decision_flagged` at raw cos 0.88 (#010): I personally verified the test uses `_vector_with_raw_cosine(0.88)`, queries via `_query_vector()`, and asserts `action == "flagged"` plus `flag_threshold <= score < auto_merge_threshold`. The spec-literal claim and the test code agree.
+
+3. `_apply_merge` shared between auto-merge and human-confirm (#011, #014): verified via grep — `apps/memory/src/tree/memory/review/core.py:49` imports from `tree.memory.extraction.add_entity`, and `core.py:445` calls `await _apply_merge(...)`. No duplicate implementation. The "auto-merge and human-merge cannot drift" contract is genuine, not aspirational.
+
+**Silently-dropped scope check.** Three categories disposed honestly, not silently:
+
+- 5 un-rewired `TestNormalizeNodes` scenarios at flow level (#012): explicitly disposed by Tester as PASS-with-note (defense-in-depth gap; primitives at #008/#009/#010/#011 already cover the behavior). Recommended as a future rollup, not a Blocker.
+- FLAG-path masking under default config (#015): documented in PR description §"Follow-ups" with explicit text. The engine still produces `flagged` correctly; the masking is a config-interaction property, not a defect. Not silently dropped.
+- Prefect cache contamination + `ensure_indexes` IndexOptionsConflict: both documented in PR description §"Follow-ups". Real operator hazards but acceptable to ship with documentation and a workaround in the smoke.
+
+**PR description quality** (`tracker/015-pr-description.md`):
+
+- Soft-join contract is its own §"The `_id` vs `canonical_name` soft join" section with the mongosh aggregation example (lines 133-152). The surprise — two physical nodes sharing one canonical — is impossible to miss.
+- Three merge strategies + env-var switch are in §"Merge strategies" with copy-paste command lines (lines 102-131).
+- Follow-ups list at lines 154-223 honestly enumerates: (a) the 4 PR-Reviewer-time NITs from Testers #011/#014, (b) the three #015-discovered limitations with detailed Recommendation paragraphs each, (c) the 6 carry-forward future-work items. Nothing buried.
+
+**Carry-forward NITs (acknowledged, non-blocking for ACCEPT):**
+
+- `sources: list[PydanticObjectId]` vs `source_id: str` ODM typing gap (Tester #011) — flagged for PR Reviewer.
+- CLI subcommands surface raw `ValueError` traceback for nonexistent pair (Tester #014) — flagged for PR Reviewer.
+- Pipeline uses sequential `for doc in docs: await task(doc)` instead of `.map(documents)` (Tester #012) — flagged for PR Reviewer; not a regression because per-doc fan-out AC still passes via the sequential loop.
+- Stale comment in `dedup.py:285-289` saying `merged_into` is NOT indexed (Tester #013) — flagged for PR Reviewer.
+
+The PR description's §"Follow-ups (intentionally out of scope)" surfaces all four to the human merger.
+
+User satisfaction guaranteed. SWE may push to feature branch via /night Step 7.
