@@ -70,12 +70,13 @@ def build_nl_query_system_prompt() -> str:
     # Edge types and their constraints.
     edge_sections: list[str] = []
     for et in EdgeType:
-        constraint = EDGE_CONSTRAINTS.get(et)
-        if constraint:
-            edge_sections.append(
-                f"  - {et.value}: {constraint.source_type.value} -> "
-                f"{constraint.target_type.value} ({constraint.description})"
-            )
+        constraints = EDGE_CONSTRAINTS.get(et)
+        if constraints:
+            for constraint in constraints:
+                edge_sections.append(
+                    f"  - {et.value}: {constraint.source_type.value} -> "
+                    f"{constraint.target_type.value} ({constraint.description})"
+                )
         else:
             edge_sections.append(f"  - {et.value}")
     edge_types_block = "\n".join(edge_sections)

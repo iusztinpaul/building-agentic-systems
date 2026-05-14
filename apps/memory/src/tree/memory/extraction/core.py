@@ -176,7 +176,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             logger.warning("Skipping non-extractable edge type: %s", edge_type)
             continue
 
-        constraint = EDGE_CONSTRAINTS[edge_type]
+        constraints = EDGE_CONSTRAINTS[edge_type]
         try:
             src_type = NodeType(e["source_type"])
             tgt_type = NodeType(e["target_type"])
@@ -184,12 +184,13 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             logger.warning("Skipping edge with invalid node types: %s", e)
             continue
 
-        if src_type != constraint.source_type or tgt_type != constraint.target_type:
+        if not any(
+            src_type == c.source_type and tgt_type == c.target_type for c in constraints
+        ):
             logger.warning(
-                "Edge %s violates constraint (%s→%s expected, got %s→%s)",
+                "Edge %s violates constraint (expected one of %s, got %s→%s)",
                 edge_type,
-                constraint.source_type,
-                constraint.target_type,
+                [(c.source_type, c.target_type) for c in constraints],
                 src_type,
                 tgt_type,
             )
