@@ -44,6 +44,7 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.15.2",
     "pre-commit>=4.0",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
@@ -51,6 +52,13 @@ testpaths = ["tests/unit", "tests/integration"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
+# Surface hangs fast in CI: any single test that runs longer than 15 min is
+# killed. Pre-existing MCP integration tests that retry against mock Gemini
+# keys can run for several minutes, so we leave generous headroom — the goal
+# is to catch true hangs (silence > 15 min), not flag legitimately slow tests.
+# Tighter per-test bounds belong on the test (``@pytest.mark.timeout(N)``).
+timeout = 900
+timeout_method = "signal"
 filterwarnings = [
     "ignore:Logger 'prefect:UserWarning",
     "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",

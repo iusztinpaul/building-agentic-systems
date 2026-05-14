@@ -13,12 +13,14 @@ collected DB state.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from prefect import tags as prefect_tags
 
 from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.memory.extraction.dedup import DeduplicationResult
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
@@ -79,6 +81,15 @@ def _patch_pipeline_deps(
     Importantly, we patch ``get_embedding_model`` in the pipeline module so
     the resolver / dedup / task ④ paths all share one fake model — and patch
     ``init_mongodb`` so the flow reuses the test's open client.
+
+    ``dedupe_entity`` is also patched everywhere it's called (task ⑤'s
+    ``_dedupe_entities`` and task ⑥'s ``add_entity``). Otherwise the real
+    function would run an Atlas ``$vectorSearch`` against the
+    ``knowledge_graph`` collection — in CI this happens before the indexing
+    pipeline has had a chance to create ``vector_index``, and an in-flight
+    aggregation against a missing search index can stall waiting for it to
+    appear. Skipping dedup altogether matches the "no candidates" decision
+    these tests expect anyway, and keeps the assertions stable.
     """
 
     mocker.patch(
@@ -93,6 +104,18 @@ def _patch_pipeline_deps(
     mocker.patch(
         "tree.memory.extraction.pipeline.get_embedding_model",
         return_value=embedding_model,
+    )
+    # Patch ``dedupe_entity`` at every call site so neither task ⑤ nor task ⑥
+    # (via ``add_entity``) issues a live ``$vectorSearch``. Default decision
+    # is ``"none"`` — i.e. always treat the incoming entity as new — which
+    # matches the empty-graph starting state these tests rely on.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.dedupe_entity",
+        new=AsyncMock(return_value=DeduplicationResult(action="none")),
+    )
+    mocker.patch(
+        "tree.memory.extraction.add_entity.dedupe_entity",
+        new=AsyncMock(return_value=DeduplicationResult(action="none")),
     )
 
 
