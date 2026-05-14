@@ -130,6 +130,16 @@ EDGE_CONSTRAINTS: dict[EdgeType, EdgeConstraint] = {
         target_type=NodeType.PREFERENCE,
         description="Person has a preference or opinion",
     ),
+    EdgeType.SAME_AS: EdgeConstraint(
+        source_type=NodeType.PERSON,
+        target_type=NodeType.PERSON,
+        description=(
+            "Two nodes of the same type refer to the same real-world entity; "
+            "emitted by the resolver/dedup pipeline, not the LLM. The "
+            "PERSON→PERSON pair documents the primary resolution case; the "
+            "edge applies symmetrically to any same-type node pair."
+        ),
+    ),
 }
 
 # Node/edge types the LLM should extract (vs structural types created by pipeline code).
@@ -153,6 +163,7 @@ STRUCTURAL_EDGE_TYPES: set[EdgeType] = {
     EdgeType.NEXT,
     EdgeType.MENTIONS,
     EdgeType.REFERENCED,
+    EdgeType.SAME_AS,
 }
 
 

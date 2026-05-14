@@ -28,6 +28,7 @@ class EdgeType(StrEnum):
     TODO = "todo"
     EXPERIENCED = "experienced"
     HAS = "has"
+    SAME_AS = "same_as"
 
 
 # --- ID builders ---
@@ -59,6 +60,13 @@ class KnowledgeGraphEntry(BeanieDocument):
     name: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] = Field(default_factory=list)
+
+    # Resolution + dedup (node-only; edge rows keep documented defaults)
+    canonical_name: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    confidence: float = 1.0
+    merged_into: str | None = None
+    merged_at: datetime | None = None
 
     # Edge fields
     source_node_id: str | None = None
