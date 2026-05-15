@@ -59,7 +59,7 @@ sources:
 models:
   llm:
     provider: gemini
-    model: gemini-2.5-flash-lite
+    model: gemini-3.1-flash-lite
   embedding:
     provider: sentence-transformers
     model: all-MiniLM-L6-v2
