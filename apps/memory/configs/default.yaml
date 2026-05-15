@@ -69,7 +69,21 @@ extraction:
   chunk_size: 512
   chunk_overlap: 64
   llm_concurrency: 5
-  similarity_threshold: 0.85
+  resolution:
+    fuzzy_threshold: 0.85
+    semantic_threshold: 0.80
+    type_strict: true
+    max_candidates_per_type: 1000
+    embedding_cache_max_size: 10000
+  dedup:
+    enabled: true
+    auto_merge_threshold: 0.95
+    flag_threshold: 0.85
+    use_fuzzy_matching: true
+    fuzzy_threshold: 0.90
+    max_candidates: 10
+    match_same_type_only: true
+    merge_strategy: keep_primary
 
 query:
   top_k: 10

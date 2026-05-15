@@ -123,3 +123,12 @@ scrape-web: # On-demand scrape of one or more URLs via Bright Data Web Unlocker 
 
 serve-mcp: # Serve the MCP server for knowledge graph queries.
 	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
+
+
+# --- Smoke ---
+
+smoke-resolution-dedup: # End-to-end resolution+dedup smoke. Pass STRATEGY=keep_primary|merge_properties|keep_aliases. Optional RESTART_INFRA=1 to run 'make local-restart' first.
+	@if [ -z "$(STRATEGY)" ]; then echo 'USAGE: make smoke-resolution-dedup STRATEGY=keep_primary|merge_properties|keep_aliases [RESTART_INFRA=1]'; exit 1; fi
+	TREE_EXTRACTION__DEDUP__MERGE_STRATEGY=$(STRATEGY) uv run python scripts/smoke_resolution_dedup.py run \
+		--strategy $(STRATEGY) \
+		$(if $(filter 1,$(RESTART_INFRA)),--restart-infra,)

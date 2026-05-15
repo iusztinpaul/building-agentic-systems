@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.voyageai.com/v1/multimodalembeddings"
 
+# Known native output dimensions per Voyage multimodal model id. Used when
+# the caller does not request Matryoshka truncation via ``output_dimension``.
+# Source: https://docs.voyageai.com/docs/multimodal-embeddings — keep in
+# lockstep with the API docs.
+_MODEL_NATIVE_DIMENSIONS: dict[str, int] = {
+    "voyage-multimodal-3": 1024,
+    "voyage-multimodal-3.5": 1024,
+}
+
 
 class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
     """Embedding model backed by the Voyage AI multimodal embeddings API.
@@ -53,6 +62,28 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
         self._output_dimension = output_dimension
         self._truncation = truncation
         self._timeout = timeout
+
+    @property
+    def dimensions(self) -> int:
+        """Output vector size.
+
+        Uses the caller-supplied Matryoshka ``output_dimension`` when set,
+        otherwise the model's native dimensionality from
+        ``_MODEL_NATIVE_DIMENSIONS``.
+        """
+
+        if self._output_dimension is not None:
+            return self._output_dimension
+        native = _MODEL_NATIVE_DIMENSIONS.get(self._model)
+        if native is None:
+            raise ModelError(
+                f"VoyageMultimodalEmbeddingModel has no explicit "
+                f"`output_dimension` and the native dimension for model "
+                f"'{self._model}' is unknown. Add it to "
+                f"_MODEL_NATIVE_DIMENSIONS in voyage_multimodal_embedding.py "
+                f"or construct the model with an explicit `output_dimension=`."
+            )
+        return native
 
     # ------------------------------------------------------------------
     # Embedding

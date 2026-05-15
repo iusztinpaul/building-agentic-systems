@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_APP_NAME = "vllm-embedding-models"
 _DEFAULT_FUNCTION_NAME = "voyageai-voyage-4-nano"
 
+# Known native output dimensions for models deployed via the Modal vLLM
+# manifest at ``apps/memory/deploy/embedding_models.py``. Used as a fallback
+# when the model is constructed without an explicit ``dimensions`` (i.e.
+# no Matryoshka truncation is requested and the server returns the model's
+# native vector size). Keep in lockstep with the deployment manifest.
+_MODEL_NATIVE_DIMENSIONS: dict[str, int] = {
+    "voyageai/voyage-4-nano": 1024,
+}
+
 
 class ModalEmbeddingModel(BaseEmbeddingModel):
     """Embedding model backed by a Modal-deployed vLLM server.
@@ -51,6 +60,29 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         self._function_name = function_name
         self._health_timeout = health_timeout
         self._client: AsyncOpenAI | None = None
+
+    @property
+    def dimensions(self) -> int:
+        """Output vector size.
+
+        If a Matryoshka ``dimensions`` was supplied at construction time
+        (passed as ``dimensions=`` to vLLM's OpenAI-compatible embeddings
+        endpoint), use it. Otherwise fall back to the model's known native
+        size from ``_MODEL_NATIVE_DIMENSIONS`` — the same value the
+        deployed Modal function would return.
+        """
+
+        if self._dimensions is not None:
+            return self._dimensions
+        native = _MODEL_NATIVE_DIMENSIONS.get(self._model_name)
+        if native is None:
+            raise ModelError(
+                f"ModalEmbeddingModel has no explicit `dimensions` and the "
+                f"native dimension for model '{self._model_name}' is unknown. "
+                f"Add it to _MODEL_NATIVE_DIMENSIONS in modal_embedding.py "
+                f"or construct the model with an explicit `dimensions=`."
+            )
+        return native
 
     # ------------------------------------------------------------------
     # Lazy initialisation (async)

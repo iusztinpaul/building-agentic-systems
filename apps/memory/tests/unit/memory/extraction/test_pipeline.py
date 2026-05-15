@@ -1,0 +1,475 @@
+"""Unit tests for the six-task extraction pipeline.
+
+Each test exercises a single task body (``task.fn``) with mocked Mongo /
+embedding / LLM dependencies. Behavior that requires Prefect's task runtime
+(caching, retries, mapping) is verified in
+``tests/integration/memory/test_extraction_pipeline.py`` against the live
+flow.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from tree.entities.knowledge_graph import NodeType
+from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
+from tree.memory.extraction.pipeline import (
+    _CachedSingleEmbedding,
+    _dedupe_entities,
+    _embed_entity,
+    _extract_chunks_and_structural,
+    _llm_extract_entities,
+    _resolve_entities,
+    embed_entities_task,
+    extract_chunks_and_structural_task,
+    llm_extract_entities_task,
+    memory_extraction,
+    run_extraction_for_documents,
+)
+from tree.memory.resolution.composite import CompositeResolver
+from tree.memory.resolution.types import ResolvedEntity
+from tree.memory.types import (
+    ChunkedDocument,
+    EmbeddingMap,
+    ExtractedNode,
+    ExtractionResult,
+    RawExtraction,
+    ResolutionOutput,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_document(
+    *,
+    doc_id: str = "507f1f77bcf86cd799439011",
+    content: str = "Alice ships ML pipelines.",
+    source_uri: str = "https://example.com/a",
+) -> Any:
+    """Build a minimal Document-like object that ``_extract_chunks_and_structural`` accepts."""
+
+    doc = MagicMock(name="Document")
+    doc.id = doc_id
+    doc.source_uri = source_uri
+    doc.source_type = MagicMock(value="huggingface")
+    doc.date = None
+    doc.content = content
+    doc.references = []
+    return doc
+
+
+def _async_cursor(items: list[dict[str, Any]]) -> Any:
+    """Build a mocked ``cursor`` that supports ``async for`` and ``.limit(...)``."""
+
+    async def _aiter():
+        for it in items:
+            yield it
+
+    cursor = MagicMock(name="cursor")
+    cursor.__aiter__ = lambda self: _aiter()
+    cursor.limit = MagicMock(return_value=cursor)
+    return cursor
+
+
+def _make_database_with_candidates(
+    candidates_by_type: dict[NodeType, list[dict[str, Any]]],
+) -> Any:
+    """Build a database mock whose ``[col].find(...)`` returns the seeded candidates."""
+
+    def _find(query: dict[str, Any], projection: dict[str, Any] | None = None):
+        ntype = query.get("type")
+        for t, docs in candidates_by_type.items():
+            if t.value == ntype:
+                return _async_cursor(docs)
+        return _async_cursor([])
+
+    collection = MagicMock(name="kg_collection")
+    collection.find = MagicMock(side_effect=_find)
+    collection.update_one = AsyncMock(return_value=MagicMock())
+
+    database = MagicMock(name="database")
+    database.__getitem__.return_value = collection
+    return database
+
+
+# ---------------------------------------------------------------------------
+# Task ① — extract_chunks_and_structural
+# ---------------------------------------------------------------------------
+
+
+class TestExtractChunksAndStructuralTask:
+    async def test_empty_content_returns_empty_chunks(self) -> None:
+        doc = _make_document(content="")
+        chunked = await _extract_chunks_and_structural(doc)
+        assert chunked.chunk_texts == []
+        assert chunked.chunk_ids == []
+        assert chunked.structural.nodes == []
+        assert chunked.structural.edges == []
+
+    async def test_content_produces_chunks_and_structural_doc_node(self) -> None:
+        doc = _make_document(content="some content " * 50)
+        chunked = await _extract_chunks_and_structural(doc)
+        assert len(chunked.chunk_texts) >= 1
+        # Exactly one DOCUMENT node in the structural payload.
+        doc_nodes = [n for n in chunked.structural.nodes if n.type == NodeType.DOCUMENT]
+        assert len(doc_nodes) == 1
+        assert doc_nodes[0].name == doc.source_uri
+
+    async def test_task_decorator_is_registered(self) -> None:
+        # Identity check on the registered task name.
+        assert (
+            extract_chunks_and_structural_task.name == "extract-chunks-and-structural"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task ② — llm_extract_entities
+# ---------------------------------------------------------------------------
+
+
+class TestLlmExtractEntitiesTask:
+    async def test_no_chunks_returns_empty(self) -> None:
+        chunked = ChunkedDocument(
+            document_id="d1",
+            source_uri="u1",
+            source_type="huggingface",
+            chunk_texts=[],
+            chunk_ids=[],
+        )
+        raw = await _llm_extract_entities(chunked)
+        assert raw.extracted.nodes == []
+        assert raw.extracted.edges == []
+
+    async def test_calls_llm_per_chunk(self, mocker) -> None:
+        from tree.models.fake_model import FakeLLM
+
+        fake = FakeLLM(
+            responses=[
+                {
+                    "nodes": [{"name": "alice", "type": "person", "properties": {}}],
+                    "edges": [],
+                }
+            ]
+            * 3
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_llm",
+            return_value=fake,
+        )
+        chunked = ChunkedDocument(
+            document_id="d1",
+            source_uri="u1",
+            source_type="huggingface",
+            chunk_texts=["c1", "c2", "c3"],
+            chunk_ids=["cid-0", "cid-1", "cid-2"],
+        )
+
+        raw = await _llm_extract_entities(chunked)
+
+        assert fake.call_count == 3
+        assert len(raw.extracted.nodes) == 3
+
+    async def test_task_decorator_is_registered(self) -> None:
+        assert llm_extract_entities_task.name == "llm-extract-entities"
+
+
+# ---------------------------------------------------------------------------
+# Task ③ — resolve_entities
+# ---------------------------------------------------------------------------
+
+
+class TestResolveEntitiesTask:
+    async def test_empty_input_returns_empty_output(self, mocker) -> None:
+        resolver = MagicMock(spec=CompositeResolver)
+        database = _make_database_with_candidates({})
+        out = await _resolve_entities([], database, resolver)
+        assert out.entities == []
+        assert out.resolved_by_key == {}
+
+    async def test_candidate_fetch_uses_set_union_and_records_name_to_owner_id(
+        self, mocker
+    ) -> None:
+        """Carry-forward: candidate names include both ``name`` and non-null
+        ``canonical_name``, and ``name_to_owner_id`` maps each variant back to
+        its owning ``_id``."""
+
+        resolver = MagicMock(spec=CompositeResolver)
+        # Have the resolver return ``canonical_name="John Smith"`` for the
+        # incoming entity — that's the "John Smith mention" scenario.
+        resolver.resolve_with_types = AsyncMock(
+            return_value=[
+                ResolvedEntity(
+                    original_name="john smith",
+                    canonical_name="John Smith",
+                    entity_type=NodeType.PERSON,
+                    confidence=1.0,
+                    match_type="exact",
+                )
+            ]
+        )
+
+        database = _make_database_with_candidates(
+            {
+                NodeType.PERSON: [
+                    {
+                        "_id": "person:jean smith",
+                        "name": "Jean Smith",
+                        "canonical_name": "John Smith",
+                        "aliases": [],
+                    }
+                ]
+            }
+        )
+
+        raw = RawExtraction(
+            document_id="d1",
+            source_uri="u1",
+            chunked=ChunkedDocument(
+                document_id="d1", source_uri="u1", source_type="huggingface"
+            ),
+            extracted=ExtractionResult(
+                nodes=[
+                    ExtractedNode(
+                        name="john smith", type=NodeType.PERSON, properties={}
+                    )
+                ]
+            ),
+        )
+
+        out = await _resolve_entities([raw], database, resolver)
+
+        # Resolver was called with a candidate list whose name-set INCLUDES
+        # both "Jean Smith" and "John Smith".
+        call = resolver.resolve_with_types.await_args
+        existing = call.kwargs["existing_entities"]
+        person_candidates = existing[NodeType.PERSON]
+        assert "Jean Smith" in person_candidates
+        assert "John Smith" in person_candidates
+
+        # The reverse map ties both surface forms back to the existing _id.
+        assert out.name_to_owner_id["person|Jean Smith"] == "person:jean smith"
+        assert out.name_to_owner_id["person|John Smith"] == "person:jean smith"
+
+    async def test_candidate_cap_emits_warning(self, caplog, monkeypatch) -> None:
+        """When the candidate fetch returns >= cap docs, a WARNING is logged.
+
+        The cap is applied MongoDB-side via ``.limit(...)``; the mock cursor
+        returns whatever we hand it, so we seed exactly ``cap`` rows and
+        assert the log line and the recorded count.
+        """
+
+        monkeypatch.setenv("TREE_EXTRACTION__RESOLUTION__MAX_CANDIDATES_PER_TYPE", "5")
+
+        resolver = MagicMock(spec=CompositeResolver)
+        resolver.resolve_with_types = AsyncMock(return_value=[])
+
+        candidates = [
+            {
+                "_id": f"person:p{i}",
+                "name": f"Person {i}",
+                "canonical_name": None,
+                "aliases": [],
+            }
+            for i in range(5)
+        ]
+        database = _make_database_with_candidates({NodeType.PERSON: candidates})
+
+        raw = RawExtraction(
+            document_id="d1",
+            source_uri="u1",
+            chunked=ChunkedDocument(
+                document_id="d1", source_uri="u1", source_type="huggingface"
+            ),
+            extracted=ExtractionResult(
+                nodes=[ExtractedNode(name="probe", type=NodeType.PERSON, properties={})]
+            ),
+        )
+
+        import logging
+
+        caplog.set_level(logging.WARNING)
+        out = await _resolve_entities([raw], database, resolver)
+        assert out.candidates_seen_by_type["person"] == 5
+        assert any(
+            "PERSON candidate fetch hit cap (5)" in rec.message
+            for rec in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task ④ — embed_entity
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedEntityTask:
+    async def test_returns_name_and_vector(self, mocker) -> None:
+        model = MagicMock()
+        model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_embedding_model", return_value=model
+        )
+
+        name, vector = await _embed_entity("alice")
+        assert name == "alice"
+        assert vector == [0.1, 0.2, 0.3]
+
+    async def test_task_decorator_uses_inputs_cache(self) -> None:
+        # Cache policy is registered on the decorated task; identity check on
+        # the registered name. The cache itself is exercised in the integration
+        # suite (Prefect runtime required).
+        assert embed_entities_task.name == "embed-entity"
+
+
+# ---------------------------------------------------------------------------
+# Task ⑤ — dedupe_entities
+# ---------------------------------------------------------------------------
+
+
+class TestDedupeEntitiesTask:
+    async def test_disabled_config_short_circuits(self, mocker) -> None:
+        cfg = DeduplicationConfig(enabled=False)
+        resolved = ResolutionOutput(
+            entities=[("alice", NodeType.PERSON)],
+            resolved_by_key={
+                "d1|person|alice": ResolvedEntity(
+                    original_name="alice",
+                    canonical_name="alice",
+                    entity_type=NodeType.PERSON,
+                    confidence=1.0,
+                    match_type="exact",
+                )
+            },
+        )
+        embeddings = EmbeddingMap(vectors={"alice": [0.1] * 8})
+
+        database = MagicMock()
+        dedupe_spy = mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(),
+        )
+
+        out = await _dedupe_entities(resolved, embeddings, database, cfg)
+        assert out.decisions["d1|person|alice"].action == "none"
+        dedupe_spy.assert_not_called()
+
+    async def test_self_match_is_dropped(self, mocker) -> None:
+        cfg = DeduplicationConfig()
+        # ``dedupe_entity`` returns a "merged" with the same id as prospective.
+        mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(
+                return_value=DeduplicationResult(
+                    action="merged",
+                    matched_node_id="person:alice",
+                    matched_node_name="alice",
+                    similarity_score=1.0,
+                    match_type="embedding",
+                )
+            ),
+        )
+
+        resolved = ResolutionOutput(
+            entities=[("alice", NodeType.PERSON)],
+            resolved_by_key={
+                "d1|person|alice": ResolvedEntity(
+                    original_name="alice",
+                    canonical_name="alice",
+                    entity_type=NodeType.PERSON,
+                    confidence=1.0,
+                    match_type="exact",
+                )
+            },
+        )
+        embeddings = EmbeddingMap(vectors={"alice": [0.1] * 8})
+        out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg)
+        assert out.decisions["d1|person|alice"].action == "none"
+
+
+# ---------------------------------------------------------------------------
+# Config alignment validator
+# ---------------------------------------------------------------------------
+
+
+class TestConfigAlignmentValidator:
+    """The cross-key validator must reject a misaligned config at flow entry."""
+
+    async def test_type_strict_disagreement_raises_value_error(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("TREE_EXTRACTION__RESOLUTION__TYPE_STRICT", "true")
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP__MATCH_SAME_TYPE_ONLY", "false")
+
+        with pytest.raises(ValueError, match="type_strict.*match_same_type_only"):
+            # Drive directly through the helper that the flow calls at entry.
+            await run_extraction_for_documents(
+                ["507f1f77bcf86cd799439011"],
+                client=MagicMock(),
+                database_name="test",
+            )
+
+    async def test_dedup_threshold_inversion_raises_value_error(
+        self, monkeypatch
+    ) -> None:
+        # auto_merge_threshold MUST be strictly greater than flag_threshold.
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD", "0.5")
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP__FLAG_THRESHOLD", "0.8")
+
+        with pytest.raises(ValueError, match="auto_merge_threshold.*flag_threshold"):
+            await run_extraction_for_documents(
+                ["507f1f77bcf86cd799439011"],
+                client=MagicMock(),
+                database_name="test",
+            )
+
+
+# ---------------------------------------------------------------------------
+# _CachedSingleEmbedding — the inline cache wrapper used by task ⑥
+# ---------------------------------------------------------------------------
+
+
+class TestCachedSingleEmbedding:
+    async def test_returns_seeded_vector_regardless_of_input(self) -> None:
+        wrapper = _CachedSingleEmbedding([0.1, 0.2])
+        # Two different inputs both return the same vector — used in apply_writes
+        # to keep ``add_entity`` from re-paying for an embedding the flow already
+        # has.
+        out = await wrapper.embed(["any name"])
+        assert out == [[0.1, 0.2]]
+        out2 = await wrapper.embed(["another name"])
+        assert out2 == [[0.1, 0.2]]
+
+
+# ---------------------------------------------------------------------------
+# Flow registration
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineExports:
+    """AC: ``pipeline.py`` exports exactly one flow and six tasks."""
+
+    def test_six_tasks_exported(self) -> None:
+        from tree.memory.extraction import pipeline
+
+        expected = {
+            "extract_chunks_and_structural_task",
+            "llm_extract_entities_task",
+            "resolve_entities_task",
+            "embed_entities_task",
+            "dedupe_entities_task",
+            "apply_writes_task",
+        }
+        for name in expected:
+            assert hasattr(pipeline, name), f"Missing task export: {name}"
+
+    def test_flow_exported(self) -> None:
+        from tree.memory.extraction import pipeline
+
+        assert hasattr(pipeline, "memory_extraction")
+        # External name unchanged (referenced by the orchestrator deployment).
+        assert memory_extraction.name == "memory-extraction-etl"

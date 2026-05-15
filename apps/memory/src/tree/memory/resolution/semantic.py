@@ -1,0 +1,145 @@
+"""Semantic resolver backed by an :class:`~tree.models.base.BaseEmbeddingModel`.
+
+Computes cosine similarity between the input name's embedding and each
+candidate's embedding; returns the highest-similarity candidate above
+``threshold``. Embeddings are cached per-instance in a bounded LRU keyed on
+the normalized name string, so repeated lookups for hot names stay cheap
+without unbounded memory growth across long-running pipelines.
+
+See ``RESOLUTION_MODULE.md`` §6 and ``RESOLUTION_DEDUP_ALGORITHM.md`` §3 for
+the chain placement (alias → exact → fuzzy → semantic).
+"""
+
+from __future__ import annotations
+
+import math
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping
+
+from tree.entities.knowledge_graph import NodeType
+from tree.memory.resolution.base import AbstractResolver
+from tree.memory.resolution.types import ResolvedEntity
+from tree.models.base import BaseEmbeddingModel
+
+
+class SemanticMatchResolver(AbstractResolver):
+    """Resolve via cosine similarity over learned embeddings.
+
+    The cache is per-instance and bounded by ``cache_max_size``; eviction is
+    least-recently-used (oldest-by-access). The cache key is the normalized
+    form of the name, so ``"Alice"``, ``"  alice "``, and ``"ALICE"`` all
+    share one slot.
+    """
+
+    def __init__(
+        self,
+        embedding_model: BaseEmbeddingModel,
+        *,
+        threshold: float = 0.80,
+        cache_max_size: int = 10_000,
+    ) -> None:
+        self._embedding_model = embedding_model
+        self._threshold = threshold
+        self._cache_max_size = cache_max_size
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+
+    def clear_cache(self) -> None:
+        """Empty the embedding cache. Subsequent lookups recompute."""
+
+        self._cache.clear()
+
+    async def _embed_cached(self, name: str) -> list[float]:
+        """Return the embedding for ``name``, using/updating the LRU cache."""
+
+        key = self._normalize(name)
+        if key in self._cache:
+            # LRU hit: move to most-recently-used end.
+            self._cache.move_to_end(key)
+            return self._cache[key]
+
+        vectors = await self._embedding_model.embed([name])
+        embedding = vectors[0]
+        self._cache[key] = embedding
+        # Evict the least-recently-used entry if we are over budget.
+        while len(self._cache) > self._cache_max_size:
+            self._cache.popitem(last=False)
+        return embedding
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        """Return cosine similarity clamped to ``[0.0, 1.0]``.
+
+        Small negative values (~ -1e-9) are common with floating-point math
+        even when vectors are mathematically non-negative — clamping keeps
+        the resolver from returning sub-zero confidences.
+        """
+
+        dot = 0.0
+        norm_a = 0.0
+        norm_b = 0.0
+        for x, y in zip(a, b, strict=True):
+            dot += x * y
+            norm_a += x * x
+            norm_b += y * y
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        score = dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
+        # Defensive clamp: floating-point can produce -1e-9 or 1 + 1e-9.
+        if score < 0.0:
+            return 0.0
+        if score > 1.0:
+            return 1.0
+        return score
+
+    async def resolve(  # type: ignore[override]
+        self,
+        name: str,
+        entity_type: NodeType,
+        candidate_names: Iterable[str],
+        existing_aliases: Mapping[str, list[str]] | None = None,
+    ) -> ResolvedEntity:
+        candidates = list(candidate_names)
+        if not candidates:
+            return self._no_match(name, entity_type)
+
+        name_embedding = await self._embed_cached(name)
+
+        best_candidate: str | None = None
+        best_score = 0.0
+        for candidate in candidates:
+            candidate_embedding = await self._embed_cached(candidate)
+            score = self._cosine_similarity(name_embedding, candidate_embedding)
+            if score >= self._threshold and score > best_score:
+                best_score = score
+                best_candidate = candidate
+
+        if best_candidate is None:
+            return self._no_match(name, entity_type)
+
+        return ResolvedEntity(
+            original_name=name,
+            canonical_name=best_candidate,
+            entity_type=entity_type,
+            confidence=best_score,
+            match_type="semantic",
+        )
+
+    async def resolve_batch(  # type: ignore[override]
+        self,
+        entities: Iterable[tuple[str, NodeType]],
+        candidate_names: Iterable[str],
+        existing_aliases: Mapping[str, list[str]] | None = None,
+    ) -> list[ResolvedEntity]:
+        """Resolve each ``(name, type)`` sequentially.
+
+        Sequential rather than gather()'d so the per-instance LRU cache is
+        warmed deterministically — important for the cache-eviction tests.
+        """
+
+        candidates = list(candidate_names)
+        results: list[ResolvedEntity] = []
+        for name, entity_type in entities:
+            results.append(
+                await self.resolve(name, entity_type, candidates, existing_aliases)
+            )
+        return results

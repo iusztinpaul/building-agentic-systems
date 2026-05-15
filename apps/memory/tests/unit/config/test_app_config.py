@@ -100,7 +100,8 @@ class TestLoadAppConfig:
                     model: gemini-2.0-flash
                 extraction:
                   chunk_size: 256
-                  similarity_threshold: 0.9
+                  resolution:
+                    fuzzy_threshold: 0.9
             """)
         )
 
@@ -109,7 +110,7 @@ class TestLoadAppConfig:
         assert config.models.llm.model == "gemini-2.0-flash"
         assert config.models.llm.provider == "gemini"
         assert config.extraction.chunk_size == 256
-        assert config.extraction.similarity_threshold == 0.9
+        assert config.extraction.resolution.fuzzy_threshold == 0.9
         # Unset values keep defaults.
         assert config.extraction.chunk_overlap == 64
         assert config.models.embedding.dimensions == 768

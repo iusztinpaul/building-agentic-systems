@@ -32,9 +32,16 @@ from tree.data.web.web_unlocker import (
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.ingest import run_ingestion_pipeline
 from tree.mcp.server import mcp
+from tree.entities.knowledge_graph import NodeType
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
 from tree.memory.query.visualize import build_networkx_graph, render_html
+from tree.memory.review import (
+    MergeStrategy,
+    ReviewDecision,
+    find_pending_duplicates as _find_pending_duplicates,
+    review_duplicate as _review_duplicate,
+)
 from tree.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
@@ -525,3 +532,156 @@ async def ingest_conversation(
         embedding_model=lc["embedding_model"],
     )
     return json.dumps(summary)
+
+
+# ---------------------------------------------------------------------------
+# Human-review tools (flagged SAME_AS pairs)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_pending_duplicate(p: Any) -> dict[str, Any]:
+    """Convert a :class:`PendingDuplicate` to a JSON-friendly dict."""
+
+    return {
+        "source_node_id": p.source_node_id,
+        "target_node_id": p.target_node_id,
+        "source_name": p.source_name,
+        "target_name": p.target_name,
+        "entity_type": p.entity_type.value,
+        "similarity_score": p.similarity_score,
+        "match_type": p.match_type,
+        "flagged_at": p.flagged_at.isoformat(),
+        "edge_id": p.edge_id,
+    }
+
+
+def _serialize_review_result(r: Any) -> dict[str, Any]:
+    """Convert a :class:`ReviewResult` to a JSON-friendly dict."""
+
+    return {
+        "decision": r.decision.value,
+        "winner_node_id": r.winner_node_id,
+        "loser_node_id": r.loser_node_id,
+        "applied_strategy": (
+            r.applied_strategy.value if r.applied_strategy is not None else None
+        ),
+        "edges_transferred": r.edges_transferred,
+        "same_as_edge_id": r.same_as_edge_id,
+    }
+
+
+@mcp.tool(name="review_list_pending")
+async def review_list_pending(
+    ctx: Context,
+    entity_type: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List pending SAME_AS pairs awaiting human review.
+
+    Returned in descending order of similarity score so the highest-
+    confidence candidates surface first. The optional ``entity_type``
+    filter restricts results to pairs whose source node has that type
+    (e.g. ``"person"``).
+
+    Args:
+        entity_type: Optional NodeType value (e.g. "person", "task",
+            "episode", "preference"). ``None`` returns pairs of every
+            type.
+        limit: Maximum number of pairs to return (default 50).
+    """
+
+    try:
+        type_filter = NodeType(entity_type) if entity_type else None
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+
+    lc = ctx.lifespan_context
+    database = lc["client"][lc["database"]]
+    pending = await _find_pending_duplicates(
+        database, entity_type=type_filter, limit=limit
+    )
+    return json.dumps([_serialize_pending_duplicate(p) for p in pending], indent=2)
+
+
+@mcp.tool(name="review_confirm")
+async def review_confirm(
+    source_node_id: str,
+    target_node_id: str,
+    reviewed_by: str,
+    ctx: Context,
+    merge_strategy: str = "keep_primary",
+) -> str:
+    """Confirm a pending SAME_AS pair as a true duplicate.
+
+    Merges the loser into the winner using the same algorithm the
+    auto-merge surface would have used. Older ``created_at`` wins; ties
+    broken by higher ``confidence``; final tie broken by lexicographic
+    ``_id``. All non-SAME_AS edges incident to the loser are re-keyed to
+    the winner; the loser is tombstoned (excluded from future dedup
+    searches) but retained as an audit trail.
+
+    Args:
+        source_node_id: One endpoint of the SAME_AS edge.
+        target_node_id: The other endpoint.
+        reviewed_by: Reviewer identifier (email, agent handle, etc.) —
+            persisted on the audit edge.
+        merge_strategy: ``"keep_primary"`` (default),
+            ``"merge_properties"``, or ``"keep_aliases"``.
+    """
+
+    try:
+        strategy = MergeStrategy(merge_strategy)
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+
+    lc = ctx.lifespan_context
+    database = lc["client"][lc["database"]]
+    try:
+        result = await _review_duplicate(
+            database,
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            decision=ReviewDecision.CONFIRM,
+            reviewed_by=reviewed_by,
+            merge_strategy=strategy,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_state", "detail": str(exc)})
+
+    return json.dumps(_serialize_review_result(result), indent=2)
+
+
+@mcp.tool(name="review_reject")
+async def review_reject(
+    source_node_id: str,
+    target_node_id: str,
+    reviewed_by: str,
+    ctx: Context,
+) -> str:
+    """Reject a pending SAME_AS pair as a false positive.
+
+    Marks the audit edge ``status="rejected"`` without touching either
+    node. Future ``dedupe_entity`` runs filter out the rejected pair via
+    the reject-pair ``$lookup``, so the same pair is never re-flagged.
+
+    Args:
+        source_node_id: One endpoint of the SAME_AS edge.
+        target_node_id: The other endpoint.
+        reviewed_by: Reviewer identifier (email, agent handle, etc.).
+    """
+
+    lc = ctx.lifespan_context
+    database = lc["client"][lc["database"]]
+    try:
+        result = await _review_duplicate(
+            database,
+            source_node_id=source_node_id,
+            target_node_id=target_node_id,
+            decision=ReviewDecision.REJECT,
+            reviewed_by=reviewed_by,
+            merge_strategy=MergeStrategy.KEEP_PRIMARY,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_state", "detail": str(exc)})
+
+    return json.dumps(_serialize_review_result(result), indent=2)

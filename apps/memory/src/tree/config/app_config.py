@@ -40,11 +40,59 @@ class ModelsConfig(BaseModel):
     embedding: EmbeddingConfig = EmbeddingConfig()
 
 
+class ResolutionConfig(BaseModel):
+    """Resolver chain (Alias → Exact → Fuzzy → Semantic) tuning."""
+
+    fuzzy_threshold: float = 0.85
+    semantic_threshold: float = 0.80
+    type_strict: bool = True
+    max_candidates_per_type: int = 1000
+    embedding_cache_max_size: int = 10_000
+
+
+class DedupConfig(BaseModel):
+    """Read-only dedup-decision tuning. Mirrors
+    :class:`tree.memory.extraction.dedup.DeduplicationConfig` field-for-field
+    so the YAML can drive both."""
+
+    enabled: bool = True
+    auto_merge_threshold: float = 0.95
+    flag_threshold: float = 0.85
+    use_fuzzy_matching: bool = True
+    fuzzy_threshold: float = 0.90
+    max_candidates: int = 10
+    match_same_type_only: bool = True
+    merge_strategy: Literal["keep_primary", "merge_properties", "keep_aliases"] = (
+        "keep_primary"
+    )
+
+
 class ExtractionConfig(BaseModel):
     chunk_size: int = 512
     chunk_overlap: int = 64
     llm_concurrency: int = 5
-    similarity_threshold: float = 0.85
+    resolution: ResolutionConfig = ResolutionConfig()
+    dedup: DedupConfig = DedupConfig()
+
+    @model_validator(mode="after")
+    def _check_type_alignment(self) -> "ExtractionConfig":
+        """Cross-key invariant: resolver and dedup must agree on type-strictness.
+
+        Misalignment would let resolution match by surface name across types
+        while dedup keeps the vector search within a single type (or vice
+        versa). The flow refuses to start in that state.
+        """
+
+        if self.resolution.type_strict != self.dedup.match_same_type_only:
+            raise ValueError(
+                "Misconfigured extraction: "
+                "extraction.resolution.type_strict and "
+                "extraction.dedup.match_same_type_only must agree "
+                "(both True or both False). Found "
+                f"resolution.type_strict={self.resolution.type_strict}, "
+                f"dedup.match_same_type_only={self.dedup.match_same_type_only}."
+            )
+        return self
 
 
 class QueryConfig(BaseModel):
@@ -271,22 +319,81 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = MCPConfig()
 
 
+_BOOL_TRUE = {"1", "true", "yes", "on"}
+_BOOL_FALSE = {"0", "false", "no", "off"}
+
+
+def _coerce_env_value(raw: str) -> Any:
+    """Convert an env-var string to bool/int/float when it parses cleanly."""
+
+    lowered = raw.strip().lower()
+    if lowered in _BOOL_TRUE:
+        return True
+    if lowered in _BOOL_FALSE:
+        return False
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """Layer ``TREE_<SECTION>__<KEY>...`` env vars on top of the YAML dict.
+
+    Only overrides paths under ``extraction.resolution.*`` and
+    ``extraction.dedup.*``. Other config sections stay YAML-driven.
+
+    Reads ``TREE_EXTRACTION__RESOLUTION__TYPE_STRICT`` style keys, splitting
+    on ``__`` and lower-casing each segment. Missing intermediate dicts are
+    created on demand.
+    """
+
+    prefix = "TREE_"
+    for env_key, env_value in os.environ.items():
+        if not env_key.startswith(prefix):
+            continue
+        path = [seg.lower() for seg in env_key[len(prefix) :].split("__") if seg]
+        if not path:
+            continue
+        # Restrict to the extraction.* subtree we care about.
+        if path[0] != "extraction" or len(path) < 2:
+            continue
+        cursor: dict[str, Any] = raw
+        for segment in path[:-1]:
+            existing = cursor.get(segment)
+            if not isinstance(existing, dict):
+                existing = {}
+                cursor[segment] = existing
+            cursor = existing
+        cursor[path[-1]] = _coerce_env_value(env_value)
+    return raw
+
+
 def load_app_config(path: str | Path | None = None) -> AppConfig:
     """Load application config from a YAML file.
 
     Args:
         path: Explicit path to a YAML file. Falls back to APP_CONFIG_PATH
               env var, then configs/default.yaml.
+
+    ``TREE_EXTRACTION__RESOLUTION__*`` and ``TREE_EXTRACTION__DEDUP__*`` env
+    vars override the corresponding YAML keys; this lets operators flip a
+    single dedup/resolution knob without editing the YAML and ensures the
+    cross-key validator on :class:`ExtractionConfig` sees the actual runtime
+    values.
     """
 
     config_path = Path(path or os.environ.get("APP_CONFIG_PATH", _DEFAULT_CONFIG_PATH))
 
-    if not config_path.exists():
-        return AppConfig()
+    if config_path.exists():
+        with open(config_path) as f:
+            raw = yaml.safe_load(f) or {}
+    else:
+        raw = {}
 
-    with open(config_path) as f:
-        raw = yaml.safe_load(f) or {}
-
+    raw = _apply_env_overrides(raw)
     return AppConfig.model_validate(raw)
 
 

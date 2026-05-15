@@ -311,3 +311,26 @@ mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 ```
 
 Collections to inspect: `documents` (raw ingest) and `knowledge_graph` (nodes + edges).
+
+## Resolution & dedup smoke
+
+End-to-end smoke for the resolution + dedup pipeline, including the three
+merge strategies (`keep_primary`, `merge_properties`, `keep_aliases`),
+the human-review CLI (`scripts/review_duplicates.py`), and the
+`_id`-vs-`canonical_name` soft-join contract.
+
+```bash
+make memory-smoke-resolution-dedup STRATEGY=keep_primary
+make memory-smoke-resolution-dedup STRATEGY=merge_properties
+make memory-smoke-resolution-dedup STRATEGY=keep_aliases
+```
+
+The Makefile target sets `TREE_EXTRACTION__DEDUP__MERGE_STRATEGY=$(STRATEGY)`
+before invoking `scripts/smoke_resolution_dedup.py run --strategy …`. The
+smoke wipes `knowledge_graph`, seeds two test `documents`, runs extraction
++ indexing in-process (so the env-var override is deterministically
+honored), drives the review CLI, asserts the mongosh soft-join contract
+returns ≥1 row, and verifies the strategy-specific shape on the
+post-confirm winner. See the script's module docstring for the full
+procedure.
+
