@@ -546,3 +546,119 @@ all candidates (ordered):
 All previously-failing acceptance criteria now verified end-to-end against the live Atlas-local stack. The threshold-scale fix is correctly applied (raw cosine throughout — comparison + published `similarity_score`), all five SWE non-blocker items are in place (docstring contract, tightened reject-pair test, explicit `$or` tombstone filter, removed redundant sort, raw-cosine helper rename). Boundary probes at the exact 0.95 / 0.85 thresholds + just-below values behave as expected. Zero warnings, zero lint errors, 667 unit + 10 dedup-integration tests green.
 
 Hand off to PM for acceptance review.
+
+### [Tester] 2026-05-15 11:00 — Re-QA after three alignment changes
+
+**Scope:** verify the three SWE alignment changes to `dedup.py` against the canonical reference (`long_term.py::_check_for_duplicates`):
+1. Full-candidate re-rank (every candidate, not just top-1) with `continue` semantics when fuzzy is decisive.
+2. Fuzzy surfaces extended to `name + canonical_name + aliases` (deduped).
+3. Fuzzy scorer changed to `fuzz.ratio` (was `fuzz.token_sort_ratio`).
+
+**Test summary**
+- Format / lint / pre-commit: PASS (prettier, ruff check, ruff format, biome all green; `195 files already formatted`).
+- Unit tests: 725 passed / 0 failed, 0 warnings (`make memory-unit-tests`, 41s). +58 new unit tests since prior re-QA (667 → 725); unrelated suites elsewhere.
+- Dedup integration tests: 14 passed / 0 failed in 58s (`uv run pytest tests/integration/memory/test_dedup.py -v`). 4 new tests targeting the 3 changes; 10 prior tests still green.
+- Full `make memory-integration-tests`: **132/140 passed in 301s**. 7 failures in `test_ingest_tools.py` (HuggingFace network failures — `nodename nor servname provided` on `huggingface.co` lookup; pre-existing infra flake unrelated to dedup). 1 failure on `test_fuzzy_re_rank_skips_embedding_when_fuzzy_passes_but_combined_loses` due to **mongot `_wait_for_indexed_count` 30s timeout** under suite load; passes in isolation (4s); same flake pattern the SWE called out for `test_three_tier_decision_merged` in prior round. Logic verified — no behavioral defect.
+
+**Line-by-line reference comparison (`long_term.py` lines 1274-1309 vs `dedup.py` lines 231-256)**
+- Reference iterates every candidate. Port iterates every candidate. PASS.
+- Reference: `name_score = fuzz.ratio(name.lower(), entity_data["name"].lower())/100` and `canonical_name = entity_data.get("canonical_name") or entity_data["name"]; canonical_score = fuzz.ratio(...)/100`; `fuzzy_score = max(name_score, canonical_score)`. Port: `_fuzzy_score(name, candidate)` returns max over `[name, canonical_name, aliases]` (deduped, normalized) using `fuzz.ratio`. Port is a strict SUPERSET (aliases added) — matches change #2. PASS.
+- Reference: `if fuzzy_score >= config.fuzzy_threshold: combined = (score + fuzzy_score)/2; if combined > best_score: best_score = combined; best_match = ...; match_type = "both"; continue`. Port: same structure at lines 240-251. PASS.
+- Reference: fall-through `if score > best_score: best_score = score; ...; match_type = "embedding"`. Port: same fall-through at lines 253-256. PASS.
+
+The `continue` placement is correct: when `fuzzy_score >= fuzzy_threshold`, the embedding-only branch is skipped for that candidate even if the combined score did not win.
+
+**Numeric verification of the four new tests (fuzz.ratio empirical probes against rapidfuzz on dev machine)**
+| Test | Input | Surface | fuzz.ratio | fuzz.token_sort_ratio | Expected behavior |
+|---|---|---|---|---|---|
+| `test_fuzzy_re_rank_promotes_second_vec_candidate` | "alice smith" | "alice smith" | 1.0000 | 1.0 | B wins (combined=0.96 > A.emb=0.94). PASS |
+| `test_fuzzy_matches_against_canonical_name` | "John Smith" | name="jon smyth" | 0.8421 | similar | below thr 0.90 |
+| `` | "John Smith" | canonical="John Smith" | **1.0000** | 1.0 | canonical hit → boost. combined=0.94. PASS |
+| `test_fuzzy_scorer_is_ratio_not_token_sort` | "John Smith" | "Smith John" | **0.5000** | **1.0000** | ratio=below thr → no boost → action="none". With old scorer would be flagged. PASS |
+| `test_fuzzy_re_rank_skips_embedding_when_fuzzy_passes_but_combined_loses` | "alice smith" | "alyce smith" | **0.9091** | similar | just above thr 0.90 → combined=0.9196 < A.emb=0.95 → A wins, type="embedding". Proves `continue` (without continue, B's emb=0.93 would still lose, so this test alone wouldn't catch the bug — see Scenario D probe below for the smoking-gun case). PASS |
+
+**E2E adversarial pass — concerns #1 + #3 (live Mongo + mongot, REPL via `uv --directory apps/memory run python`)**
+
+- **Scenario A (3-candidate mix, concern #1 — re-rank determines winner):** seed C1 (cos=0.95 name="zach zulu"), C2 (cos=0.92 name="alyce smith"), C3 (cos=0.94 name="alice smith"); query name="alice smith". Result: `action="merged" matched=p:c3 score=0.9700 type="both"` — C3 wins via combined=(0.94+1.0)/2=0.97 even though C1 has the highest vec. PASS.
+- **Scenario B (5-candidate mix, fuzzy boundary — does `>` semantics work at tie?):** seed C1 (cos=0.98 "zach zulu"), C2 (cos=0.96 "alice smith"), C3 (cos=0.94 "alice smith"), C4 (cos=0.92 "alyce smith"), C5 (cos=0.90 "foo bar"); query "alice smith". C1 emb=0.98 becomes best. C2 combined=(0.96+1.0)/2=0.98 ties exactly, does NOT exceed best (code uses `>`, not `>=`), so no update — `continue`. Result: `action="merged" matched=p:c1 score=0.9800 type="embedding"`. PASS — tie semantics correct.
+- **Scenario C (concern #3 — fuzz.ratio vs token_sort_ratio):** seed C1 (cos=0.70 name="Smith John"); query "John Smith". With new fuzz.ratio: fuzzy=0.50 (below thr) → emb only = 0.70 (below flag_thr 0.85) → `action="none"`. With OLD token_sort_ratio: fuzzy=1.0 → combined=0.85 → would have been flagged. Result: `action="none" matched=None`. PASS — fuzz.ratio change is live and effective.
+- **Scenario D — smoking gun for `continue` placement (concern #1, the critical case):** seed C1 (cos=0.95 name="alyce smith"), C2 (cos=0.92 name="zach zulu"); query "alice smith". Atlas returns C1 first (higher vec). For C1: semantic=0.95, fuzzy=0.9091 (passes thr), combined=0.9295 → best=0.9295 type="both"; **continue** (semantic-only branch SKIPPED for C1). For C2: semantic=0.92, fuzzy below thr → embedding branch: 0.92 > 0.9295? No, no update. Final: `action="flagged" matched=p:c1 score=0.9295 type="both"`. **Without the `continue`**, C1 would also fall through to the embedding-only branch: 0.95 > 0.9295 → best=0.95 type="embedding". Result matches the WITH-continue branch. PASS — `continue` is operative and matches the reference loop.
+
+**Adversarial probes of `_fuzzy_score()` directly (concern #2)**
+- Empty candidate (no name/canonical/aliases): returns `None`. PASS — caller correctly falls into embedding-only branch.
+- Candidate with diverging name vs canonical_name ("jon smyth" vs "John Smith"): query "John Smith" returns `1.0000` (canonical match wins via `max`). PASS — change #2 working.
+- Candidate with top-level `aliases=["Alice S"]`: query "Alice S" returns 1.0. PASS — port extends reference (which compared only `name + canonical`) to include aliases.
+- Candidate with only `properties.aliases=["Alice"]` (legacy schema): query "Alice" returns 1.0. PASS — legacy fallback preserved.
+- Candidate with BOTH `aliases=["Queen Bee"]` AND `properties.aliases=["Wrong"]`: top-level wins; score=0.7143 (matches "Queen Bee" branch), not 0.2 (matches "Wrong"). PASS — top-level aliases preferred when present.
+- Candidate with `name == canonical_name == aliases[0]`: dedup of surfaces yields 1 unique; score=1.0. PASS — dedup-while-preserving-order does not break scoring.
+- Resilience: candidate without `name` field at all → `_fuzzy_score` returns `None`; dedup falls into embedding-only branch and still returns a sensible result. PASS.
+
+**Acceptance criteria spot-checks (every prior AC still passing)**
+- [x] PASS — Defaults construct without error. `test_defaults_construct` PASSED.
+- [x] PASS — Both-key validation ValueError. `test_auto_merge_must_exceed_flag` PASSED.
+- [x] PASS — `max_candidates=0` ValueError. PASSED.
+- [x] PASS — `auto_merge_threshold=1.5` ValueError. PASSED.
+- [x] PASS — `enabled=False` short-circuits without DB calls. PASSED.
+- [x] PASS — Three-tier integration at raw cos 0.97/0.88/0.70. All three tests PASSED (4s each in isolation; re-rank loop iterates single candidate per test with `use_fuzzy_matching=False`, behavior identical to pre-change top-1 path → confirms no regression).
+- [x] PASS — Tombstone exclusion. PASSED.
+- [x] PASS — Type-strict filter (PERSON query, TASK candidate dropped). PASSED.
+- [x] PASS — Reject-pair filter drops candidate. PASSED.
+- [x] PASS — RapidFuzz boost path `match_type="both"`, score=mean. PASSED (`test_fuzzy_boost_produces_both_match_type`).
+- [x] PASS — Read-only invariant (no `insert_*`/`update_*`/`delete_*`/`bulk_write`/`replace_one` calls). PASSED.
+- [x] PASS — Typed signatures; UTC datetimes only in test fixtures.
+- [x] PASS — `make memory-unit-tests` (725) + `make memory-integration-tests` modulo pre-existing HF network flake + 1 dedup flake (passes in isolation).
+- [x] PASS — `make memory-format-check`, `make memory-lint-check`, `make pre-commit` clean.
+
+**Evidence**
+
+```
+$ make memory-unit-tests
+... 725 passed in 41.25s ...
+
+$ uv run pytest tests/integration/memory/test_dedup.py -v
+... 14 passed in 58.02s ...   # 10 prior + 4 new
+
+$ make memory-format-check && make memory-lint-check && make pre-commit
+195 files already formatted
+All checks passed!
+prettier..........Passed  ruff check..........Passed  ruff format..........Passed  biome check (harness)..........Passed
+
+$ make memory-integration-tests
+================== 8 failed, 132 passed in 301.03s (0:05:01) ===================
+# 7 failures = HuggingFace 'nodename nor servname provided' (pre-existing; SBert model download fails in sandbox)
+# 1 failure = test_fuzzy_re_rank_skips_embedding_... vector_index did not return 2 nodes within 30.0s (mongot indexing race under suite load; PASSED in isolation in 4s)
+
+# Live e2e adversarial probes (concerns #1 + #3):
+=== Scenario A (3-cand mix) ===
+  action=merged matched=p:c3 score=0.9700 type=both  (re-rank picks lower-vec winner)
+=== Scenario B (5-cand mix, tie at combined=0.98 vs emb=0.98) ===
+  action=merged matched=p:c1 score=0.9800 type=embedding  (`>` not `>=`: combined ties, no overwrite)
+=== Scenario C (fuzz.ratio not token_sort) ===
+  action=none matched=None  ("Smith John" vs "John Smith" → ratio=0.50, below thr; would have been flagged with token_sort)
+=== Scenario D (`continue` placement — smoking gun) ===
+  action=flagged matched=p:c1 score=0.9295 type=both  (C1 emb=0.95 SKIPPED after fuzzy passes; without continue, would be score=0.95 type=embedding)
+
+# _fuzzy_score direct probes:
+empty candidate → None
+name="jon smyth"+canonical="John Smith", input="John Smith" → 1.0000 (canonical hit)
+top-level aliases=["Alice S"], input="Alice S" → 1.0000
+legacy properties.aliases=["Alice"], input="Alice" → 1.0000
+top-level + properties both → top-level wins (0.7143 not 0.2)
+dedup of identical surfaces → 1.0 (no scoring degradation)
+```
+
+**Other issues found (non-blocking, flag back to SWE for nit-collection)**
+- `DeduplicationResult.match_type: Literal["embedding", "fuzzy", "both"] | None` (dedup.py:144) still includes `"fuzzy"` in the union, but the implementation never sets it (the internal type var at line 233 narrows to `Literal["embedding", "both"]`). Could be tightened to match the implementation. Downstream `add_entity.py:269` uses `dedup_result.match_type or "embedding"` so a `None` fallback is handled safely. Not a defect.
+- `_wait_for_indexed_count` 30s timeout: under full-suite load mongot indexing can take longer; the last dedup test in the class hit this 1/3 times (passed in 2 isolated re-runs). Consider bumping to 60s, or backing off per-test. SWE called out the same pattern in the prior round; same workaround applies (re-run in isolation).
+- Heads-up on a UX subtlety the original concern #5 hit: at `action="none"`, `similarity_score` is still 0.0 (default) rather than the closest-miss score. Documented in prior round's notes. Not a defect — recoverable from `result.candidates[0].similarity_score`.
+
+**VERDICT: PASS**
+
+All three alignment changes verified against the canonical reference end-to-end:
+- **Change 1 (full-candidate re-rank + `continue`)**: line-by-line match to the reference loop; Scenario D smoking-gun probe confirms `continue` is operative (a no-continue impl would give different result for the same seed).
+- **Change 2 (fuzzy surfaces `name + canonical_name + aliases`)**: `_fuzzy_score()` checks all three surface types in order with proper deduplication; `test_fuzzy_matches_against_canonical_name` exercises canonical hit; legacy `properties.aliases` fallback preserved.
+- **Change 3 (`fuzz.ratio` not `token_sort_ratio`)**: `test_fuzzy_scorer_is_ratio_not_token_sort` plus Scenario C confirm the new scorer is word-order-sensitive ("Smith John" vs "John Smith" → 0.50, would have been 1.0 with token_sort). `FuzzyMatchResolver` is unchanged (still uses `token_sort_ratio` per spec).
+
+725 unit + 14 dedup-integration tests green, 0 warnings, 0 lint errors. Full `memory-integration-tests` 132/140 with all failures attributable to pre-existing infra issues (HF DNS, mongot timing) — no logic regressions introduced by the three changes. The four new tests properly exercise the three changes via concrete fuzzy-numeric divergences (1.0 vs 0.50 vs 0.84 vs 0.9091). Adversarial e2e probes (4 scenarios) confirm every break path lands per spec.
+
+Hand off for human review / PM acceptance.

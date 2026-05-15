@@ -2,12 +2,21 @@
 
 This module decides whether a prospective entity is a duplicate of an
 existing node in the knowledge graph. It runs an Atlas ``$vectorSearch``
-against the ``knowledge_graph`` collection and returns a tiered decision:
+against the ``knowledge_graph`` collection, re-ranks every returned
+candidate using an optional RapidFuzz boost against the candidate's
+``name``, ``canonical_name``, and ``aliases``, and returns a tiered
+decision based on the best-scoring candidate:
 
-* ``action="merged"`` — top candidate's similarity ≥ ``auto_merge_threshold``.
-* ``action="flagged"`` — top candidate's similarity in
+* ``action="merged"`` — best candidate's score ≥ ``auto_merge_threshold``.
+* ``action="flagged"`` — best candidate's score in
   ``[flag_threshold, auto_merge_threshold)``.
-* ``action="none"``  — no candidate or top candidate below ``flag_threshold``.
+* ``action="none"``  — no candidate or best candidate below ``flag_threshold``.
+
+The re-rank semantics mirror ``_check_for_duplicates`` in the reference
+``long_term.py``: a lower-vec hit with a strong fuzzy match can outrank a
+higher-vec hit whose fuzzy score is below ``fuzzy_threshold``. When fuzzy
+passes the threshold for a candidate the embedding-only branch is skipped
+for that candidate (the reference's ``continue``).
 
 The function is **strictly read-only**. SAME_AS edges, tombstones, and any
 write decisions live in ``add_entity`` (#011) and ``review_duplicate`` (#014).
@@ -155,8 +164,9 @@ async def dedupe_entity(
 
     The function is read-only: it never inserts, updates, or deletes
     documents. It runs an Atlas ``$vectorSearch`` against the
-    ``knowledge_graph`` collection, applies optional RapidFuzz scoring on
-    the top hit, and returns the tiered decision.
+    ``knowledge_graph`` collection, re-ranks every returned candidate with
+    an optional RapidFuzz boost against ``name + canonical_name + aliases``,
+    and returns the tiered decision based on the best-scoring candidate.
 
     Args:
         database: An ``AsyncDatabase`` handle to the project's MongoDB
@@ -211,29 +221,47 @@ async def dedupe_entity(
     if not candidates:
         return DeduplicationResult(action="none")
 
-    # Atlas $vectorSearch already orders hits by score descending, so the
-    # first candidate is the top hit. Normalize Atlas' cosine score
-    # ``(1 + cos) / 2`` back to raw cosine so tier thresholds (and the
+    # Atlas $vectorSearch returns hits ordered by score descending, but we
+    # re-rank every candidate so a lower-vec hit with a strong fuzzy match
+    # can still win — matching the reference ``_check_for_duplicates`` loop
+    # in ``long_term.py``. Atlas' cosine score ``(1 + cos) / 2`` is converted
+    # back to raw cosine per candidate so the tier thresholds (and the
     # public ``similarity_score`` field) speak raw cosine — matching
     # ``resolution.semantic._cosine_similarity`` and the rest of the codebase.
-    top = candidates[0]
-    raw_atlas_score = float(top.get("similarity_score", 0.0))
-    semantic_score = 2.0 * raw_atlas_score - 1.0
-    semantic_score = max(-1.0, min(1.0, semantic_score))
-    match_type: Literal["embedding", "fuzzy", "both"] = "embedding"
-    score = semantic_score
+    best_match: dict[str, Any] | None = None
+    best_score: float = 0.0
+    best_match_type: Literal["embedding", "both"] = "embedding"
 
-    # Optional RapidFuzz boost.
-    if config.use_fuzzy_matching:
-        fuzzy_score = _fuzzy_score(name, top)
-        if fuzzy_score is not None and fuzzy_score >= config.fuzzy_threshold:
-            match_type = "both"
-            score = (semantic_score + fuzzy_score) / 2.0
+    for candidate in candidates:
+        raw_atlas_score = float(candidate.get("similarity_score", 0.0))
+        semantic_score = 2.0 * raw_atlas_score - 1.0
+        semantic_score = max(-1.0, min(1.0, semantic_score))
+
+        if config.use_fuzzy_matching:
+            fuzzy_score = _fuzzy_score(name, candidate)
+            if fuzzy_score is not None and fuzzy_score >= config.fuzzy_threshold:
+                combined = (semantic_score + fuzzy_score) / 2.0
+                if combined > best_score:
+                    best_score = combined
+                    best_match = candidate
+                    best_match_type = "both"
+                # Mirror the reference loop's ``continue``: when fuzzy
+                # passes the threshold, the semantic-only branch is skipped
+                # for this candidate even if the combined score did not win.
+                continue
+
+        if semantic_score > best_score:
+            best_score = semantic_score
+            best_match = candidate
+            best_match_type = "embedding"
+
+    if best_match is None:
+        return DeduplicationResult(action="none", candidates=candidates)
 
     # Tier decision.
-    if score >= config.auto_merge_threshold:
+    if best_score >= config.auto_merge_threshold:
         action: Literal["none", "merged", "flagged"] = "merged"
-    elif score >= config.flag_threshold:
+    elif best_score >= config.flag_threshold:
         action = "flagged"
     else:
         return DeduplicationResult(
@@ -243,10 +271,10 @@ async def dedupe_entity(
 
     return DeduplicationResult(
         action=action,
-        matched_node_id=str(top.get("_id")),
-        matched_node_name=top.get("name"),
-        similarity_score=score,
-        match_type=match_type,
+        matched_node_id=str(best_match.get("_id")),
+        matched_node_name=best_match.get("name"),
+        similarity_score=best_score,
+        match_type=best_match_type,
         candidates=candidates,
     )
 
@@ -363,10 +391,17 @@ def _build_pipeline(
 
 
 def _fuzzy_score(name: str, candidate: dict[str, Any]) -> float | None:
-    """Return the best RapidFuzz token-sort score (0..1) for ``candidate``.
+    """Return the best RapidFuzz ratio score (0..1) for ``candidate``.
+
+    Compares the normalized input against the candidate's ``name``,
+    ``canonical_name`` (when present), and ``aliases``. The scorer is
+    :func:`rapidfuzz.fuzz.ratio` — matching the reference
+    ``_check_for_duplicates`` implementation. The resolver chain still uses
+    ``token_sort_ratio`` for its own fuzzy matching; the choice of scorer is
+    deliberately scoped to dedup.
 
     Returns ``None`` when ``rapidfuzz`` is unavailable or the candidate has
-    neither a ``name`` nor any ``aliases`` to compare against.
+    no ``name``/``canonical_name``/``aliases`` to compare against.
     """
 
     try:
@@ -376,9 +411,14 @@ def _fuzzy_score(name: str, candidate: dict[str, Any]) -> float | None:
 
     normalized_input = _normalize(name)
     surfaces: list[str] = []
+
     candidate_name = candidate.get("name")
     if candidate_name:
         surfaces.append(str(candidate_name))
+
+    canonical_name = candidate.get("canonical_name")
+    if canonical_name:
+        surfaces.append(str(canonical_name))
 
     aliases = candidate.get("aliases") or []
     if not aliases:
@@ -387,12 +427,22 @@ def _fuzzy_score(name: str, candidate: dict[str, Any]) -> float | None:
         aliases = (candidate.get("properties") or {}).get("aliases", [])
     surfaces.extend(str(alias) for alias in aliases if alias)
 
-    if not surfaces:
+    # Deduplicate surfaces while preserving order: a node may have
+    # ``name == canonical_name`` (or repeated aliases) and we do not want to
+    # waste comparisons on identical strings.
+    seen: set[str] = set()
+    unique_surfaces: list[str] = []
+    for surface in surfaces:
+        if surface not in seen:
+            seen.add(surface)
+            unique_surfaces.append(surface)
+
+    if not unique_surfaces:
         return None
 
     best = 0.0
-    for surface in surfaces:
-        score = fuzz.token_sort_ratio(normalized_input, _normalize(surface)) / 100.0
+    for surface in unique_surfaces:
+        score = fuzz.ratio(normalized_input, _normalize(surface)) / 100.0
         if score > best:
             best = score
     return best

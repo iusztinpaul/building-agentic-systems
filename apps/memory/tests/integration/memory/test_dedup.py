@@ -88,8 +88,9 @@ def _node_doc(
     embedding: list[float],
     merged_into: str | None = None,
     aliases: list[str] | None = None,
+    canonical_name: str | None = None,
 ) -> dict:
-    return {
+    doc: dict = {
         "_id": node_id,
         "kind": "node",
         "type": node_type.value,
@@ -101,6 +102,9 @@ def _node_doc(
         "created_at": _NOW,
         "updated_at": _NOW,
     }
+    if canonical_name is not None:
+        doc["canonical_name"] = canonical_name
+    return doc
 
 
 def _edge_doc(
@@ -605,3 +609,200 @@ class TestDedupeEntityTiers:
 
         assert result.action == "merged"
         assert result.matched_node_id == "person:g"
+
+    async def test_fuzzy_re_rank_promotes_second_vec_candidate(
+        self, mongo_client, _kg_collection
+    ) -> None:
+        """Re-rank: a lower-vec hit with a strong fuzzy match wins overall.
+
+        Seed two PERSONs:
+        - A: top by vector (raw cos 0.94), but name unrelated to the query
+          ⇒ fuzzy below threshold, semantic-only contribution = 0.94.
+        - B: second by vector (raw cos 0.92), name identical to the query
+          ⇒ fuzzy = 1.0, passes threshold; combined = (0.92 + 1.0) / 2 = 0.96.
+
+        With Change 1 active, every candidate is re-ranked, so B's combined
+        score (0.96) beats A's embedding-only score (0.94). Before the change
+        (top-1 only), A would have won and fuzzy never would have been tried
+        on B.
+        """
+
+        await _kg_collection.insert_many(
+            [
+                _node_doc(
+                    node_id="person:rerank_a",
+                    name="zxy unrelated",
+                    node_type=NodeType.PERSON,
+                    embedding=_vector_with_raw_cosine(0.94),
+                ),
+                _node_doc(
+                    node_id="person:rerank_b",
+                    name="alice smith",
+                    node_type=NodeType.PERSON,
+                    embedding=_vector_with_raw_cosine(0.92),
+                ),
+            ]
+        )
+        await _wait_for_indexed_count(_kg_collection, expected=2)
+
+        config = DeduplicationConfig(
+            use_fuzzy_matching=True,
+            fuzzy_threshold=0.90,
+        )
+        result = await dedupe_entity(
+            database=mongo_client[TEST_DATABASE],
+            name="alice smith",
+            entity_type=NodeType.PERSON,
+            embedding=_query_vector(),
+            config=config,
+        )
+
+        assert result.matched_node_id == "person:rerank_b"
+        assert result.match_type == "both"
+        # Combined = (0.92 + 1.0) / 2 = 0.96 (allow small Atlas float drift).
+        assert result.similarity_score == pytest.approx(0.96, abs=0.02)
+
+    async def test_fuzzy_matches_against_canonical_name(
+        self, mongo_client, _kg_collection
+    ) -> None:
+        """Fuzzy compares against ``canonical_name`` in addition to ``name``.
+
+        Seed a PERSON whose ``name`` is a phonetic misspelling ("jon smyth")
+        but whose ``canonical_name`` is "John Smith". Incoming query name is
+        "John Smith" with a moderate embedding (raw cos 0.88, just above
+        flag_threshold).
+
+        - Old behavior (name surface only): fuzz("john smith", "jon smyth") ≈
+          0.84, below threshold → embedding-only → action="flagged",
+          match_type="embedding", score≈0.88.
+        - New behavior (name + canonical_name): fuzz("john smith",
+          "john smith") = 1.0 → combined = (0.88 + 1.0) / 2 = 0.94 →
+          action="flagged", match_type="both", score≈0.94.
+
+        Asserting match_type="both" and score≈0.94 proves Change 2.
+        """
+
+        await _kg_collection.insert_one(
+            _node_doc(
+                node_id="person:canonical",
+                name="jon smyth",
+                node_type=NodeType.PERSON,
+                embedding=_vector_with_raw_cosine(0.88),
+                canonical_name="John Smith",
+            )
+        )
+        await _wait_for_indexed_count(_kg_collection, expected=1)
+
+        config = DeduplicationConfig(
+            use_fuzzy_matching=True,
+            fuzzy_threshold=0.90,
+        )
+        result = await dedupe_entity(
+            database=mongo_client[TEST_DATABASE],
+            name="John Smith",
+            entity_type=NodeType.PERSON,
+            embedding=_query_vector(),
+            config=config,
+        )
+
+        assert result.action == "flagged"
+        assert result.matched_node_id == "person:canonical"
+        assert result.match_type == "both"
+        # Combined ≈ (0.88 + 1.0) / 2 = 0.94.
+        assert result.similarity_score == pytest.approx(0.94, abs=0.02)
+
+    async def test_fuzzy_scorer_is_ratio_not_token_sort(
+        self, mongo_client, _kg_collection
+    ) -> None:
+        """The dedup fuzzy scorer is ``fuzz.ratio``, not ``token_sort_ratio``.
+
+        Seed a candidate whose name is "Smith John" against an incoming
+        query of "John Smith" with a low embedding (raw cos 0.70, below
+        flag_threshold):
+
+        - With ``token_sort_ratio``: tokens are reordered → score = 1.0,
+          combined = (0.70 + 1.0) / 2 = 0.85 ⇒ flagged.
+        - With ``fuzz.ratio``: word-order matters → score ≈ 0.50, below
+          fuzzy_threshold ⇒ fuzzy does NOT boost; semantic alone = 0.70 is
+          below flag_threshold ⇒ action="none".
+
+        Asserting action="none" proves Change 3.
+        """
+
+        await _kg_collection.insert_one(
+            _node_doc(
+                node_id="person:order",
+                name="Smith John",
+                node_type=NodeType.PERSON,
+                embedding=_vector_with_raw_cosine(0.70),
+            )
+        )
+        await _wait_for_indexed_count(_kg_collection, expected=1)
+
+        config = DeduplicationConfig(
+            use_fuzzy_matching=True,
+            fuzzy_threshold=0.90,
+        )
+        result = await dedupe_entity(
+            database=mongo_client[TEST_DATABASE],
+            name="John Smith",
+            entity_type=NodeType.PERSON,
+            embedding=_query_vector(),
+            config=config,
+        )
+
+        assert result.action == "none"
+        assert result.matched_node_id is None
+
+    async def test_fuzzy_re_rank_skips_embedding_when_fuzzy_passes_but_combined_loses(
+        self, mongo_client, _kg_collection
+    ) -> None:
+        """When fuzzy passes the threshold but combined < best, skip embedding-only update.
+
+        Mirrors the reference's ``continue`` placement in
+        ``_check_for_duplicates``. Seed two PERSONs:
+        - A: raw cos 0.95, name unrelated to query ⇒ fuzzy below threshold,
+          semantic-only branch sets best=0.95, type="embedding".
+        - B: raw cos 0.93, name very close to query ("alice smith" vs
+          "alyce smith" gives fuzz.ratio ≈ 0.909, just above the 0.90
+          fuzzy_threshold) ⇒ combined ≈ (0.93 + 0.909) / 2 ≈ 0.92, NOT
+          greater than 0.95, no update. Because fuzzy passed, the
+          embedding-only branch is *skipped* for B (the ``continue``).
+
+        Final: match=A, score≈0.95, type="embedding". Confirms the
+        ``continue`` placement matches the reference loop.
+        """
+
+        await _kg_collection.insert_many(
+            [
+                _node_doc(
+                    node_id="person:cont_a",
+                    name="zach zulu",
+                    node_type=NodeType.PERSON,
+                    embedding=_vector_with_raw_cosine(0.95),
+                ),
+                _node_doc(
+                    node_id="person:cont_b",
+                    name="alyce smith",
+                    node_type=NodeType.PERSON,
+                    embedding=_vector_with_raw_cosine(0.93),
+                ),
+            ]
+        )
+        await _wait_for_indexed_count(_kg_collection, expected=2)
+
+        config = DeduplicationConfig(
+            use_fuzzy_matching=True,
+            fuzzy_threshold=0.90,
+        )
+        result = await dedupe_entity(
+            database=mongo_client[TEST_DATABASE],
+            name="alice smith",
+            entity_type=NodeType.PERSON,
+            embedding=_query_vector(),
+            config=config,
+        )
+
+        assert result.matched_node_id == "person:cont_a"
+        assert result.match_type == "embedding"
+        assert result.similarity_score == pytest.approx(0.95, abs=0.02)
