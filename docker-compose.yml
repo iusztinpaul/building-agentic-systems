@@ -113,6 +113,12 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
+    # Load .env for LLM / embedding / scrape API keys (GOOGLE_API_KEY,
+    # VOYAGE_API_KEY, MODAL_EMBEDDING_API_KEY, BRIGHTDATA_*). The explicit
+    # `environment:` block below overrides Mongo/Prefect connection params
+    # so they stay container-aware (service hostnames, not localhost).
+    env_file:
+      - .env
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
       MONGO_HOST: mongodb
