@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
@@ -15,8 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 @task(name="fetch-and-extract-substack-article", retries=2, retry_delay_seconds=5)
-async def fetch_and_extract_task(article_url: str) -> tuple[Document, str]:
-    return await fetch_and_extract(article_url)
+async def fetch_and_extract_task(
+    article_url: str, user_id: PydanticObjectId
+) -> tuple[Document, str]:
+    return await fetch_and_extract(article_url, user_id)
 
 
 @task(name="load-substack-article-document", retries=1, retry_delay_seconds=2)
@@ -25,8 +28,10 @@ async def load_article_document_task(doc: Document, body_html: str) -> Document 
 
 
 @flow(name="ingest-substack-article-etl", log_prints=True)
-async def ingest_substack_article(article_url: str) -> Document | None:
-    doc, body_html = await fetch_and_extract_task(article_url)
+async def ingest_substack_article(
+    article_url: str, user_id: PydanticObjectId
+) -> Document | None:
+    doc, body_html = await fetch_and_extract_task(article_url, user_id)
     result = await load_article_document_task(doc, body_html)
 
     if result:
@@ -38,14 +43,16 @@ async def ingest_substack_article(article_url: str) -> Document | None:
 
 
 @flow(name="ingest-substack-article-batch-etl", log_prints=True)
-async def ingest_substack_article_batch(article_urls: list[str]) -> list[Document]:
+async def ingest_substack_article_batch(
+    article_urls: list[str], user_id: PydanticObjectId
+) -> list[Document]:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
 
     results = await asyncio.gather(
-        *[ingest_substack_article(url) for url in article_urls]
+        *[ingest_substack_article(url, user_id) for url in article_urls]
     )
 
     ingested = [doc for doc in results if doc is not None]

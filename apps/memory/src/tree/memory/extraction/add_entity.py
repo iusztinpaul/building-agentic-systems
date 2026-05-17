@@ -30,6 +30,8 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from beanie import PydanticObjectId
+
 from tree.entities.knowledge_graph import (
     EdgeType,
     NodeType,
@@ -68,6 +70,7 @@ async def add_entity(
     database: AsyncDatabase,
     embedding_model: BaseEmbeddingModel,
     resolver: CompositeResolver,
+    user_id: PydanticObjectId,
     name: str,
     entity_type: NodeType,
     properties: dict[str, Any],
@@ -153,7 +156,7 @@ async def add_entity(
     collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
     normalized = _normalize(name)
-    prospective_id = build_node_id(entity_type, normalized)
+    prospective_id = build_node_id(user_id, entity_type, normalized)
 
     # ------------------------------------------------------------------
     # Short-circuit: no resolution, no dedup → plain upsert.
@@ -171,6 +174,7 @@ async def add_entity(
         await _upsert_node(
             collection=collection,
             node_id=prospective_id,
+            user_id=user_id,
             entity_type=entity_type,
             name=name,
             canonical_name=name,
@@ -212,6 +216,7 @@ async def add_entity(
         embedding = embedded[0] if embedded else []
         raw_result = await dedupe_entity(
             database=database,
+            user_id=user_id,
             name=name,
             entity_type=entity_type,
             embedding=embedding,
@@ -247,6 +252,7 @@ async def add_entity(
     await _upsert_node(
         collection=collection,
         node_id=target_id,
+        user_id=user_id,
         entity_type=entity_type,
         name=name,
         canonical_name=resolved.canonical_name,
@@ -261,6 +267,7 @@ async def add_entity(
         assert dedup_result.matched_node_id is not None  # noqa: S101
         await _upsert_pending_same_as_edge(
             collection=collection,
+            user_id=user_id,
             source_node_id=target_id,
             source_type=entity_type,
             target_node_id=dedup_result.matched_node_id,
@@ -282,6 +289,7 @@ async def _upsert_node(
     *,
     collection: Any,
     node_id: str,
+    user_id: PydanticObjectId,
     entity_type: NodeType,
     name: str,
     canonical_name: str,
@@ -305,6 +313,7 @@ async def _upsert_node(
     }
 
     set_stage: dict[str, Any] = {
+        "user_id": user_id,
         "kind": "node",
         "type": entity_type.value,
         "name": name,
@@ -620,6 +629,7 @@ def _sources_union_expr(source_id: str) -> dict[str, Any]:
 async def _upsert_pending_same_as_edge(
     *,
     collection: Any,
+    user_id: PydanticObjectId,
     source_node_id: str,
     source_type: NodeType,
     target_node_id: str,
@@ -641,6 +651,7 @@ async def _upsert_pending_same_as_edge(
         {"_id": edge_id},
         {
             "$setOnInsert": {
+                "user_id": user_id,
                 "kind": "edge",
                 "type": EdgeType.SAME_AS.value,
                 "source_node_id": source_node_id,

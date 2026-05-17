@@ -8,6 +8,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
 from tree.data.substack.substack_rss import html_to_plain_text
@@ -53,18 +54,21 @@ def read_file(file_path: str) -> str:
 
 async def load_file_document(
     file_path: str,
+    user_id: PydanticObjectId,
     title: str | None = None,
 ) -> Document | None:
-    """Read a file and persist it as a Document.
+    """Read a file and persist it as a Document for ``user_id``.
 
     Returns the Document, or None if a non-LATENT duplicate already exists.
+    Dedup and LATENT promotion are scoped to ``user_id`` so two users can
+    ingest the same path independently.
     """
 
     path = Path(file_path).resolve()
     content = read_file(str(path))
     source_uri = f"file://{path}"
 
-    existing = await Document.find_one(Document.source_uri == source_uri)
+    existing = await Document.find_one({"user_id": user_id, "source_uri": source_uri})
     if existing is not None:
         if existing.source_type != SourceType.LATENT:
             logger.info("File already ingested: %s", source_uri)
@@ -81,6 +85,7 @@ async def load_file_document(
     doc = Document(
         source_type=SourceType.FILE,
         source_uri=source_uri,
+        user_id=user_id,
         title=title or path.name,
         content=content,
         date=datetime.now(tz=UTC),

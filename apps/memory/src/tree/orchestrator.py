@@ -1,7 +1,16 @@
 """
 Prefect workflow orchestrator.
 
-Registers and serves all workflow deployments.
+Registers and serves all workflow deployments. Every flow now exposes
+``user_id`` as a required, non-Optional parameter — operators MUST pass
+it when triggering the deployment, e.g.::
+
+    prefect deployment run memory-extraction-etl/memory-extraction-etl \\
+        -p user_id=507f1f77bcf86cd799439011
+
+Omitting ``user_id`` raises a ``TypeError`` at flow entry before any
+side-effects happen.
+
 The Prefect server runs via Docker Compose (make local-start).
 
 Usage:

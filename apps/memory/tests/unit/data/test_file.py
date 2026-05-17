@@ -3,8 +3,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.file import _SUPPORTED_EXTENSIONS, read_file
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestReadFile:
@@ -79,7 +82,7 @@ class TestLoadFileDocument:
 
         from tree.data.file import load_file_document
 
-        doc = await load_file_document(str(txt))
+        doc = await load_file_document(str(txt), _USER_ID)
 
         assert doc is not None
         assert doc.source_uri == f"file://{txt.resolve()}"
@@ -105,7 +108,7 @@ class TestLoadFileDocument:
 
         from tree.data.file import load_file_document
 
-        result = await load_file_document(str(txt))
+        result = await load_file_document(str(txt), _USER_ID)
         assert result is None
 
     async def test_custom_title_used(self, tmp_path, mocker) -> None:
@@ -121,5 +124,5 @@ class TestLoadFileDocument:
 
         from tree.data.file import load_file_document
 
-        doc = await load_file_document(str(txt), title="My Custom Title")
+        doc = await load_file_document(str(txt), _USER_ID, title="My Custom Title")
         assert doc.title == "My Custom Title"

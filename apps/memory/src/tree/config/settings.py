@@ -38,5 +38,24 @@ class Settings(BaseSettings):
     brightdata_unlocker_zone: str = ""
     brightdata_serp_zone: str = ""
 
+    # --- Pinned embedding configuration (Phase 1 multi-tenancy) ---
+    #
+    # The embedding model identifier and the vector dimension are pinned
+    # here — not in YAML / app_config — because they are dimension-coupled
+    # to the Atlas Vector Search index defined under ``docker/mongot/``.
+    # A mismatch between ``embedding_dim`` and the live ``vector_index``
+    # ``numDimensions`` corrupts writes silently; the indexing pipeline
+    # calls :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
+    # on boot to make that mismatch a hard, startup-time error rather
+    # than a runtime data-loss bug. See
+    # ``tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md``.
+    #
+    # YAML (``app_config.models.embedding.*``) may still override the
+    # provider/model/dimensions for local dev, but ``app_config`` logs a
+    # WARNING when the YAML dimension disagrees with this pin.
+    embedding_provider: str = "voyage"
+    embedding_model: str = "voyage-3"
+    embedding_dim: int = 1024
+
 
 settings = Settings()

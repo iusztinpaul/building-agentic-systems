@@ -9,6 +9,8 @@ from tree.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed_batch,
     load_document_task,
 )
+from beanie import PydanticObjectId
+
 from tree.entities.documents import Document, SourceType
 
 
@@ -26,6 +28,7 @@ def _make_doc(title: str = "Test Post") -> Document:
     return Document(
         source_type=SourceType.SUBSTACK,
         source_uri="https://example.substack.com/p/test-post",
+        user_id=PydanticObjectId(),
         title=title,
         summary="A summary",
         content="",
@@ -69,7 +72,7 @@ class TestExtractDocumentTask:
             return_value=doc,
         )
 
-        result = await extract_document_task.fn(_make_raw_entry())
+        result = await extract_document_task.fn(_make_raw_entry(), PydanticObjectId())
 
         assert result.title == "Test Post"
         assert result.source_type == SourceType.SUBSTACK
@@ -127,7 +130,9 @@ class TestIngestSubstackRssFeed:
             side_effect=[doc1, doc2],
         )
 
-        result = await ingest_substack_rss_feed.fn("https://example.substack.com/feed")
+        result = await ingest_substack_rss_feed.fn(
+            "https://example.substack.com/feed", PydanticObjectId()
+        )
 
         assert len(result) == 2
 
@@ -152,7 +157,9 @@ class TestIngestSubstackRssFeed:
             side_effect=[doc1, None],
         )
 
-        result = await ingest_substack_rss_feed.fn("https://example.substack.com/feed")
+        result = await ingest_substack_rss_feed.fn(
+            "https://example.substack.com/feed", PydanticObjectId()
+        )
 
         assert len(result) == 1
         assert result[0].title == "Post 1"
@@ -184,7 +191,8 @@ class TestIngestSubstackRssFeedBatch:
         )
 
         result = await ingest_substack_rss_feed_batch.fn(
-            ["https://a.substack.com/feed", "https://b.substack.com/feed"]
+            ["https://a.substack.com/feed", "https://b.substack.com/feed"],
+            PydanticObjectId(),
         )
 
         assert len(result) == 2

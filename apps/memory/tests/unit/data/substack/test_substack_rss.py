@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.substack.substack_rss import (
     extract_document,
@@ -9,6 +10,8 @@ from tree.data.substack.substack_rss import (
     parse_date,
 )
 from tree.entities.documents import SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 SAMPLE_ENTRY = {
     "title": "Test Article",
@@ -82,7 +85,7 @@ class TestParseDate:
 
 class TestExtractDocument:
     def test_maps_fields(self):
-        doc = extract_document(SAMPLE_ENTRY)
+        doc = extract_document(SAMPLE_ENTRY, _USER_ID)
 
         assert doc.source_type == SourceType.SUBSTACK
         assert doc.source_uri == "https://example.substack.com/p/test-article"
@@ -96,18 +99,18 @@ class TestExtractDocument:
 
     def test_fallback_to_summary(self):
         entry = {**SAMPLE_ENTRY, "content": [{}]}
-        doc = extract_document(entry)
+        doc = extract_document(entry, _USER_ID)
 
         assert doc.content == "A short subtitle for the article."
 
     def test_missing_author_defaults_to_unknown(self):
         entry = {k: v for k, v in SAMPLE_ENTRY.items() if k != "author"}
-        doc = extract_document(entry)
+        doc = extract_document(entry, _USER_ID)
 
         assert doc.authors == ["Unknown"]
 
     def test_empty_entry(self):
-        doc = extract_document({})
+        doc = extract_document({}, _USER_ID)
 
         assert doc.source_uri == ""
         assert doc.title == ""

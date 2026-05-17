@@ -41,6 +41,7 @@ from tree.entities.knowledge_graph import (
     build_node_id,
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
+from tree.entities.users import User
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.core import (
     build_structural_entries,
@@ -53,6 +54,7 @@ from tree.memory.extraction.dedup import (
     MergeStrategy,
     dedupe_entity,
 )
+from tree.memory.extraction.first_person_resolver import redirect_first_person
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
@@ -297,6 +299,7 @@ async def _resolve_entities(
     raws: list[RawExtraction],
     database: Any,
     resolver: CompositeResolver,
+    user_id: PydanticObjectId,
 ) -> ResolutionOutput:
     """Fetch per-type candidates and run the resolver chain.
 
@@ -344,11 +347,14 @@ async def _resolve_entities(
     name_to_owner_id: dict[str, str] = {}
     resolved_by_key: dict[str, ResolvedEntity] = {}
 
-    # Fetch candidates and resolve per type.
+    # Fetch candidates and resolve per type. Candidate scope is restricted
+    # to the run's ``user_id`` — cross-tenant rows are invisible to
+    # resolution.
     for etype, entity_pairs in by_type.items():
         collection = database[_KG_COLLECTION]
         cursor = collection.find(
             {
+                "user_id": user_id,
                 "kind": "node",
                 "type": etype.value,
                 "merged_into": {"$in": [None, "", False]},
@@ -474,6 +480,7 @@ async def _dedupe_entities(
     embeddings: EmbeddingMap,
     database: Any,
     dedup_config: DeduplicationConfig,
+    user_id: PydanticObjectId,
 ) -> DedupMap:
     """For each resolved entity, run :func:`dedupe_entity` and bucket the
     decision under a stable per-entity key."""
@@ -494,9 +501,10 @@ async def _dedupe_entities(
             n_none += 1
             continue
 
-        prospective_id = build_node_id(entity_type, _normalize(name))
+        prospective_id = build_node_id(user_id, entity_type, _normalize(name))
         raw = await dedupe_entity(
             database=database,
+            user_id=user_id,
             name=name,
             entity_type=entity_type,
             embedding=embedding,
@@ -557,6 +565,7 @@ async def _apply_writes(
     resolver: CompositeResolver,
     dedup_config: DeduplicationConfig,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
 ) -> WriteSummary:
     """One pass over the resolved entities → ``add_entity()`` → edge upserts.
 
@@ -581,9 +590,10 @@ async def _apply_writes(
     structural_edges: list[ExtractedEdge] = []
     for raw in raws:
         for node in raw.chunked.structural.nodes:
-            node_id = build_node_id(node.type, node.name)
+            node_id = build_node_id(user_id, node.type, node.name)
             await _upsert_structural_node(
                 database=database,
+                user_id=user_id,
                 node=node,
                 node_id=node_id,
                 source_document_id=raw.document_id,
@@ -609,6 +619,7 @@ async def _apply_writes(
                 database=database,
                 embedding_model=embedding_model,
                 resolver=resolver,
+                user_id=user_id,
                 node=node,
                 source_document_id=raw.document_id,
                 resolved_entity=resolved_entity,
@@ -648,10 +659,10 @@ async def _apply_writes(
     for edge in all_edges:
         # Source/target endpoints may need remapping.
         src_id = _remap_endpoint(
-            edge.source_type, edge.source_node_id, name_to_target_id
+            edge.source_type, edge.source_node_id, name_to_target_id, user_id
         )
         tgt_id = _remap_endpoint(
-            edge.target_type, edge.target_node_id, name_to_target_id
+            edge.target_type, edge.target_node_id, name_to_target_id, user_id
         )
 
         if not _edge_endpoints_valid(edge, src_id, tgt_id):
@@ -672,6 +683,7 @@ async def _apply_writes(
     for edge_id, edge in seen_edge_ids.items():
         await _upsert_edge(
             database=database,
+            user_id=user_id,
             edge=edge,
             edge_id=edge_id,
             source_document_ids=[PydanticObjectId(raw.document_id) for raw in raws],
@@ -691,19 +703,22 @@ async def _apply_writes(
 
 
 def _remap_endpoint(
-    etype: NodeType, name: str, name_to_target_id: dict[str, str]
+    etype: NodeType,
+    name: str,
+    name_to_target_id: dict[str, str],
+    user_id: PydanticObjectId,
 ) -> str:
     """Map an extracted endpoint (raw name) to a final ``_id``.
 
-    Falls back to ``build_node_id(etype, _normalize(name))`` for endpoints
-    we did not see during the node-write pass (e.g. structural edges between
-    chunks where the target id is the raw chunk name).
+    Falls back to ``build_node_id(user_id, etype, _normalize(name))`` for
+    endpoints we did not see during the node-write pass (e.g. structural
+    edges between chunks where the target id is the raw chunk name).
     """
 
     mapped = name_to_target_id.get(make_type_name_key(etype, name))
     if mapped is not None:
         return mapped
-    return build_node_id(etype, _normalize(name))
+    return build_node_id(user_id, etype, _normalize(name))
 
 
 def _edge_endpoints_valid(edge: ExtractedEdge, src_id: str, tgt_id: str) -> bool:
@@ -722,6 +737,7 @@ async def _dispatch_entity_write(
     database: Any,
     embedding_model: BaseEmbeddingModel,
     resolver: CompositeResolver,
+    user_id: PydanticObjectId,
     node: ExtractedNode,
     source_document_id: str,
     resolved_entity: ResolvedEntity | None,
@@ -765,6 +781,7 @@ async def _dispatch_entity_write(
         database=database,
         embedding_model=model_for_call,
         resolver=resolver,
+        user_id=user_id,
         name=node.name,
         entity_type=node.type,
         properties=node.properties,
@@ -814,6 +831,7 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
 async def _upsert_structural_node(
     *,
     database: Any,
+    user_id: PydanticObjectId,
     node: ExtractedNode,
     node_id: str,
     source_document_id: str,
@@ -830,6 +848,7 @@ async def _upsert_structural_node(
         [
             {
                 "$set": {
+                    "user_id": user_id,
                     "kind": "node",
                     "type": node.type.value,
                     "name": node.name,
@@ -861,6 +880,7 @@ async def _upsert_structural_node(
 async def _upsert_edge(
     *,
     database: Any,
+    user_id: PydanticObjectId,
     edge: ExtractedEdge,
     edge_id: str,
     source_document_ids: list[PydanticObjectId],
@@ -876,6 +896,7 @@ async def _upsert_edge(
         [
             {
                 "$set": {
+                    "user_id": user_id,
                     "kind": "edge",
                     "type": edge.type.value,
                     "source_node_id": edge.source_node_id,
@@ -919,9 +940,15 @@ apply_writes_task = task(
 
 @flow(name="memory-extraction-etl", log_prints=True)
 async def memory_extraction(
+    user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
 ) -> WriteSummary:
-    """Extract knowledge-graph entries from documents.
+    """Extract knowledge-graph entries from documents for ``user_id``.
+
+    ``user_id`` is a required, non-Optional Prefect parameter. Every task
+    in the six-task pipeline receives the value; candidate fetches and
+    writes are scoped to ``user_id`` end-to-end. Cross-tenant rows are
+    invisible to resolution / dedup.
 
     Cross-key config validation runs at import time (``settings = Settings()``
     in ``app_config.py``). If the validator raises, the flow never starts;
@@ -953,18 +980,32 @@ async def memory_extraction(
     )
     database = client[settings.mongo.mongo_initdb_database]
 
-    # ----- Fetch documents ---------------------------------------------------
+    # ----- Fetch documents (scoped to user_id) -------------------------------
     if document_ids:
         docs = await Document.find(
-            {"_id": {"$in": [PydanticObjectId(did) for did in document_ids]}}
+            {
+                "_id": {"$in": [PydanticObjectId(did) for did in document_ids]},
+                "user_id": user_id,
+            }
         ).to_list()
     else:
-        docs = await Document.find({"content": {"$ne": None}}).to_list()
+        docs = await Document.find(
+            {"user_id": user_id, "content": {"$ne": None}}
+        ).to_list()
 
-    log.info("Processing %d documents for KG extraction", len(docs))
+    log.info(
+        "Processing %d documents for KG extraction (user_id=%s)", len(docs), user_id
+    )
 
     if not docs:
         return WriteSummary(documents_processed=0)
+
+    # ----- Load the active user (for the first-person resolver) -------------
+    user = await User.get(user_id)
+    if user is None:
+        # Defensive — the upstream Prefect parameter validation guarantees
+        # a non-None user_id, but a stale id is possible.
+        raise ValueError(f"User {user_id} not found; cannot run extraction.")
 
     # ----- Tasks ① and ② — per-doc fan-out ---------------------------------
     chunked_docs: list[ChunkedDocument] = []
@@ -975,8 +1016,12 @@ async def memory_extraction(
     for chunked in chunked_docs:
         raws.append(await llm_extract_entities_task(chunked))
 
+    # ----- First-person resolver (post-LLM, pre-resolve) --------------------
+    for raw in raws:
+        raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
+
     # ----- Task ③ — resolve ------------------------------------------------
-    resolved = await resolve_entities_task(raws, database, resolver)
+    resolved = await resolve_entities_task(raws, database, resolver, user_id)
 
     # ----- Task ④ — embed (mapped at single-name grain) --------------------
     canonical_names = sorted(
@@ -990,7 +1035,7 @@ async def memory_extraction(
 
     # ----- Task ⑤ — dedup --------------------------------------------------
     dedup_results = await dedupe_entities_task(
-        resolved, embeddings, database, dedup_config
+        resolved, embeddings, database, dedup_config, user_id
     )
 
     # ----- Task ⑥ — apply writes ------------------------------------------
@@ -1003,6 +1048,7 @@ async def memory_extraction(
         resolver,
         dedup_config,
         embedding_model,
+        user_id,
     )
 
     log.info(
@@ -1026,6 +1072,7 @@ async def memory_extraction(
 async def run_extraction_for_documents(
     document_ids: list[str],
     *,
+    user_id: PydanticObjectId,
     client: Any,
     database_name: str,
     llm: BaseLLM | None = None,
@@ -1038,6 +1085,9 @@ async def run_extraction_for_documents(
     from the FastMCP lifespan). The flow itself is short-circuited — we
     re-implement the same pipeline shape inline so we don't have to start a
     Prefect flow run from inside the MCP server process.
+
+    ``user_id`` is required and threaded through every step exactly as the
+    Prefect flow does.
 
     Returns:
         A :class:`WriteSummary` for the processed documents.
@@ -1054,15 +1104,24 @@ async def run_extraction_for_documents(
     database = client[database_name]
 
     docs = await Document.find(
-        {"_id": {"$in": [PydanticObjectId(did) for did in document_ids]}}
+        {
+            "_id": {"$in": [PydanticObjectId(did) for did in document_ids]},
+            "user_id": user_id,
+        }
     ).to_list()
 
     if not docs:
         return WriteSummary(documents_processed=0)
 
+    user = await User.get(user_id)
+    if user is None:
+        raise ValueError(f"User {user_id} not found; cannot run extraction.")
+
     chunked = [await _extract_chunks_and_structural(d) for d in docs]
     raws = [await _llm_extract_entities(c, llm=llm) for c in chunked]
-    resolved = await _resolve_entities(raws, database, resolver)
+    for raw in raws:
+        raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
+    resolved = await _resolve_entities(raws, database, resolver, user_id)
     canonical_names = sorted(
         {r.canonical_name for r in resolved.resolved_by_key.values()}
     )
@@ -1071,7 +1130,9 @@ async def run_extraction_for_documents(
         _name, vector = await _embed_entity(name)
         vectors[_name] = vector
     embeddings = EmbeddingMap(vectors=vectors)
-    dedup_results = await _dedupe_entities(resolved, embeddings, database, dedup_config)
+    dedup_results = await _dedupe_entities(
+        resolved, embeddings, database, dedup_config, user_id
+    )
     return await _apply_writes(
         raws,
         resolved,
@@ -1081,4 +1142,5 @@ async def run_extraction_for_documents(
         resolver,
         dedup_config,
         embedding_model,
+        user_id,
     )

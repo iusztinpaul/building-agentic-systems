@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.data.youtube.types import (
@@ -101,7 +102,9 @@ class TestIngestYoutubeVideoFlow:
         fake = _FakeFetcher([_make_transcript("hello transcript")])
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            result = await ingest_youtube_video(
+                CANONICAL_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert result is not None
         assert result.source_type == SourceType.YOUTUBE
@@ -119,8 +122,9 @@ class TestIngestYoutubeVideoFlow:
         fake = _FakeFetcher([_make_transcript()])
 
         with prefect_tags("tests"):
-            first = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
-            second = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            user_id = PydanticObjectId()
+            first = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
+            second = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
 
         assert first is not None
         assert second is None  # duplicate skipped
@@ -135,8 +139,9 @@ class TestIngestYoutubeVideoFlow:
         fake = _FakeFetcher([_make_transcript()])
 
         with prefect_tags("tests"):
-            first = await ingest_youtube_video(SHORT_URL, fetcher=fake)
-            second = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            user_id = PydanticObjectId()
+            first = await ingest_youtube_video(SHORT_URL, user_id, fetcher=fake)
+            second = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
 
         assert first is not None
         # Persists with canonical URL regardless of pasted shape.
@@ -149,14 +154,19 @@ class TestIngestYoutubeVideoFlow:
         assert rows[0].source_uri == CANONICAL_URL
 
     async def test_upgrades_latent_document(self, mongo_client, mocker) -> None:
-        latent = Document(source_type=SourceType.LATENT, source_uri=CANONICAL_URL)
+        user_id = PydanticObjectId()
+        latent = Document(
+            source_type=SourceType.LATENT,
+            source_uri=CANONICAL_URL,
+            user_id=user_id,
+        )
         await latent.insert()
 
         _patch_oembed(mocker)
         fake = _FakeFetcher([_make_transcript("transcript text")])
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            result = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
 
         assert result is not None
         assert result.id == latent.id
@@ -178,7 +188,9 @@ class TestIngestYoutubeVideoFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            result = await ingest_youtube_video(
+                CANONICAL_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert result is None
 
@@ -202,7 +214,9 @@ class TestIngestYoutubeVideoFlow:
         fake = _FakeFetcher([_make_transcript("transcript only")])
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(CANONICAL_URL, fetcher=fake)
+            result = await ingest_youtube_video(
+                CANONICAL_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert result is not None
         assert result.title == f"YouTube video {VIDEO_ID}"
@@ -227,7 +241,7 @@ class TestIngestYoutubeVideoBatchFlow:
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
-                video_urls=[url_a, url_b], fetcher=fake
+                video_urls=[url_a, url_b], user_id=PydanticObjectId(), fetcher=fake
             )
 
         assert len(result) == 2
@@ -253,7 +267,9 @@ class TestIngestYoutubeVideoBatchFlow:
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
-                video_urls=[url_good, url_bad], fetcher=_PerUrlFakeFetcher()
+                video_urls=[url_good, url_bad],
+                user_id=PydanticObjectId(),
+                fetcher=_PerUrlFakeFetcher(),
             )
 
         assert len(result) == 1

@@ -16,6 +16,8 @@ from tree.data.huggingface.arxiv_dataset_pipeline import (
     ingest_arxiv_dataset,
     load_document,
 )
+from beanie import PydanticObjectId
+
 from tree.entities.documents import Document, SourceType
 
 
@@ -23,6 +25,7 @@ def _make_doc(arxiv_id: str = "2103.00001") -> Document:
     return Document(
         source_type=SourceType.HUGGINGFACE,
         source_uri=f"https://arxiv.org/abs/{arxiv_id}",
+        user_id=PydanticObjectId(),
         title="Test Paper",
         summary="Abstract",
         content="",
@@ -90,7 +93,7 @@ class TestExtractDocumentTask:
             "update_date": "2021-03-24",
         }
 
-        result = extract_document.fn(raw)
+        result = extract_document.fn(raw, PydanticObjectId())
 
         assert result.source_uri == "https://arxiv.org/abs/2103.12345"
         assert result.title == "Test"
@@ -230,7 +233,9 @@ class TestIngestArxivDataset:
             side_effect=mock_load,
         )
 
-        result = await ingest_arxiv_dataset.fn(max_samples=4, fetch_content=False)
+        result = await ingest_arxiv_dataset.fn(
+            user_id=PydanticObjectId(), max_samples=4, fetch_content=False
+        )
 
         assert len(result) == 4
         assert call_count == 4

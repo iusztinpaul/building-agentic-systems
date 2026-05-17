@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from beanie import PydanticObjectId
 from click.testing import CliRunner
 
 from tree.data.web import SearchResult
@@ -19,6 +20,8 @@ from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 # ---------------------------------------------------------------------------
@@ -44,9 +47,16 @@ def _sample_results() -> list[SearchResult]:
 
 
 def _make_ctx() -> MagicMock:
-    """Build a mock FastMCP Context. The tool body must not touch lifespan_context."""
+    """Build a mock FastMCP Context.
 
-    return MagicMock()
+    The ``search_web`` ingest path reads ``lifespan_context['user_id']`` so we
+    stub a real dict with a stable :class:`PydanticObjectId` here. The non-
+    ingest path doesn't touch it.
+    """
+
+    ctx = MagicMock()
+    ctx.lifespan_context = {"user_id": _USER_ID}
+    return ctx
 
 
 def _get_tool_callable():
@@ -299,7 +309,7 @@ class TestSearchWebIngestPath:
             "https://example.com/graphdb",
         ]
         mock_trigger.assert_awaited_once_with(
-            ["https://example.com/kg", "https://example.com/graphdb"]
+            ["https://example.com/kg", "https://example.com/graphdb"], _USER_ID
         )
 
     async def test_ingest_top_k_truncates_to_first_k_urls(self, mocker) -> None:
@@ -321,7 +331,7 @@ class TestSearchWebIngestPath:
         # Assert
         payload = json.loads(raw)
         assert payload["ingest"]["urls"] == ["https://example.com/kg"]
-        mock_trigger.assert_awaited_once_with(["https://example.com/kg"])
+        mock_trigger.assert_awaited_once_with(["https://example.com/kg"], _USER_ID)
 
     async def test_ingest_urls_overrides_ingest_top_k_and_serp(self, mocker) -> None:
         # Arrange
@@ -349,7 +359,7 @@ class TestSearchWebIngestPath:
         # Assert
         payload = json.loads(raw)
         assert payload["ingest"]["urls"] == custom_urls
-        mock_trigger.assert_awaited_once_with(custom_urls)
+        mock_trigger.assert_awaited_once_with(custom_urls, _USER_ID)
 
     async def test_ingest_false_with_top_k_returns_invalid_input(self, mocker) -> None:
         # Arrange
@@ -634,12 +644,20 @@ class TestSearchWebCli:
         # Act
         result = runner.invoke(
             cli_main,
-            ["--query", "k graphs", "--ingest", "--ingest-top-k", "1"],
+            [
+                "--query",
+                "k graphs",
+                "--ingest",
+                "--ingest-top-k",
+                "1",
+                "--user-id",
+                str(_USER_ID),
+            ],
         )
 
         # Assert
         assert result.exit_code == 0, result.output
-        mock_trigger.assert_awaited_once_with(["https://example.com/kg"])
+        mock_trigger.assert_awaited_once_with(["https://example.com/kg"], _USER_ID)
 
     def test_ingest_urls_overrides_top_k(self, mocker, cli_main) -> None:
         # Arrange
@@ -665,12 +683,14 @@ class TestSearchWebCli:
                 "99",
                 "--ingest-urls",
                 "https://a, https://b",
+                "--user-id",
+                str(_USER_ID),
             ],
         )
 
         # Assert
         assert result.exit_code == 0, result.output
-        mock_trigger.assert_awaited_once_with(["https://a", "https://b"])
+        mock_trigger.assert_awaited_once_with(["https://a", "https://b"], _USER_ID)
 
     def test_ingest_top_k_without_ingest_flag_exits_one(self, mocker, cli_main) -> None:
         # Arrange — search must NOT be called when validation fails.
@@ -732,7 +752,7 @@ class TestSearchWebCli:
         # Act
         result = runner.invoke(
             cli_main,
-            ["--query", "k graphs", "--ingest"],
+            ["--query", "k graphs", "--ingest", "--user-id", str(_USER_ID)],
         )
 
         # Assert

@@ -15,6 +15,7 @@ import os
 from unittest.mock import MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.config.app_config import HuggingFaceDatasetSource, WebSource
@@ -22,6 +23,8 @@ from tree.data.core.ingest import ingest_url
 from tree.data.pipeline import data_pipeline
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 _BRIGHTDATA_REASON = (
     "Bright Data credentials not configured (or set to .env.example placeholder)"
@@ -66,7 +69,7 @@ class TestIngestWebUrlFlow:
     async def test_ingest_web_url_persists_document(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                doc = await ingest_web_url(_EXAMPLE_URL)
+                doc = await ingest_web_url(_EXAMPLE_URL, _USER_ID)
 
             assert doc is not None
             assert doc.source_type == SourceType.WEB
@@ -84,11 +87,11 @@ class TestIngestWebUrlFlow:
     async def test_ingest_web_url_idempotent(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                first = await ingest_web_url(_EXAMPLE_URL)
+                first = await ingest_web_url(_EXAMPLE_URL, _USER_ID)
             assert first is not None
 
             with prefect_tags("tests"):
-                second = await ingest_web_url(_EXAMPLE_URL)
+                second = await ingest_web_url(_EXAMPLE_URL, _USER_ID)
             assert second is None
 
             db_docs = await Document.find(Document.source_uri == _EXAMPLE_URL).to_list()
@@ -107,14 +110,14 @@ class TestIngestWebUrlBatchFlow:
         urls = [_EXAMPLE_ORG_URL, _EXAMPLE_NET_URL]
         try:
             with prefect_tags("tests"):
-                first_run = await ingest_web_url_batch(urls)
+                first_run = await ingest_web_url_batch(urls, _USER_ID)
             assert len(first_run) == 2
             for doc in first_run:
                 assert doc.source_type == SourceType.WEB
                 assert doc.source_uri in urls
 
             with prefect_tags("tests"):
-                second_run = await ingest_web_url_batch(urls)
+                second_run = await ingest_web_url_batch(urls, _USER_ID)
             assert len(second_run) == 0
 
             db_docs = await Document.find({"source_uri": {"$in": urls}}).to_list()
@@ -128,7 +131,7 @@ class TestDispatcherFallback:
     async def test_dispatcher_falls_through_to_web(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                doc = await ingest_url(_FALLBACK_URL)
+                doc = await ingest_url(_FALLBACK_URL, _USER_ID)
 
             assert doc is not None
             assert doc.source_type == SourceType.WEB
@@ -146,7 +149,7 @@ class TestDispatcherFallback:
     async def test_dispatcher_routes_substack_first(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                doc = await ingest_url(_SUBSTACK_URL)
+                doc = await ingest_url(_SUBSTACK_URL, _USER_ID)
 
             assert doc is not None
             # The regression guard: a substack URL must NOT fall through to
@@ -205,7 +208,7 @@ class TestDataPipelinePicksUpWebEntries:
 
         try:
             with prefect_tags("tests"):
-                result = await data_pipeline()
+                result = await data_pipeline(_USER_ID)
 
             web_docs = [d for d in result if d.source_type == SourceType.WEB]
             assert len(web_docs) == 1

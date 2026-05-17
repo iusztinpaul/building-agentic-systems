@@ -1,8 +1,15 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import pymongo.errors
 import pytest
+from beanie import PydanticObjectId
 
 from tree.config.settings import settings
 from tree.db import ALL_DOCUMENT_MODELS, init_mongodb
+from tree.entities.documents import Document, SourceType
+from tree.entities.users import User
 
 TEST_DATABASE = "integration_tests_twin"
 
@@ -50,3 +57,89 @@ async def _clean_collections(mongo_client):
 
     for model in ALL_DOCUMENT_MODELS:
         await model.find_all().delete()
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenancy isolation fixture (Phase-1 acceptance gate)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TwoUserContent:
+    """Container returned by :func:`two_users_with_content`.
+
+    Holds the two seed users plus the ``Document`` rows the fixture
+    inserted for each. The isolation test inspects the documents' ids
+    when calling ``memory_extraction.fn(document_ids=...)`` and asserts
+    no row of either tenant leaks into the other tenant's queries.
+
+    Distinct unique tokens (``antelope``/``amber`` for User A,
+    ``badger``/``bramble`` for User B) make it easy to detect leaks: a
+    User-A query returning a node whose properties mention ``badger`` is
+    a hard failure.
+    """
+
+    user_a: User
+    user_b: User
+    doc_a: Document
+    doc_b: Document
+    content_a: str
+    content_b: str
+
+
+# These conversation strings deliberately contain distinctive tokens
+# that cannot collide across tenants. The tests assert that ``antelope``
+# / ``amber`` never appear in User-B query results, and ``badger`` /
+# ``bramble`` never appear in User-A results.
+_CONTENT_A = (
+    "Alice owns the antelope analytics project. "
+    "She is responsible for the amber dashboard release."
+)
+_CONTENT_B = (
+    "Bob owns the badger reporting service. "
+    "He is responsible for the bramble migration."
+)
+
+
+@pytest.fixture()
+async def two_users_with_content(mongo_client) -> TwoUserContent:
+    """Seed two users (A, B) with one short, tenant-distinct conversation each.
+
+    The fixture does NOT run extraction or indexing — those steps are
+    test-specific and the test that consumes this fixture wires them up
+    with the appropriate fakes. The fixture's job is to land valid
+    upstream state (the user rows + a per-user ``Document`` row).
+    """
+
+    user_a = User(identifier=f"a-{PydanticObjectId()}@example.com")
+    user_b = User(identifier=f"b-{PydanticObjectId()}@example.com")
+    await user_a.insert()
+    await user_b.insert()
+
+    doc_a = Document(
+        title="User A conversation",
+        content=_CONTENT_A,
+        source_type=SourceType.CONVERSATION,
+        source_uri=f"conversation://a-{PydanticObjectId()}",
+        user_id=user_a.id,
+        authors=["Alice"],
+    )
+    doc_b = Document(
+        title="User B conversation",
+        content=_CONTENT_B,
+        source_type=SourceType.CONVERSATION,
+        source_uri=f"conversation://b-{PydanticObjectId()}",
+        user_id=user_b.id,
+        authors=["Bob"],
+    )
+    await doc_a.insert()
+    await doc_b.insert()
+
+    return TwoUserContent(
+        user_a=user_a,
+        user_b=user_b,
+        doc_a=doc_a,
+        doc_b=doc_b,
+        content_a=_CONTENT_A,
+        content_b=_CONTENT_B,
+    )

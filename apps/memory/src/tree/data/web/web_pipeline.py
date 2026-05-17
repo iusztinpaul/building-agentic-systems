@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
@@ -26,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 @task(name="fetch-and-extract-web", retries=2, retry_delay_seconds=5)
-async def fetch_and_extract_web_task(url: str) -> Document:
-    return await fetch_and_extract_web(url)
+async def fetch_and_extract_web_task(url: str, user_id: PydanticObjectId) -> Document:
+    return await fetch_and_extract_web(url, user_id)
 
 
 @task(name="load-web-document", retries=1, retry_delay_seconds=2)
@@ -36,10 +37,10 @@ async def load_web_document_task(doc: Document) -> Document | None:
 
 
 @flow(name="ingest-web-url-etl", log_prints=True)
-async def ingest_web_url(url: str) -> Document | None:
+async def ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Ingest a single URL. Assumes MongoDB is initialised by the caller."""
 
-    doc = await fetch_and_extract_web_task(url)
+    doc = await fetch_and_extract_web_task(url, user_id)
     result = await load_web_document_task(doc)
 
     if result:
@@ -51,7 +52,9 @@ async def ingest_web_url(url: str) -> Document | None:
 
 
 @flow(name="ingest-web-url-batch-etl", log_prints=True)
-async def ingest_web_url_batch(urls: list[str]) -> list[Document]:
+async def ingest_web_url_batch(
+    urls: list[str], user_id: PydanticObjectId
+) -> list[Document]:
     """Batch-ingest URLs. Initialises MongoDB once at the top, then fans out."""
 
     await init_mongodb(
@@ -59,7 +62,7 @@ async def ingest_web_url_batch(urls: list[str]) -> list[Document]:
         settings.mongo.mongo_initdb_database,
     )
 
-    results = await asyncio.gather(*[ingest_web_url(url) for url in urls])
+    results = await asyncio.gather(*[ingest_web_url(url, user_id) for url in urls])
 
     ingested = [doc for doc in results if doc is not None]
     logger.info("Ingested %d web URLs out of %d", len(ingested), len(urls))

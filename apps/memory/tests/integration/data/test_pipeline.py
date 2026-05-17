@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.config.app_config import (
@@ -11,6 +13,8 @@ from tree.config.app_config import (
 )
 from tree.data.pipeline import data_pipeline
 from tree.entities.documents import Document, SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 FAKE_RSS_ENTRIES = [
@@ -180,6 +184,7 @@ def _mock_arxiv_source(mocker) -> None:
 
 
 class TestDataPipeline:
+    @pytest.mark.slow
     async def test_runs_all_three_pipelines(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_rss_source(mocker)
@@ -195,7 +200,7 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline()
+            result = await data_pipeline(_USER_ID)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -206,6 +211,7 @@ class TestDataPipeline:
         db_docs = await Document.find_all().to_list()
         assert len(db_docs) >= 4
 
+    @pytest.mark.slow
     async def test_runs_only_rss_and_arxiv_when_no_articles(
         self, mongo_client, mocker
     ) -> None:
@@ -219,13 +225,14 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline()
+            result = await data_pipeline(_USER_ID)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
         assert len(substack_docs) == 2
         assert len(hf_docs) == 2
 
+    @pytest.mark.slow
     async def test_runs_only_articles_and_arxiv_when_no_feeds(
         self, mongo_client, mocker
     ) -> None:
@@ -239,7 +246,7 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline()
+            result = await data_pipeline(_USER_ID)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -256,7 +263,7 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline()
+            result = await data_pipeline(_USER_ID)
 
         assert all(d.source_type == SourceType.HUGGINGFACE for d in result)
         assert len(result) == 2
@@ -320,30 +327,35 @@ sources:
         rss_doc = Document(
             source_type=SourceType.SUBSTACK,
             source_uri="https://blog.example.com/p/test-post-from-rss",
+            user_id=PydanticObjectId(),
             title="RSS-fetched post",
             content="RSS content",
         )
         article_doc = Document(
             source_type=SourceType.SUBSTACK,
             source_uri="https://blog.example.com/p/test-post",
+            user_id=PydanticObjectId(),
             title="Article post",
             content="Article content",
         )
         arxiv_doc = Document(
             source_type=SourceType.HUGGINGFACE,
             source_uri="arxiv://2401.00001",
+            user_id=PydanticObjectId(),
             title="Arxiv Paper",
             content="Arxiv abstract",
         )
         web_doc_anthropic = Document(
             source_type=SourceType.WEB,
             source_uri="https://www.anthropic.com/engineering/some-page",
+            user_id=PydanticObjectId(),
             title="Anthropic page",
             content="Anthropic content",
         )
         web_doc_reddit = Document(
             source_type=SourceType.WEB,
             source_uri="https://www.reddit.com/r/AI_Agents/comments/example",
+            user_id=PydanticObjectId(),
             title="Reddit thread",
             content="Reddit content",
         )
@@ -361,7 +373,7 @@ sources:
             new=AsyncMock(return_value=[arxiv_doc]),
         )
 
-        async def _fake_ingest_url(url: str) -> Document:
+        async def _fake_ingest_url(url: str, user_id: PydanticObjectId) -> Document:
             if "anthropic.com" in url:
                 return web_doc_anthropic
             if "reddit.com" in url:
@@ -386,13 +398,17 @@ sources:
 
         # --- Run the pipeline ---
         with prefect_tags("tests"):
-            result = await data_pipeline()
+            result = await data_pipeline(_USER_ID)
 
         # --- Assert each sub-flow was dispatched exactly as expected ---
 
-        rss_mock.assert_awaited_once_with(["https://blog.example.com/feed"])
-        article_mock.assert_awaited_once_with(["https://blog.example.com/p/test-post"])
-        arxiv_mock.assert_awaited_once_with(max_samples=2, fetch_content=False)
+        rss_mock.assert_awaited_once_with(["https://blog.example.com/feed"], _USER_ID)
+        article_mock.assert_awaited_once_with(
+            ["https://blog.example.com/p/test-post"], _USER_ID
+        )
+        arxiv_mock.assert_awaited_once_with(
+            user_id=_USER_ID, max_samples=2, fetch_content=False
+        )
         # Two web URLs dispatched in parallel: one explicit, one untyped→web.
         assert ingest_url_mock.await_count == 2
         called_urls = sorted(c.args[0] for c in ingest_url_mock.await_args_list)

@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from beanie import PydanticObjectId
+
 from tree.entities.knowledge_graph import EdgeType, NodeType
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.dedup import (
@@ -30,6 +32,10 @@ from tree.models.fake_model import FakeEmbeddingModel
 
 TEST_DATABASE = "integration_tests_twin"
 _NOW = datetime.now(tz=UTC)
+# Real PydanticObjectId used everywhere in this suite so prospective_ids carry
+# a realistic 24-hex-char tenant prefix.
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+_PH = str(_USER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +72,11 @@ def _seed_person(
     properties: dict[str, Any] | None = None,
     sources: list[Any] | None = None,
     confidence: float = 1.0,
+    user_id: PydanticObjectId = _USER_ID,
 ) -> dict[str, Any]:
     return {
         "_id": node_id,
+        "user_id": user_id,
         "kind": "node",
         "type": NodeType.PERSON.value,
         "name": name,
@@ -104,10 +112,11 @@ class TestSoftJoinPreservation:
         resolver,
         mocker,
     ) -> None:
-        # Arrange
+        # Arrange — pre-existing canonical seeded under the placeholder
+        # user prefix so it shares the tenant of the row add_entity writes.
         await kg_collection.insert_one(
             _seed_person(
-                "person:apple inc",
+                f"{_PH}:person:apple inc",
                 name="apple inc",
                 canonical_name="apple inc",
             )
@@ -119,6 +128,7 @@ class TestSoftJoinPreservation:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="apple",
             entity_type=NodeType.PERSON,
             properties={},
@@ -131,13 +141,13 @@ class TestSoftJoinPreservation:
 
         # Assert
         assert dedup_result.action == "none"
-        assert target_id == "person:apple"
+        assert target_id == f"{_PH}:person:apple"
 
-        new_doc = await kg_collection.find_one({"_id": "person:apple"})
+        new_doc = await kg_collection.find_one({"_id": f"{_PH}:person:apple"})
         assert new_doc is not None
         assert new_doc["canonical_name"] == "apple inc"
 
-        old_doc = await kg_collection.find_one({"_id": "person:apple inc"})
+        old_doc = await kg_collection.find_one({"_id": f"{_PH}:person:apple inc"})
         assert old_doc is not None
         assert old_doc["canonical_name"] == "apple inc"
 
@@ -146,7 +156,7 @@ class TestSoftJoinPreservation:
             {"canonical_name": "apple inc"}
         ).to_list(length=None)
         ids = {d["_id"] for d in same_canonical}
-        assert {"person:apple", "person:apple inc"} <= ids
+        assert {f"{_PH}:person:apple", f"{_PH}:person:apple inc"} <= ids
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +197,7 @@ class TestAutoMergeKeepPrimary:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="apple corp",
             entity_type=NodeType.PERSON,
             properties={"description": "a much longer description"},
@@ -240,6 +251,7 @@ class TestAutoMergeMergeProperties:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="apple corp",
             entity_type=NodeType.PERSON,
             properties={"description": "a much longer description"},
@@ -287,6 +299,7 @@ class TestAutoMergeMergeProperties:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="alice s",
             entity_type=NodeType.PERSON,
             properties={"email": "alice@example.com"},
@@ -335,6 +348,7 @@ class TestAutoMergeMergeProperties:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="bob j",
             entity_type=NodeType.PERSON,
             properties={"tags": ["b", "c"]},
@@ -383,6 +397,7 @@ class TestAutoMergeKeepAliases:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="apple corp",
             entity_type=NodeType.PERSON,
             properties={"description": "a much longer description"},
@@ -411,15 +426,16 @@ class TestFlaggedPath:
         resolver,
         mocker,
     ) -> None:
-        # Arrange
+        # Arrange — pre-existing canonical seeded under the placeholder
+        # tenant prefix so dedupe's matched_node_id lines up with reality.
         await kg_collection.insert_one(
-            _seed_person("person:alice smith", name="alice smith")
+            _seed_person(f"{_PH}:person:alice smith", name="alice smith")
         )
         _patch_dedupe(
             mocker,
             DeduplicationResult(
                 action="flagged",
-                matched_node_id="person:alice smith",
+                matched_node_id=f"{_PH}:person:alice smith",
                 matched_node_name="alice smith",
                 similarity_score=0.88,
                 match_type="embedding",
@@ -431,6 +447,7 @@ class TestFlaggedPath:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="alyce smyth",
             entity_type=NodeType.PERSON,
             properties={},
@@ -439,15 +456,15 @@ class TestFlaggedPath:
         )
 
         # Assert
-        assert target_id == "person:alyce smyth"
+        assert target_id == f"{_PH}:person:alyce smyth"
 
         # New node exists.
-        new_node = await kg_collection.find_one({"_id": "person:alyce smyth"})
+        new_node = await kg_collection.find_one({"_id": f"{_PH}:person:alyce smyth"})
         assert new_node is not None
         assert new_node["kind"] == "node"
 
         # SAME_AS edge with status="pending".
-        edge_id = "person:alyce smyth|same_as|person:alice smith"
+        edge_id = f"{_PH}:person:alyce smyth|same_as|{_PH}:person:alice smith"
         edge = await kg_collection.find_one({"_id": edge_id})
         assert edge is not None
         assert edge["kind"] == "edge"
@@ -496,6 +513,7 @@ class TestAliasesCap:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="brand new alias",
             entity_type=NodeType.PERSON,
             properties={},
@@ -543,6 +561,7 @@ class TestSourcesCap:
             database=mongo_client[TEST_DATABASE],
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="ignored",
             entity_type=NodeType.PERSON,
             properties={},
@@ -592,6 +611,7 @@ class TestConcurrentMerges:
                 database=mongo_client[TEST_DATABASE],
                 embedding_model=embedding_model,
                 resolver=resolver,
+                user_id=_USER_ID,
                 name="apple corp",
                 entity_type=NodeType.PERSON,
                 properties={},
@@ -602,6 +622,7 @@ class TestConcurrentMerges:
                 database=mongo_client[TEST_DATABASE],
                 embedding_model=embedding_model,
                 resolver=resolver,
+                user_id=_USER_ID,
                 name="apple llc",
                 entity_type=NodeType.PERSON,
                 properties={},
@@ -647,6 +668,7 @@ class TestIdempotency:
                 database=mongo_client[TEST_DATABASE],
                 embedding_model=embedding_model,
                 resolver=resolver,
+                user_id=_USER_ID,
                 name="apple corp",
                 entity_type=NodeType.PERSON,
                 properties={},

@@ -16,16 +16,31 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
 TEST_DATABASE = "integration_tests_twin"
+
+
+async def _make_user() -> User:
+    """Create a test User and return it.
+
+    The ``after_insert`` hook upserts the ``{user_id}:person:self`` node
+    automatically; tests rely on the User existing so the pipeline's
+    first-person resolver step has something to compare against.
+    """
+
+    user = User(identifier=f"test-user-{PydanticObjectId()}")
+    await user.insert()
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +53,14 @@ async def _insert_doc(
     title: str = "Test Document",
     content: str = "Alice is building an ML pipeline for production.",
     source_uri: str = "https://example.com/test-doc",
+    user_id: PydanticObjectId,
 ) -> Document:
     doc = Document(
         title=title,
         content=content,
         source_type=SourceType.HUGGINGFACE,
         source_uri=source_uri,
+        user_id=user_id,
         authors=["Test Author"],
     )
     await doc.insert()
@@ -150,7 +167,8 @@ class TestMemoryExtractionPipeline:
     async def test_extracts_nodes_and_edges_from_document(
         self, mongo_client, mocker
     ) -> None:
-        doc = await _insert_doc()
+        user = await _make_user()
+        doc = await _insert_doc(user_id=user.id)
         _patch_pipeline_deps(
             mocker,
             mongo_client,
@@ -159,7 +177,9 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(document_ids=[str(doc.id)])
+            summary = await memory_extraction(
+                user_id=user.id, document_ids=[str(doc.id)]
+            )
 
         assert summary.documents_processed == 1
         assert summary.nodes_written > 0
@@ -172,16 +192,21 @@ class TestMemoryExtractionPipeline:
         assert NodeType.CHUNK in node_types
         assert NodeType.PERSON in node_types
         assert NodeType.TASK in node_types
-        # PERSON id is type-prefixed.
+        # PERSON id carries the real user_id prefix (post-#019).
         person_nodes = [n for n in node_entries if n["type"] == NodeType.PERSON]
-        assert person_nodes[0]["_id"] == "person:alice"
+        assert person_nodes[0]["_id"] == f"{user.id}:person:alice"
+        # And every row carries the right tenant.
+        for n in node_entries:
+            assert n["user_id"] == user.id
 
     async def test_skips_document_without_content(self, mongo_client, mocker) -> None:
+        user = await _make_user()
         doc = Document(
             title="Empty Doc",
             content="",
             source_type=SourceType.HUGGINGFACE,
             source_uri="https://example.com/empty",
+            user_id=user.id,
             authors=["Author"],
         )
         await doc.insert()
@@ -193,7 +218,9 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(document_ids=[str(doc.id)])
+            summary = await memory_extraction(
+                user_id=user.id, document_ids=[str(doc.id)]
+            )
 
         assert summary.nodes_written == 0
         assert summary.edges_written == 0
@@ -204,15 +231,18 @@ class TestMemoryExtractionPipeline:
     async def test_processes_multiple_documents(self, mongo_client, mocker) -> None:
         """Per-doc fan-out: tasks ① and ② run separately for each document."""
 
+        user = await _make_user()
         doc1 = await _insert_doc(
             title="Doc 1",
             content="Alice works on ML.",
             source_uri="https://example.com/doc1",
+            user_id=user.id,
         )
         doc2 = await _insert_doc(
             title="Doc 2",
             content="Bob builds data pipelines.",
             source_uri="https://example.com/doc2",
+            user_id=user.id,
         )
 
         fake_llm = FakeLLM([_ALICE_TODO_RESPONSE, _ALICE_TODO_RESPONSE])
@@ -224,7 +254,9 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(document_ids=[str(doc1.id), str(doc2.id)])
+            summary = await memory_extraction(
+                user_id=user.id, document_ids=[str(doc1.id), str(doc2.id)]
+            )
 
         assert summary.documents_processed == 2
         # LLM was called once per chunk per doc (>= 2 calls total).
@@ -235,7 +267,8 @@ class TestMemoryExtractionPipeline:
             assert any(n["type"] == NodeType.DOCUMENT for n in node_entries)
 
     async def test_structural_edges_created(self, mongo_client, mocker) -> None:
-        doc = await _insert_doc()
+        user = await _make_user()
+        doc = await _insert_doc(user_id=user.id)
         _patch_pipeline_deps(
             mocker,
             mongo_client,
@@ -244,12 +277,21 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         _, edge_entries = await _kg_entries(mongo_client, doc.id)
         edge_types = {e["type"] for e in edge_entries}
         assert EdgeType.PART_OF in edge_types
         assert EdgeType.MENTIONS in edge_types
+
+    # NOTE: The earlier ``test_two_users_isolation`` extraction-only
+    # check was removed in #021. Its essential assertion (two tenants
+    # extracting an identical-name PERSON produce distinct ``_id``s and
+    # carry distinct ``user_id``s) is covered by:
+    #   - ``tests/unit/entities/test_node_id_isolation.py`` (id shape).
+    #   - ``tests/integration/test_two_user_isolation.py`` (full
+    #     query-path acceptance gate, including the PERSON-row
+    #     ``user_id`` invariant).
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +301,8 @@ class TestMemoryExtractionPipeline:
 
 class TestIdempotency:
     async def test_idempotent_upserts(self, mongo_client, mocker) -> None:
-        doc = await _insert_doc()
+        user = await _make_user()
+        doc = await _insert_doc(user_id=user.id)
         _patch_pipeline_deps(
             mocker,
             mongo_client,
@@ -268,7 +311,7 @@ class TestIdempotency:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         first_nodes, first_edges = await _kg_entries(mongo_client, doc.id)
         first_count = len(first_nodes) + len(first_edges)
@@ -282,7 +325,7 @@ class TestIdempotency:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         second_nodes, second_edges = await _kg_entries(mongo_client, doc.id)
         assert len(second_nodes) + len(second_edges) == first_count
@@ -318,9 +361,11 @@ class TestRewiredNormalizeNodesScenarios:
     async def test_exact_dedup_within_payload(self, mongo_client, mocker) -> None:
         """Two mentions of the same name in one chunk → one PERSON node."""
 
+        user = await _make_user()
         doc = await _insert_doc(
             content="Alice and Alice met.",
             source_uri="https://example.com/exact-dedup",
+            user_id=user.id,
         )
         _patch_pipeline_deps(
             mocker,
@@ -330,12 +375,12 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         persons = [n for n in node_entries if n["type"] == NodeType.PERSON]
         assert len(persons) == 1
-        assert persons[0]["_id"] == "person:alice smith"
+        assert persons[0]["_id"] == f"{user.id}:person:alice smith"
 
     async def test_cross_type_protection(self, mongo_client, mocker) -> None:
         """PERSON ``alice`` and TASK ``alice`` stay as two distinct nodes."""
@@ -351,9 +396,11 @@ class TestRewiredNormalizeNodesScenarios:
             ],
             "edges": [],
         }
+        user = await _make_user()
         doc = await _insert_doc(
             content="Alice has the alice task.",
             source_uri="https://example.com/cross-type",
+            user_id=user.id,
         )
         _patch_pipeline_deps(
             mocker,
@@ -363,16 +410,17 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         person = [n for n in node_entries if n["type"] == NodeType.PERSON]
         task = [n for n in node_entries if n["type"] == NodeType.TASK]
         assert len(person) == 1
         assert len(task) == 1
-        # IDs are type-prefixed, so even shared surface form stays distinct.
-        assert person[0]["_id"] == "person:alice"
-        assert task[0]["_id"] == "task:alice"
+        # IDs are tenant- and type-prefixed (#018), so even a shared surface
+        # form stays distinct across types.
+        assert person[0]["_id"] == f"{user.id}:person:alice"
+        assert task[0]["_id"] == f"{user.id}:task:alice"
 
     async def test_edge_remapping_after_in_payload_collapse(
         self, mongo_client, mocker
@@ -408,9 +456,11 @@ class TestRewiredNormalizeNodesScenarios:
                 },
             ],
         }
+        user = await _make_user()
         doc = await _insert_doc(
             content="Alice has a task. Alice owns the build ml pipeline task.",
             source_uri="https://example.com/edge-dedup",
+            user_id=user.id,
         )
         _patch_pipeline_deps(
             mocker,
@@ -420,14 +470,15 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(document_ids=[str(doc.id)])
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
         _, edge_entries = await _kg_entries(mongo_client, doc.id)
         todo_edges = [e for e in edge_entries if e["type"] == EdgeType.TODO]
         assert len(todo_edges) == 1
+        ph = user.id
         assert (
             todo_edges[0]["_id"]
-            == f"person:alice|{EdgeType.TODO}|task:build ml pipeline"
+            == f"{ph}:person:alice|{EdgeType.TODO}|{ph}:task:build ml pipeline"
         )
 
 
@@ -440,7 +491,8 @@ class TestMisconfigurationFailsFast:
     async def test_type_strict_disagreement_raises_at_entry(
         self, mongo_client, mocker, monkeypatch
     ) -> None:
-        doc = await _insert_doc()
+        user = await _make_user()
+        doc = await _insert_doc(user_id=user.id)
         _patch_pipeline_deps(
             mocker,
             mongo_client,
@@ -453,4 +505,4 @@ class TestMisconfigurationFailsFast:
 
         with pytest.raises(ValueError, match="type_strict.*match_same_type_only"):
             with prefect_tags("tests"):
-                await memory_extraction(document_ids=[str(doc.id)])
+                await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])

@@ -33,3 +33,14 @@ repos:
         entry: bash -c 'cd apps/harness && bunx biome check --write src tests'
         pass_filenames: false
         files: ^apps/harness/.*\.(ts|tsx|js|jsx|json)$
+
+      # Memory (Python) — KGQuery discipline check. Fails if raw
+      # ``KnowledgeGraphEntry.find(...)`` reads appear outside the
+      # allow-list documented in scripts/check_kgquery_discipline.py.
+      # See tracker/019 for the rationale.
+      - id: kgquery-discipline
+        name: KGQuery discipline (memory)
+        language: system
+        entry: bash -c 'cd apps/memory && uv run python scripts/check_kgquery_discipline.py'
+        pass_filenames: false
+        files: ^apps/memory/(src|scripts|deploy)/.*\.py$

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
 from tree.data.web.web import (
@@ -13,6 +14,8 @@ from tree.data.web.web import (
     load_web_document,
 )
 from tree.entities.documents import Document, SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestDeriveTitle:
@@ -89,7 +92,7 @@ class TestFetchAndExtractWeb:
             return_value=markdown,
         )
 
-        doc = await fetch_and_extract_web("https://example.com/posts/great")
+        doc = await fetch_and_extract_web("https://example.com/posts/great", _USER_ID)
 
         assert doc.source_type == SourceType.WEB
         assert doc.source_uri == "https://example.com/posts/great"
@@ -110,7 +113,9 @@ class TestFetchAndExtractWeb:
             return_value=markdown,
         )
 
-        doc = await fetch_and_extract_web("https://example.com/blog/some-thing")
+        doc = await fetch_and_extract_web(
+            "https://example.com/blog/some-thing", _USER_ID
+        )
 
         assert doc.title == "Some Thing"
 
@@ -122,7 +127,7 @@ class TestFetchAndExtractWeb:
             return_value=markdown,
         )
 
-        await fetch_and_extract_web("https://example.com/x")
+        await fetch_and_extract_web("https://example.com/x", _USER_ID)
 
         mock_fetch.assert_awaited_once()
         # Verify data_format is markdown
@@ -139,6 +144,7 @@ def _make_doc(
     return Document(
         source_type=SourceType.WEB,
         source_uri=source_uri,
+        user_id=PydanticObjectId(),
         title=title,
         summary=content[:300],
         content=content,

@@ -6,6 +6,7 @@ import logging
 from typing import Any, Literal
 
 import httpx
+from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
 
@@ -104,6 +105,7 @@ async def query_memory(
         query=query,
         llm=lc["llm"],
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
         max_results=max_results,
     )
     output = _serialize(results)
@@ -142,6 +144,7 @@ async def search_memory(
         database=lc["database"],
         query=query,
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
         top_k=top_k,
         max_hops=max_hops,
     )
@@ -186,6 +189,7 @@ async def deep_search_memory(
         database=lc["database"],
         query=query,
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
         top_k=top_k,
         max_hops=max_hops,
     )
@@ -214,8 +218,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
         url: The web URL to fetch and ingest.
     """
 
+    lc = ctx.lifespan_context
     try:
-        document = await _ingest_url_dispatch(url)
+        document = await _ingest_url_dispatch(url, lc["user_id"])
     except ValueError as exc:
         return json.dumps({"error": "unsupported_url", "detail": str(exc)})
     except BrightDataConfigurationError as exc:
@@ -234,13 +239,13 @@ async def ingest_url(url: str, ctx: Context) -> str:
     if document is None:
         return json.dumps({"status": "already_ingested", "url": url})
 
-    lc = ctx.lifespan_context
     summary = await run_ingestion_pipeline(
         document,
         client=lc["client"],
         database=lc["database"],
         llm=lc["llm"],
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
     )
     return json.dumps(summary)
 
@@ -261,8 +266,9 @@ async def ingest_file(
         title: Optional title override. Defaults to the filename.
     """
 
+    lc = ctx.lifespan_context
     try:
-        document = await _ingest_file(file_path, title)
+        document = await _ingest_file(file_path, lc["user_id"], title)
     except (
         FileNotFoundError,
         IsADirectoryError,
@@ -275,13 +281,13 @@ async def ingest_file(
     if document is None:
         return json.dumps({"status": "already_ingested", "file_path": file_path})
 
-    lc = ctx.lifespan_context
     summary = await run_ingestion_pipeline(
         document,
         client=lc["client"],
         database=lc["database"],
         llm=lc["llm"],
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
     )
     return json.dumps(summary)
 
@@ -379,8 +385,9 @@ async def search_web(
     }
 
     if ingest:
+        lc = ctx.lifespan_context
         payload["ingest"] = await _build_ingest_block(
-            results, ingest_top_k, ingest_urls
+            results, ingest_top_k, ingest_urls, user_id=lc["user_id"]
         )
 
     return json.dumps(payload, indent=2)
@@ -390,6 +397,8 @@ async def _build_ingest_block(
     results: list[Any],
     ingest_top_k: int | None,
     ingest_urls: list[str] | None,
+    *,
+    user_id: PydanticObjectId,
 ) -> dict[str, Any]:
     """Select URLs and trigger the batch ingest deployment. Always returns a dict."""
 
@@ -411,7 +420,7 @@ async def _build_ingest_block(
         }
 
     try:
-        trigger = await _trigger_url_batch_ingest(selected)
+        trigger = await _trigger_url_batch_ingest(selected, user_id)
     except Exception as exc:  # noqa: BLE001 — best-effort: never propagate.
         logger.warning("Failed to trigger ingest-web-url-batch-etl: %s", exc)
         return {
@@ -518,18 +527,19 @@ async def ingest_conversation(
             {"error": "empty_input", "detail": "Conversation text must not be empty."}
         )
 
-    document = await _ingest_conversation(conversation_text, title)
+    lc = ctx.lifespan_context
+    document = await _ingest_conversation(conversation_text, lc["user_id"], title)
 
     if document is None:
         return json.dumps({"status": "already_ingested"})
 
-    lc = ctx.lifespan_context
     summary = await run_ingestion_pipeline(
         document,
         client=lc["client"],
         database=lc["database"],
         llm=lc["llm"],
         embedding_model=lc["embedding_model"],
+        user_id=lc["user_id"],
     )
     return json.dumps(summary)
 
@@ -598,7 +608,10 @@ async def review_list_pending(
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     pending = await _find_pending_duplicates(
-        database, entity_type=type_filter, limit=limit
+        database,
+        user_id=lc["user_id"],
+        entity_type=type_filter,
+        limit=limit,
     )
     return json.dumps([_serialize_pending_duplicate(p) for p in pending], indent=2)
 
@@ -639,6 +652,7 @@ async def review_confirm(
     try:
         result = await _review_duplicate(
             database,
+            user_id=lc["user_id"],
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.CONFIRM,
@@ -675,6 +689,7 @@ async def review_reject(
     try:
         result = await _review_duplicate(
             database,
+            user_id=lc["user_id"],
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.REJECT,

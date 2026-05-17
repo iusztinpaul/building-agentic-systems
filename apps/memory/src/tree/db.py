@@ -3,8 +3,9 @@ from pymongo import AsyncMongoClient
 
 from tree.entities.documents import Document
 from tree.entities.knowledge_graph import KnowledgeGraphEntry
+from tree.entities.users import User
 
-ALL_DOCUMENT_MODELS = [Document, KnowledgeGraphEntry]
+ALL_DOCUMENT_MODELS = [Document, KnowledgeGraphEntry, User]
 
 
 async def init_mongodb(uri: str, database: str) -> AsyncMongoClient:

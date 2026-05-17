@@ -13,6 +13,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.dedup import (
@@ -21,6 +22,8 @@ from tree.memory.extraction.dedup import (
     MergeStrategy,
     dedupe_entity,
 )
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestDeduplicationConfigDefaults:
@@ -105,6 +108,7 @@ class TestDedupeEntityShortCircuit:
         # Act
         result = await dedupe_entity(
             database=database,
+            user_id=_USER_ID,
             name="alice",
             entity_type=NodeType.PERSON,
             embedding=[0.1, 0.2, 0.3],
@@ -162,6 +166,7 @@ class TestDedupeEntityReadOnlyInvariant:
         # Act
         await dedupe_entity(
             database=database,
+            user_id=_USER_ID,
             name="alice",
             entity_type=NodeType.PERSON,
             embedding=[0.1, 0.2, 0.3],

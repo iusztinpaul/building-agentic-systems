@@ -29,6 +29,7 @@ import math
 from datetime import UTC, datetime
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.config.app_config import app_config
 from tree.entities.knowledge_graph import EdgeType, NodeType
@@ -42,6 +43,7 @@ from tree.models.fake_model import FakeEmbeddingModel
 TEST_DATABASE = "integration_tests_twin"
 _DIMS = 8
 _NOW = datetime.now(tz=UTC)
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +91,11 @@ def _node_doc(
     merged_into: str | None = None,
     aliases: list[str] | None = None,
     canonical_name: str | None = None,
+    user_id: PydanticObjectId = _USER_ID,
 ) -> dict:
     doc: dict = {
         "_id": node_id,
+        "user_id": user_id,
         "kind": "node",
         "type": node_type.value,
         "name": name,
@@ -116,9 +120,11 @@ def _edge_doc(
     target_type: NodeType,
     edge_type: EdgeType,
     properties: dict | None = None,
+    user_id: PydanticObjectId = _USER_ID,
 ) -> dict:
     return {
         "_id": edge_id,
+        "user_id": user_id,
         "kind": "edge",
         "type": edge_type.value,
         "source_node_id": source_node_id,
@@ -153,7 +159,7 @@ async def _wait_for_indexed_count(
                         "queryVector": probe_vector,
                         "numCandidates": 100,
                         "limit": 50,
-                        "filter": {"kind": "node"},
+                        "filter": {"user_id": _USER_ID, "kind": "node"},
                     }
                 },
                 {"$count": "n"},
@@ -195,6 +201,7 @@ async def _kg_collection(mongo_client):
         mongo_client,
         TEST_DATABASE,
         embedding_model=FakeEmbeddingModel(dimensions=_DIMS),
+        user_id=_USER_ID,
     )
     yield col
     await db.drop_collection("knowledge_graph")
@@ -205,6 +212,7 @@ async def _kg_collection(mongo_client):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_mongot
 @pytest.mark.usefixtures("_skip_without_mongot")
 class TestDedupeEntityTiers:
     async def test_three_tier_decision_merged(
@@ -239,6 +247,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice smith query",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -275,6 +284,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alyce smyth query",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -305,6 +315,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="bob jones query",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -342,6 +353,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice new",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -372,6 +384,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="write report",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -427,6 +440,7 @@ class TestDedupeEntityTiers:
         # is filtered out by the rejected SAME_AS edge.
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -473,6 +487,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="charlie",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -517,6 +532,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="brand new",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -556,6 +572,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice smith",  # identical to candidate name → fuzz==1.0
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -600,6 +617,7 @@ class TestDedupeEntityTiers:
         config = DeduplicationConfig(use_fuzzy_matching=False)
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="grace",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -651,6 +669,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice smith",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -699,6 +718,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="John Smith",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -745,6 +765,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="John Smith",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),
@@ -797,6 +818,7 @@ class TestDedupeEntityTiers:
         )
         result = await dedupe_entity(
             database=mongo_client[TEST_DATABASE],
+            user_id=_USER_ID,
             name="alice smith",
             entity_type=NodeType.PERSON,
             embedding=_query_vector(),

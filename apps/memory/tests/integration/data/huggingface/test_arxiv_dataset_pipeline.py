@@ -1,7 +1,11 @@
+import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
 from tree.entities.documents import Document, SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 FAKE_ENTRIES = [
     {
@@ -36,7 +40,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+            result = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=5, fetch_content=False
+            )
 
         assert len(result) == 5
         for doc in result:
@@ -51,6 +57,7 @@ class TestIngestArxivDatasetFlow:
         ).to_list()
         assert len(db_docs) == 5
 
+    @pytest.mark.slow
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         mocker.patch(
             "tree.data.huggingface.arxiv_dataset.load_dataset",
@@ -62,7 +69,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            first_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+            first_run = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=5, fetch_content=False
+            )
         assert len(first_run) == 5
 
         mocker.patch(
@@ -71,7 +80,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            second_run = await ingest_arxiv_dataset(max_samples=5, fetch_content=False)
+            second_run = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=5, fetch_content=False
+            )
         assert len(second_run) == 0
 
         db_docs = await Document.find(
@@ -79,6 +90,7 @@ class TestIngestArxivDatasetFlow:
         ).to_list()
         assert len(db_docs) == 5
 
+    @pytest.mark.slow
     async def test_with_fetch_content(self, mongo_client, mocker) -> None:
         mocker.patch(
             "tree.data.huggingface.arxiv_dataset.load_dataset",
@@ -94,7 +106,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_arxiv_dataset(max_samples=2, fetch_content=True)
+            result = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=2, fetch_content=True
+            )
 
         assert len(result) == 2
         for doc in result:
@@ -121,7 +135,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_arxiv_dataset(max_samples=7, fetch_content=False)
+            result = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=7, fetch_content=False
+            )
 
         assert len(result) == 7
         db_docs = await Document.find(
@@ -133,6 +149,7 @@ class TestIngestArxivDatasetFlow:
         latent = Document(
             source_type=SourceType.LATENT,
             source_uri="https://arxiv.org/abs/2103.00000",
+            user_id=_USER_ID,
         )
         await latent.insert()
 
@@ -146,7 +163,9 @@ class TestIngestArxivDatasetFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_arxiv_dataset(max_samples=1, fetch_content=False)
+            result = await ingest_arxiv_dataset(
+                user_id=_USER_ID, max_samples=1, fetch_content=False
+            )
 
         assert len(result) == 1
         assert result[0].id == latent.id

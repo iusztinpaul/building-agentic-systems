@@ -27,6 +27,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from beanie import PydanticObjectId
 from prefect import flow
 
 from tree.config.app_config import (
@@ -47,14 +48,17 @@ from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
+from tree.memory.indexing.core import assert_settings_match_live_vector_index
 
 logger = logging.getLogger(__name__)
 
 
 async def _ingest_arxiv_dataset_entry(
     entry: HuggingFaceDatasetSource,
+    user_id: PydanticObjectId,
 ) -> list[Document]:
     return await ingest_arxiv_dataset(
+        user_id=user_id,
         max_samples=entry.max_samples,
         fetch_content=entry.fetch_content,
     )
@@ -64,22 +68,44 @@ async def _ingest_arxiv_dataset_entry(
 # Add a new dataset by registering its id alongside a handler that maps
 # the source entry to the right ingestion flow.
 _HUGGINGFACE_DATASET_HANDLERS: dict[
-    str, Callable[[HuggingFaceDatasetSource], Awaitable[list[Document]]]
+    str,
+    Callable[[HuggingFaceDatasetSource, PydanticObjectId], Awaitable[list[Document]]],
 ] = {
     "librarian-bots/arxiv-metadata-snapshot": _ingest_arxiv_dataset_entry,
 }
 
 
 @flow(name="data-pipeline-etl", log_prints=True)
-async def data_pipeline() -> list[Document]:
+async def data_pipeline(user_id: PydanticObjectId) -> list[Document]:
     """Walk the flat ``app_config.sources.sources`` list and dispatch each
-    entry to the right sub-flow.
+    entry to the right sub-flow under ``user_id``.
     """
 
-    await init_mongodb(
+    client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
+
+    # #016 boot-time gate: refuse to run if ``settings.embedding_dim``
+    # disagrees with the live Atlas Vector Search index. The data
+    # pipeline itself does not write vectors, but it produces the
+    # documents the indexing pipeline will embed — a silent dim drift
+    # here corrupts every downstream embedding write. ``vector_index
+    # not found`` is non-fatal at this layer (first-ever run, indexing
+    # hasn't bootstrapped the index yet) — only a real dim **mismatch**
+    # hard-fails.
+    try:
+        await assert_settings_match_live_vector_index(
+            client, settings.mongo.mongo_initdb_database
+        )
+    except RuntimeError as exc:
+        if "vector_index not found" in str(exc):
+            logger.info(
+                "vector_index not yet provisioned; skipping dim-check at "
+                "data_pipeline boot. The indexing pipeline will bootstrap it."
+            )
+        else:
+            raise
 
     all_ingested: list[Document] = []
 
@@ -90,7 +116,7 @@ async def data_pipeline() -> list[Document]:
     if rss_entries:
         feed_urls = [s.uri for s in rss_entries]
         logger.info("Starting substack RSS pipeline with %d feeds", len(feed_urls))
-        rss_docs = await ingest_substack_rss_feed_batch(feed_urls)
+        rss_docs = await ingest_substack_rss_feed_batch(feed_urls, user_id)
         all_ingested.extend(rss_docs)
         logger.info("Substack RSS pipeline ingested %d documents", len(rss_docs))
     else:
@@ -103,7 +129,7 @@ async def data_pipeline() -> list[Document]:
         logger.info(
             "Starting substack article pipeline with %d URLs", len(article_urls)
         )
-        article_docs = await ingest_substack_article_batch(article_urls)
+        article_docs = await ingest_substack_article_batch(article_urls, user_id)
         all_ingested.extend(article_docs)
         logger.info(
             "Substack article pipeline ingested %d documents", len(article_docs)
@@ -118,7 +144,7 @@ async def data_pipeline() -> list[Document]:
     if yt_rss_entries:
         yt_rss_urls = [s.uri for s in yt_rss_entries]
         logger.info("Starting YouTube RSS pipeline with %d feeds", len(yt_rss_urls))
-        yt_rss_docs = await ingest_youtube_rss_feed_batch(yt_rss_urls)
+        yt_rss_docs = await ingest_youtube_rss_feed_batch(yt_rss_urls, user_id)
         all_ingested.extend(yt_rss_docs)
         logger.info("YouTube RSS pipeline ingested %d documents", len(yt_rss_docs))
     else:
@@ -129,7 +155,7 @@ async def data_pipeline() -> list[Document]:
     if yt_video_entries:
         yt_video_urls = [s.uri for s in yt_video_entries]
         logger.info("Starting YouTube video pipeline with %d URLs", len(yt_video_urls))
-        yt_video_docs = await ingest_youtube_video_batch(yt_video_urls)
+        yt_video_docs = await ingest_youtube_video_batch(yt_video_urls, user_id)
         all_ingested.extend(yt_video_docs)
         logger.info("YouTube video pipeline ingested %d documents", len(yt_video_docs))
     else:
@@ -148,7 +174,7 @@ async def data_pipeline() -> list[Document]:
                     f"Register a handler in {__name__}._HUGGINGFACE_DATASET_HANDLERS."
                 )
             logger.info("Starting HuggingFace dataset pipeline for %s", entry.uri)
-            hf_docs = await handler(entry)
+            hf_docs = await handler(entry, user_id)
             all_ingested.extend(hf_docs)
             logger.info(
                 "HuggingFace dataset pipeline for %s ingested %d documents",
@@ -164,7 +190,9 @@ async def data_pipeline() -> list[Document]:
     web_entries = [s for s in sources if isinstance(s, WebSource)]
     if web_entries:
         logger.info("Starting URL pipeline (dispatcher) with %d URLs", len(web_entries))
-        url_results = await asyncio.gather(*[ingest_url(s.uri) for s in web_entries])
+        url_results = await asyncio.gather(
+            *[ingest_url(s.uri, user_id) for s in web_entries]
+        )
         url_docs = [d for d in url_results if d is not None]
         all_ingested.extend(url_docs)
         logger.info("URL pipeline ingested %d documents", len(url_docs))

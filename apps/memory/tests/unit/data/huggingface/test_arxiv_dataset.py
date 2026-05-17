@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.huggingface.arxiv_dataset import (
     extract_document,
@@ -9,6 +10,8 @@ from tree.data.huggingface.arxiv_dataset import (
     parse_update_date,
 )
 from tree.entities.documents import SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 SAMPLE_ENTRY = {
     "id": "2103.12345",
@@ -73,7 +76,7 @@ class TestParseAuthors:
 
 class TestExtractDocument:
     def test_maps_fields(self) -> None:
-        doc = extract_document(SAMPLE_ENTRY)
+        doc = extract_document(SAMPLE_ENTRY, _USER_ID)
 
         assert doc.source_type == SourceType.HUGGINGFACE
         assert doc.source_uri == "https://arxiv.org/abs/2103.12345"
@@ -86,7 +89,7 @@ class TestExtractDocument:
         assert doc.references == []
 
     def test_empty_entry_returns_none(self) -> None:
-        result = extract_document({})
+        result = extract_document({}, _USER_ID)
 
         assert result is None
 
@@ -99,7 +102,7 @@ class TestExtractDocument:
             "categories": None,
             "update_date": None,
         }
-        doc = extract_document(entry)
+        doc = extract_document(entry, _USER_ID)
 
         assert doc.source_uri == "https://arxiv.org/abs/2103.00001"
         assert doc.title == ""

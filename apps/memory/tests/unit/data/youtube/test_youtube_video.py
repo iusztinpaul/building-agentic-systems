@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from beanie import PydanticObjectId
+
 from tree.data.youtube.types import (
     FetchedTranscript,
     TranscriptSegment,
@@ -23,6 +25,7 @@ from tree.entities.documents import SourceType
 
 VIDEO_ID = "eYaWxljC4sA"
 CANONICAL_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 def _make_transcript(
@@ -79,7 +82,10 @@ class TestBuildDocument:
         transcript = _make_transcript(plain_text="line one\nline two")
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         assert doc.source_type == SourceType.YOUTUBE
@@ -93,7 +99,10 @@ class TestBuildDocument:
         transcript = _make_transcript(plain_text="some words")
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         assert doc.title == f"YouTube video {VIDEO_ID}"
@@ -106,7 +115,10 @@ class TestBuildDocument:
         transcript = _make_transcript(plain_text=long_text)
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         # No title → summary uses the transcript prefix (≤ 280 chars per spec).
@@ -119,7 +131,10 @@ class TestBuildDocument:
         transcript = _make_transcript()
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         assert doc.summary == "A Real Title"
@@ -129,7 +144,10 @@ class TestBuildDocument:
         transcript = _make_transcript()
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         assert doc.date is not None
@@ -142,7 +160,10 @@ class TestBuildDocument:
         transcript = _make_transcript()
 
         doc = build_document(
-            video_id=VIDEO_ID, metadata=metadata, transcript=transcript
+            video_id=VIDEO_ID,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=_USER_ID,
         )
 
         assert doc.date == publish

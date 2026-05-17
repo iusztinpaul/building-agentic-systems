@@ -41,6 +41,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from beanie import PydanticObjectId
+
 from tree.entities.knowledge_graph import (
     EdgeType,
     NodeType,
@@ -72,10 +74,11 @@ _KG_COLLECTION = "knowledge_graph"
 async def find_pending_duplicates(
     database: AsyncDatabase,
     *,
+    user_id: PydanticObjectId,
     entity_type: NodeType | None = None,
     limit: int = 50,
 ) -> list[PendingDuplicate]:
-    """List SAME_AS edges with ``status="pending"``.
+    """List SAME_AS edges with ``status="pending"`` for ``user_id``.
 
     Sorts by similarity score (``properties.confidence``) descending so
     the most-likely duplicates surface first. The optional ``entity_type``
@@ -84,8 +87,14 @@ async def find_pending_duplicates(
     rely on source/target type being equal because the dedup pipeline
     only emits SAME_AS between same-typed nodes).
 
+    Tenant scoping:
+        Every ``$match`` (including the two ``$lookup`` pipelines that
+        hydrate source/target nodes) carries an explicit ``user_id``
+        predicate. Cross-tenant rows are invisible by construction.
+
     Args:
         database: ``AsyncDatabase`` handle.
+        user_id: The tenant whose pending pairs are returned. Required.
         entity_type: Optional :class:`NodeType` filter. ``None`` returns
             pending pairs of every type.
         limit: Maximum number of pairs to return.
@@ -101,6 +110,7 @@ async def find_pending_duplicates(
     pipeline: list[dict[str, Any]] = [
         {
             "$match": {
+                "user_id": user_id,
                 "kind": "edge",
                 "type": EdgeType.SAME_AS.value,
                 "properties.status": "pending",
@@ -111,16 +121,30 @@ async def find_pending_duplicates(
         {
             "$lookup": {
                 "from": _KG_COLLECTION,
-                "localField": "source_node_id",
-                "foreignField": "_id",
+                "let": {"src_id": "$source_node_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": ["$_id", "$$src_id"]},
+                            "user_id": user_id,
+                        }
+                    }
+                ],
                 "as": "_source_node",
             }
         },
         {
             "$lookup": {
                 "from": _KG_COLLECTION,
-                "localField": "target_node_id",
-                "foreignField": "_id",
+                "let": {"tgt_id": "$target_node_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {"$eq": ["$_id", "$$tgt_id"]},
+                            "user_id": user_id,
+                        }
+                    }
+                ],
                 "as": "_target_node",
             }
         },
@@ -184,7 +208,12 @@ async def find_pending_duplicates(
 # ---------------------------------------------------------------------------
 
 
-async def get_same_as_cluster(database: AsyncDatabase, node_id: str) -> set[str]:
+async def get_same_as_cluster(
+    database: AsyncDatabase,
+    node_id: str,
+    *,
+    user_id: PydanticObjectId,
+) -> set[str]:
     """Return ``node_id`` plus every node it shares a SAME_AS edge with.
 
     Single-hop only. Status is ignored — confirmed, pending, and rejected
@@ -192,9 +221,15 @@ async def get_same_as_cluster(database: AsyncDatabase, node_id: str) -> set[str]
     in the returned set so callers can pass the set directly to query
     helpers without re-adding the seed.
 
+    Tenant scoping:
+        The ``find(...)`` over SAME_AS edges carries an explicit
+        ``user_id`` predicate. A cross-tenant ``node_id`` returns just
+        the seed (no edges visible under the bound tenant).
+
     Args:
         database: ``AsyncDatabase`` handle.
         node_id: The ``_id`` of the node to centre the cluster on.
+        user_id: The tenant whose SAME_AS edges are traversed. Required.
 
     Returns:
         A set of node ``_id`` strings.
@@ -205,6 +240,7 @@ async def get_same_as_cluster(database: AsyncDatabase, node_id: str) -> set[str]
 
     cursor = collection.find(
         {
+            "user_id": user_id,
             "kind": "edge",
             "type": EdgeType.SAME_AS.value,
             "$or": [
@@ -233,13 +269,14 @@ async def get_same_as_cluster(database: AsyncDatabase, node_id: str) -> set[str]
 async def review_duplicate(
     database: AsyncDatabase,
     *,
+    user_id: PydanticObjectId,
     source_node_id: str,
     target_node_id: str,
     decision: ReviewDecision,
     reviewed_by: str,
     merge_strategy: MergeStrategy = MergeStrategy.KEEP_PRIMARY,
 ) -> ReviewResult:
-    """Confirm or reject a pending SAME_AS pair.
+    """Confirm or reject a pending SAME_AS pair belonging to ``user_id``.
 
     Locates the SAME_AS edge between the two nodes (either direction). On
     ``CONFIRM`` picks a winner via the tiebreaker rule (older
@@ -264,8 +301,15 @@ async def review_duplicate(
     * A cross-decision transition (confirm-after-reject or
       reject-after-confirm) raises :class:`ValueError`.
 
+    Tenant scoping:
+        Every ``find_one`` / ``update_one`` carries an explicit
+        ``user_id`` predicate. Calling this with a pair whose SAME_AS
+        edge belongs to a different tenant raises ``ValueError`` (the
+        edge is invisible under ``user_id``).
+
     Args:
         database: ``AsyncDatabase`` handle.
+        user_id: The tenant the SAME_AS edge belongs to. Required.
         source_node_id: One endpoint of the SAME_AS edge.
         target_node_id: The other endpoint of the SAME_AS edge.
         decision: :class:`ReviewDecision.CONFIRM` or
@@ -279,9 +323,10 @@ async def review_duplicate(
         A populated :class:`ReviewResult`.
 
     Raises:
-        ValueError: When no SAME_AS edge exists between the two nodes,
-            either node is missing, or the persisted status disagrees
-            with ``decision`` (cross-decision transition).
+        ValueError: When no SAME_AS edge exists between the two nodes
+            (under ``user_id``), either node is missing, or the
+            persisted status disagrees with ``decision`` (cross-decision
+            transition).
     """
 
     collection = database[_KG_COLLECTION]
@@ -291,6 +336,7 @@ async def review_duplicate(
     #    build_edge_id because we don't know which side is source vs target.
     edge_doc = await collection.find_one(
         {
+            "user_id": user_id,
             "kind": "edge",
             "type": EdgeType.SAME_AS.value,
             "$or": [
@@ -317,6 +363,7 @@ async def review_duplicate(
     if decision is ReviewDecision.REJECT:
         return await _handle_reject(
             collection=collection,
+            user_id=user_id,
             edge_id=edge_id,
             current_status=current_status,
             reviewed_by=reviewed_by,
@@ -325,6 +372,7 @@ async def review_duplicate(
 
     return await _handle_confirm(
         collection=collection,
+        user_id=user_id,
         edge_doc=edge_doc,
         edge_id=edge_id,
         current_status=current_status,
@@ -342,6 +390,7 @@ async def review_duplicate(
 async def _handle_reject(
     *,
     collection: Any,
+    user_id: PydanticObjectId,
     edge_id: str,
     current_status: str | None,
     reviewed_by: str,
@@ -354,7 +403,7 @@ async def _handle_reject(
         )
 
     await collection.update_one(
-        {"_id": edge_id},
+        {"_id": edge_id, "user_id": user_id},
         {
             "$set": {
                 "properties.status": "rejected",
@@ -384,6 +433,7 @@ async def _handle_reject(
 async def _handle_confirm(
     *,
     collection: Any,
+    user_id: PydanticObjectId,
     edge_doc: dict[str, Any],
     edge_id: str,
     current_status: str | None,
@@ -404,15 +454,16 @@ async def _handle_confirm(
     if current_status == "confirmed":
         return await _build_idempotent_confirm_result(
             collection=collection,
+            user_id=user_id,
             edge_doc=edge_doc,
             edge_id=edge_id,
             src_id=src_id,
             tgt_id=tgt_id,
         )
 
-    # Load both endpoint nodes.
-    src_node = await collection.find_one({"_id": src_id})
-    tgt_node = await collection.find_one({"_id": tgt_id})
+    # Load both endpoint nodes (tenant-scoped).
+    src_node = await collection.find_one({"_id": src_id, "user_id": user_id})
+    tgt_node = await collection.find_one({"_id": tgt_id, "user_id": user_id})
     if src_node is None or tgt_node is None:
         raise ValueError(
             f"review_duplicate: cannot confirm — one or both endpoint "
@@ -459,7 +510,7 @@ async def _handle_confirm(
     # This is a one-shot post-merge $set so we keep the audit trail.
     if len(loser_sources) > 1:
         await collection.update_one(
-            {"_id": winner_id},
+            {"_id": winner_id, "user_id": user_id},
             [
                 {
                     "$set": {
@@ -480,6 +531,7 @@ async def _handle_confirm(
     # ------------------------------------------------------------------
     edges_transferred = await _transfer_edges(
         collection=collection,
+        user_id=user_id,
         loser_id=loser_id,
         winner_id=winner_id,
         audit_edge_id=edge_id,
@@ -490,7 +542,7 @@ async def _handle_confirm(
     # Step 3 — tombstone the loser.
     # ------------------------------------------------------------------
     await collection.update_one(
-        {"_id": loser_id},
+        {"_id": loser_id, "user_id": user_id},
         {
             "$set": {
                 "merged_into": winner_id,
@@ -504,7 +556,7 @@ async def _handle_confirm(
     # Step 4 — stamp the audit edge.
     # ------------------------------------------------------------------
     await collection.update_one(
-        {"_id": edge_id},
+        {"_id": edge_id, "user_id": user_id},
         {
             "$set": {
                 "properties.status": "confirmed",
@@ -533,6 +585,7 @@ async def _handle_confirm(
 async def _build_idempotent_confirm_result(
     *,
     collection: Any,
+    user_id: PydanticObjectId,
     edge_doc: dict[str, Any],
     edge_id: str,
     src_id: str,
@@ -556,8 +609,12 @@ async def _build_idempotent_confirm_result(
     if winner_id is None or loser_id is None:
         # Fallback: read the merged_into tombstone on whichever endpoint
         # was the loser. The remaining endpoint must be the winner.
-        src_node = await collection.find_one({"_id": src_id}, {"merged_into": 1})
-        tgt_node = await collection.find_one({"_id": tgt_id}, {"merged_into": 1})
+        src_node = await collection.find_one(
+            {"_id": src_id, "user_id": user_id}, {"merged_into": 1}
+        )
+        tgt_node = await collection.find_one(
+            {"_id": tgt_id, "user_id": user_id}, {"merged_into": 1}
+        )
         if src_node and src_node.get("merged_into") == tgt_id:
             loser_id = src_id
             winner_id = tgt_id
@@ -619,6 +676,7 @@ def _decide_winner(
 async def _transfer_edges(
     *,
     collection: Any,
+    user_id: PydanticObjectId,
     loser_id: str,
     winner_id: str,
     audit_edge_id: str,
@@ -653,6 +711,7 @@ async def _transfer_edges(
 
     cursor = collection.find(
         {
+            "user_id": user_id,
             "kind": "edge",
             "_id": {"$ne": audit_edge_id},
             "$or": [
@@ -669,7 +728,7 @@ async def _transfer_edges(
         edge_type_raw = edge.get("type")
         if edge_type_raw is None:
             # Defensive — skip malformed edges.
-            await collection.delete_one({"_id": old_id})
+            await collection.delete_one({"_id": old_id, "user_id": user_id})
             continue
 
         new_src = winner_id if old_src == loser_id else old_src
@@ -677,7 +736,7 @@ async def _transfer_edges(
 
         # Self-loop after substitution → drop without re-keying.
         if new_src == new_tgt:
-            await collection.delete_one({"_id": old_id})
+            await collection.delete_one({"_id": old_id, "user_id": user_id})
             transferred += 1
             continue
 
@@ -686,7 +745,7 @@ async def _transfer_edges(
 
         if new_id == audit_edge_id:
             # Defensive: never overwrite the audit edge.
-            await collection.delete_one({"_id": old_id})
+            await collection.delete_one({"_id": old_id, "user_id": user_id})
             continue
 
         if new_id == old_id:
@@ -699,10 +758,11 @@ async def _transfer_edges(
         loser_properties = edge.get("properties") or {}
 
         await collection.update_one(
-            {"_id": new_id},
+            {"_id": new_id, "user_id": user_id},
             [
                 {
                     "$set": {
+                        "user_id": user_id,
                         "kind": "edge",
                         "type": edge_type.value,
                         "source_node_id": new_src,
@@ -744,7 +804,7 @@ async def _transfer_edges(
             upsert=True,
         )
 
-        await collection.delete_one({"_id": old_id})
+        await collection.delete_one({"_id": old_id, "user_id": user_id})
         transferred += 1
 
     return transferred

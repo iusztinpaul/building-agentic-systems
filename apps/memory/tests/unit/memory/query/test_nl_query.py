@@ -1,4 +1,5 @@
 import pytest
+from beanie import PydanticObjectId
 from pymongo.errors import OperationFailure
 
 from tree.entities.knowledge_graph import EdgeType, NodeType
@@ -11,6 +12,8 @@ from tree.memory.query.nl_query import (
 )
 from tree.models.exceptions import PipelineValidationError
 
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
 
 class TestValidatePipeline:
     def test_allowed_stages_pass(self):
@@ -19,7 +22,7 @@ class TestValidatePipeline:
             {"$project": {"name": 1}},
             {"$limit": 10},
         ]
-        result = validate_pipeline(pipeline)
+        result = validate_pipeline(pipeline, _USER_ID)
 
         # Should have the original stages plus the appended $project for embedding.
         assert any("$match" in s for s in result)
@@ -29,26 +32,52 @@ class TestValidatePipeline:
         pipeline = [{"$match": {"kind": "node"}}, {"$out": "evil_collection"}]
 
         with pytest.raises(PipelineValidationError, match="not allowed"):
-            validate_pipeline(pipeline)
+            validate_pipeline(pipeline, _USER_ID)
 
     def test_blocked_where_stage_raises(self):
         pipeline = [{"$where": "this.kind == 'node'"}]
 
         with pytest.raises(PipelineValidationError, match="not allowed"):
-            validate_pipeline(pipeline)
+            validate_pipeline(pipeline, _USER_ID)
 
     def test_blocked_merge_stage_raises(self):
         pipeline = [{"$match": {}}, {"$merge": "other"}]
 
         with pytest.raises(PipelineValidationError, match="not allowed"):
-            validate_pipeline(pipeline)
+            validate_pipeline(pipeline, _USER_ID)
 
-    def test_lookup_wrong_collection_raises(self):
+    def test_lookup_stage_rejected(self):
+        """Blocker #1 — ``$lookup`` is no longer in the allow-list.
+
+        ``$lookup`` could carry a sub-pipeline that bypasses ``_inject_user_id``
+        (which only walks the top-level stages). Removing it from the
+        allow-list eliminates the cross-tenant-join leak surface. Realistic
+        joins use ``$graphLookup`` (already user-scoped via
+        ``restrictSearchWithMatch``) instead.
+        """
+
         pipeline = [
             {"$match": {"kind": "node"}},
             {
                 "$lookup": {
-                    "from": "evil_collection",
+                    "from": "knowledge_graph",
+                    "pipeline": [{"$match": {"kind": "edge"}}],
+                    "as": "x",
+                }
+            },
+        ]
+
+        with pytest.raises(PipelineValidationError, match="not allowed"):
+            validate_pipeline(pipeline, _USER_ID)
+
+    def test_lookup_with_localfield_also_rejected(self):
+        """``$lookup`` is rejected whether or not it uses a sub-pipeline."""
+
+        pipeline = [
+            {"$match": {"kind": "node"}},
+            {
+                "$lookup": {
+                    "from": "knowledge_graph",
                     "localField": "_id",
                     "foreignField": "source_node_id",
                     "as": "edges",
@@ -56,8 +85,65 @@ class TestValidatePipeline:
             },
         ]
 
-        with pytest.raises(PipelineValidationError, match="from"):
-            validate_pipeline(pipeline)
+        with pytest.raises(PipelineValidationError, match="not allowed"):
+            validate_pipeline(pipeline, _USER_ID)
+
+    def test_facet_stage_rejected(self):
+        """Blocker #1 (cycle 2) — ``$facet`` is no longer in the allow-list.
+
+        ``$facet`` carries one sub-pipeline per output field. Each sub-pipeline
+        can include any stage (including ``$lookup``), and ``_inject_user_id``
+        only walks the top-level outer pipeline. A planted shape of
+        ``[$match, $facet{leaked: [$lookup{pipeline: [$match {kind: edge}]}]}]``
+        was demonstrated to leak the other tenant's documents at runtime.
+        Removing ``$facet`` from the allow-list closes the leak surface
+        without forcing recursive sub-pipeline validation.
+        """
+
+        pipeline = [
+            {"$match": {"kind": "node"}},
+            {
+                "$facet": {
+                    "leaked": [
+                        {
+                            "$lookup": {
+                                "from": "knowledge_graph",
+                                "pipeline": [{"$match": {"kind": "edge"}}],
+                                "as": "all",
+                            }
+                        },
+                        {"$limit": 5},
+                    ]
+                }
+            },
+            {"$limit": 5},
+        ]
+
+        with pytest.raises(PipelineValidationError, match="not allowed"):
+            validate_pipeline(pipeline, _USER_ID)
+
+    def test_unionwith_stage_rejected(self):
+        """``$unionWith`` carries a sub-pipeline that targets a collection.
+
+        Even if the union targets ``knowledge_graph`` itself, the inner
+        ``pipeline`` is not walked by ``_inject_user_id``, so the union would
+        merge in documents from every tenant. Belt-and-braces: ``$unionWith``
+        was already absent from the allow-list, but the regression test
+        pins that decision so a future maintainer can't quietly add it.
+        """
+
+        pipeline = [
+            {"$match": {"kind": "node"}},
+            {
+                "$unionWith": {
+                    "coll": "knowledge_graph",
+                    "pipeline": [{"$match": {"kind": "edge"}}],
+                }
+            },
+        ]
+
+        with pytest.raises(PipelineValidationError, match="not allowed"):
+            validate_pipeline(pipeline, _USER_ID)
 
     def test_graphlookup_correct_collection_passes(self):
         pipeline = [
@@ -73,7 +159,7 @@ class TestValidatePipeline:
             },
             {"$limit": 10},
         ]
-        result = validate_pipeline(pipeline)
+        result = validate_pipeline(pipeline, _USER_ID)
 
         assert any("$graphLookup" in s for s in result)
 
@@ -92,11 +178,11 @@ class TestValidatePipeline:
         ]
 
         with pytest.raises(PipelineValidationError, match="from"):
-            validate_pipeline(pipeline)
+            validate_pipeline(pipeline, _USER_ID)
 
     def test_limit_injected_when_missing(self):
         pipeline = [{"$match": {"kind": "node"}}]
-        result = validate_pipeline(pipeline, max_results=25)
+        result = validate_pipeline(pipeline, _USER_ID, max_results=25)
 
         limit_stages = [s for s in result if "$limit" in s]
         assert len(limit_stages) == 1
@@ -104,7 +190,7 @@ class TestValidatePipeline:
 
     def test_limit_not_duplicated_when_present(self):
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 5}]
-        result = validate_pipeline(pipeline)
+        result = validate_pipeline(pipeline, _USER_ID)
 
         limit_stages = [s for s in result if "$limit" in s]
         assert len(limit_stages) == 1
@@ -112,7 +198,7 @@ class TestValidatePipeline:
 
     def test_existing_limit_clamped_to_max_results(self):
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 100}]
-        result = validate_pipeline(pipeline, max_results=5)
+        result = validate_pipeline(pipeline, _USER_ID, max_results=5)
 
         limit_stages = [s for s in result if "$limit" in s]
         assert len(limit_stages) == 1
@@ -120,7 +206,7 @@ class TestValidatePipeline:
 
     def test_existing_limit_below_max_results_unchanged(self):
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 3}]
-        result = validate_pipeline(pipeline, max_results=10)
+        result = validate_pipeline(pipeline, _USER_ID, max_results=10)
 
         limit_stages = [s for s in result if "$limit" in s]
         assert len(limit_stages) == 1
@@ -128,17 +214,17 @@ class TestValidatePipeline:
 
     def test_embedding_stripped(self):
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 10}]
-        result = validate_pipeline(pipeline)
+        result = validate_pipeline(pipeline, _USER_ID)
 
         assert result[-1] == {"$project": {"embedding": 0}}
 
     def test_empty_pipeline_raises(self):
         with pytest.raises(PipelineValidationError, match="empty"):
-            validate_pipeline([])
+            validate_pipeline([], _USER_ID)
 
     def test_empty_stage_raises(self):
         with pytest.raises(PipelineValidationError, match="empty"):
-            validate_pipeline([{}])
+            validate_pipeline([{}], _USER_ID)
 
     def test_vector_search_must_be_first(self):
         pipeline = [
@@ -154,7 +240,7 @@ class TestValidatePipeline:
         ]
 
         with pytest.raises(PipelineValidationError, match="first stage"):
-            validate_pipeline(pipeline)
+            validate_pipeline(pipeline, _USER_ID)
 
     def test_vector_search_at_first_position_passes(self):
         pipeline = [
@@ -168,9 +254,111 @@ class TestValidatePipeline:
             },
             {"$limit": 5},
         ]
-        result = validate_pipeline(pipeline)
+        result = validate_pipeline(pipeline, _USER_ID)
 
         assert "$vectorSearch" in result[0]
+
+    @pytest.mark.parametrize(
+        "first_stage",
+        [
+            pytest.param(
+                {"$group": {"_id": "$type", "items": {"$push": "$$ROOT"}}},
+                id="group",
+            ),
+            pytest.param({"$sample": {"size": 10}}, id="sample"),
+            pytest.param({"$sort": {"name": 1}}, id="sort"),
+            pytest.param({"$project": {"name": 1, "user_id": 1}}, id="project"),
+            pytest.param({"$unwind": "$tags"}, id="unwind"),
+            pytest.param(
+                {
+                    "$bucket": {
+                        "groupBy": "$score",
+                        "boundaries": [0, 5, 10],
+                        "default": "other",
+                        "output": {"items": {"$push": "$$ROOT"}},
+                    }
+                },
+                id="bucket",
+            ),
+            pytest.param({"$count": "total"}, id="count"),
+            pytest.param({"$sortByCount": "$user_id"}, id="sortbycount"),
+            pytest.param({"$addFields": {"x": 1}}, id="addfields"),
+        ],
+    )
+    def test_tenant_match_prepended_when_first_stage_is_not_match_or_vectorsearch(
+        self, first_stage
+    ):
+        """Blocker #1 (cycle 3) — `_inject_user_id` must enforce tenant scoping.
+
+        The cycle-2 fix removed sub-pipeline-bearing stages, but `_inject_user_id`
+        still had "modify-existing" semantics: it patched any `$match` /
+        `$vectorSearch` / `$graphLookup` that was already in the pipeline but
+        did NOT prepend a tenant filter when the pipeline didn't lead with
+        one. The Tester demonstrated runtime leaks for `$group`, `$sample`,
+        `$sort`, `$project`, `$unwind`, `$bucket`, `$count`, and
+        `$sortByCount` as first stages.
+
+        Contract: when the first stage is not `$match` or `$vectorSearch`,
+        `validate_pipeline` must prepend `{"$match": {"user_id": user_id}}`
+        as the new leading stage so every downstream operator runs against a
+        tenant-scoped subset.
+        """
+
+        pipeline = [first_stage, {"$limit": 10}]
+
+        result = validate_pipeline(pipeline, _USER_ID)
+
+        assert result[0] == {"$match": {"user_id": _USER_ID}}, (
+            f"Expected leading tenant $match, got {result[0]!r}"
+        )
+
+    def test_tenant_match_not_prepended_when_first_stage_is_match(self):
+        """When the pipeline already leads with `$match`, no duplicate prepend.
+
+        The existing `_inject_user_id` walks `$match` stages and merges in the
+        tenant filter; prepending again would just produce a redundant
+        leading `$match` stage. The contract is "tenant scope on or before
+        the first non-trivial stage", which the in-place merge already
+        provides for `$match`-led pipelines.
+        """
+
+        pipeline = [{"$match": {"kind": "node"}}, {"$limit": 10}]
+
+        result = validate_pipeline(pipeline, _USER_ID)
+
+        # The leading stage should be the original `$match` with `user_id`
+        # merged in — NOT a separate prepended `$match`.
+        assert "$match" in result[0]
+        assert result[0]["$match"].get("user_id") == _USER_ID
+        # And the second stage should be the original `$limit`, not another
+        # `$match`.
+        assert "$limit" in result[1]
+
+    def test_tenant_match_not_prepended_when_first_stage_is_vectorsearch(self):
+        """When the pipeline leads with `$vectorSearch`, tenant filter goes inside its `filter`.
+
+        Prepending a `$match` ahead of `$vectorSearch` would violate Mongo's
+        rule that `$vectorSearch` must be the first stage. The injection
+        path that merges `user_id` into `$vectorSearch.filter` already
+        scopes the search.
+        """
+
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": [0.1, 0.2],
+                    "limit": 10,
+                }
+            },
+            {"$limit": 5},
+        ]
+
+        result = validate_pipeline(pipeline, _USER_ID)
+
+        assert "$vectorSearch" in result[0]
+        assert result[0]["$vectorSearch"]["filter"]["user_id"] == _USER_ID
 
 
 class TestBuildSystemPrompt:
@@ -381,6 +569,7 @@ class TestExecuteNlQuery:
             query="find all people",
             llm=mock_deps["llm"],
             embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
         )
 
         assert len(results) == 1
@@ -404,6 +593,7 @@ class TestExecuteNlQuery:
             query="find nodes",
             llm=mock_deps["llm"],
             embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
             max_retries=1,
         )
 
@@ -428,6 +618,7 @@ class TestExecuteNlQuery:
             query="find nodes",
             llm=mock_deps["llm"],
             embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
             max_retries=1,
         )
 
@@ -443,6 +634,7 @@ class TestExecuteNlQuery:
                 query="find nodes",
                 llm=mock_deps["llm"],
                 embedding_model=mock_deps["embedding_model"],
+                user_id=_USER_ID,
                 max_retries=1,
             )
 
@@ -465,6 +657,7 @@ class TestExecuteNlQuery:
             query="find all people",
             llm=mock_deps["llm"],
             embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
             max_retries=1,
         )
 
@@ -487,6 +680,7 @@ class TestExecuteNlQuery:
             query="find nodes",
             llm=mock_deps["llm"],
             embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
             max_results=7,
         )
 
@@ -505,6 +699,7 @@ class TestExecuteNlQuery:
                 query="find nodes",
                 llm=mock_deps["llm"],
                 embedding_model=mock_deps["embedding_model"],
+                user_id=_USER_ID,
                 max_retries=0,
             )
 

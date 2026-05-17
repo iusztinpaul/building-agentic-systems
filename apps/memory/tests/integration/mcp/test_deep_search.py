@@ -205,7 +205,9 @@ class TestWriteDeepSearchResults:
 
 class TestDeepSearchMemoryTool:
     async def test_returns_yaml_index(self, make_mcp_ctx, seed_graph, memory_dir):
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(), user_id=seed_graph["user_id"]
+        )
 
         result = await deep_search_memory(
             "alice", ctx, top_k=5, max_hops=1, session_id="e2e-test"
@@ -225,7 +227,9 @@ class TestDeepSearchMemoryTool:
     async def test_no_results_returns_message(
         self, make_mcp_ctx, seed_graph, memory_dir
     ):
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(), user_id=seed_graph["user_id"]
+        )
 
         result = await deep_search_memory(
             "xyznonexistent999", ctx, top_k=5, max_hops=0, session_id="e2e-empty"

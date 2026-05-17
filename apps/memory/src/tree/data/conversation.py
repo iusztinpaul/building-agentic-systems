@@ -8,6 +8,7 @@ import hashlib
 import logging
 from datetime import UTC, datetime
 
+from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
 from tree.entities.documents import Document, SourceType
@@ -22,12 +23,14 @@ def _content_hash(text: str) -> str:
 
 async def load_conversation_document(
     conversation_text: str,
+    user_id: PydanticObjectId,
     title: str | None = None,
 ) -> Document | None:
-    """Persist conversation text as a Document.
+    """Persist conversation text as a Document for ``user_id``.
 
     Uses a content-hash based source_uri so that retries and re-ingestion
-    of the same text are idempotent.
+    of the same text are idempotent. Dedup is scoped to ``user_id`` so
+    two users can ingest the same transcript independently.
 
     Returns the Document, or None if a duplicate already exists.
 
@@ -41,7 +44,7 @@ async def load_conversation_document(
     source_uri = f"conversation://{_content_hash(conversation_text)}"
     now = datetime.now(tz=UTC)
 
-    existing = await Document.find_one(Document.source_uri == source_uri)
+    existing = await Document.find_one({"user_id": user_id, "source_uri": source_uri})
     if existing is not None:
         logger.info("Conversation already ingested: %s", source_uri)
         return None
@@ -49,6 +52,7 @@ async def load_conversation_document(
     doc = Document(
         source_type=SourceType.CONVERSATION,
         source_uri=source_uri,
+        user_id=user_id,
         title=title or f"Conversation {now.isoformat()}",
         content=conversation_text,
         date=now,

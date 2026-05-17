@@ -26,7 +26,11 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find all people", ctx)
 
@@ -46,7 +50,11 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find alice", ctx)
 
@@ -63,7 +71,11 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find relationships", ctx)
 
@@ -83,7 +95,11 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find episodes", ctx)
 
@@ -104,7 +120,11 @@ class TestQueryMemoryTool:
                 },
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find people", ctx)
 
@@ -125,7 +145,11 @@ class TestQueryMemoryTool:
                 }
             ]
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find all people", ctx, max_results=1)
 
@@ -152,7 +176,11 @@ class TestQueryMemoryTool:
                 "tree.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
-        ctx = make_mcp_ctx(llm=llm, embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            llm=llm,
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await query_memory("find people", ctx, visualize=True)
 
@@ -170,7 +198,10 @@ class TestSearchMemoryTool:
     async def test_returns_nodes_via_text_search(self, make_mcp_ctx, seed_graph):
         """Text index is available — search_memory finds nodes by name."""
 
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1)
 
@@ -181,7 +212,10 @@ class TestSearchMemoryTool:
     async def test_graph_expansion_includes_edges(self, make_mcp_ctx, seed_graph):
         """Graph expansion from alice should discover the related_to edge and bob."""
 
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1)
 
@@ -192,7 +226,10 @@ class TestSearchMemoryTool:
     async def test_max_results_truncates_output(self, make_mcp_ctx, seed_graph):
         """max_results caps total nodes + edges returned."""
 
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         # Without cap, alice search returns alice node + edge + bob node = 3 docs.
         result = await search_memory("alice", ctx, top_k=5, max_hops=1, max_results=2)
@@ -203,7 +240,10 @@ class TestSearchMemoryTool:
     async def test_no_results_returns_empty(self, make_mcp_ctx, seed_graph):
         """A query with no matches returns an empty list."""
 
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await search_memory("xyznonexistent999", ctx, top_k=5, max_hops=0)
 
@@ -220,7 +260,10 @@ class TestSearchMemoryTool:
                 "tree.memory.query.visualize", fromlist=["render_html"]
             ).render_html(g, output=output_file, open_browser=False),
         )
-        ctx = make_mcp_ctx(embedding_model=FakeEmbeddingModel())
+        ctx = make_mcp_ctx(
+            embedding_model=FakeEmbeddingModel(),
+            user_id=seed_graph["user_id"],
+        )
 
         result = await search_memory("alice", ctx, top_k=5, max_hops=1, visualize=True)
 

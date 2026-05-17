@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.config.app_config import (
     HuggingFaceDatasetSource,
@@ -12,6 +13,8 @@ from tree.config.app_config import (
     YouTubeVideoSource,
 )
 from tree.data.pipeline import data_pipeline
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 def _make_mock_pipeline(mocker, name: str) -> AsyncMock:
@@ -30,6 +33,20 @@ def _make_config(mocker, sources: list[SourceEntry] | None = None) -> MagicMock:
 
 
 class TestDataPipeline:
+    @pytest.fixture(autouse=True)
+    def _stub_index_dim_check(self, mocker) -> None:
+        """Skip the live-mongot-vs-settings dim check in unit tests.
+
+        The flow now hard-fails at boot when ``settings.embedding_dim``
+        disagrees with the mongot index (#016 + #020). Unit tests don't
+        run mongot, so we stub the assertion out.
+        """
+
+        mocker.patch(
+            "tree.data.pipeline.assert_settings_match_live_vector_index",
+            new_callable=AsyncMock,
+        )
+
     async def test_dispatches_each_variant(self, mocker) -> None:
         mock_init = mocker.patch(
             "tree.data.pipeline.init_mongodb", new_callable=AsyncMock
@@ -64,15 +81,19 @@ class TestDataPipeline:
             ],
         )
 
-        result = await data_pipeline()
+        result = await data_pipeline(_USER_ID)
 
         assert len(result) == 4
         mock_init.assert_awaited_once()
-        mock_rss.assert_awaited_once_with(["https://example.com/feed"])
-        mock_articles.assert_awaited_once_with(["https://example.com/p/article"])
-        mock_arxiv.assert_awaited_once_with(max_samples=5, fetch_content=True)
+        mock_rss.assert_awaited_once_with(["https://example.com/feed"], _USER_ID)
+        mock_articles.assert_awaited_once_with(
+            ["https://example.com/p/article"], _USER_ID
+        )
+        mock_arxiv.assert_awaited_once_with(
+            user_id=_USER_ID, max_samples=5, fetch_content=True
+        )
         mock_ingest_url.assert_awaited_once_with(
-            "https://martinfowler.com/articles/microservices.html"
+            "https://martinfowler.com/articles/microservices.html", _USER_ID
         )
 
     async def test_skips_rss_when_no_substack_rss_entries(self, mocker) -> None:
@@ -89,7 +110,7 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_rss.assert_not_awaited()
         mock_articles.assert_awaited_once()
@@ -111,7 +132,7 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_rss.assert_awaited_once()
         mock_articles.assert_not_awaited()
@@ -130,7 +151,7 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_rss.assert_not_awaited()
         mock_articles.assert_not_awaited()
@@ -155,7 +176,7 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_arxiv.assert_not_awaited()
 
@@ -169,7 +190,7 @@ class TestDataPipeline:
 
         _make_config(mocker, sources=[])
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_init.assert_awaited_once()
 
@@ -187,7 +208,7 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
         mock_ingest_url.assert_not_awaited()
 
@@ -209,7 +230,7 @@ class TestDataPipeline:
             ],
         )
 
-        result = await data_pipeline()
+        result = await data_pipeline(_USER_ID)
 
         assert mock_ingest_url.await_count == 2
         awaited_urls = [call.args[0] for call in mock_ingest_url.await_args_list]
@@ -238,7 +259,7 @@ class TestDataPipeline:
             ],
         )
 
-        result = await data_pipeline()
+        result = await data_pipeline(_USER_ID)
 
         assert kept in result
         assert None not in result
@@ -259,9 +280,9 @@ class TestDataPipeline:
             sources=[SubstackRssSource(uri=uri) for uri in feeds],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
-        mock_rss.assert_awaited_once_with(feeds)
+        mock_rss.assert_awaited_once_with(feeds, _USER_ID)
 
     async def test_groups_substack_article_entries_into_single_batch_call(
         self, mocker
@@ -277,9 +298,9 @@ class TestDataPipeline:
             sources=[SubstackArticleSource(uri=uri) for uri in articles],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
-        mock_articles.assert_awaited_once_with(articles)
+        mock_articles.assert_awaited_once_with(articles, _USER_ID)
 
     async def test_passes_huggingface_dataset_overrides(self, mocker) -> None:
         # Per-entry ``max_samples`` and ``fetch_content`` must be forwarded
@@ -300,9 +321,11 @@ class TestDataPipeline:
             ],
         )
 
-        await data_pipeline()
+        await data_pipeline(_USER_ID)
 
-        mock_arxiv.assert_awaited_once_with(max_samples=42, fetch_content=True)
+        mock_arxiv.assert_awaited_once_with(
+            user_id=_USER_ID, max_samples=42, fetch_content=True
+        )
 
     async def test_dispatches_youtube_rss_entries(self, mocker) -> None:
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
@@ -324,9 +347,9 @@ class TestDataPipeline:
             sources=[YouTubeRssSource(uri=uri) for uri in feeds],
         )
 
-        result = await data_pipeline()
+        result = await data_pipeline(_USER_ID)
 
-        mock_yt_rss.assert_awaited_once_with(feeds)
+        mock_yt_rss.assert_awaited_once_with(feeds, _USER_ID)
         assert doc in result
 
     async def test_dispatches_youtube_video_entries(self, mocker) -> None:
@@ -349,9 +372,9 @@ class TestDataPipeline:
             sources=[YouTubeVideoSource(uri=uri) for uri in urls],
         )
 
-        result = await data_pipeline()
+        result = await data_pipeline(_USER_ID)
 
-        mock_yt_video.assert_awaited_once_with(urls)
+        mock_yt_video.assert_awaited_once_with(urls, _USER_ID)
         assert doc in result
 
     async def test_skips_youtube_branches_when_absent(self, mocker, caplog) -> None:
@@ -370,7 +393,7 @@ class TestDataPipeline:
         )
 
         with caplog.at_level(logging.INFO, logger="tree.data.pipeline"):
-            await data_pipeline()
+            await data_pipeline(_USER_ID)
 
         mock_yt_rss.assert_not_awaited()
         mock_yt_video.assert_not_awaited()
@@ -400,4 +423,4 @@ class TestDataPipeline:
         )
 
         with pytest.raises(ValueError, match="someone/unregistered-dataset"):
-            await data_pipeline()
+            await data_pipeline(_USER_ID)

@@ -5,6 +5,7 @@ from email.utils import parsedate_to_datetime
 
 import feedparser
 import httpx
+from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 from pymongo.errors import DuplicateKeyError
 
@@ -56,7 +57,7 @@ def parse_date(entry: dict) -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def extract_document(raw_entry: dict) -> Document:
+def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document:
     content_html = raw_entry.get("content", [{}])[0].get("value", "")
     if not content_html:
         content_html = raw_entry.get("summary", "")
@@ -64,6 +65,7 @@ def extract_document(raw_entry: dict) -> Document:
     return Document(
         source_type=SourceType.SUBSTACK,
         source_uri=raw_entry.get("link", ""),
+        user_id=user_id,
         title=raw_entry.get("title", ""),
         summary=raw_entry.get("summary", raw_entry.get("title", "")),
         content=html_to_plain_text(content_html),
@@ -72,23 +74,29 @@ def extract_document(raw_entry: dict) -> Document:
     )
 
 
-async def resolve_references(uris: list[str]) -> list[Document]:
-    """Find or create Documents for each reference URI."""
+async def resolve_references(
+    uris: list[str], user_id: PydanticObjectId
+) -> list[Document]:
+    """Find or create LATENT Documents for each reference URI under ``user_id``."""
 
     ref_docs: list[Document] = []
     for uri in uris:
-        existing = await Document.find_one(Document.source_uri == uri)
+        existing = await Document.find_one({"user_id": user_id, "source_uri": uri})
         if existing:
             ref_docs.append(existing)
             continue
 
         try:
-            latent_doc = Document(source_type=SourceType.LATENT, source_uri=uri)
+            latent_doc = Document(
+                source_type=SourceType.LATENT,
+                source_uri=uri,
+                user_id=user_id,
+            )
             await latent_doc.insert()
             ref_docs.append(latent_doc)
             logger.debug("Created latent document: %s", uri)
         except DuplicateKeyError:
-            existing = await Document.find_one(Document.source_uri == uri)
+            existing = await Document.find_one({"user_id": user_id, "source_uri": uri})
             if existing:
                 ref_docs.append(existing)
 
@@ -98,10 +106,15 @@ async def resolve_references(uris: list[str]) -> list[Document]:
 async def load_document(doc: Document, raw_entry: dict) -> Document | None:
     """Dedup, resolve references, and persist a single document.
 
+    ``doc.user_id`` is the tenant under which dedup runs; reference URIs
+    are scoped to the same user.
+
     Returns the persisted Document, or None if skipped as duplicate.
     """
 
-    existing = await Document.find_one(Document.source_uri == doc.source_uri)
+    existing = await Document.find_one(
+        {"user_id": doc.user_id, "source_uri": doc.source_uri}
+    )
     if existing and existing.source_type != SourceType.LATENT:
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None
@@ -110,7 +123,7 @@ async def load_document(doc: Document, raw_entry: dict) -> Document | None:
     ref_uris = [
         uri for uri in extract_references(content_html) if uri != doc.source_uri
     ]
-    doc.references = await resolve_references(ref_uris)
+    doc.references = await resolve_references(ref_uris, doc.user_id)
 
     if existing:
         doc.id = existing.id

@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
@@ -39,6 +40,11 @@ from tree.memory.types import (
     RawExtraction,
     ResolutionOutput,
 )
+
+
+# A stable user_id used across the unit suite.
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+_PH = str(_USER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +194,38 @@ class TestResolveEntitiesTask:
     async def test_empty_input_returns_empty_output(self, mocker) -> None:
         resolver = MagicMock(spec=CompositeResolver)
         database = _make_database_with_candidates({})
-        out = await _resolve_entities([], database, resolver)
+        out = await _resolve_entities([], database, resolver, _USER_ID)
         assert out.entities == []
         assert out.resolved_by_key == {}
+
+    async def test_candidate_fetch_includes_user_id_filter(self, mocker) -> None:
+        """The candidate cursor must be issued with ``user_id`` in the query."""
+
+        resolver = MagicMock(spec=CompositeResolver)
+        resolver.resolve_with_types = AsyncMock(return_value=[])
+
+        candidates = [
+            {"_id": "person:p0", "name": "p0", "canonical_name": None, "aliases": []}
+        ]
+        database = _make_database_with_candidates({NodeType.PERSON: candidates})
+
+        raw = RawExtraction(
+            document_id="d1",
+            source_uri="u1",
+            chunked=ChunkedDocument(
+                document_id="d1", source_uri="u1", source_type="huggingface"
+            ),
+            extracted=ExtractionResult(
+                nodes=[ExtractedNode(name="probe", type=NodeType.PERSON, properties={})]
+            ),
+        )
+
+        await _resolve_entities([raw], database, resolver, _USER_ID)
+
+        collection = database.__getitem__.return_value
+        find_call = collection.find.call_args_list[0]
+        find_filter = find_call.args[0]
+        assert find_filter["user_id"] == _USER_ID
 
     async def test_candidate_fetch_uses_set_union_and_records_name_to_owner_id(
         self, mocker
@@ -200,8 +235,6 @@ class TestResolveEntitiesTask:
         its owning ``_id``."""
 
         resolver = MagicMock(spec=CompositeResolver)
-        # Have the resolver return ``canonical_name="John Smith"`` for the
-        # incoming entity — that's the "John Smith mention" scenario.
         resolver.resolve_with_types = AsyncMock(
             return_value=[
                 ResolvedEntity(
@@ -242,7 +275,7 @@ class TestResolveEntitiesTask:
             ),
         )
 
-        out = await _resolve_entities([raw], database, resolver)
+        out = await _resolve_entities([raw], database, resolver, _USER_ID)
 
         # Resolver was called with a candidate list whose name-set INCLUDES
         # both "Jean Smith" and "John Smith".
@@ -294,7 +327,7 @@ class TestResolveEntitiesTask:
         import logging
 
         caplog.set_level(logging.WARNING)
-        out = await _resolve_entities([raw], database, resolver)
+        out = await _resolve_entities([raw], database, resolver, _USER_ID)
         assert out.candidates_seen_by_type["person"] == 5
         assert any(
             "PERSON candidate fetch hit cap (5)" in rec.message
@@ -354,7 +387,7 @@ class TestDedupeEntitiesTask:
             new=AsyncMock(),
         )
 
-        out = await _dedupe_entities(resolved, embeddings, database, cfg)
+        out = await _dedupe_entities(resolved, embeddings, database, cfg, _USER_ID)
         assert out.decisions["d1|person|alice"].action == "none"
         dedupe_spy.assert_not_called()
 
@@ -366,7 +399,7 @@ class TestDedupeEntitiesTask:
             new=AsyncMock(
                 return_value=DeduplicationResult(
                     action="merged",
-                    matched_node_id="person:alice",
+                    matched_node_id=f"{_PH}:person:alice",
                     matched_node_name="alice",
                     similarity_score=1.0,
                     match_type="embedding",
@@ -387,7 +420,7 @@ class TestDedupeEntitiesTask:
             },
         )
         embeddings = EmbeddingMap(vectors={"alice": [0.1] * 8})
-        out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg)
+        out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg, _USER_ID)
         assert out.decisions["d1|person|alice"].action == "none"
 
 
@@ -409,6 +442,7 @@ class TestConfigAlignmentValidator:
             # Drive directly through the helper that the flow calls at entry.
             await run_extraction_for_documents(
                 ["507f1f77bcf86cd799439011"],
+                user_id=_USER_ID,
                 client=MagicMock(),
                 database_name="test",
             )
@@ -423,6 +457,7 @@ class TestConfigAlignmentValidator:
         with pytest.raises(ValueError, match="auto_merge_threshold.*flag_threshold"):
             await run_extraction_for_documents(
                 ["507f1f77bcf86cd799439011"],
+                user_id=_USER_ID,
                 client=MagicMock(),
                 database_name="test",
             )
@@ -473,3 +508,29 @@ class TestPipelineExports:
         assert hasattr(pipeline, "memory_extraction")
         # External name unchanged (referenced by the orchestrator deployment).
         assert memory_extraction.name == "memory-extraction-etl"
+
+
+# ---------------------------------------------------------------------------
+# Required-user_id contract on the flow signature
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredUserIdSignature:
+    """The flow refuses to start without a ``user_id`` argument.
+
+    The Prefect ``@flow`` decorator preserves the underlying function's
+    signature; calling ``.fn(...)`` without ``user_id`` triggers Python's
+    standard ``TypeError: missing 1 required positional argument``.
+    """
+
+    async def test_flow_missing_user_id_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="user_id"):
+            await memory_extraction.fn(document_ids=["x"])  # type: ignore[call-arg]
+
+    async def test_run_helper_missing_user_id_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="user_id"):
+            await run_extraction_for_documents(  # type: ignore[call-arg]
+                ["x"],
+                client=MagicMock(),
+                database_name="test",
+            )

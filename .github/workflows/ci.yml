@@ -13,7 +13,9 @@ env:
   MONGO_INITDB_ROOT_USERNAME: tree
   MONGO_INITDB_ROOT_PASSWORD: tree
   MONGO_INITDB_DATABASE: tree
-  MONGOT_PORT: "27028"
+  # MONGOT_PORT intentionally unset — mongot is not started on CI (see the
+  # "Start infrastructure" step). Tests that need mongot are skipped via
+  # ``-m "not requires_mongot"``.
   # Prefect
   PREFECT_PORT: "4200"
   PREFECT_API_URL: http://127.0.0.1:4200/api
@@ -51,8 +53,27 @@ jobs:
         run: uv run ruff check src/ tests/ scripts/ deploy/
         working-directory: apps/memory
 
+      - name: Create empty .env for docker-compose
+        # ``docker-compose.yml`` declares ``env_file: [.env]`` on the
+        # ``prefect-worker`` service (added in commit 133fb10). Even when we
+        # target unrelated services with ``up -d <names>`` / ``stop <names>``,
+        # Docker Compose still validates the merged config and aborts with
+        # ``env file ... not found`` if ``.env`` is missing on the runner. An
+        # empty file satisfies the lookup without leaking secrets — the
+        # prefect-worker service is never started in CI so its env contents
+        # don't matter.
+        run: touch .env
+
       - name: Start infrastructure
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init mongot prefect-server
+        # mongot is intentionally NOT started on CI. Its Search Index Management
+        # gRPC channel is unreliable on GitHub runners (see CI run 25989844295:
+        # 16 ``Failed to establish connectivity of gRPC channel before deadline``
+        # errors + 7 five-minute hangs on live ``$vectorSearch``). Tests that
+        # need mongot are tagged ``@pytest.mark.requires_mongot`` and skipped
+        # below; they're exercised locally with the full ``docker-compose.yml``
+        # stack instead. ``mongodb-init`` still runs to bring up the replica
+        # set; the keyfile / mongot-user override lives in ``docker-compose.ci.yml``.
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init prefect-server
 
       - name: Wait for MongoDB to be ready
         run: |
@@ -75,23 +96,9 @@ jobs:
               -u "$MONGO_INITDB_ROOT_USERNAME" \
               -p "$MONGO_INITDB_ROOT_PASSWORD" \
               --authenticationDatabase admin \
-              --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null)
+              --quiet --eval "try { rs.status().ok } catch(e) { 0 }" 2>/dev/null || echo 0)
             if [ "$STATUS" = "1" ]; then
               echo "Replica set is ready."
-              break
-            fi
-            echo "Attempt $i/30..."
-            sleep 5
-          done
-
-      - name: Wait for mongot to be ready
-        run: |
-          echo "Waiting for mongot search service on port $MONGOT_PORT..."
-          for i in $(seq 1 30); do
-            if nc -z localhost $MONGOT_PORT 2>/dev/null; then
-              echo "mongot port is open, waiting 10s for sync..."
-              sleep 10
-              echo "mongot is ready."
               break
             fi
             echo "Attempt $i/30..."
@@ -110,8 +117,21 @@ jobs:
             sleep 5
           done
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Unit tests
+        run: uv run pytest tests/unit
+        working-directory: apps/memory
+        env:
+          PYTHONPATH: ./src/
+
+      - name: Integration tests (excludes @pytest.mark.requires_mongot)
+        # ``-m "not requires_mongot"`` skips the mongot/Atlas-Search subset
+        # (see the "Start infrastructure" comment above). The remaining tests
+        # already finish in ~1 min locally; we deliberately run them
+        # sequentially because the autouse ``_clean_collections`` fixture
+        # wipes the shared test database between tests, so parallel workers
+        # (``-n auto``) collide on each other's writes. ``--timeout=300`` is a
+        # per-test safety net for true hangs.
+        run: uv run pytest tests/integration -m "not requires_mongot" --timeout=300
         working-directory: apps/memory
         env:
           PYTHONPATH: ./src/

@@ -16,6 +16,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
 
+from beanie import PydanticObjectId
+
 from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
@@ -29,17 +31,19 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 
-async def _ingest_substack_article(url: str) -> Document | None:
+async def _ingest_substack_article(
+    url: str, user_id: PydanticObjectId
+) -> Document | None:
     """Ingest a Substack article via the Substack article pipeline."""
 
     from tree.data.substack.substack_article_pipeline import (
         ingest_substack_article,
     )
 
-    return await ingest_substack_article(url)
+    return await ingest_substack_article(url, user_id)
 
 
-async def _ingest_youtube_video(url: str) -> Document | None:
+async def _ingest_youtube_video(url: str, user_id: PydanticObjectId) -> Document | None:
     """Ingest a single YouTube video URL via the YouTube video pipeline.
 
     Note: ``ingest_url`` is single-document by contract, so YouTube channel
@@ -49,22 +53,24 @@ async def _ingest_youtube_video(url: str) -> Document | None:
 
     from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video
 
-    return await ingest_youtube_video(url)
+    return await ingest_youtube_video(url, user_id)
 
 
-async def _ingest_web_url(url: str) -> Document | None:
+async def _ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Ingest an arbitrary URL via the generic web (Bright Data) pipeline."""
 
     from tree.data.web.web_pipeline import ingest_web_url
 
-    return await ingest_web_url(url)
+    return await ingest_web_url(url, user_id)
 
 
 # Registry: (domain_substring, handler).
 # Order matters — first match wins. YouTube hosts are listed before
 # ``substack.com`` (and therefore before the custom-Substack-domain
 # fallback below) so YouTube URLs always route to the YouTube handler.
-_URL_HANDLERS: list[tuple[str, Callable[[str], Awaitable[Document | None]]]] = [
+_URL_HANDLERS: list[
+    tuple[str, Callable[[str, PydanticObjectId], Awaitable[Document | None]]]
+] = [
     ("youtube.com", _ingest_youtube_video),
     ("youtu.be", _ingest_youtube_video),
     ("substack.com", _ingest_substack_article),
@@ -95,8 +101,8 @@ def _get_configured_substack_domains() -> set[str]:
     return domains
 
 
-async def ingest_url(url: str) -> Document | None:
-    """Route a URL to the appropriate data pipeline and ingest it.
+async def ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
+    """Route a URL to the appropriate data pipeline and ingest it for ``user_id``.
 
     Matches against:
     1. Static registry patterns (e.g. ``substack.com``).
@@ -139,14 +145,14 @@ async def ingest_url(url: str) -> Document | None:
     for pattern, handler in _URL_HANDLERS:
         if pattern in domain:
             logger.info("Routing URL to '%s' pipeline: %s", pattern, url)
-            return await handler(url)
+            return await handler(url, user_id)
 
     # Custom Substack domain match.
     bare_domain = domain.removeprefix("www.")
     if bare_domain in _get_configured_substack_domains():
         logger.info("Routing URL to 'substack (custom domain)' pipeline: %s", url)
-        return await _ingest_substack_article(url)
+        return await _ingest_substack_article(url, user_id)
 
     # Fallback: generic web pipeline (Bright Data Web Unlocker).
     logger.info("Routing URL to 'web (Bright Data fallback)' pipeline: %s", url)
-    return await _ingest_web_url(url)
+    return await _ingest_web_url(url, user_id)

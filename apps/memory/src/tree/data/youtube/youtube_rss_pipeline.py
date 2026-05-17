@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
@@ -55,7 +56,9 @@ async def load_video_task(doc: Document) -> Document | None:
 
 @flow(name="ingest-youtube-rss-feed-etl", log_prints=True, validate_parameters=False)
 async def ingest_youtube_rss_feed(
-    feed_url: str, fetcher: TranscriptFetcher | None = None
+    feed_url: str,
+    user_id: PydanticObjectId,
+    fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
     """Ingest every video referenced by a YouTube channel RSS feed.
 
@@ -104,7 +107,10 @@ async def ingest_youtube_rss_feed(
 
         metadata = feed_entry_to_metadata(entry)
         doc = build_document(
-            video_id=video_id, metadata=metadata, transcript=transcript
+            video_id=video_id,
+            metadata=metadata,
+            transcript=transcript,
+            user_id=user_id,
         )
         result = await load_video_task(doc)
         if result is not None:
@@ -120,7 +126,9 @@ async def ingest_youtube_rss_feed(
     validate_parameters=False,
 )
 async def ingest_youtube_rss_feed_batch(
-    feed_urls: list[str], fetcher: TranscriptFetcher | None = None
+    feed_urls: list[str],
+    user_id: PydanticObjectId,
+    fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
     """Batch-ingest a list of YouTube channel feeds.
 
@@ -136,7 +144,10 @@ async def ingest_youtube_rss_feed_batch(
     fetcher = fetcher or _default_chained_fetcher()
 
     results = await asyncio.gather(
-        *[ingest_youtube_rss_feed(feed_url, fetcher=fetcher) for feed_url in feed_urls]
+        *[
+            ingest_youtube_rss_feed(feed_url, user_id, fetcher=fetcher)
+            for feed_url in feed_urls
+        ]
     )
 
     return [doc for docs in results for doc in docs]

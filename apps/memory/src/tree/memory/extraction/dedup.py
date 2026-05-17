@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
+from beanie import PydanticObjectId
+
 from tree.entities.knowledge_graph import EdgeType, NodeType
 from tree.memory.resolution.types import _normalize
 
@@ -154,6 +156,7 @@ class DeduplicationResult:
 async def dedupe_entity(
     *,
     database: AsyncDatabase,
+    user_id: PydanticObjectId,
     name: str,
     entity_type: NodeType,
     embedding: list[float],
@@ -200,6 +203,7 @@ async def dedupe_entity(
 
     collection = database[_KG_COLLECTION]
     pipeline = _build_pipeline(
+        user_id=user_id,
         entity_type=entity_type,
         embedding=embedding,
         config=config,
@@ -286,14 +290,20 @@ async def dedupe_entity(
 
 def _build_pipeline(
     *,
+    user_id: PydanticObjectId,
     entity_type: NodeType,
     embedding: list[float],
     config: DeduplicationConfig,
     incoming_node_id: str | None,
 ) -> list[dict[str, Any]]:
-    """Build the ``$vectorSearch`` + filter + reject-pair aggregation."""
+    """Build the ``$vectorSearch`` + filter + reject-pair aggregation.
 
-    vector_filter: dict[str, Any] = {"kind": "node"}
+    ``user_id`` is pinned to the vector-search ``filter`` so candidates
+    from another tenant are pruned server-side before the
+    ``$match`` / ``$lookup`` post-filters run.
+    """
+
+    vector_filter: dict[str, Any] = {"user_id": user_id, "kind": "node"}
     if config.match_same_type_only:
         vector_filter["type"] = entity_type.value
 
@@ -336,6 +346,7 @@ def _build_pipeline(
                         "pipeline": [
                             {
                                 "$match": {
+                                    "user_id": user_id,
                                     "kind": "edge",
                                     "type": EdgeType.SAME_AS.value,
                                     "properties.status": "rejected",

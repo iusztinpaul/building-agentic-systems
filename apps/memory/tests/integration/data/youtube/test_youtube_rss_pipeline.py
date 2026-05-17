@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.data.youtube.types import (
@@ -141,7 +142,9 @@ class TestIngestYoutubeRssFeedFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            result = await ingest_youtube_rss_feed(
+                FEED_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert len(result) == 3
         for doc in result:
@@ -182,14 +185,15 @@ class TestIngestYoutubeRssFeedFlow:
 
         fake = _FakeFetcher({vid: _make_transcript(video_id=vid) for vid in VIDEO_IDS})
 
+        user_id = PydanticObjectId()
         with prefect_tags("tests"):
-            first = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            first = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
         assert len(first) == 3
 
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
 
         with prefect_tags("tests"):
-            second = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            second = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
         assert len(second) == 0
 
         db_docs = await Document.find(
@@ -197,9 +201,15 @@ class TestIngestYoutubeRssFeedFlow:
         ).to_list()
         assert len(db_docs) == 3
 
+    @pytest.mark.slow
     async def test_upgrades_latent_document(self, mongo_client, mocker) -> None:
+        user_id = PydanticObjectId()
         canonical = f"https://www.youtube.com/watch?v={VIDEO_IDS[0]}"
-        latent = Document(source_type=SourceType.LATENT, source_uri=canonical)
+        latent = Document(
+            source_type=SourceType.LATENT,
+            source_uri=canonical,
+            user_id=user_id,
+        )
         await latent.insert()
 
         mocker.patch(
@@ -211,7 +221,7 @@ class TestIngestYoutubeRssFeedFlow:
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            result = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
 
         assert len(result) == 1
         assert result[0].id == latent.id
@@ -246,7 +256,9 @@ class TestIngestYoutubeRssFeedFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            result = await ingest_youtube_rss_feed(
+                FEED_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert len(result) == 2
         persisted_ids = sorted(doc.source_uri for doc in result)
@@ -299,7 +311,9 @@ class TestIngestYoutubeRssFeedFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            result = await ingest_youtube_rss_feed(
+                FEED_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert len(result) == 2
 
@@ -332,7 +346,9 @@ class TestIngestYoutubeRssFeedFlow:
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, fetcher=fake)
+            result = await ingest_youtube_rss_feed(
+                FEED_URL, PydanticObjectId(), fetcher=fake
+            )
 
         assert len(result) == 1
         doc = result[0]
@@ -368,7 +384,9 @@ class TestIngestYoutubeRssFeedBatchFlow:
 
         with prefect_tags("tests"):
             result = await ingest_youtube_rss_feed_batch(
-                feed_urls=[FEED_URL, FEED_URL_B], fetcher=fake
+                feed_urls=[FEED_URL, FEED_URL_B],
+                user_id=PydanticObjectId(),
+                fetcher=fake,
             )
 
         # Both feeds return the same single entry → second is a duplicate.

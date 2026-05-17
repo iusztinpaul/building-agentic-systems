@@ -179,11 +179,14 @@ During development, run these steps after every atomic change or before commitin
  1. Format and lint: `make memory-format-fix && make memory-lint-fix && make memory-format-check && make memory-lint-check`
  2. Pre-commit: `make pre-commit`
  3. Unit tests: `make memory-unit-tests`
+ 3b. Fast integration tests (optional but recommended; <2 min): `make memory-integration-tests` — excludes `@pytest.mark.slow`.
 
 When the feature is considered done and ready for PR, ALWAYS run:
 
- 4. Integration tests: `make memory-integration-tests` (can take up to 15 minutes)
+ 4. Full integration tests: `make memory-integration-tests-all` (~5 min; includes `@pytest.mark.slow`). CI runs this same target.
  5. Run and verify the code end-to-end. For example, when testing the memory run: `make memory-serve-workflows & `→ `make memory-run-data-pipeline` → `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results. Always adapt this e2e example based on the modifications you've made. If necessary you should run multiple tests covering all the modifications you've made in the feature PR you are working on.
+
+Slow tests are marked `@pytest.mark.slow`; `grep -rn "pytest.mark.slow" apps/memory/tests/` shows what's excluded from the fast loop. Use `make memory-integration-tests-slow` to run only the slow tail (useful when iterating on a vector-index or full-Prefect-e2e change).
 
 ## Build
 
@@ -213,15 +216,41 @@ Run unit tests frequently during development:
 make memory-unit-tests
 ```
 
-Run integration tests only when the feature is done (can take up to 15 minutes):
+Run the **fast integration loop** (excludes `@pytest.mark.slow`, target <2 min) between iterations:
 ```
 make memory-integration-tests
+```
+
+When the feature is done and ready for PR, run the **full integration suite** (~5 min; CI runs this same target):
+```
+make memory-integration-tests-all
+```
+
+Run only the slow integration tail (useful when iterating on a vector-index or full-Prefect-e2e change):
+```
+make memory-integration-tests-slow
+```
+
+Mirror the CI integration command locally (skip mongot-dependent tests; runs sequentially because the shared-DB cleanup fixture makes parallel `-n auto` workers collide):
+```
+make memory-integration-tests-ci
 ```
 
 Or run all tests together (aggregate across apps):
 ```
 make tests
 ```
+
+### Test-marker hierarchy
+
+Two **orthogonal** pytest markers gate test selection:
+
+- `@pytest.mark.slow` — tests that take >3s or require vector-index convergence / full Prefect e2e. Excluded from the fast inner loop (`make memory-integration-tests`); included in `make memory-integration-tests-all` and the local CI mirror.
+- `@pytest.mark.requires_mongot` — tests that need a working Atlas Search / mongot service (live `$vectorSearch`, `create_search_index`, or the `_skip_without_mongot` fixture). **Excluded from CI** because mongot's Search Index Management gRPC channel is unreliable on GitHub runners (CI run 25989844295: 16 connectivity errors + 7 five-minute hangs). Included in every local target, where the full `docker-compose.yml` stack brings mongot up. A test can be `slow` without needing mongot, or vice versa.
+
+CI runs `pytest tests/integration -m "not requires_mongot" --timeout=300`. The Tester's acceptance-gate target `make memory-integration-tests-all` runs everything, including mongot — so before signing off on a feature, run it locally with the full stack up.
+
+`pytest-xdist` is installed in dev deps but **not enabled in CI**: the autouse `_clean_collections` fixture in `tests/integration/conftest.py` wipes every collection between tests, so parallel workers race against each other. If we ever need parallelization we'd need per-worker test DB names (`PYTEST_XDIST_WORKER` suffix).
 
 ## Running Pipelines
 
@@ -243,6 +272,53 @@ make memory-run-memory-pipeline-indexing
 The `make memory-serve-workflows` process must be running for pipeline triggers to be picked up, as it acts as the in-process Prefect worker. Without it, deployments are registered but no worker will execute them.
 
 Always use these Make commands instead of `prefect deployment run` directly, as the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
+
+### Phase 1 migration (one-shot)
+
+When upgrading an existing pre-multi-tenancy deployment to the Phase-1
+schema, run the one-shot migration script before any other pipeline. It
+seeds a `User`, backfills `user_id` onto every existing `Document`, drops
+the `knowledge_graph` collection (which extraction will rebuild), and
+triggers the extraction + indexing pipelines for the seed user.
+
+1. **Always dry-run first** to inspect the plan with counts. No writes:
+```
+make memory-migrate-multi-tenancy USER_IDENTIFIER=dev@example.com DRY_RUN=1
+```
+This prints "would create user X; would backfill N documents; would drop M KG rows".
+
+2. **Apply** (writes; idempotent — safe to re-run):
+```
+make memory-migrate-multi-tenancy USER_IDENTIFIER=dev@example.com NAME="Dev User"
+```
+
+3. **Verify** in `mongosh`:
+```
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true"
+> db.users.find({identifier: "dev@example.com"})
+> db.documents.countDocuments({user_id: ObjectId("<seed_user_id>")})
+> db.knowledge_graph.find({_id: /:person:self$/})
+```
+
+Notes:
+- The script needs `make memory-serve-workflows &` running to trigger
+  the Prefect deployments at step 5. If the worker isn't up, pass
+  `NO_TRIGGER_PIPELINES=1` and re-run the pipelines manually via
+  `make memory-run-memory-pipeline-extraction USER_ID=...` and
+  `make memory-run-memory-pipeline-indexing USER_ID=...`.
+- **Step 4.5 (post-#023):** the migration now calls `ensure_indexes`
+  inline immediately after re-creating the `person:self` node. The
+  freshly dropped `knowledge_graph` collection therefore ships with its
+  text / vector / `user_id`-prefixed compound indexes already in place
+  when the script returns, rather than waiting on the fire-and-forget
+  indexing deployment in step 5. Idempotent: step 5's indexing run
+  re-issues the same `ensure_indexes` call.
+- The script ABORTS if `documents` already carries `user_id` values
+  from a different tenant (this script is a one-shot bootstrap, not a
+  multi-tenant rebalance).
+- Re-running with the same `--identifier` is a no-op (the seed user
+  is re-used, the `update_many` writes no new values, and the
+  self-person `$setOnInsert` upsert leaves the existing row alone).
 
 ## Running Custom Commands for Project Level Dependencies
 

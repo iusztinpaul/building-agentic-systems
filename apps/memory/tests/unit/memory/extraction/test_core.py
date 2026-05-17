@@ -354,6 +354,7 @@ class TestUpsertGraphEntriesArrayCaps:
         )
         await upsert_graph_entries(
             result,
+            user_id=PydanticObjectId(),
             source_document_id=PydanticObjectId(),
             database="test",
             client=client,
@@ -383,6 +384,7 @@ class TestUpsertGraphEntriesArrayCaps:
         )
         await upsert_graph_entries(
             result,
+            user_id=PydanticObjectId(),
             source_document_id=PydanticObjectId(),
             database="test",
             client=client,
@@ -414,6 +416,7 @@ class TestUpsertGraphEntriesArrayCaps:
         )
         await upsert_graph_entries(
             result,
+            user_id=PydanticObjectId(),
             source_document_id=PydanticObjectId(),
             database="test",
             client=client,
