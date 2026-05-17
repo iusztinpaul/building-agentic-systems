@@ -1,15 +1,22 @@
 """
 Query module for the unified memory.
 
-Two-step retrieval:
+Two-step retrieval, every step scoped to the run's ``user_id``:
+
 1. search_nodes  — find entry-point nodes via text + vector search (RRF fusion).
 2. expand_graph  — walk edges up to N hops from the seed nodes.
 3. query_memory  — end-to-end orchestrator combining both steps.
+
+Every public entry point takes ``user_id`` as a required, non-Optional
+parameter. The internal helpers thread the value through ``$vectorSearch``
+``filter`` clauses and ``$match`` stages so cross-tenant rows never appear
+in a single response.
 """
 
 import logging
 from typing import Any
 
+from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient
 
 from tree.config.app_config import app_config
@@ -31,12 +38,15 @@ async def search_nodes(
     database: str,
     query: str,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
     *,
     top_k: int | None = None,
 ) -> list[dict[str, Any]]:
     """Find entry-point nodes via combined text and vector search.
 
     Uses reciprocal rank fusion (RRF) to merge results from both methods.
+    ``user_id`` is pinned into both the ``$vectorSearch`` filter and the
+    text ``$match`` so cross-tenant rows are pruned server-side.
     """
 
     top_k = top_k if top_k is not None else app_config.query.top_k
@@ -46,11 +56,11 @@ async def search_nodes(
 
     # --- Vector search ---
     vector_results = await _vector_search(
-        collection, query, embedding_model, limit=top_k
+        collection, query, embedding_model, user_id=user_id, limit=top_k
     )
 
     # --- Text search ---
-    text_results = await _text_search(collection, query, limit=top_k)
+    text_results = await _text_search(collection, query, user_id=user_id, limit=top_k)
 
     # --- RRF fusion ---
     fused = _rrf_fuse(vector_results, text_results, k=rrf_k)
@@ -66,6 +76,7 @@ async def _vector_search(
     query: str,
     embedding_model: BaseEmbeddingModel,
     *,
+    user_id: PydanticObjectId,
     limit: int,
 ) -> list[dict[str, Any]]:
     """Run $vectorSearch on the knowledge_graph collection."""
@@ -80,7 +91,7 @@ async def _vector_search(
                 "queryVector": query_vector,
                 "numCandidates": limit * 10,
                 "limit": limit,
-                "filter": {"kind": "node"},
+                "filter": {"user_id": user_id, "kind": "node"},
             }
         },
         {"$addFields": {"_search_score": {"$meta": "vectorSearchScore"}}},
@@ -101,15 +112,23 @@ async def _text_search(
     collection: Any,
     query: str,
     *,
+    user_id: PydanticObjectId,
     limit: int,
 ) -> list[dict[str, Any]]:
     """Run $text query on the knowledge_graph collection.
 
-    Uses a standard MongoDB text index (not Atlas Search).
+    Uses a standard MongoDB text index (not Atlas Search). ``user_id`` is
+    folded into the ``$match`` so cross-tenant hits never leak.
     """
 
     pipeline = [
-        {"$match": {"kind": "node", "$text": {"$search": query}}},
+        {
+            "$match": {
+                "user_id": user_id,
+                "kind": "node",
+                "$text": {"$search": query},
+            }
+        },
         {"$addFields": {"_search_score": {"$meta": "textScore"}}},
         {"$sort": {"_search_score": -1}},
         {"$limit": limit},
@@ -163,13 +182,16 @@ async def expand_graph(
     client: AsyncMongoClient,
     database: str,
     node_ids: list[Any],
+    user_id: PydanticObjectId,
     *,
     max_hops: int | None = None,
 ) -> QueryResult:
     """Starting from seed node _ids, traverse edges up to max_hops.
 
     Uses two $graphLookup passes (outgoing + incoming) to do bidirectional
-    traversal, then hydrates all discovered node documents.
+    traversal, then hydrates all discovered node documents. Every match
+    stage carries ``user_id`` and the $graphLookup ``restrictSearchWithMatch``
+    filters cross-tenant edges out of the traversal.
     """
 
     max_hops = max_hops if max_hops is not None else app_config.query.max_hops
@@ -181,7 +203,11 @@ async def expand_graph(
         all_nodes: list[dict[str, Any]] = []
         if node_ids:
             async for node in collection.find(
-                {"kind": "node", "_id": {"$in": list(node_ids)}}
+                {
+                    "user_id": user_id,
+                    "kind": "node",
+                    "_id": {"$in": list(node_ids)},
+                }
             ):
                 all_nodes.append(node)
         return QueryResult(nodes=all_nodes, edges=[])
@@ -190,7 +216,7 @@ async def expand_graph(
     depth = max_hops - 1
 
     pipeline = [
-        {"$match": {"kind": "node", "_id": {"$in": node_ids}}},
+        {"$match": {"user_id": user_id, "kind": "node", "_id": {"$in": node_ids}}},
         # Outgoing: seed._id → edge.source_node_id, follow edge.target_node_id
         {
             "$graphLookup": {
@@ -200,7 +226,7 @@ async def expand_graph(
                 "connectToField": "source_node_id",
                 "as": "outgoing",
                 "maxDepth": depth,
-                "restrictSearchWithMatch": {"kind": "edge"},
+                "restrictSearchWithMatch": {"user_id": user_id, "kind": "edge"},
             }
         },
         # Incoming: seed._id → edge.target_node_id, follow edge.source_node_id
@@ -212,7 +238,7 @@ async def expand_graph(
                 "connectToField": "target_node_id",
                 "as": "incoming",
                 "maxDepth": depth,
-                "restrictSearchWithMatch": {"kind": "edge"},
+                "restrictSearchWithMatch": {"user_id": user_id, "kind": "edge"},
             }
         },
         # Merge both directions into a single deduplicated array per seed.
@@ -236,11 +262,15 @@ async def expand_graph(
             node_id_set.add(edge["source_node_id"])
             node_id_set.add(edge["target_node_id"])
 
-    # Hydrate all discovered nodes.
+    # Hydrate all discovered nodes (still scoped to user_id).
     all_nodes: list[dict[str, Any]] = []
     if node_id_set:
         async for node in collection.find(
-            {"kind": "node", "_id": {"$in": list(node_id_set)}}
+            {
+                "user_id": user_id,
+                "kind": "node",
+                "_id": {"$in": list(node_id_set)},
+            }
         ):
             all_nodes.append(node)
 
@@ -265,14 +295,19 @@ async def query_memory(
     database: str,
     query: str,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
     *,
     top_k: int | None = None,
     max_hops: int | None = None,
 ) -> QueryResult:
-    """Search for relevant nodes, then expand the graph around them."""
+    """Search for relevant nodes, then expand the graph around them.
+
+    Every step is scoped to ``user_id``. A single query never returns
+    rows from another tenant.
+    """
 
     seed_nodes = await search_nodes(
-        client, database, query, embedding_model, top_k=top_k
+        client, database, query, embedding_model, user_id, top_k=top_k
     )
 
     if not seed_nodes:
@@ -281,4 +316,4 @@ async def query_memory(
 
     seed_ids = [node["_id"] for node in seed_nodes]
 
-    return await expand_graph(client, database, seed_ids, max_hops=max_hops)
+    return await expand_graph(client, database, seed_ids, user_id, max_hops=max_hops)

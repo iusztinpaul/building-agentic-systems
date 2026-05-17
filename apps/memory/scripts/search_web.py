@@ -21,6 +21,7 @@ import json
 import logging
 
 import click
+from beanie import PydanticObjectId
 
 from tree.data.web.web_search_ingest import trigger_url_batch_ingest
 from tree.data.web.web_serp import search as web_search
@@ -51,6 +52,7 @@ async def _run(
     ingest: bool,
     ingest_top_k: int | None,
     ingest_urls: list[str] | None,
+    user_id: PydanticObjectId | None,
 ) -> int:
     """Run the SERP query and (optionally) fire the ingest deployment.
 
@@ -108,7 +110,10 @@ async def _run(
     }
 
     if ingest:
-        payload["ingest"] = await _maybe_ingest(results, ingest_top_k, ingest_urls)
+        assert user_id is not None  # checked by caller
+        payload["ingest"] = await _maybe_ingest(
+            results, ingest_top_k, ingest_urls, user_id
+        )
 
     logger.info("%s", json.dumps(payload, indent=2))
     return 0
@@ -118,6 +123,7 @@ async def _maybe_ingest(
     results: list,
     ingest_top_k: int | None,
     ingest_urls: list[str] | None,
+    user_id: PydanticObjectId,
 ) -> dict[str, object]:
     """Pick URLs and fire-and-forget the batch ingest deployment.
 
@@ -141,7 +147,7 @@ async def _maybe_ingest(
         }
 
     try:
-        trigger = await trigger_url_batch_ingest(selected)
+        trigger = await trigger_url_batch_ingest(selected, user_id)
     except Exception as exc:  # noqa: BLE001 — best-effort.
         logger.error("Failed to trigger ingest-web-url-batch-etl: %s", exc)
         return {
@@ -218,6 +224,14 @@ async def _maybe_ingest(
         "Overrides --ingest-top-k."
     ),
 )
+@click.option(
+    "--user-id",
+    default=None,
+    help=(
+        "Tenant id to attribute the ingestion to. Required when --ingest is set. "
+        "Pass a 24-char Mongo ObjectId."
+    ),
+)
 def main(
     query: str,
     engine: str,
@@ -227,10 +241,18 @@ def main(
     ingest: bool,
     ingest_top_k: int | None,
     ingest_urls: str | None,
+    user_id: str | None,
 ) -> None:
     """Run a Bright Data SERP search and print results."""
 
     parsed_ingest_urls = _parse_ingest_urls(ingest_urls)
+
+    parsed_user_id: PydanticObjectId | None = None
+    if ingest:
+        if not user_id:
+            logger.error("--user-id is required when --ingest is set")
+            raise SystemExit(1)
+        parsed_user_id = PydanticObjectId(user_id)
 
     exit_code = asyncio.run(
         _run(
@@ -242,6 +264,7 @@ def main(
             ingest,
             ingest_top_k,
             parsed_ingest_urls,
+            parsed_user_id,
         )
     )
     if exit_code != 0:

@@ -19,9 +19,11 @@ import asyncio
 import logging
 from typing import Any
 
+from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.config.app_config import app_config
+from tree.config.settings import settings
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,17 @@ _KG_COLLECTION = "knowledge_graph"
 # Index names (shared with query module).
 _TEXT_INDEX_NAME = "text_index"
 _VECTOR_INDEX_NAME = "vector_index"
-_CANONICAL_NAME_INDEX = "canonical_name_index"
+_CANONICAL_NAME_INDEX = "user_canonical_name_index"
+
+# Legacy compound index names that the ``user_*``-prefixed versions
+# replace. The reconcile loop in :func:`ensure_indexes` drops these on
+# first run so callers don't carry two parallel sets of indexes.
+_LEGACY_COMPOUND_INDEX_NAMES: tuple[str, ...] = (
+    "kind_source_node",
+    "kind_target_node",
+    "kind_embedding",
+    "canonical_name_index",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,9 +52,19 @@ _CANONICAL_NAME_INDEX = "canonical_name_index"
 
 
 def _node_to_text(node: dict[str, Any]) -> str:
-    """Build an embeddable text representation from a node document."""
+    """Build an embeddable text representation from a node document.
 
-    parts = [f"{node.get('type', '')}: {node.get('_id', '')}"]
+    Uses the node's surface ``name`` (or ``canonical_name`` if absent) as
+    the headline token rather than ``_id``. Post-Phase-1 every ``_id``
+    starts with ``"{user_id}:"`` — a 24-char ObjectId hex prefix that is
+    constant per tenant and adds no semantic value (we already filter
+    ``$vectorSearch`` by ``user_id`` server-side). Falling back to the
+    ``_id`` only when both name fields are missing preserves backward
+    compatibility with legacy rows.
+    """
+
+    headline = node.get("name") or node.get("canonical_name") or node.get("_id", "")
+    parts = [f"{node.get('type', '')}: {headline}"]
     props = node.get("properties", {})
     for key, value in props.items():
         if value and key != "content":
@@ -57,14 +79,19 @@ async def embed_nodes(
     client: AsyncMongoClient,
     database: str,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
 ) -> int:
-    """Compute embeddings for all nodes that have an empty embedding vector.
+    """Compute embeddings for nodes belonging to ``user_id`` that lack one.
 
     Backfill semantics: only nodes whose ``embedding`` is missing, ``None``,
     or an empty list are re-embedded. Nodes whose embeddings were already
     written inline by the extraction pipeline (task ④ in
     ``tree.memory.extraction.pipeline``) are skipped — running this
     function repeatedly is a no-op once every node has a vector.
+
+    Cross-tenant rows are invisible to this function. A two-tenant database
+    that runs ``embed_nodes`` once per user produces two disjoint
+    embedding batches.
 
     Returns the number of nodes embedded.
     """
@@ -73,11 +100,15 @@ async def embed_nodes(
     collection = db[_KG_COLLECTION]
     batch_size = app_config.query.embedding_batch_size
 
-    # Fetch only nodes whose embedding is missing/None/empty. Nodes with a
-    # non-empty embedding vector are intentionally excluded so this stays
-    # a backfill, not a re-embedder.
+    # Fetch only nodes whose embedding is missing/None/empty AND that
+    # belong to ``user_id``. Nodes with a non-empty embedding vector are
+    # intentionally excluded so this stays a backfill, not a re-embedder.
     docs = await collection.find(
-        {"kind": "node", "embedding": {"$in": [[], None]}},
+        {
+            "user_id": user_id,
+            "kind": "node",
+            "embedding": {"$in": [[], None]},
+        },
     ).to_list()
 
     embedded_count = 0
@@ -128,9 +159,15 @@ _TEXT_INDEX_FIELDS: list[tuple[str, str]] = [
 ]
 
 # Filter paths the vector-search index must expose so $vectorSearch
-# queries can prune candidates server-side. ``merged_into`` lets dedup
-# exclude tombstones without a post-aggregation $match.
-_VECTOR_INDEX_FILTER_PATHS: tuple[str, ...] = ("kind", "type", "merged_into")
+# queries can prune candidates server-side. ``user_id`` is first — every
+# tenant-scoped $vectorSearch carries a ``user_id`` filter; ``merged_into``
+# lets dedup exclude tombstones without a post-aggregation $match.
+_VECTOR_INDEX_FILTER_PATHS: tuple[str, ...] = (
+    "user_id",
+    "kind",
+    "type",
+    "merged_into",
+)
 
 
 async def ensure_indexes(
@@ -138,8 +175,18 @@ async def ensure_indexes(
     database: str,
     *,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
 ) -> None:
     """Create classic and search indexes on the knowledge_graph collection.
+
+    ``user_id`` is the **leading key** of every compound index — that
+    pattern matches every tenant-scoped read in this codebase, so a
+    ``find({"user_id": X, ...})`` lookup hits the index prefix without a
+    full collection scan. The actual indexes themselves are global to the
+    collection; ``user_id`` is the first key, not a separate index per
+    tenant. ``user_id`` is passed (rather than read from settings) so the
+    parameter shape mirrors the other pipeline entry points and tests can
+    drive index creation deterministically.
 
     Reads ``embedding_model.dimensions`` ONCE and uses it to drive the
     vector-search index's ``numDimensions``. If a ``vector_index`` already
@@ -147,8 +194,22 @@ async def ensure_indexes(
     and drops + recreates it.
 
     Idempotent: every step inspects live state and skips when the desired
-    configuration is already in place.
+    configuration is already in place. Legacy compound indexes
+    (``kind_source_node`` etc.) are dropped on first run.
     """
+
+    # ``user_id`` is bound by the caller; ``ensure_indexes`` is parameterised
+    # on it so the signature mirrors the rest of the pipeline. The actual
+    # compound indexes are global to the collection (one index covers every
+    # tenant) — the parameter exists for shape consistency and to surface a
+    # ``TypeError`` when a caller forgets it. We log it here so the operator
+    # can correlate an index-reconcile run with the tenant that triggered it.
+    logger.info(
+        "Ensuring indexes on %s (triggered by tenant user_id=%s; indexes "
+        "themselves are global to the collection)",
+        _KG_COLLECTION,
+        user_id,
+    )
 
     db = client[database]
     collection = db[_KG_COLLECTION]
@@ -158,6 +219,9 @@ async def ensure_indexes(
     # under us mid-call.
     target_dimensions = embedding_model.dimensions
 
+    # --- Drop legacy non-tenant-prefixed compound indexes (idempotent) ---
+    await _drop_legacy_compound_indexes(collection)
+
     # --- Classic indexes ---
 
     await collection.create_index(
@@ -166,25 +230,26 @@ async def ensure_indexes(
     )
     logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, _KG_COLLECTION)
 
-    # Compound indexes for common query patterns.
+    # Compound indexes for common query patterns. Every key starts with
+    # ``user_id`` so tenant-scoped reads hit the index prefix.
     await collection.create_index(
-        [("kind", 1), ("source_node_id", 1)],
-        name="kind_source_node",
+        [("user_id", 1), ("kind", 1), ("source_node_id", 1)],
+        name="user_kind_source_node",
     )
     await collection.create_index(
-        [("kind", 1), ("target_node_id", 1)],
-        name="kind_target_node",
+        [("user_id", 1), ("kind", 1), ("target_node_id", 1)],
+        name="user_kind_target_node",
     )
     await collection.create_index(
-        [("kind", 1), ("embedding", 1)],
-        name="kind_embedding",
+        [("user_id", 1), ("kind", 1), ("embedding", 1)],
+        name="user_kind_embedding",
     )
-    # Non-unique, sparse index on the top-level ``canonical_name`` field —
-    # nodes share canonicals (alias families collapse onto the same
-    # canonical) and edges have ``canonical_name=None``, so sparse + non-
-    # unique is the right shape for soft-join lookups.
+    # Non-unique, sparse index on (user_id, canonical_name) — nodes share
+    # canonicals (alias families collapse onto the same canonical) and
+    # edges have ``canonical_name=None``, so sparse + non-unique is the
+    # right shape for soft-join lookups.
     await collection.create_index(
-        [("canonical_name", 1)],
+        [("user_id", 1), ("canonical_name", 1)],
         name=_CANONICAL_NAME_INDEX,
         sparse=True,
         unique=False,
@@ -193,6 +258,36 @@ async def ensure_indexes(
 
     # --- Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)
+
+
+async def _drop_legacy_compound_indexes(collection: Any) -> None:
+    """Drop any pre-#019 compound indexes that lacked the ``user_id`` prefix.
+
+    Safe to call repeatedly: each drop is wrapped so a missing index is a
+    no-op, and the function only targets the known legacy names.
+    """
+
+    try:
+        existing = await collection.index_information()
+    except Exception:  # noqa: BLE001 — never block startup on this
+        logger.debug("Could not list classic indexes; skipping legacy drop")
+        return
+
+    for name in _LEGACY_COMPOUND_INDEX_NAMES:
+        if name in existing:
+            try:
+                await collection.drop_index(name)
+                logger.info(
+                    "Dropped legacy compound index '%s' on %s",
+                    name,
+                    _KG_COLLECTION,
+                )
+            except Exception:  # noqa: BLE001 — drop failures are non-fatal
+                logger.warning(
+                    "Failed to drop legacy compound index '%s' (will retry next run)",
+                    name,
+                    exc_info=True,
+                )
 
 
 def _build_vector_index_definition(dimensions: int) -> dict[str, Any]:
@@ -330,3 +425,67 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
     logger.warning(
         "Vector search index '%s' did not appear in time", _VECTOR_INDEX_NAME
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Startup-time settings vs. live vector index check
+# ---------------------------------------------------------------------------
+
+
+async def assert_settings_match_live_vector_index(
+    client: AsyncMongoClient,
+    database: str,
+) -> None:
+    """Hard-error gate between ``settings.embedding_dim`` and the live mongot index.
+
+    Phase 1 of multi-tenancy pins the embedding dimension in
+    :mod:`tree.config.settings`. The Atlas Vector Search index under
+    ``docker/mongot/`` must reflect the same value — a mismatch silently
+    corrupts every ``$vectorSearch`` write. This helper inspects the live
+    ``vector_index`` definition for ``database.knowledge_graph`` and:
+
+    * Returns ``None`` if ``numDimensions`` on the live index equals
+      ``settings.embedding_dim``.
+    * Raises :class:`RuntimeError` (with both numbers in the message) on
+      mismatch.
+    * Raises :class:`RuntimeError` (``"vector_index not found"``) when no
+      index named ``vector_index`` is present — caller decides whether to
+      bootstrap one via :func:`ensure_indexes` or fail.
+
+    Intended call site: indexing-pipeline boot, before any embedding
+    write. See ``tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md``.
+    """
+
+    collection = client[database][_KG_COLLECTION]
+    cursor = await collection.list_search_indexes()
+    indexes: list[dict[str, Any]] = [idx async for idx in cursor]
+
+    live: dict[str, Any] | None = next(
+        (idx for idx in indexes if idx.get("name") == _VECTOR_INDEX_NAME),
+        None,
+    )
+    if live is None:
+        raise RuntimeError(
+            f"vector_index not found in database '{database}'; expected an "
+            f"Atlas Vector Search index named '{_VECTOR_INDEX_NAME}' with "
+            f"numDimensions={settings.embedding_dim}. Run the indexing "
+            f"pipeline to bootstrap it."
+        )
+
+    live_dimensions = _extract_existing_vector_index_dimensions(live)
+    if live_dimensions is None:
+        raise RuntimeError(
+            f"vector_index '{_VECTOR_INDEX_NAME}' in database '{database}' has "
+            f"no parseable numDimensions; expected "
+            f"settings.embedding_dim={settings.embedding_dim}."
+        )
+
+    if live_dimensions != settings.embedding_dim:
+        raise RuntimeError(
+            f"Embedding dimension mismatch: "
+            f"settings.embedding_dim={settings.embedding_dim} but live "
+            f"vector_index numDimensions={live_dimensions}. Rebuild the "
+            f"mongot index (drop + ensure_indexes) so it matches the pinned "
+            f"settings value, or revert settings.embedding_dim to "
+            f"{live_dimensions}."
+        )

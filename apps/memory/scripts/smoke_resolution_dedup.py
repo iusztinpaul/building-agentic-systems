@@ -548,6 +548,9 @@ async def _run_indexing_inproc() -> None:
 # ---------------------------------------------------------------------------
 
 
+_SMOKE_USER_ID_STR = "000000000000000000000023"
+
+
 def _invoke_review_cli_list() -> str:
     """Run ``scripts/review_duplicates.py list --entity-type person``."""
 
@@ -557,6 +560,8 @@ def _invoke_review_cli_list() -> str:
             "run",
             "python",
             "scripts/review_duplicates.py",
+            "--user-id",
+            _SMOKE_USER_ID_STR,
             "list",
             "--entity-type",
             NodeType.PERSON.value,
@@ -575,6 +580,8 @@ def _invoke_review_cli_confirm(
             "run",
             "python",
             "scripts/review_duplicates.py",
+            "--user-id",
+            _SMOKE_USER_ID_STR,
             "confirm",
             source_node_id,
             target_node_id,
@@ -851,10 +858,22 @@ async def run_smoke(*, strategy: MergeStrategy, restart_infra: bool) -> int:
         logger.info("--- review CLI: list pending ---")
         cli_list_output = _invoke_review_cli_list()
 
+        from beanie import PydanticObjectId
+
         from tree.memory.review import find_pending_duplicates
 
+        # NOTE (#023): the smoke script does not yet wire user_id through
+        # the extraction/indexing/review chain. The smoke is already
+        # broken w.r.t. multi-tenancy (it calls
+        # ``memory_extraction.fn(document_ids=...)`` without ``user_id``)
+        # — this call is updated to keep the file compilable. A separate
+        # task should rebuild the smoke around a fixture user.
+        _SMOKE_USER_ID = PydanticObjectId("000000000000000000000023")
         pending = await find_pending_duplicates(
-            client[database_name], entity_type=NodeType.PERSON, limit=10
+            client[database_name],
+            user_id=_SMOKE_USER_ID,
+            entity_type=NodeType.PERSON,
+            limit=10,
         )
         logger.info("found %d pending pair(s) via API", len(pending))
         if not pending:

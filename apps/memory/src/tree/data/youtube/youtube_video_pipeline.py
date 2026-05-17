@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
@@ -57,7 +58,7 @@ def _default_chained_fetcher() -> TranscriptFetcher:
 
 @task(name="fetch-youtube-video", retries=2, retry_delay_seconds=5)
 async def fetch_video_task(
-    video_url: str, fetcher: TranscriptFetcher
+    video_url: str, fetcher: TranscriptFetcher, user_id: PydanticObjectId
 ) -> tuple[Document, str] | None:
     """Resolve, transcribe, enrich, and assemble — return (doc, video_id) or None.
 
@@ -84,7 +85,12 @@ async def fetch_video_task(
     payload = await fetch_oembed_metadata(canonical_url)
     metadata = parse_oembed_metadata(payload, video_id=video_id)
 
-    doc = build_document(video_id=video_id, metadata=metadata, transcript=transcript)
+    doc = build_document(
+        video_id=video_id,
+        metadata=metadata,
+        transcript=transcript,
+        user_id=user_id,
+    )
     return doc, video_id
 
 
@@ -95,7 +101,9 @@ async def load_video_task(doc: Document) -> Document | None:
 
 @flow(name="ingest-youtube-video-etl", log_prints=True, validate_parameters=False)
 async def ingest_youtube_video(
-    video_url: str, fetcher: TranscriptFetcher | None = None
+    video_url: str,
+    user_id: PydanticObjectId,
+    fetcher: TranscriptFetcher | None = None,
 ) -> Document | None:
     """Ingest a single YouTube video URL into the documents collection.
 
@@ -106,7 +114,7 @@ async def ingest_youtube_video(
 
     fetcher = fetcher or _default_chained_fetcher()
 
-    fetched = await fetch_video_task(video_url, fetcher)
+    fetched = await fetch_video_task(video_url, fetcher, user_id)
     if fetched is None:
         return None
 
@@ -120,7 +128,9 @@ async def ingest_youtube_video(
     validate_parameters=False,
 )
 async def ingest_youtube_video_batch(
-    video_urls: list[str], fetcher: TranscriptFetcher | None = None
+    video_urls: list[str],
+    user_id: PydanticObjectId,
+    fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
     """Batch-ingest a list of video URLs.
 
@@ -136,7 +146,7 @@ async def ingest_youtube_video_batch(
     fetcher = fetcher or _default_chained_fetcher()
 
     results = await asyncio.gather(
-        *[ingest_youtube_video(url, fetcher=fetcher) for url in video_urls]
+        *[ingest_youtube_video(url, user_id, fetcher=fetcher) for url in video_urls]
     )
 
     ingested = [doc for doc in results if doc is not None]

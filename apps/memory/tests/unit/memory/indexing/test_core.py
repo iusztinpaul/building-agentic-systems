@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.memory.indexing.core import (
     _build_vector_index_definition,
@@ -15,6 +16,9 @@ from tree.memory.indexing.core import (
 )
 from tree.models.base import BaseEmbeddingModel
 from tree.models.fake_model import FakeEmbeddingModel
+
+
+_TEST_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +77,10 @@ def _make_collection(
     desired starting state; subsequent calls (with the index name) return
     a non-empty result so the wait-loop in ``_ensure_vector_index`` exits
     immediately.
+
+    ``index_information`` (used by ``_drop_legacy_compound_indexes``)
+    returns an empty dict so the legacy-drop loop is a no-op by default;
+    individual tests can override.
     """
 
     initial = initial_indexes or []
@@ -89,6 +97,8 @@ def _make_collection(
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock()
     collection.drop_search_index = AsyncMock()
+    collection.index_information = AsyncMock(return_value={})
+    collection.drop_index = AsyncMock()
     return collection
 
 
@@ -114,20 +124,30 @@ class TestEnsureIndexes:
             client,
             "test_db",
             embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
         )
 
         created_names = {
             call.kwargs.get("name") for call in collection.create_index.call_args_list
         }
 
-        assert "kind_source_node" in created_names
-        assert "kind_target_node" in created_names
-        assert "kind_embedding" in created_names
+        # Post-#019: compound indexes carry the ``user_*`` prefix and
+        # ``user_id`` as the leading key.
+        assert "user_kind_source_node" in created_names
+        assert "user_kind_target_node" in created_names
+        assert "user_kind_embedding" in created_names
+        # Verify the leading-key contract for one of them.
+        source_call = next(
+            call
+            for call in collection.create_index.call_args_list
+            if call.kwargs.get("name") == "user_kind_source_node"
+        )
+        assert source_call.args[0][0] == ("user_id", 1)
 
     async def test_vector_index_includes_filter_fields(self) -> None:
-        """The created vector index must declare ``kind``, ``type`` AND
-        ``merged_into`` as filter paths so $vectorSearch can prune
-        tombstones server-side."""
+        """The created vector index must declare ``user_id``, ``kind``,
+        ``type``, AND ``merged_into`` as filter paths so $vectorSearch can
+        prune cross-tenant rows and tombstones server-side."""
 
         collection = _make_collection()
         client = _wire_client(collection)
@@ -136,6 +156,7 @@ class TestEnsureIndexes:
             client,
             "test_db",
             embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
         )
 
         collection.create_search_index.assert_awaited_once()
@@ -143,6 +164,7 @@ class TestEnsureIndexes:
         fields = model["definition"]["fields"]
         filter_paths = {f["path"] for f in fields if f.get("type") == "filter"}
 
+        assert "user_id" in filter_paths
         assert "kind" in filter_paths
         assert "type" in filter_paths
         assert "merged_into" in filter_paths
@@ -158,6 +180,7 @@ class TestEnsureIndexes:
             client,
             "test_db",
             embedding_model=FakeEmbeddingModel(dimensions=42),
+            user_id=_TEST_USER_ID,
         )
 
         model = collection.create_search_index.await_args.kwargs["model"]
@@ -167,7 +190,8 @@ class TestEnsureIndexes:
         assert vector_field["numDimensions"] == 42
 
     async def test_canonical_name_index_created(self) -> None:
-        """A non-unique, sparse index on ``canonical_name`` must be created."""
+        """A non-unique, sparse compound (user_id, canonical_name) index
+        must be created."""
 
         collection = _make_collection()
         client = _wire_client(collection)
@@ -176,6 +200,7 @@ class TestEnsureIndexes:
             client,
             "test_db",
             embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
         )
 
         canonical_call = next(
@@ -184,7 +209,8 @@ class TestEnsureIndexes:
             if call.kwargs.get("name") == _CANONICAL_NAME_INDEX
         )
         keys = canonical_call.args[0]
-        assert keys == [("canonical_name", 1)]
+        # user_id is the leading key (post-#019).
+        assert keys == [("user_id", 1), ("canonical_name", 1)]
         assert canonical_call.kwargs.get("sparse") is True
         assert canonical_call.kwargs.get("unique") is False
 
@@ -199,6 +225,7 @@ class TestEnsureIndexes:
             client,
             "test_db",
             embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
         )
 
         text_call = next(
@@ -241,6 +268,7 @@ class TestEnsureIndexes:
                 client,
                 "test_db",
                 embedding_model=FakeEmbeddingModel(dimensions=768),
+                user_id=_TEST_USER_ID,
             )
 
         collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
@@ -272,6 +300,7 @@ class TestEnsureIndexes:
                         "numDimensions": 8,
                         "similarity": "cosine",
                     },
+                    {"type": "filter", "path": "user_id"},
                     {"type": "filter", "path": "kind"},
                     {"type": "filter", "path": "type"},
                     {"type": "filter", "path": "merged_into"},
@@ -286,6 +315,7 @@ class TestEnsureIndexes:
                 client,
                 "test_db",
                 embedding_model=FakeEmbeddingModel(dimensions=8),
+                user_id=_TEST_USER_ID,
             )
 
         collection.drop_search_index.assert_not_awaited()
@@ -323,6 +353,7 @@ class TestEnsureIndexes:
                 client,
                 "test_db",
                 embedding_model=FakeEmbeddingModel(dimensions=8),
+                user_id=_TEST_USER_ID,
             )
 
         collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
@@ -340,7 +371,15 @@ class TestVectorIndexDefinition:
     def test_definition_includes_required_filters(self) -> None:
         defn = _build_vector_index_definition(dimensions=16)
         filter_paths = {f["path"] for f in defn["fields"] if f.get("type") == "filter"}
-        assert set(_VECTOR_INDEX_FILTER_PATHS) == {"kind", "type", "merged_into"}
+        # Post-#019: user_id is required as a filter path so $vectorSearch
+        # can prune cross-tenant rows server-side.
+        assert set(_VECTOR_INDEX_FILTER_PATHS) == {
+            "user_id",
+            "kind",
+            "type",
+            "merged_into",
+        }
+        assert _VECTOR_INDEX_FILTER_PATHS[0] == "user_id"
         assert set(_VECTOR_INDEX_FILTER_PATHS).issubset(filter_paths)
 
     def test_text_index_fields_constant(self) -> None:
@@ -398,13 +437,18 @@ class TestEmbedNodesIsBackfillOnly:
         spy_model = _SpyEmbeddingModel(dimensions=4)
 
         # Act
-        embedded = await embed_nodes(client, "test_db", spy_model)
+        embedded = await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
 
         # Assert
         assert embedded == 1
-        # The query the function issues must exclude non-empty embeddings.
+        # The query the function issues must exclude non-empty embeddings
+        # and be scoped to ``user_id``.
         find_filter = collection.find.call_args.args[0]
-        assert find_filter == {"kind": "node", "embedding": {"$in": [[], None]}}
+        assert find_filter == {
+            "user_id": _TEST_USER_ID,
+            "kind": "node",
+            "embedding": {"$in": [[], None]},
+        }
         # Only one batch with the single empty-embedding node was embedded.
         assert len(spy_model.calls) == 1
         assert len(spy_model.calls[0]) == 1
@@ -420,7 +464,7 @@ class TestEmbedNodesIsBackfillOnly:
         client = _wire_client(collection)
         spy_model = _SpyEmbeddingModel(dimensions=4)
 
-        embedded = await embed_nodes(client, "test_db", spy_model)
+        embedded = await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
 
         assert embedded == 0
         assert spy_model.calls == []

@@ -3,8 +3,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.conversation import _content_hash, load_conversation_document
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestContentHash:
@@ -23,11 +26,11 @@ class TestContentHash:
 class TestLoadConversationDocument:
     async def test_raises_for_empty_text(self) -> None:
         with pytest.raises(ValueError, match="empty"):
-            await load_conversation_document("   ")
+            await load_conversation_document("   ", _USER_ID)
 
     async def test_raises_for_whitespace_only(self) -> None:
         with pytest.raises(ValueError, match="empty"):
-            await load_conversation_document("\n\t  ")
+            await load_conversation_document("\n\t  ", _USER_ID)
 
     async def test_creates_document_for_new_conversation(self, mocker) -> None:
         mocker.patch(
@@ -37,7 +40,7 @@ class TestLoadConversationDocument:
         )
         mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
-        doc = await load_conversation_document("Alice likes Python.")
+        doc = await load_conversation_document("Alice likes Python.", _USER_ID)
 
         assert doc is not None
         assert doc.source_uri.startswith("conversation://")
@@ -51,8 +54,8 @@ class TestLoadConversationDocument:
         )
         mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
-        doc1 = await load_conversation_document("Same text")
-        doc2 = await load_conversation_document("Same text")
+        doc1 = await load_conversation_document("Same text", _USER_ID)
+        doc2 = await load_conversation_document("Same text", _USER_ID)
 
         assert doc1.source_uri == doc2.source_uri
 
@@ -64,7 +67,7 @@ class TestLoadConversationDocument:
             return_value=existing,
         )
 
-        result = await load_conversation_document("Already ingested text.")
+        result = await load_conversation_document("Already ingested text.", _USER_ID)
         assert result is None
 
     async def test_custom_title_used(self, mocker) -> None:
@@ -75,7 +78,7 @@ class TestLoadConversationDocument:
         )
         mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
-        doc = await load_conversation_document("Text", title="My Title")
+        doc = await load_conversation_document("Text", _USER_ID, title="My Title")
         assert doc.title == "My Title"
 
     async def test_default_title_contains_timestamp(self, mocker) -> None:
@@ -86,7 +89,7 @@ class TestLoadConversationDocument:
         )
         mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
 
-        doc = await load_conversation_document("Text")
+        doc = await load_conversation_document("Text", _USER_ID)
         assert doc.title.startswith("Conversation ")
 
     async def test_handles_duplicate_key_error_gracefully(self, mocker) -> None:
@@ -103,5 +106,5 @@ class TestLoadConversationDocument:
             side_effect=DuplicateKeyError("duplicate"),
         )
 
-        result = await load_conversation_document("Race condition text.")
+        result = await load_conversation_document("Race condition text.", _USER_ID)
         assert result is None

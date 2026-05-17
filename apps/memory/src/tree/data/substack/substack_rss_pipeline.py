@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
@@ -21,8 +22,8 @@ async def fetch_feed_task(source_uri: str) -> list[dict]:
 
 
 @task(name="extract-substack-document")
-async def extract_document_task(raw_entry: dict) -> Document:
-    return extract_document(raw_entry)
+async def extract_document_task(raw_entry: dict, user_id: PydanticObjectId) -> Document:
+    return extract_document(raw_entry, user_id)
 
 
 @task(name="load-substack-document", retries=1, retry_delay_seconds=2)
@@ -31,9 +32,11 @@ async def load_document_task(doc: Document, raw_entry: dict) -> Document | None:
 
 
 @flow(name="ingest-substack-rss-feed-etl", log_prints=True)
-async def ingest_substack_rss_feed(feed_url: str) -> list[Document]:
+async def ingest_substack_rss_feed(
+    feed_url: str, user_id: PydanticObjectId
+) -> list[Document]:
     entries = await fetch_feed_task(feed_url)
-    documents = [await extract_document_task(entry) for entry in entries]
+    documents = [await extract_document_task(entry, user_id) for entry in entries]
 
     ingested: list[Document] = []
     for doc, entry in zip(documents, entries):
@@ -47,14 +50,16 @@ async def ingest_substack_rss_feed(feed_url: str) -> list[Document]:
 
 
 @flow(name="ingest-substack-rss-feed-batch-etl", log_prints=True)
-async def ingest_substack_rss_feed_batch(feed_urls: list[str]) -> list[Document]:
+async def ingest_substack_rss_feed_batch(
+    feed_urls: list[str], user_id: PydanticObjectId
+) -> list[Document]:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
 
     results = await asyncio.gather(
-        *[ingest_substack_rss_feed(feed_url) for feed_url in feed_urls]
+        *[ingest_substack_rss_feed(feed_url, user_id) for feed_url in feed_urls]
     )
 
     return [doc for docs in results for doc in docs]

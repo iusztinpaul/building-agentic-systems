@@ -3,6 +3,7 @@ from collections.abc import Generator
 from datetime import datetime, timezone
 
 import httpx
+from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 from datasets import load_dataset
 from pymongo.errors import DuplicateKeyError
@@ -46,8 +47,11 @@ def parse_authors(authors_str: str | None) -> list[str]:
     return authors if authors else ["Unknown"]
 
 
-def extract_document(raw_entry: dict) -> Document | None:
-    """Transform a single raw arxiv dataset entry into a Document. Returns None if the entry has no ID."""
+def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document | None:
+    """Transform a single raw arxiv dataset entry into a Document.
+
+    Returns None if the entry has no ID.
+    """
 
     arxiv_id = raw_entry.get("id", "")
     if not arxiv_id:
@@ -64,6 +68,7 @@ def extract_document(raw_entry: dict) -> Document | None:
     return Document(
         source_type=SourceType.HUGGINGFACE,
         source_uri=source_uri,
+        user_id=user_id,
         title=(raw_entry.get("title") or "").strip(),
         summary=abstract,
         content="",
@@ -151,12 +156,14 @@ async def fetch_paper_content(source_uri: str) -> str:
 
 
 async def load_document(doc: Document) -> Document | None:
-    """Dedup and persist a single arxiv document.
+    """Dedup and persist a single arxiv document (scoped to ``doc.user_id``).
 
     Returns the persisted Document, or None if skipped as duplicate.
     """
 
-    existing = await Document.find_one(Document.source_uri == doc.source_uri)
+    existing = await Document.find_one(
+        {"user_id": doc.user_id, "source_uri": doc.source_uri}
+    )
     if existing and existing.source_type != SourceType.LATENT:
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None

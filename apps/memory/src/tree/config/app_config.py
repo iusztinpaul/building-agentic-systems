@@ -9,6 +9,7 @@ Resolution order:
     2. configs/default.yaml (memory app root: ``apps/memory/``)
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union
@@ -16,6 +17,10 @@ from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
+
+from tree.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
@@ -30,9 +35,18 @@ class LLMConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    provider: str = "gemini"
-    model: str = "text-embedding-004"
-    dimensions: int = 768
+    """YAML-tunable embedding config.
+
+    Defaults mirror the pinned values in :mod:`tree.config.settings`
+    (``settings.embedding_*``). A YAML override is allowed — local dev
+    legitimately swaps to ``sentence-transformers`` / mock — but
+    :func:`load_app_config` logs a WARNING when ``dimensions`` disagrees
+    with ``settings.embedding_dim`` so the drift is visible at boot.
+    """
+
+    provider: str = Field(default_factory=lambda: settings.embedding_provider)
+    model: str = Field(default_factory=lambda: settings.embedding_model)
+    dimensions: int = Field(default_factory=lambda: settings.embedding_dim)
 
 
 class ModelsConfig(BaseModel):
@@ -394,7 +408,31 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
         raw = {}
 
     raw = _apply_env_overrides(raw)
-    return AppConfig.model_validate(raw)
+    config = AppConfig.model_validate(raw)
+    _warn_on_embedding_dim_mismatch(config)
+    return config
+
+
+def _warn_on_embedding_dim_mismatch(config: AppConfig) -> None:
+    """Log a WARNING when YAML embedding dim disagrees with the pinned settings.
+
+    Phase 1 of multi-tenancy pins ``settings.embedding_dim`` as the
+    single source of truth for the Atlas Vector Search index. The YAML
+    override stays available for local dev (mock/sentence-transformers),
+    but a silent disagreement between the YAML and the pin is the kind
+    of drift that surfaces later as an index-write failure. Surface it
+    at config-load time instead.
+    """
+
+    if config.models.embedding.dimensions != settings.embedding_dim:
+        logger.warning(
+            "app_config.embedding.dimensions=%d does not match "
+            "settings.embedding_dim=%d; mongot index is pinned to settings. "
+            "If this is a local-dev override (mock/sentence-transformers) you "
+            "can ignore this; otherwise rebuild the vector index.",
+            config.models.embedding.dimensions,
+            settings.embedding_dim,
+        )
 
 
 app_config = load_app_config()

@@ -15,11 +15,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.web.web_search_ingest import (
     DEPLOYMENT_NAME,
     trigger_url_batch_ingest,
 )
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 def _make_mock_client(
@@ -58,7 +61,7 @@ class TestTriggerUrlBatchIngest:
     async def test_empty_urls_raises_value_error(self) -> None:
         # Arrange / Act / Assert
         with pytest.raises(ValueError, match="urls must not be empty"):
-            await trigger_url_batch_ingest([])
+            await trigger_url_batch_ingest([], _USER_ID)
 
     async def test_returns_flow_run_id_and_tracking_url(self, mocker) -> None:
         # Arrange
@@ -69,7 +72,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        result = await trigger_url_batch_ingest(["https://a", "https://b"])
+        result = await trigger_url_batch_ingest(["https://a", "https://b"], _USER_ID)
 
         # Assert
         assert result["flow_run_id"] == "abcd-1234"
@@ -81,7 +84,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        await trigger_url_batch_ingest(["https://a"])
+        await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
         # Assert
         client.read_deployment_by_name.assert_awaited_once_with(DEPLOYMENT_NAME)
@@ -94,13 +97,13 @@ class TestTriggerUrlBatchIngest:
         urls = ["https://a", "https://b", "https://c"]
 
         # Act
-        await trigger_url_batch_ingest(urls)
+        await trigger_url_batch_ingest(urls, _USER_ID)
 
         # Assert
         client.create_flow_run_from_deployment.assert_awaited_once()
         kwargs = client.create_flow_run_from_deployment.await_args.kwargs
         assert kwargs["deployment_id"] == "dep-xyz"
-        assert kwargs["parameters"] == {"urls": urls}
+        assert kwargs["parameters"] == {"urls": urls, "user_id": str(_USER_ID)}
 
     async def test_does_not_poll_run_state(self, mocker) -> None:
         """Fire-and-forget: helper must not call ``read_flow_run`` (no polling loop)."""
@@ -110,7 +113,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        await trigger_url_batch_ingest(["https://a"])
+        await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
         # Assert
         client.read_flow_run.assert_not_awaited()
@@ -127,7 +130,7 @@ class TestTriggerUrlBatchIngest:
 
         # Act / Assert
         with pytest.raises(RuntimeError, match="deployment not found"):
-            await trigger_url_batch_ingest(["https://a"])
+            await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
     async def test_strips_api_suffix_for_tracking_url(self, mocker) -> None:
         # Arrange — api_url ends with /api/, base URL should drop the suffix.
@@ -138,7 +141,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        result = await trigger_url_batch_ingest(["https://a"])
+        result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
         # Assert
         assert result["tracking_url"] == "http://prefect.local:4200/runs/flow-run/run-1"
@@ -157,7 +160,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        result = await trigger_url_batch_ingest(["https://a"])
+        result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
         # Assert
         assert (
@@ -180,7 +183,7 @@ class TestTriggerUrlBatchIngest:
         _patch_get_client(mocker, client)
 
         # Act
-        result = await trigger_url_batch_ingest(["https://a"])
+        result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
         # Assert
         assert result["flow_run_id"] == "run-unk"

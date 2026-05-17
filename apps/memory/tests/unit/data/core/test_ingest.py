@@ -4,6 +4,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.config.app_config import (
     HuggingFaceDatasetSource,
@@ -16,6 +17,8 @@ from tree.data.core.ingest import (
     _get_configured_substack_domains,
     ingest_url,
 )
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 @pytest.fixture(autouse=True)
@@ -139,10 +142,10 @@ class TestIngestUrl:
             [("substack.com", mock_handler)],
         )
 
-        await ingest_url("https://newsletter.substack.com/p/article")
+        await ingest_url("https://newsletter.substack.com/p/article", _USER_ID)
 
         mock_handler.assert_awaited_once_with(
-            "https://newsletter.substack.com/p/article"
+            "https://newsletter.substack.com/p/article", _USER_ID
         )
 
     async def test_routes_custom_substack_domain(self, mocker) -> None:
@@ -162,9 +165,11 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url("https://decodingai.com/p/my-article")
+        await ingest_url("https://decodingai.com/p/my-article", _USER_ID)
 
-        mock_substack.assert_awaited_once_with("https://decodingai.com/p/my-article")
+        mock_substack.assert_awaited_once_with(
+            "https://decodingai.com/p/my-article", _USER_ID
+        )
         mock_fallback.assert_not_awaited()
 
     async def test_static_registry_takes_precedence(self, mocker) -> None:
@@ -178,7 +183,7 @@ class TestIngestUrl:
             return_value={"example.com"},
         )
 
-        await ingest_url("https://example.com/p/article")
+        await ingest_url("https://example.com/p/article", _USER_ID)
 
         static_handler.assert_awaited_once()
 
@@ -194,10 +199,12 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url("https://martinfowler.com/articles/microservices.html")
+        await ingest_url(
+            "https://martinfowler.com/articles/microservices.html", _USER_ID
+        )
 
         mock_fallback.assert_awaited_once_with(
-            "https://martinfowler.com/articles/microservices.html"
+            "https://martinfowler.com/articles/microservices.html", _USER_ID
         )
 
     async def test_falls_through_to_web_for_github_url(self, mocker) -> None:
@@ -212,10 +219,10 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url("https://github.com/anthropics/claude-code")
+        await ingest_url("https://github.com/anthropics/claude-code", _USER_ID)
 
         mock_fallback.assert_awaited_once_with(
-            "https://github.com/anthropics/claude-code"
+            "https://github.com/anthropics/claude-code", _USER_ID
         )
 
     async def test_fallback_emits_info_log(self, mocker, caplog) -> None:
@@ -232,7 +239,7 @@ class TestIngestUrl:
 
         url = "https://martinfowler.com/articles/microservices.html"
         with caplog.at_level(logging.INFO, logger="tree.data.core.ingest"):
-            await ingest_url(url)
+            await ingest_url(url, _USER_ID)
 
         expected = f"Routing URL to 'web (Bright Data fallback)' pipeline: {url}"
         assert any(expected in record.getMessage() for record in caplog.records)
@@ -259,7 +266,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="scheme"):
-            await ingest_url(url)
+            await ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()
@@ -292,9 +299,9 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url(url)
+        await ingest_url(url, _USER_ID)
 
-        mock_youtube.assert_awaited_once_with(url)
+        mock_youtube.assert_awaited_once_with(url, _USER_ID)
         mock_substack.assert_not_awaited()
         mock_fallback.assert_not_awaited()
 
@@ -319,7 +326,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="youtube_rss"):
-            await ingest_url(url)
+            await ingest_url(url, _USER_ID)
 
         mock_youtube.assert_not_awaited()
         mock_fallback.assert_not_awaited()
@@ -345,7 +352,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="missing a host"):
-            await ingest_url(url)
+            await ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()

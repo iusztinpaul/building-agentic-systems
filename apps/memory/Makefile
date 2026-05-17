@@ -38,11 +38,23 @@ tests: # Run all tests (unit + integration).
 unit-tests: # Run unit tests only.
 	uv run pytest tests/unit
 
-integration-tests: # Run integration tests only (can take up to 15 minutes).
+integration-tests: # Fast inner-loop integration tests (excludes @pytest.mark.slow). Target wall time <2 min.
+	uv run pytest tests/integration -m "not slow"
+
+integration-tests-slow: # Run only the slow integration tests (vector-index convergence + full Prefect e2e).
+	uv run pytest tests/integration -m "slow"
+
+integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot). Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
 	uv run pytest tests/integration
+
+integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests. Useful for reproducing CI behavior. Runs sequentially because the shared-DB cleanup fixture makes parallel runs collide.
+	uv run pytest tests/integration -m "not requires_mongot" --timeout=300
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files
+
+check-kgquery-discipline: # Enforce that raw KnowledgeGraphEntry.find(...) reads only live inside the allow-listed modules. Run by pre-commit; fails on a planted violation.
+	@uv run python scripts/check_kgquery_discipline.py
 
 format-fix: # Auto-format Python code using ruff formatter.
 	uv run ruff format $(QA_FOLDERS)
@@ -84,24 +96,44 @@ serve-workflows: # Serve Prefect workflow deployments.
 
 
 # --- Data Pipelines ---
+#
+# Every pipeline below requires a tenant USER_ID (a 24-char Mongo ObjectId).
+# Pass it on the make command line, e.g.::
+#
+#     make run-data-pipeline USER_ID=507f1f77bcf86cd799439011
+#
+# Wired in #020; there is no silent fallback to a default user.
 
-run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks all entries in configs/default.yaml sources.
-	uv run python scripts/run_data_pipeline.py
+run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks all entries in configs/default.yaml sources. Requires USER_ID=<oid>.
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
+	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)"
 
 
 # --- Memory Pipelines ---
 # Pattern: run-<memory-pipeline-name>-memory-pipeline
 
-run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Optionally pass DOC_IDS="id1 id2".
-	uv run python scripts/run_memory_pipeline.py $(DOC_IDS)
+run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2".
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
+	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",)
 
-run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes).
-	uv run python scripts/run_indexing_pipeline.py
+run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Requires USER_ID=<oid>.
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
+	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
+
+# --- Migration (Phase 1 one-shot) ---
+
+migrate-multi-tenancy: # One-shot Phase-1 multi-tenancy migration. Requires USER_IDENTIFIER=<email|sub>. Optional NAME="Display Name", DRY_RUN=1, NO_TRIGGER_PIPELINES=1.
+	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make migrate-multi-tenancy USER_IDENTIFIER=<email> [NAME="Display Name"] [DRY_RUN=1] [NO_TRIGGER_PIPELINES=1]'; exit 1; fi
+	uv run python scripts/migrate_multi_tenancy.py --identifier "$(USER_IDENTIFIER)" \
+		$(if $(NAME),--name "$(NAME)",) \
+		$(if $(filter 1,$(DRY_RUN)),--dry-run,) \
+		$(if $(filter 1,$(NO_TRIGGER_PIPELINES)),--no-trigger-pipelines,)
 
 # --- Querying ---
 
-query-graph: # Query and visualize the knowledge graph. Pass QUERY="your query" for search, omit for full graph.
-	uv run python scripts/query_graph.py $(if $(QUERY),--query "$(QUERY)",)
+query-graph: # Query and visualize the knowledge graph for one user. Requires USER_ID=<oid>. Pass QUERY="your query" for search, omit for full graph.
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make query-graph USER_ID=<24-char Mongo ObjectId> [QUERY="..."]'; exit 1; fi
+	uv run python scripts/query_graph.py --user-id "$(USER_ID)" $(if $(QUERY),--query "$(QUERY)",)
 
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi
@@ -121,8 +153,9 @@ scrape-web: # On-demand scrape of one or more URLs via Bright Data Web Unlocker 
 		$(if $(MAX_CHARS),--max-chars $(MAX_CHARS),) \
 		$(if $(TIMEOUT),--timeout $(TIMEOUT),)
 
-serve-mcp: # Serve the MCP server for knowledge graph queries.
-	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
+serve-mcp: # Serve the MCP server. Requires USER_ID=<oid> OR TREE_USER_IDENTIFIER env. Optional TRANSPORT=stdio|http|sse|streamable-http.
+	@if [ -z "$(USER_ID)" ] && [ -z "$(TREE_USER_IDENTIFIER)" ]; then echo 'USAGE: make serve-mcp USER_ID=<oid>  (or set TREE_USER_IDENTIFIER=<handle>)'; exit 1; fi
+	uv run python scripts/serve_mcp.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(TRANSPORT_ARG)
 
 
 # --- Smoke ---

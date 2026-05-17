@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 
+from beanie import PydanticObjectId
 from prefect.client.orchestration import get_client
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,9 @@ def _build_tracking_url(api_url: str, flow_run_id: str) -> str | None:
     return None
 
 
-async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str | None]:
+async def trigger_url_batch_ingest(
+    urls: list[str], user_id: PydanticObjectId
+) -> dict[str, str | None]:
     """Fire the ``ingest-web-url-batch-etl`` deployment with the given URLs.
 
     Looks up the deployment by name, creates a flow run with
@@ -78,7 +81,7 @@ async def trigger_url_batch_ingest(urls: list[str]) -> dict[str, str | None]:
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
-            parameters={"urls": urls},
+            parameters={"urls": urls, "user_id": str(user_id)},
         )
         flow_run_id = str(flow_run.id)
         tracking_url = _build_tracking_url(str(client.api_url), flow_run_id)

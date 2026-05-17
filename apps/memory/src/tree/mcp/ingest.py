@@ -11,6 +11,8 @@ flow run from inside the MCP server process.
 import logging
 from typing import Any
 
+from beanie import PydanticObjectId
+
 from tree.entities.documents import Document
 from tree.memory.extraction.pipeline import run_extraction_for_documents
 from tree.memory.indexing.core import embed_nodes
@@ -26,6 +28,7 @@ async def run_ingestion_pipeline(
     database: str,
     llm: BaseLLM,
     embedding_model: BaseEmbeddingModel,
+    user_id: PydanticObjectId,
 ) -> dict[str, Any]:
     """Run memory extraction and indexing on a Document.
 
@@ -50,13 +53,14 @@ async def run_ingestion_pipeline(
 
     summary = await run_extraction_for_documents(
         [str(document.id)],
+        user_id=user_id,
         client=client,
         database_name=database,
         llm=llm,
         embedding_model=embedding_model,
     )
 
-    await embed_nodes(client, database, embedding_model)
+    await embed_nodes(client, database, embedding_model, user_id)
 
     return {
         "status": "ingested",

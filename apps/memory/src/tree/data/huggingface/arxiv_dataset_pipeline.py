@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.app_config import HuggingFaceDatasetSource, app_config
@@ -20,8 +21,8 @@ ARXIV_DATASET_ID = "librarian-bots/arxiv-metadata-snapshot"
 
 
 @task(name="extract-arxiv-document")
-def extract_document(raw_entry: dict) -> Document | None:
-    return _extract_document(raw_entry)
+def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document | None:
+    return _extract_document(raw_entry, user_id)
 
 
 @task(name="fetch-arxiv-paper-content", retries=1, retry_delay_seconds=5)
@@ -82,6 +83,7 @@ def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
 
 @flow(name="ingest-arxiv-dataset-etl", log_prints=True)
 async def ingest_arxiv_dataset(
+    user_id: PydanticObjectId,
     max_samples: int | None = None,
     fetch_content: bool | None = None,
 ) -> list[Document]:
@@ -105,7 +107,7 @@ async def ingest_arxiv_dataset(
     ingested: list[Document] = []
 
     for batch in _fetch_dataset_batches(max_samples, batch_size):
-        documents = [extract_document(entry) for entry in batch]
+        documents = [extract_document(entry, user_id) for entry in batch]
 
         results = await asyncio.gather(
             *[

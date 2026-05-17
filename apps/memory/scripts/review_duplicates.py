@@ -1,21 +1,29 @@
 """Human-review CLI for flagged SAME_AS pairs.
 
+Every subcommand requires ``--user-id <ObjectId>`` (post-#023) — the
+review surface is tenant-scoped and there is no fallback to a default
+tenant.
+
 Usage:
     # List pending pairs.
-    uv --directory apps/memory run python scripts/review_duplicates.py list \
+    uv --directory apps/memory run python scripts/review_duplicates.py \
+        --user-id 507f1f77bcf86cd799439011 list \
         [--entity-type person] [--limit 10]
 
     # Confirm or reject a specific pair.
-    uv --directory apps/memory run python scripts/review_duplicates.py confirm \
+    uv --directory apps/memory run python scripts/review_duplicates.py \
+        --user-id 507f... confirm \
         person:alice person:alice s --reviewed-by alice@example.com \
         [--strategy keep_primary|merge_properties|keep_aliases]
 
-    uv --directory apps/memory run python scripts/review_duplicates.py reject \
+    uv --directory apps/memory run python scripts/review_duplicates.py \
+        --user-id 507f... reject \
         person:bob person:bobby --reviewed-by alice@example.com
 
     # Interactive walk (no subcommand): prompt for reviewer name once, then
     # walk pending pairs one at a time.
-    uv --directory apps/memory run python scripts/review_duplicates.py
+    uv --directory apps/memory run python scripts/review_duplicates.py \
+        --user-id 507f...
 
 Calls :func:`tree.logging.init_logger` at module level per project
 convention so ``logger.info`` calls in the review module surface.
@@ -27,6 +35,7 @@ import asyncio
 import logging
 
 import click
+from beanie import PydanticObjectId
 
 from tree.logging import init_logger
 
@@ -88,7 +97,9 @@ def _format_review_result(result: ReviewResult) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _list_async(entity_type: NodeType | None, limit: int) -> None:
+async def _list_async(
+    *, user_id: PydanticObjectId, entity_type: NodeType | None, limit: int
+) -> None:
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
@@ -96,7 +107,7 @@ async def _list_async(entity_type: NodeType | None, limit: int) -> None:
     try:
         database = client[settings.mongo.mongo_initdb_database]
         pending = await find_pending_duplicates(
-            database, entity_type=entity_type, limit=limit
+            database, user_id=user_id, entity_type=entity_type, limit=limit
         )
         _print_pending(pending)
     finally:
@@ -105,6 +116,7 @@ async def _list_async(entity_type: NodeType | None, limit: int) -> None:
 
 async def _review_async(
     *,
+    user_id: PydanticObjectId,
     source_node_id: str,
     target_node_id: str,
     decision: ReviewDecision,
@@ -119,6 +131,7 @@ async def _review_async(
         database = client[settings.mongo.mongo_initdb_database]
         result = await review_duplicate(
             database,
+            user_id=user_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=decision,
@@ -130,7 +143,9 @@ async def _review_async(
         await client.close()
 
 
-async def _interactive_async(reviewed_by: str, limit: int) -> None:
+async def _interactive_async(
+    *, user_id: PydanticObjectId, reviewed_by: str, limit: int
+) -> None:
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
@@ -140,7 +155,7 @@ async def _interactive_async(reviewed_by: str, limit: int) -> None:
     skipped = 0
     try:
         database = client[settings.mongo.mongo_initdb_database]
-        pending = await find_pending_duplicates(database, limit=limit)
+        pending = await find_pending_duplicates(database, user_id=user_id, limit=limit)
         if not pending:
             click.echo("No pending duplicates. Nothing to review.")
             return
@@ -176,6 +191,7 @@ async def _interactive_async(reviewed_by: str, limit: int) -> None:
                 try:
                     result = await review_duplicate(
                         database,
+                        user_id=user_id,
                         source_node_id=p.source_node_id,
                         target_node_id=p.target_node_id,
                         decision=ReviewDecision.CONFIRM,
@@ -194,6 +210,7 @@ async def _interactive_async(reviewed_by: str, limit: int) -> None:
             try:
                 result = await review_duplicate(
                     database,
+                    user_id=user_id,
                     source_node_id=p.source_node_id,
                     target_node_id=p.target_node_id,
                     decision=ReviewDecision.REJECT,
@@ -222,6 +239,13 @@ async def _interactive_async(reviewed_by: str, limit: int) -> None:
 
 @click.group(invoke_without_command=True)
 @click.option(
+    "--user-id",
+    "user_id",
+    required=True,
+    type=str,
+    help="Tenant ObjectId. Required for every subcommand (#023).",
+)
+@click.option(
     "--limit",
     type=int,
     default=50,
@@ -229,14 +253,21 @@ async def _interactive_async(reviewed_by: str, limit: int) -> None:
     help="Maximum number of pending pairs to walk in interactive mode.",
 )
 @click.pass_context
-def main(ctx: click.Context, limit: int) -> None:
+def main(ctx: click.Context, user_id: str, limit: int) -> None:
     """Review flagged duplicate pairs. Runs the interactive walk by default."""
+
+    ctx.ensure_object(dict)
+    ctx.obj["user_id"] = PydanticObjectId(user_id)
 
     if ctx.invoked_subcommand is not None:
         return
 
     reviewed_by = click.prompt("Reviewer name (email or handle)", type=str)
-    asyncio.run(_interactive_async(reviewed_by=reviewed_by, limit=limit))
+    asyncio.run(
+        _interactive_async(
+            user_id=ctx.obj["user_id"], reviewed_by=reviewed_by, limit=limit
+        )
+    )
 
 
 @main.command("list")
@@ -253,11 +284,14 @@ def main(ctx: click.Context, limit: int) -> None:
     show_default=True,
     help="Maximum number of rows to print.",
 )
-def list_cmd(entity_type: str | None, limit: int) -> None:
+@click.pass_context
+def list_cmd(ctx: click.Context, entity_type: str | None, limit: int) -> None:
     """List pending SAME_AS pairs."""
 
     entity_filter = NodeType(entity_type) if entity_type else None
-    asyncio.run(_list_async(entity_type=entity_filter, limit=limit))
+    asyncio.run(
+        _list_async(user_id=ctx.obj["user_id"], entity_type=entity_filter, limit=limit)
+    )
 
 
 @main.command("confirm")
@@ -275,11 +309,15 @@ def list_cmd(entity_type: str | None, limit: int) -> None:
     show_default=True,
     help="Merge strategy.",
 )
-def confirm_cmd(source: str, target: str, reviewed_by: str, strategy: str) -> None:
+@click.pass_context
+def confirm_cmd(
+    ctx: click.Context, source: str, target: str, reviewed_by: str, strategy: str
+) -> None:
     """Confirm a pending SAME_AS pair as a true duplicate."""
 
     asyncio.run(
         _review_async(
+            user_id=ctx.obj["user_id"],
             source_node_id=source,
             target_node_id=target,
             decision=ReviewDecision.CONFIRM,
@@ -297,11 +335,13 @@ def confirm_cmd(source: str, target: str, reviewed_by: str, strategy: str) -> No
     required=True,
     help="Reviewer identifier (email or handle).",
 )
-def reject_cmd(source: str, target: str, reviewed_by: str) -> None:
+@click.pass_context
+def reject_cmd(ctx: click.Context, source: str, target: str, reviewed_by: str) -> None:
     """Reject a pending SAME_AS pair (mark as not-a-duplicate)."""
 
     asyncio.run(
         _review_async(
+            user_id=ctx.obj["user_id"],
             source_node_id=source,
             target_node_id=target,
             decision=ReviewDecision.REJECT,

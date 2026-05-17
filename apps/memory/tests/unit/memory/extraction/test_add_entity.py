@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.add_entity import add_entity
@@ -26,6 +27,12 @@ from tree.memory.extraction.dedup import (
     MergeStrategy,
 )
 from tree.memory.resolution.types import ResolvedEntity
+
+
+# A stable user_id used across the suite. Real ``PydanticObjectId`` so
+# the prospective_id includes a realistic 24-hex-char prefix.
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+_PH = str(_USER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +117,7 @@ class TestAddEntityInputValidation:
                 database=database,
                 embedding_model=_make_embedding_model(),
                 resolver=_make_resolver(),
+                user_id=_USER_ID,
                 name="   ",
                 entity_type=NodeType.PERSON,
                 properties={},
@@ -124,6 +132,7 @@ class TestAddEntityInputValidation:
                 database=database,
                 embedding_model=_make_embedding_model(),
                 resolver=_make_resolver(),
+                user_id=_USER_ID,
                 name="alice",
                 entity_type=NodeType.PERSON,
                 properties={"confidence": 1.5},
@@ -138,9 +147,26 @@ class TestAddEntityInputValidation:
                 database=database,
                 embedding_model=_make_embedding_model(),
                 resolver=_make_resolver(),
+                user_id=_USER_ID,
                 name="alice",
                 entity_type=NodeType.PERSON,
                 properties={"confidence": -0.1},
+                source_id="src1",
+                dedup_config=DeduplicationConfig(),
+            )
+
+    async def test_missing_user_id_raises_type_error(self, mocker) -> None:
+        """``add_entity`` refuses to run without ``user_id``."""
+
+        database, _ = _make_database(mocker)
+        with pytest.raises(TypeError, match="user_id"):
+            await add_entity(  # type: ignore[call-arg]
+                database=database,
+                embedding_model=_make_embedding_model(),
+                resolver=_make_resolver(),
+                name="alice",
+                entity_type=NodeType.PERSON,
+                properties={},
                 source_id="src1",
                 dedup_config=DeduplicationConfig(),
             )
@@ -164,6 +190,7 @@ class TestAddEntityShortCircuit:
             database=database,
             embedding_model=embedding_model,
             resolver=resolver,
+            user_id=_USER_ID,
             name="Alice",
             entity_type=NodeType.PERSON,
             properties={"email": "a@x.com"},
@@ -173,12 +200,16 @@ class TestAddEntityShortCircuit:
             deduplicate=False,
         )
 
-        # Assert — single upsert at the canonical _id.
-        assert target_id == "person:alice"
+        # Assert — single upsert at the canonical _id, prefixed with user_id.
+        assert target_id == f"{_PH}:person:alice"
         assert resolved.match_type == "none"
         assert dedup_result.action == "none"
         assert collection.update_one.call_count == 1
         assert _count_same_as_calls(collection) == 0
+        # The upserted document carries the bound user_id.
+        node_call = collection.update_one.call_args_list[0]
+        set_stage = node_call.args[1][0]["$set"]
+        assert set_stage["user_id"] == _USER_ID
         # Resolver and dedup must not have been called.
         resolver.resolve.assert_not_called()
         dedupe_spy.assert_not_called()
@@ -224,6 +255,7 @@ class TestAddEntityMergedAction:
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(),
+            user_id=_USER_ID,
             name="alice corp",
             entity_type=NodeType.PERSON,
             properties={"description": "a longer description"},
@@ -266,6 +298,7 @@ class TestAddEntityFlaggedAction:
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(),
+            user_id=_USER_ID,
             name="alyce smyth",
             entity_type=NodeType.PERSON,
             properties={},
@@ -274,21 +307,23 @@ class TestAddEntityFlaggedAction:
         )
 
         # Assert
-        assert target_id == "person:alyce smyth"
+        assert target_id == f"{_PH}:person:alyce smyth"
         assert returned.applied_strategy is None  # only set on merged
         # Two upserts: the new node + the SAME_AS edge.
         assert collection.update_one.call_count == 2
         # First call upserts at the new node id.
         node_args = collection.update_one.call_args_list[0]
-        assert node_args.args[0] == {"_id": "person:alyce smyth"}
+        assert node_args.args[0] == {"_id": f"{_PH}:person:alyce smyth"}
         # Second call upserts the SAME_AS edge.
         edge_args = collection.update_one.call_args_list[1]
         assert (
-            edge_args.args[0]["_id"] == "person:alyce smyth|same_as|person:alice_smith"
+            edge_args.args[0]["_id"]
+            == f"{_PH}:person:alyce smyth|same_as|person:alice_smith"
         )
-        # Edge payload carries pending status + confidence + match_type.
+        # Edge payload carries pending status + confidence + match_type and user_id.
         edge_update = edge_args.args[1]
         assert edge_update["$setOnInsert"]["properties.status"] == "pending"
+        assert edge_update["$setOnInsert"]["user_id"] == _USER_ID
         assert edge_update["$set"]["properties.confidence"] == 0.88
         assert edge_update["$set"]["properties.match_type"] == "embedding"
         assert edge_args.kwargs.get("upsert") is True
@@ -311,6 +346,7 @@ class TestAddEntityNoneAction:
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(canonical_name="apple inc"),
+            user_id=_USER_ID,
             name="apple",
             entity_type=NodeType.PERSON,
             properties={},
@@ -319,12 +355,12 @@ class TestAddEntityNoneAction:
         )
 
         # Assert
-        assert target_id == "person:apple"
+        assert target_id == f"{_PH}:person:apple"
         assert returned.applied_strategy is None
         # Exactly one update_one (the new node), no SAME_AS edge.
         assert collection.update_one.call_count == 1
         node_args = collection.update_one.call_args_list[0]
-        assert node_args.args[0] == {"_id": "person:apple"}
+        assert node_args.args[0] == {"_id": f"{_PH}:person:apple"}
         assert _count_same_as_calls(collection) == 0
 
 
@@ -346,6 +382,7 @@ class TestAddEntityCanonicalNameWritten:
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(canonical_name="apple inc", match_type="exact"),
+            user_id=_USER_ID,
             name="apple",
             entity_type=NodeType.PERSON,
             properties={},
@@ -358,6 +395,8 @@ class TestAddEntityCanonicalNameWritten:
         pipeline = node_call.args[1]
         set_stage = pipeline[0]["$set"]
         assert set_stage["canonical_name"] == "apple inc"
+        # user_id is stamped on the upsert.
+        assert set_stage["user_id"] == _USER_ID
 
 
 # ---------------------------------------------------------------------------
@@ -375,18 +414,19 @@ class TestAddEntitySelfMatchExclusion:
         database, collection = _make_database(mocker)
         dedup_result = DeduplicationResult(
             action="merged",
-            matched_node_id="person:alice",
+            matched_node_id=f"{_PH}:person:alice",
             matched_node_name="alice",
             similarity_score=1.0,
             match_type="embedding",
         )
         _patch_dedupe_entity(mocker, dedup_result)
 
-        # Act — prospective_id is also "person:alice" (same normalized form).
+        # Act — prospective_id is also the user_id-prefixed person:alice.
         target_id, _resolved, returned = await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(),
+            user_id=_USER_ID,
             name="Alice",
             entity_type=NodeType.PERSON,
             properties={},
@@ -395,7 +435,7 @@ class TestAddEntitySelfMatchExclusion:
         )
 
         # Assert — fall back to the new-node path (action="none").
-        assert target_id == "person:alice"
+        assert target_id == f"{_PH}:person:alice"
         assert returned.action == "none"
         # No merge into the same node, no SAME_AS edge.
         assert collection.update_one.call_count == 1
@@ -419,6 +459,7 @@ class TestAddEntityDedupDisabled:
             database=database,
             embedding_model=_make_embedding_model(),
             resolver=_make_resolver(),
+            user_id=_USER_ID,
             name="alice",
             entity_type=NodeType.PERSON,
             properties={},
@@ -427,7 +468,52 @@ class TestAddEntityDedupDisabled:
         )
 
         # Assert — dedupe_entity not called; behaves like action="none".
-        assert target_id == "person:alice"
+        assert target_id == f"{_PH}:person:alice"
         assert dedup_result.action == "none"
         assert collection.update_one.call_count == 1
         dedupe_spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Two-user isolation
+# ---------------------------------------------------------------------------
+
+
+class TestAddEntityTwoUserIsolation:
+    """Two users writing the same name produce two distinct rows."""
+
+    async def test_two_users_distinct_ids(self, mocker) -> None:
+        user_a = PydanticObjectId("507f1f77bcf86cd799439011")
+        user_b = PydanticObjectId("507f1f77bcf86cd799439022")
+
+        database_a, collection_a = _make_database(mocker)
+        database_b, collection_b = _make_database(mocker)
+
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        target_a, _, _ = await add_entity(
+            database=database_a,
+            embedding_model=_make_embedding_model(),
+            resolver=_make_resolver(),
+            user_id=user_a,
+            name="alice",
+            entity_type=NodeType.PERSON,
+            properties={},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+        target_b, _, _ = await add_entity(
+            database=database_b,
+            embedding_model=_make_embedding_model(),
+            resolver=_make_resolver(),
+            user_id=user_b,
+            name="alice",
+            entity_type=NodeType.PERSON,
+            properties={},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        assert target_a != target_b
+        assert target_a.startswith(f"{user_a}:")
+        assert target_b.startswith(f"{user_b}:")

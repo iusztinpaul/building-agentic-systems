@@ -3,6 +3,8 @@
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+from beanie import PydanticObjectId
+
 from tree.data.web.web_pipeline import (
     fetch_and_extract_web_task,
     ingest_web_url,
@@ -20,6 +22,7 @@ def _make_doc(
     return Document(
         source_type=SourceType.WEB,
         source_uri=source_uri,
+        user_id=PydanticObjectId(),
         title=title,
         summary="summary",
         content="body",
@@ -54,7 +57,9 @@ class TestFetchAndExtractWebTask:
             return_value=doc,
         )
 
-        result = await fetch_and_extract_web_task.fn("https://example.com/x")
+        result = await fetch_and_extract_web_task.fn(
+            "https://example.com/x", PydanticObjectId()
+        )
 
         assert result is doc
 
@@ -99,7 +104,7 @@ class TestIngestWebUrl:
             return_value=doc,
         )
 
-        result = await ingest_web_url.fn("https://example.com/x")
+        result = await ingest_web_url.fn("https://example.com/x", PydanticObjectId())
 
         assert result is doc
 
@@ -116,7 +121,7 @@ class TestIngestWebUrl:
             return_value=None,
         )
 
-        result = await ingest_web_url.fn("https://example.com/x")
+        result = await ingest_web_url.fn("https://example.com/x", PydanticObjectId())
 
         assert result is None
 
@@ -142,7 +147,7 @@ class TestIngestWebUrlBatch:
         )
 
         result = await ingest_web_url_batch.fn(
-            ["https://example.com/a", "https://example.com/b"]
+            ["https://example.com/a", "https://example.com/b"], PydanticObjectId()
         )
 
         mock_init.assert_awaited_once()
@@ -168,7 +173,7 @@ class TestIngestWebUrlBatch:
         )
 
         result = await ingest_web_url_batch.fn(
-            ["https://example.com/a", "https://example.com/b"]
+            ["https://example.com/a", "https://example.com/b"], PydanticObjectId()
         )
 
         assert len(result) == 1
@@ -180,7 +185,7 @@ class TestIngestWebUrlBatch:
             new_callable=AsyncMock,
         )
 
-        result = await ingest_web_url_batch.fn([])
+        result = await ingest_web_url_batch.fn([], PydanticObjectId())
 
         mock_init.assert_awaited_once()
         assert result == []

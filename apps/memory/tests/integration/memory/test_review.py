@@ -17,13 +17,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import (
     EdgeType,
     NodeType,
     build_edge_id,
-    build_node_id,
 )
+from tree.entities.knowledge_graph import build_node_id as _build_node_id
 from tree.mcp.tools import review_confirm, review_list_pending, review_reject
 from tree.memory.review import (
     MergeStrategy,
@@ -32,6 +33,24 @@ from tree.memory.review import (
     get_same_as_cluster,
     review_duplicate,
 )
+
+
+# Per #018: all KG ids are tenant-scoped. Review-pipeline tests in this
+# module operate on a single fixture user — multi-tenant isolation is the
+# subject of the #021 acceptance test, not these review-logic tests.
+_REVIEW_USER_ID = PydanticObjectId("000000000000000000000018")
+
+
+def build_node_id(node_type: NodeType, name: str) -> str:
+    """Local 2-arg wrapper so this test module reads cleanly.
+
+    Delegates to the real ``build_node_id`` with the module-level fixture
+    ``user_id``. Once #019/#020 thread user_id end-to-end and #021 lands
+    the isolation test, the review integration tests can be updated to
+    parameterise on user_id and this shim removed.
+    """
+
+    return _build_node_id(_REVIEW_USER_ID, node_type, name)
 
 
 TEST_DATABASE = "integration_tests_twin"
@@ -64,18 +83,25 @@ def make_mcp_ctx(mongo_client):
 
     Mirrors the fixture in ``tests/integration/mcp/conftest.py`` so the
     MCP tool tests in this file can share the same MongoDB client without
-    pulling that conftest in.
+    pulling that conftest in. The fixture pins ``user_id`` to
+    ``_REVIEW_USER_ID`` so the review tools (post-#023) propagate it
+    down into the business-logic calls.
     """
 
     from unittest.mock import MagicMock
 
-    def _factory(llm: Any = None, embedding_model: Any = None) -> MagicMock:
+    def _factory(
+        llm: Any = None,
+        embedding_model: Any = None,
+        user_id: PydanticObjectId | None = None,
+    ) -> MagicMock:
         ctx = MagicMock()
         ctx.lifespan_context = {
             "client": mongo_client,
             "database": TEST_DATABASE,
             "llm": llm,
             "embedding_model": embedding_model,
+            "user_id": user_id if user_id is not None else _REVIEW_USER_ID,
         }
         return ctx
 
@@ -95,12 +121,16 @@ def _make_node(
     merged_into: str | None = None,
 ) -> dict[str, Any]:
     now = created_at or _NOW
+    # ``node_id`` now has the shape "{user_id}:{type}:{name}" — strip
+    # the user prefix when reverse-deriving the name fallback.
+    fallback_name = node_id.split(":", 2)[2] if node_id.count(":") >= 2 else node_id
     return {
         "_id": node_id,
+        "user_id": _REVIEW_USER_ID,
         "kind": "node",
         "type": node_type.value,
-        "name": name or node_id.split(":", 1)[1],
-        "canonical_name": name or node_id.split(":", 1)[1],
+        "name": name or fallback_name,
+        "canonical_name": name or fallback_name,
         "aliases": aliases or [],
         "properties": properties or {},
         "sources": sources or [],
@@ -125,6 +155,7 @@ def _make_same_as_edge(
     now = created_at or _NOW
     return {
         "_id": edge_id,
+        "user_id": _REVIEW_USER_ID,
         "kind": "edge",
         "type": EdgeType.SAME_AS.value,
         "source_node_id": source_id,
@@ -156,6 +187,7 @@ def _make_edge(
     edge_id = build_edge_id(source_id, edge_type, target_id)
     return {
         "_id": edge_id,
+        "user_id": _REVIEW_USER_ID,
         "kind": "edge",
         "type": edge_type.value,
         "source_node_id": source_id,
@@ -220,7 +252,7 @@ class TestFindPendingDuplicates:
 
         # Act — PERSON-only, limit 10.
         results = await find_pending_duplicates(
-            database, entity_type=NodeType.PERSON, limit=10
+            database, user_id=_REVIEW_USER_ID, entity_type=NodeType.PERSON, limit=10
         )
 
         # Assert
@@ -246,7 +278,9 @@ class TestFindPendingDuplicates:
         await kg_collection.insert_many(docs)
 
         # Act
-        results = await find_pending_duplicates(database, limit=2)
+        results = await find_pending_duplicates(
+            database, user_id=_REVIEW_USER_ID, limit=2
+        )
 
         # Assert
         assert len(results) == 2
@@ -266,7 +300,9 @@ class TestFindPendingDuplicates:
         await kg_collection.insert_many(docs)
 
         # Act
-        results = await find_pending_duplicates(database, limit=50)
+        results = await find_pending_duplicates(
+            database, user_id=_REVIEW_USER_ID, limit=50
+        )
 
         # Assert
         assert results == []
@@ -348,6 +384,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
         # Act
         result = await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=alice_id,
             target_node_id=bob_id,
             decision=ReviewDecision.CONFIRM,
@@ -438,6 +475,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
         # Act
         result = await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.CONFIRM,
@@ -473,6 +511,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
         # Act — first confirm.
         first = await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.CONFIRM,
@@ -486,6 +525,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
         # Act — second confirm with identical args.
         second = await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.CONFIRM,
@@ -518,6 +558,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
 
         await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.CONFIRM,
@@ -529,6 +570,7 @@ class TestReviewDuplicateConfirmKeepPrimary:
         with pytest.raises(ValueError) as exc:
             await review_duplicate(
                 database,
+                user_id=_REVIEW_USER_ID,
                 source_node_id=a_id,
                 target_node_id=b_id,
                 decision=ReviewDecision.REJECT,
@@ -571,6 +613,7 @@ class TestReviewDuplicateReject:
         # Act
         result = await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.REJECT,
@@ -622,6 +665,7 @@ class TestReviewDuplicateReject:
 
         await review_duplicate(
             database,
+            user_id=_REVIEW_USER_ID,
             source_node_id=a_id,
             target_node_id=b_id,
             decision=ReviewDecision.REJECT,
@@ -632,6 +676,7 @@ class TestReviewDuplicateReject:
         with pytest.raises(ValueError) as exc:
             await review_duplicate(
                 database,
+                user_id=_REVIEW_USER_ID,
                 source_node_id=a_id,
                 target_node_id=b_id,
                 decision=ReviewDecision.CONFIRM,
@@ -653,6 +698,7 @@ class TestReviewDuplicateReject:
         with pytest.raises(ValueError) as exc:
             await review_duplicate(
                 database,
+                user_id=_REVIEW_USER_ID,
                 source_node_id="person:a",
                 target_node_id="person:b",
                 decision=ReviewDecision.REJECT,
@@ -685,7 +731,7 @@ class TestGetSameAsCluster:
         await kg_collection.insert_many(docs)
 
         # Act
-        cluster = await get_same_as_cluster(database, b)
+        cluster = await get_same_as_cluster(database, b, user_id=_REVIEW_USER_ID)
 
         # Assert — single-hop from b reaches a and c (in either direction).
         # d is two hops away — must not be included.
@@ -698,7 +744,9 @@ class TestGetSameAsCluster:
         await kg_collection.insert_one(_make_node("person:lonely"))
 
         # Act
-        cluster = await get_same_as_cluster(database, "person:lonely")
+        cluster = await get_same_as_cluster(
+            database, "person:lonely", user_id=_REVIEW_USER_ID
+        )
 
         # Assert
         assert cluster == {"person:lonely"}

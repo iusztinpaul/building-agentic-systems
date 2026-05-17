@@ -333,6 +333,7 @@ def build_structural_entries(
 async def upsert_graph_entries(
     result: ExtractionResult,
     *,
+    user_id: PydanticObjectId,
     source_document_id: PydanticObjectId,
     database: str,
     client: Any,
@@ -350,7 +351,7 @@ async def upsert_graph_entries(
     ops: list[UpdateOne] = []
 
     for node in result.nodes:
-        node_id = build_node_id(node.type, node.name)
+        node_id = build_node_id(user_id, node.type, node.name)
         aliases = node.properties.get("aliases", [])
         # Exclude aliases from the merge so Stage 1 does not overwrite
         # the existing aliases array — Stage 2 handles alias accumulation.
@@ -364,6 +365,7 @@ async def upsert_graph_entries(
                     # Stage 1: merge properties and set scalar fields.
                     {
                         "$set": {
+                            "user_id": user_id,
                             "kind": "node",
                             "type": node.type.value,
                             "name": node.name,
@@ -413,8 +415,8 @@ async def upsert_graph_entries(
         )
 
     for edge in result.edges:
-        src_id = build_node_id(edge.source_type, edge.source_node_id)
-        tgt_id = build_node_id(edge.target_type, edge.target_node_id)
+        src_id = build_node_id(user_id, edge.source_type, edge.source_node_id)
+        tgt_id = build_node_id(user_id, edge.target_type, edge.target_node_id)
         edge_id = build_edge_id(src_id, edge.type, tgt_id)
         ops.append(
             UpdateOne(
@@ -422,6 +424,7 @@ async def upsert_graph_entries(
                 [
                     {
                         "$set": {
+                            "user_id": user_id,
                             "kind": "edge",
                             "type": edge.type.value,
                             "source_node_id": src_id,

@@ -21,6 +21,7 @@ import os
 
 import httpx
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.web.web_search_ingest import (
     DEPLOYMENT_NAME,
@@ -57,7 +58,9 @@ class TestSearchWebIngestTrigger:
         """
 
         try:
-            result = await trigger_url_batch_ingest(["https://example.com"])
+            result = await trigger_url_batch_ingest(
+                ["https://example.com"], PydanticObjectId()
+            )
         except Exception as exc:  # noqa: BLE001 — surface the real cause.
             pytest.skip(
                 f"Deployment {DEPLOYMENT_NAME!r} not registered "

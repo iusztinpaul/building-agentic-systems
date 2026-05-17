@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from beanie import PydanticObjectId
 
 from tree.data.substack.substack_article import (
     _extract_article_body,
@@ -9,6 +10,8 @@ from tree.data.substack.substack_article import (
     fetch_article,
 )
 from tree.entities.documents import SourceType
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 SAMPLE_HTML = """
 <html>
@@ -110,7 +113,7 @@ class TestExtractArticleBody:
 class TestExtractDocumentFromHtml:
     def test_extracts_all_fields(self):
         doc = extract_document_from_html(
-            SAMPLE_HTML, "https://example.substack.com/p/my-article"
+            SAMPLE_HTML, "https://example.substack.com/p/my-article", _USER_ID
         )
 
         assert doc.source_type == SourceType.SUBSTACK
@@ -124,22 +127,30 @@ class TestExtractDocumentFromHtml:
         assert "<p>" not in doc.content
 
     def test_fallback_title_from_title_tag(self):
-        doc = extract_document_from_html(MINIMAL_HTML, "https://example.com/p/test")
+        doc = extract_document_from_html(
+            MINIMAL_HTML, "https://example.com/p/test", _USER_ID
+        )
 
         assert doc.title == "Fallback Title"
 
     def test_summary_falls_back_to_title(self):
-        doc = extract_document_from_html(MINIMAL_HTML, "https://example.com/p/test")
+        doc = extract_document_from_html(
+            MINIMAL_HTML, "https://example.com/p/test", _USER_ID
+        )
 
         assert doc.summary == "Fallback Title"
 
     def test_missing_author_defaults_to_unknown(self):
-        doc = extract_document_from_html(EMPTY_HTML, "https://example.com/p/test")
+        doc = extract_document_from_html(
+            EMPTY_HTML, "https://example.com/p/test", _USER_ID
+        )
 
         assert doc.authors == ["Unknown"]
 
     def test_empty_html(self):
-        doc = extract_document_from_html(EMPTY_HTML, "https://example.com/p/test")
+        doc = extract_document_from_html(
+            EMPTY_HTML, "https://example.com/p/test", _USER_ID
+        )
 
         assert doc.source_uri == "https://example.com/p/test"
         assert doc.content == ""

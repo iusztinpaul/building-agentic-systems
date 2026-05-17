@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.review.core import _decide_winner, find_pending_duplicates
@@ -29,6 +30,7 @@ from tree.memory.review.types import (
 
 
 _NOW = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
+_USER_ID = PydanticObjectId()
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +188,7 @@ class TestFindPendingDuplicatesShortCircuit:
         database.__getitem__.return_value = collection
 
         # Act
-        result = await find_pending_duplicates(database, limit=0)
+        result = await find_pending_duplicates(database, user_id=_USER_ID, limit=0)
 
         # Assert
         assert result == []
@@ -200,7 +202,7 @@ class TestFindPendingDuplicatesShortCircuit:
         database.__getitem__.return_value = collection
 
         # Act
-        result = await find_pending_duplicates(database, limit=-5)
+        result = await find_pending_duplicates(database, user_id=_USER_ID, limit=-5)
 
         # Assert
         assert result == []

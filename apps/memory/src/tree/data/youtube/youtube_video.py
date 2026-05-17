@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from beanie import PydanticObjectId
 
 from tree.data.youtube.types import FetchedTranscript, VideoMetadata
 from tree.data.youtube.urls import canonical_video_url
@@ -85,7 +86,11 @@ def parse_oembed_metadata(payload: dict[str, Any], *, video_id: str) -> VideoMet
 
 
 def build_document(
-    *, video_id: str, metadata: VideoMetadata, transcript: FetchedTranscript
+    *,
+    video_id: str,
+    metadata: VideoMetadata,
+    transcript: FetchedTranscript,
+    user_id: PydanticObjectId,
 ) -> Document:
     """Assemble a `Document` from oEmbed metadata + a fetched transcript.
 
@@ -111,6 +116,7 @@ def build_document(
     return Document(
         source_type=SourceType.YOUTUBE,
         source_uri=canonical_video_url(video_id),
+        user_id=user_id,
         title=title,
         summary=summary,
         content=transcript.plain_text,
@@ -135,7 +141,9 @@ async def load_video_document(doc: Document) -> Document | None:
     document already lives at the same canonical URL.
     """
 
-    existing = await Document.find_one(Document.source_uri == doc.source_uri)
+    existing = await Document.find_one(
+        {"user_id": doc.user_id, "source_uri": doc.source_uri}
+    )
     if existing and existing.source_type != SourceType.LATENT:
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None

@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timezone
 
 import httpx
+from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 
 from tree.data.substack.substack_rss import (
@@ -89,7 +90,9 @@ def _extract_article_body(soup: BeautifulSoup) -> str:
     return ""
 
 
-def extract_document_from_html(html: str, article_url: str) -> Document:
+def extract_document_from_html(
+    html: str, article_url: str, user_id: PydanticObjectId
+) -> Document:
     """Parse a Substack article HTML page into a Document."""
 
     soup = BeautifulSoup(html, "html.parser")
@@ -122,6 +125,7 @@ def extract_document_from_html(html: str, article_url: str) -> Document:
     return Document(
         source_type=SourceType.SUBSTACK,
         source_uri=article_url,
+        user_id=user_id,
         title=title,
         summary=summary or title,
         content=content,
@@ -141,12 +145,14 @@ async def load_article_document(doc: Document, body_html: str) -> Document | Non
     return await load_document(doc, synthetic_entry)
 
 
-async def fetch_and_extract(article_url: str) -> tuple[Document, str]:
+async def fetch_and_extract(
+    article_url: str, user_id: PydanticObjectId
+) -> tuple[Document, str]:
     """Fetch an article and extract a Document plus the raw body HTML."""
 
     html = await fetch_article(article_url)
     soup = BeautifulSoup(html, "html.parser")
     body_html = _extract_article_body(soup)
-    doc = extract_document_from_html(html, article_url)
+    doc = extract_document_from_html(html, article_url, user_id)
 
     return doc, body_html

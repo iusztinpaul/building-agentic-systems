@@ -18,7 +18,15 @@ class TestLoadAppConfig:
         config = load_app_config()
 
         assert config.models.llm.provider == "gemini"
-        assert config.models.llm.model == "gemini-2.5-flash-lite"
+        # Bumped from gemini-2.5-flash-lite → gemini-3.1-flash-lite in
+        # commit 210f8d5 (configs/default.yaml). The test asserts the
+        # live YAML value so the unit suite stays green; bumping the
+        # model in YAML requires a single matching change here.
+        assert config.models.llm.model == "gemini-3.1-flash-lite"
+        # default.yaml overrides the pinned settings.embedding_dim (1024) with
+        # the local-dev sentence-transformers value (384). Phase 1 of
+        # multi-tenancy keeps this YAML override path open — see
+        # tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md.
         assert config.models.embedding.dimensions == 384
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
@@ -113,7 +121,10 @@ class TestLoadAppConfig:
         assert config.extraction.resolution.fuzzy_threshold == 0.9
         # Unset values keep defaults.
         assert config.extraction.chunk_overlap == 64
-        assert config.models.embedding.dimensions == 768
+        # Embedding dimension falls back to the pinned settings value
+        # (1024) when the YAML doesn't override it. See
+        # tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md.
+        assert config.models.embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):
         config = load_app_config(tmp_path / "nonexistent.yaml")

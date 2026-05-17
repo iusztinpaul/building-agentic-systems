@@ -23,6 +23,8 @@ import pytest
 from tree.config.app_config import app_config
 from tree.data.core import ingest as ingest_module
 from tree.data.core.ingest import _get_configured_substack_domains, ingest_url
+from beanie import PydanticObjectId
+
 from tree.entities.documents import Document, SourceType
 
 
@@ -63,6 +65,7 @@ class TestDispatcherAgainstMigratedDefaultConfig:
         substack_doc = Document(
             source_type=SourceType.SUBSTACK,
             source_uri="https://decodingai.com/p/some-fresh-post",
+            user_id=PydanticObjectId(),
             title="Fresh post",
             content="Article body.",
         )
@@ -77,10 +80,11 @@ class TestDispatcherAgainstMigratedDefaultConfig:
             new=AsyncMock(return_value=None),
         )
 
-        result = await ingest_url("https://decodingai.com/p/some-fresh-post")
+        user_id = PydanticObjectId()
+        result = await ingest_url("https://decodingai.com/p/some-fresh-post", user_id)
 
         substack_handler.assert_awaited_once_with(
-            "https://decodingai.com/p/some-fresh-post"
+            "https://decodingai.com/p/some-fresh-post", user_id
         )
         web_handler.assert_not_awaited()
         assert result is substack_doc
@@ -94,6 +98,7 @@ class TestDispatcherAgainstMigratedDefaultConfig:
         web_doc = Document(
             source_type=SourceType.WEB,
             source_uri="https://news.ycombinator.com/item?id=1",
+            user_id=PydanticObjectId(),
             title="HN item",
             content="HN content.",
         )
@@ -108,9 +113,12 @@ class TestDispatcherAgainstMigratedDefaultConfig:
             new=AsyncMock(return_value=None),
         )
 
-        result = await ingest_url("https://news.ycombinator.com/item?id=1")
+        user_id = PydanticObjectId()
+        result = await ingest_url("https://news.ycombinator.com/item?id=1", user_id)
 
-        web_handler.assert_awaited_once_with("https://news.ycombinator.com/item?id=1")
+        web_handler.assert_awaited_once_with(
+            "https://news.ycombinator.com/item?id=1", user_id
+        )
         substack_handler.assert_not_awaited()
         assert result is web_doc
         assert result.source_type == SourceType.WEB

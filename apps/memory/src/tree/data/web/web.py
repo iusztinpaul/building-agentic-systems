@@ -20,6 +20,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
+from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
 from tree.data.web.web_unlocker import fetch_url
@@ -69,7 +70,7 @@ def _derive_summary(markdown: str) -> str:
     return collapsed[:_SUMMARY_MAX_CHARS]
 
 
-async def fetch_and_extract_web(url: str) -> Document:
+async def fetch_and_extract_web(url: str, user_id: PydanticObjectId) -> Document:
     """Fetch ``url`` via Bright Data Web Unlocker (markdown) and build a Document.
 
     The returned Document has ``source_type=SourceType.WEB``, ``source_uri=url``,
@@ -86,6 +87,7 @@ async def fetch_and_extract_web(url: str) -> Document:
     return Document(
         source_type=SourceType.WEB,
         source_uri=url,
+        user_id=user_id,
         title=title,
         summary=summary,
         content=markdown,
@@ -95,13 +97,16 @@ async def fetch_and_extract_web(url: str) -> Document:
 
 
 async def load_web_document(doc: Document) -> Document | None:
-    """Persist a single web Document with idempotent upsert semantics.
+    """Persist a single web Document with idempotent upsert semantics
+    (scoped to ``doc.user_id``).
 
     Returns the persisted Document, or ``None`` if a non-LATENT duplicate
     already exists or a concurrent insert wins the race.
     """
 
-    existing = await Document.find_one(Document.source_uri == doc.source_uri)
+    existing = await Document.find_one(
+        {"user_id": doc.user_id, "source_uri": doc.source_uri}
+    )
     if existing is not None:
         if existing.source_type != SourceType.LATENT:
             logger.info("Web URL already ingested: %s", doc.source_uri)

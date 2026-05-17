@@ -1,3 +1,5 @@
+import pytest
+from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.data.substack.substack_rss_pipeline import (
@@ -40,7 +42,9 @@ class TestIngestSubstackRssFeedFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+            result = await ingest_substack_rss_feed(
+                "https://blog.example.com/feed", PydanticObjectId()
+            )
 
         assert len(result) == 3
         for doc in result:
@@ -53,6 +57,7 @@ class TestIngestSubstackRssFeedFlow:
         ).to_list()
         assert len(db_docs) == 3
 
+    @pytest.mark.slow
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         mocker.patch(
             "tree.data.substack.substack_rss.httpx.AsyncClient",
@@ -63,8 +68,11 @@ class TestIngestSubstackRssFeedFlow:
             return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
         )
 
+        user_id = PydanticObjectId()
         with prefect_tags("tests"):
-            first_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
+            first_run = await ingest_substack_rss_feed(
+                "https://blog.example.com/feed", user_id
+            )
         assert len(first_run) == 3
 
         mocker.patch(
@@ -77,7 +85,9 @@ class TestIngestSubstackRssFeedFlow:
         )
 
         with prefect_tags("tests"):
-            second_run = await ingest_substack_rss_feed("https://blog.example.com/feed")
+            second_run = await ingest_substack_rss_feed(
+                "https://blog.example.com/feed", user_id
+            )
         assert len(second_run) == 0
 
         db_docs = await Document.find(
@@ -96,7 +106,9 @@ class TestIngestSubstackRssFeedFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+            result = await ingest_substack_rss_feed(
+                "https://blog.example.com/feed", PydanticObjectId()
+            )
 
         assert len(result) == 1
         assert len(result[0].references) == 1
@@ -109,9 +121,11 @@ class TestIngestSubstackRssFeedFlow:
         assert latent.source_type == SourceType.LATENT
 
     async def test_upgrades_latent_document(self, mongo_client, mocker) -> None:
+        user_id = PydanticObjectId()
         latent = Document(
             source_type=SourceType.LATENT,
             source_uri="https://blog.example.com/p/post-0",
+            user_id=user_id,
         )
         await latent.insert()
 
@@ -125,7 +139,9 @@ class TestIngestSubstackRssFeedFlow:
         )
 
         with prefect_tags("tests"):
-            result = await ingest_substack_rss_feed("https://blog.example.com/feed")
+            result = await ingest_substack_rss_feed(
+                "https://blog.example.com/feed", user_id
+            )
 
         assert len(result) == 1
         assert result[0].id == latent.id
@@ -153,7 +169,8 @@ class TestIngestSubstackRssFeedBatchFlow:
                 feed_urls=[
                     "https://blog-a.example.com/feed",
                     "https://blog-b.example.com/feed",
-                ]
+                ],
+                user_id=PydanticObjectId(),
             )
 
         # Both feeds return the same 1 entry with the same link, so second is a dup

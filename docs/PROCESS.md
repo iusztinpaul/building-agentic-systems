@@ -222,7 +222,7 @@ Between its two human gates, `/night` runs autonomously:
 ### Tester Done
 
 - [ ] Every acceptance criterion walked through and marked PASS / FAIL with evidence.
-- [ ] Full suite run (`make pre-commit && make unit-tests && make integration-tests`) — output appended.
+- [ ] Full suite run (`make pre-commit && make unit-tests && make integration-tests-all`) — output appended. **The `-all` target is required at the acceptance gate**; the bare `make integration-tests` target is the fast inner-loop subset and excludes `@pytest.mark.slow` tests.
 - [ ] **E2E QA-style break-it pass**: ran the feature the way users will (CLI / HTTP / UI), tried at least 2–3 realistic break paths (empty input, malformed input, large input, concurrent invocation, etc.), recorded what happened. **This is the headline duty, not a formality.**
 - [ ] Any SWE `NOT RUN` items: either run them now, or explain why not.
 - [ ] Suspicious results investigated (a 3-second pass on a multi-step flow is a red flag).
@@ -350,10 +350,16 @@ Stack-agnostic conventions. Each project's `CLAUDE.md` fills in the specifics.
 - **Format / lint**: `make format-fix && make lint-fix && make format-check && make lint-check`
 - **Pre-commit**: `make pre-commit`
 - **Unit tests**: `make unit-tests`
-- **Integration tests**: `make integration-tests`
+- **Integration tests (fast inner loop, <2 min)**: `make integration-tests` — excludes `@pytest.mark.slow`. Use this between SWE iterations and inside the Night inner loop.
+- **Integration tests (full, ~5 min)**: `make integration-tests-all` — runs every test including slow ones. Required at the Tester acceptance gate, in CI, and before any push.
+- **Integration tests (slow only)**: `make integration-tests-slow` — handy when iterating on a vector-index or full-Prefect-e2e change.
 - **All tests**: `make tests`
 - **Build**: `make build`
 - **Run any project-level Python**: `uv run python ...`
+
+Mark a test `@pytest.mark.slow` when it takes >3s or requires full Prefect e2e. CI runs slow tests (so long as they're not also `requires_mongot`); the local fast loop excludes them. `grep -rn "pytest.mark.slow" apps/memory/tests/` shows what's currently excluded.
+
+Mark a test `@pytest.mark.requires_mongot` when it issues a live Atlas `$vectorSearch`, calls `create_search_index`, or otherwise depends on the mongot Search Index Management service. **CI excludes these** (mongot's gRPC channel is unreliable on GitHub runners — see CI run 25989844295). The Tester MUST run them locally with the full `docker-compose.yml` stack (which brings mongot up) before the Phase-1-style acceptance gate. The acceptance command is `make memory-integration-tests-all`; the CI-mirror command (no mongot) is `make memory-integration-tests-ci`. The two markers are orthogonal — a test can be `slow` without needing mongot, or vice versa.
 
 ## Reuse Existing Skills
 
