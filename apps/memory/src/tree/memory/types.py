@@ -7,10 +7,17 @@ from tree.memory.resolution.types import ResolvedEntity
 
 
 class ExtractedNode(BaseModel):
-    """A node extracted by the LLM (before persistence)."""
+    """A node extracted by the LLM (before persistence).
+
+    Phase-3 #028: ``subtype`` carries the LLM-emitted (or pipeline-derived)
+    closed-vocabulary slot — e.g. ``("object", "task")`` for what used
+    to be a top-level ``task`` row. ``None`` is accepted at construction;
+    the strict subtype-required envelope check lands at #030.
+    """
 
     name: str
     type: NodeType
+    subtype: str | None = None
     properties: dict[str, Any] = {}
     chunk_id: str = ""
 

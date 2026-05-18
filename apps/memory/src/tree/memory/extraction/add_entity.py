@@ -80,6 +80,7 @@ async def add_entity(
     deduplicate: bool = True,
     candidate_names: Sequence[str] | None = None,
     candidate_aliases: Mapping[str, list[str]] | None = None,
+    subtype: str | None = None,
 ) -> tuple[str, ResolvedEntity, DeduplicationResult]:
     """Resolve, dedupe, and upsert a single entity.
 
@@ -176,6 +177,7 @@ async def add_entity(
             node_id=prospective_id,
             user_id=user_id,
             entity_type=entity_type,
+            subtype=subtype,
             name=name,
             canonical_name=name,
             properties=properties,
@@ -254,6 +256,7 @@ async def add_entity(
         node_id=target_id,
         user_id=user_id,
         entity_type=entity_type,
+        subtype=subtype,
         name=name,
         canonical_name=resolved.canonical_name,
         properties=properties,
@@ -298,6 +301,7 @@ async def _upsert_node(
     confidence: float,
     source_id: str,
     now: datetime,
+    subtype: str | None = None,
 ) -> None:
     """Upsert a new node at ``node_id`` with a single aggregation pipeline.
 
@@ -316,6 +320,10 @@ async def _upsert_node(
         "user_id": user_id,
         "kind": "node",
         "type": entity_type.value,
+        # #028: ``subtype`` is a top-level column; ``None`` is a real
+        # value (means "freeform / unset"). Persist on every upsert so
+        # subtype refinements from a later LLM pass land idempotently.
+        "subtype": subtype,
         "name": name,
         "canonical_name": canonical_name,
         "properties": {

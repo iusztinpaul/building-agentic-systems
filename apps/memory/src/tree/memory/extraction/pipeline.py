@@ -784,6 +784,7 @@ async def _dispatch_entity_write(
         user_id=user_id,
         name=node.name,
         entity_type=node.type,
+        subtype=node.subtype,
         properties=node.properties,
         source_id=source_document_id,
         dedup_config=dedup_config,

@@ -186,12 +186,18 @@ class TestMemoryExtractionPipeline:
         assert summary.edges_written > 0
 
         node_entries, edge_entries = await _kg_entries(mongo_client, doc.id)
-        # DOCUMENT, CHUNK, PERSON, TASK all present.
+        # Post-#028: DOCUMENT, CHUNK, PERSON are unchanged; what used
+        # to be ``type=task`` now stores as ``type=object,
+        # subtype=task`` — same logical content, new POLE+O shape.
         node_types = {n["type"] for n in node_entries}
         assert NodeType.DOCUMENT in node_types
         assert NodeType.CHUNK in node_types
         assert NodeType.PERSON in node_types
-        assert NodeType.TASK in node_types
+        assert NodeType.OBJECT in node_types
+        object_nodes = [n for n in node_entries if n["type"] == NodeType.OBJECT]
+        assert any(n.get("subtype") == "task" for n in object_nodes), (
+            "expected at least one object-subtype-task node from the LLM emission"
+        )
         # PERSON id carries the real user_id prefix (post-#019).
         person_nodes = [n for n in node_entries if n["type"] == NodeType.PERSON]
         assert person_nodes[0]["_id"] == f"{user.id}:person:alice"
@@ -414,13 +420,21 @@ class TestRewiredNormalizeNodesScenarios:
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         person = [n for n in node_entries if n["type"] == NodeType.PERSON]
-        task = [n for n in node_entries if n["type"] == NodeType.TASK]
+        # Post-#028: legacy ``type=task`` is rerouted at extraction time
+        # to ``type=object, subtype=task``; the type-prefix isolation
+        # still holds (alice the person vs. alice the object are
+        # distinct rows under different parent types).
+        task_objects = [
+            n
+            for n in node_entries
+            if n["type"] == NodeType.OBJECT and n.get("subtype") == "task"
+        ]
         assert len(person) == 1
-        assert len(task) == 1
+        assert len(task_objects) == 1
         # IDs are tenant- and type-prefixed (#018), so even a shared surface
         # form stays distinct across types.
         assert person[0]["_id"] == f"{user.id}:person:alice"
-        assert task[0]["_id"] == f"{user.id}:task:alice"
+        assert task_objects[0]["_id"] == f"{user.id}:object:alice"
 
     async def test_edge_remapping_after_in_payload_collapse(
         self, mongo_client, mocker

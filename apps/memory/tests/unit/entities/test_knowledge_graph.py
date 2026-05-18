@@ -450,18 +450,25 @@ class TestTypeFieldValidator:
         assert "owns" in str(excinfo.value)
 
     async def test_accepts_every_registered_node_type(self):
+        # Phase-3 #028: iterate the **registry**, not the enum. The
+        # ``NodeType.TASK`` / ``EPISODE`` legacy aliases survive on
+        # the enum but they are no longer top-level types — their
+        # construction triggers the legacy → POLE+O reroute (covered
+        # by :class:`TestLegacyNodeTypeReroute`).
+        from tree.entities.ontology import NODE_REGISTRY
+
         user_id = _user_id()
-        for node_type in NodeType:
+        for type_name in NODE_REGISTRY:
             entry = KnowledgeGraphEntry(
-                id=f"{user_id}:{node_type.value}:x",
+                id=f"{user_id}:{type_name}:x",
                 user_id=user_id,
                 kind="node",
-                type=node_type.value,
+                type=type_name,
                 name="x",
                 created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 updated_at=datetime(2026, 1, 2, tzinfo=UTC),
             )
-            assert entry.type == node_type.value
+            assert entry.type == type_name
 
     async def test_accepts_every_registered_edge_type(self):
         user_id = _user_id()
@@ -505,27 +512,296 @@ class TestBuildIdAcceptsStringTypes:
         assert from_enum == from_str == f"{src}|todo|{tgt}"
 
 
-class TestOntologyTreeExtensionsModuleExists:
-    """The Tree-extensions module must import successfully and must
-    NOT mutate the built-in registries on import (task #027 is
-    behavior-neutral; the actual subtype registrations land in #028)."""
+class TestKnowledgeGraphEntrySubtype:
+    """Phase-3 #028: ``KnowledgeGraphEntry.subtype: str | None`` is a
+    live column on the model and validated against the parent type's
+    closed ``subtypes`` set when the parent has one. The validator is
+    intentionally loose at construction: ``subtype is None`` is
+    accepted (the strict envelope check is #030's job)."""
 
-    def test_module_imports_with_no_side_effects(self):
-        # Snapshot the registry before importing.
-        from tree.entities.ontology import EDGE_REGISTRY, NODE_REGISTRY
+    def _build(self, user_id, **overrides):
+        defaults = dict(
+            id=f"{user_id}:person:alice",
+            user_id=user_id,
+            kind="node",
+            type="person",
+            name="alice",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        defaults.update(overrides)
+        return KnowledgeGraphEntry(**defaults)
 
-        nodes_before = set(NODE_REGISTRY)
-        edges_before = set(EDGE_REGISTRY)
+    async def test_subtype_field_defaults_to_none(self):
+        user_id = _user_id()
+        entry = self._build(user_id)
+        assert entry.subtype is None
 
-        # Import (or re-import) the extensions module.
-        import importlib
+    async def test_valid_subtype_on_closed_vocab_parent_accepted(self):
+        user_id = _user_id()
+        entry = self._build(user_id, type="person", subtype="individual")
+        assert entry.subtype == "individual"
+        assert entry.type == "person"
 
-        import tree.entities.ontology_tree_extensions as ext
+    async def test_invalid_subtype_on_closed_vocab_parent_rejected(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            self._build(user_id, type="person", subtype="dragon")
+        # Validator message must surface the bad subtype + allowed set
+        # so a downstream debugger can see what's allowed.
+        msg = str(excinfo.value)
+        assert "dragon" in msg
+        assert "individual" in msg
 
-        importlib.reload(ext)
+    async def test_subtype_none_on_closed_vocab_parent_accepted_loose(self):
+        # "Loose at construction" — the envelope-level strict check
+        # lands in #030. Intermediate pipeline steps that construct a
+        # KG entry before extraction has populated ``subtype`` must
+        # still validate.
+        user_id = _user_id()
+        entry = self._build(user_id, type="person", subtype=None)
+        assert entry.subtype is None
 
-        nodes_after = set(NODE_REGISTRY)
-        edges_after = set(EDGE_REGISTRY)
+    async def test_subtype_on_freeform_parent_accepted(self):
+        # ``preference`` is still freeform after #028; any subtype value
+        # (or none) is acceptable.
+        user_id = _user_id()
+        entry = self._build(
+            user_id,
+            id=f"{user_id}:preference:foo",
+            type="preference",
+            subtype="anything-goes",
+            properties={"content": "x"},
+        )
+        assert entry.subtype == "anything-goes"
 
-        assert nodes_after == nodes_before
-        assert edges_after == edges_before
+    @pytest.mark.parametrize(
+        "type_name,subtype",
+        [
+            ("organization", "company"),
+            ("organization", "nonprofit"),
+            ("location", "city"),
+            ("location", "country"),
+            ("event", "meeting"),
+            ("event", "incident"),
+            ("event", "episode"),  # Tree extension
+            ("object", "vehicle"),
+            ("object", "software"),
+            ("object", "task"),  # Tree extension
+            ("object", "topic"),  # Tree extension
+            ("object", "project"),  # Tree extension
+        ],
+    )
+    async def test_every_canonical_subtype_constructs(self, type_name, subtype):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:{type_name}:x",
+            user_id=user_id,
+            kind="node",
+            type=type_name,
+            subtype=subtype,
+            name="x",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        assert entry.type == type_name
+        assert entry.subtype == subtype
+
+    async def test_subtype_on_edge_row_skipped(self):
+        # The subtype validator is node-only; edge rows pass through
+        # even when their ``type`` is a registered edge with no
+        # subtype vocabulary.
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:alice|related_to|{user_id}:person:bob",
+            user_id=user_id,
+            kind="edge",
+            type="related_to",
+            source_node_id=f"{user_id}:person:alice",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:person:bob",
+            target_type=NodeType.PERSON,
+            subtype="whatever",  # Not validated on edges.
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        assert entry.subtype == "whatever"
+
+
+class TestLegacyNodeTypeReroute:
+    """Phase-3 #028: legacy node rows of ``type=task`` / ``type=episode``
+    are silently re-routed at validator time to the new POLE+O
+    subtype shape — ``type='object', subtype='task'`` and
+    ``type='event', subtype='episode'`` respectively. This keeps
+    code paths that still construct with ``NodeType.TASK`` working
+    (user prompt explicitly preserves the enum aliases for read
+    paths) while ensuring writes always land in the POLE+O storage
+    form. The actual DB-row migration is #033's job."""
+
+    def _build(self, user_id, **overrides):
+        defaults = dict(
+            id=f"{user_id}:object:ship demo",
+            user_id=user_id,
+            kind="node",
+            type=NodeType.TASK,
+            name="ship demo",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        defaults.update(overrides)
+        return KnowledgeGraphEntry(**defaults)
+
+    async def test_legacy_task_enum_reroutes_to_object_task(self):
+        user_id = _user_id()
+        entry = self._build(user_id, type=NodeType.TASK)
+        assert entry.type == "object"
+        assert entry.subtype == "task"
+
+    async def test_legacy_task_raw_string_reroutes_to_object_task(self):
+        user_id = _user_id()
+        entry = self._build(user_id, type="task")
+        assert entry.type == "object"
+        assert entry.subtype == "task"
+
+    async def test_legacy_episode_enum_reroutes_to_event_episode(self):
+        user_id = _user_id()
+        entry = self._build(
+            user_id,
+            id=f"{user_id}:event:first day",
+            type=NodeType.EPISODE,
+            name="first day",
+        )
+        assert entry.type == "event"
+        assert entry.subtype == "episode"
+
+    async def test_legacy_episode_raw_string_reroutes_to_event_episode(self):
+        user_id = _user_id()
+        entry = self._build(
+            user_id,
+            id=f"{user_id}:event:first day",
+            type="episode",
+            name="first day",
+        )
+        assert entry.type == "event"
+        assert entry.subtype == "episode"
+
+    async def test_explicit_subtype_overrides_default_reroute_value(self):
+        # Defensive: a caller may pre-populate subtype with a richer
+        # value (e.g. a future migration that wants finer-grained
+        # tagging). The reroute must rewrite ``type`` but leave the
+        # explicit ``subtype`` untouched.
+        user_id = _user_id()
+        entry = self._build(
+            user_id,
+            type=NodeType.TASK,
+            subtype="project",  # caller-provided override
+        )
+        assert entry.type == "object"
+        assert entry.subtype == "project"
+
+    async def test_legacy_and_new_shape_produce_equivalent_rows(self):
+        # The core invariant of the user-prompt clause "Tests must
+        # cover both old and new shapes producing equivalent stored
+        # rows".
+        user_id = _user_id()
+        legacy = self._build(user_id, type=NodeType.TASK)
+        explicit = self._build(user_id, type="object", subtype="task")
+
+        # Both rows store with the same logical shape.
+        legacy_dump = legacy.model_dump(exclude={"created_at", "updated_at"})
+        explicit_dump = explicit.model_dump(exclude={"created_at", "updated_at"})
+        assert legacy_dump == explicit_dump
+
+    async def test_reroute_does_not_touch_edge_rows(self):
+        # Edges carry their own ``source_type`` / ``target_type`` columns
+        # holding ``NodeType.TASK`` literally — the rewrite is scoped
+        # to ``kind="node"`` so legacy edge constraints survive until
+        # #029's edge collapse.
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:alice|todo|{user_id}:task:write",
+            user_id=user_id,
+            kind="edge",
+            type="todo",
+            source_node_id=f"{user_id}:person:alice",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:task:write",
+            target_type=NodeType.TASK,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        assert entry.type == "todo"
+        assert entry.target_type == NodeType.TASK
+
+
+class TestSubtypeIndexDeclared:
+    """The (user_id, kind, type, subtype) compound index ships in
+    #028 so MCP queries like "all object/task for this user" land
+    on an index prefix. Pinned so a future index refactor doesn't
+    silently drop it."""
+
+    def test_user_kind_type_subtype_index_declared(self) -> None:
+        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        target_key = [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)]
+        assert any(
+            list(im.document.get("key", {}).items()) == target_key
+            for im in index_models
+        ), f"Expected compound index on {target_key}; got {index_models}"
+
+
+class TestOntologyTreeExtensionsModuleApplied:
+    """Phase-3 #028: importing the Tree-extensions module **mutates**
+    the registry — it's the canonical example of an extension consumer
+    self-applying ``register_node_subtype()``. Pinned shape:
+
+    * ``object`` parent now has the 6 canonical POLE+O subtypes plus
+      Tree's ``task`` / ``topic`` / ``project`` extensions (9 total).
+    * ``event`` parent now has the 7 canonical POLE+O subtypes plus
+      Tree's ``episode`` extension (8 total).
+    * ``SUBTYPE_EXTRAS`` carries the ``ProjectExtras`` model under
+      ``("object", "project")``.
+    """
+
+    def test_object_subtypes_include_tree_extensions(self):
+        from tree.entities.ontology import NODE_REGISTRY
+
+        object_spec = NODE_REGISTRY["object"]
+        assert object_spec.subtypes is not None
+        assert "task" in object_spec.subtypes
+        assert "topic" in object_spec.subtypes
+        assert "project" in object_spec.subtypes
+        # Canonical POLE+O subtypes still present.
+        for canonical in {
+            "vehicle",
+            "phone",
+            "email",
+            "document",
+            "device",
+            "software",
+        }:
+            assert canonical in object_spec.subtypes
+        assert len(object_spec.subtypes) == 9
+
+    def test_event_subtypes_include_episode_extension(self):
+        from tree.entities.ontology import NODE_REGISTRY
+
+        event_spec = NODE_REGISTRY["event"]
+        assert event_spec.subtypes is not None
+        assert "episode" in event_spec.subtypes
+        for canonical in {
+            "incident",
+            "meeting",
+            "transaction",
+            "communication",
+            "travel",
+            "employment",
+            "observation",
+        }:
+            assert canonical in event_spec.subtypes
+        assert len(event_spec.subtypes) == 8
+
+    def test_project_extras_registered_in_subtype_extras(self):
+        from tree.entities.ontology import SUBTYPE_EXTRAS
+        from tree.entities.ontology_tree_extensions import ProjectExtras
+
+        assert SUBTYPE_EXTRAS[("object", "project")] is ProjectExtras

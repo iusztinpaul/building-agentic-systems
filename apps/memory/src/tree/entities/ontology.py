@@ -278,17 +278,136 @@ class ChunkProperties(BaseModel):
 
 
 class PersonProperties(BaseModel):
-    """A person mentioned in or related to the content."""
+    """An individual person mentioned in or related to the content."""
 
     aliases: list[str] = Field(
         default_factory=list,
         description="Alternative names, nicknames, or references to this person",
     )
     email: str | None = Field(default=None, description="Email address if known")
+    date_of_birth: str | None = Field(
+        default=None,
+        description="Date of birth in ISO 8601 format (YYYY-MM-DD)",
+    )
+    nationality: str | None = Field(
+        default=None,
+        description="Nationality or country of citizenship",
+    )
+    occupation: str | None = Field(
+        default=None,
+        description="Primary job, role, or profession",
+    )
+
+
+class OrganizationProperties(BaseModel):
+    """An organization (company, nonprofit, government body, etc.)."""
+
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternative names, acronyms, or trade names for the organization",
+    )
+    jurisdiction: str | None = Field(
+        default=None,
+        description=(
+            "Legal jurisdiction the organization is registered or operates in "
+            "(e.g. 'Delaware, US', 'United Kingdom')"
+        ),
+    )
+    registration_number: str | None = Field(
+        default=None,
+        description="Government or registry identifier (EIN, company number, etc.)",
+    )
+
+
+class LocationProperties(BaseModel):
+    """A geographic or named location."""
+
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternative names, abbreviations, or translations of the location",
+    )
+    address: str | None = Field(
+        default=None,
+        description="Street address or postal form when applicable",
+    )
+    city: str | None = Field(default=None, description="City the location belongs to")
+    country: str | None = Field(
+        default=None,
+        description="Country the location belongs to (use ISO 3166 short name when known)",
+    )
+    coordinates: str | None = Field(
+        default=None,
+        description=(
+            "Decimal latitude/longitude pair, e.g. '37.7749,-122.4194'. "
+            "Single string keeps the JSON-schema scalar-friendly for the LLM."
+        ),
+    )
+
+
+class EventProperties(BaseModel):
+    """An event (incident, meeting, transaction, communication, etc.)."""
+
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternative names or labels for the event",
+    )
+    date: str | None = Field(
+        default=None,
+        description="Date the event occurred (ISO 8601 YYYY-MM-DD)",
+    )
+    time: str | None = Field(
+        default=None,
+        description="Time the event occurred (HH:MM:SS, UTC unless otherwise stated)",
+    )
+    duration: str | None = Field(
+        default=None,
+        description="ISO 8601 duration (e.g. 'PT1H30M' for 1 hour 30 minutes)",
+    )
+    outcome: str | None = Field(
+        default=None,
+        description="Short summary of what happened or resulted from the event",
+    )
+
+
+class ObjectProperties(BaseModel):
+    """A physical or digital object (vehicle, phone, document, device, etc.)."""
+
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Alternative names or labels for the object",
+    )
+    identifier: str | None = Field(
+        default=None,
+        description="External identifier (license plate, IMEI, URL, etc.)",
+    )
+    make: str | None = Field(
+        default=None,
+        description="Manufacturer or brand of the object",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Model name or version of the object",
+    )
+    serial_number: str | None = Field(
+        default=None,
+        description="Serial number or other unique-per-instance identifier",
+    )
+
+
+# --- Retained legacy property schemas (kept importable by callers; the
+# top-level ``task`` / ``episode`` registrations are removed in #028 in
+# favor of subtype extensions on ``object`` / ``event``). ---
 
 
 class TaskProperties(BaseModel):
-    """A task, project, or actionable item associated with a person."""
+    """A task, project, or actionable item associated with a person.
+
+    **Deprecated** as a top-level POLE+O type after #028; ``task`` now
+    lives as a Tree subtype under ``object`` (see
+    :mod:`tree.entities.ontology_tree_extensions`). Kept as an
+    importable schema so legacy call sites compile during the staging
+    window between #028 and #033 (migration).
+    """
 
     content: str = Field(description="Description of the task or project")
     date: str | None = Field(
@@ -298,7 +417,12 @@ class TaskProperties(BaseModel):
 
 
 class EpisodeProperties(BaseModel):
-    """A life or work episode experienced by a person."""
+    """A life or work episode experienced by a person.
+
+    **Deprecated** as a top-level POLE+O type after #028; ``episode``
+    now lives as a Tree subtype under ``event`` (see
+    :mod:`tree.entities.ontology_tree_extensions`).
+    """
 
     content: str = Field(description="Description of the episode or experience")
     date: str | None = Field(
@@ -362,31 +486,76 @@ register_node_type(
         name="person",
         properties_schema=PersonProperties,
         description=PersonProperties.__doc__ or "",
-        # Closed-subtype set lands in #028 (POLE+O); freeform for now.
-        subtypes=None,
+        # #028: closed POLE+O subtype set.
+        subtypes=frozenset({"individual", "alias", "persona"}),
         llm_extractable=True,
     )
 )
 
 register_node_type(
     NodeTypeSpec(
-        name="task",
-        properties_schema=TaskProperties,
-        description=TaskProperties.__doc__ or "",
-        # #028 re-routes task under the (object, task) subtype pair;
-        # kept here as a top-level type for Phase-3 part 1.
-        subtypes=None,
+        name="organization",
+        properties_schema=OrganizationProperties,
+        description=OrganizationProperties.__doc__ or "",
+        subtypes=frozenset(
+            {
+                "company",
+                "nonprofit",
+                "government",
+                "educational",
+                "political",
+                "religious",
+                "military",
+            }
+        ),
         llm_extractable=True,
     )
 )
 
 register_node_type(
     NodeTypeSpec(
-        name="episode",
-        properties_schema=EpisodeProperties,
-        description=EpisodeProperties.__doc__ or "",
-        # #028 re-routes episode under (event, episode).
-        subtypes=None,
+        name="location",
+        properties_schema=LocationProperties,
+        description=LocationProperties.__doc__ or "",
+        subtypes=frozenset(
+            {"address", "city", "region", "country", "landmark", "coordinates"}
+        ),
+        llm_extractable=True,
+    )
+)
+
+register_node_type(
+    NodeTypeSpec(
+        name="event",
+        properties_schema=EventProperties,
+        description=EventProperties.__doc__ or "",
+        # Canonical POLE+O subtypes only; Tree's ``episode`` extension
+        # is registered downstream in ``ontology_tree_extensions``.
+        subtypes=frozenset(
+            {
+                "incident",
+                "meeting",
+                "transaction",
+                "communication",
+                "travel",
+                "employment",
+                "observation",
+            }
+        ),
+        llm_extractable=True,
+    )
+)
+
+register_node_type(
+    NodeTypeSpec(
+        name="object",
+        properties_schema=ObjectProperties,
+        description=ObjectProperties.__doc__ or "",
+        # Canonical POLE+O subtypes only; Tree's ``task`` / ``topic`` /
+        # ``project`` extensions are registered downstream.
+        subtypes=frozenset(
+            {"vehicle", "phone", "email", "document", "device", "software"}
+        ),
         llm_extractable=True,
     )
 )
@@ -580,34 +749,70 @@ def get_ontology_schema() -> dict[str, Any]:
     """Build the ontology schema for LLM extraction prompts.
 
     Returns a dict describing extractable node types (with their
-    property schemas) and edge types (with their source/target
-    constraints). Output is byte-identical (post deterministic
-    key sort) to the pre-registry implementation — pinned by a
-    golden-file snapshot test.
+    property schemas + closed subtype vocabularies) and edge types
+    (with their source/target constraints). Iteration is deterministic
+    (alphabetical by name) so the generated prompt is byte-stable across
+    Python runs — pinned by a golden-file snapshot test.
+
+    Phase-3 #028: each LLM-extractable node type now also surfaces its
+    ``subtypes`` list when the registry pins a closed vocabulary; the
+    LLM is expected to emit a ``subtype`` field alongside ``type`` and
+    ``name``. Types with ``subtypes=None`` (freeform — e.g. legacy
+    ``preference``) omit the ``subtypes`` key, signalling the LLM that
+    subtype is optional and freeform.
     """
 
     node_types: dict[str, Any] = {}
-    # Iterate in NodeType-enum order so the output stays deterministic
-    # even though NODE_REGISTRY is dict-insertion-ordered.
-    for node_type in LLM_EXTRACTABLE_NODE_TYPES:
-        spec = NODE_REGISTRY[node_type.value]
+    # Sort alphabetically by name for deterministic prompt output.
+    # Prior to #028 this iterated a Python ``set`` (non-deterministic
+    # ordering across hash-randomized runs); the Tester surfaced that
+    # while reviewing #027.
+    extractable_node_names = sorted(
+        name for name, spec in NODE_REGISTRY.items() if spec.llm_extractable
+    )
+    for name in extractable_node_names:
+        spec = NODE_REGISTRY[name]
         schema = spec.properties_schema.model_json_schema()
-        node_types[node_type.value] = {
+        node_info: dict[str, Any] = {
             "description": spec.properties_schema.__doc__ or "",
             "properties": schema.get("properties", {}),
             "required": schema.get("required", []),
         }
+        if spec.subtypes is not None:
+            # Sorted for deterministic prompt; an empty set still surfaces
+            # so the LLM knows the type accepts no subtypes today.
+            node_info["subtypes"] = sorted(spec.subtypes)
+        node_types[name] = node_info
 
     edge_types: dict[str, Any] = {}
-    for edge_type in LLM_EXTRACTABLE_EDGE_TYPES:
+    extractable_edge_names = sorted(
+        name for name, spec in EDGE_REGISTRY.items() if spec.llm_extractable
+    )
+    for name in extractable_edge_names:
         # LLM-extractable edges each have a single (source, target)
         # allowed pair by design; we pick the first entry.
-        spec = EDGE_REGISTRY[edge_type.value]
+        spec = EDGE_REGISTRY[name]
         src, tgt = spec.allowed_pairs[0]
-        edge_types[edge_type.value] = {
+        edge_types[name] = {
             "source_type": src,
             "target_type": tgt,
             "description": spec.description,
         }
 
     return {"node_types": node_types, "edge_types": edge_types}
+
+
+# ---------------------------------------------------------------------------
+# Tree downstream subtype extensions (self-application of the extension API)
+# ---------------------------------------------------------------------------
+#
+# Imported here at the BOTTOM of the canonical ontology module so the
+# canonical POLE+O parents (``object`` / ``event``) are already in
+# :data:`NODE_REGISTRY` when ``register_node_subtype`` is called. The
+# extensions module is intentionally side-effecting — see its docstring.
+#
+# We intentionally do **not** re-export anything from it; consumers that
+# need the Tree-specific Pydantic shells (``ProjectExtras`` /
+# ``ExternalRef``) import them from
+# :mod:`tree.entities.ontology_tree_extensions` directly.
+from tree.entities import ontology_tree_extensions as _tree_extensions  # noqa: E402, F401

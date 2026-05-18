@@ -104,6 +104,7 @@ the output schema.
     {{
       "name": "<canonical lowercase name>",
       "type": "<node type from ontology>",
+      "subtype": "<subtype from the type's `subtypes` list, or null>",
       "properties": {{ ... }}
     }}
   ],
@@ -122,6 +123,10 @@ the output schema.
 Rules:
 - Node names MUST be lowercase.
 - Only use node types and edge types listed in the ontology.
+- When the ontology lists a `subtypes` array for a node type, pick the
+  best matching subtype value from that array and put it on the node's
+  `subtype` field. When the type has no `subtypes` array, omit `subtype`
+  (or set it to null).
 - Respect edge constraints (source_type → target_type).
 - If no entities or relationships are found, return empty lists.
 """
@@ -146,16 +151,48 @@ async def extract_entities(
     return result
 
 
+# --- Phase-3 #028: legacy LLM emissions for the pre-POLE+O top-level
+# node types ``task`` / ``episode`` are silently re-routed to the new
+# (parent, subtype) shape. The LLM prompt has been updated to emit the
+# new shape directly (with a ``subtype`` field), but this rewrite keeps
+# the parser tolerant of older prompts and saved/cached examples during
+# the staging window between #028 and #033.
+_LEGACY_NODE_TYPE_REWRITES: dict[str, tuple[NodeType, str]] = {
+    "task": (NodeType.OBJECT, "task"),
+    "episode": (NodeType.EVENT, "episode"),
+}
+
+
 def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
     """Validate and filter the raw LLM output against the ontology."""
 
     nodes: list[ExtractedNode] = []
     for n in raw.get("nodes", []):
         try:
-            node_type = NodeType(n["type"])
-        except KeyError, ValueError:
-            logger.warning("Skipping node with invalid type: %s", n)
+            type_value = n["type"]
+        except KeyError:
+            logger.warning("Skipping node with missing type: %s", n)
             continue
+
+        # Legacy → POLE+O subtype re-route (see _LEGACY_NODE_TYPE_REWRITES).
+        legacy_rewrite = _LEGACY_NODE_TYPE_REWRITES.get(type_value)
+        emitted_subtype = n.get("subtype")
+        if legacy_rewrite is not None:
+            node_type, derived_subtype = legacy_rewrite
+            # An LLM that already learned the new shape may emit the
+            # legacy ``type`` but pre-populate ``subtype``; trust the
+            # caller's value when present.
+            subtype: str | None = (
+                emitted_subtype if emitted_subtype is not None else derived_subtype
+            )
+        else:
+            try:
+                node_type = NodeType(type_value)
+            except ValueError:
+                logger.warning("Skipping node with invalid type: %s", n)
+                continue
+            subtype = emitted_subtype if emitted_subtype is not None else None
+
         if node_type not in LLM_EXTRACTABLE_NODE_TYPES:
             logger.warning("Skipping non-extractable node type: %s", node_type)
             continue
@@ -163,6 +200,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             ExtractedNode(
                 name=str(n.get("name", "")).lower().strip(),
                 type=node_type,
+                subtype=subtype,
                 properties=n.get("properties", {}),
             )
         )
@@ -178,6 +216,12 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             logger.warning("Skipping non-extractable edge type: %s", edge_type)
             continue
 
+        # Edge endpoints from older prompts may still name the legacy
+        # top-level types — keep the lookup tolerant. The per-pair
+        # constraint check below uses the (now-legacy) ``EdgeConstraint``
+        # entries which still reference ``NodeType.TASK`` / ``EPISODE``
+        # for ``todo`` / ``experienced`` / ``same_as`` (#029 collapses
+        # those into ``related_to``).
         constraints = EDGE_CONSTRAINTS[edge_type]
         try:
             src_type = NodeType(e["source_type"])
@@ -368,6 +412,13 @@ async def upsert_graph_entries(
                             "user_id": user_id,
                             "kind": "node",
                             "type": node.type.value,
+                            # #028: persist the POLE+O subtype slot. ``None``
+                            # is written as a NULL column on first insert and
+                            # left untouched on subsequent merges; once
+                            # populated, later writes overwrite with the
+                            # latest LLM-emitted value (last-write-wins on
+                            # the slot, mirroring ``properties``-merge).
+                            "subtype": node.subtype,
                             "name": node.name,
                             "properties": {
                                 "$mergeObjects": [

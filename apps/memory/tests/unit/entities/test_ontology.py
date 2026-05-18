@@ -47,7 +47,11 @@ from tree.entities.ontology import (
 )
 
 
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v1.json"
+# Phase-3 #028: the schema grew (4 new POLE+O canonical types; ``subtypes``
+# fields added on every closed-vocab parent; ``task`` / ``episode`` no longer
+# top-level), so the v1 snapshot from #027 is superseded by v2. The v1
+# snapshot is kept on disk for historical-diff review but no test reads it.
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v2.json"
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +218,11 @@ class TestRegisterNodeSubtype:
             register_node_subtype("nonexistent_parent", "scientist")
 
     def test_raises_when_parent_is_freeform(self, registry_snapshot):
-        # "person" is registered with subtypes=None (freeform) in
-        # the built-in registrations; extension semantics don't apply.
+        # Post-#028, ``person`` has a closed subtype set; ``preference``
+        # is the remaining freeform LLM-extractable type, so it's the
+        # parent we exercise the freeform branch against.
         with pytest.raises(ValueError, match="freeform"):
-            register_node_subtype("person", "scientist")
+            register_node_subtype("preference", "scientist")
 
     def test_appends_subtype_to_closed_parent(self, registry_snapshot):
         # Re-register "person" with an empty closed set so we can
@@ -269,17 +274,26 @@ class TestRegisterNodeSubtype:
 
 
 class TestRetrofitRegistries:
-    def test_node_registry_has_exactly_the_six_legacy_types(self):
+    def test_node_registry_has_exactly_the_pole_o_types(self):
+        # Post-#028: 8 entries — 5 POLE+O LLM-extractable (person,
+        # organization, location, event, object) + preference (still
+        # freeform) + 2 structural (document, chunk). The legacy
+        # ``task`` / ``episode`` top-level rows are GONE and live as
+        # subtypes under ``object`` / ``event`` (see
+        # ``test_tree_extensions_self_application``).
         assert set(NODE_REGISTRY) == {
             "document",
             "chunk",
             "person",
-            "task",
-            "episode",
+            "organization",
+            "location",
+            "event",
+            "object",
             "preference",
         }
 
     def test_edge_registry_has_exactly_the_nine_legacy_types(self):
+        # Untouched in #028 — the edge collapse lands in #029.
         assert set(EDGE_REGISTRY) == {
             "part_of",
             "next",
@@ -292,11 +306,17 @@ class TestRetrofitRegistries:
             "same_as",
         }
 
-    def test_llm_extractable_node_types_unchanged(self):
+    def test_llm_extractable_node_types_pole_o(self):
+        # Post-#028: 5 POLE+O canonical + preference (still freeform).
+        # ``NodeType.TASK`` / ``NodeType.EPISODE`` enum members survive
+        # as legacy aliases but are no longer registered as top-level
+        # extractable types — they live as subtypes under object/event.
         assert LLM_EXTRACTABLE_NODE_TYPES == {
             NodeType.PERSON,
-            NodeType.TASK,
-            NodeType.EPISODE,
+            NodeType.ORGANIZATION,
+            NodeType.LOCATION,
+            NodeType.EVENT,
+            NodeType.OBJECT,
             NodeType.PREFERENCE,
         }
 
@@ -332,15 +352,30 @@ class TestRetrofitRegistries:
 
 
 class TestBackwardCompatViews:
-    def test_every_node_type_has_properties(self):
-        for node_type in NodeType:
+    def test_every_registered_node_type_has_properties(self):
+        # Post-#028: ``NODE_PROPERTIES`` is built from
+        # :data:`NODE_REGISTRY`, so ``NodeType.TASK`` / ``EPISODE``
+        # (which survive only as legacy aliases) are intentionally
+        # absent. Iterate the registry, not the enum.
+        for type_name in NODE_REGISTRY:
+            node_type = NodeType(type_name)
             assert node_type in NODE_PROPERTIES, f"Missing properties for {node_type}"
+
+    def test_legacy_node_type_aliases_absent_from_properties(self):
+        # The enum still exposes TASK/EPISODE for code-path compat,
+        # but ``NODE_PROPERTIES`` mirrors the registry — which no
+        # longer holds those entries.
+        assert NodeType.TASK not in NODE_PROPERTIES
+        assert NodeType.EPISODE not in NODE_PROPERTIES
 
     def test_every_edge_type_has_constraint(self):
         for edge_type in EdgeType:
             assert edge_type in EDGE_CONSTRAINTS, f"Missing constraint for {edge_type}"
 
     def test_same_as_constraints_cover_all_four_self_pairs(self):
+        # ``same_as`` allowed_pairs are unchanged in #028 — the legacy
+        # pre-POLE+O pair list still applies (task↔task / episode↔episode
+        # carry over until #029 collapses these into ``related_to``).
         same_as = EDGE_CONSTRAINTS[EdgeType.SAME_AS]
         pairs = {(c.source_type.value, c.target_type.value) for c in same_as}
         assert pairs == {
@@ -357,9 +392,16 @@ class TestBackwardCompatViews:
 
 
 class TestEnumShim:
-    def test_node_type_members_match_node_registry(self):
+    def test_node_type_members_match_node_registry_plus_legacy_aliases(self):
+        # Post-#028: the enum has the 6 registry entries the LLM cares
+        # about (+ DOCUMENT/CHUNK) PLUS two legacy aliases — ``TASK``
+        # and ``EPISODE`` — that the :class:`KnowledgeGraphEntry`
+        # mode=before validator silently re-routes to the new
+        # (parent, subtype) shape. The aliases are intentionally NOT
+        # in :data:`NODE_REGISTRY`.
         enum_values = {member.value for member in NodeType}
-        assert enum_values == set(NODE_REGISTRY)
+        legacy_aliases = {"task", "episode"}
+        assert enum_values == set(NODE_REGISTRY) | legacy_aliases
 
     def test_edge_type_members_match_edge_registry(self):
         enum_values = {member.value for member in EdgeType}
@@ -367,10 +409,15 @@ class TestEnumShim:
 
     def test_node_type_exports_every_legacy_member(self):
         # Pinned so a future refactor that drops a member fails loudly.
+        # Post-#028 the enum also exposes the four new POLE+O canonicals.
         for name in [
             "DOCUMENT",
             "CHUNK",
             "PERSON",
+            "ORGANIZATION",
+            "LOCATION",
+            "EVENT",
+            "OBJECT",
             "TASK",
             "EPISODE",
             "PREFERENCE",
@@ -452,3 +499,340 @@ class TestGetOntologySchema:
         # doesn't matter; we already sort_keys when we write the file.
         actual = json.loads(json.dumps(get_ontology_schema(), sort_keys=True))
         assert actual == snapshot
+
+    def test_iteration_order_is_deterministic(self):
+        # Tester flagged on #027 that ``get_ontology_schema()`` iterated
+        # a Python ``set`` which produced non-deterministic prompt order
+        # across hash-randomized runs. #028's implementation sorts by
+        # name; pin that contract here.
+        first = list(get_ontology_schema()["node_types"].keys())
+        second = list(get_ontology_schema()["node_types"].keys())
+        assert first == second
+        assert first == sorted(first)
+
+    def test_subtypes_surface_for_closed_vocab_parents(self):
+        schema = get_ontology_schema()
+
+        # Each of the five POLE+O LLM-extractable types has a closed
+        # subtype set and surfaces a sorted ``subtypes`` list in the
+        # schema for the LLM prompt.
+        for type_name in ("person", "organization", "location", "event", "object"):
+            node_info = schema["node_types"][type_name]
+            assert "subtypes" in node_info
+            subtypes = node_info["subtypes"]
+            assert isinstance(subtypes, list)
+            assert subtypes == sorted(subtypes)
+            assert len(subtypes) > 0
+
+    def test_subtypes_omitted_for_freeform_parent(self):
+        # ``preference`` keeps ``subtypes=None`` in the registry (the
+        # typed-slots refactor lands in #032). The schema must omit the
+        # ``subtypes`` key so the LLM treats subtype as freeform.
+        schema = get_ontology_schema()
+        assert "subtypes" not in schema["node_types"]["preference"]
+
+    def test_object_schema_includes_tree_extension_subtypes(self):
+        # Self-application of the extension API: Tree's
+        # ``task`` / ``topic`` / ``project`` subtypes (registered in
+        # :mod:`tree.entities.ontology_tree_extensions`) show up in
+        # the LLM-facing schema for the canonical ``object`` parent —
+        # the LLM doesn't see them as a separate "Tree thing".
+        schema = get_ontology_schema()
+        object_subtypes = set(schema["node_types"]["object"]["subtypes"])
+        assert {"task", "topic", "project"}.issubset(object_subtypes)
+
+
+# ---------------------------------------------------------------------------
+# 7. POLE+O canonical type registration (#028)
+# ---------------------------------------------------------------------------
+
+
+class TestPoleOCanonicalTypes:
+    """Phase-3 #028 pins the four new POLE+O canonical node types
+    (organization, location, event, object), each with a closed
+    subtype vocabulary and a ``*Properties`` Pydantic shell."""
+
+    @pytest.mark.parametrize(
+        "name,expected_subtypes",
+        [
+            ("person", {"individual", "alias", "persona"}),
+            (
+                "organization",
+                {
+                    "company",
+                    "nonprofit",
+                    "government",
+                    "educational",
+                    "political",
+                    "religious",
+                    "military",
+                },
+            ),
+            (
+                "location",
+                {"address", "city", "region", "country", "landmark", "coordinates"},
+            ),
+            # Note: ``event`` and ``object`` here include the Tree
+            # extension subtypes too — they're inseparable from the
+            # registry-level view after import.
+            (
+                "event",
+                {
+                    "incident",
+                    "meeting",
+                    "transaction",
+                    "communication",
+                    "travel",
+                    "employment",
+                    "observation",
+                    "episode",  # Tree extension
+                },
+            ),
+            (
+                "object",
+                {
+                    "vehicle",
+                    "phone",
+                    "email",
+                    "document",
+                    "device",
+                    "software",
+                    "task",  # Tree extension
+                    "topic",  # Tree extension
+                    "project",  # Tree extension
+                },
+            ),
+        ],
+    )
+    def test_canonical_subtype_set(self, name, expected_subtypes):
+        spec = NODE_REGISTRY[name]
+        assert spec.subtypes == frozenset(expected_subtypes)
+        assert spec.llm_extractable is True
+
+    def test_organization_properties_has_field_descriptions(self):
+        from tree.entities.ontology import OrganizationProperties
+
+        schema = OrganizationProperties.model_json_schema()
+        # Every field must carry a non-empty description — the LLM
+        # reads these as its only context. ``aliases`` is the
+        # list-typed field, so the description hangs off the parent.
+        for field in ("aliases", "jurisdiction", "registration_number"):
+            assert schema["properties"][field].get("description"), (
+                f"OrganizationProperties.{field} is missing a Field(description=...)"
+            )
+
+    def test_location_properties_has_field_descriptions(self):
+        from tree.entities.ontology import LocationProperties
+
+        schema = LocationProperties.model_json_schema()
+        for field in ("aliases", "address", "city", "country", "coordinates"):
+            assert schema["properties"][field].get("description"), (
+                f"LocationProperties.{field} is missing a Field(description=...)"
+            )
+
+    def test_event_properties_has_field_descriptions(self):
+        from tree.entities.ontology import EventProperties
+
+        schema = EventProperties.model_json_schema()
+        for field in ("aliases", "date", "time", "duration", "outcome"):
+            assert schema["properties"][field].get("description"), (
+                f"EventProperties.{field} is missing a Field(description=...)"
+            )
+
+    def test_object_properties_has_field_descriptions(self):
+        from tree.entities.ontology import ObjectProperties
+
+        schema = ObjectProperties.model_json_schema()
+        for field in ("aliases", "identifier", "make", "model", "serial_number"):
+            assert schema["properties"][field].get("description"), (
+                f"ObjectProperties.{field} is missing a Field(description=...)"
+            )
+
+    def test_person_properties_pole_o_extensions(self):
+        # #028 also extends ``PersonProperties`` with three new POLE+O
+        # fields (date_of_birth, nationality, occupation).
+        from tree.entities.ontology import PersonProperties
+
+        schema = PersonProperties.model_json_schema()
+        for field in ("aliases", "email", "date_of_birth", "nationality", "occupation"):
+            assert field in schema["properties"], (
+                f"PersonProperties.{field} missing after #028"
+            )
+            assert schema["properties"][field].get("description"), (
+                f"PersonProperties.{field} is missing a Field(description=...)"
+            )
+
+    def test_task_and_episode_not_top_level(self):
+        # The legacy ``task`` / ``episode`` rows are GONE from
+        # the top-level registry; they live as subtypes under
+        # ``object`` / ``event`` now.
+        assert "task" not in NODE_REGISTRY
+        assert "episode" not in NODE_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# 8. Tree subtype extensions (self-application of the extension API)
+# ---------------------------------------------------------------------------
+
+
+class TestTreeExtensionsSelfApplication:
+    """Pin the four Tree extensions registered in
+    :mod:`tree.entities.ontology_tree_extensions`. The whole point of
+    the extension API is that Tree's domain concepts (``task`` /
+    ``episode`` / ``topic`` / ``project``) ride on top of the
+    POLE+O canonical parents — they look indistinguishable from
+    canonical subtypes to downstream consumers.
+    """
+
+    def test_object_task_extension(self):
+        assert "task" in NODE_REGISTRY["object"].subtypes
+
+    def test_event_episode_extension(self):
+        assert "episode" in NODE_REGISTRY["event"].subtypes
+
+    def test_object_topic_extension(self):
+        # ``topic`` is Tree-only — NEVER a canonical POLE+O subtype.
+        # Pinned so a misreading of the spec doesn't accidentally
+        # promote it to canonical.
+        assert "topic" in NODE_REGISTRY["object"].subtypes
+
+    def test_object_project_extension_has_extras(self):
+        from tree.entities.ontology_tree_extensions import ProjectExtras
+
+        assert "project" in NODE_REGISTRY["object"].subtypes
+        assert SUBTYPE_EXTRAS[("object", "project")] is ProjectExtras
+
+
+class TestExternalRefAndProjectExtras:
+    """The ``ProjectExtras`` schema is a thin wrapper around
+    ``ExternalRef``, which is the public handle for "this object
+    points at a richly-tracked project in Linear/Notion/etc.".
+    """
+
+    def test_external_ref_round_trip(self):
+        from tree.entities.ontology_tree_extensions import ExternalRef
+
+        original = ExternalRef(
+            system="linear",
+            id="PRJ-123",
+            url="https://linear.app/teams/x/projects/PRJ-123",
+        )
+
+        dumped = original.model_dump()
+        rehydrated = ExternalRef.model_validate(dumped)
+
+        assert rehydrated == original
+
+    def test_external_ref_url_is_optional(self):
+        from tree.entities.ontology_tree_extensions import ExternalRef
+
+        # ``url`` is the only optional field — without it the handle
+        # still resolves.
+        ref = ExternalRef(system="notion", id="page-abc")
+
+        assert ref.url is None
+
+    def test_project_extras_round_trip(self):
+        from tree.entities.ontology_tree_extensions import (
+            ExternalRef,
+            ProjectExtras,
+        )
+
+        original = ProjectExtras(
+            external_ref=ExternalRef(system="linear", id="PRJ-1"),
+        )
+
+        dumped = original.model_dump()
+        rehydrated = ProjectExtras.model_validate(dumped)
+
+        assert rehydrated == original
+        assert rehydrated.external_ref is not None
+        assert rehydrated.external_ref.system == "linear"
+        assert rehydrated.external_ref.id == "PRJ-1"
+
+    def test_project_extras_external_ref_is_optional(self):
+        from tree.entities.ontology_tree_extensions import ProjectExtras
+
+        # ``external_ref`` is optional — a Tree-only project with no
+        # external mirror is a valid construction.
+        extras = ProjectExtras()
+
+        assert extras.external_ref is None
+
+    def test_external_ref_descriptions_present(self):
+        # Pin the LLM-facing descriptions so a refactor that drops them
+        # fails loudly.
+        from tree.entities.ontology_tree_extensions import ExternalRef
+
+        schema = ExternalRef.model_json_schema()
+        for field in ("system", "id", "url"):
+            assert schema["properties"][field].get("description"), (
+                f"ExternalRef.{field} is missing a Field(description=...)"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 9. register_node_subtype — failure modes ([#028] integration coverage)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterNodeSubtypeFailureModes:
+    """The extension API has three documented failure modes; #027's
+    primitive tests cover the parent-unknown + parent-freeform
+    branches. #028 self-applies the API in production, so this block
+    adds the "conflicting subtype-extras model" edge case the
+    extension API supports today (last-write-wins on extras model).
+    """
+
+    def test_register_against_unknown_parent_raises(self, registry_snapshot):
+        with pytest.raises(ValueError, match="not registered"):
+            register_node_subtype("nope_unknown_parent", "subtype")
+
+    def test_register_against_freeform_parent_raises(self, registry_snapshot):
+        # Pre-#028 ``person`` was freeform; post-#028 ``preference`` is.
+        # Use it to pin the freeform-rejection branch.
+        with pytest.raises(ValueError, match="freeform"):
+            register_node_subtype("preference", "scientific")
+
+    def test_re_registering_same_subtype_is_idempotent(self, registry_snapshot):
+        # The extension API is set-union-based; re-registering an
+        # existing subtype on the same parent must not raise.
+        before = NODE_REGISTRY["object"].subtypes
+        assert before is not None
+        assert "task" in before
+        size_before = len(before)
+
+        # No-op (subtype already in the set).
+        register_node_subtype("object", "task", description="re-register")
+
+        after = NODE_REGISTRY["object"].subtypes
+        assert after is not None
+        assert "task" in after
+        assert len(after) == size_before
+
+    def test_subtype_extras_last_write_wins(self, registry_snapshot):
+        # The extension API stores ``extra_properties`` in a parallel
+        # dict; re-registering a subtype with a new extras model
+        # overwrites the previous one. Pinned so a future refactor
+        # that wants stricter semantics gets a failing test to think
+        # about.
+        class _ExtrasV1(BaseModel):
+            v: int = Field(default=1)
+
+        class _ExtrasV2(BaseModel):
+            v: int = Field(default=2)
+
+        register_node_type(
+            NodeTypeSpec(
+                name="conflictparent",
+                properties_schema=PersonProperties,
+                description="Test parent for extras conflict.",
+                subtypes=frozenset(),
+            )
+        )
+
+        register_node_subtype("conflictparent", "child", extra_properties=_ExtrasV1)
+        assert SUBTYPE_EXTRAS[("conflictparent", "child")] is _ExtrasV1
+
+        register_node_subtype("conflictparent", "child", extra_properties=_ExtrasV2)
+        assert SUBTYPE_EXTRAS[("conflictparent", "child")] is _ExtrasV2

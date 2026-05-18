@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 from beanie import Document as BeanieDocument
 from beanie import Indexed, PydanticObjectId
@@ -30,18 +30,34 @@ from pymongo import IndexModel
 
 
 class NodeType(StrEnum):
-    """Backward-compat shim built from ``NODE_REGISTRY`` (#027).
+    """Backward-compat shim built from ``NODE_REGISTRY`` (#027, extended #028).
 
-    Members map 1:1 to registered node-type names. New code should
-    reference type names as strings or read ``NODE_REGISTRY`` directly.
+    Members map 1:1 to registered node-type names — **except** ``TASK``
+    and ``EPISODE``, which are retained as **legacy aliases** after #028.
+    The strings ``"task"`` and ``"episode"`` are no longer registered as
+    top-level node types; they're re-routed by
+    :class:`KnowledgeGraphEntry`'s ``mode="before"`` validator to
+    ``(type="object", subtype="task")`` and
+    ``(type="event", subtype="episode")``. Reading those enum members in
+    consumer code still works (StrEnum -> str), but any
+    ``KnowledgeGraphEntry`` constructed with ``type=NodeType.TASK``
+    silently re-shapes to the new POLE+O storage form.
+
+    New code should reference type names as strings or read
+    ``NODE_REGISTRY`` directly.
     """
 
     DOCUMENT = "document"
     CHUNK = "chunk"
     PERSON = "person"
+    ORGANIZATION = "organization"
+    LOCATION = "location"
+    EVENT = "event"
+    OBJECT = "object"
+    PREFERENCE = "preference"
+    # --- Legacy aliases (#028) — re-routed at write time ---
     TASK = "task"
     EPISODE = "episode"
-    PREFERENCE = "preference"
 
 
 class EdgeType(StrEnum):
@@ -136,6 +152,12 @@ class KnowledgeGraphEntry(BeanieDocument):
 
     # Node fields
     name: str | None = None
+    # Phase-3 #028: closed-vocabulary subtype slot. Validated against
+    # the parent type's ``NODE_REGISTRY[type].subtypes`` set when the
+    # parent has a closed subtype vocabulary. ``None`` is accepted at
+    # construction (loose); the strict-every-LLM-node-has-a-subtype
+    # rule lands at the envelope-validator pipeline in #030.
+    subtype: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] = Field(default_factory=list)
 
@@ -157,6 +179,53 @@ class KnowledgeGraphEntry(BeanieDocument):
     # Timestamps
     created_at: datetime
     updated_at: datetime
+
+    # --- Phase-3 #028: legacy (type=task|episode) → (parent, subtype) ---
+    # Re-routes legacy node rows at construction time so the rest of the
+    # validator chain sees the new POLE+O shape. Runs in ``mode="before"``
+    # because the downstream type-vs-registry check would otherwise
+    # reject ``"task"`` / ``"episode"`` (they're no longer registered as
+    # top-level node types after #028).
+    #
+    # Idempotent: a row that already carries ``type="object",
+    # subtype="task"`` is untouched. If the caller has already set
+    # ``subtype`` explicitly, the legacy ``type`` is rewritten but
+    # ``subtype`` is left as the caller provided it.
+    _LEGACY_NODE_REWRITES: ClassVar[dict[str, tuple[str, str]]] = {
+        # legacy type -> (new parent, subtype)
+        "task": ("object", "task"),
+        "episode": ("event", "episode"),
+    }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reroute_legacy_node_types(cls, data: Any) -> Any:
+        """Rewrite legacy ``(type=task|episode)`` to the POLE+O subtype shape.
+
+        Only touches ``kind="node"`` rows. Edge rows keep their legacy
+        ``source_type`` / ``target_type`` columns untouched — those are
+        cleaned up by #029's edge collapse, not here.
+        """
+
+        if not isinstance(data, dict):
+            return data
+        if data.get("kind") != "node":
+            return data
+        raw_type = data.get("type")
+        # ``type`` may arrive as a ``NodeType`` enum member or a plain
+        # str; normalize once for the lookup.
+        type_value = raw_type.value if hasattr(raw_type, "value") else raw_type
+        rewrite = cls._LEGACY_NODE_REWRITES.get(type_value)
+        if rewrite is None:
+            return data
+        new_type, new_subtype = rewrite
+        out = dict(data)
+        out["type"] = new_type
+        # Only fill subtype if the caller didn't already supply one
+        # (defensive — lets a future migration override legacy mappings).
+        if out.get("subtype") is None:
+            out["subtype"] = new_subtype
+        return out
 
     @model_validator(mode="after")
     def _check_type_against_registry(self) -> "KnowledgeGraphEntry":
@@ -188,6 +257,49 @@ class KnowledgeGraphEntry(BeanieDocument):
         # (Phase 1) is the gate that rejects those.
         return self
 
+    @model_validator(mode="after")
+    def _check_subtype_against_registry(self) -> "KnowledgeGraphEntry":
+        """Phase-3 #028: enforce ``subtype`` is in the parent's closed set.
+
+        Loose contract at construction time:
+
+        * Non-node rows pass through unchanged.
+        * Nodes whose parent type isn't registered fall through (the
+          previous validator already rejected unregistered types).
+        * Nodes whose parent's ``subtypes`` is ``None`` (freeform —
+          e.g. ``document`` / ``chunk`` / pre-#028 ``person``) accept
+          any subtype value, including ``None``.
+        * Nodes whose parent has a non-empty closed set:
+          - ``subtype is None`` is accepted (the strict
+            "every LLM node must have a subtype" rule is an
+            envelope-level check that lands at #030's validator
+            pipeline; intermediate construction in the resolver /
+            indexing path may legitimately leave subtype unfilled).
+          - ``subtype not in spec.subtypes`` -> ``ValueError``.
+        """
+
+        from tree.entities.ontology import NODE_REGISTRY
+
+        if self.kind != "node":
+            return self
+        spec = NODE_REGISTRY.get(self.type)
+        if spec is None:
+            # The type-vs-registry validator already raised; this branch
+            # is defensive and unreachable in practice.
+            return self
+        if spec.subtypes is None:
+            # Freeform parent — no validation.
+            return self
+        if self.subtype is None:
+            # Loose at construction; tighter checks land in #030.
+            return self
+        if self.subtype not in spec.subtypes:
+            raise ValueError(
+                f"subtype {self.subtype!r} not in allowed set "
+                f"{sorted(spec.subtypes)} for node type {self.type!r}"
+            )
+        return self
+
     class Settings:
         name = "knowledge_graph"
         indexes = [
@@ -204,5 +316,14 @@ class KnowledgeGraphEntry(BeanieDocument):
             IndexModel(
                 [("user_id", 1), ("type", 1), ("name", 1)],
                 name="user_type_name",
+            ),
+            # #028: filter by (type, subtype) for POLE+O — e.g. "all
+            # `object/task` for this user". The `subtype` column is
+            # sparse-by-nature (None on document/chunk and on rows
+            # written before #028), but the index still serves the
+            # explicit-subtype queries the MCP tools issue.
+            IndexModel(
+                [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)],
+                name="user_kind_type_subtype",
             ),
         ]
