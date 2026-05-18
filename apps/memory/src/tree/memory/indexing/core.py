@@ -254,6 +254,20 @@ async def ensure_indexes(
         sparse=True,
         unique=False,
     )
+    # #029: partial index for the ``related_to`` umbrella edge.
+    # Filter ``semantic_type`` non-null so only ``related_to`` rows
+    # carry the index cost. Idempotent on re-create. Also declared on
+    # :class:`tree.entities.knowledge_graph.KnowledgeGraphEntry`; the
+    # dynamic create here keeps the indexing-pipeline run-path
+    # authoritative (it's the surface CI/integration tests assert on).
+    # ``$ne: null`` is not a valid partial-filter expression in
+    # MongoDB; ``$type: "string"`` is the supported equivalent (every
+    # ``semantic_type`` value is a string by validator contract).
+    await collection.create_index(
+        [("user_id", 1), ("type", 1), ("semantic_type", 1)],
+        name="user_type_semantic_type",
+        partialFilterExpression={"semantic_type": {"$type": "string"}},
+    )
     logger.info("Compound indexes ensured on %s", _KG_COLLECTION)
 
     # --- Vector search index (for $vectorSearch) ---

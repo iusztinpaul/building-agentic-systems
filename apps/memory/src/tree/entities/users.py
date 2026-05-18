@@ -105,6 +105,10 @@ class User(BeanieDocument):
             "user_id": self.id,
             "kind": "node",
             "type": NodeType.PERSON.value,
+            # #028: ``person`` now carries the closed POLE+O subtype
+            # vocabulary ``{"individual", "alias", "persona"}``; the
+            # seed self-person is the canonical ``individual``.
+            "subtype": "individual",
             "name": "self",
             "canonical_name": canonical_name,
             "properties": properties,

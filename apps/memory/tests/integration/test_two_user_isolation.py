@@ -133,11 +133,13 @@ _LLM_RESPONSE_A: dict[str, Any] = {
         {
             "name": "alice",
             "type": "person",
+            "subtype": "individual",
             "properties": {"aliases": []},
         },
         {
             "name": "antelope analytics project",
             "type": "task",
+            "subtype": "task",
             "properties": {
                 "content": "Own the antelope analytics project (amber dashboard)."
             },
@@ -161,11 +163,13 @@ _LLM_RESPONSE_B: dict[str, Any] = {
         {
             "name": "bob",
             "type": "person",
+            "subtype": "individual",
             "properties": {"aliases": []},
         },
         {
             "name": "badger reporting service",
             "type": "task",
+            "subtype": "task",
             "properties": {
                 "content": "Own the badger reporting service (bramble migration)."
             },
@@ -513,13 +517,16 @@ class TestTwoUserIsolation:
     # ------------------------------------------------------------------
 
     async def test_kgquery_find_edges_returns_only_user_a_edges(self) -> None:
+        # Post-#029 legacy ``todo`` LLM emissions re-route to
+        # ``related_to + semantic_type='has_task'``. Query by the
+        # umbrella edge type.
         kg_a = KGQuery(self.user_a.id)
 
-        todos_a = await kg_a.find_edges(type=EdgeType.TODO)
+        related_a = await kg_a.find_edges(type=EdgeType.RELATED_TO)
 
-        assert todos_a, "Expected at least one TODO edge for user A."
-        self._assert_no_b_rows(todos_a)
-        self._assert_no_b_tokens(todos_a)
+        assert related_a, "Expected at least one related_to edge for user A."
+        self._assert_no_b_rows(related_a)
+        self._assert_no_b_tokens(related_a)
 
     # ------------------------------------------------------------------
     # Query path 6 — KGQuery.find_neighbors

@@ -138,10 +138,18 @@ def _patch_pipeline_deps(
 
 _ALICE_TODO_RESPONSE: dict[str, Any] = {
     "nodes": [
-        {"name": "alice", "type": "person", "properties": {"aliases": ["alice doe"]}},
+        # Post-#030: every LLM-extractable POLE+O node with a closed
+        # subtype vocabulary MUST emit ``subtype`` (envelope check).
+        {
+            "name": "alice",
+            "type": "person",
+            "subtype": "individual",
+            "properties": {"aliases": ["alice doe"]},
+        },
         {
             "name": "build ml pipeline",
             "type": "task",
+            "subtype": "task",
             "properties": {"content": "Build an ML pipeline"},
         },
     ],
@@ -186,12 +194,18 @@ class TestMemoryExtractionPipeline:
         assert summary.edges_written > 0
 
         node_entries, edge_entries = await _kg_entries(mongo_client, doc.id)
-        # DOCUMENT, CHUNK, PERSON, TASK all present.
+        # Post-#028: DOCUMENT, CHUNK, PERSON are unchanged; what used
+        # to be ``type=task`` now stores as ``type=object,
+        # subtype=task`` — same logical content, new POLE+O shape.
         node_types = {n["type"] for n in node_entries}
         assert NodeType.DOCUMENT in node_types
         assert NodeType.CHUNK in node_types
         assert NodeType.PERSON in node_types
-        assert NodeType.TASK in node_types
+        assert NodeType.OBJECT in node_types
+        object_nodes = [n for n in node_entries if n["type"] == NodeType.OBJECT]
+        assert any(n.get("subtype") == "task" for n in object_nodes), (
+            "expected at least one object-subtype-task node from the LLM emission"
+        )
         # PERSON id carries the real user_id prefix (post-#019).
         person_nodes = [n for n in node_entries if n["type"] == NodeType.PERSON]
         assert person_nodes[0]["_id"] == f"{user.id}:person:alice"
@@ -342,11 +356,13 @@ def _two_alice_response() -> dict[str, Any]:
             {
                 "name": "alice smith",
                 "type": "person",
+                "subtype": "individual",
                 "properties": {"aliases": ["ali"]},
             },
             {
                 "name": "alice smith",
                 "type": "person",
+                "subtype": "individual",
                 "properties": {"email": "alice@example.com"},
             },
         ],
@@ -387,10 +403,16 @@ class TestRewiredNormalizeNodesScenarios:
 
         response = {
             "nodes": [
-                {"name": "alice", "type": "person", "properties": {}},
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
                 {
                     "name": "alice",
                     "type": "task",
+                    "subtype": "task",
                     "properties": {"content": "the alice task"},
                 },
             ],
@@ -414,13 +436,21 @@ class TestRewiredNormalizeNodesScenarios:
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         person = [n for n in node_entries if n["type"] == NodeType.PERSON]
-        task = [n for n in node_entries if n["type"] == NodeType.TASK]
+        # Post-#028: legacy ``type=task`` is rerouted at extraction time
+        # to ``type=object, subtype=task``; the type-prefix isolation
+        # still holds (alice the person vs. alice the object are
+        # distinct rows under different parent types).
+        task_objects = [
+            n
+            for n in node_entries
+            if n["type"] == NodeType.OBJECT and n.get("subtype") == "task"
+        ]
         assert len(person) == 1
-        assert len(task) == 1
+        assert len(task_objects) == 1
         # IDs are tenant- and type-prefixed (#018), so even a shared surface
         # form stays distinct across types.
         assert person[0]["_id"] == f"{user.id}:person:alice"
-        assert task[0]["_id"] == f"{user.id}:task:alice"
+        assert task_objects[0]["_id"] == f"{user.id}:object:alice"
 
     async def test_edge_remapping_after_in_payload_collapse(
         self, mongo_client, mocker
@@ -429,11 +459,22 @@ class TestRewiredNormalizeNodesScenarios:
 
         response = {
             "nodes": [
-                {"name": "alice", "type": "person", "properties": {}},
-                {"name": "alice", "type": "person", "properties": {}},
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
                 {
                     "name": "build ml pipeline",
                     "type": "task",
+                    "subtype": "task",
                     "properties": {"content": "x"},
                 },
             ],
@@ -472,13 +513,20 @@ class TestRewiredNormalizeNodesScenarios:
         with prefect_tags("tests"):
             await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
+        # Post-#029: legacy ``todo`` LLM emissions re-route to
+        # ``related_to + semantic_type='has_task'``; endpoint type
+        # also re-routes from ``task`` to ``object``.
         _, edge_entries = await _kg_entries(mongo_client, doc.id)
-        todo_edges = [e for e in edge_entries if e["type"] == EdgeType.TODO]
-        assert len(todo_edges) == 1
+        related_to_edges = [
+            e
+            for e in edge_entries
+            if e["type"] == EdgeType.RELATED_TO and e.get("semantic_type") == "has_task"
+        ]
+        assert len(related_to_edges) == 1
         ph = user.id
         assert (
-            todo_edges[0]["_id"]
-            == f"{ph}:person:alice|{EdgeType.TODO}|{ph}:task:build ml pipeline"
+            related_to_edges[0]["_id"]
+            == f"{ph}:person:alice|{EdgeType.RELATED_TO}|{ph}:object:build ml pipeline"
         )
 
 

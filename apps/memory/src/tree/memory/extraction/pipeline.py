@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -34,8 +34,15 @@ from tree.config.app_config import load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document
+from tree.entities.extraction_audit import (
+    ExtractionDroppedField,
+    ExtractionRejection,
+    truncate_raw_row,
+    truncate_raw_value,
+)
 from tree.entities.knowledge_graph import (
     EdgeType,
+    ExtractorInfo,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -55,6 +62,17 @@ from tree.memory.extraction.dedup import (
     dedupe_entity,
 )
 from tree.memory.extraction.first_person_resolver import redirect_first_person
+from tree.memory.extraction.preference_supersession import (
+    canonicalize_preference_names,
+    resolve_supersessions,
+    write_self_has_preference_edges,
+)
+from tree.memory.extraction.validation import (
+    get_edge_property_schema,
+    get_node_property_schemas,
+    validate_envelope,
+    validate_properties,
+)
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
@@ -135,7 +153,17 @@ def _live_app_config() -> Any:
 
 def _build_dedup_config() -> DeduplicationConfig:
     """Translate the YAML :class:`DedupConfig` to the runtime
-    :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``)."""
+    :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``).
+
+    The YAML config (``app_config.extraction.dedup``) is the
+    authoritative source for the runtime thresholds today; the new
+    ``settings.dedup`` BaseSettings (#032) is the env-level surface
+    that operators can flip without editing YAML. The
+    cross-validator on :class:`ExtractionConfig` that pins
+    resolution / dedup type-strictness keys off the YAML config, so
+    the runtime config flows through the YAML path to keep the gate
+    intact.
+    """
 
     cfg = _live_app_config().extraction.dedup
     return DeduplicationConfig(
@@ -287,6 +315,301 @@ llm_extract_entities_task = task(
     cache_expiration=timedelta(days=30),
     retries=2,
     retry_delay_seconds=15,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ②.5 — envelope + field validation (NEW in #030)
+# ---------------------------------------------------------------------------
+#
+# Lives between LLM extract and resolve so the resolver only sees rows
+# that survived the envelope check. The validator is **strict at the
+# envelope** (drops the whole row when ``type`` / ``semantic_type`` /
+# pair / subtype is wrong) and **lenient at the field** (drops just the
+# offending property). Both branches write audit rows to
+# ``extraction_rejections`` / ``extraction_dropped_fields`` so prompt
+# drift is structured signal, not a log line.
+
+
+def _make_extractor_info() -> ExtractorInfo:
+    """Build the per-run :class:`ExtractorInfo` provenance block.
+
+    Reads the active LLM model name from ``app_config.models.llm.model``
+    and pins the pipeline release tag from this Python package's
+    ``__version__``. Both are stable across a single flow invocation.
+    """
+
+    cfg = _live_app_config()
+    llm_name = cfg.models.llm.model
+    try:
+        # ``importlib.metadata`` is the canonical lookup; falls back to
+        # a static string if the package isn't installed (test runners
+        # that exercise the module without ``pip install -e .``).
+        from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+        try:
+            pkg_version = _pkg_version("tree-memory")
+        except PackageNotFoundError:
+            pkg_version = "0.0.0+local"
+    except Exception:  # noqa: BLE001
+        pkg_version = "0.0.0+local"
+
+    return ExtractorInfo(name=llm_name, version=f"tree-memory-{pkg_version}")
+
+
+async def _write_envelope_rejection(
+    *,
+    database: Any,
+    user_id: PydanticObjectId,
+    document_id: PydanticObjectId | None,
+    chunk_id: str | None,
+    raw_row: dict[str, Any],
+    reason: str,
+    extractor: ExtractorInfo,
+) -> None:
+    """Insert one ``extraction_rejections`` audit row.
+
+    Uses the raw Mongo collection (not Beanie's ``.insert()``) so the
+    write is scoped to the same ``database`` handle the rest of the
+    pipeline uses — keeps test patches uniform.
+    """
+
+    rejection = ExtractionRejection(
+        user_id=user_id,
+        document_id=document_id,
+        chunk_id=chunk_id,
+        timestamp=datetime.now(tz=UTC),
+        rejected_at_stage="envelope",
+        rejection_reason=reason,
+        raw_row=truncate_raw_row(raw_row),
+        extractor=extractor,
+    )
+    await database["extraction_rejections"].insert_one(
+        rejection.model_dump(by_alias=True, exclude={"id"})
+    )
+
+
+async def _write_dropped_field(
+    *,
+    database: Any,
+    user_id: PydanticObjectId,
+    document_id: PydanticObjectId | None,
+    chunk_id: str | None,
+    row_type: str,
+    row_subtype: str | None,
+    semantic_type: str | None,
+    dropped_field: str,
+    raw_value: Any,
+    reason: str,
+    extractor: ExtractorInfo,
+) -> None:
+    """Insert one ``extraction_dropped_fields`` audit row."""
+
+    dropped = ExtractionDroppedField(
+        user_id=user_id,
+        document_id=document_id,
+        chunk_id=chunk_id,
+        timestamp=datetime.now(tz=UTC),
+        row_type=row_type,
+        row_subtype=row_subtype,
+        semantic_type=semantic_type,
+        dropped_field=dropped_field,
+        raw_value=truncate_raw_value(raw_value),
+        reason=reason,
+        extractor=extractor,
+    )
+    await database["extraction_dropped_fields"].insert_one(
+        dropped.model_dump(by_alias=True, exclude={"id"})
+    )
+
+
+async def _validate_raws(
+    *,
+    raws: list[RawExtraction],
+    database: Any,
+    user_id: PydanticObjectId,
+    extractor: ExtractorInfo,
+) -> list[RawExtraction]:
+    """Apply envelope + field validation to every LLM-extracted row.
+
+    Mutates each :class:`RawExtraction` in place:
+
+    * Nodes / edges that fail envelope validation are removed from
+      ``raw.extracted`` and a row is inserted into
+      ``extraction_rejections``.
+    * Nodes / edges that pass envelope validation but have invalid /
+      unknown fields keep the row (lenient policy) and write one row
+      per dropped field to ``extraction_dropped_fields``. The
+      surviving properties replace ``raw.extracted.*.properties``.
+
+    Structural rows (``document`` / ``chunk`` / pipeline-emitted edges
+    in ``raw.chunked.structural``) are intentionally **not** validated
+    here — they're built deterministically by the pipeline, not by the
+    LLM, so envelope drift is impossible.
+    """
+
+    log = _get_run_logger()
+    for raw in raws:
+        document_id: PydanticObjectId | None
+        try:
+            document_id = PydanticObjectId(raw.document_id)
+        except Exception:  # noqa: BLE001 — defensive against odd shapes
+            document_id = None
+
+        # #030: emissions the parser already dropped (unknown type,
+        # invalid endpoints, ...) flow through ``raw_rejections``. Surface
+        # each one as an ``extraction_rejections`` row.
+        for rejection in raw.extracted.raw_rejections:
+            await _write_envelope_rejection(
+                database=database,
+                user_id=user_id,
+                document_id=document_id,
+                chunk_id=rejection.chunk_id or None,
+                raw_row=rejection.raw,
+                reason=rejection.reason,
+                extractor=extractor,
+            )
+        raw.extracted.raw_rejections = []
+
+        validated_nodes: list[ExtractedNode] = []
+        for node in raw.extracted.nodes:
+            type_value = (
+                node.type.value if hasattr(node.type, "value") else str(node.type)
+            )
+            envelope = validate_envelope(
+                kind="node",
+                type=type_value,
+                subtype=node.subtype,
+                name=node.name,
+            )
+            if not envelope.ok:
+                await _write_envelope_rejection(
+                    database=database,
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=node.chunk_id or None,
+                    raw_row={
+                        "type": type_value,
+                        "subtype": node.subtype,
+                        "name": node.name,
+                        "properties": node.properties,
+                    },
+                    reason=envelope.reason or "envelope_invalid",
+                    extractor=extractor,
+                )
+                log.info(
+                    "envelope_rejection node type=%s name=%r reason=%s",
+                    type_value,
+                    node.name,
+                    envelope.reason,
+                )
+                continue
+
+            parent_schema, extras_schema = get_node_property_schemas(
+                type=type_value, subtype=node.subtype
+            )
+            validated_props, drops = validate_properties(
+                node.properties or {}, parent_schema, extras_schema
+            )
+            for drop in drops:
+                await _write_dropped_field(
+                    database=database,
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=node.chunk_id or None,
+                    row_type=type_value,
+                    row_subtype=node.subtype,
+                    semantic_type=None,
+                    dropped_field=drop.field,
+                    raw_value=drop.value,
+                    reason=drop.reason,
+                    extractor=extractor,
+                )
+            node.properties = validated_props
+            validated_nodes.append(node)
+
+        validated_edges: list[ExtractedEdge] = []
+        for edge in raw.extracted.edges:
+            type_value = (
+                edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+            )
+            src_type = (
+                edge.source_type.value
+                if hasattr(edge.source_type, "value")
+                else str(edge.source_type)
+            )
+            tgt_type = (
+                edge.target_type.value
+                if hasattr(edge.target_type, "value")
+                else str(edge.target_type)
+            )
+            envelope = validate_envelope(
+                kind="edge",
+                type=type_value,
+                source_type=src_type,
+                target_type=tgt_type,
+                semantic_type=edge.semantic_type,
+            )
+            if not envelope.ok:
+                await _write_envelope_rejection(
+                    database=database,
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=edge.chunk_id or None,
+                    raw_row={
+                        "type": type_value,
+                        "semantic_type": edge.semantic_type,
+                        "source_type": src_type,
+                        "source_node_id": edge.source_node_id,
+                        "target_type": tgt_type,
+                        "target_node_id": edge.target_node_id,
+                        "properties": edge.properties,
+                    },
+                    reason=envelope.reason or "envelope_invalid",
+                    extractor=extractor,
+                )
+                log.info(
+                    "envelope_rejection edge type=%s semantic=%s reason=%s",
+                    type_value,
+                    edge.semantic_type,
+                    envelope.reason,
+                )
+                continue
+
+            edge_schema = get_edge_property_schema(
+                type=type_value, semantic_type=edge.semantic_type
+            )
+            validated_props, drops = validate_properties(
+                edge.properties or {}, edge_schema, None
+            )
+            for drop in drops:
+                await _write_dropped_field(
+                    database=database,
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=edge.chunk_id or None,
+                    row_type=type_value,
+                    row_subtype=None,
+                    semantic_type=edge.semantic_type,
+                    dropped_field=drop.field,
+                    raw_value=drop.value,
+                    reason=drop.reason,
+                    extractor=extractor,
+                )
+            edge.properties = validated_props
+            validated_edges.append(edge)
+
+        raw.extracted.nodes = validated_nodes
+        raw.extracted.edges = validated_edges
+
+    return raws
+
+
+validate_raws_task = task(
+    _validate_raws,
+    name="validate-raws",
+    cache_policy=NO_CACHE,
+    retries=1,
 )
 
 
@@ -566,6 +889,7 @@ async def _apply_writes(
     dedup_config: DeduplicationConfig,
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
+    extractor: ExtractorInfo | None = None,
 ) -> WriteSummary:
     """One pass over the resolved entities → ``add_entity()`` → edge upserts.
 
@@ -628,6 +952,7 @@ async def _apply_writes(
                 resolved=resolved,
                 dedup_config=dedup_config,
                 summary=summary,
+                extractor=extractor,
             )
             name_to_target_id[make_type_name_key(node.type, node.name)] = target_id
 
@@ -675,18 +1000,28 @@ async def _apply_writes(
             target_node_id=tgt_id,
             target_type=edge.target_type,
             type=edge.type,
+            semantic_type=edge.semantic_type,
             properties=edge.properties,
             chunk_id=edge.chunk_id,
         )
 
     # Upsert each collapsed edge.
     for edge_id, edge in seen_edge_ids.items():
+        # Only stamp ``extractor`` on LLM-extractable edges (today only
+        # ``related_to``). Structural edges (``part_of``, ``next``,
+        # ``mentions``, ``referenced``, ``has``, ``same_as``) skip the
+        # column per ``plan.md:210``.
+        edge_type_value = (
+            edge.type.value if hasattr(edge.type, "value") else str(edge.type)
+        )
+        edge_extractor = extractor if edge_type_value == "related_to" else None
         await _upsert_edge(
             database=database,
             user_id=user_id,
             edge=edge,
             edge_id=edge_id,
             source_document_ids=[PydanticObjectId(raw.document_id) for raw in raws],
+            extractor=edge_extractor,
         )
         summary.edges_written += 1
 
@@ -746,6 +1081,7 @@ async def _dispatch_entity_write(
     resolved: ResolutionOutput,
     dedup_config: DeduplicationConfig,
     summary: WriteSummary,
+    extractor: ExtractorInfo | None = None,
 ) -> str:
     """Write one LLM-extracted entity through ``add_entity``.
 
@@ -761,13 +1097,40 @@ async def _dispatch_entity_write(
     # Inject the pre-computed embedding into ``add_entity`` via embedding_model.
     # The shared embedding map already has the canonical-name vector — wrap the
     # real model so ``add_entity``'s internal ``embed([name])`` returns it.
+    #
+    # #032 fix-2: for ``preference`` nodes the stored embedding MUST come
+    # from ``properties.statement`` (not the slug-name) so the
+    # supersession resolver's statement<->statement comparison is
+    # apples-to-apples. We embed the statement here on-the-fly when the
+    # cached vector is keyed by canonical/name; the cache hit only fires
+    # when the canonical IS the statement (rare). For ``fact`` nodes we
+    # similarly prefer ``properties.object``.
     canonical = (
         resolved_entity.canonical_name if resolved_entity is not None else node.name
     )
-    cached_vec = embeddings.vectors.get(canonical)
-    model_for_call: BaseEmbeddingModel = (
-        _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
-    )
+    statement_text: str | None = None
+    if node.type == NodeType.PREFERENCE:
+        prop_statement = (node.properties or {}).get("statement")
+        if isinstance(prop_statement, str) and prop_statement.strip():
+            statement_text = prop_statement.strip()
+    elif node.type == NodeType.FACT:
+        prop_object = (node.properties or {}).get("object") or (
+            node.properties or {}
+        ).get("object_")
+        if isinstance(prop_object, str) and prop_object.strip():
+            statement_text = prop_object.strip()
+
+    if statement_text is not None:
+        vectors = await embedding_model.embed([statement_text])
+        statement_vec = vectors[0] if vectors else []
+        model_for_call: BaseEmbeddingModel = (
+            _CachedSingleEmbedding(statement_vec) if statement_vec else embedding_model
+        )
+    else:
+        cached_vec = embeddings.vectors.get(canonical)
+        model_for_call = (
+            _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
+        )
 
     candidate_names = sorted(
         {
@@ -784,10 +1147,12 @@ async def _dispatch_entity_write(
         user_id=user_id,
         name=node.name,
         entity_type=node.type,
+        subtype=node.subtype,
         properties=node.properties,
         source_id=source_document_id,
         dedup_config=dedup_config,
         candidate_names=candidate_names,
+        extractor=extractor,
     )
 
     summary.nodes_written += 1
@@ -884,42 +1249,49 @@ async def _upsert_edge(
     edge: ExtractedEdge,
     edge_id: str,
     source_document_ids: list[PydanticObjectId],
+    extractor: ExtractorInfo | None = None,
 ) -> None:
-    """Upsert one collapsed edge document."""
+    """Upsert one collapsed edge document.
+
+    #030: ``extractor`` is stamped on LLM-extracted edges (today only
+    ``related_to`` rows). Structural edges pass ``extractor=None`` and
+    leave the column unset on the row.
+    """
 
     from datetime import UTC, datetime
 
     collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
+    set_stage: dict[str, Any] = {
+        "user_id": user_id,
+        "kind": "edge",
+        "type": edge.type.value,
+        # #029: persist ``semantic_type`` (None on non-related_to).
+        "semantic_type": edge.semantic_type,
+        "source_node_id": edge.source_node_id,
+        "source_type": edge.source_type.value,
+        "target_node_id": edge.target_node_id,
+        "target_type": edge.target_type.value,
+        "properties": {
+            "$mergeObjects": [
+                {"$ifNull": ["$properties", {}]},
+                edge.properties,
+            ]
+        },
+        "sources": {
+            "$setUnion": [
+                {"$ifNull": ["$sources", []]},
+                source_document_ids,
+            ]
+        },
+        "created_at": {"$ifNull": ["$created_at", now]},
+        "updated_at": now,
+    }
+    if extractor is not None:
+        set_stage["extractor"] = extractor.model_dump()
     await collection.update_one(
         {"_id": edge_id},
-        [
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "kind": "edge",
-                    "type": edge.type.value,
-                    "source_node_id": edge.source_node_id,
-                    "source_type": edge.source_type.value,
-                    "target_node_id": edge.target_node_id,
-                    "target_type": edge.target_type.value,
-                    "properties": {
-                        "$mergeObjects": [
-                            {"$ifNull": ["$properties", {}]},
-                            edge.properties,
-                        ]
-                    },
-                    "sources": {
-                        "$setUnion": [
-                            {"$ifNull": ["$sources", []]},
-                            source_document_ids,
-                        ]
-                    },
-                    "created_at": {"$ifNull": ["$created_at", now]},
-                    "updated_at": now,
-                }
-            }
-        ],
+        [{"$set": set_stage}],
         upsert=True,
     )
 
@@ -1016,9 +1388,51 @@ async def memory_extraction(
     for chunked in chunked_docs:
         raws.append(await llm_extract_entities_task(chunked))
 
-    # ----- First-person resolver (post-LLM, pre-resolve) --------------------
+    # ----- Task ②.5 — envelope + field validation (#030) -------------------
+    # Runs BEFORE the first-person resolver so the resolver never sees
+    # rows the envelope would reject. The lenient field-level pass
+    # also strips bad property values (e.g. ``aliases: 5``) that
+    # would otherwise blow up downstream iterators.
+    extractor = _make_extractor_info()
+    await validate_raws_task(
+        raws=raws,
+        database=database,
+        user_id=user_id,
+        extractor=extractor,
+    )
+
+    # ----- First-person resolver (post-validate, pre-resolve) --------------
     for raw in raws:
         raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
+
+    # ----- #032 — canonicalize preference names (#032 fix-3) ---------------
+    # Rewrite every preference's ``name`` to a deterministic slug of
+    # ``properties.statement`` so the LLM's drift between e.g.
+    # ``"prefers dark mode for editors"`` (sentence form) and
+    # ``"prefers-light-mode"`` (kebab-case) doesn't break the
+    # ``_id`` contract. Must run BEFORE the supersession resolver so
+    # candidate-row IDs line up.
+    canonicalize_preference_names(raws)
+
+    # ----- #032 — supersession resolver branch (pre-dedup) -----------------
+    # Runs BEFORE the standard dedup so contradiction trumps dedup
+    # (per `plan.md:534`). Mutates `raws` in place: when a
+    # preference / fact row supersedes a prior one we write the
+    # supersession to MongoDB and mark the in-memory node so the
+    # apply-writes step preserves ``valid_from``.
+    judge_llm = get_llm()
+    await resolve_supersessions(
+        database=database,
+        user_id=user_id,
+        llm=judge_llm,
+        embedding_model=embedding_model,
+        raws=raws,
+    )
+
+    # ----- #032 — deterministic ``has: person:self -> preference`` -----
+    # The LLM is told NOT to emit ``has`` (it is
+    # ``llm_extractable=False``). The pipeline owns the edge.
+    await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
 
     # ----- Task ③ — resolve ------------------------------------------------
     resolved = await resolve_entities_task(raws, database, resolver, user_id)
@@ -1049,6 +1463,7 @@ async def memory_extraction(
         dedup_config,
         embedding_model,
         user_id,
+        extractor,
     )
 
     log.info(
@@ -1119,8 +1534,24 @@ async def run_extraction_for_documents(
 
     chunked = [await _extract_chunks_and_structural(d) for d in docs]
     raws = [await _llm_extract_entities(c, llm=llm) for c in chunked]
+    extractor = _make_extractor_info()
+    await _validate_raws(
+        raws=raws, database=database, user_id=user_id, extractor=extractor
+    )
     for raw in raws:
         raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
+    # #032 - canonicalize preference names, then supersession resolver
+    # branch, then deterministic ``has`` edges.
+    canonicalize_preference_names(raws)
+    judge_llm = llm if llm is not None else get_llm()
+    await resolve_supersessions(
+        database=database,
+        user_id=user_id,
+        llm=judge_llm,
+        embedding_model=embedding_model,
+        raws=raws,
+    )
+    await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
     canonical_names = sorted(
         {r.canonical_name for r in resolved.resolved_by_key.values()}
@@ -1143,4 +1574,5 @@ async def run_extraction_for_documents(
         dedup_config,
         embedding_model,
         user_id,
+        extractor,
     )

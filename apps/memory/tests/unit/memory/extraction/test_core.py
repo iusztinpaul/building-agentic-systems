@@ -49,18 +49,29 @@ class TestChunkDocument:
 
 class TestParseExtraction:
     def test_valid_nodes_and_edges(self):
+        # Post-#029: the LLM-extractable wire shape uses ``related_to``
+        # with a ``semantic_type``. The parser also tolerates a legacy
+        # ``"todo"`` emission (re-routed to ``related_to + has_task``);
+        # exercise the canonical new shape here, the legacy re-route is
+        # pinned by ``test_legacy_todo_reroutes_to_related_to``.
         raw = {
             "nodes": [
                 {"name": "Alice", "type": "person", "properties": {"aliases": []}},
-                {"name": "Write code", "type": "task", "properties": {"content": "x"}},
+                {
+                    "name": "Write code",
+                    "type": "object",
+                    "subtype": "task",
+                    "properties": {"content": "x"},
+                },
             ],
             "edges": [
                 {
                     "source_node_id": "alice",
                     "source_type": "person",
                     "target_node_id": "write code",
-                    "target_type": "task",
-                    "type": "todo",
+                    "target_type": "object",
+                    "type": "related_to",
+                    "semantic_type": "has_task",
                 }
             ],
         }
@@ -70,7 +81,101 @@ class TestParseExtraction:
         assert result.nodes[0].name == "alice"
         assert result.nodes[0].type == NodeType.PERSON
         assert len(result.edges) == 1
-        assert result.edges[0].type == EdgeType.TODO
+        assert result.edges[0].type == EdgeType.RELATED_TO
+        assert result.edges[0].semantic_type == "has_task"
+
+    def test_legacy_todo_reroutes_to_related_to(self):
+        # The parser re-routes legacy LLM emissions so cached examples
+        # / older prompts still produce valid POLE+O edges.
+        raw = {
+            "nodes": [],
+            "edges": [
+                {
+                    "source_node_id": "alice",
+                    "source_type": "person",
+                    "target_node_id": "write code",
+                    "target_type": "task",  # legacy top-level type
+                    "type": "todo",
+                }
+            ],
+        }
+        result = _parse_extraction(raw)
+        assert len(result.edges) == 1
+        edge = result.edges[0]
+        assert edge.type == EdgeType.RELATED_TO
+        assert edge.semantic_type == "has_task"
+        assert edge.target_type == NodeType.OBJECT
+
+    def test_legacy_experienced_reroutes_to_related_to(self):
+        raw = {
+            "nodes": [],
+            "edges": [
+                {
+                    "source_node_id": "alice",
+                    "source_type": "person",
+                    "target_node_id": "first day",
+                    "target_type": "episode",
+                    "type": "experienced",
+                }
+            ],
+        }
+        result = _parse_extraction(raw)
+        assert len(result.edges) == 1
+        edge = result.edges[0]
+        assert edge.type == EdgeType.RELATED_TO
+        assert edge.semantic_type == "experienced_by"
+        assert edge.target_type == NodeType.EVENT
+
+    def test_drops_related_to_with_unknown_semantic(self):
+        raw = {
+            "nodes": [],
+            "edges": [
+                {
+                    "source_node_id": "alice",
+                    "source_type": "person",
+                    "target_node_id": "bob",
+                    "target_type": "person",
+                    "type": "related_to",
+                    "semantic_type": "dragon_breath",
+                }
+            ],
+        }
+        result = _parse_extraction(raw)
+        assert result.edges == []
+
+    def test_drops_related_to_with_pair_violation(self):
+        # employed_by is (person, organization), not (organization, person).
+        raw = {
+            "nodes": [],
+            "edges": [
+                {
+                    "source_node_id": "anthropic",
+                    "source_type": "organization",
+                    "target_node_id": "alice",
+                    "target_type": "person",
+                    "type": "related_to",
+                    "semantic_type": "employed_by",
+                }
+            ],
+        }
+        result = _parse_extraction(raw)
+        assert result.edges == []
+
+    def test_drops_related_to_with_missing_semantic(self):
+        raw = {
+            "nodes": [],
+            "edges": [
+                {
+                    "source_node_id": "alice",
+                    "source_type": "person",
+                    "target_node_id": "bob",
+                    "target_type": "person",
+                    "type": "related_to",
+                }
+            ],
+        }
+        result = _parse_extraction(raw)
+        assert result.edges == []
 
     def test_skips_invalid_node_type(self):
         raw = {"nodes": [{"name": "x", "type": "invalid_type"}], "edges": []}
@@ -99,6 +204,9 @@ class TestParseExtraction:
         assert result.edges == []
 
     def test_skips_edge_violating_constraint(self):
+        # The legacy reverse-direction ``todo`` is rewritten to
+        # ``related_to + has_task`` first, then dropped because
+        # (object, person) is not in ``has_task.allowed_pairs``.
         raw = {
             "nodes": [],
             "edges": [
@@ -409,8 +517,9 @@ class TestUpsertGraphEntriesArrayCaps:
                     source_node_id="alice",
                     source_type=NodeType.PERSON,
                     target_node_id="write code",
-                    target_type=NodeType.TASK,
-                    type=EdgeType.TODO,
+                    target_type=NodeType.OBJECT,
+                    type=EdgeType.RELATED_TO,
+                    semantic_type="has_task",
                 )
             ],
         )

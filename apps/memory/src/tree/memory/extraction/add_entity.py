@@ -34,6 +34,7 @@ from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import (
     EdgeType,
+    ExtractorInfo,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -80,6 +81,8 @@ async def add_entity(
     deduplicate: bool = True,
     candidate_names: Sequence[str] | None = None,
     candidate_aliases: Mapping[str, list[str]] | None = None,
+    subtype: str | None = None,
+    extractor: ExtractorInfo | None = None,
 ) -> tuple[str, ResolvedEntity, DeduplicationResult]:
     """Resolve, dedupe, and upsert a single entity.
 
@@ -176,6 +179,7 @@ async def add_entity(
             node_id=prospective_id,
             user_id=user_id,
             entity_type=entity_type,
+            subtype=subtype,
             name=name,
             canonical_name=name,
             properties=properties,
@@ -183,6 +187,7 @@ async def add_entity(
             confidence=1.0,
             source_id=source_id,
             now=now,
+            extractor=extractor,
         )
         return prospective_id, resolved, dedup_result
 
@@ -254,6 +259,7 @@ async def add_entity(
         node_id=target_id,
         user_id=user_id,
         entity_type=entity_type,
+        subtype=subtype,
         name=name,
         canonical_name=resolved.canonical_name,
         properties=properties,
@@ -261,6 +267,7 @@ async def add_entity(
         confidence=resolved.confidence if resolved.match_type != "none" else 1.0,
         source_id=source_id,
         now=now,
+        extractor=extractor,
     )
 
     if dedup_result.action == "flagged":
@@ -298,6 +305,8 @@ async def _upsert_node(
     confidence: float,
     source_id: str,
     now: datetime,
+    subtype: str | None = None,
+    extractor: ExtractorInfo | None = None,
 ) -> None:
     """Upsert a new node at ``node_id`` with a single aggregation pipeline.
 
@@ -316,6 +325,10 @@ async def _upsert_node(
         "user_id": user_id,
         "kind": "node",
         "type": entity_type.value,
+        # #028: ``subtype`` is a top-level column; ``None`` is a real
+        # value (means "freeform / unset"). Persist on every upsert so
+        # subtype refinements from a later LLM pass land idempotently.
+        "subtype": subtype,
         "name": name,
         "canonical_name": canonical_name,
         "properties": {
@@ -342,6 +355,11 @@ async def _upsert_node(
     }
     if embedding is not None:
         set_stage["embedding"] = {"$ifNull": ["$embedding", embedding]}
+    if extractor is not None:
+        # #030: stamp provenance on every LLM-extracted node row.
+        # Structural rows (document / chunk) pass ``extractor=None``
+        # and the column stays unset on the row.
+        set_stage["extractor"] = extractor.model_dump()
 
     await collection.update_one(
         {"_id": node_id},

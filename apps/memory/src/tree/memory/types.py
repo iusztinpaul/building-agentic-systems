@@ -7,23 +7,57 @@ from tree.memory.resolution.types import ResolvedEntity
 
 
 class ExtractedNode(BaseModel):
-    """A node extracted by the LLM (before persistence)."""
+    """A node extracted by the LLM (before persistence).
+
+    Phase-3 #028: ``subtype`` carries the LLM-emitted (or pipeline-derived)
+    closed-vocabulary slot — e.g. ``("object", "task")`` for what used
+    to be a top-level ``task`` row. ``None`` is accepted at construction;
+    the strict subtype-required envelope check lands at #030.
+    """
 
     name: str
     type: NodeType
+    subtype: str | None = None
     properties: dict[str, Any] = {}
     chunk_id: str = ""
 
 
 class ExtractedEdge(BaseModel):
-    """An edge extracted by the LLM (before persistence)."""
+    """An edge extracted by the LLM (before persistence).
+
+    Phase-3 #029: ``semantic_type`` carries the discriminator for the
+    new ``related_to`` umbrella edge. Required on every ``related_to``
+    row, ``None`` on every other edge type — enforced again by the
+    :class:`KnowledgeGraphEntry` model validator at write time.
+    """
 
     source_node_id: str
     source_type: NodeType
     target_node_id: str
     target_type: NodeType
     type: EdgeType
+    semantic_type: str | None = None
     properties: dict[str, Any] = {}
+    chunk_id: str = ""
+
+
+class RawRejection(BaseModel):
+    """A raw LLM emission ``_parse_extraction`` chose to drop (#030).
+
+    Carried forward through :class:`ExtractionResult` so the
+    validator-pipeline step in :mod:`tree.memory.extraction.pipeline`
+    can turn it into an ``extraction_rejections`` row instead of
+    losing the signal to a ``logger.warning`` line.
+
+    The two reasons today (per :func:`_parse_extraction`'s drop list)
+    are ``unknown_type`` (the LLM emitted a type string we don't
+    register) and ``invalid_endpoint_types`` (an edge with one of its
+    endpoint types not in :class:`NodeType`).
+    """
+
+    kind: str
+    reason: str
+    raw: dict[str, Any] = Field(default_factory=dict)
     chunk_id: str = ""
 
 
@@ -32,12 +66,18 @@ class ExtractionResult(BaseModel):
 
     nodes: list[ExtractedNode] = []
     edges: list[ExtractedEdge] = []
+    # #030: rows the LLM-emission parser dropped before the envelope
+    # validator could see them. Carried to the validator-task so the
+    # ``extraction_rejections`` audit collection receives every drop,
+    # not just envelope-level ones.
+    raw_rejections: list[RawRejection] = Field(default_factory=list)
 
     def merge(self, other: "ExtractionResult") -> "ExtractionResult":
         """Combine two results (e.g. from different chunks)."""
         return ExtractionResult(
             nodes=self.nodes + other.nodes,
             edges=self.edges + other.edges,
+            raw_rejections=self.raw_rejections + other.raw_rejections,
         )
 
 

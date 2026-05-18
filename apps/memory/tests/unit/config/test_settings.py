@@ -97,3 +97,70 @@ class TestSettingsSingleton:
         assert isinstance(settings.embedding_dim, int)
         assert isinstance(settings.embedding_model, str)
         assert isinstance(settings.embedding_provider, str)
+
+
+# ---------------------------------------------------------------------------
+# #032 — DedupConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDedupConfigDefaults:
+    """Per ``plan.md:524-530`` the dedup config exposes four knobs with
+    pinned defaults the rest of the resolver/dedup pipeline reads."""
+
+    def test_defaults(self) -> None:
+        module = _reload_settings_module()
+
+        cfg = module.settings.dedup
+        assert cfg.auto_merge_threshold == 0.95
+        assert cfg.flag_threshold == 0.85
+        assert cfg.fuzzy_threshold == 90
+        assert cfg.match_same_type_only is True
+        # #032 fix-1: bound-candidate-set cap on the supersession
+        # resolver's judge calls. Default 8 keeps LLM cost bounded.
+        assert cfg.supersession_candidate_cap == 8
+
+
+class TestDedupConfigEnvOverrides:
+    def test_auto_merge_threshold_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DEDUP_AUTO_MERGE_THRESHOLD", "0.99")
+
+        module = _reload_settings_module()
+
+        assert module.settings.dedup.auto_merge_threshold == 0.99
+
+    def test_flag_threshold_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DEDUP_FLAG_THRESHOLD", "0.70")
+
+        module = _reload_settings_module()
+
+        assert module.settings.dedup.flag_threshold == 0.70
+
+    def test_fuzzy_threshold_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DEDUP_FUZZY_THRESHOLD", "85")
+
+        module = _reload_settings_module()
+
+        assert module.settings.dedup.fuzzy_threshold == 85
+
+    def test_match_same_type_only_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DEDUP_MATCH_SAME_TYPE_ONLY", "false")
+
+        module = _reload_settings_module()
+
+        assert module.settings.dedup.match_same_type_only is False
+
+    def test_supersession_candidate_cap_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DEDUP_SUPERSESSION_CANDIDATE_CAP", "4")
+
+        module = _reload_settings_module()
+
+        assert module.settings.dedup.supersession_candidate_cap == 4

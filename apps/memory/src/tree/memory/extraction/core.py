@@ -36,9 +36,15 @@ from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
     LLM_EXTRACTABLE_EDGE_TYPES,
     LLM_EXTRACTABLE_NODE_TYPES,
+    RELATION_SEMANTICS,
     get_ontology_schema,
 )
-from tree.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
+from tree.memory.types import (
+    ExtractedEdge,
+    ExtractedNode,
+    ExtractionResult,
+    RawRejection,
+)
 from tree.models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
@@ -104,6 +110,7 @@ the output schema.
     {{
       "name": "<canonical lowercase name>",
       "type": "<node type from ontology>",
+      "subtype": "<subtype from the type's `subtypes` list, or null>",
       "properties": {{ ... }}
     }}
   ],
@@ -114,6 +121,7 @@ the output schema.
       "target_node_id": "<name of target node>",
       "target_type": "<node type of target>",
       "type": "<edge type from ontology>",
+      "semantic_type": "<one of the `semantic_types` keys when type=related_to, else null>",
       "properties": {{}}
     }}
   ]
@@ -122,8 +130,79 @@ the output schema.
 Rules:
 - Node names MUST be lowercase.
 - Only use node types and edge types listed in the ontology.
+- When the ontology lists a `subtypes` array for a node type, pick the
+  best matching subtype value from that array and put it on the node's
+  `subtype` field. When the type has no `subtypes` array, omit `subtype`
+  (or set it to null).
 - Respect edge constraints (source_type → target_type).
+- For `related_to` edges (the umbrella domain-relation edge), you MUST
+  set `semantic_type` to one of the keys under `edge_types.related_to.semantic_types`
+  in the ontology. The `(source_type, target_type)` pair MUST appear in
+  that semantic's `allowed_pairs`. Use the semantic's `properties` schema
+  to populate the edge's `properties`.
+- For every other edge type, omit `semantic_type` (or set it to null).
 - If no entities or relationships are found, return empty lists.
+
+## Emitting facts vs. typed relations vs. preferences
+
+Use this decision tree for any proposition of the form
+"subject — predicate — object" (e.g. "Earth orbits the Sun",
+"Paul works at Anthropic", "I prefer dark mode"):
+
+1. **First-person preference** ("I prefer X over Y", "I like dark mode"):
+   emit a `preference` node with the typed-slot properties shape:
+     - `statement`: short canonical phrase, <=80 chars
+       (e.g. "prefers dark mode")
+     - `category`: one of the closed enum members surfaced under
+       `node_types.preference.properties.category` (ui / language /
+       food / communication / work_style / time / social / aesthetic /
+       other). Use `other` only as a last resort.
+     - `target` (optional): what is preferred (e.g. "dark mode")
+     - `over` (optional): what is dis-preferred when comparative
+     - `context` (optional): when / where the preference applies
+     - `strength` (optional, defaults "moderate"): weak / moderate /
+       strong
+   Don't emit a fact or a typed edge for first-person preferences.
+   Example: "I really love dark mode in editors" -> a `preference`
+   node with `name="prefers-dark-mode"`, properties
+   `{{"statement": "prefers dark mode", "category": "ui",
+   "target": "dark mode", "context": "in editors",
+   "strength": "strong"}}`.
+
+   STRICT-MODE POLICY (per `plan.md:461-465`):
+     * Preferences are first-person only. If the speaker attributes
+       a preference to a third party ("Alice prefers vegetarian
+       food"), DO NOT emit a `preference` node - emit a `fact`
+       instead (see branch 3).
+     * Do NOT emit any `has` edge. The pipeline writes the
+       deterministic `has: person:self -> preference` edge itself
+       post-extraction.
+     * If you notice that the new preference CONTRADICTS an earlier
+       preference the user expressed, just emit the new one; a
+       resolver downstream handles bi-temporal supersession
+       automatically.
+
+2. **Both subject and object resolve to POLE+O entities AND the relation
+   matches one of the registered `related_to` semantics**: emit a
+   `related_to` edge with the matching `semantic_type`. Don't emit a fact.
+   Example: "Anthropic is headquartered in San Francisco" → a
+   `related_to + semantic_type=headquarters_at` edge from
+   `organization:anthropic` to `location:san francisco`.
+
+3. **Otherwise** — free-text subject or object, relation doesn't match
+   any registered semantic, or the proposition is a third-party claim
+   (e.g. "Alice prefers dark mode") — emit a `fact` node with
+   `subject` / `predicate` / `object` properties. Facts are **island
+   nodes**: do NOT emit any edge (`mentions`, `same_as`, `related_to`,
+   `has`, ...) whose source or target is a `fact`. Such edges are
+   rejected at the validator and add no value.
+   Example: "Earth orbits the Sun" → a `fact` node with
+   `name="earth-orbits-sun"` and properties `subject="earth"`,
+   `predicate="orbits"`, `object="sun"` — and NO edges.
+
+   Like preferences, contradictory facts (e.g. two statements on the
+   same `(subject, predicate)`) are bi-temporally superseded by the
+   resolver - just emit the new fact, don't try to retract the old.
 """
 
 
@@ -142,61 +221,219 @@ async def extract_entities(
         node.chunk_id = chunk_id
     for edge in result.edges:
         edge.chunk_id = chunk_id
+    # #030: raw rejections from this chunk carry the same chunk_id so
+    # the audit collection's ``chunk_id`` column points at the source.
+    for rejection in result.raw_rejections:
+        rejection.chunk_id = chunk_id
 
     return result
 
 
+# --- Phase-3 #028: legacy LLM emissions for the pre-POLE+O top-level
+# node types ``task`` / ``episode`` are silently re-routed to the new
+# (parent, subtype) shape. The LLM prompt has been updated to emit the
+# new shape directly (with a ``subtype`` field), but this rewrite keeps
+# the parser tolerant of older prompts and saved/cached examples during
+# the staging window between #028 and #033.
+_LEGACY_NODE_TYPE_REWRITES: dict[str, tuple[NodeType, str]] = {
+    "task": (NodeType.OBJECT, "task"),
+    "episode": (NodeType.EVENT, "episode"),
+}
+
+
 def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
-    """Validate and filter the raw LLM output against the ontology."""
+    """Validate and filter the raw LLM output against the ontology.
+
+    #030: rows that this function drops (unknown type, missing type,
+    non-extractable type, invalid endpoint types, edge-constraint
+    violations) are carried forward as
+    :class:`tree.memory.types.RawRejection` entries on
+    :attr:`ExtractionResult.raw_rejections`. The validator-pipeline
+    step at :mod:`tree.memory.extraction.pipeline` then turns each one
+    into an ``extraction_rejections`` row so the signal is structured
+    rather than lost to ``logger.warning``.
+    """
 
     nodes: list[ExtractedNode] = []
+    raw_rejections: list[RawRejection] = []
     for n in raw.get("nodes", []):
         try:
-            node_type = NodeType(n["type"])
-        except KeyError, ValueError:
-            logger.warning("Skipping node with invalid type: %s", n)
+            type_value = n["type"]
+        except KeyError:
+            logger.warning("Skipping node with missing type: %s", n)
+            raw_rejections.append(
+                RawRejection(kind="node", reason="missing_type", raw=dict(n))
+            )
             continue
+
+        # Legacy → POLE+O subtype re-route (see _LEGACY_NODE_TYPE_REWRITES).
+        legacy_rewrite = _LEGACY_NODE_TYPE_REWRITES.get(type_value)
+        emitted_subtype = n.get("subtype")
+        if legacy_rewrite is not None:
+            node_type, derived_subtype = legacy_rewrite
+            # An LLM that already learned the new shape may emit the
+            # legacy ``type`` but pre-populate ``subtype``; trust the
+            # caller's value when present.
+            subtype: str | None = (
+                emitted_subtype if emitted_subtype is not None else derived_subtype
+            )
+        else:
+            try:
+                node_type = NodeType(type_value)
+            except ValueError:
+                logger.warning("Skipping node with invalid type: %s", n)
+                raw_rejections.append(
+                    RawRejection(kind="node", reason="unknown_type", raw=dict(n))
+                )
+                continue
+            subtype = emitted_subtype if emitted_subtype is not None else None
+
         if node_type not in LLM_EXTRACTABLE_NODE_TYPES:
             logger.warning("Skipping non-extractable node type: %s", node_type)
+            raw_rejections.append(
+                RawRejection(kind="node", reason="non_extractable_type", raw=dict(n))
+            )
             continue
         nodes.append(
             ExtractedNode(
                 name=str(n.get("name", "")).lower().strip(),
                 type=node_type,
+                subtype=subtype,
                 properties=n.get("properties", {}),
             )
         )
 
     edges: list[ExtractedEdge] = []
     for e in raw.get("edges", []):
+        raw_type = e.get("type")
+        if raw_type is None:
+            logger.warning("Skipping edge with missing type: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="missing_type", raw=dict(e))
+            )
+            continue
+
+        # #029: re-route legacy LLM emissions ``todo`` / ``experienced``
+        # to the new umbrella shape. The prompt no longer asks for
+        # those types — this branch keeps the parser tolerant of older
+        # prompts and cached examples during the staging window.
+        legacy_semantic: str | None = None
+        if raw_type == "todo":
+            raw_type = "related_to"
+            legacy_semantic = "has_task"
+        elif raw_type == "experienced":
+            raw_type = "related_to"
+            legacy_semantic = "experienced_by"
+
         try:
-            edge_type = EdgeType(e["type"])
-        except KeyError, ValueError:
+            edge_type = EdgeType(raw_type)
+        except ValueError:
             logger.warning("Skipping edge with invalid type: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="unknown_type", raw=dict(e))
+            )
             continue
         if edge_type not in LLM_EXTRACTABLE_EDGE_TYPES:
             logger.warning("Skipping non-extractable edge type: %s", edge_type)
-            continue
-
-        constraints = EDGE_CONSTRAINTS[edge_type]
-        try:
-            src_type = NodeType(e["source_type"])
-            tgt_type = NodeType(e["target_type"])
-        except KeyError, ValueError:
-            logger.warning("Skipping edge with invalid node types: %s", e)
-            continue
-
-        if not any(
-            src_type == c.source_type and tgt_type == c.target_type for c in constraints
-        ):
-            logger.warning(
-                "Edge %s violates constraint (expected one of %s, got %s→%s)",
-                edge_type,
-                [(c.source_type, c.target_type) for c in constraints],
-                src_type,
-                tgt_type,
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="non_extractable_type", raw=dict(e))
             )
             continue
+
+        try:
+            src_type_value = e["source_type"]
+            tgt_type_value = e["target_type"]
+        except KeyError:
+            logger.warning("Skipping edge with missing endpoint types: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="missing_endpoint_type", raw=dict(e))
+            )
+            continue
+
+        # #029: re-route legacy endpoint types ``task`` / ``episode``
+        # to the new POLE+O parents now that those types no longer
+        # exist as top-level node types.
+        if src_type_value == "task":
+            src_type_value = "object"
+        elif src_type_value == "episode":
+            src_type_value = "event"
+        if tgt_type_value == "task":
+            tgt_type_value = "object"
+        elif tgt_type_value == "episode":
+            tgt_type_value = "event"
+
+        try:
+            src_type = NodeType(src_type_value)
+            tgt_type = NodeType(tgt_type_value)
+        except ValueError:
+            logger.warning("Skipping edge with invalid node types: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="invalid_endpoint_type", raw=dict(e))
+            )
+            continue
+
+        # Resolve semantic_type for ``related_to`` rows. Legacy
+        # rewrites already populated ``legacy_semantic``; the prompt
+        # surfaces the field as ``semantic_type``.
+        semantic_type = legacy_semantic or e.get("semantic_type")
+
+        # Per-semantic constraint check for ``related_to``. Constraints
+        # for the other edges fall through to the umbrella check below.
+        if edge_type == EdgeType.RELATED_TO:
+            if not isinstance(semantic_type, str) or not semantic_type:
+                logger.warning(
+                    "Skipping related_to edge with missing semantic_type: %s", e
+                )
+                raw_rejections.append(
+                    RawRejection(
+                        kind="edge",
+                        reason="missing_semantic_type",
+                        raw=dict(e),
+                    )
+                )
+                continue
+            spec = RELATION_SEMANTICS.get(semantic_type)
+            if spec is None:
+                logger.warning(
+                    "Skipping related_to edge with unknown semantic_type=%r: %s",
+                    semantic_type,
+                    e,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="unknown_semantic", raw=dict(e))
+                )
+                continue
+            if (src_type.value, tgt_type.value) not in spec.allowed_pairs:
+                logger.warning(
+                    "related_to[%s] disallows pair (%s, %s); allowed=%s",
+                    semantic_type,
+                    src_type.value,
+                    tgt_type.value,
+                    spec.allowed_pairs,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="disallowed_pair", raw=dict(e))
+                )
+                continue
+        else:
+            constraints = EDGE_CONSTRAINTS.get(edge_type, [])
+            if not any(
+                src_type == c.source_type and tgt_type == c.target_type
+                for c in constraints
+            ):
+                logger.warning(
+                    "Edge %s violates constraint (expected one of %s, got %s→%s)",
+                    edge_type,
+                    [(c.source_type, c.target_type) for c in constraints],
+                    src_type,
+                    tgt_type,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="disallowed_pair", raw=dict(e))
+                )
+                continue
+            # Non-related_to edges must NOT carry a semantic_type.
+            semantic_type = None
 
         edges.append(
             ExtractedEdge(
@@ -205,11 +442,12 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                 target_node_id=str(e.get("target_node_id", "")).lower().strip(),
                 target_type=tgt_type,
                 type=edge_type,
+                semantic_type=semantic_type,
                 properties=e.get("properties", {}),
             )
         )
 
-    return ExtractionResult(nodes=nodes, edges=edges)
+    return ExtractionResult(nodes=nodes, edges=edges, raw_rejections=raw_rejections)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +606,13 @@ async def upsert_graph_entries(
                             "user_id": user_id,
                             "kind": "node",
                             "type": node.type.value,
+                            # #028: persist the POLE+O subtype slot. ``None``
+                            # is written as a NULL column on first insert and
+                            # left untouched on subsequent merges; once
+                            # populated, later writes overwrite with the
+                            # latest LLM-emitted value (last-write-wins on
+                            # the slot, mirroring ``properties``-merge).
+                            "subtype": node.subtype,
                             "name": node.name,
                             "properties": {
                                 "$mergeObjects": [
@@ -427,6 +672,11 @@ async def upsert_graph_entries(
                             "user_id": user_id,
                             "kind": "edge",
                             "type": edge.type.value,
+                            # #029: persist ``semantic_type`` on every edge
+                            # row (None for non-related_to). The partial
+                            # index ``user_type_semantic_type`` only
+                            # indexes non-null rows.
+                            "semantic_type": edge.semantic_type,
                             "source_node_id": src_id,
                             "source_type": edge.source_type.value,
                             "target_node_id": tgt_id,

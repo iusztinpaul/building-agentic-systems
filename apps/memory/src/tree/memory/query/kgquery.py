@@ -17,13 +17,19 @@ migration script.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import EdgeType, KnowledgeGraphEntry, NodeType
+from tree.entities.ontology import PreferenceCategory
 
 logger = logging.getLogger(__name__)
+
+_KG_COLLECTION = "knowledge_graph"
+_FACT_TYPE = NodeType.FACT.value
+_PREFERENCE_TYPE = NodeType.PREFERENCE.value
 
 
 class KGQuery:
@@ -137,6 +143,181 @@ class KGQuery:
         if target_node_id is not None:
             f["target_node_id"] = target_node_id
         f.update(self._scrub_user_id(filter))
+        return await KnowledgeGraphEntry.find(f).to_list()
+
+    # ------------------------------------------------------------------
+    # Fact reads (#031) — island-style; no edge traversal
+    # ------------------------------------------------------------------
+
+    async def find_facts(
+        self,
+        *,
+        subject: str | None = None,
+        predicate: str | None = None,
+        object: str | None = None,
+    ) -> list[KnowledgeGraphEntry]:
+        """Return ``fact`` nodes matching any combination of
+        ``(subject, predicate, object)``.
+
+        Each provided filter is an exact-match against the
+        corresponding entry in ``properties.<key>`` (the wire-form
+        key — the LLM emits ``"object"``, which is the alias for
+        :attr:`tree.entities.ontology.FactProperties.object_`). Filters
+        omitted are treated as "any". Always filtered by
+        ``self.user_id`` and ``type == "fact"`` (per #031's island rule
+        — facts are retrievable only by string match or vector
+        similarity, never by graph traversal).
+        """
+
+        f: dict[str, Any] = {
+            "user_id": self.user_id,
+            "kind": "node",
+            "type": _FACT_TYPE,
+        }
+        if subject is not None:
+            f["properties.subject"] = subject
+        if predicate is not None:
+            f["properties.predicate"] = predicate
+        if object is not None:
+            # Wire-form key — ``FactProperties.object_`` has
+            # ``alias="object"`` so the stored document carries
+            # ``properties.object``.
+            f["properties.object"] = object
+        return await KnowledgeGraphEntry.find(f).to_list()
+
+    async def find_facts_by_similarity(
+        self,
+        query_embedding: list[float],
+        *,
+        k: int = 5,
+    ) -> list[KnowledgeGraphEntry]:
+        """Vector-search ``fact`` nodes by embedding similarity.
+
+        Reuses the existing Phase-1 Atlas ``$vectorSearch`` plumbing
+        on the ``vector_index`` — the only difference vs. the generic
+        node search is the pre-filter on ``type == "fact"``. The
+        caller supplies a query embedding directly (computed against
+        the same model the indexing pipeline uses); this method does
+        not call the embedding model itself, which keeps it
+        unit-testable without an embedding dependency.
+
+        Args:
+            query_embedding: The query vector, dimension-matched to
+                the live vector index.
+            k: Maximum number of results to return (default 5).
+
+        Returns:
+            The top-``k`` ``fact`` nodes for ``self.user_id`` ranked
+            by cosine similarity. Empty list when mongot is
+            unavailable (logged at WARNING).
+        """
+
+        # Use the Beanie-managed PyMongo collection so we can issue
+        # the ``$vectorSearch`` aggregation directly (Beanie's typed
+        # ``find()`` doesn't expose ``$vectorSearch`` natively).
+        collection = KnowledgeGraphEntry.get_pymongo_collection()
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": query_embedding,
+                    "numCandidates": max(k * 10, 50),
+                    "limit": k,
+                    "filter": {
+                        "user_id": self.user_id,
+                        "kind": "node",
+                        "type": _FACT_TYPE,
+                    },
+                }
+            },
+        ]
+        try:
+            cursor = await collection.aggregate(pipeline)
+            docs = await cursor.to_list(length=None)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "find_facts_by_similarity: vector search unavailable; "
+                "returning empty list"
+            )
+            return []
+
+        # Re-hydrate to Beanie objects so callers get the typed shape.
+        rows: list[KnowledgeGraphEntry] = []
+        for doc in docs:
+            rows.append(KnowledgeGraphEntry.model_validate(doc))
+        return rows
+
+    # ------------------------------------------------------------------
+    # Preference reads (#032) - bi-temporal queries
+    # ------------------------------------------------------------------
+
+    async def find_current_preferences(
+        self,
+        category: PreferenceCategory | None = None,
+    ) -> list[KnowledgeGraphEntry]:
+        """Return preferences that are CURRENTLY valid for ``self.user_id``.
+
+        "Current" = ``valid_until is None`` (the row hasn't been
+        superseded). Optionally filtered by ``category``.
+
+        Pinned by the integration tests in #032 - a supersession
+        flips the old preference's ``valid_until`` to ``now()`` so
+        this query stops returning it the instant the new preference
+        wins the contradiction judge.
+        """
+
+        f: dict[str, Any] = {
+            "user_id": self.user_id,
+            "kind": "node",
+            "type": _PREFERENCE_TYPE,
+            "$or": [
+                {"valid_until": {"$exists": False}},
+                {"valid_until": None},
+            ],
+        }
+        if category is not None:
+            f["properties.category"] = category.value
+        return await KnowledgeGraphEntry.find(f).to_list()
+
+    async def find_preferences_at(
+        self,
+        ts: datetime,
+        category: PreferenceCategory | None = None,
+    ) -> list[KnowledgeGraphEntry]:
+        """Return preferences that were valid at the point in time ``ts``.
+
+        A row was valid at ``ts`` when ``valid_from <= ts`` AND
+        (``valid_until > ts`` OR ``valid_until is None``). Optional
+        ``category`` narrows the slice.
+
+        Useful for "what was the user's UI preference last month?"
+        queries when reviewing supersession history.
+        """
+
+        f: dict[str, Any] = {
+            "user_id": self.user_id,
+            "kind": "node",
+            "type": _PREFERENCE_TYPE,
+            "$and": [
+                {
+                    "$or": [
+                        {"valid_from": {"$exists": False}},
+                        {"valid_from": None},
+                        {"valid_from": {"$lte": ts}},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"valid_until": {"$exists": False}},
+                        {"valid_until": None},
+                        {"valid_until": {"$gt": ts}},
+                    ]
+                },
+            ],
+        }
+        if category is not None:
+            f["properties.category"] = category.value
         return await KnowledgeGraphEntry.find(f).to_list()
 
     async def find_neighbors(

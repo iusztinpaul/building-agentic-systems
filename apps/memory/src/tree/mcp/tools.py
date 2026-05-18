@@ -511,6 +511,8 @@ async def ingest_conversation(
     conversation_text: str,
     ctx: Context,
     title: str | None = None,
+    session_uri: str | None = None,
+    session_started_at: str | None = None,
 ) -> str:
     """Extract knowledge from a conversation and add it to the knowledge graph.
 
@@ -520,6 +522,17 @@ async def ingest_conversation(
     Args:
         conversation_text: The full conversation text to process.
         title: Optional title for the conversation document.
+        session_uri: Optional caller-supplied stable session identifier
+            (e.g. ``"claude-session://abc"``, ``"openai-thread://..."``).
+            When provided, becomes the Document's ``source_uri``
+            verbatim — so two callers passing the same ``session_uri``
+            dedupe to a single Document even if the text changes between
+            calls. When omitted, falls back to a content-hash
+            ``conversation://`` URI (Phase-1 behavior).
+        session_started_at: Optional ISO-8601 UTC timestamp marking when
+            the session began (e.g. ``"2026-05-17T14:30:00Z"``). Stored
+            on ``Document.metadata["session_started_at"]``. Must be
+            timezone-aware; naive timestamps are rejected.
     """
 
     if not conversation_text.strip():
@@ -527,8 +540,36 @@ async def ingest_conversation(
             {"error": "empty_input", "detail": "Conversation text must not be empty."}
         )
 
+    parsed_session_started_at = None
+    if session_started_at is not None:
+        from datetime import datetime as _dt
+
+        try:
+            parsed_session_started_at = _dt.fromisoformat(
+                session_started_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            return json.dumps(
+                {
+                    "error": "invalid_input",
+                    "detail": (
+                        "session_started_at must be an ISO-8601 datetime string "
+                        f"(e.g. '2026-05-17T14:30:00Z'); got {session_started_at!r}: {exc}"
+                    ),
+                }
+            )
+
     lc = ctx.lifespan_context
-    document = await _ingest_conversation(conversation_text, lc["user_id"], title)
+    try:
+        document = await _ingest_conversation(
+            conversation_text,
+            lc["user_id"],
+            title=title,
+            session_uri=session_uri,
+            session_started_at=parsed_session_started_at,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": "invalid_input", "detail": str(exc)})
 
     if document is None:
         return json.dumps({"status": "already_ingested"})
