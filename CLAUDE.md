@@ -373,6 +373,7 @@ Notes:
   second run drops an already-empty `knowledge_graph`, re-upserts the
   same `person:self` (`$setOnInsert`), and re-triggers the pipelines
   (themselves idempotent — same chunk hashes → same emissions).
+- **Multi-tenant note:** this drops every tenant's KG rows. Trigger per-tenant extraction afterwards for any other tenant whose data you want rebuilt.
 
 ## Running Custom Commands for Project Level Dependencies
 
