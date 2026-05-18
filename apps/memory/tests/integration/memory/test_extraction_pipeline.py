@@ -138,10 +138,18 @@ def _patch_pipeline_deps(
 
 _ALICE_TODO_RESPONSE: dict[str, Any] = {
     "nodes": [
-        {"name": "alice", "type": "person", "properties": {"aliases": ["alice doe"]}},
+        # Post-#030: every LLM-extractable POLE+O node with a closed
+        # subtype vocabulary MUST emit ``subtype`` (envelope check).
+        {
+            "name": "alice",
+            "type": "person",
+            "subtype": "individual",
+            "properties": {"aliases": ["alice doe"]},
+        },
         {
             "name": "build ml pipeline",
             "type": "task",
+            "subtype": "task",
             "properties": {"content": "Build an ML pipeline"},
         },
     ],
@@ -348,11 +356,13 @@ def _two_alice_response() -> dict[str, Any]:
             {
                 "name": "alice smith",
                 "type": "person",
+                "subtype": "individual",
                 "properties": {"aliases": ["ali"]},
             },
             {
                 "name": "alice smith",
                 "type": "person",
+                "subtype": "individual",
                 "properties": {"email": "alice@example.com"},
             },
         ],
@@ -393,10 +403,16 @@ class TestRewiredNormalizeNodesScenarios:
 
         response = {
             "nodes": [
-                {"name": "alice", "type": "person", "properties": {}},
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
                 {
                     "name": "alice",
                     "type": "task",
+                    "subtype": "task",
                     "properties": {"content": "the alice task"},
                 },
             ],
@@ -443,11 +459,22 @@ class TestRewiredNormalizeNodesScenarios:
 
         response = {
             "nodes": [
-                {"name": "alice", "type": "person", "properties": {}},
-                {"name": "alice", "type": "person", "properties": {}},
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
+                {
+                    "name": "alice",
+                    "type": "person",
+                    "subtype": "individual",
+                    "properties": {},
+                },
                 {
                     "name": "build ml pipeline",
                     "type": "task",
+                    "subtype": "task",
                     "properties": {"content": "x"},
                 },
             ],

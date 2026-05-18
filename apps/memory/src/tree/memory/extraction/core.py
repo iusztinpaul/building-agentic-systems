@@ -39,7 +39,12 @@ from tree.entities.ontology import (
     RELATION_SEMANTICS,
     get_ontology_schema,
 )
-from tree.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
+from tree.memory.types import (
+    ExtractedEdge,
+    ExtractedNode,
+    ExtractionResult,
+    RawRejection,
+)
 from tree.models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
@@ -155,6 +160,10 @@ async def extract_entities(
         node.chunk_id = chunk_id
     for edge in result.edges:
         edge.chunk_id = chunk_id
+    # #030: raw rejections from this chunk carry the same chunk_id so
+    # the audit collection's ``chunk_id`` column points at the source.
+    for rejection in result.raw_rejections:
+        rejection.chunk_id = chunk_id
 
     return result
 
@@ -172,14 +181,28 @@ _LEGACY_NODE_TYPE_REWRITES: dict[str, tuple[NodeType, str]] = {
 
 
 def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
-    """Validate and filter the raw LLM output against the ontology."""
+    """Validate and filter the raw LLM output against the ontology.
+
+    #030: rows that this function drops (unknown type, missing type,
+    non-extractable type, invalid endpoint types, edge-constraint
+    violations) are carried forward as
+    :class:`tree.memory.types.RawRejection` entries on
+    :attr:`ExtractionResult.raw_rejections`. The validator-pipeline
+    step at :mod:`tree.memory.extraction.pipeline` then turns each one
+    into an ``extraction_rejections`` row so the signal is structured
+    rather than lost to ``logger.warning``.
+    """
 
     nodes: list[ExtractedNode] = []
+    raw_rejections: list[RawRejection] = []
     for n in raw.get("nodes", []):
         try:
             type_value = n["type"]
         except KeyError:
             logger.warning("Skipping node with missing type: %s", n)
+            raw_rejections.append(
+                RawRejection(kind="node", reason="missing_type", raw=dict(n))
+            )
             continue
 
         # Legacy → POLE+O subtype re-route (see _LEGACY_NODE_TYPE_REWRITES).
@@ -198,11 +221,17 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                 node_type = NodeType(type_value)
             except ValueError:
                 logger.warning("Skipping node with invalid type: %s", n)
+                raw_rejections.append(
+                    RawRejection(kind="node", reason="unknown_type", raw=dict(n))
+                )
                 continue
             subtype = emitted_subtype if emitted_subtype is not None else None
 
         if node_type not in LLM_EXTRACTABLE_NODE_TYPES:
             logger.warning("Skipping non-extractable node type: %s", node_type)
+            raw_rejections.append(
+                RawRejection(kind="node", reason="non_extractable_type", raw=dict(n))
+            )
             continue
         nodes.append(
             ExtractedNode(
@@ -218,6 +247,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
         raw_type = e.get("type")
         if raw_type is None:
             logger.warning("Skipping edge with missing type: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="missing_type", raw=dict(e))
+            )
             continue
 
         # #029: re-route legacy LLM emissions ``todo`` / ``experienced``
@@ -236,9 +268,15 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             edge_type = EdgeType(raw_type)
         except ValueError:
             logger.warning("Skipping edge with invalid type: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="unknown_type", raw=dict(e))
+            )
             continue
         if edge_type not in LLM_EXTRACTABLE_EDGE_TYPES:
             logger.warning("Skipping non-extractable edge type: %s", edge_type)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="non_extractable_type", raw=dict(e))
+            )
             continue
 
         try:
@@ -246,6 +284,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             tgt_type_value = e["target_type"]
         except KeyError:
             logger.warning("Skipping edge with missing endpoint types: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="missing_endpoint_type", raw=dict(e))
+            )
             continue
 
         # #029: re-route legacy endpoint types ``task`` / ``episode``
@@ -265,6 +306,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             tgt_type = NodeType(tgt_type_value)
         except ValueError:
             logger.warning("Skipping edge with invalid node types: %s", e)
+            raw_rejections.append(
+                RawRejection(kind="edge", reason="invalid_endpoint_type", raw=dict(e))
+            )
             continue
 
         # Resolve semantic_type for ``related_to`` rows. Legacy
@@ -279,6 +323,13 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                 logger.warning(
                     "Skipping related_to edge with missing semantic_type: %s", e
                 )
+                raw_rejections.append(
+                    RawRejection(
+                        kind="edge",
+                        reason="missing_semantic_type",
+                        raw=dict(e),
+                    )
+                )
                 continue
             spec = RELATION_SEMANTICS.get(semantic_type)
             if spec is None:
@@ -286,6 +337,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                     "Skipping related_to edge with unknown semantic_type=%r: %s",
                     semantic_type,
                     e,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="unknown_semantic", raw=dict(e))
                 )
                 continue
             if (src_type.value, tgt_type.value) not in spec.allowed_pairs:
@@ -295,6 +349,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                     src_type.value,
                     tgt_type.value,
                     spec.allowed_pairs,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="disallowed_pair", raw=dict(e))
                 )
                 continue
         else:
@@ -309,6 +366,9 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                     [(c.source_type, c.target_type) for c in constraints],
                     src_type,
                     tgt_type,
+                )
+                raw_rejections.append(
+                    RawRejection(kind="edge", reason="disallowed_pair", raw=dict(e))
                 )
                 continue
             # Non-related_to edges must NOT carry a semantic_type.
@@ -326,7 +386,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
         )
 
-    return ExtractionResult(nodes=nodes, edges=edges)
+    return ExtractionResult(nodes=nodes, edges=edges, raw_rejections=raw_rejections)
 
 
 # ---------------------------------------------------------------------------

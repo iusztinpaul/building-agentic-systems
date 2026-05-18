@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 
 from beanie import Document as BeanieDocument
 from beanie import Indexed, PydanticObjectId
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import IndexModel
 
 
@@ -80,6 +80,34 @@ class EdgeType(StrEnum):
     RELATED_TO = "related_to"
     HAS = "has"
     SAME_AS = "same_as"
+
+
+# --- Phase-3 #030: ExtractorInfo (provenance metadata) ---
+
+
+class ExtractorInfo(BaseModel):
+    """Provenance metadata for an LLM-extracted ``KnowledgeGraphEntry``.
+
+    Stored as an **embedded** Pydantic model on every row the extraction
+    pipeline writes from an LLM emission. Structural rows
+    (``document``, ``chunk``) leave the column ``None`` per `plan.md:210`.
+
+    A query like
+    ``db.knowledge_graph.find({"extractor.name": "gemini-2.5-pro"})`` then
+    surfaces every LLM-extracted row, which is the audit signal `plan.md`
+    calls out at line 208.
+    """
+
+    name: str = Field(
+        description="Extractor identifier — typically the LLM model name (e.g. 'gemini-2.5-pro').",
+    )
+    version: str = Field(
+        description="Pipeline / model version tag (e.g. 'tree-memory-0.1.0').",
+    )
+    extraction_time_ms: int | None = Field(
+        default=None,
+        description="Wall-time the LLM call took for this row, in milliseconds. Optional perf metric.",
+    )
 
 
 # --- ID builders ---
@@ -191,6 +219,43 @@ class KnowledgeGraphEntry(BeanieDocument):
     # Timestamps
     created_at: datetime
     updated_at: datetime
+
+    # --- Phase-3 #030: common columns added by the validator + provenance task ---
+    #
+    # ``description`` is the free-text human-readable label the LLM may
+    # emit alongside ``name``; it's surfaced on UIs / preview prompts.
+    # ``valid_from`` / ``valid_until`` are the bi-temporal columns used
+    # by #031 (`fact`) and #032 (`preference` supersession). Both
+    # accept tz-aware UTC datetimes only — naive datetimes are rejected
+    # by ``_check_temporal_fields_are_tz_aware`` so we never silently
+    # mix wall-clock and UTC values inside the graph.
+    # ``extractor`` is the embedded :class:`ExtractorInfo` provenance
+    # block populated by the extraction pipeline on every LLM-extracted
+    # row. ``None`` on structural rows (``document`` / ``chunk``).
+    description: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    extractor: ExtractorInfo | None = None
+
+    @field_validator("valid_from", "valid_until", mode="after")
+    @classmethod
+    def _require_tz_aware_temporal(cls, value: datetime | None) -> datetime | None:
+        """Reject naive datetimes on ``valid_from`` / ``valid_until``.
+
+        Per ``CLAUDE.md``: all datetimes are timezone aware (UTC by
+        default). Mixing a naive value into the graph corrupts later
+        comparisons against tz-aware ``now`` — make that a hard error
+        at validation time. ``None`` is fine (the column is optional).
+        """
+
+        if value is None:
+            return value
+        if value.tzinfo is None:
+            raise ValueError(
+                "valid_from / valid_until must be timezone-aware (UTC); "
+                f"got naive datetime {value!r}"
+            )
+        return value
 
     # --- Phase-3 #028: legacy (type=task|episode) → (parent, subtype) ---
     # Re-routes legacy node rows at construction time so the rest of the

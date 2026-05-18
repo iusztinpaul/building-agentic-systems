@@ -1379,7 +1379,42 @@ def get_ontology_schema() -> dict[str, Any]:
             edge_info["semantic_types"] = semantic_types
         edge_types[name] = edge_info
 
-    return {"node_types": node_types, "edge_types": edge_types}
+    # #030: surface the row-level common columns to the LLM so it
+    # knows it can emit ``description`` / ``valid_from`` / ``valid_until``
+    # alongside the type-specific ``properties`` payload. The
+    # ``extractor`` column is **server-stamped** by the extraction
+    # pipeline, so the LLM is told not to emit it.
+    common_fields = {
+        "description": {
+            "type": "string",
+            "optional": True,
+            "description": (
+                "Optional human-readable label for the row, surfaced in "
+                "UIs and preview prompts."
+            ),
+        },
+        "valid_from": {
+            "type": "string",
+            "optional": True,
+            "description": (
+                "ISO 8601 timestamp the row's validity period begins, "
+                "or null when unknown."
+            ),
+        },
+        "valid_until": {
+            "type": "string",
+            "optional": True,
+            "description": (
+                "ISO 8601 timestamp the row's validity period ends, or "
+                "null when the row is still current / unknown."
+            ),
+        },
+    }
+    return {
+        "node_types": node_types,
+        "edge_types": edge_types,
+        "common_fields": common_fields,
+    }
 
 
 # ---------------------------------------------------------------------------

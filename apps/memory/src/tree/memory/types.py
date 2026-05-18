@@ -41,17 +41,43 @@ class ExtractedEdge(BaseModel):
     chunk_id: str = ""
 
 
+class RawRejection(BaseModel):
+    """A raw LLM emission ``_parse_extraction`` chose to drop (#030).
+
+    Carried forward through :class:`ExtractionResult` so the
+    validator-pipeline step in :mod:`tree.memory.extraction.pipeline`
+    can turn it into an ``extraction_rejections`` row instead of
+    losing the signal to a ``logger.warning`` line.
+
+    The two reasons today (per :func:`_parse_extraction`'s drop list)
+    are ``unknown_type`` (the LLM emitted a type string we don't
+    register) and ``invalid_endpoint_types`` (an edge with one of its
+    endpoint types not in :class:`NodeType`).
+    """
+
+    kind: str
+    reason: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+    chunk_id: str = ""
+
+
 class ExtractionResult(BaseModel):
     """Aggregated extraction output from one or more chunks."""
 
     nodes: list[ExtractedNode] = []
     edges: list[ExtractedEdge] = []
+    # #030: rows the LLM-emission parser dropped before the envelope
+    # validator could see them. Carried to the validator-task so the
+    # ``extraction_rejections`` audit collection receives every drop,
+    # not just envelope-level ones.
+    raw_rejections: list[RawRejection] = Field(default_factory=list)
 
     def merge(self, other: "ExtractionResult") -> "ExtractionResult":
         """Combine two results (e.g. from different chunks)."""
         return ExtractionResult(
             nodes=self.nodes + other.nodes,
             edges=self.edges + other.edges,
+            raw_rejections=self.raw_rejections + other.raw_rejections,
         )
 
 

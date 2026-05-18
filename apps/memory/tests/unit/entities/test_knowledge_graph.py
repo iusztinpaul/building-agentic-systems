@@ -6,6 +6,7 @@ from pymongo import IndexModel
 
 from tree.entities.knowledge_graph import (
     EdgeType,
+    ExtractorInfo,
     KnowledgeGraphEntry,
     NodeType,
     build_edge_id,
@@ -1027,3 +1028,108 @@ class TestStructuralHasEdgeAccepted:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         assert entry.type == "has"
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 #030 — ExtractorInfo + new common columns
+# ---------------------------------------------------------------------------
+
+
+class TestExtractorInfo:
+    def test_round_trip(self) -> None:
+        info = ExtractorInfo(
+            name="gemini-2.5-pro",
+            version="tree-memory-0.1.0",
+            extraction_time_ms=812,
+        )
+        rehydrated = ExtractorInfo.model_validate(info.model_dump())
+        assert rehydrated == info
+
+    def test_extraction_time_optional(self) -> None:
+        info = ExtractorInfo(name="gemini", version="v1")
+        assert info.extraction_time_ms is None
+
+    def test_field_descriptions_present(self) -> None:
+        schema = ExtractorInfo.model_json_schema()
+        for field in ("name", "version", "extraction_time_ms"):
+            assert schema["properties"][field].get("description"), (
+                f"ExtractorInfo.{field} missing description"
+            )
+
+
+class TestKnowledgeGraphCommonColumns:
+    """#030 adds ``description``, ``valid_from``, ``valid_until``, and
+    ``extractor`` to :class:`KnowledgeGraphEntry`. Each is optional;
+    legacy rows load with defaults."""
+
+    def _build(self, **overrides):
+        user_id = _user_id()
+        defaults = dict(
+            id=f"{user_id}:person:alice",
+            user_id=user_id,
+            kind="node",
+            type="person",
+            subtype="individual",
+            name="alice",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        defaults.update(overrides)
+        return KnowledgeGraphEntry(**defaults)
+
+    async def test_defaults_none(self) -> None:
+        entry = self._build()
+        assert entry.description is None
+        assert entry.valid_from is None
+        assert entry.valid_until is None
+        assert entry.extractor is None
+
+    async def test_round_trip_with_values(self) -> None:
+        vf = datetime(2025, 1, 1, tzinfo=UTC)
+        vu = datetime(2025, 12, 31, tzinfo=UTC)
+        entry = self._build(
+            description="A person known for X.",
+            valid_from=vf,
+            valid_until=vu,
+            extractor=ExtractorInfo(name="gemini-2.5-pro", version="tree-memory-0.1.0"),
+        )
+        dumped = entry.model_dump()
+        rehydrated = KnowledgeGraphEntry.model_validate(dumped)
+        assert rehydrated.description == "A person known for X."
+        assert rehydrated.valid_from == vf
+        assert rehydrated.valid_until == vu
+        assert rehydrated.extractor is not None
+        assert rehydrated.extractor.name == "gemini-2.5-pro"
+
+    async def test_valid_from_naive_rejected(self) -> None:
+        naive = datetime(2025, 1, 1)
+        assert naive.tzinfo is None
+        with pytest.raises(Exception) as excinfo:
+            self._build(valid_from=naive)
+        assert "timezone-aware" in str(excinfo.value)
+
+    async def test_valid_until_naive_rejected(self) -> None:
+        naive = datetime(2025, 1, 1)
+        with pytest.raises(Exception):
+            self._build(valid_until=naive)
+
+    async def test_legacy_doc_without_new_fields_loads_with_defaults(self) -> None:
+        user_id = _user_id()
+        legacy = {
+            "_id": f"{user_id}:person:bob",
+            "id": f"{user_id}:person:bob",
+            "user_id": user_id,
+            "kind": "node",
+            "type": "person",
+            "name": "bob",
+            "properties": {},
+            "embedding": [],
+            "sources": [],
+            "created_at": datetime(2025, 12, 1, tzinfo=UTC),
+            "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
+        }
+        entry = KnowledgeGraphEntry.model_validate(legacy)
+        assert entry.description is None
+        assert entry.valid_from is None
+        assert entry.valid_until is None
+        assert entry.extractor is None

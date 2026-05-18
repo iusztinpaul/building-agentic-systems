@@ -59,7 +59,7 @@ from tree.entities.ontology import (
 # fields added on every closed-vocab parent; ``task`` / ``episode`` no longer
 # top-level), so the v1 snapshot from #027 is superseded by v2. The v1
 # snapshot is kept on disk for historical-diff review but no test reads it.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v3.json"
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v4.json"
 
 
 # ---------------------------------------------------------------------------

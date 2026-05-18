@@ -133,11 +133,13 @@ _LLM_RESPONSE_A: dict[str, Any] = {
         {
             "name": "alice",
             "type": "person",
+            "subtype": "individual",
             "properties": {"aliases": []},
         },
         {
             "name": "antelope analytics project",
             "type": "task",
+            "subtype": "task",
             "properties": {
                 "content": "Own the antelope analytics project (amber dashboard)."
             },
@@ -161,11 +163,13 @@ _LLM_RESPONSE_B: dict[str, Any] = {
         {
             "name": "bob",
             "type": "person",
+            "subtype": "individual",
             "properties": {"aliases": []},
         },
         {
             "name": "badger reporting service",
             "type": "task",
+            "subtype": "task",
             "properties": {
                 "content": "Own the badger reporting service (bramble migration)."
             },

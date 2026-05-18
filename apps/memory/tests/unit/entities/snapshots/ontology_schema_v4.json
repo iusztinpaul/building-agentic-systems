@@ -1,4 +1,21 @@
 {
+  "common_fields": {
+    "description": {
+      "description": "Optional human-readable label for the row, surfaced in UIs and preview prompts.",
+      "optional": true,
+      "type": "string"
+    },
+    "valid_from": {
+      "description": "ISO 8601 timestamp the row's validity period begins, or null when unknown.",
+      "optional": true,
+      "type": "string"
+    },
+    "valid_until": {
+      "description": "ISO 8601 timestamp the row's validity period ends, or null when the row is still current / unknown.",
+      "optional": true,
+      "type": "string"
+    }
+  },
   "edge_types": {
     "related_to": {
       "allowed_pairs": [
