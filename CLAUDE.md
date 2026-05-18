@@ -320,6 +320,60 @@ Notes:
   is re-used, the `update_many` writes no new values, and the
   self-person `$setOnInsert` upsert leaves the existing row alone).
 
+### Phase 2-5 reset-ontology migration (POLE+O)
+
+When upgrading an already-Phase-1 deployment to the Phase-2-through-5
+POLE+O ontology (registry + collapsed `related_to` + `fact` island +
+preference typed slots + bi-temporal supersession + audit
+collections), run the migration with the `RESET_ONTOLOGY=1` knob. It
+wipes `knowledge_graph` and the two Phase-3 audit collections, re-runs
+the User `after_insert` hook to recreate `person:self` under the new
+shape (`subtype="individual"`), ensures the new compound indexes (the
+`(user_id, type, semantic_type)` partial index from #029) inline, and
+triggers extraction + indexing under the new ontology.
+
+1. **Always dry-run first** to inspect the plan with counts. No writes:
+```
+make memory-migrate-multi-tenancy USER_IDENTIFIER=dev@example.com RESET_ONTOLOGY=1 DRY_RUN=1
+```
+This prints "would drop knowledge_graph (N rows); would drop
+extraction_rejections (M rows); would drop extraction_dropped_fields
+(P rows); would re-create person:self for dev@example.com; would
+trigger extraction + indexing."
+
+2. **Apply** (writes; idempotent — safe to re-run):
+```
+make memory-migrate-multi-tenancy USER_IDENTIFIER=dev@example.com RESET_ONTOLOGY=1
+```
+
+3. **Verify** in `mongosh`:
+```
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true"
+> db.knowledge_graph.find({_id: /:person:self$/})
+> db.knowledge_graph.find({type: "organization"}).limit(3)
+> db.knowledge_graph.find({type: "related_to", semantic_type: "employed_by"}).limit(3)
+> db.knowledge_graph.find({type: "fact"}).limit(3)
+> db.extraction_rejections.countDocuments({})
+> db.extraction_dropped_fields.countDocuments({})
+```
+
+Notes:
+- **Aborts** if the seed `User(identifier=...)` does not exist. This
+  path assumes the Phase-1 bootstrap migration has already run. If you
+  are bootstrapping a brand-new deployment, run the migration WITHOUT
+  `RESET_ONTOLOGY=1` first, then re-run it with `RESET_ONTOLOGY=1` if
+  you need to wipe-and-rebuild.
+- The `documents` collection is **not** touched. Re-extraction reads
+  the same per-tenant documents and rebuilds the graph against the new
+  POLE+O ontology.
+- Same Prefect-worker contract as Phase 1: requires
+  `make memory-serve-workflows &` running, or pass
+  `NO_TRIGGER_PIPELINES=1` to skip the deployment trigger.
+- **Idempotent.** Re-running with the same `--identifier` is safe: the
+  second run drops an already-empty `knowledge_graph`, re-upserts the
+  same `person:self` (`$setOnInsert`), and re-triggers the pipelines
+  (themselves idempotent — same chunk hashes → same emissions).
+
 ## Running Custom Commands for Project Level Dependencies
 
 Use `uv` to run any custom command that is not present in the @Makefile or @apps/memory/Makefile, but uses Python or other dependency installed through uv, usually available in @apps/memory/pyproject.toml.

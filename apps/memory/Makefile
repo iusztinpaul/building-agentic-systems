@@ -120,14 +120,15 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
 	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
 
-# --- Migration (Phase 1 one-shot) ---
+# --- Migration (Phase 1 one-shot + Phase 2-5 reset-ontology) ---
 
-migrate-multi-tenancy: # One-shot Phase-1 multi-tenancy migration. Requires USER_IDENTIFIER=<email|sub>. Optional NAME="Display Name", DRY_RUN=1, NO_TRIGGER_PIPELINES=1.
-	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make migrate-multi-tenancy USER_IDENTIFIER=<email> [NAME="Display Name"] [DRY_RUN=1] [NO_TRIGGER_PIPELINES=1]'; exit 1; fi
+migrate-multi-tenancy: # Multi-tenancy migration. Default = Phase-1 bootstrap. RESET_ONTOLOGY=1 = Phase 2-5 wipe-and-rebuild. Requires USER_IDENTIFIER=<email|sub>. Optional NAME="Display Name", DRY_RUN=1, NO_TRIGGER_PIPELINES=1, RESET_ONTOLOGY=1.
+	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make migrate-multi-tenancy USER_IDENTIFIER=<email> [NAME="Display Name"] [DRY_RUN=1] [NO_TRIGGER_PIPELINES=1] [RESET_ONTOLOGY=1]'; exit 1; fi
 	uv run python scripts/migrate_multi_tenancy.py --identifier "$(USER_IDENTIFIER)" \
 		$(if $(NAME),--name "$(NAME)",) \
 		$(if $(filter 1,$(DRY_RUN)),--dry-run,) \
-		$(if $(filter 1,$(NO_TRIGGER_PIPELINES)),--no-trigger-pipelines,)
+		$(if $(filter 1,$(NO_TRIGGER_PIPELINES)),--no-trigger-pipelines,) \
+		$(if $(filter 1,$(RESET_ONTOLOGY)),--reset-ontology,)
 
 # --- Querying ---
 

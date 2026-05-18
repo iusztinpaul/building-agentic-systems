@@ -180,3 +180,223 @@ class TestCLIEntryPoint:
         result = runner.invoke(_module.main, ["--identifier", "x@example.com"])
 
         assert result.exit_code == 2
+
+    def test_reset_ontology_flag_plumbs_through_to_run_migration(self, mocker):
+        """``--reset-ontology`` is wired through ``main`` to ``_run_migration``."""
+
+        run_mock = mocker.patch.object(
+            _module,
+            "_run_migration",
+            new=AsyncMock(return_value=None),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            _module.main,
+            ["--identifier", "x@example.com", "--reset-ontology"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert run_mock.await_count == 1
+        kwargs = run_mock.await_args.kwargs
+        assert kwargs["reset_ontology"] is True
+        assert kwargs["identifier"] == "x@example.com"
+
+    def test_default_run_has_reset_ontology_false(self, mocker):
+        """Default invocation leaves ``reset_ontology=False`` (Phase-1 path)."""
+
+        run_mock = mocker.patch.object(
+            _module,
+            "_run_migration",
+            new=AsyncMock(return_value=None),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(_module.main, ["--identifier", "x@example.com"])
+
+        assert result.exit_code == 0, result.output
+        kwargs = run_mock.await_args.kwargs
+        assert kwargs["reset_ontology"] is False
+
+
+class TestResetOntologyPath:
+    """Branch-level checks for the ``--reset-ontology`` migration path."""
+
+    async def test_aborts_when_seed_user_missing(self, mocker):
+        """Live ``--reset-ontology`` aborts when the seed user doesn't exist."""
+
+        mocker.patch.object(_module, "init_mongodb", new=AsyncMock(return_value=None))
+        mocker.patch.object(_module.User, "find_one", new=AsyncMock(return_value=None))
+
+        with pytest.raises(_module.MigrationAbort) as exc:
+            await _module._run_migration(
+                identifier="newcomer@example.com",
+                name=None,
+                dry_run=False,
+                trigger_pipelines=False,
+                reset_ontology=True,
+            )
+
+        # The error must point operators at the bootstrap path so they
+        # know the recovery procedure.
+        assert "Phase-1" not in str(exc.value) or "without --reset-ontology" in str(
+            exc.value
+        )
+        assert "newcomer@example.com" in str(exc.value)
+
+    async def test_dry_run_reset_ontology_creates_no_writes(self, mocker):
+        """Dry-run ``--reset-ontology`` must invoke no mutation step."""
+
+        mocker.patch.object(_module, "init_mongodb", new=AsyncMock(return_value=None))
+        existing_user = _module.User(
+            identifier="dev@example.com", attributes={"name": "Dev"}
+        )
+        existing_user.id = PydanticObjectId()
+        mocker.patch.object(
+            _module.User, "find_one", new=AsyncMock(return_value=existing_user)
+        )
+        mocker.patch.object(
+            _module, "_count_kg_entries", new=AsyncMock(return_value=42)
+        )
+        mocker.patch.object(
+            _module, "_count_extraction_rejections", new=AsyncMock(return_value=3)
+        )
+        mocker.patch.object(
+            _module, "_count_extraction_dropped_fields", new=AsyncMock(return_value=7)
+        )
+
+        drop_kg = mocker.patch.object(
+            _module, "_drop_knowledge_graph", new=AsyncMock(return_value=None)
+        )
+        drop_audits = mocker.patch.object(
+            _module,
+            "_drop_extraction_audit_collections",
+            new=AsyncMock(return_value=None),
+        )
+        refire = mocker.patch.object(
+            _module, "_refire_self_person", new=AsyncMock(return_value=None)
+        )
+        ensure = mocker.patch.object(
+            _module, "_ensure_kg_indexes", new=AsyncMock(return_value=None)
+        )
+        trigger = mocker.patch.object(
+            _module, "_trigger_pipelines", new=AsyncMock(return_value=None)
+        )
+
+        result = await _module._run_migration(
+            identifier="dev@example.com",
+            name=None,
+            dry_run=True,
+            trigger_pipelines=True,
+            reset_ontology=True,
+        )
+
+        assert result is existing_user
+        drop_kg.assert_not_called()
+        drop_audits.assert_not_called()
+        refire.assert_not_called()
+        ensure.assert_not_called()
+        trigger.assert_not_called()
+
+    async def test_reset_ontology_runs_all_steps_in_order(self, mocker):
+        """Live ``--reset-ontology`` invokes every mutation step exactly once."""
+
+        mocker.patch.object(_module, "init_mongodb", new=AsyncMock(return_value=None))
+        existing_user = _module.User(
+            identifier="dev@example.com", attributes={"name": "Dev"}
+        )
+        existing_user.id = PydanticObjectId()
+        mocker.patch.object(
+            _module.User, "find_one", new=AsyncMock(return_value=existing_user)
+        )
+
+        drop_kg = mocker.patch.object(
+            _module, "_drop_knowledge_graph", new=AsyncMock(return_value=None)
+        )
+        drop_audits = mocker.patch.object(
+            _module,
+            "_drop_extraction_audit_collections",
+            new=AsyncMock(return_value=None),
+        )
+        refire = mocker.patch.object(
+            _module, "_refire_self_person", new=AsyncMock(return_value=None)
+        )
+        ensure = mocker.patch.object(
+            _module, "_ensure_kg_indexes", new=AsyncMock(return_value=None)
+        )
+        trigger = mocker.patch.object(
+            _module, "_trigger_pipelines", new=AsyncMock(return_value=None)
+        )
+
+        result = await _module._run_migration(
+            identifier="dev@example.com",
+            name=None,
+            dry_run=False,
+            trigger_pipelines=True,
+            reset_ontology=True,
+        )
+
+        assert result is existing_user
+        drop_kg.assert_awaited_once()
+        drop_audits.assert_awaited_once()
+        refire.assert_awaited_once_with(existing_user)
+        ensure.assert_awaited_once()
+        trigger.assert_awaited_once_with(existing_user.id)
+
+    async def test_reset_ontology_skips_phase1_steps(self, mocker):
+        """``--reset-ontology`` must NOT touch ``documents`` or call the
+        Phase-1 safety check.
+
+        Pin so a refactor that accidentally re-routes through the
+        bootstrap path's ``_assert_safe_to_migrate`` (and would crash
+        when a real multi-tenant DB is present) fails loudly.
+        """
+
+        mocker.patch.object(_module, "init_mongodb", new=AsyncMock(return_value=None))
+        existing_user = _module.User(identifier="dev@example.com", attributes={})
+        existing_user.id = PydanticObjectId()
+        mocker.patch.object(
+            _module.User, "find_one", new=AsyncMock(return_value=existing_user)
+        )
+
+        backfill = mocker.patch.object(
+            _module, "_backfill_documents", new=AsyncMock(return_value=0)
+        )
+        safety = mocker.patch.object(
+            _module, "_assert_safe_to_migrate", new=AsyncMock(return_value=None)
+        )
+        find_or_create = mocker.patch.object(
+            _module,
+            "_find_or_create_seed_user",
+            new=AsyncMock(return_value=(existing_user, False)),
+        )
+        # Stub the mutation steps so the path runs cleanly.
+        mocker.patch.object(
+            _module, "_drop_knowledge_graph", new=AsyncMock(return_value=None)
+        )
+        mocker.patch.object(
+            _module,
+            "_drop_extraction_audit_collections",
+            new=AsyncMock(return_value=None),
+        )
+        mocker.patch.object(
+            _module, "_refire_self_person", new=AsyncMock(return_value=None)
+        )
+        mocker.patch.object(
+            _module, "_ensure_kg_indexes", new=AsyncMock(return_value=None)
+        )
+        mocker.patch.object(
+            _module, "_trigger_pipelines", new=AsyncMock(return_value=None)
+        )
+
+        await _module._run_migration(
+            identifier="dev@example.com",
+            name=None,
+            dry_run=False,
+            trigger_pipelines=True,
+            reset_ontology=True,
+        )
+
+        backfill.assert_not_called()
+        safety.assert_not_called()
+        find_or_create.assert_not_called()
