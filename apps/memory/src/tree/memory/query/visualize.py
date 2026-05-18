@@ -67,8 +67,8 @@ def build_networkx_graph(result: QueryResult) -> nx.DiGraph:
         node_type = node.get("type", "unknown")
         props = node.get("properties", {})
 
-        label = _truncate(node_id, 40)
-        label_parts = [label, f"[{node_type}]"]
+        name = _extract_display_name(node_id, node_type, props)
+        label_parts = [_truncate(name, 40), f"[{node_type}]"]
 
         hover_lines = [f"id: {node_id}", f"type: {node_type}"]
         for k, v in props.items():
@@ -93,9 +93,19 @@ def build_networkx_graph(result: QueryResult) -> nx.DiGraph:
 
         # Ensure endpoints exist (may be missing if query returned partial graph).
         if src not in G:
-            G.add_node(src, label=_truncate(src, 40), title=src, group="unknown")
+            G.add_node(
+                src,
+                label=_truncate(_extract_display_name(src, "unknown", {}), 40),
+                title=src,
+                group="unknown",
+            )
         if tgt not in G:
-            G.add_node(tgt, label=_truncate(tgt, 40), title=tgt, group="unknown")
+            G.add_node(
+                tgt,
+                label=_truncate(_extract_display_name(tgt, "unknown", {}), 40),
+                title=tgt,
+                group="unknown",
+            )
 
         G.add_edge(src, tgt, label=edge_type, title=f"type: {edge_type}")
 
@@ -152,3 +162,24 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _extract_display_name(node_id: str, node_type: str, props: dict) -> str:
+    """Derive a human-readable label from a node row.
+
+    Prefers ``properties.canonical_name`` (set by the resolver for typed
+    nodes). Falls back to stripping the ``{user_id}:{type}:`` prefix from
+    the canonical ``_id`` (``{24-char ObjectId}:{type}:{name}`` per the
+    Phase-1 multi-tenancy ID scheme). Names themselves may contain
+    further ``:`` segments (e.g. chunk ids), so we strip only the two
+    leading prefix segments rather than splitting from the right.
+    """
+
+    canonical = props.get("canonical_name") if isinstance(props, dict) else None
+    if isinstance(canonical, str) and canonical.strip():
+        return canonical
+
+    parts = node_id.split(":", 2)
+    if len(parts) == 3 and parts[1] == node_type:
+        return parts[2]
+    return node_id
