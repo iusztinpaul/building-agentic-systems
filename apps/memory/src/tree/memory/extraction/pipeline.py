@@ -675,6 +675,7 @@ async def _apply_writes(
             target_node_id=tgt_id,
             target_type=edge.target_type,
             type=edge.type,
+            semantic_type=edge.semantic_type,
             properties=edge.properties,
             chunk_id=edge.chunk_id,
         )
@@ -900,6 +901,8 @@ async def _upsert_edge(
                     "user_id": user_id,
                     "kind": "edge",
                     "type": edge.type.value,
+                    # #029: persist ``semantic_type`` (None on non-related_to).
+                    "semantic_type": edge.semantic_type,
                     "source_node_id": edge.source_node_id,
                     "source_type": edge.source_type.value,
                     "target_node_id": edge.target_node_id,

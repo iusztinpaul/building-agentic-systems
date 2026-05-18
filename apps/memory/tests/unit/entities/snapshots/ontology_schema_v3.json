@@ -1,0 +1,831 @@
+{
+  "edge_types": {
+    "related_to": {
+      "allowed_pairs": [
+        [
+          "event",
+          "event"
+        ],
+        [
+          "event",
+          "location"
+        ],
+        [
+          "location",
+          "location"
+        ],
+        [
+          "object",
+          "event"
+        ],
+        [
+          "object",
+          "location"
+        ],
+        [
+          "object",
+          "object"
+        ],
+        [
+          "organization",
+          "event"
+        ],
+        [
+          "organization",
+          "location"
+        ],
+        [
+          "organization",
+          "object"
+        ],
+        [
+          "organization",
+          "organization"
+        ],
+        [
+          "person",
+          "event"
+        ],
+        [
+          "person",
+          "location"
+        ],
+        [
+          "person",
+          "object"
+        ],
+        [
+          "person",
+          "organization"
+        ],
+        [
+          "person",
+          "person"
+        ]
+      ],
+      "description": "Umbrella edge for the 14 POLE+O domain relations (+ Tree extensions). Discriminated by ``semantic_type``.",
+      "semantic_types": {
+        "alias_of": {
+          "allowed_pairs": [
+            [
+              "event",
+              "event"
+            ],
+            [
+              "location",
+              "location"
+            ],
+            [
+              "object",
+              "object"
+            ],
+            [
+              "organization",
+              "organization"
+            ],
+            [
+              "person",
+              "person"
+            ]
+          ],
+          "description": "Surface form is an alias for the target. Distinct from structural ``same_as`` (which is the dedup-confirmed merge edge) \u2014 ``alias_of`` is LLM-extractable narrative."
+        },
+        "employed_by": {
+          "allowed_pairs": [
+            [
+              "person",
+              "organization"
+            ]
+          ],
+          "description": "Person is employed by an organization. Carries role + date range; the canonical Tree subtype for the resulting period is event/employment.",
+          "properties": {
+            "end_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "End of the relationship in ISO 8601 (YYYY-MM-DD), or None when the relationship is ongoing or the end is unknown.",
+              "title": "End Date"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role or title held during the relationship (e.g. 'senior engineer', 'board member').",
+              "title": "Role"
+            },
+            "start_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Start of the relationship in ISO 8601 (YYYY-MM-DD), or None when the start is unknown / open-ended.",
+              "title": "Start Date"
+            }
+          },
+          "required": []
+        },
+        "experienced_by": {
+          "allowed_pairs": [
+            [
+              "person",
+              "event"
+            ]
+          ],
+          "description": "Tree extension: a person experienced an event (commonly an event with subtype ``episode``). Re-routes the legacy ``EdgeType.EXPERIENCED`` semantics.",
+          "properties": {
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role the person played in the event (e.g. 'protagonist', 'witness'). None when unspecified.",
+              "title": "Role"
+            }
+          },
+          "required": []
+        },
+        "has_task": {
+          "allowed_pairs": [
+            [
+              "person",
+              "object"
+            ]
+          ],
+          "description": "Tree extension: a person has a task (object with subtype ``task``). Re-routes the legacy ``EdgeType.TODO`` semantics into the POLE+O umbrella so the LLM emits a single ``related_to`` edge type.",
+          "properties": {
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Lifecycle status of the task \u2014 e.g. 'pending', 'in_progress', 'done', 'cancelled'. None means unspecified.",
+              "title": "Status"
+            }
+          },
+          "required": []
+        },
+        "headquarters_at": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "location"
+            ]
+          ],
+          "description": "An organization's headquarters is at a location."
+        },
+        "involved": {
+          "allowed_pairs": [
+            [
+              "object",
+              "event"
+            ]
+          ],
+          "description": "An object was involved in an event (e.g. weapon, evidence).",
+          "properties": {
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role the object played in the event (e.g. 'weapon', 'evidence', 'collateral').",
+              "title": "Role"
+            }
+          },
+          "required": []
+        },
+        "knows": {
+          "allowed_pairs": [
+            [
+              "person",
+              "person"
+            ]
+          ],
+          "description": "Two persons know each other (acquaintance-grade link)."
+        },
+        "located_at": {
+          "allowed_pairs": [
+            [
+              "event",
+              "location"
+            ],
+            [
+              "object",
+              "location"
+            ]
+          ],
+          "description": "An object or event is located at a place (with optional date range so the relation can describe historical placement).",
+          "properties": {
+            "from_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Start of the period the relation held, in ISO 8601 (YYYY-MM-DD).",
+              "title": "From Date"
+            },
+            "to_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "End of the period the relation held, in ISO 8601 (YYYY-MM-DD), or None when the relation is current / unknown.",
+              "title": "To Date"
+            }
+          },
+          "required": []
+        },
+        "member_of": {
+          "allowed_pairs": [
+            [
+              "person",
+              "organization"
+            ]
+          ],
+          "description": "Person is a member of an organization (board, club, team). Carries role + date range.",
+          "properties": {
+            "end_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "End of the relationship in ISO 8601 (YYYY-MM-DD), or None when the relationship is ongoing or the end is unknown.",
+              "title": "End Date"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role or title held during the relationship (e.g. 'senior engineer', 'board member').",
+              "title": "Role"
+            },
+            "start_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Start of the relationship in ISO 8601 (YYYY-MM-DD), or None when the start is unknown / open-ended.",
+              "title": "Start Date"
+            }
+          },
+          "required": []
+        },
+        "occurred_at": {
+          "allowed_pairs": [
+            [
+              "event",
+              "location"
+            ]
+          ],
+          "description": "An event occurred at a location (point-in-time anchor)."
+        },
+        "owns": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "object"
+            ],
+            [
+              "person",
+              "object"
+            ]
+          ],
+          "description": "A person or organization owns an object.",
+          "properties": {
+            "acquisition_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Date of ownership acquisition in ISO 8601 (YYYY-MM-DD), or None when the date is unknown.",
+              "title": "Acquisition Date"
+            }
+          },
+          "required": []
+        },
+        "participated_in": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "event"
+            ],
+            [
+              "person",
+              "event"
+            ]
+          ],
+          "description": "A person or organization participated in an event.",
+          "properties": {
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role the participant played in the event (e.g. 'speaker', 'attendee', 'organizer').",
+              "title": "Role"
+            }
+          },
+          "required": []
+        },
+        "partner_with": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "organization"
+            ]
+          ],
+          "description": "Two organizations are in a partnership relation."
+        },
+        "resides_at": {
+          "allowed_pairs": [
+            [
+              "person",
+              "location"
+            ]
+          ],
+          "description": "A person resides at a location, with optional date range.",
+          "properties": {
+            "from_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Start of the period the relation held, in ISO 8601 (YYYY-MM-DD).",
+              "title": "From Date"
+            },
+            "to_date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "End of the period the relation held, in ISO 8601 (YYYY-MM-DD), or None when the relation is current / unknown.",
+              "title": "To Date"
+            }
+          },
+          "required": []
+        },
+        "subsidiary_of": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "organization"
+            ]
+          ],
+          "description": "An organization is a subsidiary of another organization."
+        },
+        "uses": {
+          "allowed_pairs": [
+            [
+              "organization",
+              "object"
+            ],
+            [
+              "person",
+              "object"
+            ]
+          ],
+          "description": "A person or organization uses an object (no transfer of ownership)."
+        }
+      }
+    }
+  },
+  "node_types": {
+    "event": {
+      "description": "An event (incident, meeting, transaction, communication, etc.).",
+      "properties": {
+        "aliases": {
+          "description": "Alternative names or labels for the event",
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date the event occurred (ISO 8601 YYYY-MM-DD)",
+          "title": "Date"
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ISO 8601 duration (e.g. 'PT1H30M' for 1 hour 30 minutes)",
+          "title": "Duration"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Short summary of what happened or resulted from the event",
+          "title": "Outcome"
+        },
+        "time": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Time the event occurred (HH:MM:SS, UTC unless otherwise stated)",
+          "title": "Time"
+        }
+      },
+      "required": [],
+      "subtypes": [
+        "communication",
+        "employment",
+        "episode",
+        "incident",
+        "meeting",
+        "observation",
+        "transaction",
+        "travel"
+      ]
+    },
+    "location": {
+      "description": "A geographic or named location.",
+      "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Street address or postal form when applicable",
+          "title": "Address"
+        },
+        "aliases": {
+          "description": "Alternative names, abbreviations, or translations of the location",
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "city": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "City the location belongs to",
+          "title": "City"
+        },
+        "coordinates": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Decimal latitude/longitude pair, e.g. '37.7749,-122.4194'. Single string keeps the JSON-schema scalar-friendly for the LLM.",
+          "title": "Coordinates"
+        },
+        "country": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Country the location belongs to (use ISO 3166 short name when known)",
+          "title": "Country"
+        }
+      },
+      "required": [],
+      "subtypes": [
+        "address",
+        "city",
+        "coordinates",
+        "country",
+        "landmark",
+        "region"
+      ]
+    },
+    "object": {
+      "description": "A physical or digital object (vehicle, phone, document, device, etc.).",
+      "properties": {
+        "aliases": {
+          "description": "Alternative names or labels for the object",
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "External identifier (license plate, IMEI, URL, etc.)",
+          "title": "Identifier"
+        },
+        "make": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Manufacturer or brand of the object",
+          "title": "Make"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model name or version of the object",
+          "title": "Model"
+        },
+        "serial_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Serial number or other unique-per-instance identifier",
+          "title": "Serial Number"
+        }
+      },
+      "required": [],
+      "subtypes": [
+        "device",
+        "document",
+        "email",
+        "phone",
+        "project",
+        "software",
+        "task",
+        "topic",
+        "vehicle"
+      ]
+    },
+    "organization": {
+      "description": "An organization (company, nonprofit, government body, etc.).",
+      "properties": {
+        "aliases": {
+          "description": "Alternative names, acronyms, or trade names for the organization",
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "jurisdiction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Legal jurisdiction the organization is registered or operates in (e.g. 'Delaware, US', 'United Kingdom')",
+          "title": "Jurisdiction"
+        },
+        "registration_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Government or registry identifier (EIN, company number, etc.)",
+          "title": "Registration Number"
+        }
+      },
+      "required": [],
+      "subtypes": [
+        "company",
+        "educational",
+        "government",
+        "military",
+        "nonprofit",
+        "political",
+        "religious"
+      ]
+    },
+    "person": {
+      "description": "An individual person mentioned in or related to the content.",
+      "properties": {
+        "aliases": {
+          "description": "Alternative names, nicknames, or references to this person",
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "date_of_birth": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Date of birth in ISO 8601 format (YYYY-MM-DD)",
+          "title": "Date Of Birth"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Email address if known",
+          "title": "Email"
+        },
+        "nationality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Nationality or country of citizenship",
+          "title": "Nationality"
+        },
+        "occupation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Primary job, role, or profession",
+          "title": "Occupation"
+        }
+      },
+      "required": [],
+      "subtypes": [
+        "alias",
+        "individual",
+        "persona"
+      ]
+    },
+    "preference": {
+      "description": "A preference, opinion, or pattern exhibited by a person.",
+      "properties": {
+        "content": {
+          "description": "Description of the preference",
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ]
+    }
+  }
+}

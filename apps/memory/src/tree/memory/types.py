@@ -23,13 +23,20 @@ class ExtractedNode(BaseModel):
 
 
 class ExtractedEdge(BaseModel):
-    """An edge extracted by the LLM (before persistence)."""
+    """An edge extracted by the LLM (before persistence).
+
+    Phase-3 #029: ``semantic_type`` carries the discriminator for the
+    new ``related_to`` umbrella edge. Required on every ``related_to``
+    row, ``None`` on every other edge type — enforced again by the
+    :class:`KnowledgeGraphEntry` model validator at write time.
+    """
 
     source_node_id: str
     source_type: NodeType
     target_node_id: str
     target_type: NodeType
     type: EdgeType
+    semantic_type: str | None = None
     properties: dict[str, Any] = {}
     chunk_id: str = ""
 

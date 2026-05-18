@@ -61,9 +61,16 @@ class NodeType(StrEnum):
 
 
 class EdgeType(StrEnum):
-    """Backward-compat shim built from ``EDGE_REGISTRY`` (#027).
+    """Backward-compat shim built from ``EDGE_REGISTRY`` (#027, refactored #029).
 
-    Same migration plan as :class:`NodeType`.
+    #029 collapsed the LLM-extractable domain edges ``todo`` and
+    ``experienced`` into the ``related_to`` umbrella discriminated by
+    ``semantic_type``. The enum members are GONE — code that used to
+    write ``EdgeType.TODO`` / ``EdgeType.EXPERIENCED`` now writes
+    ``EdgeType.RELATED_TO`` with ``semantic_type="has_task"`` or
+    ``"experienced_by"`` respectively. There is no legacy alias because
+    the wire shape changes: keeping a dead enum member would let
+    callers silently emit edges the validator now rejects.
     """
 
     PART_OF = "part_of"
@@ -71,8 +78,6 @@ class EdgeType(StrEnum):
     MENTIONS = "mentions"
     REFERENCED = "referenced"
     RELATED_TO = "related_to"
-    TODO = "todo"
-    EXPERIENCED = "experienced"
     HAS = "has"
     SAME_AS = "same_as"
 
@@ -173,6 +178,13 @@ class KnowledgeGraphEntry(BeanieDocument):
     source_type: NodeType | None = None
     target_node_id: str | None = None
     target_type: NodeType | None = None
+    # #029: ``semantic_type`` discriminates the new ``related_to`` umbrella
+    # edge. Required on every ``type="related_to"`` row (validated below);
+    # MUST be ``None`` on every other edge type. The compound index
+    # ``(user_id, type, semantic_type)`` declared in ``Settings.indexes``
+    # is partial-filtered on ``semantic_type``, so only ``related_to``
+    # rows pay the index cost.
+    semantic_type: str | None = None
     # Provenance
     sources: list[PydanticObjectId] = Field(default_factory=list)
 
@@ -300,6 +312,88 @@ class KnowledgeGraphEntry(BeanieDocument):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_related_to_semantic(self) -> "KnowledgeGraphEntry":
+        """Phase-3 #029: enforce ``related_to`` umbrella semantics.
+
+        Contract (per the task spec):
+
+        * ``kind="edge", type="related_to"`` rows MUST set
+          ``semantic_type`` to a registered ``RELATION_SEMANTICS``
+          name, AND ``(source_type.value, target_type.value)`` MUST
+          appear in that semantic's ``allowed_pairs``.
+        * Any other edge row MUST leave ``semantic_type`` as ``None``
+          — silently allowing it to be set on, say, a ``mentions`` row
+          would let one row be indexed under the umbrella index and
+          another under the legacy index, splitting reads.
+        * Node rows pass through unchanged.
+
+        Pair lookup uses the **parent** type names (``source_type`` /
+        ``target_type`` always carry parent names — subtypes live on
+        the node row, not the edge row). Edges that violate the
+        contract raise ``ValueError`` so the extraction-write path's
+        try/except can drop them and audit-log the rejection (the
+        ``extraction_rejections`` collection lands in #030).
+        """
+
+        if self.kind != "edge":
+            return self
+
+        from tree.entities.ontology import RELATION_SEMANTICS
+
+        if self.type == "related_to":
+            if self.semantic_type is None:
+                raise ValueError(
+                    "kind='edge' type='related_to' requires a "
+                    "non-None 'semantic_type'. Known semantics: "
+                    f"{sorted(RELATION_SEMANTICS)}"
+                )
+            spec = RELATION_SEMANTICS.get(self.semantic_type)
+            if spec is None:
+                raise ValueError(
+                    f"semantic_type {self.semantic_type!r} is not a "
+                    f"registered relation semantic. Known: "
+                    f"{sorted(RELATION_SEMANTICS)}"
+                )
+            src = self.source_type.value if self.source_type is not None else None
+            tgt = self.target_type.value if self.target_type is not None else None
+            if (src, tgt) not in spec.allowed_pairs:
+                raise ValueError(
+                    f"related_to[semantic_type={self.semantic_type!r}] "
+                    f"does not allow pair ({src!r}, {tgt!r}); "
+                    f"allowed pairs: {spec.allowed_pairs}"
+                )
+            return self
+
+        # Non-related_to edge: semantic_type MUST be None.
+        if self.semantic_type is not None:
+            raise ValueError(
+                f"semantic_type is reserved for type='related_to' edges; "
+                f"got type={self.type!r} with "
+                f"semantic_type={self.semantic_type!r}"
+            )
+
+        # Enforce ``EdgeTypeSpec.allowed_pairs`` strictly for every
+        # other registered edge type so the broadened ``mentions`` and
+        # ``same_as`` constraints — and the narrowed ``has`` — are
+        # write-time constraints, not just LLM-prompt advisories
+        # (per #029's "strict-by-omission" policy).
+        from tree.entities.ontology import EDGE_REGISTRY
+
+        spec = EDGE_REGISTRY.get(self.type)
+        if spec is None:
+            # Already rejected by ``_check_type_against_registry``; safe
+            # to fall through.
+            return self
+        src = self.source_type.value if self.source_type is not None else None
+        tgt = self.target_type.value if self.target_type is not None else None
+        if (src, tgt) not in spec.allowed_pairs:
+            raise ValueError(
+                f"edge type {self.type!r} does not allow pair ({src!r}, "
+                f"{tgt!r}); allowed pairs: {spec.allowed_pairs}"
+            )
+        return self
+
     class Settings:
         name = "knowledge_graph"
         indexes = [
@@ -325,5 +419,15 @@ class KnowledgeGraphEntry(BeanieDocument):
             IndexModel(
                 [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)],
                 name="user_kind_type_subtype",
+            ),
+            # #029: partial index for the ``related_to`` umbrella edge.
+            # Filtered on ``semantic_type`` non-null so only the new
+            # umbrella rows pay the maintenance cost; queries like
+            # ``find_edges(type='related_to', semantic_type='employed_by')``
+            # land on this index prefix.
+            IndexModel(
+                [("user_id", 1), ("type", 1), ("semantic_type", 1)],
+                name="user_type_semantic_type",
+                partialFilterExpression={"semantic_type": {"$type": "string"}},
             ),
         ]

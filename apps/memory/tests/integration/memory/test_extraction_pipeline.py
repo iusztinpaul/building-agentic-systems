@@ -486,13 +486,20 @@ class TestRewiredNormalizeNodesScenarios:
         with prefect_tags("tests"):
             await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
 
+        # Post-#029: legacy ``todo`` LLM emissions re-route to
+        # ``related_to + semantic_type='has_task'``; endpoint type
+        # also re-routes from ``task`` to ``object``.
         _, edge_entries = await _kg_entries(mongo_client, doc.id)
-        todo_edges = [e for e in edge_entries if e["type"] == EdgeType.TODO]
-        assert len(todo_edges) == 1
+        related_to_edges = [
+            e
+            for e in edge_entries
+            if e["type"] == EdgeType.RELATED_TO and e.get("semantic_type") == "has_task"
+        ]
+        assert len(related_to_edges) == 1
         ph = user.id
         assert (
-            todo_edges[0]["_id"]
-            == f"{ph}:person:alice|{EdgeType.TODO}|{ph}:task:build ml pipeline"
+            related_to_edges[0]["_id"]
+            == f"{ph}:person:alice|{EdgeType.RELATED_TO}|{ph}:object:build ml pipeline"
         )
 
 

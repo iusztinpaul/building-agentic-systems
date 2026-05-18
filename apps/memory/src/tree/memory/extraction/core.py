@@ -36,6 +36,7 @@ from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
     LLM_EXTRACTABLE_EDGE_TYPES,
     LLM_EXTRACTABLE_NODE_TYPES,
+    RELATION_SEMANTICS,
     get_ontology_schema,
 )
 from tree.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
@@ -115,6 +116,7 @@ the output schema.
       "target_node_id": "<name of target node>",
       "target_type": "<node type of target>",
       "type": "<edge type from ontology>",
+      "semantic_type": "<one of the `semantic_types` keys when type=related_to, else null>",
       "properties": {{}}
     }}
   ]
@@ -128,6 +130,12 @@ Rules:
   `subtype` field. When the type has no `subtypes` array, omit `subtype`
   (or set it to null).
 - Respect edge constraints (source_type → target_type).
+- For `related_to` edges (the umbrella domain-relation edge), you MUST
+  set `semantic_type` to one of the keys under `edge_types.related_to.semantic_types`
+  in the ontology. The `(source_type, target_type)` pair MUST appear in
+  that semantic's `allowed_pairs`. Use the semantic's `properties` schema
+  to populate the edge's `properties`.
+- For every other edge type, omit `semantic_type` (or set it to null).
 - If no entities or relationships are found, return empty lists.
 """
 
@@ -207,40 +215,104 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
 
     edges: list[ExtractedEdge] = []
     for e in raw.get("edges", []):
+        raw_type = e.get("type")
+        if raw_type is None:
+            logger.warning("Skipping edge with missing type: %s", e)
+            continue
+
+        # #029: re-route legacy LLM emissions ``todo`` / ``experienced``
+        # to the new umbrella shape. The prompt no longer asks for
+        # those types — this branch keeps the parser tolerant of older
+        # prompts and cached examples during the staging window.
+        legacy_semantic: str | None = None
+        if raw_type == "todo":
+            raw_type = "related_to"
+            legacy_semantic = "has_task"
+        elif raw_type == "experienced":
+            raw_type = "related_to"
+            legacy_semantic = "experienced_by"
+
         try:
-            edge_type = EdgeType(e["type"])
-        except KeyError, ValueError:
+            edge_type = EdgeType(raw_type)
+        except ValueError:
             logger.warning("Skipping edge with invalid type: %s", e)
             continue
         if edge_type not in LLM_EXTRACTABLE_EDGE_TYPES:
             logger.warning("Skipping non-extractable edge type: %s", edge_type)
             continue
 
-        # Edge endpoints from older prompts may still name the legacy
-        # top-level types — keep the lookup tolerant. The per-pair
-        # constraint check below uses the (now-legacy) ``EdgeConstraint``
-        # entries which still reference ``NodeType.TASK`` / ``EPISODE``
-        # for ``todo`` / ``experienced`` / ``same_as`` (#029 collapses
-        # those into ``related_to``).
-        constraints = EDGE_CONSTRAINTS[edge_type]
         try:
-            src_type = NodeType(e["source_type"])
-            tgt_type = NodeType(e["target_type"])
-        except KeyError, ValueError:
+            src_type_value = e["source_type"]
+            tgt_type_value = e["target_type"]
+        except KeyError:
+            logger.warning("Skipping edge with missing endpoint types: %s", e)
+            continue
+
+        # #029: re-route legacy endpoint types ``task`` / ``episode``
+        # to the new POLE+O parents now that those types no longer
+        # exist as top-level node types.
+        if src_type_value == "task":
+            src_type_value = "object"
+        elif src_type_value == "episode":
+            src_type_value = "event"
+        if tgt_type_value == "task":
+            tgt_type_value = "object"
+        elif tgt_type_value == "episode":
+            tgt_type_value = "event"
+
+        try:
+            src_type = NodeType(src_type_value)
+            tgt_type = NodeType(tgt_type_value)
+        except ValueError:
             logger.warning("Skipping edge with invalid node types: %s", e)
             continue
 
-        if not any(
-            src_type == c.source_type and tgt_type == c.target_type for c in constraints
-        ):
-            logger.warning(
-                "Edge %s violates constraint (expected one of %s, got %s→%s)",
-                edge_type,
-                [(c.source_type, c.target_type) for c in constraints],
-                src_type,
-                tgt_type,
-            )
-            continue
+        # Resolve semantic_type for ``related_to`` rows. Legacy
+        # rewrites already populated ``legacy_semantic``; the prompt
+        # surfaces the field as ``semantic_type``.
+        semantic_type = legacy_semantic or e.get("semantic_type")
+
+        # Per-semantic constraint check for ``related_to``. Constraints
+        # for the other edges fall through to the umbrella check below.
+        if edge_type == EdgeType.RELATED_TO:
+            if not isinstance(semantic_type, str) or not semantic_type:
+                logger.warning(
+                    "Skipping related_to edge with missing semantic_type: %s", e
+                )
+                continue
+            spec = RELATION_SEMANTICS.get(semantic_type)
+            if spec is None:
+                logger.warning(
+                    "Skipping related_to edge with unknown semantic_type=%r: %s",
+                    semantic_type,
+                    e,
+                )
+                continue
+            if (src_type.value, tgt_type.value) not in spec.allowed_pairs:
+                logger.warning(
+                    "related_to[%s] disallows pair (%s, %s); allowed=%s",
+                    semantic_type,
+                    src_type.value,
+                    tgt_type.value,
+                    spec.allowed_pairs,
+                )
+                continue
+        else:
+            constraints = EDGE_CONSTRAINTS.get(edge_type, [])
+            if not any(
+                src_type == c.source_type and tgt_type == c.target_type
+                for c in constraints
+            ):
+                logger.warning(
+                    "Edge %s violates constraint (expected one of %s, got %s→%s)",
+                    edge_type,
+                    [(c.source_type, c.target_type) for c in constraints],
+                    src_type,
+                    tgt_type,
+                )
+                continue
+            # Non-related_to edges must NOT carry a semantic_type.
+            semantic_type = None
 
         edges.append(
             ExtractedEdge(
@@ -249,6 +321,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
                 target_node_id=str(e.get("target_node_id", "")).lower().strip(),
                 target_type=tgt_type,
                 type=edge_type,
+                semantic_type=semantic_type,
                 properties=e.get("properties", {}),
             )
         )
@@ -478,6 +551,11 @@ async def upsert_graph_entries(
                             "user_id": user_id,
                             "kind": "edge",
                             "type": edge.type.value,
+                            # #029: persist ``semantic_type`` on every edge
+                            # row (None for non-related_to). The partial
+                            # index ``user_type_semantic_type`` only
+                            # indexes non-null rows.
+                            "semantic_type": edge.semantic_type,
                             "source_node_id": src_id,
                             "source_type": edge.source_type.value,
                             "target_node_id": tgt_id,

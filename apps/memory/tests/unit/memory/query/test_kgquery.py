@@ -148,14 +148,16 @@ class TestFindNeighbors:
         assert call_filter["kind"] == "edge"
 
     async def test_edge_type_filter_applied(self, mocker) -> None:
+        # Post-#029 ``EdgeType.TODO`` is gone; the umbrella ``RELATED_TO``
+        # replaces it (semantic discrimination via ``semantic_type``).
         find_mock = _patch_find(mocker, return_value=[])
         await KGQuery(_USER_A).find_neighbors(
             "xyz:person:alice",
-            edge_types=[EdgeType.TODO, EdgeType.MENTIONS],
+            edge_types=[EdgeType.RELATED_TO, EdgeType.MENTIONS],
             max_hops=1,
         )
         call_filter = find_mock.call_args.args[0]
-        assert call_filter["type"] == {"$in": ["todo", "mentions"]}
+        assert call_filter["type"] == {"$in": ["related_to", "mentions"]}
 
 
 class TestUserIdValidation:

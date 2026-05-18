@@ -102,6 +102,10 @@ _ALLOWLIST: frozenset[str] = frozenset(
         "scripts/query_graph.py",  # CLI: every find() carries user_id
         "scripts/demo_graphrag.py",  # throwaway exploration; not prod.
         "scripts/test_mongodb_setup.py",  # smoke test on test_twin_assets, not KG.
+        # One-shot operator smoke for the #029 ``related_to`` umbrella.
+        # The single ``coll.find`` carries ``user_id`` AND ``sources``;
+        # it's an audited read on the seed user.
+        "scripts/smoke_029_live_extraction.py",
     }
 )
 

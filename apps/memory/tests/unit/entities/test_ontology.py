@@ -34,16 +34,24 @@ from tree.entities.ontology import (
     LLM_EXTRACTABLE_NODE_TYPES,
     NODE_PROPERTIES,
     NODE_REGISTRY,
+    RELATION_SEMANTICS,
     STRUCTURAL_EDGE_TYPES,
     SUBTYPE_EXTRAS,
     EdgeTypeSpec,
+    EmployedByProperties,
+    MentionsProperties,
     NodeTypeSpec,
     PersonProperties,
+    RelationSemanticSpec,
+    SameAsMatchType,
+    SameAsProperties,
+    SameAsStatus,
     SubtypeSpec,
     get_ontology_schema,
     register_edge_type,
     register_node_subtype,
     register_node_type,
+    register_relation_semantic,
 )
 
 
@@ -51,7 +59,7 @@ from tree.entities.ontology import (
 # fields added on every closed-vocab parent; ``task`` / ``episode`` no longer
 # top-level), so the v1 snapshot from #027 is superseded by v2. The v1
 # snapshot is kept on disk for historical-diff review but no test reads it.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v2.json"
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v3.json"
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +76,7 @@ def registry_snapshot():
     node_snapshot = dict(NODE_REGISTRY)
     edge_snapshot = dict(EDGE_REGISTRY)
     extras_snapshot = dict(SUBTYPE_EXTRAS)
+    semantics_snapshot = dict(RELATION_SEMANTICS)
     yield
     NODE_REGISTRY.clear()
     NODE_REGISTRY.update(node_snapshot)
@@ -75,6 +84,8 @@ def registry_snapshot():
     EDGE_REGISTRY.update(edge_snapshot)
     SUBTYPE_EXTRAS.clear()
     SUBTYPE_EXTRAS.update(extras_snapshot)
+    RELATION_SEMANTICS.clear()
+    RELATION_SEMANTICS.update(semantics_snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +303,15 @@ class TestRetrofitRegistries:
             "preference",
         }
 
-    def test_edge_registry_has_exactly_the_nine_legacy_types(self):
-        # Untouched in #028 — the edge collapse lands in #029.
+    def test_edge_registry_has_post_029_edge_types(self):
+        # #029 collapsed ``todo`` / ``experienced`` into the
+        # ``related_to`` umbrella, so the registry now holds 7 edges.
         assert set(EDGE_REGISTRY) == {
             "part_of",
             "next",
             "mentions",
             "referenced",
             "related_to",
-            "todo",
-            "experienced",
             "has",
             "same_as",
         }
@@ -320,20 +330,19 @@ class TestRetrofitRegistries:
             NodeType.PREFERENCE,
         }
 
-    def test_llm_extractable_edge_types_unchanged(self):
-        assert LLM_EXTRACTABLE_EDGE_TYPES == {
-            EdgeType.RELATED_TO,
-            EdgeType.TODO,
-            EdgeType.EXPERIENCED,
-            EdgeType.HAS,
-        }
+    def test_llm_extractable_edge_types_post_029(self):
+        # #029: ``todo`` / ``experienced`` retired into ``related_to``;
+        # ``has`` is now structural (pipeline-emitted, never LLM).
+        assert LLM_EXTRACTABLE_EDGE_TYPES == {EdgeType.RELATED_TO}
 
-    def test_structural_edge_types_unchanged(self):
+    def test_structural_edge_types_post_029(self):
+        # ``has`` joins the structural set after #029.
         assert STRUCTURAL_EDGE_TYPES == {
             EdgeType.PART_OF,
             EdgeType.NEXT,
             EdgeType.MENTIONS,
             EdgeType.REFERENCED,
+            EdgeType.HAS,
             EdgeType.SAME_AS,
         }
 
@@ -372,16 +381,20 @@ class TestBackwardCompatViews:
         for edge_type in EdgeType:
             assert edge_type in EDGE_CONSTRAINTS, f"Missing constraint for {edge_type}"
 
-    def test_same_as_constraints_cover_all_four_self_pairs(self):
-        # ``same_as`` allowed_pairs are unchanged in #028 — the legacy
-        # pre-POLE+O pair list still applies (task↔task / episode↔episode
-        # carry over until #029 collapses these into ``related_to``).
+    def test_same_as_constraints_cover_post_029_pole_o_self_pairs(self):
+        # #029: ``same_as`` broadened from the legacy 4-pair set to
+        # every POLE+O LLM-extractable type (self-pair only). The
+        # legacy task↔task / episode↔episode pairs are GONE — task and
+        # episode now live as node subtypes and never carry their own
+        # ``same_as`` edge.
         same_as = EDGE_CONSTRAINTS[EdgeType.SAME_AS]
         pairs = {(c.source_type.value, c.target_type.value) for c in same_as}
         assert pairs == {
             ("person", "person"),
-            ("task", "task"),
-            ("episode", "episode"),
+            ("organization", "organization"),
+            ("location", "location"),
+            ("event", "event"),
+            ("object", "object"),
             ("preference", "preference"),
         }
 
@@ -425,18 +438,22 @@ class TestEnumShim:
             assert hasattr(NodeType, name)
 
     def test_edge_type_exports_every_legacy_member(self):
+        # Post-#029: ``TODO`` and ``EXPERIENCED`` are gone (collapsed
+        # into ``RELATED_TO + semantic_type``).
         for name in [
             "PART_OF",
             "NEXT",
             "MENTIONS",
             "REFERENCED",
             "RELATED_TO",
-            "TODO",
-            "EXPERIENCED",
             "HAS",
             "SAME_AS",
         ]:
             assert hasattr(EdgeType, name)
+        for retired in ["TODO", "EXPERIENCED"]:
+            assert not hasattr(EdgeType, retired), (
+                f"EdgeType.{retired} must be retired per #029"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -473,11 +490,43 @@ class TestGetOntologySchema:
             assert "description" in info
 
     def test_edge_schema_has_constraints(self):
+        # Post-#029: the per-edge schema carries ``allowed_pairs``
+        # (list of [src, tgt] pairs) and, for ``related_to``, a
+        # nested ``semantic_types`` map. The legacy single
+        # ``source_type``/``target_type`` is gone.
         schema = get_ontology_schema()
 
         for edge_type, info in schema["edge_types"].items():
-            assert "source_type" in info, f"Missing source_type for {edge_type}"
-            assert "target_type" in info, f"Missing target_type for {edge_type}"
+            assert "allowed_pairs" in info, f"Missing allowed_pairs for {edge_type}"
+            assert "description" in info, f"Missing description for {edge_type}"
+
+    def test_related_to_schema_has_semantic_types_map(self):
+        schema = get_ontology_schema()
+        rt = schema["edge_types"]["related_to"]
+        assert "semantic_types" in rt
+        semantic_keys = set(rt["semantic_types"].keys())
+        assert semantic_keys == {
+            "knows",
+            "member_of",
+            "employed_by",
+            "owns",
+            "uses",
+            "located_at",
+            "resides_at",
+            "headquarters_at",
+            "participated_in",
+            "occurred_at",
+            "involved",
+            "subsidiary_of",
+            "partner_with",
+            "alias_of",
+            "has_task",
+            "experienced_by",
+        }
+        # Per-semantic blocks carry their own description + allowed_pairs.
+        for semantic, info in rt["semantic_types"].items():
+            assert "description" in info, f"semantic {semantic} missing description"
+            assert "allowed_pairs" in info, f"semantic {semantic} missing allowed_pairs"
 
     def test_matches_golden_snapshot(self):
         """Pinning test: the current ``get_ontology_schema()`` output
@@ -836,3 +885,255 @@ class TestRegisterNodeSubtypeFailureModes:
 
         register_node_subtype("conflictparent", "child", extra_properties=_ExtrasV2)
         assert SUBTYPE_EXTRAS[("conflictparent", "child")] is _ExtrasV2
+
+
+# ---------------------------------------------------------------------------
+# 10. #029 — RELATION_SEMANTICS catalogue + register_relation_semantic
+# ---------------------------------------------------------------------------
+
+
+# Canonical (allowed_pairs, properties_schema-is-None) for the 16 entries.
+# Pinned here so a regression in the catalogue table fails loudly.
+_EXPECTED_SEMANTICS: dict[str, tuple[set[tuple[str, str]], bool]] = {
+    # name -> (allowed_pairs, has_properties_schema)
+    "knows": ({("person", "person")}, False),
+    "member_of": ({("person", "organization")}, True),
+    "employed_by": ({("person", "organization")}, True),
+    "owns": ({("person", "object"), ("organization", "object")}, True),
+    "uses": ({("person", "object"), ("organization", "object")}, False),
+    "located_at": ({("object", "location"), ("event", "location")}, True),
+    "resides_at": ({("person", "location")}, True),
+    "headquarters_at": ({("organization", "location")}, False),
+    "participated_in": ({("person", "event"), ("organization", "event")}, True),
+    "occurred_at": ({("event", "location")}, False),
+    "involved": ({("object", "event")}, True),
+    "subsidiary_of": ({("organization", "organization")}, False),
+    "partner_with": ({("organization", "organization")}, False),
+    "alias_of": (
+        {
+            ("person", "person"),
+            ("organization", "organization"),
+            ("location", "location"),
+            ("event", "event"),
+            ("object", "object"),
+        },
+        False,
+    ),
+    # Tree extensions
+    "has_task": ({("person", "object")}, True),
+    "experienced_by": ({("person", "event")}, True),
+}
+
+
+class TestRelationSemanticsCatalogue:
+    """The 16-entry semantic catalogue + per-spec invariants."""
+
+    def test_catalogue_has_16_entries(self):
+        assert set(RELATION_SEMANTICS) == set(_EXPECTED_SEMANTICS)
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        list(_EXPECTED_SEMANTICS.items()),
+        ids=list(_EXPECTED_SEMANTICS),
+    )
+    def test_each_semantic_has_expected_shape(self, name, expected):
+        expected_pairs, has_props = expected
+        spec = RELATION_SEMANTICS[name]
+        assert set(spec.allowed_pairs) == expected_pairs
+        assert (spec.properties_schema is not None) == has_props
+        assert spec.description, f"semantic {name!r} missing description"
+
+    def test_relation_semantic_spec_is_frozen(self):
+        spec = RelationSemanticSpec(name="x", allowed_pairs=[("a", "b")])
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            spec.name = "y"  # type: ignore[misc]
+
+    def test_every_property_schema_has_field_descriptions(self):
+        # Every per-semantic Pydantic model must carry Field(description=...)
+        # on every attribute so the LLM has context.
+        for name, spec in RELATION_SEMANTICS.items():
+            if spec.properties_schema is None:
+                continue
+            schema = spec.properties_schema.model_json_schema()
+            properties = schema.get("properties", {})
+            assert properties, f"{name} properties_schema has no fields"
+            for field_name, field_info in properties.items():
+                assert field_info.get("description"), (
+                    f"{name}.{field_name} is missing Field(description=...)"
+                )
+
+
+class TestRegisterRelationSemantic:
+    def test_registers_new_semantic(self, registry_snapshot):
+        spec = RelationSemanticSpec(
+            name="testsemantic",
+            allowed_pairs=[("person", "person")],
+            description="Test.",
+        )
+        register_relation_semantic(spec)
+        assert RELATION_SEMANTICS["testsemantic"] is spec
+
+    def test_idempotent_on_identical_re_registration(self, registry_snapshot):
+        spec = RelationSemanticSpec(
+            name="testsemantic",
+            allowed_pairs=[("person", "person")],
+            description="Test.",
+        )
+        register_relation_semantic(spec)
+        register_relation_semantic(
+            RelationSemanticSpec(
+                name="testsemantic",
+                allowed_pairs=[("person", "person")],
+                description="Test.",
+            )
+        )
+        assert RELATION_SEMANTICS["testsemantic"].description == "Test."
+
+    def test_conflicting_re_registration_raises(self, registry_snapshot):
+        register_relation_semantic(
+            RelationSemanticSpec(
+                name="testsemantic",
+                allowed_pairs=[("person", "person")],
+                description="Test.",
+            )
+        )
+        with pytest.raises(ValueError, match="conflicting re-registration"):
+            register_relation_semantic(
+                RelationSemanticSpec(
+                    name="testsemantic",
+                    allowed_pairs=[("organization", "organization")],
+                    description="Test.",
+                )
+            )
+
+
+class TestRelatedToUmbrellaEdge:
+    """The umbrella ``related_to`` edge spec is derived from the union
+    of every semantic's allowed_pairs (#029)."""
+
+    def test_related_to_allowed_pairs_is_union_of_semantics(self):
+        expected_union: set[tuple[str, str]] = set()
+        for spec in RELATION_SEMANTICS.values():
+            expected_union.update(spec.allowed_pairs)
+        assert set(EDGE_REGISTRY["related_to"].allowed_pairs) == expected_union
+
+    def test_related_to_remains_llm_extractable(self):
+        assert EDGE_REGISTRY["related_to"].llm_extractable is True
+
+    def test_only_related_to_is_llm_extractable(self):
+        # Post-#029 the only LLM-extractable domain edge is ``related_to``.
+        assert LLM_EXTRACTABLE_EDGE_TYPES == {EdgeType.RELATED_TO}
+
+
+class TestStructuralEdgePropertyModels:
+    """``MentionsProperties`` / ``SameAsProperties`` plus the
+    ``SameAsMatchType`` / ``SameAsStatus`` enums (#029)."""
+
+    def test_mentions_properties_defaults(self):
+        m = MentionsProperties()
+        assert m.confidence == 1.0
+        assert m.start_pos is None
+        assert m.end_pos is None
+
+    def test_mentions_properties_descriptions_present(self):
+        schema = MentionsProperties.model_json_schema()
+        for field in ("confidence", "start_pos", "end_pos"):
+            assert schema["properties"][field].get("description"), (
+                f"MentionsProperties.{field} missing description"
+            )
+
+    def test_same_as_properties_defaults(self):
+        s = SameAsProperties()
+        assert s.confidence == 1.0
+        assert s.match_type == SameAsMatchType.EMBEDDING
+        assert s.status == SameAsStatus.PENDING
+
+    def test_same_as_properties_round_trip(self):
+        s = SameAsProperties(
+            confidence=0.91,
+            match_type=SameAsMatchType.BOTH,
+            status=SameAsStatus.CONFIRMED,
+        )
+        dumped = s.model_dump()
+        rehydrated = SameAsProperties.model_validate(dumped)
+        assert rehydrated == s
+
+    def test_same_as_status_values(self):
+        assert SameAsStatus.PENDING == "pending"
+        assert SameAsStatus.CONFIRMED == "confirmed"
+        assert SameAsStatus.REJECTED == "rejected"
+
+    def test_same_as_match_type_values(self):
+        assert SameAsMatchType.EMBEDDING == "embedding"
+        assert SameAsMatchType.FUZZY == "fuzzy"
+        assert SameAsMatchType.BOTH == "both"
+
+    def test_employed_by_properties_round_trip(self):
+        # Pin the shared role+dates shape end-to-end.
+        e = EmployedByProperties(
+            role="staff engineer",
+            start_date="2024-03-01",
+            end_date=None,
+        )
+        rehydrated = EmployedByProperties.model_validate(e.model_dump())
+        assert rehydrated == e
+
+
+class TestMentionsBroadeningAndCarveOut:
+    """``mentions`` accepts every POLE+O LLM-extractable entity EXCEPT
+    preference (#029, ``plan.md:479``)."""
+
+    def test_mentions_allows_chunk_to_extractable_entities(self):
+        pairs = set(EDGE_REGISTRY["mentions"].allowed_pairs)
+        for tgt in ("person", "organization", "location", "event", "object"):
+            assert ("chunk", tgt) in pairs, f"missing (chunk, {tgt})"
+            assert ("document", tgt) in pairs, f"missing (document, {tgt})"
+
+    def test_mentions_carves_out_preference_target(self):
+        pairs = set(EDGE_REGISTRY["mentions"].allowed_pairs)
+        assert ("chunk", "preference") not in pairs
+        assert ("document", "preference") not in pairs
+
+    def test_mentions_properties_schema_attached(self):
+        assert EDGE_REGISTRY["mentions"].properties_schema is MentionsProperties
+
+    def test_mentions_is_structural_not_llm_extractable(self):
+        assert EDGE_REGISTRY["mentions"].llm_extractable is False
+
+
+class TestSameAsBroadening:
+    def test_same_as_allowed_pairs(self):
+        pairs = set(EDGE_REGISTRY["same_as"].allowed_pairs)
+        # Self-pair on every LLM-extractable POLE+O type (except fact).
+        assert pairs == {
+            ("person", "person"),
+            ("organization", "organization"),
+            ("location", "location"),
+            ("event", "event"),
+            ("object", "object"),
+            ("preference", "preference"),
+        }
+
+    def test_same_as_properties_schema_attached(self):
+        assert EDGE_REGISTRY["same_as"].properties_schema is SameAsProperties
+
+
+class TestHasEdgeStructural:
+    """#029: ``has`` survives as a structural edge with broadened pairs."""
+
+    def test_has_allowed_pairs_include_preference_and_object(self):
+        pairs = set(EDGE_REGISTRY["has"].allowed_pairs)
+        assert pairs == {("person", "preference"), ("person", "object")}
+
+    def test_has_is_structural_not_llm_extractable(self):
+        # Post-#029 ``has`` is pipeline-emitted, never LLM-extractable.
+        assert EDGE_REGISTRY["has"].llm_extractable is False
+
+
+class TestRetiredEdgeTypes:
+    """The retired LLM-extractable domain edges must be gone from the
+    registry."""
+
+    @pytest.mark.parametrize("retired", ["todo", "experienced"])
+    def test_retired_edge_not_in_registry(self, retired):
+        assert retired not in EDGE_REGISTRY

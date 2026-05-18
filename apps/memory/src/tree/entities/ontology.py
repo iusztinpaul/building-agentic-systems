@@ -65,7 +65,8 @@ type names.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -147,6 +148,37 @@ class SubtypeSpec:
     extra_properties: type[BaseModel] | None = None
 
 
+@dataclass(frozen=True)
+class RelationSemanticSpec:
+    """Declarative spec for one ``related_to`` semantic (#029).
+
+    Phase 3 #029 collapses the 14 POLE+O domain relations (plus Tree's
+    two extensions ``has_task`` / ``experienced_by``) into a single
+    ``related_to`` umbrella edge discriminated by a new
+    ``semantic_type`` column. Each ``RelationSemanticSpec`` describes
+    one such semantic.
+
+    Attributes:
+        name: snake_case identifier, e.g. ``"employed_by"``. Used as
+            the ``semantic_type`` string on every ``related_to`` row.
+        allowed_pairs: ``[(source_type_name, target_type_name), ...]``
+            using POLE+O **parent** type names (never subtypes). A
+            ``related_to`` edge with this ``semantic_type`` is only
+            accepted when ``(source.type, target.type)`` is in this
+            list.
+        properties_schema: Pydantic model describing the per-semantic
+            ``properties`` payload, or ``None`` when the semantic has
+            no typed properties (e.g. ``knows`` / ``alias_of``).
+        description: Human-readable description; surfaced to the LLM
+            in the prompt assembled by :func:`get_ontology_schema`.
+    """
+
+    name: str
+    allowed_pairs: list[tuple[str, str]] = field(default_factory=list)
+    properties_schema: type[BaseModel] | None = None
+    description: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Registries (mutable; populated at import time by the
 # ``register_*`` calls at the bottom of this module)
@@ -161,6 +193,10 @@ EDGE_REGISTRY: dict[str, EdgeTypeSpec] = {}
 # combine ``parent.properties_schema`` and
 # ``SUBTYPE_EXTRAS.get((parent, subtype))``.
 SUBTYPE_EXTRAS: dict[tuple[str, str], type[BaseModel]] = {}
+
+# #029: per-semantic specs for the ``related_to`` umbrella edge. Keyed
+# by ``semantic_type`` name (``"employed_by"``, ``"knows"`` ...).
+RELATION_SEMANTICS: dict[str, RelationSemanticSpec] = {}
 
 
 def register_node_type(spec: NodeTypeSpec) -> None:
@@ -249,6 +285,27 @@ def register_node_subtype(
     # description map in this task — #028 / #030 introduce that as part
     # of the subtype-aware prompt / validator wiring.
     _ = description  # accepted for forward-compatible signature
+
+
+def register_relation_semantic(spec: RelationSemanticSpec) -> None:
+    """Register a semantic for the ``related_to`` umbrella edge (#029).
+
+    Idempotent on identical re-registration; raises ``ValueError`` on
+    conflicting re-registration (same ``name`` but any field differs).
+    """
+
+    existing = RELATION_SEMANTICS.get(spec.name)
+    if existing is None:
+        RELATION_SEMANTICS[spec.name] = spec
+        return
+
+    if existing == spec:
+        return
+
+    raise ValueError(
+        "conflicting re-registration for relation semantic "
+        f"'{spec.name}': existing spec {existing!r}, new spec {spec!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +495,258 @@ class PreferenceProperties(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase-3 #029 — Structural edge property models
+# ---------------------------------------------------------------------------
+#
+# Typed property schemas for the structural ``mentions`` / ``same_as``
+# edges. Lenient field-level validation (drop a single bad property
+# without rejecting the whole edge) lands in #030; these models exist
+# now so the validator + LLM-prompt assembly can reference them.
+
+
+class MentionsProperties(BaseModel):
+    """Per-edge properties for the structural ``mentions`` edge (#029).
+
+    Carried by every ``mentions`` edge from a chunk / document to a
+    POLE+O entity. Defaults are deliberately permissive — extraction
+    code may write only ``confidence`` or omit the positions entirely.
+    """
+
+    confidence: float = Field(
+        default=1.0,
+        description=(
+            "Confidence the mention is a true reference, in [0.0, 1.0]. "
+            "Pipeline-generated mentions default to 1.0; downstream "
+            "extractors that emit weaker links can lower this."
+        ),
+    )
+    start_pos: int | None = Field(
+        default=None,
+        description=(
+            "Character offset of the mention's start within the chunk's "
+            "text, when known. None when the extractor cannot locate the "
+            "mention precisely."
+        ),
+    )
+    end_pos: int | None = Field(
+        default=None,
+        description=(
+            "Character offset of the mention's end within the chunk's text, when known."
+        ),
+    )
+
+
+class SameAsMatchType(StrEnum):
+    """How the dedup pipeline decided two nodes are the same entity.
+
+    Pinned as a closed enum so downstream consumers (review UI, audit
+    queries) can switch-statement on the value without string churn.
+    """
+
+    EMBEDDING = "embedding"
+    FUZZY = "fuzzy"
+    BOTH = "both"
+
+
+class SameAsStatus(StrEnum):
+    """Review lifecycle for a SAME_AS audit edge.
+
+    ``PENDING`` rows surface in the human-review queue; ``CONFIRMED``
+    rows have been merged; ``REJECTED`` rows are skipped on future
+    dedup passes (see ``tree.memory.extraction.dedup``'s reject-pair
+    filter).
+    """
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+
+
+class SameAsProperties(BaseModel):
+    """Per-edge properties for the structural ``same_as`` edge (#029).
+
+    Schema mirrors the dict-shaped payload the dedup pipeline (#010)
+    and the human-review surface (#014) already write today; pinning
+    it as a Pydantic model gives the #030 validator a concrete
+    target.
+    """
+
+    confidence: float = Field(
+        default=1.0,
+        description=(
+            "Best-scoring similarity (raw cosine for embedding, RapidFuzz "
+            "ratio in [0,1] for fuzzy, average of the two for ``both``). "
+            "Drives the review-queue sort order."
+        ),
+    )
+    match_type: SameAsMatchType = Field(
+        default=SameAsMatchType.EMBEDDING,
+        description=(
+            "Which dedup branch produced the candidate: embedding-only, "
+            "fuzzy-only, or both."
+        ),
+    )
+    status: SameAsStatus = Field(
+        default=SameAsStatus.PENDING,
+        description=(
+            "Review lifecycle. ``pending`` rows show up in the human-review "
+            "queue; ``confirmed`` rows have been merged; ``rejected`` rows "
+            "are excluded from future dedup passes."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 #029 — Per-semantic property models for ``related_to``
+# ---------------------------------------------------------------------------
+#
+# One ``*Properties`` model per ``RelationSemanticSpec`` that carries
+# typed properties. The semantic table at ``plan.md:227-242`` lists
+# each spec's properties verbatim — the models below mirror that
+# table. Semantics with no per-spec properties (``knows``,
+# ``alias_of``, ``headquarters_at``, ``occurred_at``, ``subsidiary_of``,
+# ``partner_with``, ``uses``) carry ``properties_schema=None``.
+
+
+class _EmploymentRoleDates(BaseModel):
+    """Shared shape for ``member_of`` / ``employed_by``.
+
+    Both semantics carry ``role`` + ``start_date`` / ``end_date``;
+    storing them as a base class keeps the model definitions DRY while
+    each consumer-facing class still has its own docstring.
+    """
+
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Role or title held during the relationship (e.g. 'senior "
+            "engineer', 'board member')."
+        ),
+    )
+    start_date: str | None = Field(
+        default=None,
+        description=(
+            "Start of the relationship in ISO 8601 (YYYY-MM-DD), or None "
+            "when the start is unknown / open-ended."
+        ),
+    )
+    end_date: str | None = Field(
+        default=None,
+        description=(
+            "End of the relationship in ISO 8601 (YYYY-MM-DD), or None "
+            "when the relationship is ongoing or the end is unknown."
+        ),
+    )
+
+
+class MemberOfProperties(_EmploymentRoleDates):
+    """Properties for ``related_to + semantic_type=member_of``."""
+
+
+class EmployedByProperties(_EmploymentRoleDates):
+    """Properties for ``related_to + semantic_type=employed_by``."""
+
+
+class OwnsProperties(BaseModel):
+    """Properties for ``related_to + semantic_type=owns``."""
+
+    acquisition_date: str | None = Field(
+        default=None,
+        description=(
+            "Date of ownership acquisition in ISO 8601 (YYYY-MM-DD), or "
+            "None when the date is unknown."
+        ),
+    )
+
+
+class _DateRangeProperties(BaseModel):
+    """Shared shape for ``located_at`` / ``resides_at`` — both carry an
+    optional ``from_date`` / ``to_date`` pair."""
+
+    from_date: str | None = Field(
+        default=None,
+        description=(
+            "Start of the period the relation held, in ISO 8601 (YYYY-MM-DD)."
+        ),
+    )
+    to_date: str | None = Field(
+        default=None,
+        description=(
+            "End of the period the relation held, in ISO 8601 "
+            "(YYYY-MM-DD), or None when the relation is current / "
+            "unknown."
+        ),
+    )
+
+
+class LocatedAtProperties(_DateRangeProperties):
+    """Properties for ``related_to + semantic_type=located_at``."""
+
+
+class ResidesAtProperties(_DateRangeProperties):
+    """Properties for ``related_to + semantic_type=resides_at``."""
+
+
+class ParticipatedInProperties(BaseModel):
+    """Properties for ``related_to + semantic_type=participated_in``."""
+
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Role the participant played in the event (e.g. 'speaker', "
+            "'attendee', 'organizer')."
+        ),
+    )
+
+
+class InvolvedProperties(BaseModel):
+    """Properties for ``related_to + semantic_type=involved`` (object → event)."""
+
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Role the object played in the event (e.g. 'weapon', "
+            "'evidence', 'collateral')."
+        ),
+    )
+
+
+class HasTaskProperties(BaseModel):
+    """Properties for the Tree extension ``has_task`` (person → object[task]).
+
+    Tree-only extension that re-routes the legacy ``EdgeType.TODO``
+    semantics into the POLE+O umbrella. Carries ``status`` so MCP /
+    UI consumers can filter ``pending`` vs ``done`` tasks without
+    cracking the object subtype.
+    """
+
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Lifecycle status of the task — e.g. 'pending', 'in_progress', "
+            "'done', 'cancelled'. None means unspecified."
+        ),
+    )
+
+
+class ExperiencedByProperties(BaseModel):
+    """Properties for the Tree extension ``experienced_by`` (person → event).
+
+    Tree-only extension that re-routes the legacy ``EdgeType.EXPERIENCED``
+    semantics into the POLE+O umbrella. The optional ``role`` mirrors
+    ``ParticipatedInProperties.role`` for shape-symmetry.
+    """
+
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Role the person played in the event (e.g. 'protagonist', "
+            "'witness'). None when unspecified."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Backward-compat helper type (kept for nl_query.py consumers)
 # ---------------------------------------------------------------------------
 
@@ -572,6 +881,247 @@ register_node_type(
 )
 
 
+# ---------------------------------------------------------------------------
+# #029 — Relation-semantics catalogue (16 entries)
+# ---------------------------------------------------------------------------
+#
+# 14 canonical POLE+O semantics (``plan.md:227-242``) plus 2 Tree
+# extensions (``has_task``, ``experienced_by``). Registered BEFORE the
+# umbrella ``related_to`` edge so its ``allowed_pairs`` can be
+# computed as the union of every spec's pairs.
+
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="knows",
+        allowed_pairs=[("person", "person")],
+        properties_schema=None,
+        description="Two persons know each other (acquaintance-grade link).",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="member_of",
+        allowed_pairs=[("person", "organization")],
+        properties_schema=MemberOfProperties,
+        description=(
+            "Person is a member of an organization (board, club, team). "
+            "Carries role + date range."
+        ),
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="employed_by",
+        allowed_pairs=[("person", "organization")],
+        properties_schema=EmployedByProperties,
+        description=(
+            "Person is employed by an organization. Carries role + date "
+            "range; the canonical Tree subtype for the resulting period "
+            "is event/employment."
+        ),
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="owns",
+        allowed_pairs=[
+            ("person", "object"),
+            ("organization", "object"),
+        ],
+        properties_schema=OwnsProperties,
+        description="A person or organization owns an object.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="uses",
+        allowed_pairs=[
+            ("person", "object"),
+            ("organization", "object"),
+        ],
+        properties_schema=None,
+        description="A person or organization uses an object (no transfer of ownership).",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="located_at",
+        allowed_pairs=[
+            ("object", "location"),
+            ("event", "location"),
+        ],
+        properties_schema=LocatedAtProperties,
+        description=(
+            "An object or event is located at a place (with optional date "
+            "range so the relation can describe historical placement)."
+        ),
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="resides_at",
+        allowed_pairs=[("person", "location")],
+        properties_schema=ResidesAtProperties,
+        description="A person resides at a location, with optional date range.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="headquarters_at",
+        allowed_pairs=[("organization", "location")],
+        properties_schema=None,
+        description="An organization's headquarters is at a location.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="participated_in",
+        allowed_pairs=[
+            ("person", "event"),
+            ("organization", "event"),
+        ],
+        properties_schema=ParticipatedInProperties,
+        description="A person or organization participated in an event.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="occurred_at",
+        allowed_pairs=[("event", "location")],
+        properties_schema=None,
+        description="An event occurred at a location (point-in-time anchor).",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="involved",
+        allowed_pairs=[("object", "event")],
+        properties_schema=InvolvedProperties,
+        description="An object was involved in an event (e.g. weapon, evidence).",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="subsidiary_of",
+        allowed_pairs=[("organization", "organization")],
+        properties_schema=None,
+        description="An organization is a subsidiary of another organization.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="partner_with",
+        allowed_pairs=[("organization", "organization")],
+        properties_schema=None,
+        description="Two organizations are in a partnership relation.",
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="alias_of",
+        allowed_pairs=[
+            ("person", "person"),
+            ("organization", "organization"),
+            ("location", "location"),
+            ("event", "event"),
+            ("object", "object"),
+        ],
+        properties_schema=None,
+        description=(
+            "Surface form is an alias for the target. Distinct from "
+            "structural ``same_as`` (which is the dedup-confirmed merge "
+            "edge) — ``alias_of`` is LLM-extractable narrative."
+        ),
+    )
+)
+
+# --- Tree extensions (per the task spec). Not canonical POLE+O. ---
+
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="has_task",
+        allowed_pairs=[("person", "object")],
+        properties_schema=HasTaskProperties,
+        description=(
+            "Tree extension: a person has a task (object with subtype "
+            "``task``). Re-routes the legacy ``EdgeType.TODO`` semantics "
+            "into the POLE+O umbrella so the LLM emits a single "
+            "``related_to`` edge type."
+        ),
+    )
+)
+register_relation_semantic(
+    RelationSemanticSpec(
+        name="experienced_by",
+        allowed_pairs=[("person", "event")],
+        properties_schema=ExperiencedByProperties,
+        description=(
+            "Tree extension: a person experienced an event (commonly an "
+            "event with subtype ``episode``). Re-routes the legacy "
+            "``EdgeType.EXPERIENCED`` semantics."
+        ),
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Built-in edge registrations
+# ---------------------------------------------------------------------------
+
+
+# Compute the union of every semantic's allowed_pairs for ``related_to``.
+# Deduplicated + sorted so the registry view is stable across runs.
+def _related_to_allowed_pairs() -> list[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for spec in RELATION_SEMANTICS.values():
+        pairs.update(spec.allowed_pairs)
+    return sorted(pairs)
+
+
+# POLE+O LLM-extractable node types — the targets that ``mentions`` and
+# ``same_as`` accept after #029's broadening. Derived from the registry
+# (rather than hard-coded) so a future #031 ``fact`` registration that
+# adds ``llm_extractable=True`` would NOT silently slip into ``mentions``
+# — the carve-out below is explicit.
+def _pole_o_llm_extractable_for_mentions() -> list[str]:
+    """Targets the ``mentions`` edge accepts (carve-out per ``plan.md:479``).
+
+    ``preference`` is excluded because preferences attach only to
+    ``person:self`` via the structural ``has`` edge, not via chunk
+    mentions. ``fact`` (lands in #031) is also excluded — encoding the
+    carve-out now keeps #031's surface area small.
+    """
+
+    out: list[str] = []
+    for name in sorted(NODE_REGISTRY):
+        spec = NODE_REGISTRY[name]
+        if not spec.llm_extractable:
+            continue
+        if name in {"preference", "fact"}:
+            continue
+        out.append(name)
+    return out
+
+
+def _pole_o_llm_extractable_for_same_as() -> list[str]:
+    """Source/target type for ``same_as`` (self-pair only).
+
+    Includes ``preference`` (a confirmed merge between two preference
+    rows is a legitimate dedup outcome) but excludes ``fact`` (island
+    rule per #031). All other LLM-extractable POLE+O types qualify.
+    """
+
+    out: list[str] = []
+    for name in sorted(NODE_REGISTRY):
+        spec = NODE_REGISTRY[name]
+        if not spec.llm_extractable:
+            continue
+        if name == "fact":
+            continue
+        out.append(name)
+    return out
+
+
 register_edge_type(
     EdgeTypeSpec(
         name="part_of",
@@ -592,12 +1142,19 @@ register_edge_type(
     )
 )
 
+# #029: ``mentions`` is broadened from (document, person) to
+# {chunk, document} → every POLE+O LLM-extractable type EXCEPT
+# preference (carve-out per ``plan.md:479``).
 register_edge_type(
     EdgeTypeSpec(
         name="mentions",
-        allowed_pairs=[("document", "person")],
-        properties_schema=None,
-        description="Document mentions a person",
+        allowed_pairs=[
+            (src, tgt)
+            for src in ("chunk", "document")
+            for tgt in _pole_o_llm_extractable_for_mentions()
+        ],
+        properties_schema=MentionsProperties,
+        description="A chunk or document mentions a POLE+O entity (except preference).",
         llm_extractable=False,
     )
 )
@@ -612,60 +1169,55 @@ register_edge_type(
     )
 )
 
+# #029: ``related_to`` is now the LLM-extractable umbrella edge. Its
+# allowed_pairs are the union of every RELATION_SEMANTICS spec's
+# allowed_pairs. The per-semantic constraint (``semantic_type`` ∈ registry
+# AND (source.type, target.type) ∈ spec.allowed_pairs) is enforced by
+# the ``KnowledgeGraphEntry`` model validator.
 register_edge_type(
     EdgeTypeSpec(
         name="related_to",
-        allowed_pairs=[("person", "person")],
+        allowed_pairs=_related_to_allowed_pairs(),
         properties_schema=None,
-        description="Two people are related or connected",
+        description=(
+            "Umbrella edge for the 14 POLE+O domain relations (+ Tree "
+            "extensions). Discriminated by ``semantic_type``."
+        ),
         llm_extractable=True,
     )
 )
 
-register_edge_type(
-    EdgeTypeSpec(
-        name="todo",
-        allowed_pairs=[("person", "task")],
-        properties_schema=None,
-        description="Person has a task or project to do",
-        llm_extractable=True,
-    )
-)
-
-register_edge_type(
-    EdgeTypeSpec(
-        name="experienced",
-        allowed_pairs=[("person", "episode")],
-        properties_schema=None,
-        description="Person experienced a life or work episode",
-        llm_extractable=True,
-    )
-)
-
+# #029: ``has`` survives as a STRUCTURAL edge (pipeline-emitted, not
+# LLM-extractable) for ``person:self`` attachments only. Today's
+# constraint covers (person, preference); the spec also calls for
+# broadening to (person, object) so the deterministic pipeline can
+# write "self has a task" without re-shaping it as a ``related_to``
+# row. The LLM never emits this edge.
 register_edge_type(
     EdgeTypeSpec(
         name="has",
-        allowed_pairs=[("person", "preference")],
+        allowed_pairs=[
+            ("person", "preference"),
+            ("person", "object"),
+        ],
         properties_schema=None,
-        description="Person has a preference or opinion",
-        llm_extractable=True,
+        description=(
+            "Structural attachment from ``person:self`` to a preference "
+            "or a Tree task (object/task). Pipeline-emitted, never "
+            "LLM-extractable."
+        ),
+        llm_extractable=False,
     )
 )
 
-# SAME_AS applies to all four LLM-extractable self-pairs (PERSON↔PERSON,
-# TASK↔TASK, EPISODE↔EPISODE, PREFERENCE↔PREFERENCE). Emitted by the
-# resolver/dedup pipeline (#011), not by the LLM.
+# #029: ``same_as`` broadened from the legacy four-type set to every
+# POLE+O LLM-extractable type (excluding ``fact``), source==target.
 register_edge_type(
     EdgeTypeSpec(
         name="same_as",
-        allowed_pairs=[
-            ("person", "person"),
-            ("task", "task"),
-            ("episode", "episode"),
-            ("preference", "preference"),
-        ],
-        properties_schema=None,
-        description="Two nodes refer to the same real-world entity",
+        allowed_pairs=[(t, t) for t in _pole_o_llm_extractable_for_same_as()],
+        properties_schema=SameAsProperties,
+        description="Two nodes of the same POLE+O type refer to the same real-world entity",
         llm_extractable=False,
     )
 )
@@ -689,35 +1241,29 @@ def _per_type_constraints(name: str) -> list[EdgeConstraint]:
     ``EdgeConstraint`` per allowed pair. The description is shared
     across all pairs (the spec carries a single description); this
     matches the original ``EDGE_CONSTRAINTS`` shape for every built-in
-    edge except ``same_as``, which previously had four
-    pair-specific descriptions. For the SAME_AS rows we synthesize a
-    pair-specific description so downstream prompt builders that
-    iterate constraints keep producing meaningful output.
+    edge. The SAME_AS pair-specific descriptions kept for legacy
+    callers; pair endpoints that aren't part of the active enum
+    (``NodeType``) are skipped so the back-compat view never raises.
     """
 
     spec = EDGE_REGISTRY[name]
-    pair_descriptions: dict[tuple[str, str], str] = {}
-    if name == "same_as":
-        pair_descriptions = {
-            (
-                "person",
-                "person",
-            ): "Two PERSON nodes refer to the same real-world entity",
-            ("task", "task"): "Two TASK nodes refer to the same task",
-            ("episode", "episode"): "Two EPISODE nodes refer to the same episode",
-            (
-                "preference",
-                "preference",
-            ): "Two PREFERENCE nodes refer to the same preference",
-        }
 
     constraints: list[EdgeConstraint] = []
     for src, tgt in spec.allowed_pairs:
+        try:
+            src_enum = NodeType(src)
+            tgt_enum = NodeType(tgt)
+        except ValueError:
+            # A registered pair references a node type not in the
+            # backward-compat enum (e.g. a future ``fact`` type). Skip
+            # — back-compat callers iterate the enum, so they only need
+            # entries the enum can express.
+            continue
         constraints.append(
             EdgeConstraint(
-                source_type=NodeType(src),
-                target_type=NodeType(tgt),
-                description=pair_descriptions.get((src, tgt), spec.description),
+                source_type=src_enum,
+                target_type=tgt_enum,
+                description=spec.description,
             )
         )
     return constraints
@@ -735,13 +1281,33 @@ LLM_EXTRACTABLE_NODE_TYPES: set[NodeType] = {
     NodeType(name) for name, spec in NODE_REGISTRY.items() if spec.llm_extractable
 }
 
+
+def _edge_type_safe(name: str) -> EdgeType | None:
+    """Best-effort lookup against the back-compat enum.
+
+    Returns ``None`` when the registered edge isn't in ``EdgeType`` —
+    which happens transiently if a downstream consumer registers a
+    new edge before the next ``EdgeType`` shim refresh. Today every
+    built-in registration has a matching enum member.
+    """
+
+    try:
+        return EdgeType(name)
+    except ValueError:
+        return None
+
+
 LLM_EXTRACTABLE_EDGE_TYPES: set[EdgeType] = {
-    EdgeType(name) for name, spec in EDGE_REGISTRY.items() if spec.llm_extractable
+    et
+    for name, spec in EDGE_REGISTRY.items()
+    if spec.llm_extractable and (et := _edge_type_safe(name)) is not None
 }
 
 # Edges created deterministically by pipeline code (not LLM-extracted).
 STRUCTURAL_EDGE_TYPES: set[EdgeType] = {
-    EdgeType(name) for name, spec in EDGE_REGISTRY.items() if not spec.llm_extractable
+    et
+    for name, spec in EDGE_REGISTRY.items()
+    if not spec.llm_extractable and (et := _edge_type_safe(name)) is not None
 }
 
 
@@ -789,15 +1355,29 @@ def get_ontology_schema() -> dict[str, Any]:
         name for name, spec in EDGE_REGISTRY.items() if spec.llm_extractable
     )
     for name in extractable_edge_names:
-        # LLM-extractable edges each have a single (source, target)
-        # allowed pair by design; we pick the first entry.
         spec = EDGE_REGISTRY[name]
-        src, tgt = spec.allowed_pairs[0]
-        edge_types[name] = {
-            "source_type": src,
-            "target_type": tgt,
+        edge_info: dict[str, Any] = {
             "description": spec.description,
+            "allowed_pairs": [list(pair) for pair in sorted(spec.allowed_pairs)],
         }
+        # #029: the ``related_to`` umbrella edge surfaces its per-
+        # semantic catalogue so the LLM emits
+        # ``{"type": "related_to", "semantic_type": "...", ...}``.
+        if name == "related_to":
+            semantic_types: dict[str, Any] = {}
+            for semantic_name in sorted(RELATION_SEMANTICS):
+                rs = RELATION_SEMANTICS[semantic_name]
+                semantic_info: dict[str, Any] = {
+                    "description": rs.description,
+                    "allowed_pairs": [list(pair) for pair in sorted(rs.allowed_pairs)],
+                }
+                if rs.properties_schema is not None:
+                    schema = rs.properties_schema.model_json_schema()
+                    semantic_info["properties"] = schema.get("properties", {})
+                    semantic_info["required"] = schema.get("required", [])
+                semantic_types[semantic_name] = semantic_info
+            edge_info["semantic_types"] = semantic_types
+        edge_types[name] = edge_info
 
     return {"node_types": node_types, "edge_types": edge_types}
 

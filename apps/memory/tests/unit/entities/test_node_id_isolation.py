@@ -77,14 +77,15 @@ class TestNodeIdIsolation:
 class TestBuildEdgeIdShapePreserved:
     def test_edge_id_unchanged_signature(self) -> None:
         # Edges are tenant-scoped by construction: both endpoint ids
-        # already carry the user prefix.
+        # already carry the user prefix. Post-#029 ``EdgeType.TODO`` is
+        # gone; pin the shape against the surviving umbrella.
         user_id = PydanticObjectId()
         src = build_node_id(user_id, NodeType.PERSON, "alice")
-        tgt = build_node_id(user_id, NodeType.TASK, "write a book")
+        tgt = build_node_id(user_id, NodeType.OBJECT, "write a book")
 
-        result = build_edge_id(src, EdgeType.TODO, tgt)
+        result = build_edge_id(src, EdgeType.RELATED_TO, tgt)
 
-        assert result == f"{src}|todo|{tgt}"
+        assert result == f"{src}|related_to|{tgt}"
         # The edge id encodes the user prefix on both endpoints — a
         # cross-user edge would be obvious by inspection.
         assert result.count(f"{user_id}:") == 2

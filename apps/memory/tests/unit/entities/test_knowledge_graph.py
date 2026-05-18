@@ -42,12 +42,15 @@ class TestBuildNodeId:
 class TestBuildEdgeId:
     def test_builds_edge_id(self):
         # Source/target carry the user prefix; edge id wraps them.
+        # Post-#029 the ``todo`` edge type is gone; ``has_task`` semantics
+        # are emitted via ``related_to``. The build_edge_id call itself
+        # is type-agnostic — verify with the surviving ``RELATED_TO``.
         user_id = PydanticObjectId()
         src = build_node_id(user_id, NodeType.PERSON, "alice")
-        tgt = build_node_id(user_id, NodeType.TASK, "write a book")
+        tgt = build_node_id(user_id, NodeType.OBJECT, "write a book")
 
-        result = build_edge_id(src, EdgeType.TODO, tgt)
-        assert result == f"{src}|todo|{tgt}"
+        result = build_edge_id(src, EdgeType.RELATED_TO, tgt)
+        assert result == f"{src}|related_to|{tgt}"
 
 
 class TestKnowledgeGraphEntry:
@@ -76,6 +79,7 @@ class TestKnowledgeGraphEntry:
             user_id=user_id,
             kind="edge",
             type=EdgeType.RELATED_TO,
+            semantic_type="knows",
             source_node_id=f"{user_id}:person:alice",
             source_type=NodeType.PERSON,
             target_node_id=f"{user_id}:person:bob",
@@ -204,13 +208,13 @@ class TestResolutionDedupFields:
             EdgeType.MENTIONS,
             EdgeType.REFERENCED,
             EdgeType.RELATED_TO,
-            EdgeType.TODO,
-            EdgeType.EXPERIENCED,
             EdgeType.HAS,
         ],
     )
     async def test_existing_edge_types_unchanged(self, previously_shipped):
         # Adding SAME_AS must not rename / remove any prior member.
+        # Post-#029: ``TODO`` and ``EXPERIENCED`` are intentionally
+        # gone — they're now ``RELATED_TO + semantic_type``.
         assert previously_shipped in EdgeType
 
     async def test_same_as_edge_id_uses_build_edge_id_shape(self):
@@ -393,21 +397,26 @@ class TestTypeFieldIsRelaxedString:
         assert entry.type == "person"
 
     async def test_edge_constructed_with_raw_string_type(self):
+        # Post-#029 ``todo`` is gone; the surviving extractable wire
+        # shape is ``related_to + semantic_type``. Pin the string-type
+        # construction path against the new umbrella instead.
         user_id = _user_id()
         entry = KnowledgeGraphEntry(
-            id=f"{user_id}:person:alice|todo|{user_id}:task:write a book",
+            id=f"{user_id}:person:alice|related_to|{user_id}:object:write a book",
             user_id=user_id,
             kind="edge",
-            type="todo",
+            type="related_to",
+            semantic_type="has_task",
             source_node_id=f"{user_id}:person:alice",
             source_type=NodeType.PERSON,
-            target_node_id=f"{user_id}:task:write a book",
-            target_type=NodeType.TASK,
+            target_node_id=f"{user_id}:object:write a book",
+            target_type=NodeType.OBJECT,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
 
-        assert entry.type == "todo"
+        assert entry.type == "related_to"
+        assert entry.semantic_type == "has_task"
 
 
 class TestTypeFieldValidator:
@@ -470,22 +479,69 @@ class TestTypeFieldValidator:
             )
             assert entry.type == type_name
 
-    async def test_accepts_every_registered_edge_type(self):
+    @pytest.mark.parametrize(
+        "edge_type,src_type,src_name,tgt_type,tgt_name,extra",
+        [
+            (EdgeType.PART_OF, NodeType.CHUNK, "c", NodeType.DOCUMENT, "d", {}),
+            (EdgeType.NEXT, NodeType.CHUNK, "c0", NodeType.CHUNK, "c1", {}),
+            (EdgeType.MENTIONS, NodeType.CHUNK, "c", NodeType.PERSON, "alice", {}),
+            (
+                EdgeType.REFERENCED,
+                NodeType.DOCUMENT,
+                "d1",
+                NodeType.DOCUMENT,
+                "d2",
+                {},
+            ),
+            (
+                EdgeType.RELATED_TO,
+                NodeType.PERSON,
+                "alice",
+                NodeType.PERSON,
+                "bob",
+                {"semantic_type": "knows"},
+            ),
+            (
+                EdgeType.HAS,
+                NodeType.PERSON,
+                "self",
+                NodeType.PREFERENCE,
+                "coffee",
+                {},
+            ),
+            (
+                EdgeType.SAME_AS,
+                NodeType.PERSON,
+                "alice",
+                NodeType.PERSON,
+                "alice s",
+                {},
+            ),
+        ],
+    )
+    async def test_accepts_every_registered_edge_type(
+        self, edge_type, src_type, src_name, tgt_type, tgt_name, extra
+    ):
+        # Post-#029, every edge type enforces its ``allowed_pairs``;
+        # ``related_to`` additionally requires ``semantic_type``.
         user_id = _user_id()
-        for edge_type in EdgeType:
-            entry = KnowledgeGraphEntry(
-                id=(f"{user_id}:person:alice|{edge_type.value}|{user_id}:person:bob"),
-                user_id=user_id,
-                kind="edge",
-                type=edge_type.value,
-                source_node_id=f"{user_id}:person:alice",
-                source_type=NodeType.PERSON,
-                target_node_id=f"{user_id}:person:bob",
-                target_type=NodeType.PERSON,
-                created_at=datetime(2026, 1, 1, tzinfo=UTC),
-                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
-            )
-            assert entry.type == edge_type.value
+        entry = KnowledgeGraphEntry(
+            id=(
+                f"{user_id}:{src_type.value}:{src_name}|{edge_type.value}|"
+                f"{user_id}:{tgt_type.value}:{tgt_name}"
+            ),
+            user_id=user_id,
+            kind="edge",
+            type=edge_type.value,
+            source_node_id=f"{user_id}:{src_type.value}:{src_name}",
+            source_type=src_type,
+            target_node_id=f"{user_id}:{tgt_type.value}:{tgt_name}",
+            target_type=tgt_type,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            **extra,
+        )
+        assert entry.type == edge_type.value
 
 
 class TestBuildIdAcceptsStringTypes:
@@ -502,14 +558,17 @@ class TestBuildIdAcceptsStringTypes:
         assert from_enum == from_str == f"{user_id}:person:alice"
 
     def test_build_edge_id_with_str(self):
+        # Post-#029 ``todo`` / ``EdgeType.TODO`` is gone. Pin the
+        # build_edge_id "string OR enum" parity against the surviving
+        # ``related_to`` umbrella.
         user_id = PydanticObjectId()
         src = build_node_id(user_id, NodeType.PERSON, "alice")
-        tgt = build_node_id(user_id, NodeType.TASK, "write")
+        tgt = build_node_id(user_id, NodeType.OBJECT, "write")
 
-        from_enum = build_edge_id(src, EdgeType.TODO, tgt)
-        from_str = build_edge_id(src, "todo", tgt)
+        from_enum = build_edge_id(src, EdgeType.RELATED_TO, tgt)
+        from_str = build_edge_id(src, "related_to", tgt)
 
-        assert from_enum == from_str == f"{src}|todo|{tgt}"
+        assert from_enum == from_str == f"{src}|related_to|{tgt}"
 
 
 class TestKnowledgeGraphEntrySubtype:
@@ -617,6 +676,7 @@ class TestKnowledgeGraphEntrySubtype:
             user_id=user_id,
             kind="edge",
             type="related_to",
+            semantic_type="knows",
             source_node_id=f"{user_id}:person:alice",
             source_type=NodeType.PERSON,
             target_node_id=f"{user_id}:person:bob",
@@ -713,25 +773,28 @@ class TestLegacyNodeTypeReroute:
         assert legacy_dump == explicit_dump
 
     async def test_reroute_does_not_touch_edge_rows(self):
-        # Edges carry their own ``source_type`` / ``target_type`` columns
-        # holding ``NodeType.TASK`` literally — the rewrite is scoped
-        # to ``kind="node"`` so legacy edge constraints survive until
-        # #029's edge collapse.
+        # Edges carry their own ``source_type`` / ``target_type`` columns;
+        # the node-shape rewrite is scoped to ``kind="node"``. After
+        # #029, ``todo`` is no longer a registered edge type — exercise
+        # the "edge rewrite doesn't fire" invariant via the surviving
+        # ``related_to`` umbrella with a legacy-looking ``NodeType.TASK``
+        # endpoint (which still exists as an enum alias).
         user_id = _user_id()
         entry = KnowledgeGraphEntry(
-            id=f"{user_id}:person:alice|todo|{user_id}:task:write",
+            id=f"{user_id}:person:alice|related_to|{user_id}:object:write",
             user_id=user_id,
             kind="edge",
-            type="todo",
+            type="related_to",
+            semantic_type="has_task",
             source_node_id=f"{user_id}:person:alice",
             source_type=NodeType.PERSON,
-            target_node_id=f"{user_id}:task:write",
-            target_type=NodeType.TASK,
+            target_node_id=f"{user_id}:object:write",
+            target_type=NodeType.OBJECT,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
-        assert entry.type == "todo"
-        assert entry.target_type == NodeType.TASK
+        assert entry.type == "related_to"
+        assert entry.target_type == NodeType.OBJECT
 
 
 class TestSubtypeIndexDeclared:
@@ -805,3 +868,162 @@ class TestOntologyTreeExtensionsModuleApplied:
         from tree.entities.ontology_tree_extensions import ProjectExtras
 
         assert SUBTYPE_EXTRAS[("object", "project")] is ProjectExtras
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 #029 — `related_to` umbrella validator
+# ---------------------------------------------------------------------------
+
+
+class TestRelatedToSemanticValidator:
+    """Five branches of ``_check_related_to_semantic`` (#029):
+
+    1. Accept a valid (semantic_type, source_type, target_type) triple.
+    2. Reject a pair-violating triple.
+    3. Reject an unknown semantic_type.
+    4. Reject a related_to row missing semantic_type.
+    5. Reject a semantic_type set on a non-related_to edge.
+    """
+
+    def _build_related_to(self, user_id, **overrides):
+        defaults = dict(
+            id=f"{user_id}:person:a|related_to|{user_id}:person:b",
+            user_id=user_id,
+            kind="edge",
+            type="related_to",
+            semantic_type="knows",
+            source_node_id=f"{user_id}:person:a",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:person:b",
+            target_type=NodeType.PERSON,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        defaults.update(overrides)
+        return KnowledgeGraphEntry(**defaults)
+
+    async def test_accepts_valid_employed_by_person_to_organization(self):
+        user_id = _user_id()
+        entry = self._build_related_to(
+            user_id,
+            id=f"{user_id}:person:alice|related_to|{user_id}:organization:anthropic",
+            semantic_type="employed_by",
+            source_node_id=f"{user_id}:person:alice",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:organization:anthropic",
+            target_type=NodeType.ORGANIZATION,
+        )
+        assert entry.semantic_type == "employed_by"
+        assert entry.source_type == NodeType.PERSON
+        assert entry.target_type == NodeType.ORGANIZATION
+
+    async def test_rejects_pair_violation(self):
+        # employed_by is (person, organization), not (organization, person).
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            self._build_related_to(
+                user_id,
+                id=(
+                    f"{user_id}:organization:anthropic|related_to|"
+                    f"{user_id}:person:alice"
+                ),
+                semantic_type="employed_by",
+                source_node_id=f"{user_id}:organization:anthropic",
+                source_type=NodeType.ORGANIZATION,
+                target_node_id=f"{user_id}:person:alice",
+                target_type=NodeType.PERSON,
+            )
+        msg = str(excinfo.value)
+        assert "employed_by" in msg
+
+    async def test_rejects_unknown_semantic(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            self._build_related_to(user_id, semantic_type="dragon_breath")
+        msg = str(excinfo.value)
+        assert "dragon_breath" in msg
+
+    async def test_rejects_missing_semantic_on_related_to(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            self._build_related_to(user_id, semantic_type=None)
+        msg = str(excinfo.value)
+        assert "semantic_type" in msg
+
+    async def test_rejects_semantic_on_non_related_to(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            KnowledgeGraphEntry(
+                id=f"{user_id}:person:alice|has|{user_id}:preference:coffee",
+                user_id=user_id,
+                kind="edge",
+                type="has",
+                semantic_type="employed_by",  # Wrong: only related_to carries this
+                source_node_id=f"{user_id}:person:alice",
+                source_type=NodeType.PERSON,
+                target_node_id=f"{user_id}:preference:coffee",
+                target_type=NodeType.PREFERENCE,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+        msg = str(excinfo.value)
+        assert "semantic_type" in msg
+        assert "has" in msg
+
+
+class TestSemanticTypeIndex:
+    """The ``(user_id, type, semantic_type)`` partial index is declared
+    on the model so the indexing pipeline picks it up on boot (#029)."""
+
+    def test_user_type_semantic_type_index_declared(self) -> None:
+        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        target_key = [("user_id", 1), ("type", 1), ("semantic_type", 1)]
+        match = None
+        for im in index_models:
+            if list(im.document.get("key", {}).items()) == target_key:
+                match = im
+                break
+        assert match is not None, (
+            f"Expected partial compound index on {target_key}; got {index_models}"
+        )
+        # Partial filter must restrict to non-null semantic_type rows.
+        partial = match.document.get("partialFilterExpression")
+        assert partial == {"semantic_type": {"$type": "string"}}
+
+
+class TestStructuralHasEdgeAccepted:
+    """``has`` now covers both (person, preference) and (person, object)
+    construction paths (#029)."""
+
+    async def test_has_person_to_preference_accepted(self):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:self|has|{user_id}:preference:coffee",
+            user_id=user_id,
+            kind="edge",
+            type="has",
+            source_node_id=f"{user_id}:person:self",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:preference:coffee",
+            target_type=NodeType.PREFERENCE,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        assert entry.type == "has"
+        assert entry.semantic_type is None
+
+    async def test_has_person_to_object_accepted(self):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:self|has|{user_id}:object:ship-demo",
+            user_id=user_id,
+            kind="edge",
+            type="has",
+            source_node_id=f"{user_id}:person:self",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:object:ship-demo",
+            target_type=NodeType.OBJECT,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        assert entry.type == "has"
