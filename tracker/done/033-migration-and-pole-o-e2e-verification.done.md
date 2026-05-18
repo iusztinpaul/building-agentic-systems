@@ -523,3 +523,16 @@ then deselect them under `-m "not requires_mongot"`; local acceptance runs
 (`make memory-integration-tests-all`) still execute them.
 
 Fixing now.
+
+### [On-Call] 2026-05-18 16:00 — CI Resolution
+
+Fix `2ea3da0` (`fix(ci): mark reset-ontology e2e tests as requires_mongot`)
+pushed. New CI run: https://github.com/iusztinpaul/building-agentic-systems/actions/runs/26043840460 (15m19s) — **GREEN**.
+
+Final CI test counts:
+- Unit: 1202 passed.
+- Integration (CI selection, `-m "not requires_mongot"`): 139 passed, 12 skipped, 60 deselected (was 57; +3 = the newly-marked tests), 0 failed.
+
+The three mongot-dependent reset-ontology tests still run locally under
+`make memory-integration-tests-all` (the Tester's acceptance gate), so the
+post-Phase-3 contract remains fully verified. Closing the loop.
