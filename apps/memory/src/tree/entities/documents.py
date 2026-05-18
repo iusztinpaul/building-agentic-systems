@@ -1,8 +1,10 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from beanie import Document as BeanieDocument
 from beanie import Link, PydanticObjectId
+from pydantic import Field
 from pymongo import IndexModel
 
 
@@ -30,6 +32,12 @@ class Document(BeanieDocument):
     authors: list[str] = []
     date: datetime | None = None
     references: list[Link["Document"]] = []
+    # Per-source free-form metadata. Phase-2 conversation ingestion stores
+    # ``session_started_at`` (tz-aware UTC ``datetime``) here when the
+    # caller supplies one; other sources are free to add their own keys.
+    # No index is created on this field — it is a bag, not a queryable
+    # surface.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     class Settings:
         name = "documents"
