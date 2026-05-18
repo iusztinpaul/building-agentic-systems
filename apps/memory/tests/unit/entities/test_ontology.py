@@ -58,9 +58,12 @@ from tree.entities.ontology import (
 # Phase-3 #028 grew the schema with 4 new POLE+O canonical types; #029
 # folded the LLM-extractable domain edges into ``related_to``; #030 added
 # the ``common_fields`` block; #031 adds the ``fact`` LLM-extractable
-# node type with ``FactProperties``. The v1–v4 snapshots are kept on
-# disk for historical-diff review but no test reads them.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v5.json"
+# node type with ``FactProperties``; #032 replaces the free-form
+# preference ``content: str`` field with the typed-slot
+# ``PreferenceProperties`` and registers the ``superseded_by``
+# structural edge. The v1-v5 snapshots are kept on disk for
+# historical-diff review but no test reads them.
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v6.json"
 
 
 # ---------------------------------------------------------------------------
@@ -307,9 +310,11 @@ class TestRetrofitRegistries:
             "fact",
         }
 
-    def test_edge_registry_has_post_029_edge_types(self):
+    def test_edge_registry_has_post_032_edge_types(self):
         # #029 collapsed ``todo`` / ``experienced`` into the
-        # ``related_to`` umbrella, so the registry now holds 7 edges.
+        # ``related_to`` umbrella; #032 adds the bi-temporal
+        # ``superseded_by`` structural edge. The registry now holds
+        # 8 edges.
         assert set(EDGE_REGISTRY) == {
             "part_of",
             "next",
@@ -318,6 +323,7 @@ class TestRetrofitRegistries:
             "related_to",
             "has",
             "same_as",
+            "superseded_by",
         }
 
     def test_llm_extractable_node_types_pole_o(self):
@@ -343,8 +349,9 @@ class TestRetrofitRegistries:
         # ``has`` is now structural (pipeline-emitted, never LLM).
         assert LLM_EXTRACTABLE_EDGE_TYPES == {EdgeType.RELATED_TO}
 
-    def test_structural_edge_types_post_029(self):
-        # ``has`` joins the structural set after #029.
+    def test_structural_edge_types_post_032(self):
+        # ``has`` joins the structural set after #029; #032 adds the
+        # bi-temporal ``superseded_by`` structural edge.
         assert STRUCTURAL_EDGE_TYPES == {
             EdgeType.PART_OF,
             EdgeType.NEXT,
@@ -352,6 +359,7 @@ class TestRetrofitRegistries:
             EdgeType.REFERENCED,
             EdgeType.HAS,
             EdgeType.SAME_AS,
+            EdgeType.SUPERSEDED_BY,
         }
 
     def test_extractable_and_structural_edges_are_disjoint(self):
@@ -450,7 +458,8 @@ class TestEnumShim:
 
     def test_edge_type_exports_every_legacy_member(self):
         # Post-#029: ``TODO`` and ``EXPERIENCED`` are gone (collapsed
-        # into ``RELATED_TO + semantic_type``).
+        # into ``RELATED_TO + semantic_type``). Post-#032:
+        # ``SUPERSEDED_BY`` joins as a structural bi-temporal edge.
         for name in [
             "PART_OF",
             "NEXT",
@@ -459,6 +468,7 @@ class TestEnumShim:
             "RELATED_TO",
             "HAS",
             "SAME_AS",
+            "SUPERSEDED_BY",
         ]:
             assert hasattr(EdgeType, name)
         for retired in ["TODO", "EXPERIENCED"]:
@@ -1238,8 +1248,17 @@ class TestFactIslandRule:
     """
 
     def test_no_edge_allowed_pair_has_fact_endpoint(self):
+        # Post-#032: the resolver-written ``superseded_by`` edge is the
+        # one carve-out - facts can chain via supersession. The
+        # envelope validator still blocks LLM-emitted attempts via the
+        # ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` guard, but the registry
+        # itself records ``(fact, fact)`` in superseded_by's allowed
+        # pairs so the :class:`KnowledgeGraphEntry` model validator
+        # accepts the resolver's direct write.
         offenders = []
         for name, spec in EDGE_REGISTRY.items():
+            if name == "superseded_by":
+                continue
             for src, tgt in spec.allowed_pairs:
                 if src == "fact" or tgt == "fact":
                     offenders.append((name, src, tgt))
@@ -1329,3 +1348,238 @@ class TestKnowledgeGraphEntryAcceptsFactNode:
         assert entry.type == "fact"
         assert entry.subtype is None
         assert entry.properties["object"] == "sun"
+
+
+# ---------------------------------------------------------------------------
+# 12. #032 — PreferenceCategory, typed PreferenceProperties, superseded_by
+# ---------------------------------------------------------------------------
+
+
+class TestPreferenceCategoryEnum:
+    """Pin the closed ``PreferenceCategory`` enum surface (#032)."""
+
+    def test_enum_has_exactly_nine_members(self):
+        from tree.entities.ontology import PreferenceCategory
+
+        values = {member.value for member in PreferenceCategory}
+        assert values == {
+            "ui",
+            "language",
+            "food",
+            "communication",
+            "work_style",
+            "time",
+            "social",
+            "aesthetic",
+            "other",
+        }
+
+
+class TestPreferencePropertiesTypedSlots:
+    """The new ``PreferenceProperties`` is typed-slot, not free-form (#032)."""
+
+    def test_required_fields(self):
+        from tree.entities.ontology import PreferenceProperties
+
+        required = {
+            name
+            for name, info in PreferenceProperties.model_fields.items()
+            if info.is_required()
+        }
+        assert required == {"statement", "category"}
+
+    def test_optional_fields_default_none_or_moderate(self):
+        from tree.entities.ontology import PreferenceProperties
+
+        instance = PreferenceProperties(statement="prefers dark mode", category="ui")
+        assert instance.target is None
+        assert instance.over is None
+        assert instance.context is None
+        assert instance.strength == "moderate"
+
+    def test_strength_literal_rejects_unknown(self):
+        from pydantic import ValidationError
+
+        from tree.entities.ontology import PreferenceProperties
+
+        with pytest.raises(ValidationError):
+            PreferenceProperties(
+                statement="prefers dark mode",
+                category="ui",
+                strength="lukewarm",
+            )
+
+    def test_statement_max_length(self):
+        from pydantic import ValidationError
+
+        from tree.entities.ontology import PreferenceProperties
+
+        # 81 chars — over the 80-char cap.
+        with pytest.raises(ValidationError):
+            PreferenceProperties(statement="x" * 81, category="ui")
+
+    def test_content_field_is_gone(self):
+        # The pre-#032 ``content: str`` field is gone; if someone tries
+        # to construct with ``content=...`` (legacy shape), it is
+        # silently dropped by Pydantic (no extra). The two required
+        # fields are still required.
+        from pydantic import ValidationError
+
+        from tree.entities.ontology import PreferenceProperties
+
+        with pytest.raises(ValidationError):
+            PreferenceProperties(content="prefers dark mode")
+
+    def test_registry_points_at_new_typed_schema(self):
+        from tree.entities.ontology import NODE_REGISTRY, PreferenceProperties
+
+        assert NODE_REGISTRY["preference"].properties_schema is PreferenceProperties
+        # Subtypes stays None — preferences are categorised via the
+        # ``category`` slot, not a subtype.
+        assert NODE_REGISTRY["preference"].subtypes is None
+
+
+class TestSupersededByRegistration:
+    """The ``superseded_by`` edge is registered structurally (#032)."""
+
+    def test_registered_in_edge_registry(self):
+        from tree.entities.ontology import EDGE_REGISTRY, SupersededByProperties
+
+        assert "superseded_by" in EDGE_REGISTRY
+        spec = EDGE_REGISTRY["superseded_by"]
+        assert spec.properties_schema is SupersededByProperties
+        assert spec.llm_extractable is False
+
+    def test_allowed_pairs_are_preference_preference_and_fact_fact(self):
+        from tree.entities.ontology import EDGE_REGISTRY
+
+        spec = EDGE_REGISTRY["superseded_by"]
+        assert set(spec.allowed_pairs) == {
+            ("preference", "preference"),
+            ("fact", "fact"),
+        }
+
+    def test_excluded_from_llm_prompt(self):
+        from tree.entities.ontology import get_ontology_schema
+
+        # ``llm_extractable=False`` -> not in the prompt's edge list.
+        schema = get_ontology_schema()
+        assert "superseded_by" not in schema["edge_types"]
+
+
+class TestSupersededByProperties:
+    """Per-edge properties model for the ``superseded_by`` edge (#032)."""
+
+    def test_required_fields(self):
+        from tree.entities.ontology import SupersededByProperties
+
+        required = {
+            name
+            for name, info in SupersededByProperties.model_fields.items()
+            if info.is_required()
+        }
+        assert required == {"superseded_at", "reason"}
+
+    def test_reason_literal_rejects_unknown(self):
+        from datetime import UTC, datetime
+
+        from pydantic import ValidationError
+
+        from tree.entities.ontology import SupersededByProperties
+
+        with pytest.raises(ValidationError):
+            SupersededByProperties(
+                superseded_at=datetime.now(tz=UTC),
+                reason="banana",  # type: ignore[arg-type]
+            )
+
+    def test_tz_aware_superseded_at_required(self):
+        from datetime import datetime
+
+        from tree.entities.ontology import SupersededByProperties
+
+        with pytest.raises(ValueError, match="tz-aware"):
+            SupersededByProperties(
+                superseded_at=datetime(2025, 1, 1, 12, 0, 0),
+                reason="contradiction",
+            )
+
+
+class TestSupersededByEdgeConstraints:
+    """Envelope validator must accept same-type supersession and reject
+    cross-type / unsupported endpoints (#032)."""
+
+    def test_preference_to_preference_accepted(self):
+        from tree.memory.extraction.validation import validate_envelope
+
+        result = validate_envelope(
+            kind="edge",
+            type="superseded_by",
+            source_type="preference",
+            target_type="preference",
+            semantic_type=None,
+        )
+        assert result.ok is True
+        assert result.reason is None
+
+    def test_fact_to_fact_rejected_by_fact_island_carveout(self):
+        # The ``fact``-endpoint carve-out in the envelope validator
+        # rejects every edge with a fact endpoint - even
+        # ``superseded_by``. The supersession write path bypasses the
+        # envelope validator (the resolver writes directly), but the
+        # validator surface is the right place for this contract: any
+        # LLM-emitted attempt is rejected.
+        from tree.memory.extraction.validation import validate_envelope
+
+        result = validate_envelope(
+            kind="edge",
+            type="superseded_by",
+            source_type="fact",
+            target_type="fact",
+            semantic_type=None,
+        )
+        assert result.ok is False
+        assert result.reason == "fact_endpoint_disallowed"
+
+    def test_cross_type_preference_to_fact_rejected(self):
+        from tree.memory.extraction.validation import validate_envelope
+
+        result = validate_envelope(
+            kind="edge",
+            type="superseded_by",
+            source_type="preference",
+            target_type="fact",
+            semantic_type=None,
+        )
+        assert result.ok is False
+        assert result.reason == "fact_endpoint_disallowed"
+
+    def test_person_to_person_rejected(self):
+        from tree.memory.extraction.validation import validate_envelope
+
+        # ``(person, person)`` is not in ``superseded_by`` allowed pairs.
+        result = validate_envelope(
+            kind="edge",
+            type="superseded_by",
+            source_type="person",
+            target_type="person",
+            semantic_type=None,
+        )
+        assert result.ok is False
+        assert result.reason == "disallowed_pair"
+
+    def test_mentions_to_preference_rejected_regression(self):
+        # #029 carve-out: ``mentions`` never targets ``preference``.
+        # Pinned here so #032's preference refactor doesn't accidentally
+        # let it back in.
+        from tree.memory.extraction.validation import validate_envelope
+
+        result = validate_envelope(
+            kind="edge",
+            type="mentions",
+            source_type="chunk",
+            target_type="preference",
+            semantic_type=None,
+        )
+        assert result.ok is False
+        assert result.reason == "disallowed_pair"

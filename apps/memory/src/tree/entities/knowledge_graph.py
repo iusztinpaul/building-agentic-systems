@@ -85,6 +85,10 @@ class EdgeType(StrEnum):
     RELATED_TO = "related_to"
     HAS = "has"
     SAME_AS = "same_as"
+    # #032: bi-temporal supersession edge. Resolver-written
+    # (LLM never emits this). Allowed pairs:
+    # ``(preference, preference)`` and ``(fact, fact)``.
+    SUPERSEDED_BY = "superseded_by"
 
 
 # --- Phase-3 #030: ExtractorInfo (provenance metadata) ---

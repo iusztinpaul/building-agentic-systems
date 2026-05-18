@@ -66,10 +66,11 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tree.entities.knowledge_graph import EdgeType, NodeType
 
@@ -488,10 +489,142 @@ class EpisodeProperties(BaseModel):
     )
 
 
-class PreferenceProperties(BaseModel):
-    """A preference, opinion, or pattern exhibited by a person."""
+class PreferenceCategory(StrEnum):
+    """Closed enum of preference categories (#032).
 
-    content: str = Field(description="Description of the preference")
+    Drives the supersession-candidate partition: a new preference only
+    competes with prior preferences in the same ``(user_id, category)``
+    slice. Adding a new category here is a schema change that requires
+    regenerating the ontology prompt snapshot.
+    """
+
+    UI = "ui"
+    LANGUAGE = "language"
+    FOOD = "food"
+    COMMUNICATION = "communication"
+    WORK_STYLE = "work_style"
+    TIME = "time"
+    SOCIAL = "social"
+    AESTHETIC = "aesthetic"
+    OTHER = "other"
+
+
+class PreferenceProperties(BaseModel):
+    """A first-person preference, opinion, or pattern of the user (#032).
+
+    Replaces the pre-#032 free-form ``content: str`` shape with typed
+    slots so retrieval and review tooling can filter / partition
+    preferences (e.g. "show me my UI preferences", "supersede this
+    preference if I express a contradictory UI preference").
+
+    Strict-mode policy (per `plan.md:461-465`): preferences attribute
+    first-person opinions only. Third-party preferences ("Bob prefers
+    vegetarian") are emitted as ``fact`` rows instead — never as
+    ``preference`` rows.
+
+    Migration: pre-#032 rows carry a ``content`` field and no
+    ``statement`` / ``category``. The model accepts them at read time
+    by re-mapping legacy ``content`` -> ``statement`` and defaulting
+    ``category="other"``, so the pipeline never crashes on legacy
+    rows. The canonical migration that rewrites every preference row
+    lands in #033 (wipe-and-rebuild).
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    statement: str = Field(
+        description=(
+            "Short canonical preference statement, <=80 chars (e.g. "
+            "'prefers dark mode'). The deterministic node ``name`` is "
+            "derived from this string."
+        ),
+        max_length=80,
+    )
+    category: PreferenceCategory = Field(
+        description=(
+            "Closed-enum category - drives filter queries and the "
+            "supersession-candidate partition (a new preference only "
+            "competes with prior preferences in the same category)."
+        ),
+    )
+    target: str | None = Field(
+        default=None,
+        description=(
+            "What is preferred - a resolved entity name OR a free string "
+            "for abstract concepts (e.g. 'dark mode', 'python', 'sushi')."
+        ),
+    )
+    over: str | None = Field(
+        default=None,
+        description=(
+            "What is dis-preferred when the preference is comparative "
+            "(e.g. 'prefers dark mode OVER light mode')."
+        ),
+    )
+    context: str | None = Field(
+        default=None,
+        description=(
+            "When / where the preference applies (replaces graph-edge "
+            "scoping). For example 'in editors' or 'at work'."
+        ),
+    )
+    strength: Literal["weak", "moderate", "strong"] = Field(
+        default="moderate",
+        description=(
+            "How strongly the user holds this preference. Drives review "
+            "ordering and weights for downstream consumers."
+        ),
+    )
+
+
+class SupersededByProperties(BaseModel):
+    """Per-edge properties for the bi-temporal ``superseded_by`` edge (#032).
+
+    Resolver-written, never LLM-emitted. The edge points from the NEW
+    (winning) row to the OLD (superseded) row. The OLD row's
+    ``valid_until`` is set to the same timestamp; the NEW row's
+    ``valid_from`` is set to ``superseded_at``. Together those three
+    writes form one atomic supersession.
+
+    Generalises to both ``(preference, preference)`` and ``(fact, fact)``
+    (same-type only - the spec pins same-type supersession).
+    """
+
+    superseded_at: datetime = Field(
+        description=(
+            "When the supersession was written (UTC, tz-aware). Mirrors "
+            "the OLD row's ``valid_until`` and the NEW row's "
+            "``valid_from``."
+        )
+    )
+    reason: Literal["contradiction", "stale"] = Field(
+        description=(
+            "Why the supersession was written. 'contradiction' = the "
+            "judge fired on two semantically opposing rows; 'stale' = "
+            "explicit operator override (no judge call)."
+        )
+    )
+    judge_confidence: float | None = Field(
+        default=None,
+        description=(
+            "Confidence (0.0-1.0) from the contradiction-judge LLM "
+            "call when ``reason == 'contradiction'``; None when reason "
+            "is 'stale' or the judge didn't surface a confidence."
+        ),
+    )
+
+    @field_validator("superseded_at", mode="after")
+    @classmethod
+    def _require_tz_aware(cls, value: datetime) -> datetime:
+        """Reject naive datetimes - mirrors the
+        :class:`KnowledgeGraphEntry` ``valid_from``/``valid_until`` rule."""
+
+        if value.tzinfo is None:
+            raise ValueError(
+                "SupersededByProperties.superseded_at must be tz-aware "
+                f"(UTC); got naive {value!r}"
+            )
+        return value
 
 
 class FactProperties(BaseModel):
@@ -1283,6 +1416,30 @@ register_edge_type(
         allowed_pairs=[(t, t) for t in _pole_o_llm_extractable_for_same_as()],
         properties_schema=SameAsProperties,
         description="Two nodes of the same POLE+O type refer to the same real-world entity",
+        llm_extractable=False,
+    )
+)
+
+# #032: ``superseded_by`` is the bi-temporal supersession edge. The NEW
+# (winning) row points at the OLD (superseded) row; the OLD row's
+# ``valid_until`` is set to the same instant the NEW row's
+# ``valid_from`` carries. The edge is resolver-written -
+# ``llm_extractable=False`` - and intentionally same-type only:
+# ``(preference, preference)`` for the canonical user-preference
+# supersession path and ``(fact, fact)`` for contradictory propositions
+# (per ``plan.md:557``). Cross-type chains (e.g. preference -> fact)
+# are intentionally rejected at the envelope: contradictions only
+# make sense within a single row type.
+register_edge_type(
+    EdgeTypeSpec(
+        name="superseded_by",
+        allowed_pairs=[("preference", "preference"), ("fact", "fact")],
+        properties_schema=SupersededByProperties,
+        description=(
+            "Bi-temporal supersession edge. Newer row points at the row "
+            "it replaced. Resolver-written; same-type only "
+            "(preference->preference or fact->fact)."
+        ),
         llm_extractable=False,
     )
 )

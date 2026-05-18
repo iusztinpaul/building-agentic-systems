@@ -62,6 +62,11 @@ from tree.memory.extraction.dedup import (
     dedupe_entity,
 )
 from tree.memory.extraction.first_person_resolver import redirect_first_person
+from tree.memory.extraction.preference_supersession import (
+    canonicalize_preference_names,
+    resolve_supersessions,
+    write_self_has_preference_edges,
+)
 from tree.memory.extraction.validation import (
     get_edge_property_schema,
     get_node_property_schemas,
@@ -148,7 +153,17 @@ def _live_app_config() -> Any:
 
 def _build_dedup_config() -> DeduplicationConfig:
     """Translate the YAML :class:`DedupConfig` to the runtime
-    :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``)."""
+    :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``).
+
+    The YAML config (``app_config.extraction.dedup``) is the
+    authoritative source for the runtime thresholds today; the new
+    ``settings.dedup`` BaseSettings (#032) is the env-level surface
+    that operators can flip without editing YAML. The
+    cross-validator on :class:`ExtractionConfig` that pins
+    resolution / dedup type-strictness keys off the YAML config, so
+    the runtime config flows through the YAML path to keep the gate
+    intact.
+    """
 
     cfg = _live_app_config().extraction.dedup
     return DeduplicationConfig(
@@ -1082,13 +1097,40 @@ async def _dispatch_entity_write(
     # Inject the pre-computed embedding into ``add_entity`` via embedding_model.
     # The shared embedding map already has the canonical-name vector — wrap the
     # real model so ``add_entity``'s internal ``embed([name])`` returns it.
+    #
+    # #032 fix-2: for ``preference`` nodes the stored embedding MUST come
+    # from ``properties.statement`` (not the slug-name) so the
+    # supersession resolver's statement<->statement comparison is
+    # apples-to-apples. We embed the statement here on-the-fly when the
+    # cached vector is keyed by canonical/name; the cache hit only fires
+    # when the canonical IS the statement (rare). For ``fact`` nodes we
+    # similarly prefer ``properties.object``.
     canonical = (
         resolved_entity.canonical_name if resolved_entity is not None else node.name
     )
-    cached_vec = embeddings.vectors.get(canonical)
-    model_for_call: BaseEmbeddingModel = (
-        _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
-    )
+    statement_text: str | None = None
+    if node.type == NodeType.PREFERENCE:
+        prop_statement = (node.properties or {}).get("statement")
+        if isinstance(prop_statement, str) and prop_statement.strip():
+            statement_text = prop_statement.strip()
+    elif node.type == NodeType.FACT:
+        prop_object = (node.properties or {}).get("object") or (
+            node.properties or {}
+        ).get("object_")
+        if isinstance(prop_object, str) and prop_object.strip():
+            statement_text = prop_object.strip()
+
+    if statement_text is not None:
+        vectors = await embedding_model.embed([statement_text])
+        statement_vec = vectors[0] if vectors else []
+        model_for_call: BaseEmbeddingModel = (
+            _CachedSingleEmbedding(statement_vec) if statement_vec else embedding_model
+        )
+    else:
+        cached_vec = embeddings.vectors.get(canonical)
+        model_for_call = (
+            _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
+        )
 
     candidate_names = sorted(
         {
@@ -1363,6 +1405,35 @@ async def memory_extraction(
     for raw in raws:
         raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
 
+    # ----- #032 — canonicalize preference names (#032 fix-3) ---------------
+    # Rewrite every preference's ``name`` to a deterministic slug of
+    # ``properties.statement`` so the LLM's drift between e.g.
+    # ``"prefers dark mode for editors"`` (sentence form) and
+    # ``"prefers-light-mode"`` (kebab-case) doesn't break the
+    # ``_id`` contract. Must run BEFORE the supersession resolver so
+    # candidate-row IDs line up.
+    canonicalize_preference_names(raws)
+
+    # ----- #032 — supersession resolver branch (pre-dedup) -----------------
+    # Runs BEFORE the standard dedup so contradiction trumps dedup
+    # (per `plan.md:534`). Mutates `raws` in place: when a
+    # preference / fact row supersedes a prior one we write the
+    # supersession to MongoDB and mark the in-memory node so the
+    # apply-writes step preserves ``valid_from``.
+    judge_llm = get_llm()
+    await resolve_supersessions(
+        database=database,
+        user_id=user_id,
+        llm=judge_llm,
+        embedding_model=embedding_model,
+        raws=raws,
+    )
+
+    # ----- #032 — deterministic ``has: person:self -> preference`` -----
+    # The LLM is told NOT to emit ``has`` (it is
+    # ``llm_extractable=False``). The pipeline owns the edge.
+    await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
+
     # ----- Task ③ — resolve ------------------------------------------------
     resolved = await resolve_entities_task(raws, database, resolver, user_id)
 
@@ -1469,6 +1540,18 @@ async def run_extraction_for_documents(
     )
     for raw in raws:
         raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
+    # #032 - canonicalize preference names, then supersession resolver
+    # branch, then deterministic ``has`` edges.
+    canonicalize_preference_names(raws)
+    judge_llm = llm if llm is not None else get_llm()
+    await resolve_supersessions(
+        database=database,
+        user_id=user_id,
+        llm=judge_llm,
+        embedding_model=embedding_model,
+        raws=raws,
+    )
+    await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
     canonical_names = sorted(
         {r.canonical_name for r in resolved.resolved_by_key.values()}

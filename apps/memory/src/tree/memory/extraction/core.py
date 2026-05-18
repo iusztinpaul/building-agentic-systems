@@ -150,9 +150,37 @@ Use this decision tree for any proposition of the form
 "Paul works at Anthropic", "I prefer dark mode"):
 
 1. **First-person preference** ("I prefer X over Y", "I like dark mode"):
-   emit a `preference` node. Don't emit a fact or a typed edge.
-   Example: "I prefer vegetarian food" → a `preference` node with
-   `name="vegetarian-food"` and properties `content="prefers vegetarian food"`.
+   emit a `preference` node with the typed-slot properties shape:
+     - `statement`: short canonical phrase, <=80 chars
+       (e.g. "prefers dark mode")
+     - `category`: one of the closed enum members surfaced under
+       `node_types.preference.properties.category` (ui / language /
+       food / communication / work_style / time / social / aesthetic /
+       other). Use `other` only as a last resort.
+     - `target` (optional): what is preferred (e.g. "dark mode")
+     - `over` (optional): what is dis-preferred when comparative
+     - `context` (optional): when / where the preference applies
+     - `strength` (optional, defaults "moderate"): weak / moderate /
+       strong
+   Don't emit a fact or a typed edge for first-person preferences.
+   Example: "I really love dark mode in editors" -> a `preference`
+   node with `name="prefers-dark-mode"`, properties
+   `{{"statement": "prefers dark mode", "category": "ui",
+   "target": "dark mode", "context": "in editors",
+   "strength": "strong"}}`.
+
+   STRICT-MODE POLICY (per `plan.md:461-465`):
+     * Preferences are first-person only. If the speaker attributes
+       a preference to a third party ("Alice prefers vegetarian
+       food"), DO NOT emit a `preference` node - emit a `fact`
+       instead (see branch 3).
+     * Do NOT emit any `has` edge. The pipeline writes the
+       deterministic `has: person:self -> preference` edge itself
+       post-extraction.
+     * If you notice that the new preference CONTRADICTS an earlier
+       preference the user expressed, just emit the new one; a
+       resolver downstream handles bi-temporal supersession
+       automatically.
 
 2. **Both subject and object resolve to POLE+O entities AND the relation
    matches one of the registered `related_to` semantics**: emit a
@@ -171,6 +199,10 @@ Use this decision tree for any proposition of the form
    Example: "Earth orbits the Sun" → a `fact` node with
    `name="earth-orbits-sun"` and properties `subject="earth"`,
    `predicate="orbits"`, `object="sun"` — and NO edges.
+
+   Like preferences, contradictory facts (e.g. two statements on the
+   same `(subject, predicate)`) are bi-temporally superseded by the
+   resolver - just emit the new fact, don't try to retract the old.
 """
 
 

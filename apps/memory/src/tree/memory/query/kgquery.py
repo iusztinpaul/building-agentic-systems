@@ -17,16 +17,19 @@ migration script.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import EdgeType, KnowledgeGraphEntry, NodeType
+from tree.entities.ontology import PreferenceCategory
 
 logger = logging.getLogger(__name__)
 
 _KG_COLLECTION = "knowledge_graph"
 _FACT_TYPE = NodeType.FACT.value
+_PREFERENCE_TYPE = NodeType.PREFERENCE.value
 
 
 class KGQuery:
@@ -244,6 +247,78 @@ class KGQuery:
         for doc in docs:
             rows.append(KnowledgeGraphEntry.model_validate(doc))
         return rows
+
+    # ------------------------------------------------------------------
+    # Preference reads (#032) - bi-temporal queries
+    # ------------------------------------------------------------------
+
+    async def find_current_preferences(
+        self,
+        category: PreferenceCategory | None = None,
+    ) -> list[KnowledgeGraphEntry]:
+        """Return preferences that are CURRENTLY valid for ``self.user_id``.
+
+        "Current" = ``valid_until is None`` (the row hasn't been
+        superseded). Optionally filtered by ``category``.
+
+        Pinned by the integration tests in #032 - a supersession
+        flips the old preference's ``valid_until`` to ``now()`` so
+        this query stops returning it the instant the new preference
+        wins the contradiction judge.
+        """
+
+        f: dict[str, Any] = {
+            "user_id": self.user_id,
+            "kind": "node",
+            "type": _PREFERENCE_TYPE,
+            "$or": [
+                {"valid_until": {"$exists": False}},
+                {"valid_until": None},
+            ],
+        }
+        if category is not None:
+            f["properties.category"] = category.value
+        return await KnowledgeGraphEntry.find(f).to_list()
+
+    async def find_preferences_at(
+        self,
+        ts: datetime,
+        category: PreferenceCategory | None = None,
+    ) -> list[KnowledgeGraphEntry]:
+        """Return preferences that were valid at the point in time ``ts``.
+
+        A row was valid at ``ts`` when ``valid_from <= ts`` AND
+        (``valid_until > ts`` OR ``valid_until is None``). Optional
+        ``category`` narrows the slice.
+
+        Useful for "what was the user's UI preference last month?"
+        queries when reviewing supersession history.
+        """
+
+        f: dict[str, Any] = {
+            "user_id": self.user_id,
+            "kind": "node",
+            "type": _PREFERENCE_TYPE,
+            "$and": [
+                {
+                    "$or": [
+                        {"valid_from": {"$exists": False}},
+                        {"valid_from": None},
+                        {"valid_from": {"$lte": ts}},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"valid_until": {"$exists": False}},
+                        {"valid_until": None},
+                        {"valid_until": {"$gt": ts}},
+                    ]
+                },
+            ],
+        }
+        if category is not None:
+            f["properties.category"] = category.value
+        return await KnowledgeGraphEntry.find(f).to_list()
 
     async def find_neighbors(
         self,

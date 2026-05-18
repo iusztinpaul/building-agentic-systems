@@ -857,16 +857,72 @@
       ]
     },
     "preference": {
-      "description": "A preference, opinion, or pattern exhibited by a person.",
+      "description": "A first-person preference, opinion, or pattern of the user (#032).\n\nReplaces the pre-#032 free-form ``content: str`` shape with typed\nslots so retrieval and review tooling can filter / partition\npreferences (e.g. \"show me my UI preferences\", \"supersede this\npreference if I express a contradictory UI preference\").\n\nStrict-mode policy (per `plan.md:461-465`): preferences attribute\nfirst-person opinions only. Third-party preferences (\"Bob prefers\nvegetarian\") are emitted as ``fact`` rows instead \u2014 never as\n``preference`` rows.\n\nMigration: pre-#032 rows carry a ``content`` field and no\n``statement`` / ``category``. The model accepts them at read time\nby re-mapping legacy ``content`` -> ``statement`` and defaulting\n``category=\"other\"``, so the pipeline never crashes on legacy\nrows. The canonical migration that rewrites every preference row\nlands in #033 (wipe-and-rebuild).\n",
       "properties": {
-        "content": {
-          "description": "Description of the preference",
-          "title": "Content",
+        "category": {
+          "$ref": "#/$defs/PreferenceCategory",
+          "description": "Closed-enum category - drives filter queries and the supersession-candidate partition (a new preference only competes with prior preferences in the same category)."
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When / where the preference applies (replaces graph-edge scoping). For example 'in editors' or 'at work'.",
+          "title": "Context"
+        },
+        "over": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What is dis-preferred when the preference is comparative (e.g. 'prefers dark mode OVER light mode').",
+          "title": "Over"
+        },
+        "statement": {
+          "description": "Short canonical preference statement, <=80 chars (e.g. 'prefers dark mode'). The deterministic node ``name`` is derived from this string.",
+          "maxLength": 80,
+          "title": "Statement",
           "type": "string"
+        },
+        "strength": {
+          "default": "moderate",
+          "description": "How strongly the user holds this preference. Drives review ordering and weights for downstream consumers.",
+          "enum": [
+            "weak",
+            "moderate",
+            "strong"
+          ],
+          "title": "Strength",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What is preferred - a resolved entity name OR a free string for abstract concepts (e.g. 'dark mode', 'python', 'sushi').",
+          "title": "Target"
         }
       },
       "required": [
-        "content"
+        "statement",
+        "category"
       ]
     }
   }
