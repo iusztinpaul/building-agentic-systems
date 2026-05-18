@@ -350,3 +350,182 @@ class TestResolutionDedupFields:
         # Current behavior: naive datetime is accepted as-is.
         assert entry.merged_at is not None
         assert entry.merged_at.tzinfo is None
+
+
+# ---------------------------------------------------------------------------
+# Phase-3 #027 — relaxed `type: str` + registry-driven validator.
+# ---------------------------------------------------------------------------
+
+
+class TestTypeFieldIsRelaxedString:
+    """Post-#027 the wire type of ``type`` is ``str``. The enum shims
+    still flow through (``StrEnum`` -> ``str``)."""
+
+    async def test_node_constructed_with_raw_string_type(self):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:alice",
+            user_id=user_id,
+            kind="node",
+            type="person",
+            name="alice",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+        # The wire value is plain str (no enum coercion).
+        assert entry.type == "person"
+        assert isinstance(entry.type, str)
+
+    async def test_node_constructed_with_enum_member_still_works(self):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:alice",
+            user_id=user_id,
+            kind="node",
+            type=NodeType.PERSON,
+            name="alice",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+        # StrEnum serializes to the string value.
+        assert entry.type == "person"
+
+    async def test_edge_constructed_with_raw_string_type(self):
+        user_id = _user_id()
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:person:alice|todo|{user_id}:task:write a book",
+            user_id=user_id,
+            kind="edge",
+            type="todo",
+            source_node_id=f"{user_id}:person:alice",
+            source_type=NodeType.PERSON,
+            target_node_id=f"{user_id}:task:write a book",
+            target_type=NodeType.TASK,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+        assert entry.type == "todo"
+
+
+class TestTypeFieldValidator:
+    """The ``_check_type_against_registry`` model validator rejects rows
+    whose ``type`` is not in the registry for the row's ``kind``."""
+
+    async def test_rejects_unknown_node_type(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            KnowledgeGraphEntry(
+                id=f"{user_id}:ferret:alice",
+                user_id=user_id,
+                kind="node",
+                type="ferret",
+                name="alice",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+
+        # Validators surface through Pydantic's ValidationError; the
+        # underlying message is the ValueError we raise.
+        assert "ferret" in str(excinfo.value)
+
+    async def test_rejects_unknown_edge_type(self):
+        user_id = _user_id()
+        with pytest.raises(Exception) as excinfo:
+            KnowledgeGraphEntry(
+                id=f"{user_id}:person:alice|owns|{user_id}:task:write",
+                user_id=user_id,
+                kind="edge",
+                type="owns",
+                source_node_id=f"{user_id}:person:alice",
+                source_type=NodeType.PERSON,
+                target_node_id=f"{user_id}:task:write",
+                target_type=NodeType.TASK,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+
+        assert "owns" in str(excinfo.value)
+
+    async def test_accepts_every_registered_node_type(self):
+        user_id = _user_id()
+        for node_type in NodeType:
+            entry = KnowledgeGraphEntry(
+                id=f"{user_id}:{node_type.value}:x",
+                user_id=user_id,
+                kind="node",
+                type=node_type.value,
+                name="x",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+            assert entry.type == node_type.value
+
+    async def test_accepts_every_registered_edge_type(self):
+        user_id = _user_id()
+        for edge_type in EdgeType:
+            entry = KnowledgeGraphEntry(
+                id=(f"{user_id}:person:alice|{edge_type.value}|{user_id}:person:bob"),
+                user_id=user_id,
+                kind="edge",
+                type=edge_type.value,
+                source_node_id=f"{user_id}:person:alice",
+                source_type=NodeType.PERSON,
+                target_node_id=f"{user_id}:person:bob",
+                target_type=NodeType.PERSON,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+            assert entry.type == edge_type.value
+
+
+class TestBuildIdAcceptsStringTypes:
+    """Post-#027 ``build_node_id`` / ``build_edge_id`` accept either
+    the :class:`NodeType` / :class:`EdgeType` shim **or** a plain
+    ``str`` — both produce identical ``_id`` strings."""
+
+    def test_build_node_id_with_str(self):
+        user_id = PydanticObjectId()
+
+        from_enum = build_node_id(user_id, NodeType.PERSON, "alice")
+        from_str = build_node_id(user_id, "person", "alice")
+
+        assert from_enum == from_str == f"{user_id}:person:alice"
+
+    def test_build_edge_id_with_str(self):
+        user_id = PydanticObjectId()
+        src = build_node_id(user_id, NodeType.PERSON, "alice")
+        tgt = build_node_id(user_id, NodeType.TASK, "write")
+
+        from_enum = build_edge_id(src, EdgeType.TODO, tgt)
+        from_str = build_edge_id(src, "todo", tgt)
+
+        assert from_enum == from_str == f"{src}|todo|{tgt}"
+
+
+class TestOntologyTreeExtensionsModuleExists:
+    """The Tree-extensions module must import successfully and must
+    NOT mutate the built-in registries on import (task #027 is
+    behavior-neutral; the actual subtype registrations land in #028)."""
+
+    def test_module_imports_with_no_side_effects(self):
+        # Snapshot the registry before importing.
+        from tree.entities.ontology import EDGE_REGISTRY, NODE_REGISTRY
+
+        nodes_before = set(NODE_REGISTRY)
+        edges_before = set(EDGE_REGISTRY)
+
+        # Import (or re-import) the extensions module.
+        import importlib
+
+        import tree.entities.ontology_tree_extensions as ext
+
+        importlib.reload(ext)
+
+        nodes_after = set(NODE_REGISTRY)
+        edges_after = set(EDGE_REGISTRY)
+
+        assert nodes_after == nodes_before
+        assert edges_after == edges_before
