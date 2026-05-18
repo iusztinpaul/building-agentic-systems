@@ -478,3 +478,48 @@ All 16 acceptance criteria are addressed: 15 verified PASS with concrete evidenc
 - Live e2e migration cycle on the dev `tree` DB (dry-run → live run → idempotent re-run) with mongosh-verified post-conditions matches every promise in the spec.
 
 The feature is shipping-ready. Hand off to PM for acceptance review.
+
+### [On-Call] 2026-05-18 15:30 — CI Failure
+
+**Failed step:** memory (python) → Integration tests (excludes @pytest.mark.requires_mongot)
+
+**Run:** https://github.com/iusztinpaul/building-agentic-systems/actions/runs/26042350203 (16m1s)
+
+**Result line:** `===== 3 failed, 139 passed, 12 skipped, 57 deselected in 773.93s (0:12:53) =====`
+
+**Failing tests** (all in `apps/memory/tests/integration/scripts/test_migrate_pole_o_ontology.py`):
+- `TestResetOntologyMigrationE2E::test_reset_ontology_drops_collections_and_recreates_self_person`
+- `TestResetOntologyMigrationE2E::test_reset_ontology_is_idempotent`
+- `TestResetOntologyMigrationE2E::test_default_path_unchanged_under_pole_o`
+
+**Error**
+```
+pymongo.errors.OperationFailure: Executor error during aggregate command on
+namespace: integration_tests_twin.knowledge_graph :: caused by ::
+Error connecting to Search Index Management service.
+{'ok': 0.0, 'code': 125, 'codeName': 'CommandFailed', ...}
+```
+
+**Root cause**
+All three failing tests call `_run_migration(...)`, which calls
+`_ensure_kg_indexes(...)` → `ensure_indexes(...)` → `_ensure_vector_index(...)`,
+which talks to mongot (`list_search_indexes` + `create_search_index`). Mongot's
+gRPC Search Index Management channel is unreliable on GitHub runners (see
+`tracker/done/024-ci-skip-mongot-and-simplify.done.md`), which is exactly why
+`CLAUDE.md` defines the `requires_mongot` marker and CI excludes it via
+`-m "not requires_mongot"`. These three tests need that marker; they currently
+inherit only the class-level `@pytest.mark.slow`. The other two tests in the
+same class (`test_dry_run_lists_drops_without_writes`,
+`test_aborts_when_seed_user_missing`) short-circuit before
+`_ensure_kg_indexes` so they correctly stay unmarked.
+
+The test module's top docstring was also wrong — it claimed "no mongot
+dependency" — which is what masked the missing markers from the Tester.
+
+**Fix**
+Add `@pytest.mark.requires_mongot` to the three failing tests and correct the
+module docstring to reflect that step 4.5 of the migration hits mongot. CI will
+then deselect them under `-m "not requires_mongot"`; local acceptance runs
+(`make memory-integration-tests-all`) still execute them.
+
+Fixing now.

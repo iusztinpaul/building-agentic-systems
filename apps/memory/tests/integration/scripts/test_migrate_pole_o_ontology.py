@@ -1,9 +1,16 @@
 """Integration tests for the ``--reset-ontology`` migration path (#033).
 
-The migration is its own test: it talks to live Mongo (no mongot
-dependency — the script doesn't touch search indexes; the Prefect
-indexing run does, but the deployment trigger is disabled in these
-tests via ``trigger_pipelines=False``).
+The migration talks to live Mongo AND live mongot — step 4.5
+(``_ensure_kg_indexes``) calls ``ensure_indexes`` inline, which in turn
+calls ``list_search_indexes`` / ``create_search_index`` against mongot.
+Tests that reach step 4.5 are therefore marked
+``@pytest.mark.requires_mongot`` so CI's
+``-m "not requires_mongot"`` selector excludes them (mongot's gRPC
+Search Index Management channel is unreliable on GitHub runners — see
+``tracker/done/024-ci-skip-mongot-and-simplify.done.md``). The two
+short-circuit tests (``test_dry_run_lists_drops_without_writes`` and
+``test_aborts_when_seed_user_missing``) exit before step 4.5 so they
+need no mongot and run in CI.
 
 These tests are marked ``@pytest.mark.slow`` because each one rebuilds
 the ``knowledge_graph`` collection from scratch and exercises the live
@@ -234,6 +241,7 @@ class TestResetOntologyMigrationE2E:
             == pre_dropped_count
         )
 
+    @pytest.mark.requires_mongot
     async def test_reset_ontology_drops_collections_and_recreates_self_person(
         self, mongo_client
     ) -> None:
@@ -315,6 +323,7 @@ class TestResetOntologyMigrationE2E:
         # path first; otherwise they cannot recover.
         assert "without --reset-ontology" in message
 
+    @pytest.mark.requires_mongot
     async def test_reset_ontology_is_idempotent(self, mongo_client) -> None:
         """Re-running ``--reset-ontology`` is a no-op for the user-facing
         state.
@@ -355,6 +364,7 @@ class TestResetOntologyMigrationE2E:
         assert first_self["_id"] == second_self["_id"]
         assert second_self.get("subtype") == "individual"
 
+    @pytest.mark.requires_mongot
     async def test_default_path_unchanged_under_pole_o(self, mongo_client) -> None:
         """AC #2: the default (Phase-1 bootstrap) path is byte-identical
         post-Phase-3.
