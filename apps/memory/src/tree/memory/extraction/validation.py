@@ -110,15 +110,41 @@ def validate_properties(
             drops.append(FieldDrop(field=key, value=value, reason="unknown_field"))
         return validated, drops
 
+    # Build an alias-aware lookup. Pydantic's ``model_fields`` keys are
+    # the **Python** field names (e.g. ``object_``), but the LLM emits
+    # the **wire-form** key (e.g. ``"object"``) — which for fields with
+    # ``Field(alias=...)`` is the alias, not the Python name.
+    # ``key_to_python_name`` maps every accepted key (both Python name
+    # and alias when present) onto the Python field name so the
+    # ``TypeAdapter`` annotation lookup works regardless of how the
+    # caller spelled it. Validated keys are stored under the wire-form
+    # key (alias when present, Python name otherwise) so the on-disk
+    # shape preserves the LLM's emitted key — important for
+    # ``FactProperties.object``, which is named ``object_`` in Python
+    # to avoid shadowing the builtin.
+    key_to_python_name: dict[str, str] = {}
+    python_name_to_wire_key: dict[str, str] = {}
+    for python_name, field_info in combined_fields.items():
+        alias = field_info.alias
+        wire_key = alias if alias is not None else python_name
+        python_name_to_wire_key[python_name] = wire_key
+        # The Python name is always accepted as a lookup key.
+        key_to_python_name[python_name] = python_name
+        # The alias is also accepted (most common LLM-facing form).
+        if alias is not None:
+            key_to_python_name[alias] = python_name
+
     for key, value in raw.items():
-        if key not in combined_fields:
+        python_name = key_to_python_name.get(key)
+        if python_name is None:
             drops.append(FieldDrop(field=key, value=value, reason="unknown_field"))
             continue
-        field_info = combined_fields[key]
+        field_info = combined_fields[python_name]
         annotation = field_info.annotation
+        wire_key = python_name_to_wire_key[python_name]
         try:
             adapter = TypeAdapter(annotation)
-            validated[key] = adapter.validate_python(value)
+            validated[wire_key] = adapter.validate_python(value)
         except ValidationError as e:
             # Compact the Pydantic error message — full validators
             # include the schema URL which is noisy in the audit row.
@@ -141,9 +167,13 @@ def validate_properties(
 
 
 # Endpoint type names that disqualify an edge entirely. Encoding the
-# ``fact`` carve-out here keeps #031's surface area small — once
-# ``fact`` registers, this list is the single point of truth for the
-# "facts are an island" rule.
+# ``fact`` carve-out here keeps #031's surface area small — now that
+# ``fact`` is registered as a real LLM-extractable node type, this list
+# is the single point of truth for the "facts are an island" rule
+# (per ``plan.md:440-455``). NB: this is the *edge*-endpoint forbidden
+# list — ``fact`` is **valid** as a node ``type`` (kind="node"); only
+# edges whose ``source_type`` or ``target_type`` is ``"fact"`` are
+# rejected.
 _FORBIDDEN_EDGE_ENDPOINT_TYPES: frozenset[str] = frozenset({"fact"})
 
 
@@ -216,11 +246,12 @@ def _validate_node_envelope(
     if spec is None:
         return EnvelopeResult(ok=False, reason="unknown_type")
 
-    # ``fact`` is reserved as a future node type (#031). Even on
-    # ``kind="node"`` we drop emissions until #031 explicitly enables
-    # it — keeps the validator forward-compatible.
-    if type in _FORBIDDEN_EDGE_ENDPOINT_TYPES:
-        return EnvelopeResult(ok=False, reason="fact_endpoint_disallowed")
+    # NOTE (#031): ``fact`` is a real, accepted node type — the
+    # forbidden-endpoint list is only applied to *edges*. The
+    # construction of a ``kind="node", type="fact"`` row passes through
+    # the same name + subtype rules as every other registered node
+    # type. (``fact``'s ``subtypes is None`` so the subtype check is
+    # a no-op below.)
 
     # The strict name+subtype rules apply only to LLM-extractable
     # nodes. Structural nodes (``document`` / ``chunk``) are

@@ -89,11 +89,15 @@ def test_every_property_model_field_has_description(
         pytest.skip(f"{label} has no fields")
     schema = model.model_json_schema()
     properties: dict[str, Any] = schema.get("properties", {})
-    for field_name, _info in fields.items():
-        # Pydantic surfaces the description via the JSON schema; if a
-        # field is declared with ``Field(description="…")`` the JSON
-        # schema carries the value, otherwise the key is absent.
-        prop = properties.get(field_name, {})
+    for field_name, field_info in fields.items():
+        # Pydantic's ``model_json_schema()`` keys by the wire-form name
+        # — alias if ``Field(alias=...)`` is set, otherwise the Python
+        # attribute name. Look the field up by alias-or-name so models
+        # like :class:`FactProperties` (which has ``object_: str =
+        # Field(alias="object")`` to avoid shadowing the builtin) still
+        # surface the description.
+        lookup_key = field_info.alias or field_name
+        prop = properties.get(lookup_key, {})
         description = prop.get("description")
         assert description, (
             f"{label}.{field_name} is missing Field(description=...); "

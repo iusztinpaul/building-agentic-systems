@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from tree.entities.knowledge_graph import EdgeType, NodeType
 
@@ -494,6 +494,55 @@ class PreferenceProperties(BaseModel):
     content: str = Field(description="Description of the preference")
 
 
+class FactProperties(BaseModel):
+    """A free-form proposition that doesn't fit any typed entity relation.
+
+    Facts (#031) are the LLM extraction escape-hatch for propositions
+    whose subject or object doesn't resolve to a POLE+O entity worth
+    traversing, OR whose relation doesn't match any registered
+    ``related_to`` semantic. They are **island nodes** — the envelope
+    validator rejects every edge with a ``fact`` endpoint, so a fact
+    has zero edges to or from it. Retrieval is by ``name`` /
+    ``subject`` / ``object`` string match or vector similarity only
+    (see :class:`tree.memory.query.kgquery.KGQuery`).
+
+    Bi-temporal columns ``valid_from`` / ``valid_until`` live on
+    :class:`tree.entities.knowledge_graph.KnowledgeGraphEntry` and are
+    populated at extraction time when the LLM emits them. Supersession
+    of contradictory facts lands in #032; until then contradictory
+    facts coexist and both surface in retrieval.
+
+    The ``object`` field shadows the builtin :class:`object` type, so
+    it's stored on the Python class as ``object_`` with a Pydantic
+    ``alias="object"`` — the wire / JSON-schema / LLM-prompt key stays
+    the plain string ``"object"``. ``populate_by_name=True`` lets
+    construction work from either spelling.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    subject: str = Field(
+        description=(
+            "The proposition's left side. Free-text OR a resolved entity "
+            "name (no inverse lookup — facts are island nodes)."
+        )
+    )
+    predicate: str = Field(
+        description=(
+            "The relation verb (e.g. 'prefers', 'lives_in', 'speaks'). "
+            "If this fits one of the registered ``related_to`` semantics "
+            "AND both endpoints resolve as entities, emit a ``related_to`` "
+            "edge with that ``semantic_type`` instead."
+        )
+    )
+    object_: str = Field(
+        alias="object",
+        description=(
+            "The proposition's right side. Free-text OR a resolved entity name."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase-3 #029 — Structural edge property models
 # ---------------------------------------------------------------------------
@@ -875,6 +924,22 @@ register_node_type(
         properties_schema=PreferenceProperties,
         description=PreferenceProperties.__doc__ or "",
         # Typed slots land in #032.
+        subtypes=None,
+        llm_extractable=True,
+    )
+)
+
+# #031: ``fact`` is the LLM-extractable escape-hatch node type for
+# propositions that don't fit any registered relation semantic. Island
+# rule: the envelope validator rejects every edge whose source or
+# target is a ``fact`` row (see ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` in
+# :mod:`tree.memory.extraction.validation`). Subtypes are ``None``
+# (freeform — facts are not categorized).
+register_node_type(
+    NodeTypeSpec(
+        name="fact",
+        properties_schema=FactProperties,
+        description=FactProperties.__doc__ or "",
         subtypes=None,
         llm_extractable=True,
     )

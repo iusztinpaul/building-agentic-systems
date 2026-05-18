@@ -560,6 +560,31 @@
         "travel"
       ]
     },
+    "fact": {
+      "description": "A free-form proposition that doesn't fit any typed entity relation.\n\nFacts (#031) are the LLM extraction escape-hatch for propositions\nwhose subject or object doesn't resolve to a POLE+O entity worth\ntraversing, OR whose relation doesn't match any registered\n``related_to`` semantic. They are **island nodes** \u2014 the envelope\nvalidator rejects every edge with a ``fact`` endpoint, so a fact\nhas zero edges to or from it. Retrieval is by ``name`` /\n``subject`` / ``object`` string match or vector similarity only\n(see :class:`tree.memory.query.kgquery.KGQuery`).\n\nBi-temporal columns ``valid_from`` / ``valid_until`` live on\n:class:`tree.entities.knowledge_graph.KnowledgeGraphEntry` and are\npopulated at extraction time when the LLM emits them. Supersession\nof contradictory facts lands in #032; until then contradictory\nfacts coexist and both surface in retrieval.\n\nThe ``object`` field shadows the builtin :class:`object` type, so\nit's stored on the Python class as ``object_`` with a Pydantic\n``alias=\"object\"`` \u2014 the wire / JSON-schema / LLM-prompt key stays\nthe plain string ``\"object\"``. ``populate_by_name=True`` lets\nconstruction work from either spelling.\n",
+      "properties": {
+        "object": {
+          "description": "The proposition's right side. Free-text OR a resolved entity name.",
+          "title": "Object",
+          "type": "string"
+        },
+        "predicate": {
+          "description": "The relation verb (e.g. 'prefers', 'lives_in', 'speaks'). If this fits one of the registered ``related_to`` semantics AND both endpoints resolve as entities, emit a ``related_to`` edge with that ``semantic_type`` instead.",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "subject": {
+          "description": "The proposition's left side. Free-text OR a resolved entity name (no inverse lookup \u2014 facts are island nodes).",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "subject",
+        "predicate",
+        "object"
+      ]
+    },
     "location": {
       "description": "A geographic or named location.",
       "properties": {

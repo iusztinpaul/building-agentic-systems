@@ -213,15 +213,21 @@ class TestEnvelopeNodeBranches:
         )
         assert result.ok is True
 
-    def test_fact_node_endpoint_rejected_today(self) -> None:
-        # ``fact`` lands in #031; encoding the carve-out as a node-level
-        # rejection now keeps the rule consistent.
-        result = validate_envelope(kind="node", type="fact", name="x")
-        # ``fact`` isn't in NODE_REGISTRY yet so the registry check
-        # fires first — either ``unknown_type`` or the future
-        # ``fact_endpoint_disallowed`` is acceptable.
+    def test_fact_node_accepted_after_031(self) -> None:
+        # Post-#031: ``fact`` is a real LLM-extractable node type with
+        # ``subtypes=None`` (freeform). The forbidden-endpoint list is
+        # applied to *edges* only — a node-kind ``fact`` row passes the
+        # envelope as long as it carries a non-empty ``name``.
+        result = validate_envelope(kind="node", type="fact", name="earth-orbits-sun")
+        assert result.ok is True
+        assert result.reason is None
+
+    def test_fact_node_missing_name_rejected(self) -> None:
+        # ``fact`` is LLM-extractable, so the strict ``missing_name``
+        # rule still applies (deterministic ``_id`` needs a name).
+        result = validate_envelope(kind="node", type="fact", name="")
         assert result.ok is False
-        assert result.reason in {"unknown_type", "fact_endpoint_disallowed"}
+        assert result.reason == "missing_name"
 
 
 class TestEnvelopeEdgeBranches:
@@ -425,11 +431,14 @@ class TestValidatePropertiesOnEdgeSemantic:
         ("event", "meeting", "demo day", None),
         ("object", "task", "ship-demo", None),
         ("preference", None, "coffee", None),
+        # #031: fact is freeform LLM-extractable; accepted with a name.
+        ("fact", None, "earth-orbits-sun", None),
         # Negative cases
         ("person", None, "alice", "missing_subtype"),
         ("person", "dragon", "alice", "unknown_subtype"),
         ("organization", "company", "", "missing_name"),
         ("dragon", None, "smaug", "unknown_type"),
+        ("fact", None, "", "missing_name"),
     ],
 )
 def test_envelope_node_matrix(
@@ -441,3 +450,100 @@ def test_envelope_node_matrix(
     else:
         assert result.ok is False
         assert result.reason == reason
+
+
+# ---------------------------------------------------------------------------
+# #031 — every edge with a ``fact`` endpoint is rejected
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "edge_type,source_type,target_type,semantic_type",
+    [
+        # Structural edge with fact target.
+        ("mentions", "chunk", "fact", None),
+        # Structural edge with two fact endpoints.
+        ("same_as", "fact", "fact", None),
+        # related_to with fact source.
+        ("related_to", "fact", "person", "knows"),
+        # related_to with fact target.
+        ("related_to", "person", "fact", "knows"),
+        # ``has`` (structural) with fact target.
+        ("has", "person", "fact", None),
+    ],
+    ids=[
+        "mentions chunk -> fact",
+        "same_as fact -> fact",
+        "related_to fact -> person",
+        "related_to person -> fact",
+        "has person -> fact",
+    ],
+)
+def test_fact_endpoint_disallowed_on_every_edge(
+    edge_type: str,
+    source_type: str,
+    target_type: str,
+    semantic_type: str | None,
+) -> None:
+    result = validate_envelope(
+        kind="edge",
+        type=edge_type,
+        source_type=source_type,
+        target_type=target_type,
+        semantic_type=semantic_type,
+    )
+    assert result.ok is False
+    assert result.reason == "fact_endpoint_disallowed"
+
+
+# ---------------------------------------------------------------------------
+# #031 — validate_properties is alias-aware (``FactProperties.object_``)
+# ---------------------------------------------------------------------------
+
+
+class TestValidatePropertiesFactAlias:
+    """FactProperties has ``object_: str = Field(alias="object")``.
+    The validator MUST accept the wire-form key ``"object"`` and store
+    the validated value under that same wire-form key, so the on-disk
+    document shape matches what the LLM emitted (and what
+    ``find_facts(object=...)`` queries for).
+    """
+
+    def test_object_alias_accepted_and_stored_under_wire_key(self) -> None:
+        from tree.entities.ontology import FactProperties
+
+        raw = {"subject": "earth", "predicate": "orbits", "object": "sun"}
+        validated, drops = validate_properties(raw, FactProperties)
+        assert drops == []
+        assert validated == raw  # wire-form preserved on output
+
+    def test_python_name_also_accepted(self) -> None:
+        from tree.entities.ontology import FactProperties
+
+        # If a caller uses the Python attribute name directly, it's
+        # still validated — but the output is normalized to the
+        # wire-form alias so downstream consumers (KGQuery / Mongo
+        # queries) see a single key.
+        raw = {"subject": "a", "predicate": "is", "object_": "b"}
+        validated, drops = validate_properties(raw, FactProperties)
+        assert drops == []
+        assert validated == {"subject": "a", "predicate": "is", "object": "b"}
+
+    def test_unknown_field_still_dropped(self) -> None:
+        from tree.entities.ontology import FactProperties
+
+        raw = {"subject": "a", "predicate": "is", "object": "b", "garbage": 1}
+        validated, drops = validate_properties(raw, FactProperties)
+        assert validated == {"subject": "a", "predicate": "is", "object": "b"}
+        assert len(drops) == 1
+        assert drops[0].field == "garbage"
+
+    def test_type_failure_on_object_dropped(self) -> None:
+        from tree.entities.ontology import FactProperties
+
+        # ``object`` is ``str``; passing a list triggers a Pydantic
+        # ValidationError that the lenient validator must NOT raise.
+        raw = {"subject": "a", "predicate": "is", "object": [1, 2]}
+        validated, drops = validate_properties(raw, FactProperties)
+        assert "object" not in validated
+        assert any(d.field == "object" for d in drops)

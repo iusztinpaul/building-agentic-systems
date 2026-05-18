@@ -55,11 +55,12 @@ from tree.entities.ontology import (
 )
 
 
-# Phase-3 #028: the schema grew (4 new POLE+O canonical types; ``subtypes``
-# fields added on every closed-vocab parent; ``task`` / ``episode`` no longer
-# top-level), so the v1 snapshot from #027 is superseded by v2. The v1
-# snapshot is kept on disk for historical-diff review but no test reads it.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v4.json"
+# Phase-3 #028 grew the schema with 4 new POLE+O canonical types; #029
+# folded the LLM-extractable domain edges into ``related_to``; #030 added
+# the ``common_fields`` block; #031 adds the ``fact`` LLM-extractable
+# node type with ``FactProperties``. The v1–v4 snapshots are kept on
+# disk for historical-diff review but no test reads them.
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v5.json"
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +293,8 @@ class TestRetrofitRegistries:
         # ``task`` / ``episode`` top-level rows are GONE and live as
         # subtypes under ``object`` / ``event`` (see
         # ``test_tree_extensions_self_application``).
+        # Post-#031: ``fact`` joins as a 9th entry — the LLM-extractable
+        # escape-hatch node type.
         assert set(NODE_REGISTRY) == {
             "document",
             "chunk",
@@ -301,6 +304,7 @@ class TestRetrofitRegistries:
             "event",
             "object",
             "preference",
+            "fact",
         }
 
     def test_edge_registry_has_post_029_edge_types(self):
@@ -318,6 +322,9 @@ class TestRetrofitRegistries:
 
     def test_llm_extractable_node_types_pole_o(self):
         # Post-#028: 5 POLE+O canonical + preference (still freeform).
+        # Post-#031: ``fact`` joins the LLM-extractable set as the
+        # POLE+O escape-hatch for propositions that don't fit any
+        # registered relation semantic.
         # ``NodeType.TASK`` / ``NodeType.EPISODE`` enum members survive
         # as legacy aliases but are no longer registered as top-level
         # extractable types — they live as subtypes under object/event.
@@ -328,6 +335,7 @@ class TestRetrofitRegistries:
             NodeType.EVENT,
             NodeType.OBJECT,
             NodeType.PREFERENCE,
+            NodeType.FACT,
         }
 
     def test_llm_extractable_edge_types_post_029(self):
@@ -412,6 +420,8 @@ class TestEnumShim:
         # mode=before validator silently re-routes to the new
         # (parent, subtype) shape. The aliases are intentionally NOT
         # in :data:`NODE_REGISTRY`.
+        # Post-#031: ``FACT`` joins the enum + registry as the POLE+O
+        # escape-hatch node type.
         enum_values = {member.value for member in NodeType}
         legacy_aliases = {"task", "episode"}
         assert enum_values == set(NODE_REGISTRY) | legacy_aliases
@@ -434,6 +444,7 @@ class TestEnumShim:
             "TASK",
             "EPISODE",
             "PREFERENCE",
+            "FACT",
         ]:
             assert hasattr(NodeType, name)
 
@@ -1137,3 +1148,184 @@ class TestRetiredEdgeTypes:
     @pytest.mark.parametrize("retired", ["todo", "experienced"])
     def test_retired_edge_not_in_registry(self, retired):
         assert retired not in EDGE_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# 12. #031 — ``fact`` escape-hatch node (island-style)
+# ---------------------------------------------------------------------------
+
+
+class TestFactNodeRegistration:
+    """#031: ``fact`` is an LLM-extractable POLE+O escape-hatch node
+    with ``FactProperties`` (subject / predicate / object). It has no
+    closed subtype vocabulary and participates in zero edges — the
+    envelope validator's forbidden-endpoint list pins the rule.
+    """
+
+    def test_fact_registered_with_expected_spec(self):
+        from tree.entities.ontology import FactProperties
+
+        spec = NODE_REGISTRY["fact"]
+        assert spec.name == "fact"
+        assert spec.properties_schema is FactProperties
+        assert spec.subtypes is None
+        assert spec.llm_extractable is True
+        assert spec.description  # non-empty
+
+    def test_fact_properties_round_trip_with_alias(self):
+        """The wire-form key MUST be ``"object"`` (alias) even though the
+        Python attribute is ``object_`` (to avoid shadowing the builtin).
+        Pydantic ``model_validate`` with ``populate_by_name=True`` accepts
+        either spelling; ``model_dump(by_alias=True)`` emits the alias.
+        """
+
+        from tree.entities.ontology import FactProperties
+
+        # Construct from wire-form keys (the LLM's emission).
+        fp = FactProperties.model_validate(
+            {"subject": "earth", "predicate": "orbits", "object": "sun"}
+        )
+        assert fp.subject == "earth"
+        assert fp.predicate == "orbits"
+        assert fp.object_ == "sun"
+
+        # Dump with aliases — the on-disk / wire form.
+        dumped = fp.model_dump(by_alias=True)
+        assert dumped == {
+            "subject": "earth",
+            "predicate": "orbits",
+            "object": "sun",
+        }
+        # Round-trip via the alias-named dict.
+        rehydrated = FactProperties.model_validate(dumped)
+        assert rehydrated == fp
+
+    def test_fact_properties_construct_from_python_name(self):
+        """``populate_by_name=True`` accepts the Python attribute name
+        ``object_`` as well — keeps existing call sites that use the
+        attribute name working."""
+
+        from tree.entities.ontology import FactProperties
+
+        fp = FactProperties(subject="a", predicate="is", object_="b")
+        assert fp.object_ == "b"
+
+    def test_fact_properties_field_descriptions_non_empty(self):
+        from tree.entities.ontology import FactProperties
+
+        schema = FactProperties.model_json_schema()
+        # by_alias=True is the default for model_json_schema, so the
+        # wire-form key ``"object"`` appears in the properties map.
+        properties = schema["properties"]
+        for wire_key in ("subject", "predicate", "object"):
+            assert wire_key in properties, (
+                f"FactProperties wire-form key {wire_key!r} missing from schema"
+            )
+            assert properties[wire_key].get("description"), (
+                f"FactProperties.{wire_key} is missing Field(description=...)"
+            )
+
+    def test_fact_in_llm_extractable_set(self):
+        # Pin the public view: ``fact`` MUST be in the LLM-extractable
+        # set so the prompt assembler surfaces it.
+        assert NodeType.FACT in LLM_EXTRACTABLE_NODE_TYPES
+
+
+class TestFactIslandRule:
+    """#031: facts are an **island** — no edge type has ``fact`` in its
+    ``allowed_pairs``, and no relation semantic does either. These tests
+    pin the rule across every registered edge / semantic.
+    """
+
+    def test_no_edge_allowed_pair_has_fact_endpoint(self):
+        offenders = []
+        for name, spec in EDGE_REGISTRY.items():
+            for src, tgt in spec.allowed_pairs:
+                if src == "fact" or tgt == "fact":
+                    offenders.append((name, src, tgt))
+        assert offenders == [], (
+            f"Fact endpoint found on edge allowed_pairs: {offenders!r}"
+        )
+
+    def test_no_relation_semantic_has_fact_endpoint(self):
+        offenders = []
+        for name, spec in RELATION_SEMANTICS.items():
+            for src, tgt in spec.allowed_pairs:
+                if src == "fact" or tgt == "fact":
+                    offenders.append((name, src, tgt))
+        assert offenders == [], (
+            f"Fact endpoint found on relation_semantic allowed_pairs: {offenders!r}"
+        )
+
+    def test_mentions_does_not_allow_fact_target(self):
+        # Explicit pin against the carve-out in ontology.py's
+        # ``_pole_o_llm_extractable_for_mentions`` helper.
+        pairs = set(EDGE_REGISTRY["mentions"].allowed_pairs)
+        for src, tgt in pairs:
+            assert tgt != "fact", (
+                f"mentions edge unexpectedly allows fact target: {(src, tgt)}"
+            )
+
+    def test_same_as_does_not_allow_fact(self):
+        pairs = set(EDGE_REGISTRY["same_as"].allowed_pairs)
+        assert ("fact", "fact") not in pairs
+
+
+class TestFactSchemaInPrompt:
+    """The fact node MUST surface in ``get_ontology_schema()`` so the
+    LLM extraction prompt includes its properties + the decision tree
+    section lifted into the system prompt.
+    """
+
+    def test_fact_node_present_in_ontology_schema(self):
+        schema = get_ontology_schema()
+        assert "fact" in schema["node_types"]
+        node_info = schema["node_types"]["fact"]
+        # Freeform — no subtypes list.
+        assert "subtypes" not in node_info
+        # All three FactProperties fields surface under their wire-form keys.
+        properties = node_info["properties"]
+        for wire_key in ("subject", "predicate", "object"):
+            assert wire_key in properties
+
+    def test_fact_required_fields(self):
+        schema = get_ontology_schema()
+        required = set(schema["node_types"]["fact"]["required"])
+        # All three properties are required (no defaults).
+        assert required == {"subject", "predicate", "object"}
+
+
+class TestKnowledgeGraphEntryAcceptsFactNode:
+    """The Beanie ``KnowledgeGraphEntry`` model must accept a fact-typed
+    node row constructed from the validator's surviving properties."""
+
+    def test_construct_fact_node_entry(self):
+        from datetime import UTC, datetime
+
+        from beanie import PydanticObjectId
+
+        from tree.entities.knowledge_graph import KnowledgeGraphEntry
+
+        user_id = PydanticObjectId()
+        now = datetime.now(tz=UTC)
+        # Wire-form ``"object"`` key — what the validator stores after
+        # alias-aware ``validate_properties``.
+        entry = KnowledgeGraphEntry(
+            id=f"{user_id}:fact:earth-orbits-sun",
+            user_id=user_id,
+            kind="node",
+            type="fact",
+            name="earth-orbits-sun",
+            subtype=None,
+            properties={
+                "subject": "earth",
+                "predicate": "orbits",
+                "object": "sun",
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        assert entry.kind == "node"
+        assert entry.type == "fact"
+        assert entry.subtype is None
+        assert entry.properties["object"] == "sun"

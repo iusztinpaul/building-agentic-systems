@@ -142,6 +142,35 @@ Rules:
   to populate the edge's `properties`.
 - For every other edge type, omit `semantic_type` (or set it to null).
 - If no entities or relationships are found, return empty lists.
+
+## Emitting facts vs. typed relations vs. preferences
+
+Use this decision tree for any proposition of the form
+"subject — predicate — object" (e.g. "Earth orbits the Sun",
+"Paul works at Anthropic", "I prefer dark mode"):
+
+1. **First-person preference** ("I prefer X over Y", "I like dark mode"):
+   emit a `preference` node. Don't emit a fact or a typed edge.
+   Example: "I prefer vegetarian food" → a `preference` node with
+   `name="vegetarian-food"` and properties `content="prefers vegetarian food"`.
+
+2. **Both subject and object resolve to POLE+O entities AND the relation
+   matches one of the registered `related_to` semantics**: emit a
+   `related_to` edge with the matching `semantic_type`. Don't emit a fact.
+   Example: "Anthropic is headquartered in San Francisco" → a
+   `related_to + semantic_type=headquarters_at` edge from
+   `organization:anthropic` to `location:san francisco`.
+
+3. **Otherwise** — free-text subject or object, relation doesn't match
+   any registered semantic, or the proposition is a third-party claim
+   (e.g. "Alice prefers dark mode") — emit a `fact` node with
+   `subject` / `predicate` / `object` properties. Facts are **island
+   nodes**: do NOT emit any edge (`mentions`, `same_as`, `related_to`,
+   `has`, ...) whose source or target is a `fact`. Such edges are
+   rejected at the validator and add no value.
+   Example: "Earth orbits the Sun" → a `fact` node with
+   `name="earth-orbits-sun"` and properties `subject="earth"`,
+   `predicate="orbits"`, `object="sun"` — and NO edges.
 """
 
 

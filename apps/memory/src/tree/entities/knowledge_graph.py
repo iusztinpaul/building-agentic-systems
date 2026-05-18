@@ -55,6 +55,11 @@ class NodeType(StrEnum):
     EVENT = "event"
     OBJECT = "object"
     PREFERENCE = "preference"
+    # #031: ``fact`` is an LLM-extractable POLE+O escape-hatch node type
+    # for propositions that don't fit any registered relation semantic.
+    # Island-style: facts participate in no edges (the envelope validator
+    # rejects every edge whose source or target is a ``fact``).
+    FACT = "fact"
     # --- Legacy aliases (#028) — re-routed at write time ---
     TASK = "task"
     EPISODE = "episode"
