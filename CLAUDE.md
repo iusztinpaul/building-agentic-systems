@@ -392,7 +392,7 @@ Notes:
   (themselves idempotent — same chunk hashes → same emissions).
 - **Multi-tenant note:** this drops every tenant's KG rows. Trigger per-tenant extraction afterwards for any other tenant whose data you want rebuilt.
 
-### Voyage-3 vector-index rebuild (one-shot, when adopting the voyage-3 YAML default)
+### Voyage vector-index rebuild (one-shot, when adopting the voyage YAML default)
 
 Use this runbook when the data or memory pipeline boots and immediately
 raises an **Embedding dimension mismatch** error such as:
@@ -403,13 +403,33 @@ RuntimeError: Embedding dimension mismatch: app_config.models.embedding.dimensio
 
 This happens on any deployment that ran the pipeline at least once under
 the previous `sentence-transformers` / `MiniLM-L6-v2` / 384-d YAML defaults
-and is now pulling the post-#034 voyage-3 / 1024-d defaults. The check is
-deliberate — `assert_settings_match_live_vector_index` in
+and is now pulling the post-#034 / post-#038 voyage / 1024-d defaults.
+The check is deliberate — `assert_settings_match_live_vector_index` in
 `apps/memory/src/tree/memory/indexing/core.py` exists precisely to prevent
 silent dim-drift corruption (a `$vectorSearch` against a stale-dim index
 silently returns garbage instead of raising). The literal anchor string
 `Embedding dimension mismatch` is preserved verbatim across releases so
 this runbook is grep-discoverable from the error text alone.
+
+> [!CAUTION]
+> **Vector-space change: voyage-3 → voyage-multimodal-3 is a SILENT
+> CORRUPTION RISK.** #038 switched the project default from `voyage-3`
+> (text endpoint, 1024-d) to `voyage-multimodal-3` (multimodal endpoint,
+> 1024-d). The dimension is identical, so the
+> `assert_settings_match_live_vector_index` boot check **will NOT
+> catch this** — but the two models produce embeddings in different
+> semantic spaces. If your live `knowledge_graph` carries voyage-3
+> vectors and you adopt this branch, every `$vectorSearch` query
+> compares a voyage-multimodal-3 query vector against voyage-3
+> document vectors and returns wrong-but-superficially-plausible
+> results. **You must re-extract:** drop the live `vector_index`, run
+> the indexing pipeline to recreate it at the new (still 1024-d)
+> shape, then **re-trigger extraction** so every node's `embedding`
+> field is re-computed under `voyage-multimodal-3`. The cleanest path
+> is the Phase-2-5 `RESET_ONTOLOGY=1` migration above, which drops
+> `knowledge_graph` entirely and re-extracts. Skipping this step
+> leaves the database in a state where text + graph search work and
+> semantic search returns garbage with zero error signals.
 
 > [!WARNING]
 > The rebuild **wipes** the live `vector_index` on
@@ -430,7 +450,7 @@ mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnect
 
 2. **Re-trigger the indexing pipeline**, which calls `ensure_indexes` and
    recreates the index at the YAML-declared `models.embedding.dimensions`
-   (1024 for voyage-3):
+   (1024 for `voyage-3` / `voyage-multimodal-3`):
 ```bash
 make memory-serve-workflows &
 make memory-run-memory-pipeline-indexing USER_ID=<oid>

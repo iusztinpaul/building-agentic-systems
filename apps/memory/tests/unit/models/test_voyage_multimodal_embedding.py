@@ -191,3 +191,158 @@ class TestVoyageMultimodalEmbed:
             "json"
         )
         assert len(payload["inputs"]) == 3
+
+
+class TestVoyageMultimodalRateLimitRetry:
+    """The 429 exponential-backoff loop was folded into this client from
+    the deprecated text-only client in #038. The tests below mirror the
+    coverage that used to live in ``test_voyage_embedding.py``.
+    """
+
+    async def test_embed_retries_on_429_then_succeeds(self, mocker) -> None:
+        """HTTP 429 should trigger the exponential-backoff loop and the
+        call should ultimately succeed when the rate limit clears.
+
+        Regression test for the Voyage free-tier 3 RPM / 10K TPM limit
+        tripping the extraction flow — the model retries transparently
+        so Prefect's per-task ``retries=2`` budget isn't burned on
+        transient rate-limit errors.
+        """
+
+        # Patch asyncio.sleep so the test runs instantly.
+        mock_sleep = mocker.patch(
+            "tree.models.voyage_multimodal_embedding.asyncio.sleep",
+            new_callable=AsyncMock,
+        )
+
+        m = VoyageMultimodalEmbeddingModel(
+            api_key="key",
+            model="voyage-multimodal-3",
+            rate_limit_backoff_seconds=(0.1, 0.2, 0.4),
+        )
+
+        responses = [
+            _mock_aiohttp_response(status=429, json_data={"detail": "throttled"}),
+            _mock_aiohttp_response(status=429, json_data={"detail": "throttled"}),
+            _mock_aiohttp_response(
+                status=200, json_data={"data": [{"embedding": [0.1, 0.2]}]}
+            ),
+        ]
+
+        # Each `session.post(...)` returns a *fresh* response context,
+        # so swap mock_resp per attempt.
+        def _make_session_for_call(call_idx: int):
+            sess = AsyncMock()
+            sess.post = MagicMock(return_value=responses[call_idx])
+            sess.__aenter__ = AsyncMock(return_value=sess)
+            sess.__aexit__ = AsyncMock(return_value=False)
+            return sess
+
+        sessions = [_make_session_for_call(i) for i in range(3)]
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.side_effect = sessions
+            result = await m.embed(["hello"])
+
+        assert result == [[0.1, 0.2]]
+        # Two sleeps for the two 429s.
+        assert mock_sleep.await_count == 2
+        # First sleep is the first backoff value (0.1), second is 0.2.
+        assert mock_sleep.await_args_list[0].args == (0.1,)
+        assert mock_sleep.await_args_list[1].args == (0.2,)
+
+    async def test_embed_raises_when_429_backoff_exhausted(self, mocker) -> None:
+        """If 429s persist past the backoff schedule, the model must
+        surface an ExtractionError that names the rate-limit cause —
+        not a misleading "connection failed" or hang."""
+
+        mocker.patch(
+            "tree.models.voyage_multimodal_embedding.asyncio.sleep",
+            new_callable=AsyncMock,
+        )
+
+        m = VoyageMultimodalEmbeddingModel(
+            api_key="key",
+            model="voyage-multimodal-3",
+            rate_limit_backoff_seconds=(0.1, 0.1),  # only 2 retries
+        )
+
+        # Three consecutive 429s — one initial + two retries exhausts.
+        def _new_429_session(_call_idx: int):
+            resp = _mock_aiohttp_response(
+                status=429, json_data={"detail": "still throttled"}
+            )
+            sess = AsyncMock()
+            sess.post = MagicMock(return_value=resp)
+            sess.__aenter__ = AsyncMock(return_value=sess)
+            sess.__aexit__ = AsyncMock(return_value=False)
+            return sess
+
+        sessions = [_new_429_session(i) for i in range(5)]
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.side_effect = sessions
+            with pytest.raises(
+                ExtractionError,
+                match="rate-limit retries exhausted",
+            ):
+                await m.embed(["test"])
+
+    async def test_embed_fails_fast_on_non_429_5xx(self, mocker) -> None:
+        """Non-429 errors (e.g. 500) must fail fast — they are not
+        transient. The model must raise ``ExtractionError`` without
+        sleeping or retrying.
+        """
+
+        mock_sleep = mocker.patch(
+            "tree.models.voyage_multimodal_embedding.asyncio.sleep",
+            new_callable=AsyncMock,
+        )
+
+        m = VoyageMultimodalEmbeddingModel(
+            api_key="key",
+            model="voyage-multimodal-3",
+            # Generous schedule — the test asserts we don't use any of it.
+            rate_limit_backoff_seconds=(0.1, 0.1, 0.1),
+        )
+
+        mock_resp = _mock_aiohttp_response(
+            status=500, json_data={"detail": "internal error"}
+        )
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            with pytest.raises(
+                ExtractionError, match="Voyage multimodal API error 500"
+            ):
+                await m.embed(["test"])
+
+        assert mock_sleep.await_count == 0
+
+    async def test_embed_fails_fast_on_non_429_4xx(self, mocker) -> None:
+        """4xx other than 429 (e.g. 401 invalid key) must also fail fast."""
+
+        mock_sleep = mocker.patch(
+            "tree.models.voyage_multimodal_embedding.asyncio.sleep",
+            new_callable=AsyncMock,
+        )
+
+        m = VoyageMultimodalEmbeddingModel(
+            api_key="key",
+            model="voyage-multimodal-3",
+        )
+
+        mock_resp = _mock_aiohttp_response(
+            status=401, json_data={"detail": "Invalid API key"}
+        )
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            with pytest.raises(
+                ExtractionError, match="Voyage multimodal API error 401"
+            ):
+                await m.embed(["test"])
+
+        assert mock_sleep.await_count == 0

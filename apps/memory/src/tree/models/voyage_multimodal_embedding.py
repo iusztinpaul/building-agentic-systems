@@ -1,13 +1,28 @@
 """Embedding model that calls the Voyage AI multimodal embeddings API.
 
 Uses ``aiohttp`` to call ``POST https://api.voyageai.com/v1/multimodalembeddings``
-directly, wrapping text inputs as multimodal content.  Image support can be
+directly, wrapping text inputs as multimodal content. Image support can be
 added later by extending the ``embed`` method or adding an ``embed_multimodal``
 method.
+
+**Rate-limit behavior.** Voyage's free tier is 3 RPM / 10K TPM (see
+https://docs.voyageai.com/docs/pricing); the per-task Prefect retry count
+(``retries=2`` on ``embed_entities_task``) is not enough to ride out a
+60-second rate window on its own. ``embed`` therefore wraps the POST in
+an internal exponential-backoff loop that retries on HTTP 429 and fails
+fast on every other non-200 status, so Prefect's retry budget isn't
+burned on transient rate-limit errors. The schedule is configurable via
+``rate_limit_backoff_seconds``; when it runs out, ``embed`` surfaces an
+``ExtractionError`` whose message contains the literal anchor
+``"rate-limit retries exhausted"`` so operators can grep for it. This
+logic was originally implemented on a separate text-only client and
+folded into the multimodal client in #038 when the project consolidated
+on a single voyage client (``voyage-multimodal-3``).
 
 API docs: https://docs.voyageai.com/docs/multimodal-embeddings
 """
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -19,6 +34,21 @@ from tree.models.exceptions import ExtractionError, ModelError
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.voyageai.com/v1/multimodalembeddings"
+
+# Default exponential-backoff schedule for HTTP 429 rate limits. Kept
+# tight (8 attempts, capped at 60s each) so a real outage still surfaces
+# inside a few minutes while comfortably riding out a free-tier 3 RPM
+# window. See the module docstring for the rationale.
+_DEFAULT_RATE_LIMIT_BACKOFF_SECONDS: tuple[float, ...] = (
+    2.0,
+    4.0,
+    8.0,
+    16.0,
+    30.0,
+    60.0,
+    60.0,
+    60.0,
+)
 
 # Known native output dimensions per Voyage multimodal model id. Used when
 # the caller does not request Matryoshka truncation via ``output_dimension``.
@@ -40,6 +70,13 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
     Supports optional ``input_type`` (``"query"`` / ``"document"``) for
     retrieval-optimised embeddings, and ``output_dimension`` for Matryoshka
     truncation (``voyage-multimodal-3.5`` supports 256, 512, 1024, 2048).
+
+    Calls to :meth:`embed` are wrapped in an exponential-backoff loop that
+    retries transient HTTP 429 (rate-limit) responses and fails fast on
+    every other non-200 status. The retry schedule is overridable via the
+    ``rate_limit_backoff_seconds`` constructor parameter; when the
+    schedule runs out, :meth:`embed` raises ``ExtractionError`` with the
+    anchor message ``"rate-limit retries exhausted"``.
     """
 
     def __init__(
@@ -50,6 +87,9 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
         output_dimension: int | None = None,
         truncation: bool = True,
         timeout: float = 120.0,
+        rate_limit_backoff_seconds: tuple[float, ...] = (
+            _DEFAULT_RATE_LIMIT_BACKOFF_SECONDS
+        ),
     ) -> None:
         if not api_key:
             raise ModelError(
@@ -62,6 +102,7 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
         self._output_dimension = output_dimension
         self._truncation = truncation
         self._timeout = timeout
+        self._rate_limit_backoff_seconds = rate_limit_backoff_seconds
 
     @property
     def dimensions(self) -> int:
@@ -90,7 +131,13 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
     # ------------------------------------------------------------------
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed text strings via the Voyage multimodal API."""
+        """Embed text strings via the Voyage multimodal API.
+
+        Retries transparently on HTTP 429 per
+        ``self._rate_limit_backoff_seconds``; fails fast on every other
+        non-200 status. Raises ``ExtractionError`` when the backoff
+        schedule is exhausted or any non-rate-limit failure occurs.
+        """
 
         if not texts:
             return []
@@ -112,30 +159,57 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
             "Content-Type": "application/json",
         }
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    _API_URL, json=payload, headers=headers
-                ) as resp:
-                    body = await resp.json()
+        # Exponential-backoff loop for HTTP 429 (rate limit). All other
+        # statuses fail fast — they are not transient. Free-tier Voyage
+        # is 3 RPM, so even normal extraction runs into 429s; without
+        # this retry the Prefect task burns its retry budget and the
+        # entire flow fails. See ``tracker/038-consolidate-voyage-clients``
+        # for the consolidation that moved this loop here from the
+        # deprecated text-only client.
+        backoff_iter = iter(self._rate_limit_backoff_seconds)
+        while True:
+            try:
+                timeout = aiohttp.ClientTimeout(total=self._timeout)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        _API_URL, json=payload, headers=headers
+                    ) as resp:
+                        body = await resp.json()
 
-                    if resp.status != 200:
-                        detail = body.get("detail", body)
-                        raise ExtractionError(
-                            f"Voyage multimodal API error {resp.status}: {detail}"
-                        )
+                        if resp.status == 429:
+                            detail = body.get("detail", body)
+                            try:
+                                sleep_s = next(backoff_iter)
+                            except StopIteration:
+                                raise ExtractionError(
+                                    "Voyage multimodal API error 429: "
+                                    f"rate-limit retries exhausted ({detail})"
+                                ) from None
+                            logger.warning(
+                                "Voyage 429 (rate limit); sleeping %.1fs "
+                                "before retry. detail=%s",
+                                sleep_s,
+                                detail,
+                            )
+                            await asyncio.sleep(sleep_s)
+                            continue
 
-                    data = body.get("data")
-                    if data is None:
-                        raise ExtractionError(
-                            f"Voyage multimodal API returned unexpected response: {body}"
-                        )
+                        if resp.status != 200:
+                            detail = body.get("detail", body)
+                            raise ExtractionError(
+                                f"Voyage multimodal API error {resp.status}: {detail}"
+                            )
 
-                    return [item["embedding"] for item in data]
-        except ExtractionError:
-            raise
-        except Exception as exc:
-            raise ExtractionError(
-                f"Voyage multimodal embedding call failed: {exc}"
-            ) from exc
+                        data = body.get("data")
+                        if data is None:
+                            raise ExtractionError(
+                                f"Voyage multimodal API returned unexpected response: {body}"
+                            )
+
+                        return [item["embedding"] for item in data]
+            except ExtractionError:
+                raise
+            except Exception as exc:
+                raise ExtractionError(
+                    f"Voyage multimodal embedding call failed: {exc}"
+                ) from exc

@@ -62,7 +62,7 @@ models:
     model: gemini-3.1-flash-lite
   embedding:
     provider: voyage
-    model: voyage-3
+    model: voyage-multimodal-3
     dimensions: 1024
 
 extraction:

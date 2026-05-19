@@ -7,7 +7,6 @@ from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
 from tree.models.get_model import get_embedding_model, get_llm
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
-from tree.models.voyage_embedding import VoyageEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 
@@ -79,33 +78,13 @@ class TestGetEmbeddingModel:
 
         assert isinstance(result, ModalEmbeddingModel)
 
-    def test_returns_voyage_text_embedding_by_default(self, mocker) -> None:
-        """The post-#034 YAML default is ``voyage / voyage-3 / 1024``; ``voyage-3``
-        is a text-only model and MUST be routed through the
-        ``/v1/embeddings`` client, not the multimodal one.
-
-        Regression test for #037 — the multimodal endpoint returns
-        ``HTTP 400: Model voyage-3 is not supported``, which crashed the
-        memory-extraction flow under the post-#034 defaults.
+    def test_returns_voyage_multimodal_embedding(self, mocker) -> None:
+        """After #038 the project pins ``voyage-multimodal-3`` as the
+        single Voyage client; the routing branch on the model id was
+        removed, so the ``voyage`` provider always returns
+        :class:`VoyageMultimodalEmbeddingModel` regardless of the model
+        name carried in YAML.
         """
-
-        # _mock_app_config sets model="text-embedding-004"; override to
-        # voyage-3 so the routing branch is exercised.
-        mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.model", "voyage-3"
-        )
-        mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.dimensions", 1024
-        )
-
-        result = get_embedding_model(provider="voyage")
-
-        assert isinstance(result, VoyageEmbeddingModel)
-        assert not isinstance(result, VoyageMultimodalEmbeddingModel)
-
-    def test_returns_voyage_multimodal_for_multimodal_model(self, mocker) -> None:
-        """``voyage-multimodal-3`` / ``voyage-multimodal-3.5`` still go
-        to the multimodal client at ``/v1/multimodalembeddings``."""
 
         mocker.patch(
             "tree.models.get_model.app_config.models.embedding.model",

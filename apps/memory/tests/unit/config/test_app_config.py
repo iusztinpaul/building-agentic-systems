@@ -23,12 +23,14 @@ class TestLoadAppConfig:
         # live YAML value so the unit suite stays green; bumping the
         # model in YAML requires a single matching change here.
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # default.yaml is now authoritative for embedding (#034). The
-        # production-pinned voyage-3 at 1024-d is the default; local-dev
-        # operators editing the YAML in place can flip it to a smaller
-        # model + dim.
+        # default.yaml is now authoritative for embedding (#034). After
+        # #038 the project consolidated on a single Voyage client backed
+        # by the multimodal endpoint; ``voyage-multimodal-3`` is also
+        # 1024-d, so the dim stays put while the model identifier
+        # changes. Local-dev operators editing the YAML in place can
+        # flip it to a smaller model + dim.
         assert config.models.embedding.provider == "voyage"
-        assert config.models.embedding.model == "voyage-3"
+        assert config.models.embedding.model == "voyage-multimodal-3"
         assert config.models.embedding.dimensions == 1024
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
