@@ -86,7 +86,7 @@ async def data_pipeline(user_id: PydanticObjectId) -> list[Document]:
         settings.mongo.mongo_initdb_database,
     )
 
-    # #016 boot-time gate: refuse to run if ``settings.embedding_dim``
+    # #016+#034 boot-time gate: refuse to run if ``app_config.models.embedding.dimensions``
     # disagrees with the live Atlas Vector Search index. The data
     # pipeline itself does not write vectors, but it produces the
     # documents the indexing pipeline will embed — a silent dim drift

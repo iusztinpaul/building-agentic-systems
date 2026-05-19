@@ -23,11 +23,13 @@ class TestLoadAppConfig:
         # live YAML value so the unit suite stays green; bumping the
         # model in YAML requires a single matching change here.
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # default.yaml overrides the pinned settings.embedding_dim (1024) with
-        # the local-dev sentence-transformers value (384). Phase 1 of
-        # multi-tenancy keeps this YAML override path open — see
-        # tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md.
-        assert config.models.embedding.dimensions == 384
+        # default.yaml is now authoritative for embedding (#034). The
+        # production-pinned voyage-3 at 1024-d is the default; local-dev
+        # operators editing the YAML in place can flip it to a smaller
+        # model + dim.
+        assert config.models.embedding.provider == "voyage"
+        assert config.models.embedding.model == "voyage-3"
+        assert config.models.embedding.dimensions == 1024
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
 
@@ -121,9 +123,8 @@ class TestLoadAppConfig:
         assert config.extraction.resolution.fuzzy_threshold == 0.9
         # Unset values keep defaults.
         assert config.extraction.chunk_overlap == 64
-        # Embedding dimension falls back to the pinned settings value
-        # (1024) when the YAML doesn't override it. See
-        # tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md.
+        # Embedding dimension falls back to the plain Pydantic default
+        # (1024) when the custom YAML doesn't override it (#034).
         assert config.models.embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):

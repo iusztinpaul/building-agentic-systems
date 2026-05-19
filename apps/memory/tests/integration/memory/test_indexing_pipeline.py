@@ -128,7 +128,7 @@ async def _clean_kg_collection(mongo_client):
 @pytest.fixture()
 def _stub_dim_check(mocker):
     """Stub the #016 dim assertion: these tests build an index with the
-    fake model's small dimension (8), not ``settings.embedding_dim``
+    fake model's small dimension (8), not ``app_config.models.embedding.dimensions``
     (1024 in prod). Without this stub the new #020 boot-time assertion
     in ``memory_indexing`` would hard-fail on the deliberate mismatch.
     """

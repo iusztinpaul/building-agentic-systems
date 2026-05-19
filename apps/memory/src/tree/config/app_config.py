@@ -18,8 +18,6 @@ from urllib.parse import urlparse
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from tree.config.settings import settings
-
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -35,18 +33,20 @@ class LLMConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """YAML-tunable embedding config.
+    """YAML-authoritative embedding config.
 
-    Defaults mirror the pinned values in :mod:`tree.config.settings`
-    (``settings.embedding_*``). A YAML override is allowed — local dev
-    legitimately swaps to ``sentence-transformers`` / mock — but
-    :func:`load_app_config` logs a WARNING when ``dimensions`` disagrees
-    with ``settings.embedding_dim`` so the drift is visible at boot.
+    Post-#034 the YAML is the single source of truth for the embedding
+    provider/model/dimensions. ``dimensions`` is dimension-coupled to
+    the Atlas Vector Search index defined under ``docker/mongot/``;
+    :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
+    asserts the YAML value matches the live ``vector_index`` at boot,
+    turning a mismatch into a hard startup-time error instead of a
+    silent data-loss bug.
     """
 
-    provider: str = Field(default_factory=lambda: settings.embedding_provider)
-    model: str = Field(default_factory=lambda: settings.embedding_model)
-    dimensions: int = Field(default_factory=lambda: settings.embedding_dim)
+    provider: str = Field(default="voyage")
+    model: str = Field(default="voyage-3")
+    dimensions: int = Field(default=1024)
 
 
 class ModelsConfig(BaseModel):
@@ -67,7 +67,18 @@ class ResolutionConfig(BaseModel):
 class DedupConfig(BaseModel):
     """Read-only dedup-decision tuning. Mirrors
     :class:`tree.memory.extraction.dedup.DeduplicationConfig` field-for-field
-    so the YAML can drive both."""
+    so the YAML can drive both.
+
+    Post-#034 this is the *sole* source of truth for dedup behavior:
+    the ``DEDUP_*`` env-prefixed BaseSettings model has been
+    decommissioned. Operators who need a one-off override use
+    ``TREE_EXTRACTION__DEDUP__<KEY>`` (see :func:`_apply_env_overrides`).
+
+    ``supersession_candidate_cap`` lives here too (was env-only on the
+    retired ``settings.DedupConfig``): it bounds the bound-candidate set
+    the supersession resolver feeds to the contradiction judge per
+    ``(user_id, category)`` partition.
+    """
 
     enabled: bool = True
     auto_merge_threshold: float = 0.95
@@ -79,6 +90,7 @@ class DedupConfig(BaseModel):
     merge_strategy: Literal["keep_primary", "merge_properties", "keep_aliases"] = (
         "keep_primary"
     )
+    supersession_candidate_cap: int = 8
 
 
 class ExtractionConfig(BaseModel):
@@ -409,30 +421,7 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
 
     raw = _apply_env_overrides(raw)
     config = AppConfig.model_validate(raw)
-    _warn_on_embedding_dim_mismatch(config)
     return config
-
-
-def _warn_on_embedding_dim_mismatch(config: AppConfig) -> None:
-    """Log a WARNING when YAML embedding dim disagrees with the pinned settings.
-
-    Phase 1 of multi-tenancy pins ``settings.embedding_dim`` as the
-    single source of truth for the Atlas Vector Search index. The YAML
-    override stays available for local dev (mock/sentence-transformers),
-    but a silent disagreement between the YAML and the pin is the kind
-    of drift that surfaces later as an index-write failure. Surface it
-    at config-load time instead.
-    """
-
-    if config.models.embedding.dimensions != settings.embedding_dim:
-        logger.warning(
-            "app_config.embedding.dimensions=%d does not match "
-            "settings.embedding_dim=%d; mongot index is pinned to settings. "
-            "If this is a local-dev override (mock/sentence-transformers) you "
-            "can ignore this; otherwise rebuild the vector index.",
-            config.models.embedding.dimensions,
-            settings.embedding_dim,
-        )
 
 
 app_config = load_app_config()

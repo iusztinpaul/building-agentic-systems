@@ -102,6 +102,19 @@ project-root/
   - Writing unit tests for Prefect, Modal, Opik or other infra components. They represent our infrastructure layer, 
 which is tested only via integration tests.
 
+## Configuration
+
+**The rule: YAML for behavior config; `.env` for credentials and infra endpoints.**
+
+- **`apps/memory/configs/default.yaml`** is the single source of truth for behavior knobs: model names + dimensions, chunk sizes, LLM concurrency, resolution/dedup thresholds, query/MCP tuning, and the `sources:` list. Every value here has a typed Pydantic model in `apps/memory/src/tree/config/app_config.py`.
+- **`.env` (driven by `apps/memory/src/tree/config/settings.py`)** is reserved for credentials (API keys) and per-environment infrastructure endpoints (Mongo host/port, Prefect URL, BrightData zones). It reads like a wallet — no behavior knobs, no commented-out tuning parameters.
+
+**Where to put new things.** A new tunable behavior knob goes in `default.yaml` and `app_config.py`. Do NOT add it to `.env.example` or `settings.py`. A new credential or infra endpoint goes in `.env.example` and `settings.py`.
+
+**Escape hatch.** Operators may override any YAML key via `TREE_<SECTION>__<KEY>` env vars — for example `TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99`. The mechanism is `_apply_env_overrides` in `app_config.py`. This is for emergency one-shot ops use; new knobs should not be documented in `.env.example`.
+
+**Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override.
+
 ## Tech Stack
 
 ### Core
