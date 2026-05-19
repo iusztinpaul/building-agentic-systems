@@ -7,6 +7,7 @@ from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.voyage_embedding import VoyageEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -52,9 +53,25 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
             model=app_config.models.embedding.model,
         )
     if provider == "voyage":
-        return VoyageMultimodalEmbeddingModel(
+        # Voyage exposes two endpoints behind the same API: a **text**
+        # endpoint at ``/v1/embeddings`` (the ``voyage-3`` family) and a
+        # **multimodal** endpoint at ``/v1/multimodalembeddings``
+        # (the ``voyage-multimodal-*`` family). They are NOT
+        # interchangeable — routing ``voyage-3`` to the multimodal
+        # endpoint returns ``HTTP 400: Model voyage-3 is not supported``.
+        # Pick the right client based on the model id; see
+        # ``tracker/037-fresh-deploy-e2e-acceptance.in-progress.md``
+        # for the regression that motivated this split.
+        model_name = app_config.models.embedding.model
+        if model_name.startswith("voyage-multimodal"):
+            return VoyageMultimodalEmbeddingModel(
+                api_key=settings.voyage_api_key.get_secret_value(),
+                model=model_name,
+                output_dimension=app_config.models.embedding.dimensions,
+            )
+        return VoyageEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
+            model=model_name,
             output_dimension=app_config.models.embedding.dimensions,
         )
     raise ValueError(f"Unknown embedding provider: {provider}")
