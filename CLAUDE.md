@@ -115,6 +115,10 @@ which is tested only via integration tests.
 
 **Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override.
 
+### macOS torch / TMPDIR shim
+
+`apps/memory/Makefile` exports `TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)` on Darwin so every `make memory-*` target inherits a sub-104-byte tmpdir. Background: macOS `sockaddr_un.sun_path` is only 104 bytes, and torch's `torch_shm_manager` constructs `<TMPDIR>/torch_<pid>_<rand>/manager.sock`; long inherited `TMPDIR`s (some agent shells inherit an ~81-char `com.apple.shortcuts.mac-helper` path) overflow that buffer and SIGABRT the helper, surfacing as `RuntimeError: no response from torch_shm_manager`. If you run memory-app scripts **outside** `make` (e.g. directly via `uv run ...`), set `TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)` manually. The regression sentinel is `apps/memory/tests/integration/test_torch_shared_memory.py`; see `tracker/done/035-pin-torch-version-py314-arm64.md` for the full diagnostic.
+
 ## Tech Stack
 
 ### Core
