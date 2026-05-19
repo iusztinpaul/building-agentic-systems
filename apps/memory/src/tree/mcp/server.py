@@ -155,7 +155,7 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     user_id = _SERVER_USER_ID
 
     # Ensure indexes (creates ``vector_index`` if absent), then assert
-    # the live index dimension matches ``settings.embedding_dim``. The
+    # the live index dimension matches ``app_config.models.embedding.dimensions``. The
     # assertion is the loud-fail gate the plan calls for.
     await ensure_indexes(
         client, database, embedding_model=embedding_model, user_id=user_id

@@ -11,13 +11,13 @@ branch. For every incoming ``preference`` or ``fact`` row, it asks:
      candidates on embedding cosine - under the project's local-dev
      embedder (``sentence-transformers/all-MiniLM-L6-v2``) the cosine
      between e.g. "prefers dark mode" and "prefers light mode" is
-     ~0.64, well below ``settings.dedup.flag_threshold = 0.85``, so the
+     ~0.64, well below ``app_config.extraction.dedup.flag_threshold = 0.85``, so the
      judge was never invoked end-to-end. Instead we pull the K
      most-recent **active** candidates in the same partition (sorted
      by ``valid_from`` desc, then ``created_at`` desc) and call
      :func:`tree.memory.extraction.judge.judge_contradiction` on each
      in turn. K is bounded by
-     ``settings.dedup.supersession_candidate_cap`` (default 8) so LLM
+     ``app_config.extraction.dedup.supersession_candidate_cap`` (default 8) so LLM
      cost stays bounded per extraction batch. **First contradiction
      wins** - we stop judging once a contradiction is found.
 
@@ -62,7 +62,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 
-from tree.config.settings import settings
+from tree.config.app_config import load_app_config
 from tree.entities.knowledge_graph import (
     EdgeType,
     NodeType,
@@ -179,7 +179,7 @@ class SupersessionDecision:
         judge_confidence: The judge's self-reported confidence.
         candidates_judged: How many candidates the judge was actually
             asked about before we either fired or fell through. Bounded
-            above by ``settings.dedup.supersession_candidate_cap``.
+            above by ``app_config.extraction.dedup.supersession_candidate_cap``.
     """
 
     node: ExtractedNode
@@ -590,7 +590,7 @@ async def resolve_supersessions(
     ``(user_id, properties.subject, properties.predicate)``.
 
     The cap on per-partition candidates fed to the judge is
-    ``settings.dedup.supersession_candidate_cap`` (default 8). No
+    ``app_config.extraction.dedup.supersession_candidate_cap`` (default 8). No
     cosine pre-filter is applied - the judge is asked to decide on
     every candidate in turn, most-recent first, and the **first
     contradiction wins**.
@@ -608,7 +608,12 @@ async def resolve_supersessions(
     """
 
     now = now or datetime.now(tz=UTC)
-    cap = settings.dedup.supersession_candidate_cap
+    # Re-load the YAML config every call so test-level
+    # ``TREE_EXTRACTION__DEDUP__SUPERSESSION_CANDIDATE_CAP`` overrides and
+    # YAML edits are picked up without restarting the process. Per-call
+    # cost is a single small ``yaml.safe_load`` of ``default.yaml``,
+    # comparable to a dict-attribute read; this is not on a hot path.
+    cap = load_app_config().extraction.dedup.supersession_candidate_cap
     decisions: list[SupersessionDecision] = []
 
     for raw in raws:

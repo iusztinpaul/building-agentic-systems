@@ -61,9 +61,9 @@ models:
     provider: gemini
     model: gemini-3.1-flash-lite
   embedding:
-    provider: sentence-transformers
-    model: all-MiniLM-L6-v2
-    dimensions: 384
+    provider: voyage
+    model: voyage-multimodal-3
+    dimensions: 1024
 
 extraction:
   chunk_size: 512
@@ -84,6 +84,7 @@ extraction:
     max_candidates: 10
     match_same_type_only: true
     merge_strategy: keep_primary
+    supersession_candidate_cap: 8
 
 query:
   top_k: 10

@@ -102,6 +102,23 @@ project-root/
   - Writing unit tests for Prefect, Modal, Opik or other infra components. They represent our infrastructure layer, 
 which is tested only via integration tests.
 
+## Configuration
+
+**The rule: YAML for behavior config; `.env` for credentials and infra endpoints.**
+
+- **`apps/memory/configs/default.yaml`** is the single source of truth for behavior knobs: model names + dimensions, chunk sizes, LLM concurrency, resolution/dedup thresholds, query/MCP tuning, and the `sources:` list. Every value here has a typed Pydantic model in `apps/memory/src/tree/config/app_config.py`.
+- **`.env` (driven by `apps/memory/src/tree/config/settings.py`)** is reserved for credentials (API keys) and per-environment infrastructure endpoints (Mongo host/port, Prefect URL, BrightData zones). It reads like a wallet — no behavior knobs, no commented-out tuning parameters.
+
+**Where to put new things.** A new tunable behavior knob goes in `default.yaml` and `app_config.py`. Do NOT add it to `.env.example` or `settings.py`. A new credential or infra endpoint goes in `.env.example` and `settings.py`.
+
+**Escape hatch.** Operators may override any YAML key via `TREE_<SECTION>__<KEY>` env vars — for example `TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99`. The mechanism is `_apply_env_overrides` in `app_config.py`. This is for emergency one-shot ops use; new knobs should not be documented in `.env.example`.
+
+**Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override.
+
+### macOS torch / TMPDIR shim
+
+`apps/memory/Makefile` exports `TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)` on Darwin so every `make memory-*` target inherits a sub-104-byte tmpdir. Background: macOS `sockaddr_un.sun_path` is only 104 bytes, and torch's `torch_shm_manager` constructs `<TMPDIR>/torch_<pid>_<rand>/manager.sock`; long inherited `TMPDIR`s (some agent shells inherit an ~81-char `com.apple.shortcuts.mac-helper` path) overflow that buffer and SIGABRT the helper, surfacing as `RuntimeError: no response from torch_shm_manager`. If you run memory-app scripts **outside** `make` (e.g. directly via `uv run ...`), set `TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)` manually. The regression sentinel is `apps/memory/tests/integration/test_torch_shared_memory.py`; see `tracker/done/035-pin-torch-version-py314-arm64.md` for the full diagnostic.
+
 ## Tech Stack
 
 ### Core
@@ -374,6 +391,110 @@ Notes:
   same `person:self` (`$setOnInsert`), and re-triggers the pipelines
   (themselves idempotent — same chunk hashes → same emissions).
 - **Multi-tenant note:** this drops every tenant's KG rows. Trigger per-tenant extraction afterwards for any other tenant whose data you want rebuilt.
+
+### Voyage vector-index rebuild (one-shot, when adopting the voyage YAML default)
+
+Use this runbook when the data or memory pipeline boots and immediately
+raises an **Embedding dimension mismatch** error such as:
+
+```
+RuntimeError: Embedding dimension mismatch: app_config.models.embedding.dimensions=1024 but live vector_index numDimensions=384. Rebuild the mongot index (drop + ensure_indexes) so it matches the YAML value, or set apps/memory/configs/default.yaml's models.embedding.dimensions to 384.
+```
+
+This happens on any deployment that ran the pipeline at least once under
+the previous `sentence-transformers` / `MiniLM-L6-v2` / 384-d YAML defaults
+and is now pulling the post-#034 / post-#038 voyage / 1024-d defaults.
+The check is deliberate — `assert_settings_match_live_vector_index` in
+`apps/memory/src/tree/memory/indexing/core.py` exists precisely to prevent
+silent dim-drift corruption (a `$vectorSearch` against a stale-dim index
+silently returns garbage instead of raising). The literal anchor string
+`Embedding dimension mismatch` is preserved verbatim across releases so
+this runbook is grep-discoverable from the error text alone.
+
+> [!CAUTION]
+> **Vector-space change: voyage-3 → voyage-multimodal-3 is a SILENT
+> CORRUPTION RISK.** #038 switched the project default from `voyage-3`
+> (text endpoint, 1024-d) to `voyage-multimodal-3` (multimodal endpoint,
+> 1024-d). The dimension is identical, so the
+> `assert_settings_match_live_vector_index` boot check **will NOT
+> catch this** — but the two models produce embeddings in different
+> semantic spaces. If your live `knowledge_graph` carries voyage-3
+> vectors and you adopt this branch, every `$vectorSearch` query
+> compares a voyage-multimodal-3 query vector against voyage-3
+> document vectors and returns wrong-but-superficially-plausible
+> results. **You must re-extract:** drop the live `vector_index`, run
+> the indexing pipeline to recreate it at the new (still 1024-d)
+> shape, then **re-trigger extraction** so every node's `embedding`
+> field is re-computed under `voyage-multimodal-3`. The cleanest path
+> is the Phase-2-5 `RESET_ONTOLOGY=1` migration above, which drops
+> `knowledge_graph` entirely and re-extracts. Skipping this step
+> leaves the database in a state where text + graph search work and
+> semantic search returns garbage with zero error signals.
+
+> [!WARNING]
+> The rebuild **wipes** the live `vector_index` on
+> `db.knowledge_graph`. Until mongot re-converges (~30-90s after the
+> indexing pipeline recreates the index), every `$vectorSearch` query
+> returns empty — the agent's memory queries degrade to text + graph
+> only during that window. Schedule the rebuild accordingly.
+
+**Recipe (two commands; idempotent on a healthy 1024-d index — the drop
+is the only destructive step, `ensure_indexes` no-ops when the live shape
+already matches):**
+
+1. **Drop the stale vector index** via `mongosh`:
+```bash
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true" \
+  --eval 'db.knowledge_graph.dropSearchIndex("vector_index")'
+```
+
+2. **Re-trigger the indexing pipeline**, which calls `ensure_indexes` and
+   recreates the index at the YAML-declared `models.embedding.dimensions`
+   (1024 for `voyage-3` / `voyage-multimodal-3`):
+```bash
+make memory-serve-workflows &
+make memory-run-memory-pipeline-indexing USER_ID=<oid>
+```
+
+3. **Verify** in `mongosh` that the new index is `READY` at the new dim:
+```bash
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true" \
+  --eval 'db.knowledge_graph.aggregate([{$listSearchIndexes: {name: "vector_index"}}])'
+```
+Expected output shows `numDimensions: 1024` and `status: READY`. The
+**convergence window** is typically 30-90s after `ensure_indexes` returns
+(same window documented for fresh-deploy index creation); until then
+`$vectorSearch` is empty. Re-running the data pipeline at this point
+should no longer raise the dim-mismatch error — the boot check returns
+`None`.
+
+Notes:
+- **Row-level embeddings are still stale.** `ensure_indexes` only
+  replaces the mongot index definition; it does not touch the
+  `embedding` field on existing `knowledge_graph` rows. Those vectors
+  were produced by the old 384-d model and are now both wrong-shape AND
+  wrong-semantic-space. The indexing pipeline's `embed_unembedded_nodes`
+  step backfills only nodes whose `embedding` field is missing — it
+  will NOT re-embed rows that already carry a (stale 384-d) vector. For
+  a full refresh, run the reset-ontology migration above (which drops
+  `knowledge_graph` entirely and triggers re-extraction), OR re-run
+  extraction explicitly:
+```bash
+make memory-run-memory-pipeline-extraction USER_ID=<oid>
+make memory-run-memory-pipeline-indexing USER_ID=<oid>
+```
+- **Idempotent.** Re-running the recipe on an already-1024-d index
+  drops + recreates the same shape; `ensure_indexes` is a no-op when
+  configuration matches.
+- **Fresh deploys never hit this path.** On a clean machine,
+  `make memory-run-memory-pipeline-indexing` is the first thing that
+  creates `vector_index` and it creates it at the current YAML dim
+  directly. This runbook is only relevant for upgrades over an existing
+  mongot dataset.
+- **Do not edit `default.yaml` back to 384.** The error message offers
+  that as a fallback for emergencies; the supported path is to rebuild
+  the index at the current YAML value. See the `## Configuration`
+  section above — the YAML is the source of truth for embedding dim.
 
 ## Running Custom Commands for Project Level Dependencies
 

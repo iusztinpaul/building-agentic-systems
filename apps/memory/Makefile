@@ -9,6 +9,25 @@ export UV_PROJECT_ENVIRONMENT=.venv
 export VIRTUAL_ENV=.venv
 export PYTHONPATH = ./src/
 
+# --- macOS short-TMPDIR shim (see CLAUDE.md "Configuration > macOS torch / TMPDIR") ---
+#
+# On macOS arm64 + Python 3.14, torch's bundled ``torch_shm_manager`` constructs
+# a Unix-domain socket path of the form ``<TMPDIR>/torch_<pid>_<rand>/manager.sock``
+# and stuffs it into a ``sockaddr_un`` whose ``sun_path`` field is only 104 bytes
+# on Darwin (vs. 108 on Linux). If the inherited ``TMPDIR`` is long (e.g. the
+# ``/var/folders/.../com.apple.shortcuts.mac-helper/`` path some agent shells
+# inherit, ~81 chars), the full socket path overflows, ``__stack_chk_fail`` traps,
+# and the helper aborts with SIGABRT — surfacing as
+# ``RuntimeError: no response from torch_shm_manager``. See
+# ``tracker/done/035-pin-torch-version-py314-arm64.md`` for the full diagnostic
+# log. The canonical per-user short tmpdir on macOS is ``getconf
+# DARWIN_USER_TEMP_DIR`` (~49 chars), which keeps the path safely under 104.
+# No-op on Linux (``sun_path`` is 108 bytes there and ``/tmp`` is 5 chars).
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+export TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)
+endif
+
 .PHONY: tests
 
 # --- Default Values ---
@@ -22,6 +41,14 @@ TRANSPORT_ARG := $(if $(TRANSPORT),--transport $(TRANSPORT),)
 
 help: # Display memory-app targets.
 	@grep -E '^[a-zA-Z0-9 _-]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m%s\033[00m:%s\n" "$$(echo $$l | cut -f 1 -d':')" "$$(echo $$l | cut -f 2- -d'#')"; done
+
+print-tmpdir: # Print the effective TMPDIR for memory-app make targets. Diagnoses the macOS sockaddr_un sun_path overflow that crashes torch_shm_manager.
+	@echo "TMPDIR=$$TMPDIR"
+	@echo "TMPDIR length: $$(printf '%s' "$$TMPDIR" | wc -c | tr -d ' ') bytes"
+	@echo "uname -s: $$(uname -s)"
+
+smoke-torch-shared-memory: # Smoke-test that torch.tensor(0).share_memory_() runs cleanly under the make-provided TMPDIR. Catches the macOS sockaddr_un sun_path overflow.
+	@uv run python -c "import os, torch; print('TMPDIR=' + os.environ.get('TMPDIR', '<unset>')); torch.tensor(0).share_memory_(); print('OK')"
 
 build: # Build the project.
 	uv sync

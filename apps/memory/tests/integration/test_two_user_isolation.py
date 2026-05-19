@@ -230,7 +230,7 @@ def _patch_indexing_deps(mocker, mongo_client, embedding_model) -> None:
 
     The boot-time ``assert_settings_match_live_vector_index`` check is
     stubbed because the test runs with an 8-dim fake model while
-    ``settings.embedding_dim`` is the production pin (1024).
+    ``app_config.models.embedding.dimensions`` is the production pin (1024).
     """
 
     mocker.patch(

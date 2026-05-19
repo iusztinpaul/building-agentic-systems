@@ -52,6 +52,16 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
             model=app_config.models.embedding.model,
         )
     if provider == "voyage":
+        # The project pinned the multimodal model family
+        # (``voyage-multimodal-*`` against ``/v1/multimodalembeddings``)
+        # as the single Voyage client in #038, so there is only one
+        # code path here. Text-only models such as ``voyage-3`` are not
+        # supported by the multimodal endpoint (Voyage returns
+        # ``HTTP 400: Model voyage-3 is not supported``); operators
+        # who flip ``models.embedding.model`` to a non-multimodal id
+        # will see that error at the first ``embed`` call. The text
+        # client added in #037 was removed in the same commit — see
+        # ``tracker/038-consolidate-voyage-clients`` for context.
         return VoyageMultimodalEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
             model=app_config.models.embedding.model,

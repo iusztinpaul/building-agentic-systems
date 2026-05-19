@@ -155,14 +155,14 @@ def _build_dedup_config() -> DeduplicationConfig:
     """Translate the YAML :class:`DedupConfig` to the runtime
     :class:`DeduplicationConfig` (re-validates ranges via ``__post_init__``).
 
-    The YAML config (``app_config.extraction.dedup``) is the
-    authoritative source for the runtime thresholds today; the new
-    ``settings.dedup`` BaseSettings (#032) is the env-level surface
-    that operators can flip without editing YAML. The
-    cross-validator on :class:`ExtractionConfig` that pins
-    resolution / dedup type-strictness keys off the YAML config, so
-    the runtime config flows through the YAML path to keep the gate
-    intact.
+    The YAML config (``app_config.extraction.dedup``) is the sole
+    authoritative source for the runtime thresholds. Operators who
+    need a one-off override use the ``TREE_EXTRACTION__DEDUP__<KEY>``
+    env-var escape hatch (see :func:`_apply_env_overrides` in
+    ``app_config``); the previous ``DEDUP_*``-prefixed BaseSettings
+    surface was decommissioned in #034. The cross-validator on
+    :class:`ExtractionConfig` that pins resolution / dedup
+    type-strictness keys off the YAML config.
     """
 
     cfg = _live_app_config().extraction.dedup

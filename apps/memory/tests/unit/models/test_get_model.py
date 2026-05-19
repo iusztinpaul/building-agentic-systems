@@ -78,7 +78,22 @@ class TestGetEmbeddingModel:
 
         assert isinstance(result, ModalEmbeddingModel)
 
-    def test_returns_voyage_embedding(self) -> None:
+    def test_returns_voyage_multimodal_embedding(self, mocker) -> None:
+        """After #038 the project pins ``voyage-multimodal-3`` as the
+        single Voyage client; the routing branch on the model id was
+        removed, so the ``voyage`` provider always returns
+        :class:`VoyageMultimodalEmbeddingModel` regardless of the model
+        name carried in YAML.
+        """
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.embedding.model",
+            "voyage-multimodal-3",
+        )
+        mocker.patch(
+            "tree.models.get_model.app_config.models.embedding.dimensions", 1024
+        )
+
         result = get_embedding_model(provider="voyage")
 
         assert isinstance(result, VoyageMultimodalEmbeddingModel)

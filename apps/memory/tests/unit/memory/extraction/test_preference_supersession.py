@@ -439,17 +439,17 @@ class TestPreferenceSupersessionDoesNotFire:
 
 class TestSupersessionCandidateCap:
     """#032 fix-1: the resolver hits the judge AT MOST
-    ``settings.dedup.supersession_candidate_cap`` times per incoming
-    row, even when many same-partition candidates exist."""
+    ``app_config.extraction.dedup.supersession_candidate_cap`` times per
+    incoming row, even when many same-partition candidates exist."""
 
-    async def test_caps_judge_calls_at_k(self, mocker) -> None:
+    async def test_caps_judge_calls_at_k(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Override the cap to a small number for the test so we don't
-        # need to seed 9 rows just to prove a cap of 8.
-        mocker.patch(
-            "tree.memory.extraction.preference_supersession.settings.dedup."
-            "supersession_candidate_cap",
-            3,
-        )
+        # need to seed 9 rows just to prove a cap of 8. Post-#034 the
+        # YAML is authoritative and the call site re-loads it on every
+        # call; ``TREE_EXTRACTION__DEDUP__*`` is the public override hook.
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP__SUPERSESSION_CANDIDATE_CAP", "3")
         # Seed 5 same-partition candidates, all "not contradiction".
         now = datetime.now(tz=UTC)
         seed: list[dict[str, Any]] = []
@@ -490,16 +490,14 @@ class TestSupersessionCandidateCap:
             f"expected at most K=3 judge calls under cap-3 setting; got {judge.calls}"
         )
 
-    async def test_first_contradiction_wins(self, mocker) -> None:
+    async def test_first_contradiction_wins(
+        self, mocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """If the K candidates are judged most-recent-first and the
         first one returns CONTRADICT, the judge is NOT called for the
         remaining K-1 candidates."""
 
-        mocker.patch(
-            "tree.memory.extraction.preference_supersession.settings.dedup."
-            "supersession_candidate_cap",
-            4,
-        )
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP__SUPERSESSION_CANDIDATE_CAP", "4")
         now = datetime.now(tz=UTC)
         # Three candidates; most recent is the "fresh" dark-mode one.
         seed = [

@@ -23,7 +23,6 @@ from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.config.app_config import app_config
-from tree.config.settings import settings
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -450,25 +449,30 @@ async def assert_settings_match_live_vector_index(
     client: AsyncMongoClient,
     database: str,
 ) -> None:
-    """Hard-error gate between ``settings.embedding_dim`` and the live mongot index.
+    """Hard-error gate between ``app_config.models.embedding.dimensions``
+    and the live mongot index.
 
-    Phase 1 of multi-tenancy pins the embedding dimension in
-    :mod:`tree.config.settings`. The Atlas Vector Search index under
-    ``docker/mongot/`` must reflect the same value — a mismatch silently
-    corrupts every ``$vectorSearch`` write. This helper inspects the live
-    ``vector_index`` definition for ``database.knowledge_graph`` and:
+    Post-#034 the YAML (``app_config.models.embedding.dimensions``) is the
+    authoritative source for the embedding dimension. The Atlas Vector
+    Search index under ``docker/mongot/`` must reflect the same value —
+    a mismatch silently corrupts every ``$vectorSearch`` write. This
+    helper inspects the live ``vector_index`` definition for
+    ``database.knowledge_graph`` and:
 
     * Returns ``None`` if ``numDimensions`` on the live index equals
-      ``settings.embedding_dim``.
+      ``app_config.models.embedding.dimensions``.
     * Raises :class:`RuntimeError` (with both numbers in the message) on
-      mismatch.
+      mismatch. The literal substring ``Embedding dimension mismatch``
+      is preserved as a grep anchor for the #036 runbook.
     * Raises :class:`RuntimeError` (``"vector_index not found"``) when no
       index named ``vector_index`` is present — caller decides whether to
       bootstrap one via :func:`ensure_indexes` or fail.
 
     Intended call site: indexing-pipeline boot, before any embedding
-    write. See ``tracker/016-pin-embedding-model-and-dim-in-settings.groomed.md``.
+    write. See ``tracker/034-voyage-3-yaml-default.groomed.md``.
     """
+
+    expected_dim = app_config.models.embedding.dimensions
 
     collection = client[database][_KG_COLLECTION]
     cursor = await collection.list_search_indexes()
@@ -482,7 +486,7 @@ async def assert_settings_match_live_vector_index(
         raise RuntimeError(
             f"vector_index not found in database '{database}'; expected an "
             f"Atlas Vector Search index named '{_VECTOR_INDEX_NAME}' with "
-            f"numDimensions={settings.embedding_dim}. Run the indexing "
+            f"numDimensions={expected_dim}. Run the indexing "
             f"pipeline to bootstrap it."
         )
 
@@ -491,15 +495,15 @@ async def assert_settings_match_live_vector_index(
         raise RuntimeError(
             f"vector_index '{_VECTOR_INDEX_NAME}' in database '{database}' has "
             f"no parseable numDimensions; expected "
-            f"settings.embedding_dim={settings.embedding_dim}."
+            f"app_config.models.embedding.dimensions={expected_dim}."
         )
 
-    if live_dimensions != settings.embedding_dim:
+    if live_dimensions != expected_dim:
         raise RuntimeError(
             f"Embedding dimension mismatch: "
-            f"settings.embedding_dim={settings.embedding_dim} but live "
+            f"app_config.models.embedding.dimensions={expected_dim} but live "
             f"vector_index numDimensions={live_dimensions}. Rebuild the "
-            f"mongot index (drop + ensure_indexes) so it matches the pinned "
-            f"settings value, or revert settings.embedding_dim to "
-            f"{live_dimensions}."
+            f"mongot index (drop + ensure_indexes) so it matches the YAML "
+            f"value, or set apps/memory/configs/default.yaml's "
+            f"models.embedding.dimensions to {live_dimensions}."
         )
