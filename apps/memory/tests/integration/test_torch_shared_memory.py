@@ -30,6 +30,8 @@ Marked ``@pytest.mark.slow`` because importing torch is ~1-2s.
 from __future__ import annotations
 
 import os
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -63,13 +65,34 @@ def test_torch_shm_socket_path_fits_in_sockaddr_un() -> None:
     code path that's hard to bisect.
     """
     # Arrange
+    #
+    # On macOS, ``TMPDIR`` MUST be set — the Makefile shim
+    # (``export TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)``) is the
+    # whole point of this regression test. A missing ``TMPDIR`` on macOS
+    # means the shim regressed, which is exactly the failure mode this
+    # test is the sentinel for. On Linux (including GitHub Actions
+    # runners, which call ``uv run pytest`` directly without going
+    # through the Makefile and where the shell step does not always
+    # export ``TMPDIR``), fall back to ``tempfile.gettempdir()`` — that
+    # mirrors what Python / glibc / torch's libshm actually do at runtime
+    # when ``$TMPDIR`` is unset, so the synthesized-socket-path check
+    # below remains meaningful. The 104-byte ``sun_path`` constraint
+    # itself is macOS-specific; on Linux the check trivially passes
+    # because ``/tmp`` is 4 chars, but keeping it exercised on Linux
+    # catches a regression where the synthesis logic itself breaks
+    # (e.g. someone bumps ``_TORCH_SHM_SUFFIX_BYTES`` past 100).
     tmpdir = os.environ.get("TMPDIR")
-    assert tmpdir is not None, (
-        "TMPDIR is not set; the Makefile shim "
-        "(export TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)) should "
-        "have exported it on macOS, and Linux always inherits one from "
-        "the shell. Investigate why this test process is missing it."
-    )
+    if tmpdir is None:
+        assert sys.platform != "darwin", (
+            "TMPDIR is not set on macOS; the Makefile shim "
+            "(export TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)) "
+            "should have exported it. This is the regression this "
+            "sentinel test exists to catch — investigate apps/memory/"
+            "Makefile's Darwin TMPDIR block."
+        )
+        # Linux fallback: use the platform default that torch's libshm
+        # would actually see when ``$TMPDIR`` is unset.
+        tmpdir = tempfile.gettempdir()
 
     # Act: synthesize the longest socket path torch_shm_manager would
     # construct under this TMPDIR.
