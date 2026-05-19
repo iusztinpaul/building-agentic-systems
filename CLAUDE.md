@@ -392,6 +392,90 @@ Notes:
   (themselves idempotent — same chunk hashes → same emissions).
 - **Multi-tenant note:** this drops every tenant's KG rows. Trigger per-tenant extraction afterwards for any other tenant whose data you want rebuilt.
 
+### Voyage-3 vector-index rebuild (one-shot, when adopting the voyage-3 YAML default)
+
+Use this runbook when the data or memory pipeline boots and immediately
+raises an **Embedding dimension mismatch** error such as:
+
+```
+RuntimeError: Embedding dimension mismatch: app_config.models.embedding.dimensions=1024 but live vector_index numDimensions=384. Rebuild the mongot index (drop + ensure_indexes) so it matches the YAML value, or set apps/memory/configs/default.yaml's models.embedding.dimensions to 384.
+```
+
+This happens on any deployment that ran the pipeline at least once under
+the previous `sentence-transformers` / `MiniLM-L6-v2` / 384-d YAML defaults
+and is now pulling the post-#034 voyage-3 / 1024-d defaults. The check is
+deliberate — `assert_settings_match_live_vector_index` in
+`apps/memory/src/tree/memory/indexing/core.py` exists precisely to prevent
+silent dim-drift corruption (a `$vectorSearch` against a stale-dim index
+silently returns garbage instead of raising). The literal anchor string
+`Embedding dimension mismatch` is preserved verbatim across releases so
+this runbook is grep-discoverable from the error text alone.
+
+> [!WARNING]
+> The rebuild **wipes** the live `vector_index` on
+> `db.knowledge_graph`. Until mongot re-converges (~30-90s after the
+> indexing pipeline recreates the index), every `$vectorSearch` query
+> returns empty — the agent's memory queries degrade to text + graph
+> only during that window. Schedule the rebuild accordingly.
+
+**Recipe (two commands; idempotent on a healthy 1024-d index — the drop
+is the only destructive step, `ensure_indexes` no-ops when the live shape
+already matches):**
+
+1. **Drop the stale vector index** via `mongosh`:
+```bash
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true" \
+  --eval 'db.knowledge_graph.dropSearchIndex("vector_index")'
+```
+
+2. **Re-trigger the indexing pipeline**, which calls `ensure_indexes` and
+   recreates the index at the YAML-declared `models.embedding.dimensions`
+   (1024 for voyage-3):
+```bash
+make memory-serve-workflows &
+make memory-run-memory-pipeline-indexing USER_ID=<oid>
+```
+
+3. **Verify** in `mongosh` that the new index is `READY` at the new dim:
+```bash
+mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnection=true" \
+  --eval 'db.knowledge_graph.aggregate([{$listSearchIndexes: {name: "vector_index"}}])'
+```
+Expected output shows `numDimensions: 1024` and `status: READY`. The
+**convergence window** is typically 30-90s after `ensure_indexes` returns
+(same window documented for fresh-deploy index creation); until then
+`$vectorSearch` is empty. Re-running the data pipeline at this point
+should no longer raise the dim-mismatch error — the boot check returns
+`None`.
+
+Notes:
+- **Row-level embeddings are still stale.** `ensure_indexes` only
+  replaces the mongot index definition; it does not touch the
+  `embedding` field on existing `knowledge_graph` rows. Those vectors
+  were produced by the old 384-d model and are now both wrong-shape AND
+  wrong-semantic-space. The indexing pipeline's `embed_unembedded_nodes`
+  step backfills only nodes whose `embedding` field is missing — it
+  will NOT re-embed rows that already carry a (stale 384-d) vector. For
+  a full refresh, run the reset-ontology migration above (which drops
+  `knowledge_graph` entirely and triggers re-extraction), OR re-run
+  extraction explicitly:
+```bash
+make memory-run-memory-pipeline-extraction USER_ID=<oid>
+make memory-run-memory-pipeline-indexing USER_ID=<oid>
+```
+- **Idempotent.** Re-running the recipe on an already-1024-d index
+  drops + recreates the same shape; `ensure_indexes` is a no-op when
+  configuration matches.
+- **Fresh deploys never hit this path.** On a clean machine,
+  `make memory-run-memory-pipeline-indexing` is the first thing that
+  creates `vector_index` and it creates it at the current YAML dim
+  directly. This runbook is only relevant for upgrades over an existing
+  mongot dataset.
+- **Do not edit `default.yaml` back to 384.** The error message offers
+  that as a fallback for emergencies; the supported path is to rebuild
+  the index at the current YAML value. See the `## Configuration`
+  section above — the YAML is the source of truth for embedding dim.
+
 ## Running Custom Commands for Project Level Dependencies
 
 Use `uv` to run any custom command that is not present in the @Makefile or @apps/memory/Makefile, but uses Python or other dependency installed through uv, usually available in @apps/memory/pyproject.toml.
