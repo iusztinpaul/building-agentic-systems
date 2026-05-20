@@ -85,6 +85,10 @@ project-root/
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
 - Always add types to function or method parameters and return types. Even if they return `None`.
 
+### Python gotchas
+
+- **PEP 758 `except` syntax is valid here.** This project pins `requires-python >=3.14`, so `except TypeError, ValueError:` (parenthesis-free, multiple exception types) is **valid** Python 3.14 syntax per [PEP 758](https://peps.python.org/pep-0758/) — NOT a Python-2 relic or a `SyntaxError`. `ast.parse`, `py_compile`, `import`, and CI all correctly accept it (CI installs 3.14 via `uv python install`). Do not flag it as a defect or "fix" it; it compiles and catches both exception types correctly. (Example in the wild: `apps/memory/src/tree/memory/indexing/core.py`.)
+
 ### Writing Scripts
 
 - Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `tree.logging` at module level to configure logging.
@@ -172,6 +176,8 @@ By default, you will use the "Paul Iusztin" user when testing.
 
 Use Squid's `/night` and `/day` skills to do any changes to the codebase.
 
+- **Commit on the feature branch, never sub-branches.** During a `/night` run every per-task commit lands on the single feature branch `feat/<slug>`. Do not create or switch to a per-task sub-branch (e.g. `feat/043-…`) — commits there miss the feature branch and have to be reconciled.
+
 ## Step-by-Step Verification Steps
 
 During development, run these steps after every atomic change or before commiting anything to git:
@@ -195,6 +201,8 @@ make memory-build
 ```
 
 ## Running QA and Tests
+
+**Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
 We use `ruff` as our formatter and linter.
 
