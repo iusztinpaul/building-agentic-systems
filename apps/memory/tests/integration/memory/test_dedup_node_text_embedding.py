@@ -108,7 +108,12 @@ async def _insert_doc(
 
 
 def _patch_pipeline_deps(
-    mocker, mongo_client, *, llm: Any, embedding_model: BaseEmbeddingModel
+    mocker,
+    mongo_client,
+    *,
+    llm: Any,
+    embedding_model: BaseEmbeddingModel,
+    resolution_embedding_model: BaseEmbeddingModel | None = None,
 ) -> None:
     mocker.patch(
         "tree.memory.extraction.pipeline.init_mongodb", return_value=mongo_client
@@ -118,13 +123,17 @@ def _patch_pipeline_deps(
         TEST_DATABASE,
     )
     mocker.patch("tree.memory.extraction.pipeline.get_llm", return_value=llm)
-    mocker.patch(
-        "tree.memory.extraction.pipeline.get_embedding_model",
-        return_value=embedding_model,
-    )
+    # #043: the SEARCH model is the persisted / dedup / supersession handle.
     mocker.patch(
         "tree.memory.extraction.pipeline.get_search_embedding_model",
         return_value=embedding_model,
+    )
+    # #043: the resolution model feeds the resolver's transient name vector.
+    # Default to the same handle as search (the YAML default points both at
+    # voyage-multimodal-3) unless a test wants to distinguish the two.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+        return_value=resolution_embedding_model or embedding_model,
     )
     # Force a new-node decision so we observe the persisted vector directly
     # (no live $vectorSearch needed).
@@ -359,6 +368,102 @@ class TestPreferenceStillStoresStatementEmbedding:
 
 
 # ---------------------------------------------------------------------------
+# #043 — resolution name vector (transient) vs search node-text vector
+# (persisted). The two embedding handles are distinct: the resolver embeds
+# the NAME with the resolution model and that vector is NEVER persisted, while
+# the persisted node ``embedding`` comes from the SEARCH model's node-text.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestResolutionModelIsNameOnlyAndTransient:
+    async def test_persisted_vector_is_search_node_text_not_resolution_name(
+        self, mongo_client, _kg_collection, mocker
+    ) -> None:
+        # Arrange — two DISTINGUISHABLE models. The resolution model records
+        # every text it embeds (so we can prove it only ever sees the NAME)
+        # and returns a different vector family than the search model.
+        name = f"andrej karpathy {uuid4().hex[:8]}"
+        user = await _make_user()
+        doc = await _insert_doc(
+            content="Andrej Karpathy is a researcher.",
+            source_uri="https://example.com/ak-043",
+            user_id=user.id,
+        )
+        llm = FakeLLM(
+            [
+                {
+                    "nodes": [
+                        {
+                            "name": name,
+                            "type": "person",
+                            "subtype": "individual",
+                            "properties": {"role": "researcher"},
+                        }
+                    ],
+                    "edges": [],
+                }
+            ]
+        )
+
+        # The search model: persisted vectors come from here (node-text).
+        search_model = _PerTextEmbeddingModel(dimensions=_DIMS)
+
+        # The resolution model: a SEPARATE handle whose vectors are a constant
+        # family that the search model never produces, AND which records every
+        # text it embeds. If the resolution vector were ever persisted, the
+        # assertion below would catch it.
+        class _RecordingResolutionModel(BaseEmbeddingModel):
+            def __init__(self) -> None:
+                self.embedded_texts: list[str] = []
+
+            @property
+            def dimensions(self) -> int:
+                return _DIMS
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                self.embedded_texts.extend(texts)
+                # A sentinel vector the search model never returns.
+                return [[9.0] * _DIMS for _ in texts]
+
+        resolution_model = _RecordingResolutionModel()
+        _patch_pipeline_deps(
+            mocker,
+            mongo_client,
+            llm=llm,
+            embedding_model=search_model,
+            resolution_embedding_model=resolution_model,
+        )
+
+        # Act
+        with prefect_tags("tests"):
+            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+
+        # Assert — the persisted vector is the SEARCH model's node-text vector.
+        person_id = build_node_id(user.id, NodeType.PERSON, name)
+        row = await _kg_collection.find_one({"_id": person_id})
+        assert row is not None, "expected the person node to be created"
+
+        node_text = node_to_embedding_text(row)
+        assert row["embedding"] == search_model.vec(node_text)
+        # The resolution model's sentinel vector was NEVER persisted.
+        assert row["embedding"] != [9.0] * _DIMS
+
+        # And the resolution model embedded the NAME (the light op), not the
+        # node-text. (There are existing same-type candidates only if the
+        # graph is non-empty; ``person:self`` shares the type, so the resolver
+        # runs and embeds the incoming name + any candidate names — never the
+        # multi-line node-text the search model builds.)
+        assert any(name in t for t in resolution_model.embedded_texts), (
+            f"resolution model never embedded the entity name; "
+            f"saw {resolution_model.embedded_texts!r}"
+        )
+        assert all("\n" not in t for t in resolution_model.embedded_texts), (
+            "resolution model embedded multi-line node-text, expected NAME only"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Auto-merge story — dedup decision in the SAME space as persisted vectors
 # ---------------------------------------------------------------------------
 
@@ -401,10 +506,11 @@ class TestNearDuplicateAutoMergesInSameSpace:
             TEST_DATABASE,
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.get_embedding_model", return_value=model
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=model,
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
             return_value=model,
         )
         mocker.patch(

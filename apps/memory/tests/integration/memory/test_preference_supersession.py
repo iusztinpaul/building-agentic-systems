@@ -100,13 +100,15 @@ def _patch_pipeline_deps(
         TEST_DATABASE,
     )
     mocker.patch("tree.memory.extraction.pipeline.get_llm", return_value=llm)
+    # #043: the resolver builds from the RESOLUTION model factory (transient
+    # name vector). Point it at the same canned model.
     mocker.patch(
-        "tree.memory.extraction.pipeline.get_embedding_model",
+        "tree.memory.extraction.pipeline.get_resolution_embedding_model",
         return_value=embedding_model,
     )
-    # #042: task ④ embeds via the SEARCH model factory; point it at the
-    # same canned model so the preference statement vector still comes from
-    # the test mapping.
+    # #042/#043: task ④ AND the supersession judge embed via the SEARCH model
+    # factory; point it at the same canned model so the preference statement
+    # vector still comes from the test mapping.
     mocker.patch(
         "tree.memory.extraction.pipeline.get_search_embedding_model",
         return_value=embedding_model,

@@ -92,8 +92,8 @@ from tree.memory.types import (
 )
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.get_model import (
-    get_embedding_model,
     get_llm,
+    get_resolution_embedding_model,
     get_search_embedding_model,
 )
 
@@ -1417,8 +1417,17 @@ async def memory_extraction(
         raise unwrapped from exc
 
     dedup_config = _build_dedup_config()
-    embedding_model = get_embedding_model()
-    resolver = _build_resolver(embedding_model)
+    # #043: two distinct embedding handles now coexist in the flow.
+    #   * ``resolution_embedding_model`` — feeds the resolver's semantic stage,
+    #     which embeds the entity NAME only. Transient: the per-instance bounded
+    #     LRU in ``SemanticMatchResolver`` discards it and no write path persists
+    #     it. Not dimension-coupled to the live ``vector_index`` (#039).
+    #   * ``search_embedding_model`` — the persisted, index-coupled vector. Feeds
+    #     dedup, supersession (statement-vs-persisted-statement), and the node
+    #     ``embedding`` written by apply-writes (#042).
+    resolution_embedding_model = get_resolution_embedding_model()
+    search_embedding_model = get_search_embedding_model()
+    resolver = _build_resolver(resolution_embedding_model)
 
     # Initialize the DB connection (Beanie + Motor handles) ---------------------
     client = await init_mongodb(
@@ -1500,7 +1509,10 @@ async def memory_extraction(
         database=database,
         user_id=user_id,
         llm=judge_llm,
-        embedding_model=embedding_model,
+        # #043: supersession embeds the new statement and compares it against
+        # PERSISTED preference (statement) vectors — same space → SEARCH model,
+        # NOT the resolution model.
+        embedding_model=search_embedding_model,
         raws=raws,
     )
 
@@ -1526,6 +1538,10 @@ async def memory_extraction(
     )
 
     # ----- Task ⑥ — apply writes ------------------------------------------
+    # #043: apply-writes persists the node ``embedding`` → SEARCH model. (The
+    # task-④ vector reuse from #042 already pins the persisted vector to the
+    # search model; this handle is the fallback ``embedding_model`` for any
+    # node that lacks a pre-computed vector.)
     summary = await apply_writes_task(
         raws,
         resolved,
@@ -1534,7 +1550,7 @@ async def memory_extraction(
         database,
         resolver,
         dedup_config,
-        embedding_model,
+        search_embedding_model,
         user_id,
         extractor,
     )
@@ -1587,8 +1603,17 @@ async def run_extraction_for_documents(
     except Exception as exc:
         raise _unwrap_validation_error(exc) from exc
     dedup_config = _build_dedup_config()
-    embedding_model = embedding_model or get_embedding_model()
-    resolver = _build_resolver(embedding_model)
+    # #043: split the embedding handles exactly like ``memory_extraction``.
+    #   * The injected ``embedding_model`` (the MCP lifespan's caller-owned
+    #     handle) is the SEARCH / persisted model — it drives supersession, the
+    #     node-text embed, and the apply-writes node ``embedding``. Falls back
+    #     to ``get_search_embedding_model()`` when the caller injects nothing.
+    #   * The resolver ALWAYS builds from ``get_resolution_embedding_model()``:
+    #     its semantic stage embeds the entity NAME only and the vector is
+    #     transient (never persisted). The injected handle never reaches the
+    #     resolver.
+    search_embedding_model = embedding_model or get_search_embedding_model()
+    resolver = _build_resolver(get_resolution_embedding_model())
     database = client[database_name]
 
     docs = await Document.find(
@@ -1621,21 +1646,23 @@ async def run_extraction_for_documents(
         database=database,
         user_id=user_id,
         llm=judge_llm,
-        embedding_model=embedding_model,
+        # #043: statement-vs-persisted-statement → SEARCH model.
+        embedding_model=search_embedding_model,
         raws=raws,
     )
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
     # #042: embed at node-text grain (see ``memory_extraction`` task ④).
-    # The MCP ingest path injects a caller-owned ``embedding_model`` (the
-    # FastMCP lifespan holds its own handle); use it directly here rather
-    # than the ``get_search_embedding_model`` factory so the injected model
-    # actually drives the embed step — task ④ in the Prefect flow uses the
-    # factory because it has no injected handle.
+    # The MCP ingest path injects a caller-owned SEARCH/persisted handle (the
+    # FastMCP lifespan holds its own); use it directly here rather than the
+    # ``get_search_embedding_model`` factory so the injected model actually
+    # drives the embed step — task ④ in the Prefect flow uses the factory
+    # because it has no injected handle. (The resolution model is NOT used
+    # here: the node-text vector is persisted, so it must be the search space.)
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
     vectors: dict[str, list[float]] = {}
     if embeddable_texts:
-        embedded = await embedding_model.embed(embeddable_texts)
+        embedded = await search_embedding_model.embed(embeddable_texts)
         vectors = dict(zip(embeddable_texts, embedded))
     embeddings = EmbeddingMap(vectors=vectors)
     dedup_results = await _dedupe_entities(
@@ -1649,7 +1676,8 @@ async def run_extraction_for_documents(
         database,
         resolver,
         dedup_config,
-        embedding_model,
+        # #043: apply-writes persists node vectors → SEARCH/persisted model.
+        search_embedding_model,
         user_id,
         extractor,
     )
