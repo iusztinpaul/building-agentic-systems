@@ -7,6 +7,7 @@ from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -59,13 +60,20 @@ def _build_embedding_model(
             model=cfg.model,
         )
     if provider == "voyage":
-        # The project pins the multimodal model family (``voyage-multimodal-*``
-        # against ``/v1/multimodalembeddings``) as the only Voyage client.
-        # Text-only models such as ``voyage-3`` are not supported by the
-        # multimodal endpoint (Voyage returns ``HTTP 400: Model voyage-3 is
-        # not supported``); flipping an embedding block's ``model`` to a
-        # non-multimodal id surfaces that error at the first ``embed`` call.
-        return VoyageMultimodalEmbeddingModel(
+        # Voyage exposes two endpoints behind the same API: a **text** endpoint
+        # at ``/v1/embeddings`` (the ``voyage-3`` family) and a **multimodal**
+        # endpoint at ``/v1/multimodalembeddings`` (the ``voyage-multimodal-*``
+        # family). They are NOT interchangeable — routing ``voyage-3`` to the
+        # multimodal endpoint returns ``HTTP 400: Model voyage-3 is not
+        # supported``. Pick the right client by model id; both coexist (#048,
+        # a partial revert of #038's multimodal-only consolidation).
+        if cfg.model.startswith("voyage-multimodal"):
+            return VoyageMultimodalEmbeddingModel(
+                api_key=settings.voyage_api_key.get_secret_value(),
+                model=cfg.model,
+                output_dimension=cfg.dimensions,
+            )
+        return VoyageTextEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
             model=cfg.model,
             output_dimension=cfg.dimensions,

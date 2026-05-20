@@ -47,7 +47,7 @@ class EmbeddingConfig(BaseModel):
     """
 
     provider: str = Field(default="voyage")
-    model: str = Field(default="voyage-multimodal-3")
+    model: str = Field(default="voyage-3.5")
     dimensions: int = Field(default=1024)
 
 

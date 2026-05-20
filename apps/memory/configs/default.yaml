@@ -66,14 +66,16 @@ models:
   # now it mirrors search_embedding so behavior is unchanged.
   resolution_embedding:
     provider: voyage
-    model: voyage-multimodal-3
+    model: voyage-3.5
     dimensions: 1024
   # Persisted embedding used for dedup + search/query. Its output is the
   # node `embedding` field and the live mongot `vector_index` is
-  # dimension-coupled to its `dimensions`.
+  # dimension-coupled to its `dimensions`. voyage-3.5 is a TEXT model routed
+  # to /v1/embeddings (#048); 1024-d is unchanged from voyage-multimodal-3 so
+  # the vector index numDimensions and the dim-guard are unaffected.
   search_embedding:
     provider: voyage
-    model: voyage-multimodal-3
+    model: voyage-3.5
     dimensions: 1024
   # #044 real-time request-batching caps for /v1/multimodalembeddings.
   # Pack many texts into FEWER synchronous embed calls (resolution + dedup

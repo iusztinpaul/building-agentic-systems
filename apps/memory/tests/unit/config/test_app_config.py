@@ -23,19 +23,19 @@ class TestLoadAppConfig:
         # live YAML value so the unit suite stays green; bumping the
         # model in YAML requires a single matching change here.
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # default.yaml is now authoritative for embedding (#034). After
-        # #038 the project consolidated on a single Voyage client backed
-        # by the multimodal endpoint; ``voyage-multimodal-3`` is also
-        # 1024-d, so the dim stays put while the model identifier
-        # changes. #039 split the single ``embedding`` block into a
-        # transient ``resolution_embedding`` and a persisted
-        # ``search_embedding``; both still point at the same model/dim so
-        # this task is behavior-preserving.
+        # default.yaml is authoritative for embedding (#034). #048 flipped the
+        # default from the multimodal ``voyage-multimodal-3`` to the TEXT model
+        # ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5`` is also
+        # 1024-d, so the dim stays put — the vector index numDimensions and the
+        # dim-guard are unaffected — while the model identifier changes. #039
+        # split the single ``embedding`` block into a transient
+        # ``resolution_embedding`` and a persisted ``search_embedding``; both
+        # point at the same model/dim.
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.model == "voyage-3.5"
         assert config.models.resolution_embedding.dimensions == 1024
         assert config.models.search_embedding.provider == "voyage"
-        assert config.models.search_embedding.model == "voyage-multimodal-3"
+        assert config.models.search_embedding.model == "voyage-3.5"
         assert config.models.search_embedding.dimensions == 1024
         # #044: real-time request-batching caps default to the Voyage
         # per-request limits for voyage-multimodal-3.
@@ -202,9 +202,10 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.provider == "voyage"
         assert config.models.search_embedding.model == "voyage-multimodal-3"
         assert config.models.search_embedding.dimensions == 1024
-        # resolution_embedding falls back to the EmbeddingConfig defaults.
+        # resolution_embedding falls back to the EmbeddingConfig defaults
+        # (#048 flipped the code-level default model to the text ``voyage-3.5``).
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.model == "voyage-3.5"
         assert config.models.resolution_embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):

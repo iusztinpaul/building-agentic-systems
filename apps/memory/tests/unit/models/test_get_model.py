@@ -13,6 +13,7 @@ from tree.models.get_model import (
 )
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 
@@ -86,12 +87,9 @@ class TestGetEmbeddingModel:
 
         assert isinstance(result, ModalEmbeddingModel)
 
-    def test_returns_voyage_multimodal_embedding(self, mocker) -> None:
-        """After #038 the project pins ``voyage-multimodal-3`` as the
-        single Voyage client; the routing branch on the model id was
-        removed, so the ``voyage`` provider always returns
-        :class:`VoyageMultimodalEmbeddingModel` regardless of the model
-        name carried in YAML.
+    def test_returns_voyage_multimodal_for_multimodal_model(self, mocker) -> None:
+        """#048 re-introduced model-id routing for the ``voyage`` provider:
+        a ``voyage-multimodal-*`` id still resolves to the multimodal client.
         """
 
         mocker.patch(
@@ -105,6 +103,23 @@ class TestGetEmbeddingModel:
         result = get_embedding_model(provider="voyage")
 
         assert isinstance(result, VoyageMultimodalEmbeddingModel)
+
+    def test_returns_voyage_text_for_text_model(self, mocker) -> None:
+        """A non-multimodal voyage id (the #048 default ``voyage-3.5``) routes
+        to the text client targeting ``/v1/embeddings``.
+        """
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.search_embedding.model",
+            "voyage-3.5",
+        )
+        mocker.patch(
+            "tree.models.get_model.app_config.models.search_embedding.dimensions", 1024
+        )
+
+        result = get_embedding_model(provider="voyage")
+
+        assert isinstance(result, VoyageTextEmbeddingModel)
 
     def test_raises_for_unknown_provider(self) -> None:
         with pytest.raises(ValueError, match="Unknown embedding provider: unknown"):
@@ -218,3 +233,44 @@ class TestDualEmbeddingGetters:
 
         assert type(legacy_model) is type(search_model)
         assert isinstance(legacy_model, VoyageMultimodalEmbeddingModel)
+
+
+class TestVoyageModelIdRouting:
+    """``_build_embedding_model`` dispatches the voyage provider by model id.
+
+    ``voyage-multimodal-*`` → multimodal client (``/v1/multimodalembeddings``);
+    every other voyage id → the text client (``/v1/embeddings``). Both clients
+    coexist after #048's partial revert of #038.
+    """
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["voyage-3", "voyage-3.5", "voyage-3-lite", "voyage-code-3"],
+    )
+    def test_text_models_route_to_text_client(self, mocker, model_id: str) -> None:
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(provider="voyage", model=model_id, dimensions=1024),
+        )
+
+        result = get_search_embedding_model()
+
+        assert isinstance(result, VoyageTextEmbeddingModel)
+
+    @pytest.mark.parametrize(
+        "model_id",
+        ["voyage-multimodal-3", "voyage-multimodal-3.5"],
+    )
+    def test_multimodal_models_route_to_multimodal_client(
+        self, mocker, model_id: str
+    ) -> None:
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(provider="voyage", model=model_id, dimensions=1024),
+        )
+
+        result = get_search_embedding_model()
+
+        assert isinstance(result, VoyageMultimodalEmbeddingModel)
