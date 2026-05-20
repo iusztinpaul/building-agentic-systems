@@ -150,6 +150,24 @@ class TestVoyageMultimodalEmbed:
             ):
                 await model.embed(["test"])
 
+    async def test_embed_400_carries_status_code(self, model):
+        # A content rejection (HTTP 400) must carry the structured status so the
+        # resilient batcher can decide to bisect-and-skip ONLY on a real 400 —
+        # not on a substring of the message.
+        error_data = {"detail": "inputs contain invalid elements"}
+        mock_resp = _mock_aiohttp_response(status=400, json_data=error_data)
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+
+            with pytest.raises(
+                ExtractionError, match="Voyage multimodal API error 400"
+            ) as excinfo:
+                await model.embed(["test"])
+
+        assert excinfo.value.status_code == 400
+
     async def test_embed_raises_on_missing_data(self, model):
         mock_resp = _mock_aiohttp_response(status=200, json_data={"object": "list"})
         mock_session, _ = _mock_aiohttp_session(mock_resp)
@@ -285,8 +303,13 @@ class TestVoyageMultimodalRateLimitRetry:
             with pytest.raises(
                 ExtractionError,
                 match="rate-limit retries exhausted",
-            ):
+            ) as excinfo:
                 await m.embed(["test"])
+
+        # The exhausted-429 raise must carry the structured HTTP status so
+        # callers branch on it instead of the message (a 429 body can contain
+        # the digit-run "400"); the resilient batcher uses this to NOT skip 429s.
+        assert excinfo.value.status_code == 429
 
     async def test_embed_fails_fast_on_non_429_5xx(self, mocker) -> None:
         """Non-429 errors (e.g. 500) must fail fast — they are not
@@ -315,10 +338,13 @@ class TestVoyageMultimodalRateLimitRetry:
             mock_cls.return_value = mock_session
             with pytest.raises(
                 ExtractionError, match="Voyage multimodal API error 500"
-            ):
+            ) as excinfo:
                 await m.embed(["test"])
 
         assert mock_sleep.await_count == 0
+        # 5xx is transient: structured status must be carried so the resilient
+        # batcher re-raises (never skips) on server errors.
+        assert excinfo.value.status_code == 500
 
     async def test_embed_fails_fast_on_non_429_4xx(self, mocker) -> None:
         """4xx other than 429 (e.g. 401 invalid key) must also fail fast."""

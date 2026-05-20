@@ -467,3 +467,61 @@ class TestEmbedNodesIsBackfillOnly:
 
         assert embedded == 0
         assert spy_model.calls == []
+
+    async def test_skipped_placeholder_vector_is_not_persisted(
+        self, mocker, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A ``[]`` placeholder (Voyage content rejection) must NOT be written.
+
+        The skipped node stays unembedded (``embedding`` untouched, i.e. still
+        ``[]``/``None``) so a later backfill run retries it — the resilience
+        contract from this change. We assert the bulk_write op set excludes the
+        skipped doc and the returned count reflects only the persisted node, and
+        that the summary log surfaces the skip gap for ops visibility.
+        """
+
+        # Arrange — two fetched docs; the batcher returns a good vector for the
+        # first and an empty placeholder for the second (poison content).
+        good = {
+            "_id": "person:alice",
+            "type": "person",
+            "kind": "node",
+            "embedding": [],
+        }
+        skipped = {
+            "_id": "chunk:poison",
+            "type": "chunk",
+            "kind": "node",
+            "embedding": [],
+        }
+        collection = AsyncMock()
+        collection.find = MagicMock(
+            return_value=AsyncMock(
+                to_list=AsyncMock(return_value=[good, skipped]),
+            )
+        )
+        client = _wire_client(collection)
+        mocker.patch(
+            "tree.memory.indexing.core.embed_node_texts",
+            new=AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4], []]),
+        )
+
+        # Act
+        with caplog.at_level("INFO", logger="tree.memory.indexing.core"):
+            embedded = await embed_nodes(
+                client, "test_db", _SpyEmbeddingModel(dimensions=4), _TEST_USER_ID
+            )
+
+        # Assert: only the good node is persisted; the poison node is left alone.
+        assert embedded == 1
+        bulk_ops = collection.bulk_write.call_args.args[0]
+        assert len(bulk_ops) == 1
+        written_id = bulk_ops[0]._filter["_id"]
+        assert written_id == "person:alice"
+
+        # Assert: the summary log surfaces the skipped (retriable) node so the
+        # "Embedded N" count is not misread as "all fetched nodes are done".
+        summary = next(
+            r.getMessage() for r in caplog.records if "Embedded" in r.getMessage()
+        )
+        assert "(1 skipped, will retry)" in summary

@@ -12,11 +12,25 @@ object-to-object). Unifying them would silently break supersession.
 """
 
 import logging
+import re
 from typing import Any
 
 from tree.models.base import BaseEmbeddingModel
+from tree.models.exceptions import ExtractionError
 
 logger = logging.getLogger(__name__)
+
+# Voyage's embeddings endpoint 400s on control characters and unpaired
+# surrogates (common in HTML->markdown-scraped chunk content). Strip the C0
+# controls (except tab/newline/carriage-return), DEL + C1 range, and the
+# surrogate range before embedding so one bad chunk can't fail the whole batch.
+_INVALID_EMBED_CHARS_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]"
+)
+
+
+def _sanitize_for_embedding(text: str) -> str:
+    return _INVALID_EMBED_CHARS_RE.sub("", text)
 
 
 # Batching packs many texts into fewer synchronous /v1/multimodalembeddings
@@ -117,8 +131,46 @@ async def embed_in_batches(
 
     vectors: list[list[float]] = []
     for start, end in chunks:
-        vectors.extend(await embedding_model.embed(texts[start:end]))
+        vectors.extend(await _embed_chunk_resilient(embedding_model, texts[start:end]))
     return vectors
+
+
+async def _embed_chunk_resilient(
+    embedding_model: BaseEmbeddingModel, chunk: list[str]
+) -> list[list[float]]:
+    """Embed one request's chunk, skipping inputs Voyage rejects as content.
+
+    On an HTTP 400 ("invalid elements / unsupported tokens" — a poison input
+    that no retry fixes) the chunk is bisected to isolate the offending text(s),
+    which are skipped with an aligned empty-vector ``[]`` placeholder so one bad
+    chunk can't fail the whole run. Rate-limit (429) and server (5xx) errors
+    propagate untouched — they are transient and must not silently drop data.
+
+    The skip-vs-reraise decision keys off the exception's structured
+    ``status_code`` (``ExtractionError.status_code``), NOT a substring of the
+    human-readable message. The Voyage client interpolates the server response
+    body verbatim into 429/5xx messages, so a transient error whose body merely
+    contains the digit-run "400" (a token count, a ``Retry-After``, a request
+    id) must never be misread as a content rejection and silently skipped.
+    """
+
+    try:
+        return await embedding_model.embed(chunk)
+    except ExtractionError as exc:
+        # Only a structured HTTP 400 is a content rejection we skip; everything
+        # else (429, 5xx, or a status-less ExtractionError) is transient/unknown
+        # and must re-raise — never silently drop data.
+        if getattr(exc, "status_code", None) != 400:
+            raise
+        if len(chunk) <= 1:
+            logger.warning(
+                "skipping un-embeddable input (Voyage 400): %.120r", chunk[0]
+            )
+            return [[]]
+        mid = len(chunk) // 2
+        left = await _embed_chunk_resilient(embedding_model, chunk[:mid])
+        right = await _embed_chunk_resilient(embedding_model, chunk[mid:])
+        return left + right
 
 
 def node_to_embedding_text(node: dict[str, Any]) -> str:
@@ -139,7 +191,7 @@ def node_to_embedding_text(node: dict[str, Any]) -> str:
             parts.append(f"{key}: {value}")
     if props.get("content"):
         parts.append(str(props["content"]))
-    return "\n".join(parts)
+    return _sanitize_for_embedding("\n".join(parts))
 
 
 async def embed_node_texts(
