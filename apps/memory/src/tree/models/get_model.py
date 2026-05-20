@@ -26,30 +26,39 @@ def get_llm(provider: str | None = None) -> BaseLLM:
 
 
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
-    """Factory for embedding model instances."""
+    """Factory for embedding model instances.
 
-    provider = provider or app_config.models.embedding.provider
+    #039 split the single ``models.embedding`` config into a transient
+    ``resolution_embedding`` and a persisted ``search_embedding``. This
+    no-arg factory returns the **search** model so all existing call
+    sites stay behavior-identical (the search model is what feeds dedup,
+    query, and the persisted node ``embedding`` field). Task #040 grows
+    the dual factory entry points that select between the two.
+    """
+
+    embedding = app_config.models.search_embedding
+    provider = provider or embedding.provider
 
     if provider == "mock":
         logger.warning("Using mock embedding model (random vectors)")
         return MockEmbeddingModel(
-            dimensions=app_config.models.embedding.dimensions,
+            dimensions=embedding.dimensions,
         )
     if provider == "gemini":
         return GeminiEmbeddingModel(
             api_key=settings.google_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
-            dimensions=app_config.models.embedding.dimensions,
+            model=embedding.model,
+            dimensions=embedding.dimensions,
         )
     if provider == "sentence-transformers":
         return SentenceTransformerEmbeddingModel(
-            model=app_config.models.embedding.model,
-            dimensions=app_config.models.embedding.dimensions,
+            model=embedding.model,
+            dimensions=embedding.dimensions,
         )
     if provider == "modal":
         return ModalEmbeddingModel(
             api_key=settings.modal_embedding_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
+            model=embedding.model,
         )
     if provider == "voyage":
         # The project pinned the multimodal model family
@@ -58,13 +67,13 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
         # code path here. Text-only models such as ``voyage-3`` are not
         # supported by the multimodal endpoint (Voyage returns
         # ``HTTP 400: Model voyage-3 is not supported``); operators
-        # who flip ``models.embedding.model`` to a non-multimodal id
-        # will see that error at the first ``embed`` call. The text
+        # who flip ``models.search_embedding.model`` to a non-multimodal
+        # id will see that error at the first ``embed`` call. The text
         # client added in #037 was removed in the same commit — see
         # ``tracker/038-consolidate-voyage-clients`` for context.
         return VoyageMultimodalEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
-            output_dimension=app_config.models.embedding.dimensions,
+            model=embedding.model,
+            output_dimension=embedding.dimensions,
         )
     raise ValueError(f"Unknown embedding provider: {provider}")

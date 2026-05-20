@@ -59,8 +59,8 @@ class GeminiEmbeddingModel(BaseEmbeddingModel):
         model: str | None = None,
         dimensions: int | None = None,
     ) -> None:
-        model = model or app_config.models.embedding.model
-        dimensions = dimensions or app_config.models.embedding.dimensions
+        model = model or app_config.models.search_embedding.model
+        dimensions = dimensions or app_config.models.search_embedding.dimensions
         self._client = genai.Client(api_key=api_key)
         self._model = model
         self._dimensions = dimensions

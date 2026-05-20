@@ -36,12 +36,20 @@ class EmbeddingConfig(BaseModel):
     """YAML-authoritative embedding config.
 
     Post-#034 the YAML is the single source of truth for the embedding
-    provider/model/dimensions. ``dimensions`` is dimension-coupled to
-    the Atlas Vector Search index defined under ``docker/mongot/``;
+    provider/model/dimensions. Reused (#039) for both
+    :attr:`ModelsConfig.resolution_embedding` and
+    :attr:`ModelsConfig.search_embedding`.
+
+    Only the **search** embedding's ``dimensions`` is dimension-coupled
+    to the Atlas Vector Search index defined under ``docker/mongot/``;
     :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
-    asserts the YAML value matches the live ``vector_index`` at boot,
-    turning a mismatch into a hard startup-time error instead of a
-    silent data-loss bug.
+    asserts ``app_config.models.search_embedding.dimensions`` matches the
+    live ``vector_index`` at boot, turning a mismatch into a hard
+    startup-time error instead of a silent data-loss bug. The
+    **resolution** embedding is transient (computed on the entity name
+    during resolution's semantic stage and never persisted), so its
+    ``dimensions`` is not coupled to any live index and no boot gate
+    reads it.
     """
 
     provider: str = Field(default="voyage")
@@ -50,8 +58,26 @@ class EmbeddingConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
+    """Configured models.
+
+    #039 split the single ``embedding`` block into two siblings:
+
+    * ``resolution_embedding`` — transient, used only by resolution's
+      semantic stage (computed on the entity NAME, dropped afterward,
+      never persisted). Configured separately so a lighter model can be
+      swapped in without touching the persisted-vector model.
+    * ``search_embedding`` — persisted. Its output is written to the node
+      ``embedding`` field and the live mongot ``vector_index`` is
+      dimension-coupled to its ``dimensions``. Used for both dedup and
+      search/query.
+
+    Both default to the same :class:`EmbeddingConfig` so the split is
+    behavior-preserving until later tasks (#040+) configure them apart.
+    """
+
     llm: LLMConfig = LLMConfig()
-    embedding: EmbeddingConfig = EmbeddingConfig()
+    resolution_embedding: EmbeddingConfig = EmbeddingConfig()
+    search_embedding: EmbeddingConfig = EmbeddingConfig()
 
 
 class ResolutionConfig(BaseModel):

@@ -60,7 +60,18 @@ models:
   llm:
     provider: gemini
     model: gemini-3.1-flash-lite
-  embedding:
+  # Transient embedding used only by resolution's semantic stage
+  # (computed on the entity NAME, dropped afterward, never persisted).
+  # Split out in #039 so a lighter model can be configured later; for
+  # now it mirrors search_embedding so behavior is unchanged.
+  resolution_embedding:
+    provider: voyage
+    model: voyage-multimodal-3
+    dimensions: 1024
+  # Persisted embedding used for dedup + search/query. Its output is the
+  # node `embedding` field and the live mongot `vector_index` is
+  # dimension-coupled to its `dimensions`.
+  search_embedding:
     provider: voyage
     model: voyage-multimodal-3
     dimensions: 1024

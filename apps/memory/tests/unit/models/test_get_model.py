@@ -26,9 +26,11 @@ def _mock_app_config(mocker) -> None:
     mock_config = MagicMock()
     mock_config.models.llm.provider = "gemini"
     mock_config.models.llm.model = "gemini-2.0-flash"
-    mock_config.models.embedding.provider = "mock"
-    mock_config.models.embedding.model = "text-embedding-004"
-    mock_config.models.embedding.dimensions = 256
+    # #039: get_embedding_model() reads the SEARCH model (the persisted /
+    # behavior-identical path for existing call sites).
+    mock_config.models.search_embedding.provider = "mock"
+    mock_config.models.search_embedding.model = "text-embedding-004"
+    mock_config.models.search_embedding.dimensions = 256
     mocker.patch("tree.models.get_model.app_config", mock_config)
 
 
@@ -87,11 +89,11 @@ class TestGetEmbeddingModel:
         """
 
         mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.model",
+            "tree.models.get_model.app_config.models.search_embedding.model",
             "voyage-multimodal-3",
         )
         mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.dimensions", 1024
+            "tree.models.get_model.app_config.models.search_embedding.dimensions", 1024
         )
 
         result = get_embedding_model(provider="voyage")

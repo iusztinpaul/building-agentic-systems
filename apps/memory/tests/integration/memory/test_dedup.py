@@ -183,7 +183,7 @@ async def _wait_for_indexed_count(
 def _patch_embedding_dimensions(mocker):
     """Force the vector index to be created with 8 dimensions for these tests."""
 
-    mocker.patch.object(app_config.models.embedding, "dimensions", _DIMS)
+    mocker.patch.object(app_config.models.search_embedding, "dimensions", _DIMS)
 
 
 @pytest.fixture

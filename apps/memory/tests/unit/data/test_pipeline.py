@@ -37,7 +37,7 @@ class TestDataPipeline:
     def _stub_index_dim_check(self, mocker) -> None:
         """Skip the live-mongot-vs-settings dim check in unit tests.
 
-        The flow now hard-fails at boot when ``app_config.models.embedding.dimensions``
+        The flow now hard-fails at boot when ``app_config.models.search_embedding.dimensions``
         disagrees with the mongot index (#016 + #020 + #034). Unit tests don't
         run mongot, so we stub the assertion out.
         """

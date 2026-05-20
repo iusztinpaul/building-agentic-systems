@@ -449,18 +449,22 @@ async def assert_settings_match_live_vector_index(
     client: AsyncMongoClient,
     database: str,
 ) -> None:
-    """Hard-error gate between ``app_config.models.embedding.dimensions``
+    """Hard-error gate between ``app_config.models.search_embedding.dimensions``
     and the live mongot index.
 
-    Post-#034 the YAML (``app_config.models.embedding.dimensions``) is the
-    authoritative source for the embedding dimension. The Atlas Vector
-    Search index under ``docker/mongot/`` must reflect the same value —
-    a mismatch silently corrupts every ``$vectorSearch`` write. This
-    helper inspects the live ``vector_index`` definition for
-    ``database.knowledge_graph`` and:
+    Post-#034 the YAML is the authoritative source for the embedding
+    dimension; #039 pinned this gate to the **search** embedding because
+    that is the model whose output is persisted to the node ``embedding``
+    field (the resolution embedding is transient and never written, so
+    its dimension is not index-coupled). The Atlas Vector Search index
+    under ``docker/mongot/`` must reflect
+    ``app_config.models.search_embedding.dimensions`` — a mismatch
+    silently corrupts every ``$vectorSearch`` write. This helper inspects
+    the live ``vector_index`` definition for ``database.knowledge_graph``
+    and:
 
     * Returns ``None`` if ``numDimensions`` on the live index equals
-      ``app_config.models.embedding.dimensions``.
+      ``app_config.models.search_embedding.dimensions``.
     * Raises :class:`RuntimeError` (with both numbers in the message) on
       mismatch. The literal substring ``Embedding dimension mismatch``
       is preserved as a grep anchor for the #036 runbook.
@@ -472,7 +476,7 @@ async def assert_settings_match_live_vector_index(
     write. See ``tracker/034-voyage-3-yaml-default.groomed.md``.
     """
 
-    expected_dim = app_config.models.embedding.dimensions
+    expected_dim = app_config.models.search_embedding.dimensions
 
     collection = client[database][_KG_COLLECTION]
     cursor = await collection.list_search_indexes()
@@ -495,15 +499,15 @@ async def assert_settings_match_live_vector_index(
         raise RuntimeError(
             f"vector_index '{_VECTOR_INDEX_NAME}' in database '{database}' has "
             f"no parseable numDimensions; expected "
-            f"app_config.models.embedding.dimensions={expected_dim}."
+            f"app_config.models.search_embedding.dimensions={expected_dim}."
         )
 
     if live_dimensions != expected_dim:
         raise RuntimeError(
             f"Embedding dimension mismatch: "
-            f"app_config.models.embedding.dimensions={expected_dim} but live "
-            f"vector_index numDimensions={live_dimensions}. Rebuild the "
+            f"app_config.models.search_embedding.dimensions={expected_dim} but "
+            f"live vector_index numDimensions={live_dimensions}. Rebuild the "
             f"mongot index (drop + ensure_indexes) so it matches the YAML "
             f"value, or set apps/memory/configs/default.yaml's "
-            f"models.embedding.dimensions to {live_dimensions}."
+            f"models.search_embedding.dimensions to {live_dimensions}."
         )

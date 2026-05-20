@@ -1,7 +1,8 @@
 """Unit tests for :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`.
 
 Post-#034 the helper is the hard-error gate between
-``app_config.models.embedding.dimensions`` and the live mongot
+``app_config.models.search_embedding.dimensions`` (#039: pinned to the
+SEARCH model, whose vectors are the persisted ones) and the live mongot
 ``vector_index`` definition. On mismatch it raises ``RuntimeError`` whose
 message names both numbers (and preserves the literal substring
 ``Embedding dimension mismatch`` as a grep anchor for the #036
@@ -88,13 +89,15 @@ def _vector_index_doc(num_dimensions: int) -> dict[str, Any]:
 def _patch_expected_dim(mocker, dim: int) -> None:
     """Patch the YAML-driven expected dim seen by the assertion helper.
 
-    Post-#034 the helper reads ``app_config.models.embedding.dimensions``
-    at call time; we patch the attribute on the already-loaded module-level
-    config so we don't have to reload the module or write a custom YAML.
+    Post-#034 the helper reads the YAML-driven expected dim at call time;
+    #039 pinned it to ``app_config.models.search_embedding.dimensions``
+    (the persisted-vector model). We patch the attribute on the
+    already-loaded module-level config so we don't have to reload the
+    module or write a custom YAML.
     """
 
     mocker.patch(
-        "tree.memory.indexing.core.app_config.models.embedding.dimensions",
+        "tree.memory.indexing.core.app_config.models.search_embedding.dimensions",
         new=dim,
     )
 
@@ -156,6 +159,7 @@ class TestAssertSettingsMatchLiveVectorIndex:
             await assert_settings_match_live_vector_index(client, "test_db")
 
         message = str(exc_info.value)
-        # Post-#034 the message points at the YAML, not settings.embedding_dim.
-        assert "app_config.models.embedding.dimensions" in message
+        # Post-#034 the message points at the YAML, not settings.embedding_dim;
+        # #039 pinned it to the search model's dimensions.
+        assert "app_config.models.search_embedding.dimensions" in message
         assert "numDimensions" in message
