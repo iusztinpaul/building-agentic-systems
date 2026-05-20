@@ -23,6 +23,7 @@ from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.config.app_config import app_config
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -48,30 +49,6 @@ _LEGACY_COMPOUND_INDEX_NAMES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # 1. Embed nodes
 # ---------------------------------------------------------------------------
-
-
-def _node_to_text(node: dict[str, Any]) -> str:
-    """Build an embeddable text representation from a node document.
-
-    Uses the node's surface ``name`` (or ``canonical_name`` if absent) as
-    the headline token rather than ``_id``. Post-Phase-1 every ``_id``
-    starts with ``"{user_id}:"`` — a 24-char ObjectId hex prefix that is
-    constant per tenant and adds no semantic value (we already filter
-    ``$vectorSearch`` by ``user_id`` server-side). Falling back to the
-    ``_id`` only when both name fields are missing preserves backward
-    compatibility with legacy rows.
-    """
-
-    headline = node.get("name") or node.get("canonical_name") or node.get("_id", "")
-    parts = [f"{node.get('type', '')}: {headline}"]
-    props = node.get("properties", {})
-    for key, value in props.items():
-        if value and key != "content":
-            parts.append(f"{key}: {value}")
-    # Include content last (may be long).
-    if props.get("content"):
-        parts.append(str(props["content"]))
-    return "\n".join(parts)
 
 
 async def embed_nodes(
@@ -127,7 +104,7 @@ async def _embed_batch(
 ) -> int:
     """Embed a batch of node documents and write vectors back."""
 
-    texts = [_node_to_text(doc) for doc in batch]
+    texts = [node_to_embedding_text(doc) for doc in batch]
     vectors = await embedding_model.embed(texts)
 
     ops = [
