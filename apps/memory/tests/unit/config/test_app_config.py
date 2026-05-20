@@ -3,6 +3,7 @@ from collections import Counter
 
 from tree.config.app_config import (
     AppConfig,
+    DreamConfig,
     HuggingFaceDatasetSource,
     SubstackArticleSource,
     SubstackRssSource,
@@ -103,6 +104,58 @@ class TestLoadAppConfig:
             "YouTubeVideoSource": 1,
         }
         assert sum(counts.values()) == 20
+
+    def test_dream_block_loaded_from_default_yaml(self):
+        """The #051 ``dream:`` block is read into the typed :class:`DreamConfig`.
+
+        Thresholds are NOT duplicated here — they stay in
+        ``extraction.dedup``; ``DreamConfig`` carries no threshold field.
+        """
+
+        config = load_app_config()
+
+        assert config.dream.enabled is True
+        assert config.dream.cron == "0 4 * * *"
+        # default.yaml sets dry_run: false (the model default is the safer
+        # True, but the shipped YAML opts into real runs).
+        assert config.dream.dry_run is False
+        assert config.dream.max_pairs == 10_000
+        assert config.dream.enable_supersession_judge is False
+
+    def test_dream_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``dream`` block falls back to the typed defaults."""
+
+        custom = tmp_path / "no_dream.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.dream == DreamConfig()
+        assert config.dream.enabled is True
+        assert config.dream.dry_run is True  # safe model default
+        assert config.dream.max_pairs == 10_000
+        assert config.dream.enable_supersession_judge is False
+
+    def test_dream_block_loaded_from_custom_yaml(self, tmp_path):
+        """Operator-tuned dream knobs in YAML are read into the typed model."""
+
+        custom = tmp_path / "dream.yaml"
+        custom.write_text(
+            "dream:\n"
+            "  enabled: false\n"
+            '  cron: "30 2 * * *"\n'
+            "  dry_run: true\n"
+            "  max_pairs: 42\n"
+            "  enable_supersession_judge: true\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.dream.enabled is False
+        assert config.dream.cron == "30 2 * * *"
+        assert config.dream.dry_run is True
+        assert config.dream.max_pairs == 42
+        assert config.dream.enable_supersession_judge is True
 
     def test_loads_default_yaml_huggingface_dataset_entry(self):
         """The HF arxiv entry preserves the parameters from the legacy YAML."""

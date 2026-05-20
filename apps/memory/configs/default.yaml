@@ -116,6 +116,24 @@ query:
   rrf_k: 60
   embedding_batch_size: 64
 
+# Dream-consolidation pipeline (#051): an incremental, watermark-bounded
+# re-run of the three-tier dedup across the whole knowledge graph, catching
+# near-duplicate nodes that parallel ingestion's inline dedup missed.
+# Thresholds (auto_merge/flag/fuzzy) are NOT duplicated here — they stay in
+# extraction.dedup so the inline and dream surfaces can never drift.
+dream:
+  enabled: true
+  # Schedule consumed by #052's deployment (defined here so the block is
+  # complete; this task does not register the deployment).
+  cron: "0 4 * * *"
+  dry_run: false
+  # Cap on candidate pairs examined per run. Once hit, the sweep stops
+  # driving and records cap_hit=True in its stats.
+  max_pairs: 10000
+  # Gate for the LLM contradiction/supersession sweep that lands in #052.
+  # Off here: this task ships only the semantic + fuzzy sweep.
+  enable_supersession_judge: false
+
 mcp:
   max_retries: 1
   max_results: 10

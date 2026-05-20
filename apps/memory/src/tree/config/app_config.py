@@ -166,6 +166,39 @@ class ExtractionConfig(BaseModel):
         return self
 
 
+class DreamConfig(BaseModel):
+    """Dream-consolidation pipeline tuning (#051).
+
+    The dream pipeline re-runs the existing three-tier dedup across the
+    knowledge graph **incrementally** (watermark-bounded), catching
+    near-duplicate nodes that parallel ingestion's inline write-time dedup
+    missed. It owns NO thresholds of its own — the auto-merge / flag /
+    fuzzy cut-offs stay in :class:`DedupConfig` (``extraction.dedup``) so
+    the inline and the dream surfaces can never drift.
+
+    Fields:
+
+    * ``enabled`` — master on/off switch.
+    * ``cron`` — schedule consumed by #052's deployment. Defined here so the
+      block is complete; this task does NOT register the deployment.
+    * ``dry_run`` — when ``True`` the sweep reports the duplicate pairs it
+      WOULD merge/flag but performs NO writes (no merges, no SAME_AS edges,
+      no watermark advance). Safe first-rollout default.
+    * ``max_pairs`` — cap on the number of candidate pairs examined per run.
+      Once the cap is hit the sweep stops driving and records ``cap_hit`` in
+      its stats.
+    * ``enable_supersession_judge`` — gate for the LLM contradiction /
+      supersession sweep that lands in #052. Always ``False`` here; this
+      task ships only the semantic + fuzzy sweep and leaves a clean seam.
+    """
+
+    enabled: bool = True
+    cron: str = "0 4 * * *"
+    dry_run: bool = True
+    max_pairs: int = 10_000
+    enable_supersession_judge: bool = False
+
+
 class QueryConfig(BaseModel):
     top_k: int = 10
     max_hops: int = 1
@@ -388,6 +421,7 @@ class AppConfig(BaseModel):
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()
     mcp: MCPConfig = MCPConfig()
+    dream: DreamConfig = DreamConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}
