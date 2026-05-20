@@ -69,8 +69,16 @@ from tree.memory.extraction.dedup import (
     decide_from_candidates,
     dedupe_entity,
 )
+from tree.memory.extraction.preference_supersession import resolve_supersessions
 from tree.memory.review.core import review_duplicate
 from tree.memory.review.types import ReviewDecision
+from tree.memory.types import (
+    ChunkedDocument,
+    ExtractedNode,
+    ExtractionResult,
+    RawExtraction,
+)
+from tree.models.get_model import get_llm, get_search_embedding_model
 
 if TYPE_CHECKING:
     from pymongo.asynchronous.database import AsyncDatabase
@@ -520,8 +528,77 @@ async def _apply_dream_decisions(
 
 
 # ---------------------------------------------------------------------------
-# #052 seam — supersession sweep (flag-gated, NOT implemented here)
+# #052 — flag-gated LLM supersession / contradiction sweep
 # ---------------------------------------------------------------------------
+
+# The supersession sweep drives over the bi-temporal node types only — the
+# LLM contradiction judge is meaningful for PREFERENCE rows (same
+# ``(user_id, category)`` partition) and FACT rows (same
+# ``(user_id, subject, predicate)`` partition). All other node types fall
+# through to the plain semantic+fuzzy dedup sweep.
+_SUPERSESSION_NODE_TYPES: tuple[NodeType, ...] = (NodeType.PREFERENCE, NodeType.FACT)
+
+
+async def _iter_supersession_driving_nodes(
+    *,
+    database: AsyncDatabase,
+    user_id: PydanticObjectId,
+    last_run_at: datetime,
+) -> list[dict[str, Any]]:
+    """Fetch the watermark-fresh PREFERENCE / FACT nodes that DRIVE the judge.
+
+    Same incremental rule as the duplicate sweep: only nodes whose
+    ``updated_at > last_run_at`` drive. They are compared (inside
+    :func:`resolve_supersessions`) against their FULL active partition, so
+    the search space is not watermark-filtered — only the driving set is.
+
+    Unlike the duplicate sweep this does NOT require a non-empty
+    ``embedding``: the contradiction judge runs on the row's statement text,
+    not its vector. We still exclude tombstoned (``merged_into``) and
+    already-superseded (``valid_until`` set) rows — a superseded row is no
+    longer "current" and must not drive a fresh supersession.
+    """
+
+    collection = database[_KG_COLLECTION]
+    out: list[dict[str, Any]] = []
+    for entity_type in _SUPERSESSION_NODE_TYPES:
+        cursor = collection.find(
+            {
+                "user_id": user_id,
+                "kind": "node",
+                "type": entity_type.value,
+                "merged_into": {"$in": [None, "", False]},
+                "updated_at": {"$gt": last_run_at},
+                "$or": [
+                    {"valid_until": {"$exists": False}},
+                    {"valid_until": None},
+                ],
+            }
+        )
+        out.extend([doc async for doc in cursor])
+    return out
+
+
+def _stored_node_to_extracted(doc: dict[str, Any]) -> ExtractedNode:
+    """Adapt a stored KG node dict into the :class:`ExtractedNode` shape.
+
+    ``resolve_supersessions`` is built for the extraction pipeline: it walks
+    ``raw.extracted.nodes`` (a list of :class:`ExtractedNode`) and drives the
+    per-partition candidate lookup off each node's ``name`` / ``type`` /
+    ``properties``. The dream feeds it EXISTING stored nodes instead of
+    freshly-extracted ones, so we wrap each stored node in the same shape.
+    The deterministic ``_id`` the resolver re-derives via
+    ``build_node_id(user_id, type, _normalize(name))`` matches the stored
+    row's own ``_id`` (it was written by the same builder), so the resolver's
+    ``exclude_id`` self-skip lines up and we never ask "does X contradict X".
+    """
+
+    return ExtractedNode(
+        name=str(doc.get("name") or ""),
+        type=NodeType(doc["type"]),
+        subtype=doc.get("subtype"),
+        properties=dict(doc.get("properties") or {}),
+    )
 
 
 async def _supersession_sweep(
@@ -531,15 +608,78 @@ async def _supersession_sweep(
     last_run_at: datetime,
     dry_run: bool,
 ) -> None:
-    """Seam for #052's flag-gated LLM supersession / contradiction sweep.
+    """Flag-gated LLM contradiction / supersession sweep (#052).
 
-    Intentionally a no-op in #051. #052 fills this in and the flow only
-    invokes it when ``app_config.dream.enable_supersession_judge`` is True.
-    Keeping the seam here means #052 plugs into one well-named spot rather
-    than re-threading the flow.
+    Only invoked by the flow when
+    ``app_config.dream.enable_supersession_judge`` is True — on the default
+    path this function is never called, so NO LLM and NO embedding client is
+    ever constructed (cost + free-tier safety).
+
+    Drives the existing extraction-pipeline resolver
+    (:func:`tree.memory.extraction.preference_supersession.resolve_supersessions`)
+    over the dream's incremental delta: the watermark-fresh PREFERENCE / FACT
+    nodes are wrapped in :class:`RawExtraction`-shaped envelopes and handed to
+    the resolver as its ``raws`` iterable. The resolver compares each driving
+    node against its FULL active partition (``(user_id, category)`` for prefs,
+    ``(user_id, subject, predicate)`` for facts), takes the K most-recent
+    active candidates (``app_config.extraction.dedup.supersession_candidate_cap``),
+    asks the LLM judge most-recent-first, and applies first-contradiction-wins
+    (``superseded_by`` edge + bi-temporal ``valid_until``).
+
+    ``dry_run=True`` ⇒ NO writes: the resolver writes inside ``_maybe_supersede``,
+    so we simply skip the whole sweep on a dry run (parity with the merge/flag
+    path, which also writes only when ``not dry_run``).
     """
 
-    return None
+    log = _get_run_logger()
+    if dry_run:
+        log.info("dream supersession: dry_run=True — skipping (no LLM, no writes)")
+        return
+
+    driving_nodes = await _iter_supersession_driving_nodes(
+        database=database,
+        user_id=user_id,
+        last_run_at=last_run_at,
+    )
+    if not driving_nodes:
+        log.info("dream supersession: no delta preference/fact nodes — nothing to do")
+        return
+
+    # Construct the LLM + embedding client ONLY here, on the flag-on path.
+    llm = get_llm()
+    embedding_model = get_search_embedding_model()
+
+    # Each delta node becomes a one-node RawExtraction envelope so the resolver
+    # iterates exactly the watermark-fresh driving set; the partition lookup
+    # inside the resolver still spans the full active partition.
+    raws = [
+        RawExtraction(
+            document_id="dream",
+            source_uri="dream://supersession",
+            chunked=ChunkedDocument(
+                document_id="dream",
+                source_uri="dream://supersession",
+                source_type="dream",
+            ),
+            extracted=ExtractionResult(nodes=[_stored_node_to_extracted(doc)]),
+        )
+        for doc in driving_nodes
+    ]
+
+    decisions = await resolve_supersessions(
+        database=database,
+        user_id=user_id,
+        llm=llm,
+        embedding_model=embedding_model,
+        raws=raws,
+    )
+    superseded = sum(1 for d in decisions if d.superseded)
+    log.info(
+        "dream supersession: driving=%d decisions=%d superseded=%d",
+        len(driving_nodes),
+        len(decisions),
+        superseded,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,4 +827,162 @@ async def dream_consolidation(
         pairs=pairs,
         stats=stats,
         watermark_advanced=watermark_advanced,
+    )
+
+
+# ---------------------------------------------------------------------------
+# #052 — scheduled per-user fan-out
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FanOutStats:
+    """Per-run accounting for the scheduled fan-out parent flow.
+
+    ``users_total`` is how many active users were enumerated; ``succeeded``
+    /``failed`` partition them by outcome. ``failures`` maps the failing
+    ``user_id`` (string) to the exception message so one user's blow-up is
+    logged and isolated, never aborting the others.
+    """
+
+    users_total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    enabled: bool = True
+    failures: dict[str, str] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "users_total": self.users_total,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "enabled": self.enabled,
+            "failures": self.failures,
+        }
+
+
+async def _select_active_user_ids(
+    *,
+    database: AsyncDatabase,
+) -> list[PydanticObjectId]:
+    """Return the ``user_id`` of every active user, most-stable order.
+
+    The project's active-user signal is the KG ``person:self`` node carrying
+    ``properties.is_active_user=True`` (one per :class:`User`; see
+    ``entities/users.py``). Enumerating off that flag — rather than off the
+    raw ``users`` collection — means a user without a materialized self-person
+    node (mid-migration, soft-disabled) is skipped, matching the
+    "who am I?" single-source-of-truth contract.
+
+    Returned ids are de-duplicated and sorted by their string form so the
+    fan-out order is deterministic across runs (handy for tests / logs).
+    """
+
+    collection = database[_KG_COLLECTION]
+    cursor = collection.find(
+        {
+            "kind": "node",
+            "type": NodeType.PERSON.value,
+            "name": "self",
+            "properties.is_active_user": True,
+        },
+        {"user_id": 1},
+    )
+    seen: set[PydanticObjectId] = set()
+    out: list[PydanticObjectId] = []
+    async for doc in cursor:
+        uid = doc.get("user_id")
+        if uid is None or uid in seen:
+            continue
+        seen.add(uid)
+        out.append(uid)
+    out.sort(key=str)
+    return out
+
+
+async def _fan_out_dreams(
+    *,
+    user_ids: list[PydanticObjectId],
+    dry_run: bool | None,
+    runner: Any,
+) -> FanOutStats:
+    """Run ``runner(user_id=..., dry_run=...)`` once per user, isolating failures.
+
+    Pure orchestration core (no DB, no Prefect) so the enabled-gate, the
+    per-user enumeration, and the failure-isolation contract are unit-testable
+    directly. ``runner`` is the per-user dream entrypoint
+    (:func:`dream_consolidation` in the flow; a fake in tests). A single
+    user's exception is caught, logged, recorded in ``stats.failures``, and
+    the loop continues — one tenant's failure must never abort the others.
+    """
+
+    log = _get_run_logger()
+    stats = FanOutStats(users_total=len(user_ids))
+    for user_id in user_ids:
+        try:
+            await runner(user_id=user_id, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 — isolate one tenant's failure
+            stats.failed += 1
+            stats.failures[str(user_id)] = str(exc)
+            log.error(
+                "dream fan-out: user_id=%s FAILED (isolated): %s",
+                user_id,
+                exc,
+                exc_info=True,
+            )
+            continue
+        stats.succeeded += 1
+    log.info(
+        "dream fan-out: users_total=%d succeeded=%d failed=%d",
+        stats.users_total,
+        stats.succeeded,
+        stats.failed,
+    )
+    return stats
+
+
+@flow(name="dream-consolidation-all-users", log_prints=True)
+async def dream_consolidation_all_users() -> FanOutStats:
+    """Scheduled parent flow: fan the dream out to every active user.
+
+    The per-user :func:`dream_consolidation` is tenant-scoped (its watermark
+    and cost live per ``user_id``), so the cron-served deployment cannot take
+    a ``user_id`` — instead this thin parent flow enumerates active users and
+    runs the per-user dream once each. It owns NO consolidation logic of its
+    own; it only fans out.
+
+    * Skips the entire run when ``app_config.dream.enabled`` is False (zero
+      per-user dreams, zero DB reads beyond the gate).
+    * Propagates ``app_config.dream.dry_run`` to every per-user run.
+    * Isolates failures: one user's exception is logged and recorded; the
+      remaining users still run (see :func:`_fan_out_dreams`).
+    """
+
+    log = _get_run_logger()
+    dream_cfg = _live_app_config().dream
+
+    if not dream_cfg.enabled:
+        log.info(
+            "dream_consolidation_all_users: disabled via "
+            "app_config.dream.enabled=False — zero per-user dreams"
+        )
+        return FanOutStats(enabled=False)
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    database = client[settings.mongo.mongo_initdb_database]
+
+    user_ids = await _select_active_user_ids(database=database)
+    log.info(
+        "dream_consolidation_all_users: %d active user(s) to fan out (dry_run=%s)",
+        len(user_ids),
+        dream_cfg.dry_run,
+    )
+
+    return await _fan_out_dreams(
+        user_ids=user_ids,
+        dry_run=dream_cfg.dry_run,
+        runner=dream_consolidation,
     )

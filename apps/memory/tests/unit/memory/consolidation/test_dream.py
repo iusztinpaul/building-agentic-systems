@@ -554,3 +554,354 @@ class TestTwoSetRule:
         # The driving node's stored embedding was passed straight to
         # dedupe_entity — never recomputed.
         assert dream_mod.dedupe_entity.call_args.kwargs["embedding"] == [1.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# #052 — supersession sweep (flag-gated)
+# ---------------------------------------------------------------------------
+
+
+class _SupersessionFakeCursor:
+    def __init__(self, docs: list[dict[str, Any]]) -> None:
+        self._docs = docs
+
+    def __aiter__(self) -> "_SupersessionFakeCursor":
+        self._it = iter(self._docs)
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class _SupersessionFakeCollection:
+    """Collection that answers the supersession driving query by type.
+
+    Records every ``find`` filter so tests can assert the watermark +
+    not-superseded predicate the sweep issues.
+    """
+
+    def __init__(self, nodes: list[dict[str, Any]]) -> None:
+        self._nodes = nodes
+        self.find_filters: list[dict[str, Any]] = []
+
+    def find(
+        self, query: dict[str, Any], projection: Any = None
+    ) -> _SupersessionFakeCursor:
+        self.find_filters.append(query)
+        etype = query.get("type")
+        gt = query["updated_at"]["$gt"]
+        matched = [
+            n
+            for n in self._nodes
+            if n.get("type") == etype
+            and n.get("merged_into") in (None, "", False)
+            and n.get("updated_at") > gt
+            and n.get("valid_until") in (None,)
+        ]
+        return _SupersessionFakeCursor(matched)
+
+
+class _SupersessionFakeDatabase:
+    def __init__(self, collection: _SupersessionFakeCollection) -> None:
+        self._collection = collection
+
+    def __getitem__(self, name: str) -> _SupersessionFakeCollection:
+        return self._collection
+
+
+def _pref_node(
+    *, node_id: str, statement: str, category: str, updated_at: datetime
+) -> dict[str, Any]:
+    return {
+        "_id": node_id,
+        "user_id": _USER_ID,
+        "kind": "node",
+        "type": NodeType.PREFERENCE.value,
+        "name": node_id.split(":")[-1],
+        "subtype": "explicit",
+        "properties": {"statement": statement, "category": category},
+        "merged_into": None,
+        "valid_until": None,
+        "updated_at": updated_at,
+        "created_at": updated_at,
+    }
+
+
+class TestSupersessionSweep:
+    async def test_dry_run_is_noop_no_llm(self, mocker) -> None:
+        """dry_run=True ⇒ sweep returns immediately, no LLM/embedding built."""
+
+        boom = mocker.patch(
+            "tree.memory.consolidation.dream.get_llm",
+            side_effect=AssertionError("get_llm must not be called on dry-run"),
+        )
+        emb = mocker.patch(
+            "tree.memory.consolidation.dream.get_search_embedding_model",
+            side_effect=AssertionError("embedding model must not be built"),
+        )
+        resolver = mocker.patch("tree.memory.consolidation.dream.resolve_supersessions")
+
+        nodes = [
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:fresh",
+                statement="prefers dark mode",
+                category="ui",
+                updated_at=_FRESH,
+            )
+        ]
+        database = _SupersessionFakeDatabase(_SupersessionFakeCollection(nodes))
+
+        await dream_mod._supersession_sweep(
+            database=database,
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dry_run=True,
+        )
+
+        boom.assert_not_called()
+        emb.assert_not_called()
+        resolver.assert_not_called()
+
+    async def test_no_delta_is_noop_no_llm(self, mocker) -> None:
+        """No watermark-fresh pref/fact ⇒ no LLM constructed, no resolver call."""
+
+        boom = mocker.patch(
+            "tree.memory.consolidation.dream.get_llm",
+            side_effect=AssertionError("get_llm must not be called with no delta"),
+        )
+        resolver = mocker.patch("tree.memory.consolidation.dream.resolve_supersessions")
+
+        # Only a STALE preference — outside the delta.
+        nodes = [
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:stale",
+                statement="prefers tea",
+                category="drinks",
+                updated_at=_OLD,
+            )
+        ]
+        database = _SupersessionFakeDatabase(_SupersessionFakeCollection(nodes))
+
+        await dream_mod._supersession_sweep(
+            database=database,
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dry_run=False,
+        )
+
+        boom.assert_not_called()
+        resolver.assert_not_called()
+
+    async def test_drives_only_delta_nodes_into_resolver(self, mocker) -> None:
+        """Flag-on real run: only the delta pref drives resolve_supersessions.
+
+        The stale pref must NOT be wrapped into ``raws`` (driving set is
+        watermark-filtered); the resolver is the reused extraction-pipeline
+        function and is called exactly once with the delta node.
+        """
+
+        mocker.patch("tree.memory.consolidation.dream.get_llm", return_value="LLM")
+        mocker.patch(
+            "tree.memory.consolidation.dream.get_search_embedding_model",
+            return_value="EMB",
+        )
+        resolver = mocker.patch(
+            "tree.memory.consolidation.dream.resolve_supersessions",
+            return_value=[],
+        )
+
+        nodes = [
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:fresh",
+                statement="prefers light mode",
+                category="ui",
+                updated_at=_FRESH,
+            ),
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:stale",
+                statement="prefers tea",
+                category="drinks",
+                updated_at=_OLD,
+            ),
+        ]
+        database = _SupersessionFakeDatabase(_SupersessionFakeCollection(nodes))
+
+        await dream_mod._supersession_sweep(
+            database=database,
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dry_run=False,
+        )
+
+        resolver.assert_called_once()
+        kwargs = resolver.call_args.kwargs
+        assert kwargs["llm"] == "LLM"
+        assert kwargs["embedding_model"] == "EMB"
+        raws = list(kwargs["raws"])
+        # Exactly one driving node wrapped — the watermark-fresh one.
+        all_nodes = [n for raw in raws for n in raw.extracted.nodes]
+        assert len(all_nodes) == 1
+        assert all_nodes[0].properties["statement"] == "prefers light mode"
+        assert all_nodes[0].type == NodeType.PREFERENCE
+
+
+def test_stored_node_to_extracted_round_trips_slots() -> None:
+    """The adapter carries name/type/subtype/properties into ExtractedNode."""
+
+    doc = {
+        "_id": f"{_USER_ID}:preference:dark",
+        "name": "prefers-dark-mode",
+        "type": NodeType.PREFERENCE.value,
+        "subtype": "explicit",
+        "properties": {"statement": "prefers dark mode", "category": "ui"},
+    }
+
+    node = dream_mod._stored_node_to_extracted(doc)
+
+    assert node.name == "prefers-dark-mode"
+    assert node.type == NodeType.PREFERENCE
+    assert node.subtype == "explicit"
+    assert node.properties == {"statement": "prefers dark mode", "category": "ui"}
+
+
+# ---------------------------------------------------------------------------
+# #052 — scheduled per-user fan-out
+# ---------------------------------------------------------------------------
+
+
+class _ActiveUserFakeCursor:
+    def __init__(self, docs: list[dict[str, Any]]) -> None:
+        self._docs = docs
+
+    def __aiter__(self) -> "_ActiveUserFakeCursor":
+        self._it = iter(self._docs)
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+
+class _ActiveUserFakeCollection:
+    """Returns ``person:self`` rows matching the is_active_user probe."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def find(
+        self, query: dict[str, Any], projection: Any = None
+    ) -> _ActiveUserFakeCursor:
+        matched = [
+            r
+            for r in self._rows
+            if r.get("type") == query["type"]
+            and r.get("name") == query["name"]
+            and (r.get("properties") or {}).get("is_active_user")
+            == query["properties.is_active_user"]
+        ]
+        return _ActiveUserFakeCursor(matched)
+
+
+class _ActiveUserFakeDatabase:
+    def __init__(self, collection: _ActiveUserFakeCollection) -> None:
+        self._collection = collection
+
+    def __getitem__(self, name: str) -> _ActiveUserFakeCollection:
+        return self._collection
+
+
+def _self_person(
+    user_id: PydanticObjectId, *, is_active: bool = True
+) -> dict[str, Any]:
+    return {
+        "_id": f"{user_id}:person:self",
+        "user_id": user_id,
+        "kind": "node",
+        "type": NodeType.PERSON.value,
+        "name": "self",
+        "properties": {"is_active_user": is_active, "name": "User"},
+    }
+
+
+class TestActiveUserSelection:
+    async def test_selects_only_active_self_persons(self) -> None:
+        active_a = PydanticObjectId("507f1f77bcf86cd799439011")
+        active_b = PydanticObjectId("507f1f77bcf86cd799439012")
+        inactive = PydanticObjectId("507f1f77bcf86cd799439013")
+        rows = [
+            _self_person(active_a),
+            _self_person(active_b),
+            _self_person(inactive, is_active=False),
+        ]
+        database = _ActiveUserFakeDatabase(_ActiveUserFakeCollection(rows))
+
+        ids = await dream_mod._select_active_user_ids(database=database)
+
+        assert ids == sorted([active_a, active_b], key=str)
+        assert inactive not in ids
+
+    async def test_empty_when_no_active_users(self) -> None:
+        database = _ActiveUserFakeDatabase(_ActiveUserFakeCollection([]))
+
+        ids = await dream_mod._select_active_user_ids(database=database)
+
+        assert ids == []
+
+
+class TestFanOut:
+    async def test_runs_runner_once_per_user(self) -> None:
+        u1 = PydanticObjectId("507f1f77bcf86cd799439011")
+        u2 = PydanticObjectId("507f1f77bcf86cd799439012")
+        calls: list[tuple[PydanticObjectId, bool | None]] = []
+
+        async def _runner(*, user_id: PydanticObjectId, dry_run: bool | None) -> None:
+            calls.append((user_id, dry_run))
+
+        stats = await dream_mod._fan_out_dreams(
+            user_ids=[u1, u2], dry_run=True, runner=_runner
+        )
+
+        assert calls == [(u1, True), (u2, True)]
+        assert stats.users_total == 2
+        assert stats.succeeded == 2
+        assert stats.failed == 0
+
+    async def test_one_user_failure_is_isolated(self) -> None:
+        good = PydanticObjectId("507f1f77bcf86cd799439011")
+        bad = PydanticObjectId("507f1f77bcf86cd799439012")
+        good2 = PydanticObjectId("507f1f77bcf86cd799439013")
+        ran: list[PydanticObjectId] = []
+
+        async def _runner(*, user_id: PydanticObjectId, dry_run: bool | None) -> None:
+            ran.append(user_id)
+            if user_id == bad:
+                raise RuntimeError("boom for this tenant")
+
+        stats = await dream_mod._fan_out_dreams(
+            user_ids=[good, bad, good2], dry_run=False, runner=_runner
+        )
+
+        # All three users were attempted — the failure did not abort the loop.
+        assert ran == [good, bad, good2]
+        assert stats.users_total == 3
+        assert stats.succeeded == 2
+        assert stats.failed == 1
+        assert str(bad) in stats.failures
+        assert "boom for this tenant" in stats.failures[str(bad)]
+
+    async def test_no_users_is_clean_noop(self) -> None:
+        async def _runner(*, user_id: PydanticObjectId, dry_run: bool | None) -> None:
+            raise AssertionError("runner must not be called with no users")
+
+        stats = await dream_mod._fan_out_dreams(
+            user_ids=[], dry_run=None, runner=_runner
+        )
+
+        assert stats.users_total == 0
+        assert stats.succeeded == 0
+        assert stats.failed == 0

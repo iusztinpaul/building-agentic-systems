@@ -20,11 +20,13 @@ Usage:
 
 from prefect import serve
 
+from tree.config.app_config import app_config
 from tree.data.conversation_pipeline import ingest_conversation
 from tree.data.file_pipeline import ingest_file
 from tree.data.pipeline import data_pipeline
 from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
+from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.memory.indexing.pipeline import memory_indexing
 
@@ -57,5 +59,13 @@ if __name__ == "__main__":
         ingest_youtube_rss_feed_batch.to_deployment(
             name="ingest-youtube-rss-feed-batch-etl",
             tags=["data-pipeline", "youtube"],
+        ),
+        # Scheduled dream-consolidation fan-out: one cron, fans out one
+        # per-user dream run across every active user (#052). The parent
+        # flow takes no ``user_id`` — it enumerates active users itself.
+        dream_consolidation_all_users.to_deployment(
+            name="dream-consolidation-etl",
+            cron=app_config.dream.cron,
+            tags=["dream"],
         ),
     )
