@@ -183,7 +183,8 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
                             except StopIteration:
                                 raise ExtractionError(
                                     "Voyage multimodal API error 429: "
-                                    f"rate-limit retries exhausted ({detail})"
+                                    f"rate-limit retries exhausted ({detail})",
+                                    status_code=resp.status,
                                 ) from None
                             logger.warning(
                                 "Voyage 429 (rate limit); sleeping %.1fs "
@@ -197,7 +198,8 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
                         if resp.status != 200:
                             detail = body.get("detail", body)
                             raise ExtractionError(
-                                f"Voyage multimodal API error {resp.status}: {detail}"
+                                f"Voyage multimodal API error {resp.status}: {detail}",
+                                status_code=resp.status,
                             )
 
                         data = body.get("data")

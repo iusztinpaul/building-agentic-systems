@@ -10,6 +10,8 @@ multiple requests).
 
 from typing import Any
 
+import pytest
+
 from tree.memory.embedding_text import (
     embed_in_batches,
     embed_node_texts,
@@ -154,6 +156,22 @@ class TestNodeToEmbeddingText:
 
         # Assert: backward-compat behavior from the pre-refactor builder.
         assert text == ": "
+
+    def test_strips_control_chars_and_surrogates(self) -> None:
+        # Arrange: chunk content with C0 controls, DEL, a C1 char, and an
+        # unpaired surrogate — the shapes Voyage 400s on.
+        node: dict[str, Any] = {
+            "_id": "u:chunk:c1",
+            "type": "chunk",
+            "name": "chunk\x00one",
+            "properties": {"content": "good\x07text\x7f\x9fwith\ud800junk\nkept"},
+        }
+
+        # Act
+        text = node_to_embedding_text(node)
+
+        # Assert: control/surrogate chars stripped, ordinary text + newline kept.
+        assert text == "chunk: chunkone\ngoodtextwithjunk\nkept"
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +367,219 @@ class TestEmbedInBatches:
         assert len(model.calls) == 1
         assert len(model.calls[0]) == 3
         assert vectors == [[0.0], [1.0], [2.0]]
+
+
+# ---------------------------------------------------------------------------
+# embed_in_batches — skip-and-continue on Voyage content rejections
+# ---------------------------------------------------------------------------
+
+
+class _PoisonEmbeddingModel(BaseEmbeddingModel):
+    """400s on any batch containing a poison text; else returns indexed vectors.
+
+    Models Voyage's content rejection: a 400 fails the whole request, so a
+    resilient batcher must bisect to isolate and skip the poison input.
+    """
+
+    def __init__(self, poison: set[str]) -> None:
+        self._poison = poison
+        self.calls: list[list[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 2
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        from tree.models.exceptions import ExtractionError
+
+        self.calls.append(list(texts))
+        if any(t in self._poison for t in texts):
+            raise ExtractionError(
+                "Voyage multimodal API error 400: inputs contain invalid elements",
+                status_code=400,
+            )
+        return [[1.0, 1.0] for _ in texts]
+
+
+class _RateLimitedEmbeddingModel(BaseEmbeddingModel):
+    """Always raises a 429-style exhaustion error (transient, must NOT skip)."""
+
+    @property
+    def dimensions(self) -> int:
+        return 2
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        from tree.models.exceptions import ExtractionError
+
+        raise ExtractionError(
+            "Voyage multimodal API error 429: rate-limit retries exhausted (...)",
+            status_code=429,
+        )
+
+
+class TestEmbedInBatchesSkipsContentRejections:
+    async def test_skips_poison_input_keeps_order(self) -> None:
+        # Arrange: the middle text is rejected with a 400.
+        model = _PoisonEmbeddingModel(poison={"bad"})
+        texts = ["a", "bad", "c"]
+
+        # Act
+        vectors = await embed_in_batches(texts, model, max_inputs=1000)
+
+        # Assert: good inputs embedded, poison skipped with an aligned [] slot.
+        assert vectors == [[1.0, 1.0], [], [1.0, 1.0]]
+
+    async def test_rate_limit_propagates_not_skipped(self) -> None:
+        # Arrange
+        from tree.models.exceptions import ExtractionError
+
+        model = _RateLimitedEmbeddingModel()
+
+        # Act / Assert: a 429 is transient — it must raise, never be skipped.
+        with pytest.raises(ExtractionError, match="429"):
+            await embed_in_batches(["a", "b"], model, max_inputs=1000)
+
+
+class _IdentityEncodingPoisonModel(BaseEmbeddingModel):
+    """Encodes each input's identity into its vector; 400s on any poison batch.
+
+    Unlike ``_PoisonEmbeddingModel`` (which returns a uniform ``[1.0, 1.0]`` for
+    every good input and so cannot detect a positional swap), this model returns
+    a vector derived from the text itself — ``[ord(text[0])]`` — so the returned
+    sequence is a fingerprint of which good input landed in which slot. A
+    batcher that mis-aligned the bisected halves would produce a different
+    sequence, so vector equality proves exact positional alignment.
+    """
+
+    def __init__(self, poison: set[str]) -> None:
+        self._poison = poison
+        self.calls: list[list[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 1
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        from tree.models.exceptions import ExtractionError
+
+        self.calls.append(list(texts))
+        if any(t in self._poison for t in texts):
+            raise ExtractionError(
+                "Voyage multimodal API error 400: inputs contain invalid elements",
+                status_code=400,
+            )
+        return [[float(ord(t[0]))] for t in texts]
+
+
+class TestEmbedInBatchesAlignmentAdversarial:
+    """Adversarial: multi-poison bisection must keep good vectors aligned."""
+
+    async def test_multi_poison_preserves_exact_alignment(self) -> None:
+        # Arrange: poison at index 1 and index 4 of a 6-input chunk. Forcing a
+        # single request (max_inputs high) makes the batcher bisect repeatedly.
+        model = _IdentityEncodingPoisonModel(poison={"P1", "P4"})
+        texts = ["a", "P1", "c", "d", "P4", "f"]
+
+        # Act
+        vectors = await embed_in_batches(texts, model, max_inputs=1000)
+
+        # Assert: good inputs land in their own slots (fingerprinted by ord), the
+        # two poison slots are empty placeholders — no drift, no swap, no drop.
+        assert vectors == [
+            [float(ord("a"))],
+            [],
+            [float(ord("c"))],
+            [float(ord("d"))],
+            [],
+            [float(ord("f"))],
+        ]
+        assert len(vectors) == len(texts)
+
+    async def test_all_poison_chunk_yields_all_placeholders(self) -> None:
+        # Arrange: every input is rejected — full bisection down to singletons.
+        model = _IdentityEncodingPoisonModel(poison={"x", "y", "z"})
+        texts = ["x", "y", "z"]
+
+        # Act
+        vectors = await embed_in_batches(texts, model, max_inputs=1000)
+
+        # Assert: each un-embeddable input gets its own aligned [] placeholder.
+        assert vectors == [[], [], []]
+
+    async def test_429_message_containing_400_still_propagates(self) -> None:
+        # Arrange: a transient 429 whose human-readable message happens to contain
+        # the digit-run "400" (token counts, Retry-After, request IDs, quota
+        # numbers all interpolate the server body verbatim) must NOT be skipped.
+        # The discriminator keys off the structured HTTP status, not the message,
+        # so a 429 propagates even when "400" appears in its text.
+        from tree.models.exceptions import ExtractionError
+
+        class _Misleading400In429Model(BaseEmbeddingModel):
+            @property
+            def dimensions(self) -> int:
+                return 2
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                raise ExtractionError(
+                    "Voyage API error 429: rate-limit exhausted after 400 retries",
+                    status_code=429,
+                )
+
+        # Act / Assert: regression guard — a transient 429 must raise, never be
+        # bisected and silently dropped, regardless of "400" appearing in the body.
+        with pytest.raises(ExtractionError, match="429"):
+            await embed_in_batches(
+                ["a", "b"], _Misleading400In429Model(), max_inputs=1000
+            )
+
+    async def test_status_less_400_message_still_propagates(self) -> None:
+        # Arrange: an ExtractionError with NO structured status_code, whose
+        # message contains "400", must NOT be treated as a content rejection.
+        # Only a structured status_code == 400 is skippable; anything else
+        # (including a status-less error) re-raises so no data is silently lost.
+        from tree.models.exceptions import ExtractionError
+
+        class _StatusLess400MessageModel(BaseEmbeddingModel):
+            @property
+            def dimensions(self) -> int:
+                return 2
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                raise ExtractionError("some failure mentioning 400 in passing")
+
+        with pytest.raises(ExtractionError, match="400"):
+            await embed_in_batches(
+                ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
+            )
+
+
+class TestSanitizeForEmbedding:
+    """Adversarial: sanitization strips only the chars Voyage 400s on."""
+
+    def test_preserves_legitimate_unicode_tab_and_newline(self) -> None:
+        from tree.memory.embedding_text import _sanitize_for_embedding
+
+        # Arrange: smart quotes, emoji, accented letters, tab, newline, CR — all
+        # legitimate and must survive sanitization untouched.
+        text = "café “smart” \U0001f600\taccenté\nline\rret"
+
+        # Act / Assert: no-op on clean-but-rich Unicode.
+        assert _sanitize_for_embedding(text) == text
+
+    def test_strips_each_invalid_class(self) -> None:
+        from tree.memory.embedding_text import _sanitize_for_embedding
+
+        # Arrange: one char from each stripped class — C0 (NUL, BEL, VT, FF),
+        # DEL, C1 (0x80, 0x9f), and an unpaired surrogate (0xd800).
+        text = "x\x00\x07\x0b\x0c\x1f\x7f\x80\x9f\ud800y"
+
+        # Act / Assert: everything between the bookends is removed.
+        assert _sanitize_for_embedding(text) == "xy"
+
+    def test_no_op_on_plain_ascii(self) -> None:
+        from tree.memory.embedding_text import _sanitize_for_embedding
+
+        # Arrange / Act / Assert: ordinary text is untouched (cheap fast path).
+        assert _sanitize_for_embedding("person: Bob\nrole: engineer") == (
+            "person: Bob\nrole: engineer"
+        )

@@ -88,7 +88,14 @@ async def embed_nodes(
 
     embedded_count = await _embed_batch(collection, docs, embedding_model)
 
-    logger.info("Embedded %d nodes in %s", embedded_count, _KG_COLLECTION)
+    # A node fetched but not persisted was skipped as un-embeddable (Voyage 400
+    # content rejection -> empty placeholder); surface the gap so operators know
+    # a backfill retry is pending rather than reading the count as "all done".
+    skipped = len(docs) - embedded_count
+    skipped_note = f" ({skipped} skipped, will retry)" if skipped else ""
+    logger.info(
+        "Embedded %d nodes in %s%s", embedded_count, _KG_COLLECTION, skipped_note
+    )
     return embedded_count
 
 
@@ -109,9 +116,12 @@ async def _embed_batch(
 
     vectors = await embed_node_texts(docs, embedding_model)
 
+    # Skip inputs the batcher could not embed (empty placeholder from a Voyage
+    # content rejection) — leave the node unembedded so a later run retries it.
     ops = [
         UpdateOne({"_id": doc["_id"]}, {"$set": {"embedding": vector}})
         for doc, vector in zip(docs, vectors)
+        if vector
     ]
     if ops:
         await collection.bulk_write(ops)
