@@ -23,7 +23,7 @@ from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.config.app_config import app_config
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import embed_node_texts
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,6 @@ async def embed_nodes(
 
     db = client[database]
     collection = db[_KG_COLLECTION]
-    batch_size = app_config.query.embedding_batch_size
 
     # Fetch only nodes whose embedding is missing/None/empty AND that
     # belong to ``user_id``. Nodes with a non-empty embedding vector are
@@ -87,11 +86,7 @@ async def embed_nodes(
         },
     ).to_list()
 
-    embedded_count = 0
-
-    for i in range(0, len(docs), batch_size):
-        batch = docs[i : i + batch_size]
-        embedded_count += await _embed_batch(collection, batch, embedding_model)
+    embedded_count = await _embed_batch(collection, docs, embedding_model)
 
     logger.info("Embedded %d nodes in %s", embedded_count, _KG_COLLECTION)
     return embedded_count
@@ -99,17 +94,27 @@ async def embed_nodes(
 
 async def _embed_batch(
     collection: Any,
-    batch: list[dict[str, Any]],
+    docs: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
 ) -> int:
-    """Embed a batch of node documents and write vectors back."""
+    """Embed node documents via the #044 batcher and write vectors back.
 
-    texts = [node_to_embedding_text(doc) for doc in batch]
-    vectors = await embedding_model.embed(texts)
+    #044: the embedding itself is delegated to
+    :func:`tree.memory.embedding_text.embed_node_texts`, which packs the
+    node-texts into as few synchronous Voyage requests as the per-request
+    caps allow (1000 inputs / 320K tokens). This replaces the prior manual
+    ``range(0, len(docs), query.embedding_batch_size)`` slicing — that
+    issued ``ceil(N / 64)`` small requests and was the stage that exhausted
+    the free-tier 3-RPM budget. The returned vectors are positionally
+    aligned with ``docs`` (across multiple requests), so the zip below is
+    safe.
+    """
+
+    vectors = await embed_node_texts(docs, embedding_model)
 
     ops = [
         UpdateOne({"_id": doc["_id"]}, {"$set": {"embedding": vector}})
-        for doc, vector in zip(batch, vectors)
+        for doc, vector in zip(docs, vectors)
     ]
     if ops:
         await collection.bulk_write(ops)

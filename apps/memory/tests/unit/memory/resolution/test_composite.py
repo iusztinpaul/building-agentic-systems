@@ -269,6 +269,78 @@ class TestCompositeResolverWithTypes:
         assert results[0].canonical_name == "Alice"
 
 
+class _BatchCountingEmbeddingModel(BaseEmbeddingModel):
+    """Records each ``embed`` call (the list of texts) so a test can assert how
+    many SEPARATE requests were issued. Returns a stable per-text vector."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 2
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[float(len(t)), float(sum(ord(c) for c in t))] for t in texts]
+
+
+class TestCompositeResolverPrewarmsSemanticCache:
+    """#044 — ``resolve_with_types`` pre-warms the semantic resolver's cache
+    with ONE batched embed of all input + candidate names instead of one
+    request per name during the cosine loop."""
+
+    async def test_uncached_names_embedded_in_one_batched_request(self) -> None:
+        # Arrange — names that miss alias/exact/fuzzy so the semantic stage is
+        # actually exercised, and a counting model to observe request count.
+        model = _BatchCountingEmbeddingModel()
+        resolver = CompositeResolver(
+            embedding_model=model,
+            semantic_threshold=0.99,  # high → semantic rarely "matches"
+            type_strict=True,
+        )
+
+        # Two input entities, three same-type candidates. Pre-#044 this would
+        # be up to 2 + 3 = 5 separate embed requests; #044 packs them into one.
+        results = await resolver.resolve_with_types(
+            entities=[
+                ("zzz qqq", NodeType.PERSON),
+                ("www vvv", NodeType.PERSON),
+            ],
+            existing_entities={
+                NodeType.PERSON: ["aaa bbb", "ccc ddd", "eee fff"],
+            },
+            existing_aliases={},
+        )
+
+        # Assert — exactly ONE batched embed request covering all five distinct
+        # names; the per-candidate cosine loop then hit the warmed cache.
+        assert len(model.calls) == 1
+        assert set(model.calls[0]) == {
+            "zzz qqq",
+            "www vvv",
+            "aaa bbb",
+            "ccc ddd",
+            "eee fff",
+        }
+        assert len(results) == 2
+
+    async def test_no_embedding_model_skips_prewarm(self) -> None:
+        # Arrange — no semantic stage; resolve_with_types must not crash trying
+        # to pre-warm a nonexistent cache.
+        resolver = CompositeResolver(embedding_model=None, type_strict=True)
+
+        # Act
+        results = await resolver.resolve_with_types(
+            entities=[("alice", NodeType.PERSON)],
+            existing_entities={NodeType.PERSON: ["Alice"]},
+            existing_aliases={},
+        )
+
+        # Assert
+        assert results[0].canonical_name == "Alice"
+
+
 class TestCompositeResolverBatchIdempotency:
     async def test_repeated_inputs_yield_identical_canonicals(self) -> None:
         # Arrange

@@ -37,8 +37,51 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.provider == "voyage"
         assert config.models.search_embedding.model == "voyage-multimodal-3"
         assert config.models.search_embedding.dimensions == 1024
+        # #044: real-time request-batching caps default to the Voyage
+        # per-request limits for voyage-multimodal-3.
+        assert config.models.embedding_batch.max_inputs == 1000
+        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_input_tokens == 32_000
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
+
+    def test_embedding_batch_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``models.embedding_batch`` block falls back to the
+        typed defaults (the Voyage per-request caps) — #044."""
+
+        custom = tmp_path / "no_batch.yaml"
+        custom.write_text(
+            "models:\n"
+            "  search_embedding:\n"
+            "    provider: voyage\n"
+            "    model: voyage-multimodal-3\n"
+            "    dimensions: 1024\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.models.embedding_batch.max_inputs == 1000
+        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_input_tokens == 32_000
+
+    def test_embedding_batch_caps_loaded_from_yaml(self, tmp_path):
+        """Operator-tuned batching caps in YAML are read into the typed
+        :class:`EmbeddingBatchConfig` (#044)."""
+
+        custom = tmp_path / "batch.yaml"
+        custom.write_text(
+            "models:\n"
+            "  embedding_batch:\n"
+            "    max_inputs: 128\n"
+            "    max_total_tokens: 50000\n"
+            "    max_input_tokens: 8000\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.models.embedding_batch.max_inputs == 128
+        assert config.models.embedding_batch.max_total_tokens == 50_000
+        assert config.models.embedding_batch.max_input_tokens == 8000
 
     def test_loads_default_yaml_sources_flat_shape(self):
         """default.yaml uses the flat ``sources:`` list shape (post-#007).

@@ -49,7 +49,7 @@ from tree.entities.knowledge_graph import (
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.core import (
     build_structural_entries,
@@ -832,38 +832,55 @@ resolve_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed (one canonical name at a time, mapped)
+# Task ④ — embed (ALL run node-texts in one batched call, #044)
 # ---------------------------------------------------------------------------
 
 
-async def _embed_entity(text: str) -> tuple[str, list[float]]:
-    """Embed a single embeddable text (#042).
+async def _embed_entities(texts: list[str]) -> dict[str, list[float]]:
+    """Embed every embeddable text for the run via the #044 batcher.
 
-    Mapped at single-text grain so the ``INPUTS`` cache key is the
-    embeddable text itself — identical node-text in, identical vector out,
-    no recompute across runs.
+    Pre-#044 this task was ``.map()``'d at single-text grain, issuing ONE
+    Voyage request per unique canonical/node-text — the dominant source of
+    the operator's free-tier ``429 rate-limit retries exhausted``. #044
+    replaces that with a SINGLE batched call: all the run's node-texts are
+    packed into as few synchronous ``/v1/multimodalembeddings`` requests as
+    the per-request caps (1000 inputs / 320K tokens) allow via
+    :func:`tree.memory.embedding_text.embed_in_batches`. The vectors come
+    back positionally aligned, so we zip them back to their texts and return
+    a ``text -> vector`` map that task ⑤/⑥ index by embeddable text exactly
+    as before.
 
-    Pre-#042 this embedded the canonical NAME; #042 switches the grain to
-    the GENERIC node-text (or the PREFERENCE/FACT statement) so the vector
-    task ⑤ deduplicates against and task ⑥ persists lives in the same
-    space as the search corpus. The embedding model is the **search**
-    model (``get_search_embedding_model``) — the persisted, index-coupled
-    embedding. Resolution's transient name-embedding is computed
-    separately inside the resolver chain and is untouched by this task
-    (it moves onto its own model in #043).
+    Tradeoff vs. #042: the prior per-text ``INPUTS`` cache (one cache key per
+    node-text, surviving across runs) is given up in exchange for far fewer
+    requests — the win the operator asked for. The task still caches on
+    ``INPUTS`` (the whole text list), so an identical re-run of the same
+    document set is still a cache hit; only partial-overlap re-runs lose the
+    finer-grained reuse. Per-run dedup of identical texts still happens
+    upstream (the flow embeds ``sorted(set(...))``).
+
+    The embedding model is the **search** model
+    (``get_search_embedding_model``) — the persisted, index-coupled vector.
+    The 429 backoff is untouched: it lives inside ``.embed()`` and the
+    batcher calls ``.embed()`` once per chunk.
     """
 
     log = _get_run_logger()
+    if not texts:
+        return {}
+
     embedding_model = get_search_embedding_model()
-    vectors = await embedding_model.embed([text])
-    vector = vectors[0] if vectors else []
-    log.info("embed_entity: text=%r dim=%d", text, len(vector))
-    return text, vector
+    vectors = await embed_in_batches(texts, embedding_model)
+    log.info(
+        "embed_entities: n_texts=%d dim=%d",
+        len(texts),
+        len(vectors[0]) if vectors else 0,
+    )
+    return dict(zip(texts, vectors))
 
 
 embed_entities_task = task(
-    _embed_entity,
-    name="embed-entity",
+    _embed_entities,
+    name="embed-entities",
     cache_policy=INPUTS,
     cache_expiration=timedelta(days=90),
     retries=2,
@@ -1524,12 +1541,13 @@ async def memory_extraction(
     # ----- Task ③ — resolve ------------------------------------------------
     resolved = await resolve_entities_task(raws, database, resolver, user_id)
 
-    # ----- Task ④ — embed (mapped at single node-text grain, #042) ---------
+    # ----- Task ④ — embed (ALL run node-texts in one batched call, #044) ---
+    # #044: replace the per-text ``.map()`` (one Voyage request per node-text,
+    # the free-tier 429 hotspot) with a SINGLE batched embed of every unique
+    # node-text for the run. ``embed_entities_task`` packs them into as few
+    # synchronous requests as the 1000-input / 320K-token caps allow.
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
-    vectors: dict[str, list[float]] = {}
-    for text in embeddable_texts:
-        text_, vector = await embed_entities_task(text)
-        vectors[text_] = vector
+    vectors = await embed_entities_task(embeddable_texts)
     embeddings = EmbeddingMap(vectors=vectors)
 
     # ----- Task ⑤ — dedup --------------------------------------------------
@@ -1662,7 +1680,10 @@ async def run_extraction_for_documents(
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
     vectors: dict[str, list[float]] = {}
     if embeddable_texts:
-        embedded = await search_embedding_model.embed(embeddable_texts)
+        # #044: route through the batcher so a large document set is packed
+        # into request-sized chunks (1000 inputs / 320K tokens) rather than a
+        # single call that would 400 on the per-request cap.
+        embedded = await embed_in_batches(embeddable_texts, search_embedding_model)
         vectors = dict(zip(embeddable_texts, embedded))
     embeddings = EmbeddingMap(vectors=vectors)
     dedup_results = await _dedupe_entities(

@@ -22,7 +22,7 @@ from tree.memory.extraction.pipeline import (
     _CachedSingleEmbedding,
     _dedupe_entities,
     _dispatch_entity_write,
-    _embed_entity,
+    _embed_entities,
     _entity_embeddable_text,
     _extract_chunks_and_structural,
     _llm_extract_entities,
@@ -343,34 +343,56 @@ class TestResolveEntitiesTask:
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed_entity
+# Task ④ — embed_entities (batched, #044)
 # ---------------------------------------------------------------------------
 
 
-class TestEmbedEntityTask:
-    async def test_returns_text_and_vector(self, mocker) -> None:
-        # #042: task ④ embeds the entity's node-text via the SEARCH model
-        # and returns ``(text, vector)`` keyed by that text.
+class TestEmbedEntitiesTask:
+    async def test_embeds_all_texts_in_one_batched_call(self, mocker) -> None:
+        # #044: task ④ embeds EVERY run node-text in a single batched call
+        # (via embed_in_batches over the SEARCH model) and returns a
+        # ``text -> vector`` map.
         model = MagicMock()
-        model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
+        model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
         search_factory = mocker.patch(
             "tree.memory.extraction.pipeline.get_search_embedding_model",
             return_value=model,
         )
 
-        node_text = "person: Andrej Karpathy\nrole: researcher"
-        text, vector = await _embed_entity(node_text)
-        assert text == node_text
-        assert vector == [0.1, 0.2, 0.3]
-        # The text passed to the model is the node-text, not a bare name.
-        model.embed.assert_awaited_once_with([node_text])
+        texts = [
+            "person: Andrej Karpathy\nrole: researcher",
+            "person: Yann LeCun\nrole: researcher",
+        ]
+        result = await _embed_entities(texts)
+
+        assert result == {
+            texts[0]: [0.1, 0.2, 0.3],
+            texts[1]: [0.4, 0.5, 0.6],
+        }
+        # ONE embed() call carrying BOTH node-texts (not one call per text).
+        model.embed.assert_awaited_once_with(texts)
         search_factory.assert_called_once()
+
+    async def test_empty_input_returns_empty_without_calling_model(
+        self, mocker
+    ) -> None:
+        model = MagicMock()
+        model.embed = AsyncMock()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=model,
+        )
+
+        result = await _embed_entities([])
+
+        assert result == {}
+        model.embed.assert_not_awaited()
 
     async def test_task_decorator_uses_inputs_cache(self) -> None:
         # Cache policy is registered on the decorated task; identity check on
         # the registered name. The cache itself is exercised in the integration
         # suite (Prefect runtime required).
-        assert embed_entities_task.name == "embed-entity"
+        assert embed_entities_task.name == "embed-entities"
 
 
 # ---------------------------------------------------------------------------
