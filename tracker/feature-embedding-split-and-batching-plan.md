@@ -104,3 +104,75 @@ captured in #044's Scope and "Rejected alternatives" criterion instead.
 4. **E2E tier (logistics).** #045's `[HUMAN]` live-run criterion needs
    either a paid Voyage key or a small `DOC_IDS` subset on free tier
    (3 RPM). Which will the Tester use?
+
+## Log
+
+### [PR Reviewer] 2026-05-20 — Review (rollup)
+
+**VERDICT: BLOCKERS**
+
+Reviewed PR #21 (`feat/embedding-split-and-batching`) — all 46 changed files in
+`git diff $(git merge-base HEAD origin/main)...HEAD`. Filed rollup task:
+`tracker/046-pr-review-rollup.groomed.md`.
+
+Blockers: 1; Nits: 2.
+
+- **Blocker 1** — `apps/memory/src/tree/memory/indexing/core.py:321` ships
+  Python-2 `except TypeError, ValueError:` syntax (hard `SyntaxError` in Py3) on
+  the persisted-vector indexing path this feature restructures and imports.
+  Confirmed from source bytes; the local toolchain is masking the defect
+  (`py_compile` / `ast.parse` / `uv run python -import` all falsely report OK
+  for a clause real CPython 3.14 cannot compile). Line is pre-existing but the
+  PR depends on the module and cannot ship it broken.
+- Nit 1 — `query.embedding_batch_size` confirmed dead config (zero live
+  consumers; already a PR follow-up).
+- Nit 2 — `EmbeddingBatchConfig` lacks a `max_input_tokens <= max_total_tokens`
+  validator the batcher's single-oversized-input clamp relies on.
+
+Independently re-verified clean (Tester + PM had passed): `embed_in_batches`
+order preservation across multiple batches (contiguous slices + ordered
+`extend`; covered by `test_embedding_text.py`), conservative chars/3 token
+estimate + 32K per-input clamp, dedup vector reuse (same vector dedups and
+persists; no recompute, no name-vector leak — `add_entity.py` /
+`pipeline.py:_CachedSingleEmbedding`), transient resolution name-vector never
+persisted (resolver built from `get_resolution_embedding_model`; persisted +
+supersession paths use `search_embedding_model`), zero stale singular
+`app_config.models.embedding` runtime refs across the ~15 migrated sites,
+PREFERENCE/FACT statement/object embedding preserved (the #032 supersession
+contract). No debug prints / orphan TODOs / unrelated files in the diff.
+
+Doc dimension: project has `docs/adrs/` (not `docs/adr/`) and no
+`docs/glossary.md`; no new architectural decision contradicts the existing ADR
+and no new domain term is introduced, so no doc-discipline Blocker.
+
+Pipeline re-runs from inner loop on rollup #046; re-invoke me after PM ACCEPT +
+re-push. NOTE for orchestrator: the compiler-masking behaviour in this worktree
+means local "import OK / tests pass" cannot be trusted — require a clean-
+interpreter verification.
+
+### [Orchestrator] 2026-05-20 — PR Reviewer Blocker REJECTED (false positive); rollup #046 cancelled
+
+The PR Reviewer's sole Blocker — `except TypeError, ValueError:` at
+`indexing/core.py:321` claimed to be a Python-3 `SyntaxError` "masked by the
+local toolchain" — is a **false positive**. It is valid **PEP 758** syntax
+(parenthesis-free `except A, B:`, accepted for Python 3.14). Evidence:
+
+- The project pins `requires-python >=3.14` and `.python-version = 3.14`.
+- Direct runtime test on Python 3.14.0: the clause compiles AND catches both
+  `TypeError` and `ValueError` correctly.
+- CI run **26163952648** is GREEN — its integration-test job imports
+  `tree.memory.indexing.core` during collection; a real `SyntaxError` would
+  fail there. CI uses `uv python install` → 3.14, same as local.
+
+The PR Reviewer's premise that `ast.parse`/`py_compile`/`import` "falsely
+report success" is backwards: they report success because the syntax IS valid
+on 3.14. The line is also pre-existing (commit `78ab82c0`) and untouched by
+this PR. Rollup **#046 is cancelled** (not routed to the inner loop).
+
+The 2 Nits stand as non-blocking PR-description follow-ups:
+(1) `query.embedding_batch_size` dead config; (2) `EmbeddingBatchConfig`
+`max_input_tokens <= max_total_tokens` validator. Optional tiny hardening:
+parenthesize the `except` to `(TypeError, ValueError)` to stop this recurring
+false-alarm — left to operator discretion (behavior-identical).
+
+Both Step-8 gates now CLEAR: On-Call GREEN + PR Reviewer (no real Blocker).
