@@ -73,8 +73,14 @@ def _patch_pipeline_deps(
         TEST_DATABASE,
     )
     mocker.patch("tree.memory.extraction.pipeline.get_llm", return_value=llm)
+    # #043: the resolver builds from the RESOLUTION model factory.
     mocker.patch(
-        "tree.memory.extraction.pipeline.get_embedding_model",
+        "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+        return_value=embedding_model,
+    )
+    # #042: task ④ embeds node-text via the SEARCH model factory.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
         return_value=embedding_model,
     )
     mocker.patch(

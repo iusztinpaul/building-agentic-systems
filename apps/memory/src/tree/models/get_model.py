@@ -1,6 +1,6 @@
 import logging
 
-from tree.config.app_config import app_config
+from tree.config.app_config import EmbeddingConfig, app_config
 from tree.config.settings import settings
 from tree.models.base import BaseLLM, BaseEmbeddingModel
 from tree.models.fake_model import MockEmbeddingModel
@@ -25,46 +25,87 @@ def get_llm(provider: str | None = None) -> BaseLLM:
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
-def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
-    """Factory for embedding model instances."""
+def _build_embedding_model(
+    cfg: EmbeddingConfig, provider: str | None = None
+) -> BaseEmbeddingModel:
+    """Build an embedding model from a single ``EmbeddingConfig`` block.
 
-    provider = provider or app_config.models.embedding.provider
+    Holds the per-provider dispatch in one place so the role-specific
+    getters never duplicate the ``if``-ladder. ``provider`` defaults to
+    ``cfg.provider`` but may be overridden.
+    """
+
+    provider = provider or cfg.provider
 
     if provider == "mock":
         logger.warning("Using mock embedding model (random vectors)")
         return MockEmbeddingModel(
-            dimensions=app_config.models.embedding.dimensions,
+            dimensions=cfg.dimensions,
         )
     if provider == "gemini":
         return GeminiEmbeddingModel(
             api_key=settings.google_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
-            dimensions=app_config.models.embedding.dimensions,
+            model=cfg.model,
+            dimensions=cfg.dimensions,
         )
     if provider == "sentence-transformers":
         return SentenceTransformerEmbeddingModel(
-            model=app_config.models.embedding.model,
-            dimensions=app_config.models.embedding.dimensions,
+            model=cfg.model,
+            dimensions=cfg.dimensions,
         )
     if provider == "modal":
         return ModalEmbeddingModel(
             api_key=settings.modal_embedding_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
+            model=cfg.model,
         )
     if provider == "voyage":
-        # The project pinned the multimodal model family
-        # (``voyage-multimodal-*`` against ``/v1/multimodalembeddings``)
-        # as the single Voyage client in #038, so there is only one
-        # code path here. Text-only models such as ``voyage-3`` are not
-        # supported by the multimodal endpoint (Voyage returns
-        # ``HTTP 400: Model voyage-3 is not supported``); operators
-        # who flip ``models.embedding.model`` to a non-multimodal id
-        # will see that error at the first ``embed`` call. The text
-        # client added in #037 was removed in the same commit — see
-        # ``tracker/038-consolidate-voyage-clients`` for context.
+        # The project pins the multimodal model family (``voyage-multimodal-*``
+        # against ``/v1/multimodalembeddings``) as the only Voyage client.
+        # Text-only models such as ``voyage-3`` are not supported by the
+        # multimodal endpoint (Voyage returns ``HTTP 400: Model voyage-3 is
+        # not supported``); flipping an embedding block's ``model`` to a
+        # non-multimodal id surfaces that error at the first ``embed`` call.
         return VoyageMultimodalEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
-            model=app_config.models.embedding.model,
-            output_dimension=app_config.models.embedding.dimensions,
+            model=cfg.model,
+            output_dimension=cfg.dimensions,
         )
     raise ValueError(f"Unknown embedding provider: {provider}")
+
+
+def get_resolution_embedding_model() -> BaseEmbeddingModel:
+    """Factory for the resolution embedding model.
+
+    Builds from ``app_config.models.resolution_embedding`` — the
+    **transient** embedding used only by resolution's semantic stage
+    (computed on the entity name, never persisted, not index-coupled).
+    Swap this YAML block to point resolution at a lighter model without
+    touching persisted vectors.
+    """
+
+    return _build_embedding_model(app_config.models.resolution_embedding)
+
+
+def get_search_embedding_model() -> BaseEmbeddingModel:
+    """Factory for the search embedding model.
+
+    Builds from ``app_config.models.search_embedding`` — the **persisted**
+    embedding written to the node ``embedding`` field and dimension-coupled
+    to the live mongot ``vector_index``. Feeds dedup, query, and search.
+    """
+
+    return _build_embedding_model(app_config.models.search_embedding)
+
+
+def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
+    """Factory for embedding model instances (legacy shim).
+
+    Returns the **search** model. New code should call the role-named
+    getter for its job — :func:`get_resolution_embedding_model` or
+    :func:`get_search_embedding_model`.
+
+    The optional ``provider`` override builds the search model under the
+    given provider (used by the per-provider unit tests).
+    """
+
+    return _build_embedding_model(app_config.models.search_embedding, provider=provider)

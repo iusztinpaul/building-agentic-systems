@@ -33,15 +33,17 @@ class LLMConfig(BaseModel):
 
 
 class EmbeddingConfig(BaseModel):
-    """YAML-authoritative embedding config.
+    """YAML-authoritative embedding config (provider/model/dimensions).
 
-    Post-#034 the YAML is the single source of truth for the embedding
-    provider/model/dimensions. ``dimensions`` is dimension-coupled to
-    the Atlas Vector Search index defined under ``docker/mongot/``;
+    Used for both :attr:`ModelsConfig.resolution_embedding` and
+    :attr:`ModelsConfig.search_embedding`. Only the **search** embedding's
+    ``dimensions`` is dimension-coupled to the Atlas Vector Search index
+    under ``docker/mongot/``;
     :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
-    asserts the YAML value matches the live ``vector_index`` at boot,
-    turning a mismatch into a hard startup-time error instead of a
-    silent data-loss bug.
+    asserts it matches the live ``vector_index`` at boot so a mismatch is a
+    hard startup error rather than silent data loss. The **resolution**
+    embedding is transient (computed on the entity name and never
+    persisted), so its ``dimensions`` is not index-coupled.
     """
 
     provider: str = Field(default="voyage")
@@ -49,9 +51,52 @@ class EmbeddingConfig(BaseModel):
     dimensions: int = Field(default=1024)
 
 
+class EmbeddingBatchConfig(BaseModel):
+    """Per-request batching caps for Voyage ``/v1/multimodalembeddings``.
+
+    Bound how many texts :func:`tree.memory.embedding_text.embed_in_batches`
+    packs into a SINGLE synchronous embed request. Defaults are the Voyage
+    per-request caps for ``voyage-multimodal-3``:
+
+    * ``max_inputs`` — max 1,000 inputs per request.
+    * ``max_total_tokens`` — total across all inputs ≤ 320,000 per request.
+    * ``max_input_tokens`` — each single input ≤ 32,000. The model sends
+      ``truncation=True`` so an oversized input is truncated server-side
+      rather than 400-ing; this bound only governs how the batcher
+      *accounts* a single text against the per-request total.
+
+    This is synchronous request batching, NOT Voyage's async Batch API —
+    the async path is rejected because its 12h completion window can't
+    drive synchronous mid-flow dedup and it doesn't support
+    ``/v1/multimodalembeddings``.
+    """
+
+    max_inputs: int = Field(default=1000)
+    max_total_tokens: int = Field(default=320_000)
+    max_input_tokens: int = Field(default=32_000)
+
+
 class ModelsConfig(BaseModel):
+    """Configured models.
+
+    Two embedding blocks:
+
+    * ``resolution_embedding`` — transient, used only by resolution's
+      semantic stage (computed on the entity NAME, never persisted).
+      Configured separately so a lighter model can be swapped in without
+      touching the persisted-vector model.
+    * ``search_embedding`` — persisted. Its output is written to the node
+      ``embedding`` field and the live mongot ``vector_index`` is
+      dimension-coupled to its ``dimensions``. Used for dedup and query.
+
+    ``embedding_batch`` holds the per-request batching caps shared by
+    resolution, dedup, and indexing.
+    """
+
     llm: LLMConfig = LLMConfig()
-    embedding: EmbeddingConfig = EmbeddingConfig()
+    resolution_embedding: EmbeddingConfig = EmbeddingConfig()
+    search_embedding: EmbeddingConfig = EmbeddingConfig()
+    embedding_batch: EmbeddingBatchConfig = EmbeddingBatchConfig()
 
 
 class ResolutionConfig(BaseModel):

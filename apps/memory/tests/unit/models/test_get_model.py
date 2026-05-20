@@ -2,9 +2,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tree.config.app_config import EmbeddingConfig
 from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
-from tree.models.get_model import get_embedding_model, get_llm
+from tree.models.get_model import (
+    get_embedding_model,
+    get_llm,
+    get_resolution_embedding_model,
+    get_search_embedding_model,
+)
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
@@ -26,9 +32,11 @@ def _mock_app_config(mocker) -> None:
     mock_config = MagicMock()
     mock_config.models.llm.provider = "gemini"
     mock_config.models.llm.model = "gemini-2.0-flash"
-    mock_config.models.embedding.provider = "mock"
-    mock_config.models.embedding.model = "text-embedding-004"
-    mock_config.models.embedding.dimensions = 256
+    # #039: get_embedding_model() reads the SEARCH model (the persisted /
+    # behavior-identical path for existing call sites).
+    mock_config.models.search_embedding.provider = "mock"
+    mock_config.models.search_embedding.model = "text-embedding-004"
+    mock_config.models.search_embedding.dimensions = 256
     mocker.patch("tree.models.get_model.app_config", mock_config)
 
 
@@ -87,11 +95,11 @@ class TestGetEmbeddingModel:
         """
 
         mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.model",
+            "tree.models.get_model.app_config.models.search_embedding.model",
             "voyage-multimodal-3",
         )
         mocker.patch(
-            "tree.models.get_model.app_config.models.embedding.dimensions", 1024
+            "tree.models.get_model.app_config.models.search_embedding.dimensions", 1024
         )
 
         result = get_embedding_model(provider="voyage")
@@ -101,3 +109,112 @@ class TestGetEmbeddingModel:
     def test_raises_for_unknown_provider(self) -> None:
         with pytest.raises(ValueError, match="Unknown embedding provider: unknown"):
             get_embedding_model(provider="unknown")
+
+
+def _set_embedding_blocks(
+    mocker,
+    *,
+    resolution: EmbeddingConfig,
+    search: EmbeddingConfig,
+) -> None:
+    """Point the two YAML embedding blocks at concrete configs.
+
+    The module-level ``_mock_app_config`` fixture installs a ``MagicMock``
+    for ``app_config``; here we replace the two embedding sub-blocks with
+    real :class:`EmbeddingConfig` instances so each test exercises an
+    independent provider/model/dimensions triple.
+    """
+
+    mocker.patch(
+        "tree.models.get_model.app_config.models.resolution_embedding",
+        resolution,
+    )
+    mocker.patch(
+        "tree.models.get_model.app_config.models.search_embedding",
+        search,
+    )
+
+
+class TestDualEmbeddingGetters:
+    def test_both_getters_return_voyage_at_1024(self, mocker) -> None:
+        """Both blocks set to voyage / voyage-multimodal-3 / 1024 → each
+        getter returns a VoyageMultimodalEmbeddingModel at 1024 dims."""
+
+        voyage = EmbeddingConfig(
+            provider="voyage", model="voyage-multimodal-3", dimensions=1024
+        )
+        _set_embedding_blocks(mocker, resolution=voyage, search=voyage)
+
+        resolution_model = get_resolution_embedding_model()
+        search_model = get_search_embedding_model()
+
+        assert isinstance(resolution_model, VoyageMultimodalEmbeddingModel)
+        assert resolution_model.dimensions == 1024
+        assert isinstance(search_model, VoyageMultimodalEmbeddingModel)
+        assert search_model.dimensions == 1024
+
+    def test_getters_read_independent_config_blocks(self, mocker) -> None:
+        """resolution_embedding=mock + search_embedding=voyage proves the
+        two getters select from independent YAML blocks."""
+
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=256),
+            search=EmbeddingConfig(
+                provider="voyage", model="voyage-multimodal-3", dimensions=1024
+            ),
+        )
+
+        resolution_model = get_resolution_embedding_model()
+        search_model = get_search_embedding_model()
+
+        assert isinstance(resolution_model, MockEmbeddingModel)
+        assert isinstance(search_model, VoyageMultimodalEmbeddingModel)
+
+    def test_resolution_getter_builds_from_resolution_block(self, mocker) -> None:
+        """The resolution getter must read resolution_embedding, not the
+        search block."""
+
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(provider="mock", dimensions=512),
+        )
+
+        resolution_model = get_resolution_embedding_model()
+
+        assert isinstance(resolution_model, MockEmbeddingModel)
+        assert resolution_model.dimensions == 128
+
+    def test_search_getter_builds_from_search_block(self, mocker) -> None:
+        """The search getter must read search_embedding, not the
+        resolution block."""
+
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(provider="mock", dimensions=512),
+        )
+
+        search_model = get_search_embedding_model()
+
+        assert isinstance(search_model, MockEmbeddingModel)
+        assert search_model.dimensions == 512
+
+    def test_legacy_getter_aliases_search_model(self, mocker) -> None:
+        """get_embedding_model() returns the same model type as
+        get_search_embedding_model() (the persisted-vector model)."""
+
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(
+                provider="voyage", model="voyage-multimodal-3", dimensions=1024
+            ),
+        )
+
+        legacy_model = get_embedding_model()
+        search_model = get_search_embedding_model()
+
+        assert type(legacy_model) is type(search_model)
+        assert isinstance(legacy_model, VoyageMultimodalEmbeddingModel)

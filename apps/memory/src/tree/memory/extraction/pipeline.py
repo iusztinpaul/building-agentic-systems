@@ -49,6 +49,7 @@ from tree.entities.knowledge_graph import (
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
+from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.core import (
     build_structural_entries,
@@ -90,7 +91,11 @@ from tree.memory.types import (
     make_type_name_key,
 )
 from tree.models.base import BaseEmbeddingModel, BaseLLM
-from tree.models.get_model import get_embedding_model, get_llm
+from tree.models.get_model import (
+    get_llm,
+    get_resolution_embedding_model,
+    get_search_embedding_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +181,45 @@ def _build_dedup_config() -> DeduplicationConfig:
         match_same_type_only=cfg.match_same_type_only,
         merge_strategy=MergeStrategy(cfg.merge_strategy),
     )
+
+
+def _entity_embeddable_text(
+    *, entity_type: NodeType, name: str, canonical_name: str, properties: dict[str, Any]
+) -> str:
+    """Embeddable text for one extracted entity.
+
+    Mirrors :func:`tree.memory.extraction.add_entity._embeddable_text` so
+    the vector task ④ pre-computes (that ⑤ deduplicates against and ⑥
+    persists) is byte-for-byte the text ``add_entity`` would build for the
+    same node — GENERIC types embed their node-text, PREFERENCE / FACT embed
+    ``properties.statement`` / ``properties.object``. Keeping the two
+    builders in lock-step is what lets ``_CachedSingleEmbedding`` reuse the
+    vector and makes the indexing backfill a no-op for dedup-created nodes.
+    """
+
+    if entity_type == NodeType.PREFERENCE:
+        statement = (properties or {}).get("statement")
+        if isinstance(statement, str) and statement.strip():
+            return statement.strip()
+    elif entity_type == NodeType.FACT:
+        obj = (properties or {}).get("object") or (properties or {}).get("object_")
+        if isinstance(obj, str) and obj.strip():
+            return obj.strip()
+
+    # ``aliases`` / ``confidence`` are top-level columns on the persisted
+    # row, never under ``properties`` — strip them so this text matches
+    # both ``add_entity._embeddable_text`` and the indexing backfill text.
+    node = {
+        "type": entity_type.value,
+        "name": name,
+        "canonical_name": canonical_name,
+        "properties": {
+            k: v
+            for k, v in (properties or {}).items()
+            if k not in {"aliases", "confidence"}
+        },
+    }
+    return node_to_embedding_text(node)
 
 
 def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
@@ -646,6 +690,10 @@ async def _resolve_entities(
     # Collect all entities to resolve (LLM-extractable types only).
     entities: list[tuple[str, NodeType]] = []
     entities_by_doc: dict[str, list[tuple[NodeType, str]]] = {}
+    # Keep the originating node (with its properties) per entity key so we
+    # can build the per-entity embeddable text once the resolver has chosen
+    # a canonical_name.
+    node_by_key: dict[str, ExtractedNode] = {}
     for raw in raws:
         per_doc: list[tuple[NodeType, str]] = []
         for node in raw.extracted.nodes:
@@ -653,6 +701,7 @@ async def _resolve_entities(
                 continue
             entities.append((node.name, node.type))
             per_doc.append((node.type, node.name))
+            node_by_key[make_entity_key(raw.document_id, node.type, node.name)] = node
         entities_by_doc[raw.document_id] = per_doc
 
     if not entities:
@@ -669,6 +718,7 @@ async def _resolve_entities(
     candidates_seen_by_type: dict[str, int] = {}
     name_to_owner_id: dict[str, str] = {}
     resolved_by_key: dict[str, ResolvedEntity] = {}
+    embeddable_text_by_key: dict[str, str] = {}
 
     # Fetch candidates and resolve per type. Candidate scope is restricted
     # to the run's ``user_id`` — cross-tenant rows are invisible to
@@ -742,6 +792,16 @@ async def _resolve_entities(
                 if (etype, name) in doc_entities:
                     key = make_entity_key(doc_id, etype, name)
                     resolved_by_key[key] = resolved
+                    # Precompute the embeddable text now that the resolver
+                    # has picked a canonical_name. Generic types → node-text;
+                    # PREFERENCE/FACT → statement/object.
+                    node = node_by_key.get(key)
+                    embeddable_text_by_key[key] = _entity_embeddable_text(
+                        entity_type=etype,
+                        name=name,
+                        canonical_name=resolved.canonical_name,
+                        properties=(node.properties or {}) if node is not None else {},
+                    )
                     break
 
     n_per_type = {t.value: len(v) for t, v in by_type.items()}
@@ -757,6 +817,7 @@ async def _resolve_entities(
         resolved_by_key=resolved_by_key,
         name_to_owner_id=name_to_owner_id,
         candidates_seen_by_type=candidates_seen_by_type,
+        embeddable_text_by_key=embeddable_text_by_key,
     )
 
 
@@ -769,24 +830,46 @@ resolve_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed (one canonical name at a time, mapped)
+# Task ④ — embed (ALL run node-texts in one batched call)
 # ---------------------------------------------------------------------------
 
 
-async def _embed_entity(name: str) -> tuple[str, list[float]]:
-    """Embed a single canonical name. Mapped at single-name grain for cache reuse."""
+async def _embed_entities(texts: list[str]) -> dict[str, list[float]]:
+    """Embed every embeddable text for the run in one batched call.
+
+    All the run's node-texts are packed into as few synchronous
+    ``/v1/multimodalembeddings`` requests as the per-request caps (1000
+    inputs / 320K tokens) allow via
+    :func:`tree.memory.embedding_text.embed_in_batches`. Vectors come back
+    positionally aligned, so we zip them to their texts and return a
+    ``text -> vector`` map that task ⑤/⑥ index by embeddable text.
+
+    Caches on ``INPUTS`` (the whole text list), so an identical re-run of the
+    same document set is a cache hit; partial-overlap re-runs re-embed.
+    Per-run dedup of identical texts happens upstream (the flow embeds
+    ``sorted(set(...))``).
+
+    Uses the **search** model — the persisted, index-coupled vector. The 429
+    backoff is untouched: it lives inside ``.embed()``, called once per chunk.
+    """
 
     log = _get_run_logger()
-    embedding_model = get_embedding_model()
-    vectors = await embedding_model.embed([name])
-    vector = vectors[0] if vectors else []
-    log.info("embed_entity: name=%r dim=%d", name, len(vector))
-    return name, vector
+    if not texts:
+        return {}
+
+    embedding_model = get_search_embedding_model()
+    vectors = await embed_in_batches(texts, embedding_model)
+    log.info(
+        "embed_entities: n_texts=%d dim=%d",
+        len(texts),
+        len(vectors[0]) if vectors else 0,
+    )
+    return dict(zip(texts, vectors))
 
 
 embed_entities_task = task(
-    _embed_entity,
-    name="embed-entity",
+    _embed_entities,
+    name="embed-entities",
     cache_policy=INPUTS,
     cache_expiration=timedelta(days=90),
     retries=2,
@@ -816,8 +899,14 @@ async def _dedupe_entities(
         doc_id, type_value, name = key.split("|", maxsplit=2)
         entity_type = NodeType(type_value)
 
-        canonical = resolved_entity.canonical_name
-        embedding = embeddings.vectors.get(canonical) or []
+        # Dedup against the node-text vector (the same vector that will be
+        # persisted on a non-merged node), keyed by the embeddable text task
+        # ④ embedded. Falls back to the canonical-name key only when
+        # ``embeddable_text_by_key`` was not populated.
+        embeddable_text = resolved.embeddable_text_by_key.get(
+            key, resolved_entity.canonical_name
+        )
+        embedding = embeddings.vectors.get(embeddable_text) or []
 
         if not embedding or not dedup_config.enabled:
             decisions[key] = DedupDecision(action="none")
@@ -1095,42 +1184,28 @@ async def _dispatch_entity_write(
     """
 
     # Inject the pre-computed embedding into ``add_entity`` via embedding_model.
-    # The shared embedding map already has the canonical-name vector — wrap the
-    # real model so ``add_entity``'s internal ``embed([name])`` returns it.
     #
-    # #032 fix-2: for ``preference`` nodes the stored embedding MUST come
-    # from ``properties.statement`` (not the slug-name) so the
-    # supersession resolver's statement<->statement comparison is
-    # apples-to-apples. We embed the statement here on-the-fly when the
-    # cached vector is keyed by canonical/name; the cache hit only fires
-    # when the canonical IS the statement (rare). For ``fact`` nodes we
-    # similarly prefer ``properties.object``.
+    # Task ④ already embedded this entity's embeddable text (GENERIC
+    # node-text, or statement/object for PREFERENCE / FACT). We look that
+    # vector up by the same embeddable-text key and wrap it in
+    # ``_CachedSingleEmbedding`` so ``add_entity``'s internal
+    # ``embedding_model.embed([...])`` returns it WITHOUT a second embed call.
+    # ``add_entity`` rebuilds the identical text via its own
+    # ``_embeddable_text`` and persists this same vector on the non-merged
+    # path — dedup vector == persisted vector, computed once.
+    key = make_entity_key(source_document_id, node.type, node.name)
     canonical = (
         resolved_entity.canonical_name if resolved_entity is not None else node.name
     )
-    statement_text: str | None = None
-    if node.type == NodeType.PREFERENCE:
-        prop_statement = (node.properties or {}).get("statement")
-        if isinstance(prop_statement, str) and prop_statement.strip():
-            statement_text = prop_statement.strip()
-    elif node.type == NodeType.FACT:
-        prop_object = (node.properties or {}).get("object") or (
-            node.properties or {}
-        ).get("object_")
-        if isinstance(prop_object, str) and prop_object.strip():
-            statement_text = prop_object.strip()
-
-    if statement_text is not None:
-        vectors = await embedding_model.embed([statement_text])
-        statement_vec = vectors[0] if vectors else []
-        model_for_call: BaseEmbeddingModel = (
-            _CachedSingleEmbedding(statement_vec) if statement_vec else embedding_model
-        )
-    else:
-        cached_vec = embeddings.vectors.get(canonical)
-        model_for_call = (
-            _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
-        )
+    embeddable_text = resolved.embeddable_text_by_key.get(key)
+    cached_vec = (
+        embeddings.vectors.get(embeddable_text)
+        if embeddable_text is not None
+        else embeddings.vectors.get(canonical)
+    )
+    model_for_call: BaseEmbeddingModel = (
+        _CachedSingleEmbedding(cached_vec) if cached_vec else embedding_model
+    )
 
     candidate_names = sorted(
         {
@@ -1342,8 +1417,16 @@ async def memory_extraction(
         raise unwrapped from exc
 
     dedup_config = _build_dedup_config()
-    embedding_model = get_embedding_model()
-    resolver = _build_resolver(embedding_model)
+    # Two distinct embedding handles coexist in the flow:
+    #   * ``resolution_embedding_model`` — feeds the resolver's semantic stage,
+    #     which embeds the entity NAME only. Transient: discarded by the
+    #     resolver's bounded LRU, never persisted, not index-coupled.
+    #   * ``search_embedding_model`` — the persisted, index-coupled vector. Feeds
+    #     dedup, supersession (statement-vs-persisted-statement), and the node
+    #     ``embedding`` written by apply-writes.
+    resolution_embedding_model = get_resolution_embedding_model()
+    search_embedding_model = get_search_embedding_model()
+    resolver = _build_resolver(resolution_embedding_model)
 
     # Initialize the DB connection (Beanie + Motor handles) ---------------------
     client = await init_mongodb(
@@ -1414,9 +1497,9 @@ async def memory_extraction(
     # candidate-row IDs line up.
     canonicalize_preference_names(raws)
 
-    # ----- #032 — supersession resolver branch (pre-dedup) -----------------
-    # Runs BEFORE the standard dedup so contradiction trumps dedup
-    # (per `plan.md:534`). Mutates `raws` in place: when a
+    # ----- Supersession resolver branch (pre-dedup) -----------------------
+    # Runs BEFORE the standard dedup so contradiction trumps dedup.
+    # Mutates `raws` in place: when a
     # preference / fact row supersedes a prior one we write the
     # supersession to MongoDB and mark the in-memory node so the
     # apply-writes step preserves ``valid_from``.
@@ -1425,11 +1508,14 @@ async def memory_extraction(
         database=database,
         user_id=user_id,
         llm=judge_llm,
-        embedding_model=embedding_model,
+        # Supersession embeds the new statement and compares it against
+        # PERSISTED preference (statement) vectors — same space → SEARCH
+        # model, NOT the resolution model.
+        embedding_model=search_embedding_model,
         raws=raws,
     )
 
-    # ----- #032 — deterministic ``has: person:self -> preference`` -----
+    # ----- Deterministic ``has: person:self -> preference`` -----
     # The LLM is told NOT to emit ``has`` (it is
     # ``llm_extractable=False``). The pipeline owns the edge.
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
@@ -1437,14 +1523,12 @@ async def memory_extraction(
     # ----- Task ③ — resolve ------------------------------------------------
     resolved = await resolve_entities_task(raws, database, resolver, user_id)
 
-    # ----- Task ④ — embed (mapped at single-name grain) --------------------
-    canonical_names = sorted(
-        {r.canonical_name for r in resolved.resolved_by_key.values()}
-    )
-    vectors: dict[str, list[float]] = {}
-    for name in canonical_names:
-        name_, vector = await embed_entities_task(name)
-        vectors[name_] = vector
+    # ----- Task ④ — embed (ALL run node-texts in one batched call) ---------
+    # Single batched embed of every unique node-text for the run.
+    # ``embed_entities_task`` packs them into as few synchronous requests as
+    # the 1000-input / 320K-token caps allow.
+    embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
+    vectors = await embed_entities_task(embeddable_texts)
     embeddings = EmbeddingMap(vectors=vectors)
 
     # ----- Task ⑤ — dedup --------------------------------------------------
@@ -1453,6 +1537,10 @@ async def memory_extraction(
     )
 
     # ----- Task ⑥ — apply writes ------------------------------------------
+    # Apply-writes persists the node ``embedding`` → SEARCH model. (The
+    # task-④ vector reuse already pins the persisted vector to the search
+    # model; this handle is the fallback ``embedding_model`` for any node
+    # that lacks a pre-computed vector.)
     summary = await apply_writes_task(
         raws,
         resolved,
@@ -1461,7 +1549,7 @@ async def memory_extraction(
         database,
         resolver,
         dedup_config,
-        embedding_model,
+        search_embedding_model,
         user_id,
         extractor,
     )
@@ -1514,8 +1602,17 @@ async def run_extraction_for_documents(
     except Exception as exc:
         raise _unwrap_validation_error(exc) from exc
     dedup_config = _build_dedup_config()
-    embedding_model = embedding_model or get_embedding_model()
-    resolver = _build_resolver(embedding_model)
+    # Split the embedding handles exactly like ``memory_extraction``:
+    #   * The injected ``embedding_model`` (the MCP lifespan's caller-owned
+    #     handle) is the SEARCH / persisted model — it drives supersession, the
+    #     node-text embed, and the apply-writes node ``embedding``. Falls back
+    #     to ``get_search_embedding_model()`` when the caller injects nothing.
+    #   * The resolver ALWAYS builds from ``get_resolution_embedding_model()``:
+    #     its semantic stage embeds the entity NAME only and the vector is
+    #     transient (never persisted). The injected handle never reaches the
+    #     resolver.
+    search_embedding_model = embedding_model or get_search_embedding_model()
+    resolver = _build_resolver(get_resolution_embedding_model())
     database = client[database_name]
 
     docs = await Document.find(
@@ -1540,26 +1637,34 @@ async def run_extraction_for_documents(
     )
     for raw in raws:
         raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
-    # #032 - canonicalize preference names, then supersession resolver
-    # branch, then deterministic ``has`` edges.
+    # Canonicalize preference names, then supersession resolver branch,
+    # then deterministic ``has`` edges.
     canonicalize_preference_names(raws)
     judge_llm = llm if llm is not None else get_llm()
     await resolve_supersessions(
         database=database,
         user_id=user_id,
         llm=judge_llm,
-        embedding_model=embedding_model,
+        # Statement-vs-persisted-statement → SEARCH model.
+        embedding_model=search_embedding_model,
         raws=raws,
     )
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
-    canonical_names = sorted(
-        {r.canonical_name for r in resolved.resolved_by_key.values()}
-    )
+    # Embed at node-text grain (see ``memory_extraction`` task ④). The MCP
+    # ingest path injects a caller-owned SEARCH/persisted handle; use it
+    # directly here rather than the ``get_search_embedding_model`` factory so
+    # the injected model actually drives the embed step. (The resolution model
+    # is NOT used here: the node-text vector is persisted, so it must be the
+    # search space.)
+    embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
     vectors: dict[str, list[float]] = {}
-    for name in canonical_names:
-        _name, vector = await _embed_entity(name)
-        vectors[_name] = vector
+    if embeddable_texts:
+        # Route through the batcher so a large document set is packed into
+        # request-sized chunks (1000 inputs / 320K tokens) rather than a
+        # single call that would 400 on the per-request cap.
+        embedded = await embed_in_batches(embeddable_texts, search_embedding_model)
+        vectors = dict(zip(embeddable_texts, embedded))
     embeddings = EmbeddingMap(vectors=vectors)
     dedup_results = await _dedupe_entities(
         resolved, embeddings, database, dedup_config, user_id
@@ -1572,7 +1677,8 @@ async def run_extraction_for_documents(
         database,
         resolver,
         dedup_config,
-        embedding_model,
+        # Apply-writes persists node vectors → SEARCH/persisted model.
+        search_embedding_model,
         user_id,
         extractor,
     )

@@ -23,6 +23,7 @@ from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.config.app_config import app_config
+from tree.memory.embedding_text import embed_node_texts
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -50,30 +51,6 @@ _LEGACY_COMPOUND_INDEX_NAMES: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _node_to_text(node: dict[str, Any]) -> str:
-    """Build an embeddable text representation from a node document.
-
-    Uses the node's surface ``name`` (or ``canonical_name`` if absent) as
-    the headline token rather than ``_id``. Post-Phase-1 every ``_id``
-    starts with ``"{user_id}:"`` — a 24-char ObjectId hex prefix that is
-    constant per tenant and adds no semantic value (we already filter
-    ``$vectorSearch`` by ``user_id`` server-side). Falling back to the
-    ``_id`` only when both name fields are missing preserves backward
-    compatibility with legacy rows.
-    """
-
-    headline = node.get("name") or node.get("canonical_name") or node.get("_id", "")
-    parts = [f"{node.get('type', '')}: {headline}"]
-    props = node.get("properties", {})
-    for key, value in props.items():
-        if value and key != "content":
-            parts.append(f"{key}: {value}")
-    # Include content last (may be long).
-    if props.get("content"):
-        parts.append(str(props["content"]))
-    return "\n".join(parts)
-
-
 async def embed_nodes(
     client: AsyncMongoClient,
     database: str,
@@ -97,7 +74,6 @@ async def embed_nodes(
 
     db = client[database]
     collection = db[_KG_COLLECTION]
-    batch_size = app_config.query.embedding_batch_size
 
     # Fetch only nodes whose embedding is missing/None/empty AND that
     # belong to ``user_id``. Nodes with a non-empty embedding vector are
@@ -110,11 +86,7 @@ async def embed_nodes(
         },
     ).to_list()
 
-    embedded_count = 0
-
-    for i in range(0, len(docs), batch_size):
-        batch = docs[i : i + batch_size]
-        embedded_count += await _embed_batch(collection, batch, embedding_model)
+    embedded_count = await _embed_batch(collection, docs, embedding_model)
 
     logger.info("Embedded %d nodes in %s", embedded_count, _KG_COLLECTION)
     return embedded_count
@@ -122,17 +94,24 @@ async def embed_nodes(
 
 async def _embed_batch(
     collection: Any,
-    batch: list[dict[str, Any]],
+    docs: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
 ) -> int:
-    """Embed a batch of node documents and write vectors back."""
+    """Embed node documents and write vectors back.
 
-    texts = [_node_to_text(doc) for doc in batch]
-    vectors = await embedding_model.embed(texts)
+    Embedding is delegated to
+    :func:`tree.memory.embedding_text.embed_node_texts`, which packs the
+    node-texts into as few synchronous Voyage requests as the per-request
+    caps allow (1000 inputs / 320K tokens). The returned vectors are
+    positionally aligned with ``docs`` (across multiple requests), so the
+    zip below is safe.
+    """
+
+    vectors = await embed_node_texts(docs, embedding_model)
 
     ops = [
         UpdateOne({"_id": doc["_id"]}, {"$set": {"embedding": vector}})
-        for doc, vector in zip(batch, vectors)
+        for doc, vector in zip(docs, vectors)
     ]
     if ops:
         await collection.bulk_write(ops)
@@ -449,30 +428,32 @@ async def assert_settings_match_live_vector_index(
     client: AsyncMongoClient,
     database: str,
 ) -> None:
-    """Hard-error gate between ``app_config.models.embedding.dimensions``
+    """Hard-error gate between ``app_config.models.search_embedding.dimensions``
     and the live mongot index.
 
-    Post-#034 the YAML (``app_config.models.embedding.dimensions``) is the
-    authoritative source for the embedding dimension. The Atlas Vector
-    Search index under ``docker/mongot/`` must reflect the same value —
-    a mismatch silently corrupts every ``$vectorSearch`` write. This
-    helper inspects the live ``vector_index`` definition for
-    ``database.knowledge_graph`` and:
+    The YAML is the authoritative source for the embedding dimension. This
+    gate is pinned to the **search** embedding because that is the model
+    whose output is persisted to the node ``embedding`` field (the
+    resolution embedding is transient and never written, so its dimension
+    is not index-coupled). The Atlas Vector Search index under
+    ``docker/mongot/`` must reflect
+    ``app_config.models.search_embedding.dimensions`` — a mismatch silently
+    corrupts every ``$vectorSearch`` write. This helper inspects the live
+    ``vector_index`` definition for ``database.knowledge_graph`` and:
 
     * Returns ``None`` if ``numDimensions`` on the live index equals
-      ``app_config.models.embedding.dimensions``.
+      ``app_config.models.search_embedding.dimensions``.
     * Raises :class:`RuntimeError` (with both numbers in the message) on
       mismatch. The literal substring ``Embedding dimension mismatch``
-      is preserved as a grep anchor for the #036 runbook.
+      is preserved as a grep anchor for the rebuild runbook.
     * Raises :class:`RuntimeError` (``"vector_index not found"``) when no
       index named ``vector_index`` is present — caller decides whether to
       bootstrap one via :func:`ensure_indexes` or fail.
 
-    Intended call site: indexing-pipeline boot, before any embedding
-    write. See ``tracker/034-voyage-3-yaml-default.groomed.md``.
+    Intended call site: indexing-pipeline boot, before any embedding write.
     """
 
-    expected_dim = app_config.models.embedding.dimensions
+    expected_dim = app_config.models.search_embedding.dimensions
 
     collection = client[database][_KG_COLLECTION]
     cursor = await collection.list_search_indexes()
@@ -495,15 +476,15 @@ async def assert_settings_match_live_vector_index(
         raise RuntimeError(
             f"vector_index '{_VECTOR_INDEX_NAME}' in database '{database}' has "
             f"no parseable numDimensions; expected "
-            f"app_config.models.embedding.dimensions={expected_dim}."
+            f"app_config.models.search_embedding.dimensions={expected_dim}."
         )
 
     if live_dimensions != expected_dim:
         raise RuntimeError(
             f"Embedding dimension mismatch: "
-            f"app_config.models.embedding.dimensions={expected_dim} but live "
-            f"vector_index numDimensions={live_dimensions}. Rebuild the "
+            f"app_config.models.search_embedding.dimensions={expected_dim} but "
+            f"live vector_index numDimensions={live_dimensions}. Rebuild the "
             f"mongot index (drop + ensure_indexes) so it matches the YAML "
             f"value, or set apps/memory/configs/default.yaml's "
-            f"models.embedding.dimensions to {live_dimensions}."
+            f"models.search_embedding.dimensions to {live_dimensions}."
         )

@@ -47,7 +47,8 @@ Two sources of configuration, split by concern:
 
 - `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the dataset ingestor.
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
-- `models.embedding` — provider + model + dimensions (default: `sentence-transformers` / `all-MiniLM-L6-v2` / 384).
+- `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-multimodal-3` / 1024.
+- `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `extraction` — `chunk_size`, `chunk_overlap`, `llm_concurrency`, `similarity_threshold`.
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`.
 - `mcp` — `max_retries`, `max_results`.
@@ -243,7 +244,7 @@ make memory-deploy-embedding-model-test   # smoke-test the deployment
 make memory-deploy-embedding-model-stop   # tear it down
 ```
 
-Then flip `models.embedding` in `configs/default.yaml` to the Modal provider.
+Then flip `models.search_embedding` (and, if desired, `models.resolution_embedding`) in `configs/default.yaml` to the Modal provider.
 
 ## Testing
 

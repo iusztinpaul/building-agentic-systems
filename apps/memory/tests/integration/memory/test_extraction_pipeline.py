@@ -118,8 +118,16 @@ def _patch_pipeline_deps(
         TEST_DATABASE,
     )
     mocker.patch("tree.memory.extraction.pipeline.get_llm", return_value=llm)
+    # #043: the resolver builds from the RESOLUTION model. Point it at the same
+    # fake so the transient name vectors come from the test model.
     mocker.patch(
-        "tree.memory.extraction.pipeline.get_embedding_model",
+        "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+        return_value=embedding_model,
+    )
+    # #042: task ④ embeds via the SEARCH model factory directly. Point it at
+    # the same fake so the node-text vectors come from the test model.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
         return_value=embedding_model,
     )
     # Patch ``dedupe_entity`` at every call site so neither task ⑤ nor task ⑥

@@ -207,8 +207,14 @@ def _patch_extraction_deps(
         TEST_DATABASE,
     )
     mocker.patch("tree.memory.extraction.pipeline.get_llm", return_value=llm)
+    # #043: the resolver builds from the RESOLUTION model factory.
     mocker.patch(
-        "tree.memory.extraction.pipeline.get_embedding_model",
+        "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+        return_value=embedding_model,
+    )
+    # #042: task ④ embeds node-text via the SEARCH model factory.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
         return_value=embedding_model,
     )
     # Skip the live $vectorSearch dedup call so extraction doesn't depend
@@ -230,7 +236,7 @@ def _patch_indexing_deps(mocker, mongo_client, embedding_model) -> None:
 
     The boot-time ``assert_settings_match_live_vector_index`` check is
     stubbed because the test runs with an 8-dim fake model while
-    ``app_config.models.embedding.dimensions`` is the production pin (1024).
+    ``app_config.models.search_embedding.dimensions`` is the production pin (1024).
     """
 
     mocker.patch(

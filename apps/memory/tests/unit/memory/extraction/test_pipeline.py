@@ -17,10 +17,13 @@ from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.pipeline import (
     _CachedSingleEmbedding,
     _dedupe_entities,
-    _embed_entity,
+    _dispatch_entity_write,
+    _embed_entities,
+    _entity_embeddable_text,
     _extract_chunks_and_structural,
     _llm_extract_entities,
     _resolve_entities,
@@ -32,13 +35,17 @@ from tree.memory.extraction.pipeline import (
 )
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity
+from tree.models.base import BaseEmbeddingModel
 from tree.memory.types import (
     ChunkedDocument,
+    DedupDecision,
     EmbeddingMap,
     ExtractedNode,
     ExtractionResult,
     RawExtraction,
     ResolutionOutput,
+    WriteSummary,
+    make_entity_key,
 )
 
 
@@ -336,27 +343,56 @@ class TestResolveEntitiesTask:
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed_entity
+# Task ④ — embed_entities (batched, #044)
 # ---------------------------------------------------------------------------
 
 
-class TestEmbedEntityTask:
-    async def test_returns_name_and_vector(self, mocker) -> None:
+class TestEmbedEntitiesTask:
+    async def test_embeds_all_texts_in_one_batched_call(self, mocker) -> None:
+        # #044: task ④ embeds EVERY run node-text in a single batched call
+        # (via embed_in_batches over the SEARCH model) and returns a
+        # ``text -> vector`` map.
         model = MagicMock()
-        model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_embedding_model", return_value=model
+        model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        search_factory = mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=model,
         )
 
-        name, vector = await _embed_entity("alice")
-        assert name == "alice"
-        assert vector == [0.1, 0.2, 0.3]
+        texts = [
+            "person: Andrej Karpathy\nrole: researcher",
+            "person: Yann LeCun\nrole: researcher",
+        ]
+        result = await _embed_entities(texts)
+
+        assert result == {
+            texts[0]: [0.1, 0.2, 0.3],
+            texts[1]: [0.4, 0.5, 0.6],
+        }
+        # ONE embed() call carrying BOTH node-texts (not one call per text).
+        model.embed.assert_awaited_once_with(texts)
+        search_factory.assert_called_once()
+
+    async def test_empty_input_returns_empty_without_calling_model(
+        self, mocker
+    ) -> None:
+        model = MagicMock()
+        model.embed = AsyncMock()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=model,
+        )
+
+        result = await _embed_entities([])
+
+        assert result == {}
+        model.embed.assert_not_awaited()
 
     async def test_task_decorator_uses_inputs_cache(self) -> None:
         # Cache policy is registered on the decorated task; identity check on
         # the registered name. The cache itself is exercised in the integration
         # suite (Prefect runtime required).
-        assert embed_entities_task.name == "embed-entity"
+        assert embed_entities_task.name == "embed-entities"
 
 
 # ---------------------------------------------------------------------------
@@ -534,3 +570,471 @@ class TestRequiredUserIdSignature:
                 client=MagicMock(),
                 database_name="test",
             )
+
+
+# ---------------------------------------------------------------------------
+# #042 — node-text embeddable-text selection + reuse plumbing
+# ---------------------------------------------------------------------------
+
+
+class TestEntityEmbeddableText:
+    """``_entity_embeddable_text`` mirrors ``add_entity._embeddable_text``."""
+
+    def test_generic_type_returns_node_text(self) -> None:
+        properties = {"role": "researcher"}
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties=properties,
+        )
+        expected = node_to_embedding_text(
+            {
+                "type": "person",
+                "name": "Andrej Karpathy",
+                "canonical_name": "Andrej Karpathy",
+                "properties": properties,
+            }
+        )
+        assert text == expected
+        assert text != "Andrej Karpathy"
+
+    def test_generic_type_strips_aliases_and_confidence(self) -> None:
+        # ``aliases`` / ``confidence`` are top-level columns on the stored
+        # row, so they must not leak into the embeddable node-text.
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties={"role": "researcher", "aliases": ["AK"], "confidence": 0.9},
+        )
+        assert "AK" not in text
+        assert "confidence" not in text
+        assert "researcher" in text
+
+    def test_preference_returns_statement(self) -> None:
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PREFERENCE,
+            name="prefers-dark-mode",
+            canonical_name="prefers-dark-mode",
+            properties={"statement": "prefers dark mode"},
+        )
+        assert text == "prefers dark mode"
+
+    def test_fact_returns_object(self) -> None:
+        text = _entity_embeddable_text(
+            entity_type=NodeType.FACT,
+            name="france-capital",
+            canonical_name="france-capital",
+            properties={"object": "Paris"},
+        )
+        assert text == "Paris"
+
+    def test_preference_without_statement_falls_back_to_node_text(self) -> None:
+        # A malformed preference (no statement) is still embeddable.
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PREFERENCE,
+            name="prefers-dark-mode",
+            canonical_name="prefers-dark-mode",
+            properties={},
+        )
+        assert text.startswith("preference: prefers-dark-mode")
+
+
+class TestDispatchEntityWriteReusesVector:
+    """Task ⑥ reuses the task-④ vector via ``_CachedSingleEmbedding`` and
+    NEVER re-embeds the node inside apply-writes (AC: no second embed call).
+    """
+
+    async def test_no_second_embed_call_reuses_node_text_vector(self, mocker) -> None:
+        # Arrange — capture the embedding ``add_entity`` ends up using.
+        captured: dict[str, Any] = {}
+
+        async def _fake_add_entity(*args: Any, **kwargs: Any) -> Any:
+            model = kwargs["embedding_model"]
+            captured["vector"] = (await model.embed(["ignored"]))[0]
+            captured["model"] = model
+            return ("target-id", None, DeduplicationResult(action="none"))
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.add_entity",
+            new=AsyncMock(side_effect=_fake_add_entity),
+        )
+
+        node = ExtractedNode(
+            name="Andrej Karpathy",
+            type=NodeType.PERSON,
+            properties={"role": "researcher"},
+        )
+        resolved_entity = ResolvedEntity(
+            original_name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            confidence=1.0,
+            match_type="exact",
+        )
+        key = make_entity_key("d1", NodeType.PERSON, "Andrej Karpathy")
+        node_text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties={"role": "researcher"},
+        )
+        resolved = ResolutionOutput(
+            resolved_by_key={key: resolved_entity},
+            embeddable_text_by_key={key: node_text},
+        )
+        # The task-④ vector is keyed by the NODE-TEXT, not the name.
+        embeddings = EmbeddingMap(vectors={node_text: [0.42] * 8})
+
+        # A real model that would explode if actually called for a fresh embed.
+        real_model = MagicMock()
+        real_model.embed = AsyncMock(
+            side_effect=AssertionError("apply-writes must not re-embed")
+        )
+
+        # Act
+        await _dispatch_entity_write(
+            database=MagicMock(),
+            embedding_model=real_model,
+            resolver=MagicMock(spec=CompositeResolver),
+            user_id=_USER_ID,
+            node=node,
+            source_document_id="d1",
+            resolved_entity=resolved_entity,
+            decision=DedupDecision(action="none"),
+            embeddings=embeddings,
+            resolved=resolved,
+            dedup_config=DeduplicationConfig(),
+            summary=WriteSummary(),
+        )
+
+        # Assert — the vector handed to add_entity is the cached node-text
+        # vector, and the real model's embed was never invoked.
+        assert captured["vector"] == [0.42] * 8
+        assert isinstance(captured["model"], _CachedSingleEmbedding)
+        real_model.embed.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #043 — resolution name-embedding uses the RESOLUTION model (transient),
+# dedup / writes / supersession use the SEARCH model (persisted).
+# ---------------------------------------------------------------------------
+
+
+class TestResolverUsesResolutionModel:
+    """``_build_resolver`` wires its model into the semantic stage.
+
+    The model passed to ``_build_resolver`` is the one the resolver's
+    transient name-embedding semantic stage uses — proven by reaching into
+    the constructed ``CompositeResolver``'s ``SemanticMatchResolver``.
+    """
+
+    def test_build_resolver_threads_model_into_semantic_stage(self) -> None:
+        from tree.memory.extraction.pipeline import _build_resolver
+
+        sentinel_model = MagicMock(spec=BaseEmbeddingModel)
+
+        resolver = _build_resolver(sentinel_model)
+
+        assert isinstance(resolver, CompositeResolver)
+        # The semantic stage is the only resolver leg that holds an
+        # embedding model; it must be the model we passed in.
+        assert resolver._semantic is not None
+        assert resolver._semantic._embedding_model is sentinel_model
+
+
+class TestFlowEmbeddingModelSplit:
+    """Both flow entry points hold two distinct embedding handles.
+
+    Resolver ← ``get_resolution_embedding_model()`` (transient name vector).
+    Dedup / writes / supersession ← ``get_search_embedding_model()``
+    (persisted node vector). The two MUST be distinct objects so the
+    operator can later swap a lighter resolution model without touching the
+    persisted-vector space.
+    """
+
+    async def test_memory_extraction_builds_resolver_from_resolution_model(
+        self, mocker
+    ) -> None:
+        # Distinct sentinels so we can prove which handle reached the resolver.
+        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
+        search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
+        res_factory = mocker.patch(
+            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+            return_value=resolution_model,
+        )
+        search_factory = mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=search_model,
+        )
+        build_resolver = mocker.patch(
+            "tree.memory.extraction.pipeline._build_resolver",
+            return_value=MagicMock(spec=CompositeResolver),
+        )
+
+        # No-docs early-exit — the resolver/model handles are constructed
+        # BEFORE the document fetch, so we never need to mock the LLM/embed
+        # stages here.
+        mock_client = MagicMock()
+        mock_client.__getitem__.return_value = MagicMock()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.init_mongodb",
+            new=AsyncMock(return_value=mock_client),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.Document.find",
+            return_value=MagicMock(to_list=AsyncMock(return_value=[])),
+        )
+
+        await memory_extraction.fn(user_id=_USER_ID)
+
+        # The resolver is built from the RESOLUTION model, never the search model.
+        res_factory.assert_called_once()
+        build_resolver.assert_called_once_with(resolution_model)
+        # The search model factory is still wired up for dedup/writes/supersession.
+        assert search_factory.call_count >= 1
+        assert resolution_model is not search_model
+
+    async def test_memory_extraction_threads_search_model_into_supersession_and_writes(
+        self, mocker
+    ) -> None:
+        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
+        search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+            return_value=resolution_model,
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=search_model,
+        )
+        resolver = MagicMock(spec=CompositeResolver)
+        mocker.patch(
+            "tree.memory.extraction.pipeline._build_resolver",
+            return_value=resolver,
+        )
+
+        # DB plumbing — one document so the flow runs past the early-exit and
+        # reaches supersession + apply-writes.
+        mock_client = MagicMock()
+        mock_client.__getitem__.return_value = MagicMock()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.init_mongodb",
+            new=AsyncMock(return_value=mock_client),
+        )
+        doc = _make_document()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.Document.find",
+            return_value=MagicMock(to_list=AsyncMock(return_value=[doc])),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.User.get",
+            new=AsyncMock(return_value=MagicMock()),
+        )
+
+        # No-op the heavy stages; we only care about the model handle wiring.
+        chunked = ChunkedDocument(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            source_type="huggingface",
+            date=None,
+            reference_uris=[],
+            chunk_texts=[],
+            chunk_ids=[],
+            structural=ExtractionResult(),
+        )
+        raw = RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            chunked=chunked,
+            extracted=ExtractionResult(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            new=AsyncMock(return_value=chunked),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.llm_extract_entities_task",
+            new=AsyncMock(return_value=raw),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.validate_raws_task",
+            new=AsyncMock(return_value=[raw]),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.redirect_first_person",
+            return_value=[],
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.canonicalize_preference_names",
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_llm",
+            return_value=MagicMock(),
+        )
+        supersession = mocker.patch(
+            "tree.memory.extraction.pipeline.resolve_supersessions",
+            new=AsyncMock(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.write_self_has_preference_edges",
+            new=AsyncMock(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.resolve_entities_task",
+            new=AsyncMock(return_value=ResolutionOutput()),
+        )
+        apply_writes = mocker.patch(
+            "tree.memory.extraction.pipeline.apply_writes_task",
+            new=AsyncMock(return_value=WriteSummary()),
+        )
+
+        await memory_extraction.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        # Supersession compares against PERSISTED preference vectors → SEARCH model.
+        assert supersession.await_args.kwargs["embedding_model"] is search_model
+        # apply-writes persists node vectors → SEARCH model (positional arg #8).
+        assert search_model in apply_writes.await_args.args
+        assert resolution_model not in apply_writes.await_args.args
+
+    async def test_run_extraction_helper_builds_resolver_from_resolution_model(
+        self, mocker
+    ) -> None:
+        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
+        search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
+        res_factory = mocker.patch(
+            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+            return_value=resolution_model,
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=search_model,
+        )
+        build_resolver = mocker.patch(
+            "tree.memory.extraction.pipeline._build_resolver",
+            return_value=MagicMock(spec=CompositeResolver),
+        )
+        # No-docs early-exit.
+        mocker.patch(
+            "tree.memory.extraction.pipeline.Document.find",
+            return_value=MagicMock(to_list=AsyncMock(return_value=[])),
+        )
+        client = MagicMock()
+        client.__getitem__.return_value = MagicMock()
+
+        await run_extraction_for_documents(
+            ["507f1f77bcf86cd799439011"],
+            user_id=_USER_ID,
+            client=client,
+            database_name="test",
+        )
+
+        res_factory.assert_called_once()
+        build_resolver.assert_called_once_with(resolution_model)
+
+    async def test_run_extraction_helper_uses_injected_search_model_for_writes(
+        self, mocker
+    ) -> None:
+        # When the MCP path injects an ``embedding_model`` it must drive the
+        # SEARCH/persisted path (supersession + writes), NOT the resolver.
+        injected_search_model = MagicMock(
+            spec=BaseEmbeddingModel, name="injected_search"
+        )
+        injected_search_model.embed = AsyncMock(return_value=[])
+        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+            return_value=resolution_model,
+        )
+        resolver = MagicMock(spec=CompositeResolver)
+        build_resolver = mocker.patch(
+            "tree.memory.extraction.pipeline._build_resolver",
+            return_value=resolver,
+        )
+
+        doc = _make_document()
+        mocker.patch(
+            "tree.memory.extraction.pipeline.Document.find",
+            return_value=MagicMock(to_list=AsyncMock(return_value=[doc])),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.User.get",
+            new=AsyncMock(return_value=MagicMock()),
+        )
+        chunked = ChunkedDocument(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            source_type="huggingface",
+            date=None,
+            reference_uris=[],
+            chunk_texts=[],
+            chunk_ids=[],
+            structural=ExtractionResult(),
+        )
+        raw = RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            chunked=chunked,
+            extracted=ExtractionResult(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline._extract_chunks_and_structural",
+            new=AsyncMock(return_value=chunked),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline._llm_extract_entities",
+            new=AsyncMock(return_value=raw),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline._validate_raws",
+            new=AsyncMock(return_value=[raw]),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.redirect_first_person",
+            return_value=[],
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.canonicalize_preference_names",
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.get_llm",
+            return_value=MagicMock(),
+        )
+        supersession = mocker.patch(
+            "tree.memory.extraction.pipeline.resolve_supersessions",
+            new=AsyncMock(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline.write_self_has_preference_edges",
+            new=AsyncMock(),
+        )
+        mocker.patch(
+            "tree.memory.extraction.pipeline._resolve_entities",
+            new=AsyncMock(return_value=ResolutionOutput()),
+        )
+        apply_writes = mocker.patch(
+            "tree.memory.extraction.pipeline._apply_writes",
+            new=AsyncMock(return_value=WriteSummary()),
+        )
+        client = MagicMock()
+        client.__getitem__.return_value = MagicMock()
+
+        await run_extraction_for_documents(
+            ["507f1f77bcf86cd799439011"],
+            user_id=_USER_ID,
+            client=client,
+            database_name="test",
+            embedding_model=injected_search_model,
+        )
+
+        # Resolver built from the resolution model, NOT the injected search model.
+        build_resolver.assert_called_once_with(resolution_model)
+        # Supersession + writes use the injected search/persisted model.
+        assert (
+            supersession.await_args.kwargs["embedding_model"] is injected_search_model
+        )
+        assert injected_search_model in apply_writes.await_args.args
+        assert resolution_model not in apply_writes.await_args.args

@@ -60,10 +60,32 @@ models:
   llm:
     provider: gemini
     model: gemini-3.1-flash-lite
-  embedding:
+  # Transient embedding used only by resolution's semantic stage
+  # (computed on the entity NAME, dropped afterward, never persisted).
+  # Split out in #039 so a lighter model can be configured later; for
+  # now it mirrors search_embedding so behavior is unchanged.
+  resolution_embedding:
     provider: voyage
     model: voyage-multimodal-3
     dimensions: 1024
+  # Persisted embedding used for dedup + search/query. Its output is the
+  # node `embedding` field and the live mongot `vector_index` is
+  # dimension-coupled to its `dimensions`.
+  search_embedding:
+    provider: voyage
+    model: voyage-multimodal-3
+    dimensions: 1024
+  # #044 real-time request-batching caps for /v1/multimodalembeddings.
+  # Pack many texts into FEWER synchronous embed calls (resolution + dedup
+  # + indexing). Defaults sit at the Voyage per-request caps for
+  # voyage-multimodal-3; lowering them yields smaller requests (e.g. to stay
+  # under a tighter rate budget). NOT Voyage's async Batch API — that path is
+  # rejected (12h window can't drive mid-flow dedup; it doesn't support the
+  # multimodal endpoint). See tracker/044.
+  embedding_batch:
+    max_inputs: 1000
+    max_total_tokens: 320000
+    max_input_tokens: 32000
 
 extraction:
   chunk_size: 512

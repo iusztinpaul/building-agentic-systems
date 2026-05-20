@@ -265,6 +265,104 @@ class TestSemanticMatchResolverLRU:
         assert list(resolver._cache.keys()) == ["alice"]
 
 
+class TestSemanticMatchResolverPrewarm:
+    """#044 — ``prewarm_cache`` batches all uncached names into ONE request
+    and seeds the LRU, so the subsequent cosine loop is pure cache hits."""
+
+    async def test_prewarm_embeds_uncached_names_in_one_batched_request(
+        self,
+    ) -> None:
+        # Arrange
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=100)
+
+        # Act — pre-warm five candidate names.
+        await resolver.prewarm_cache(["alice", "bob", "carol", "dave", "erin"])
+
+        # Assert — exactly ONE embed() call carrying all five names (not five
+        # separate one-name calls).
+        assert len(model.calls) == 1
+        assert model.calls[0] == ["alice", "bob", "carol", "dave", "erin"]
+        # All five seeded into the cache.
+        assert set(resolver._cache.keys()) == {
+            "alice",
+            "bob",
+            "carol",
+            "dave",
+            "erin",
+        }
+
+    async def test_prewarm_then_resolve_makes_no_further_requests(self) -> None:
+        # Arrange
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.0, cache_max_size=100)
+
+        # Act — warm input + candidates, then resolve against the warmed cache.
+        await resolver.prewarm_cache(["alice", "Alice Smith", "Bob"])
+        calls_after_prewarm = len(model.calls)
+        await resolver.resolve(
+            "alice",
+            NodeType.PERSON,
+            candidate_names=["Alice Smith", "Bob"],
+        )
+
+        # Assert — the cosine loop hit the cache only; no extra embed() calls.
+        assert len(model.calls) == calls_after_prewarm == 1
+
+    async def test_prewarm_skips_already_cached_names(self) -> None:
+        # Arrange — seed "alice" via a first prewarm.
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=100)
+        await resolver.prewarm_cache(["alice"])
+        assert len(model.calls) == 1
+
+        # Act — a second prewarm overlapping the cached name.
+        await resolver.prewarm_cache(["alice", "bob"])
+
+        # Assert — only the uncached "bob" was embedded in the second call.
+        assert len(model.calls) == 2
+        assert model.calls[1] == ["bob"]
+
+    async def test_prewarm_dedups_normalized_keys(self) -> None:
+        # Arrange — case/whitespace variants share one normalized slot.
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=100)
+
+        # Act
+        await resolver.prewarm_cache(["Alice", "  alice ", "ALICE"])
+
+        # Assert — embedded once.
+        assert len(model.calls) == 1
+        assert len(model.calls[0]) == 1
+        assert list(resolver._cache.keys()) == ["alice"]
+
+    async def test_prewarm_respects_lru_bound(self) -> None:
+        # Arrange — warm more names than the cache can hold.
+        cache_max = 3
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(
+            model, threshold=0.80, cache_max_size=cache_max
+        )
+
+        # Act
+        await resolver.prewarm_cache(["a", "b", "c", "d", "e"])
+
+        # Assert — cache trimmed to the bound (oldest evicted first).
+        assert len(resolver._cache) == cache_max
+
+    async def test_prewarm_empty_is_noop(self) -> None:
+        # Arrange
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=10)
+
+        # Act
+        await resolver.prewarm_cache([])
+
+        # Assert
+        assert model.calls == []
+        assert len(resolver._cache) == 0
+
+
 class TestSemanticMatchResolverWithMockEmbeddingModel:
     """One smoke test exercising the bundled MockEmbeddingModel.
 

@@ -17,6 +17,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 
 from tree.entities.knowledge_graph import NodeType
+from tree.memory.embedding_text import embed_in_batches
 from tree.memory.resolution.base import AbstractResolver
 from tree.memory.resolution.types import ResolvedEntity
 from tree.models.base import BaseEmbeddingModel
@@ -47,6 +48,46 @@ class SemanticMatchResolver(AbstractResolver):
         """Empty the embedding cache. Subsequent lookups recompute."""
 
         self._cache.clear()
+
+    async def prewarm_cache(self, names: Iterable[str]) -> None:
+        """Batch-embed every uncached ``name``, then populate the LRU.
+
+        Packs all the not-yet-cached names into as few synchronous requests
+        as the Voyage per-request caps allow (via
+        :func:`tree.memory.embedding_text.embed_in_batches`) and seeds the
+        cache, so the subsequent cosine loop is pure cache hits — instead of
+        :meth:`_embed_cached` embedding one name per request.
+
+        Preserves the LRU and its eviction semantics: each warmed name is
+        inserted through the same normalized-key path as :meth:`_embed_cached`
+        and the cache is trimmed to ``cache_max_size`` (oldest-first)
+        afterward. Already-cached names are skipped and their recency is left
+        untouched. Names that collapse to the same normalized key are embedded
+        once.
+        """
+
+        # Collect the surface forms whose normalized key is not already
+        # cached, de-duplicated by normalized key, preserving first-seen order
+        # so the embed request order is deterministic for tests.
+        to_embed: list[str] = []
+        seen_keys: set[str] = set()
+        for name in names:
+            key = self._normalize(name)
+            if key in self._cache or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            to_embed.append(name)
+
+        if not to_embed:
+            return
+
+        vectors = await embed_in_batches(to_embed, self._embedding_model)
+        for name, embedding in zip(to_embed, vectors, strict=True):
+            self._cache[self._normalize(name)] = embedding
+
+        # Apply the same LRU bound as _embed_cached.
+        while len(self._cache) > self._cache_max_size:
+            self._cache.popitem(last=False)
 
     async def _embed_cached(self, name: str) -> list[float]:
         """Return the embedding for ``name``, using/updating the LRU cache."""

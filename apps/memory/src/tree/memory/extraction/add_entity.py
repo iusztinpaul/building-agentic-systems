@@ -39,6 +39,7 @@ from tree.entities.knowledge_graph import (
     build_edge_id,
     build_node_id,
 )
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -214,10 +215,30 @@ async def add_entity(
     # ------------------------------------------------------------------
     # Step 2 — dedup (vector-search; read-only).
     # ------------------------------------------------------------------
+    #
+    # The dedup query vector and the persisted node vector are the SAME
+    # node-text vector for GENERIC node types (built from
+    # ``node_to_embedding_text`` over the prospective node dict). This puts
+    # the dedup decision in the same vector space as the persisted corpus
+    # (indexing's backfill builds the identical text) and lets the
+    # non-merged path reuse the vector, so ``indexing.embed_nodes`` never
+    # recomputes it.
+    #
+    # PREFERENCE / FACT instead embed statement/object on BOTH the dedup
+    # vector and the persisted vector: supersession compares
+    # statement<->statement (resp. object<->object), so routing those types
+    # through the generic node-text builder would silently break it.
+    # ``_embeddable_text`` picks the right text per type.
 
     embedding: list[float] = []
     if deduplicate and dedup_config.enabled:
-        embedded = await embedding_model.embed([name])
+        embeddable_text = _embeddable_text(
+            entity_type=entity_type,
+            name=name,
+            canonical_name=resolved.canonical_name,
+            properties=properties,
+        )
+        embedded = await embedding_model.embed([embeddable_text])
         embedding = embedded[0] if embedded else []
         raw_result = await dedupe_entity(
             database=database,
@@ -285,6 +306,61 @@ async def add_entity(
         )
 
     return target_id, resolved, dedup_result
+
+
+# ---------------------------------------------------------------------------
+# Internals — embeddable-text selection
+# ---------------------------------------------------------------------------
+
+
+def _embeddable_text(
+    *,
+    entity_type: NodeType,
+    name: str,
+    canonical_name: str,
+    properties: dict[str, Any],
+) -> str:
+    """Pick the text the prospective entity is embedded on for dedup + persist.
+
+    GENERIC node types embed their **node-text** (the shared
+    :func:`node_to_embedding_text` builder), so the dedup query vector lives
+    in the SAME space as the persisted corpus (indexing's backfill embeds
+    the identical text) and the vector is reused verbatim as the new node's
+    ``embedding``.
+
+    PREFERENCE embeds ``properties.statement`` and FACT embeds
+    ``properties.object`` so supersession's statement<->statement (resp.
+    object<->object) comparison stays apples-to-apples. The statement text
+    wins only when present and non-empty; otherwise the type falls back to
+    the generic node-text builder so a malformed preference/fact is still
+    embeddable rather than blank.
+    """
+
+    if entity_type == NodeType.PREFERENCE:
+        statement = (properties or {}).get("statement")
+        if isinstance(statement, str) and statement.strip():
+            return statement.strip()
+    elif entity_type == NodeType.FACT:
+        obj = (properties or {}).get("object") or (properties or {}).get("object_")
+        if isinstance(obj, str) and obj.strip():
+            return obj.strip()
+
+    # Mirror the persisted-node shape: ``aliases`` and ``confidence`` are
+    # promoted to top-level columns by ``_upsert_node`` and never live under
+    # ``properties`` on the stored row, so strip them here too. Otherwise the
+    # dedup-time node-text would carry properties the backfill's text (built
+    # from the stored row) does not, and the two would drift.
+    node = {
+        "type": entity_type.value,
+        "name": name,
+        "canonical_name": canonical_name,
+        "properties": {
+            k: v
+            for k, v in (properties or {}).items()
+            if k not in {"aliases", "confidence"}
+        },
+    }
+    return node_to_embedding_text(node)
 
 
 # ---------------------------------------------------------------------------

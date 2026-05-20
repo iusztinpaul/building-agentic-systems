@@ -27,13 +27,61 @@ class TestLoadAppConfig:
         # #038 the project consolidated on a single Voyage client backed
         # by the multimodal endpoint; ``voyage-multimodal-3`` is also
         # 1024-d, so the dim stays put while the model identifier
-        # changes. Local-dev operators editing the YAML in place can
-        # flip it to a smaller model + dim.
-        assert config.models.embedding.provider == "voyage"
-        assert config.models.embedding.model == "voyage-multimodal-3"
-        assert config.models.embedding.dimensions == 1024
+        # changes. #039 split the single ``embedding`` block into a
+        # transient ``resolution_embedding`` and a persisted
+        # ``search_embedding``; both still point at the same model/dim so
+        # this task is behavior-preserving.
+        assert config.models.resolution_embedding.provider == "voyage"
+        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.dimensions == 1024
+        assert config.models.search_embedding.provider == "voyage"
+        assert config.models.search_embedding.model == "voyage-multimodal-3"
+        assert config.models.search_embedding.dimensions == 1024
+        # #044: real-time request-batching caps default to the Voyage
+        # per-request limits for voyage-multimodal-3.
+        assert config.models.embedding_batch.max_inputs == 1000
+        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_input_tokens == 32_000
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
+
+    def test_embedding_batch_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``models.embedding_batch`` block falls back to the
+        typed defaults (the Voyage per-request caps) — #044."""
+
+        custom = tmp_path / "no_batch.yaml"
+        custom.write_text(
+            "models:\n"
+            "  search_embedding:\n"
+            "    provider: voyage\n"
+            "    model: voyage-multimodal-3\n"
+            "    dimensions: 1024\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.models.embedding_batch.max_inputs == 1000
+        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_input_tokens == 32_000
+
+    def test_embedding_batch_caps_loaded_from_yaml(self, tmp_path):
+        """Operator-tuned batching caps in YAML are read into the typed
+        :class:`EmbeddingBatchConfig` (#044)."""
+
+        custom = tmp_path / "batch.yaml"
+        custom.write_text(
+            "models:\n"
+            "  embedding_batch:\n"
+            "    max_inputs: 128\n"
+            "    max_total_tokens: 50000\n"
+            "    max_input_tokens: 8000\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.models.embedding_batch.max_inputs == 128
+        assert config.models.embedding_batch.max_total_tokens == 50_000
+        assert config.models.embedding_batch.max_input_tokens == 8000
 
     def test_loads_default_yaml_sources_flat_shape(self):
         """default.yaml uses the flat ``sources:`` list shape (post-#007).
@@ -125,9 +173,39 @@ class TestLoadAppConfig:
         assert config.extraction.resolution.fuzzy_threshold == 0.9
         # Unset values keep defaults.
         assert config.extraction.chunk_overlap == 64
-        # Embedding dimension falls back to the plain Pydantic default
-        # (1024) when the custom YAML doesn't override it (#034).
-        assert config.models.embedding.dimensions == 1024
+        # Embedding dimensions fall back to the plain Pydantic default
+        # (1024) when the custom YAML doesn't override them (#034/#039).
+        assert config.models.resolution_embedding.dimensions == 1024
+        assert config.models.search_embedding.dimensions == 1024
+
+    def test_search_embedding_only_defaults_resolution_embedding(self, tmp_path):
+        """A YAML that sets only ``search_embedding`` loads cleanly with
+        ``resolution_embedding`` falling back to the ``EmbeddingConfig``
+        defaults (#039). Neither block is required; both default
+        independently.
+        """
+
+        custom = tmp_path / "search_only.yaml"
+        custom.write_text(
+            textwrap.dedent("""\
+                models:
+                  search_embedding:
+                    provider: voyage
+                    model: voyage-multimodal-3
+                    dimensions: 1024
+            """)
+        )
+
+        config = load_app_config(custom)
+
+        # search_embedding takes the explicit YAML values.
+        assert config.models.search_embedding.provider == "voyage"
+        assert config.models.search_embedding.model == "voyage-multimodal-3"
+        assert config.models.search_embedding.dimensions == 1024
+        # resolution_embedding falls back to the EmbeddingConfig defaults.
+        assert config.models.resolution_embedding.provider == "voyage"
+        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):
         config = load_app_config(tmp_path / "nonexistent.yaml")

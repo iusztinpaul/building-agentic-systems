@@ -155,19 +155,34 @@ class ResolutionOutput(BaseModel):
     ``candidates_seen_by_type`` records the number of candidate rows the
     resolver actually saw per type (capped at ``max_candidates_per_type``);
     cap-hits are logged WARNING by task ③.
+
+    ``embeddable_text_by_key`` maps each entity key to the text it is
+    embedded on — the GENERIC node-text for most types, or
+    ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
+    Task ④ embeds the unique set of these texts, task ⑤ deduplicates each
+    entity against its own text-vector, and task ⑥ persists the same vector
+    — so the dedup decision and the stored vector share the search corpus'
+    space.
     """
 
     entities: list[tuple[str, NodeType]] = Field(default_factory=list)
     resolved_by_key: dict[str, ResolvedEntity] = Field(default_factory=dict)
     name_to_owner_id: dict[str, str] = Field(default_factory=dict)
     candidates_seen_by_type: dict[str, int] = Field(default_factory=dict)
+    embeddable_text_by_key: dict[str, str] = Field(default_factory=dict)
 
 
 class EmbeddingMap(BaseModel):
-    """Output of task ④ — canonical-name → embedding vector.
+    """Output of task ④ — embeddable-text → embedding vector.
 
     Modeled as a plain dict carrier (not a list of tuples) so callers can
-    look up a vector in O(1) by canonical name.
+    look up a vector in O(1) by its embeddable text. The key is the
+    **embeddable text** task ④ embeds — the GENERIC node-text
+    (``node_to_embedding_text``) for most types, or
+    ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
+    Keying on node-text (rather than the canonical name) is what puts the
+    dedup query vector and the persisted node vector in the same space as
+    the search corpus.
     """
 
     vectors: dict[str, list[float]] = Field(default_factory=dict)

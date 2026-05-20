@@ -17,6 +17,8 @@
 - **Memory Pipeline:** Pipeline that maps `documents` to `knowledge graph objects` within the `knowledge_graph` collection by cleaning, chunking, graph extracting, normalizing and upserting nodes and edges directly.
 - **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored in a single mutable `knowledge_graph` collection with upsert semantics. Nodes use `_id = "type:name"` and edges use `_id = "source|type|target"` string identifiers.
 - **Agentic Tools:** Tools used to query or write to the unified memory. 
+- **Configuration:** 
+  - For the memory app, most of the configuration is done via the `apps/memory/src/tree/config/app_config.py` which loads YAML files from `apps/memory/src/tree/config`, while we intentionally keep the `.env.example` file thin scoped only to credentials or other env vars coupled with the credentials (e.g., URIs, availability zones, etc.)
 
 ## Project Structure
 
@@ -83,6 +85,10 @@ project-root/
 - All the dates are timezone aware (UTC by default). We don't accept any naive datetime objects.
 - Always add types to function or method parameters and return types. Even if they return `None`.
 
+### Python gotchas
+
+- **PEP 758 `except` syntax is valid here.** This project pins `requires-python >=3.14`, so `except TypeError, ValueError:` (parenthesis-free, multiple exception types) is **valid** Python 3.14 syntax per [PEP 758](https://peps.python.org/pep-0758/) — NOT a Python-2 relic or a `SyntaxError`. `ast.parse`, `py_compile`, `import`, and CI all correctly accept it (CI installs 3.14 via `uv python install`). Do not flag it as a defect or "fix" it; it compiles and catches both exception types correctly. (Example in the wild: `apps/memory/src/tree/memory/indexing/core.py`.)
+
 ### Writing Scripts
 
 - Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `tree.logging` at module level to configure logging.
@@ -113,7 +119,7 @@ which is tested only via integration tests.
 
 **Escape hatch.** Operators may override any YAML key via `TREE_<SECTION>__<KEY>` env vars — for example `TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99`. The mechanism is `_apply_env_overrides` in `app_config.py`. This is for emergency one-shot ops use; new knobs should not be documented in `.env.example`.
 
-**Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override.
+**Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.search_embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override. The persisted vectors come from the **search** embedding (#039); the transient `models.resolution_embedding` is not index-coupled.
 
 ### macOS torch / TMPDIR shim
 
@@ -134,7 +140,9 @@ which is tested only via integration tests.
 ### Services
 - **LLM API:** Gemini
 - **Embedding Models API:** Voyage AI
-- **Crawling and scraping:** Firecrawl
+  - [Documentation Multimodal Embeddings](https://docs.voyageai.com/docs/multimodal-embeddings)
+  - [API Reference Multimodal Embeddings](https://docs.voyageai.com/reference/multimodal-embeddings-api)
+- **Searching, crawling, scraping:** Bright Data
 
 ### Infrastructure
 - **Unified memory and database:** MongoDB
@@ -160,34 +168,15 @@ We manage all the core commands through GNU Make as our command center. File ava
 
 We use `uv` to manage our Python project such as the virtual environment(s), dependencies, and overall package the project.
 
+## Populating the Users Collection
+
+By default, you will use the "Paul Iusztin" user when testing.
+
 ## Developing New Features and Bug Fixes Workflow
 
-At the beginning of a conversation ALWAYS ask the user if they are developing a new feature/bug or continue working 
-on an existing one. 
+Use Squid's `/night` and `/day` skills to do any changes to the codebase.
 
-When developing new features follow this exact plan:
-- Create a new branch that branches off from the current active branch. If the active branch is `main`, 
-it branches off from `main`. If it's a feature branch `feat/...`, it branches off from that.
-- Plan and ask for user validation
-- Write unit and integration tests:
-  - Use red/green TDD to first write unit and integration tests for the core functionality before implementing any feature.
-  - Run `make memory-unit-tests` frequently during development (after each atomic change) to catch regressions early.
-  - If working only a module, to speed things up, run the tests only from that module. For example, when changing module `tree.data.substack`, run the tests only related to the Substack data pipelines.
-  - Run the actual code testing and debugging how the code works on dev machine.
-  - In case of errors, write regression tests for the given errors, fix them, and repeat.
-  - Only run `make memory-integration-tests` when the feature is considered done and ready for PR. Integration tests can take up to 15 minutes.
-- Implement the feature. Special considerations to always look out for:
-  - Add new dependencies to @apps/memory/pyproject.toml
-  - Update @.env.example + @apps/memory/src/tree/config/settings.py with any new required env vars
-  - After any atomic change, commit the changes to git using the `commit-commands` plugin. Then push them to git. Always check if the `pre-commit` passes.
-- PR workflow:
-  1. Use the `create-pr` skill to open/update the PR.
-  2. Check if the CI/CD pipeline passed using the `gh` CLI to look at the GitHub Actions logs. If not, fix the errors and re-run the pipelines until they pass.
-  3. Use the `code-review` plugin to review the code.
-  4. Fix the code, based on the reviews and repeat step 2 in case the CI/CD pipeline fails.
-  5. Repeat until the `code-review` and CI/CD passes.
-  6. Use the `create-pr` skill to update the description,
-  7. DON'T merge the PR. The user will.
+- **Commit on the feature branch, never sub-branches.** During a `/night` run every per-task commit lands on the single feature branch `feat/<slug>`. Do not create or switch to a per-task sub-branch (e.g. `feat/043-…`) — commits there miss the feature branch and have to be reconciled.
 
 ## Step-by-Step Verification Steps
 
@@ -212,6 +201,8 @@ make memory-build
 ```
 
 ## Running QA and Tests
+
+**Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
 We use `ruff` as our formatter and linter.
 
@@ -398,7 +389,7 @@ Use this runbook when the data or memory pipeline boots and immediately
 raises an **Embedding dimension mismatch** error such as:
 
 ```
-RuntimeError: Embedding dimension mismatch: app_config.models.embedding.dimensions=1024 but live vector_index numDimensions=384. Rebuild the mongot index (drop + ensure_indexes) so it matches the YAML value, or set apps/memory/configs/default.yaml's models.embedding.dimensions to 384.
+RuntimeError: Embedding dimension mismatch: app_config.models.search_embedding.dimensions=1024 but live vector_index numDimensions=384. Rebuild the mongot index (drop + ensure_indexes) so it matches the YAML value, or set apps/memory/configs/default.yaml's models.search_embedding.dimensions to 384.
 ```
 
 This happens on any deployment that ran the pipeline at least once under
@@ -449,7 +440,7 @@ mongosh "mongodb://tree:tree@localhost:27017/tree?authSource=admin&directConnect
 ```
 
 2. **Re-trigger the indexing pipeline**, which calls `ensure_indexes` and
-   recreates the index at the YAML-declared `models.embedding.dimensions`
+   recreates the index at the YAML-declared `models.search_embedding.dimensions`
    (1024 for `voyage-3` / `voyage-multimodal-3`):
 ```bash
 make memory-serve-workflows &

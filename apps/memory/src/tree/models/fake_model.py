@@ -31,7 +31,7 @@ class FakeEmbeddingModel(BaseEmbeddingModel):
     """Returns zero vectors. For testing only."""
 
     def __init__(self, dimensions: int | None = None) -> None:
-        dimensions = dimensions or app_config.models.embedding.dimensions
+        dimensions = dimensions or app_config.models.search_embedding.dimensions
         self._dimensions = dimensions
 
     @property
@@ -48,7 +48,7 @@ class MockEmbeddingModel(BaseEmbeddingModel):
     """Returns random vectors in [0, 1]. Drop-in replacement when the real API is unavailable."""
 
     def __init__(self, dimensions: int | None = None) -> None:
-        dimensions = dimensions or app_config.models.embedding.dimensions
+        dimensions = dimensions or app_config.models.search_embedding.dimensions
         self._dimensions = dimensions
 
     @property
