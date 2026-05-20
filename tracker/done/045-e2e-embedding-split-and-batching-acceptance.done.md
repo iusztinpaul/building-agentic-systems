@@ -397,3 +397,82 @@ $ uv run pytest tests/integration/memory/test_e2e_embedding_split_and_batching.p
   runbook run, per the SWE's caveat.
 
 **VERDICT: PASS**
+
+### [PM] 2026-05-20 19:10 — Acceptance Review (whole feature)
+
+**VERDICT: ACCEPT**
+
+Reviewed the Tester evidence for #039–#045 and read the shipped code from
+the user's perspective. All five operator asks and all six concrete
+verification points hold:
+
+1. **Config split real + operator-facing.** `configs/default.yaml` exposes
+   `models.resolution_embedding` + `models.search_embedding` as independent
+   blocks (lines 67-77); both default to `voyage-multimodal-3`/1024 so the
+   split is structural. The operator can repoint resolution at a
+   lighter/different-dim model without breaking dedup/search: the dim-guard
+   `assert_settings_match_live_vector_index` reads
+   `app_config.models.search_embedding.dimensions` ONLY (`indexing/core.py:461`)
+   — resolution dim is decoupled from the live `vector_index`.
+2. **Concerns correctly separated.** Resolution = name-only, transient (the
+   per-instance LRU in `SemanticMatchResolver`, never written); dedup +
+   indexing = node-text via the search model, persisted. The persisted
+   vector space is now consistent everywhere — this resolves the
+   name-vs-node-text inconsistency.
+3. **Dedup reuse works.** `add_entity` embeds the prospective node's
+   node-text once and persists THAT vector on the non-merged path
+   (`add_entity.py`); the indexing backfill (`embed_nodes`, filter
+   `embedding ∈ {[],None}`) is a no-op for those nodes — proven byte-identical
+   in the e2e (`after["embedding"] == before_vec`).
+4. **One shared function (ask #4).** A single generic builder
+   `node_to_embedding_text` (`embedding_text.py:192`) backs every generic
+   path: indexing (`embed_node_texts`), `add_entity._embeddable_text`, and
+   pipeline `_entity_embeddable_text`. The two extraction shims are thin
+   type-dispatchers that delegate the generic case to the one builder; the
+   PREFERENCE→statement / FACT→object branch is intentional (#032) and
+   documented. No duplicated node-text/embed logic.
+5. **Real-time request batching, not the async Batch API.** `embed_in_batches`
+   packs texts into synchronous `/v1/multimodalembeddings` requests bounded
+   by 1000 inputs / 320K tokens, clamps a single oversized input to 32K
+   (relies on `truncation=True`), and preserves input ORDER across chunks
+   (contiguous slices, concatenated). The 429 backoff is untouched (empty
+   diff on `voyage_multimodal_embedding.py`). All three stages route through
+   it (indexing, task ④, resolution prewarm). The async-Batch-API rejection
+   is documented in code (`embedding_text.py:42-60`) and the task spec: 12h
+   window can't drive mid-flow dedup + `/v1/multimodalembeddings` unsupported.
+6. **E2e proves it end-to-end.** `test_e2e_embedding_split_and_batching.py`
+   builds a REAL mongot `vector_index`, polls for convergence, and asserts
+   the headline node is retrieved at TOP rank by its own node-text vector —
+   dedup space == index space == query space. Content-encoded (sha256) model
+   proves WHICH text was embedded; sentinel resolution model would catch any
+   leak into a persisted node. The free-tier 429 on the live indexing
+   backfill is an honest tier limit (the documented exhaustion anchor in the
+   backoff loop, batcher strictly upstream) — the deterministic test
+   genuinely substitutes for the live vector path, so the feature is proven.
+
+**Documentation discipline:** project opted out of `docs/adr/` and
+`docs/glossary.md` (per the feature plan) — no checks apply. The
+architectural decision (real-time batching, NOT async Batch API) is captured
+in #044's scope + the in-code rejected-alternative note, which is sufficient
+here.
+
+**Non-blocking notes for the PR description (NOT rollups):**
+- `query.embedding_batch_size` (`default.yaml:115`) is now dead config for
+  indexing — #044 superseded it with `models.embedding_batch.*`. Left in to
+  avoid scope creep; a follow-up can remove it.
+- Live indexing backfill on the full node set needs a paid Voyage key (or a
+  3-RPM cooldown + small `DOC_IDS` subset) to complete — an operator-facing
+  free-tier limit, not a defect.
+- Re-embed migration: existing persisted vectors are stale under the new
+  node-text/search-model space — operators run `RESET_ONTOLOGY=1` (existing
+  runbook in `CLAUDE.md`) to converge; expect a `$vectorSearch`-degraded
+  window during the rebuild.
+- Dev-infra hygiene: a stale `tree-prefect-worker` container from another
+  worktree competes for Prefect deployments — stop it before any live
+  make-target runbook run. Not a code defect.
+- Test-fragility nit (Tester, #043): unit tests reach into private attrs
+  (`resolver._semantic._embedding_model`) to prove wiring — accurate today,
+  fragile to future refactors. Optional hardening.
+
+If the user checks this right now, they will be satisfied. SWE may push;
+pipeline advances to On-Call (CI) + PR Reviewer.
