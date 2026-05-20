@@ -20,6 +20,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.dedup import (
     DeduplicationConfig,
@@ -517,3 +518,150 @@ class TestAddEntityTwoUserIsolation:
         assert target_a != target_b
         assert target_a.startswith(f"{user_a}:")
         assert target_b.startswith(f"{user_b}:")
+
+
+# ---------------------------------------------------------------------------
+# #042 — node-text dedup embedding + reuse on the new node
+# ---------------------------------------------------------------------------
+
+
+class _RecordingEmbeddingModel:
+    """Embedding model that records every text it is asked to embed.
+
+    Returns a deterministic per-text vector (8-dim, seeded by ``hash``) so
+    the test can assert (a) WHICH text was embedded and (b) that the
+    persisted vector equals the dedup-query vector (same embed call).
+    """
+
+    def __init__(self) -> None:
+        self.embedded_texts: list[str] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 8
+
+    @staticmethod
+    def _vec(text: str) -> list[float]:
+        h = abs(hash(text))
+        return [((h >> (i * 4)) & 0xF) / 15.0 for i in range(8)]
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.embedded_texts.extend(texts)
+        return [self._vec(t) for t in texts]
+
+
+class TestAddEntityNodeTextEmbedding:
+    """``add_entity`` embeds the prospective node's NODE-TEXT (generic types)
+    for the dedup query and reuses that vector as the persisted embedding.
+    """
+
+    async def test_dedup_query_vector_is_node_text_not_name(self, mocker) -> None:
+        # Arrange — capture the embedding passed to dedupe_entity.
+        database, _collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        dedupe = mocker.patch(
+            "tree.memory.extraction.add_entity.dedupe_entity",
+            new=AsyncMock(return_value=DeduplicationResult(action="none")),
+        )
+
+        properties = {"role": "researcher", "org": "OpenAI"}
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Andrej Karpathy"),
+            user_id=_USER_ID,
+            name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            properties=properties,
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — the text embedded is the node-text, NOT the bare name.
+        expected_text = node_to_embedding_text(
+            {
+                "type": "person",
+                "name": "Andrej Karpathy",
+                "canonical_name": "Andrej Karpathy",
+                "properties": properties,
+            }
+        )
+        assert model.embedded_texts == [expected_text]
+        assert model.embedded_texts[0] != "Andrej Karpathy"
+        # And dedupe_entity received the node-text vector.
+        passed_vec = dedupe.await_args.kwargs["embedding"]
+        assert passed_vec == _RecordingEmbeddingModel._vec(expected_text)
+
+    async def test_new_node_persists_same_vector_no_second_embed(self, mocker) -> None:
+        # Arrange — action="none" → a new node is created.
+        database, collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        properties = {"role": "researcher"}
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Andrej Karpathy"),
+            user_id=_USER_ID,
+            name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            properties=properties,
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — exactly ONE embed call for this node (no recompute).
+        assert len(model.embedded_texts) == 1
+        node_text = model.embedded_texts[0]
+        expected_vec = _RecordingEmbeddingModel._vec(node_text)
+        # The persisted embedding equals the dedup-query vector.
+        node_call = collection.update_one.call_args_list[0]
+        set_stage = node_call.args[1][0]["$set"]
+        # ``embedding`` is written via ``$ifNull`` so unwrap the literal.
+        persisted = set_stage["embedding"]["$ifNull"][1]
+        assert persisted == expected_vec
+
+    async def test_preference_embeds_statement_not_node_text(self, mocker) -> None:
+        # Arrange
+        database, _collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        statement = "prefers dark mode in the editor"
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="prefers-dark-mode"),
+            user_id=_USER_ID,
+            name="prefers-dark-mode",
+            entity_type=NodeType.PREFERENCE,
+            properties={"statement": statement},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — the statement text is embedded, not the node-text/slug.
+        assert model.embedded_texts == [statement]
+
+    async def test_fact_embeds_object_not_node_text(self, mocker) -> None:
+        database, _collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        obj = "the capital of France is Paris"
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="france-capital"),
+            user_id=_USER_ID,
+            name="france-capital",
+            entity_type=NodeType.FACT,
+            properties={"object": obj},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        assert model.embedded_texts == [obj]

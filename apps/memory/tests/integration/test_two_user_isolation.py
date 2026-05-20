@@ -211,6 +211,11 @@ def _patch_extraction_deps(
         "tree.memory.extraction.pipeline.get_embedding_model",
         return_value=embedding_model,
     )
+    # #042: task ④ embeds node-text via the SEARCH model factory.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
+        return_value=embedding_model,
+    )
     # Skip the live $vectorSearch dedup call so extraction doesn't depend
     # on the vector index being live before indexing runs. The default
     # "none" decision matches the empty-graph starting state both users

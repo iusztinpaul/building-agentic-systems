@@ -17,10 +17,13 @@ from beanie import PydanticObjectId
 
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.pipeline import (
     _CachedSingleEmbedding,
     _dedupe_entities,
+    _dispatch_entity_write,
     _embed_entity,
+    _entity_embeddable_text,
     _extract_chunks_and_structural,
     _llm_extract_entities,
     _resolve_entities,
@@ -34,11 +37,14 @@ from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity
 from tree.memory.types import (
     ChunkedDocument,
+    DedupDecision,
     EmbeddingMap,
     ExtractedNode,
     ExtractionResult,
     RawExtraction,
     ResolutionOutput,
+    WriteSummary,
+    make_entity_key,
 )
 
 
@@ -341,16 +347,23 @@ class TestResolveEntitiesTask:
 
 
 class TestEmbedEntityTask:
-    async def test_returns_name_and_vector(self, mocker) -> None:
+    async def test_returns_text_and_vector(self, mocker) -> None:
+        # #042: task ④ embeds the entity's node-text via the SEARCH model
+        # and returns ``(text, vector)`` keyed by that text.
         model = MagicMock()
         model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_embedding_model", return_value=model
+        search_factory = mocker.patch(
+            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            return_value=model,
         )
 
-        name, vector = await _embed_entity("alice")
-        assert name == "alice"
+        node_text = "person: Andrej Karpathy\nrole: researcher"
+        text, vector = await _embed_entity(node_text)
+        assert text == node_text
         assert vector == [0.1, 0.2, 0.3]
+        # The text passed to the model is the node-text, not a bare name.
+        model.embed.assert_awaited_once_with([node_text])
+        search_factory.assert_called_once()
 
     async def test_task_decorator_uses_inputs_cache(self) -> None:
         # Cache policy is registered on the decorated task; identity check on
@@ -534,3 +547,147 @@ class TestRequiredUserIdSignature:
                 client=MagicMock(),
                 database_name="test",
             )
+
+
+# ---------------------------------------------------------------------------
+# #042 — node-text embeddable-text selection + reuse plumbing
+# ---------------------------------------------------------------------------
+
+
+class TestEntityEmbeddableText:
+    """``_entity_embeddable_text`` mirrors ``add_entity._embeddable_text``."""
+
+    def test_generic_type_returns_node_text(self) -> None:
+        properties = {"role": "researcher"}
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties=properties,
+        )
+        expected = node_to_embedding_text(
+            {
+                "type": "person",
+                "name": "Andrej Karpathy",
+                "canonical_name": "Andrej Karpathy",
+                "properties": properties,
+            }
+        )
+        assert text == expected
+        assert text != "Andrej Karpathy"
+
+    def test_generic_type_strips_aliases_and_confidence(self) -> None:
+        # ``aliases`` / ``confidence`` are top-level columns on the stored
+        # row, so they must not leak into the embeddable node-text.
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties={"role": "researcher", "aliases": ["AK"], "confidence": 0.9},
+        )
+        assert "AK" not in text
+        assert "confidence" not in text
+        assert "researcher" in text
+
+    def test_preference_returns_statement(self) -> None:
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PREFERENCE,
+            name="prefers-dark-mode",
+            canonical_name="prefers-dark-mode",
+            properties={"statement": "prefers dark mode"},
+        )
+        assert text == "prefers dark mode"
+
+    def test_fact_returns_object(self) -> None:
+        text = _entity_embeddable_text(
+            entity_type=NodeType.FACT,
+            name="france-capital",
+            canonical_name="france-capital",
+            properties={"object": "Paris"},
+        )
+        assert text == "Paris"
+
+    def test_preference_without_statement_falls_back_to_node_text(self) -> None:
+        # A malformed preference (no statement) is still embeddable.
+        text = _entity_embeddable_text(
+            entity_type=NodeType.PREFERENCE,
+            name="prefers-dark-mode",
+            canonical_name="prefers-dark-mode",
+            properties={},
+        )
+        assert text.startswith("preference: prefers-dark-mode")
+
+
+class TestDispatchEntityWriteReusesVector:
+    """Task ⑥ reuses the task-④ vector via ``_CachedSingleEmbedding`` and
+    NEVER re-embeds the node inside apply-writes (AC: no second embed call).
+    """
+
+    async def test_no_second_embed_call_reuses_node_text_vector(self, mocker) -> None:
+        # Arrange — capture the embedding ``add_entity`` ends up using.
+        captured: dict[str, Any] = {}
+
+        async def _fake_add_entity(*args: Any, **kwargs: Any) -> Any:
+            model = kwargs["embedding_model"]
+            captured["vector"] = (await model.embed(["ignored"]))[0]
+            captured["model"] = model
+            return ("target-id", None, DeduplicationResult(action="none"))
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.add_entity",
+            new=AsyncMock(side_effect=_fake_add_entity),
+        )
+
+        node = ExtractedNode(
+            name="Andrej Karpathy",
+            type=NodeType.PERSON,
+            properties={"role": "researcher"},
+        )
+        resolved_entity = ResolvedEntity(
+            original_name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            confidence=1.0,
+            match_type="exact",
+        )
+        key = make_entity_key("d1", NodeType.PERSON, "Andrej Karpathy")
+        node_text = _entity_embeddable_text(
+            entity_type=NodeType.PERSON,
+            name="Andrej Karpathy",
+            canonical_name="Andrej Karpathy",
+            properties={"role": "researcher"},
+        )
+        resolved = ResolutionOutput(
+            resolved_by_key={key: resolved_entity},
+            embeddable_text_by_key={key: node_text},
+        )
+        # The task-④ vector is keyed by the NODE-TEXT, not the name.
+        embeddings = EmbeddingMap(vectors={node_text: [0.42] * 8})
+
+        # A real model that would explode if actually called for a fresh embed.
+        real_model = MagicMock()
+        real_model.embed = AsyncMock(
+            side_effect=AssertionError("apply-writes must not re-embed")
+        )
+
+        # Act
+        await _dispatch_entity_write(
+            database=MagicMock(),
+            embedding_model=real_model,
+            resolver=MagicMock(spec=CompositeResolver),
+            user_id=_USER_ID,
+            node=node,
+            source_document_id="d1",
+            resolved_entity=resolved_entity,
+            decision=DedupDecision(action="none"),
+            embeddings=embeddings,
+            resolved=resolved,
+            dedup_config=DeduplicationConfig(),
+            summary=WriteSummary(),
+        )
+
+        # Assert — the vector handed to add_entity is the cached node-text
+        # vector, and the real model's embed was never invoked.
+        assert captured["vector"] == [0.42] * 8
+        assert isinstance(captured["model"], _CachedSingleEmbedding)
+        real_model.embed.assert_not_called()

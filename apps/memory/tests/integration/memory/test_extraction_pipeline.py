@@ -122,6 +122,12 @@ def _patch_pipeline_deps(
         "tree.memory.extraction.pipeline.get_embedding_model",
         return_value=embedding_model,
     )
+    # #042: task ④ embeds via the SEARCH model factory directly. Point it at
+    # the same fake so the node-text vectors come from the test model.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
+        return_value=embedding_model,
+    )
     # Patch ``dedupe_entity`` at every call site so neither task ⑤ nor task ⑥
     # (via ``add_entity``) issues a live ``$vectorSearch``. Default decision
     # is ``"none"`` — i.e. always treat the incoming entity as new — which

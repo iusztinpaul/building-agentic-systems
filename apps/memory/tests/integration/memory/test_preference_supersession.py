@@ -104,6 +104,13 @@ def _patch_pipeline_deps(
         "tree.memory.extraction.pipeline.get_embedding_model",
         return_value=embedding_model,
     )
+    # #042: task ④ embeds via the SEARCH model factory; point it at the
+    # same canned model so the preference statement vector still comes from
+    # the test mapping.
+    mocker.patch(
+        "tree.memory.extraction.pipeline.get_search_embedding_model",
+        return_value=embedding_model,
+    )
     # Standard dedup branch always says "no candidates" so we cleanly
     # observe whether the supersession-resolver branch fires.
     mocker.patch(
