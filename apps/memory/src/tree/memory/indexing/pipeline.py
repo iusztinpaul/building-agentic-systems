@@ -58,10 +58,11 @@ async def memory_indexing(user_id: PydanticObjectId) -> None:
     count = await embed_nodes_task(client, database, user_id)
     await ensure_indexes_task(client, database, user_id)
 
-    # #016 boot-time gate: assert the live mongot vector index agrees
-    # with ``app_config.models.search_embedding.dimensions``. Runs AFTER ``ensure_indexes`` so a
-    # freshly bootstrapped index passes; mismatch → hard-fail before the
-    # next pipeline run silently writes vectors of the wrong dimension.
+    # Boot-time gate: assert the live mongot vector index agrees with
+    # ``app_config.models.search_embedding.dimensions``. Runs AFTER
+    # ``ensure_indexes`` so a freshly bootstrapped index passes; mismatch →
+    # hard-fail before the next pipeline run silently writes vectors of the
+    # wrong dimension.
     await assert_settings_match_live_vector_index(client, database)
 
     logger.info(

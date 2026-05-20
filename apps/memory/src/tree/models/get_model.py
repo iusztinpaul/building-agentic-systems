@@ -30,13 +30,9 @@ def _build_embedding_model(
 ) -> BaseEmbeddingModel:
     """Build an embedding model from a single ``EmbeddingConfig`` block.
 
-    Holds the per-provider dispatch (mock / gemini / sentence-transformers /
-    modal / voyage) in one place so the role-specific getters
-    (:func:`get_resolution_embedding_model`, :func:`get_search_embedding_model`)
-    never duplicate the ``if``-ladder. ``model`` / ``dimensions`` are read
-    straight off ``cfg``; ``provider`` defaults to ``cfg.provider`` but may
-    be overridden (the legacy :func:`get_embedding_model` shim forwards its
-    optional ``provider`` argument this way, matching the pre-#040 behavior).
+    Holds the per-provider dispatch in one place so the role-specific
+    getters never duplicate the ``if``-ladder. ``provider`` defaults to
+    ``cfg.provider`` but may be overridden.
     """
 
     provider = provider or cfg.provider
@@ -63,16 +59,12 @@ def _build_embedding_model(
             model=cfg.model,
         )
     if provider == "voyage":
-        # The project pinned the multimodal model family
-        # (``voyage-multimodal-*`` against ``/v1/multimodalembeddings``)
-        # as the single Voyage client in #038, so there is only one
-        # code path here. Text-only models such as ``voyage-3`` are not
-        # supported by the multimodal endpoint (Voyage returns
-        # ``HTTP 400: Model voyage-3 is not supported``); operators
-        # who flip an embedding block's ``model`` to a non-multimodal
-        # id will see that error at the first ``embed`` call. The text
-        # client added in #037 was removed in the same commit — see
-        # ``tracker/038-consolidate-voyage-clients`` for context.
+        # The project pins the multimodal model family (``voyage-multimodal-*``
+        # against ``/v1/multimodalembeddings``) as the only Voyage client.
+        # Text-only models such as ``voyage-3`` are not supported by the
+        # multimodal endpoint (Voyage returns ``HTTP 400: Model voyage-3 is
+        # not supported``); flipping an embedding block's ``model`` to a
+        # non-multimodal id surfaces that error at the first ``embed`` call.
         return VoyageMultimodalEmbeddingModel(
             api_key=settings.voyage_api_key.get_secret_value(),
             model=cfg.model,
@@ -86,9 +78,9 @@ def get_resolution_embedding_model() -> BaseEmbeddingModel:
 
     Builds from ``app_config.models.resolution_embedding`` — the
     **transient** embedding used only by resolution's semantic stage
-    (computed on the entity name, never persisted, not coupled to the
-    live vector index). Swap this YAML block to point resolution at a
-    lighter/cheaper model without touching persisted vectors.
+    (computed on the entity name, never persisted, not index-coupled).
+    Swap this YAML block to point resolution at a lighter model without
+    touching persisted vectors.
     """
 
     return _build_embedding_model(app_config.models.resolution_embedding)
@@ -108,19 +100,12 @@ def get_search_embedding_model() -> BaseEmbeddingModel:
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     """Factory for embedding model instances (legacy shim).
 
-    #039 split the single ``models.embedding`` config into a transient
-    ``resolution_embedding`` and a persisted ``search_embedding``. This
-    no-arg factory returns the **search** model so all existing call
-    sites stay behavior-identical (the search model is what feeds dedup,
-    query, and the persisted node ``embedding`` field).
-
-    New code should call the role-named getter for its job —
-    :func:`get_resolution_embedding_model` or
-    :func:`get_search_embedding_model`. This shim is retained so #040's
-    diff stays reviewable; #041/#043 migrate the call sites.
+    Returns the **search** model. New code should call the role-named
+    getter for its job — :func:`get_resolution_embedding_model` or
+    :func:`get_search_embedding_model`.
 
     The optional ``provider`` override builds the search model under the
-    given provider (used by the existing per-provider unit tests).
+    given provider (used by the per-provider unit tests).
     """
 
     return _build_embedding_model(app_config.models.search_embedding, provider=provider)

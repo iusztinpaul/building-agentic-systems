@@ -50,25 +50,20 @@ class SemanticMatchResolver(AbstractResolver):
         self._cache.clear()
 
     async def prewarm_cache(self, names: Iterable[str]) -> None:
-        """Batch-embed every uncached ``name`` in ONE request, then populate
-        the LRU (#044).
+        """Batch-embed every uncached ``name``, then populate the LRU.
 
-        Pre-#044 the semantic resolver embedded the input name and each
-        candidate name one-at-a-time inside :meth:`_embed_cached` — for a
-        type with ``C`` candidates resolved against ``E`` entities that is up
-        to ``C + E`` separate Voyage requests, the resolution-stage analogue
-        of the indexing 429 hotspot. This pre-warm packs all the
-        not-yet-cached names into as few synchronous requests as the Voyage
-        per-request caps allow (via
+        Packs all the not-yet-cached names into as few synchronous requests
+        as the Voyage per-request caps allow (via
         :func:`tree.memory.embedding_text.embed_in_batches`) and seeds the
-        cache, so the subsequent cosine loop is pure cache hits.
+        cache, so the subsequent cosine loop is pure cache hits — instead of
+        :meth:`_embed_cached` embedding one name per request.
 
-        The LRU and its eviction semantics are preserved: each warmed name is
+        Preserves the LRU and its eviction semantics: each warmed name is
         inserted through the same normalized-key path as :meth:`_embed_cached`
-        and the cache is trimmed to ``cache_max_size`` (LRU/oldest-first)
-        afterward. Already-cached names are skipped (no re-embed) and their
-        recency is left untouched. Names that collapse to the same normalized
-        key are embedded once.
+        and the cache is trimmed to ``cache_max_size`` (oldest-first)
+        afterward. Already-cached names are skipped and their recency is left
+        untouched. Names that collapse to the same normalized key are embedded
+        once.
         """
 
         # Collect the surface forms whose normalized key is not already

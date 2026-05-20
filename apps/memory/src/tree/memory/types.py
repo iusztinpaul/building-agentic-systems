@@ -156,13 +156,13 @@ class ResolutionOutput(BaseModel):
     resolver actually saw per type (capped at ``max_candidates_per_type``);
     cap-hits are logged WARNING by task ③.
 
-    ``embeddable_text_by_key`` (#042) maps each entity key to the text it
-    is embedded on — the GENERIC node-text (the shared #041 builder) for
-    most types, or ``properties.statement`` / ``properties.object`` for
-    PREFERENCE / FACT. Task ④ embeds the unique set of these texts, task ⑤
-    deduplicates each entity against its own text-vector, and task ⑥
-    persists the same vector — so the dedup decision and the stored vector
-    share the search corpus' space.
+    ``embeddable_text_by_key`` maps each entity key to the text it is
+    embedded on — the GENERIC node-text for most types, or
+    ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
+    Task ④ embeds the unique set of these texts, task ⑤ deduplicates each
+    entity against its own text-vector, and task ⑥ persists the same vector
+    — so the dedup decision and the stored vector share the search corpus'
+    space.
     """
 
     entities: list[tuple[str, NodeType]] = Field(default_factory=list)
@@ -176,13 +176,11 @@ class EmbeddingMap(BaseModel):
     """Output of task ④ — embeddable-text → embedding vector.
 
     Modeled as a plain dict carrier (not a list of tuples) so callers can
-    look up a vector in O(1) by its embeddable text.
-
-    #042: the key is the **embeddable text** task ④ embeds — the GENERIC
-    node-text (the shared #041 ``node_to_embedding_text``) for most types,
-    or ``properties.statement`` / ``properties.object`` for PREFERENCE /
-    FACT. Before #042 the key was the canonical NAME and the vector was a
-    name-embedding; switching the grain to node-text is what puts the
+    look up a vector in O(1) by its embeddable text. The key is the
+    **embeddable text** task ④ embeds — the GENERIC node-text
+    (``node_to_embedding_text``) for most types, or
+    ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
+    Keying on node-text (rather than the canonical name) is what puts the
     dedup query vector and the persisted node vector in the same space as
     the search corpus.
     """

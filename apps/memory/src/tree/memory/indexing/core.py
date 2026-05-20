@@ -97,17 +97,14 @@ async def _embed_batch(
     docs: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
 ) -> int:
-    """Embed node documents via the #044 batcher and write vectors back.
+    """Embed node documents and write vectors back.
 
-    #044: the embedding itself is delegated to
+    Embedding is delegated to
     :func:`tree.memory.embedding_text.embed_node_texts`, which packs the
     node-texts into as few synchronous Voyage requests as the per-request
-    caps allow (1000 inputs / 320K tokens). This replaces the prior manual
-    ``range(0, len(docs), query.embedding_batch_size)`` slicing — that
-    issued ``ceil(N / 64)`` small requests and was the stage that exhausted
-    the free-tier 3-RPM budget. The returned vectors are positionally
-    aligned with ``docs`` (across multiple requests), so the zip below is
-    safe.
+    caps allow (1000 inputs / 320K tokens). The returned vectors are
+    positionally aligned with ``docs`` (across multiple requests), so the
+    zip below is safe.
     """
 
     vectors = await embed_node_texts(docs, embedding_model)
@@ -434,28 +431,26 @@ async def assert_settings_match_live_vector_index(
     """Hard-error gate between ``app_config.models.search_embedding.dimensions``
     and the live mongot index.
 
-    Post-#034 the YAML is the authoritative source for the embedding
-    dimension; #039 pinned this gate to the **search** embedding because
-    that is the model whose output is persisted to the node ``embedding``
-    field (the resolution embedding is transient and never written, so
-    its dimension is not index-coupled). The Atlas Vector Search index
-    under ``docker/mongot/`` must reflect
-    ``app_config.models.search_embedding.dimensions`` — a mismatch
-    silently corrupts every ``$vectorSearch`` write. This helper inspects
-    the live ``vector_index`` definition for ``database.knowledge_graph``
-    and:
+    The YAML is the authoritative source for the embedding dimension. This
+    gate is pinned to the **search** embedding because that is the model
+    whose output is persisted to the node ``embedding`` field (the
+    resolution embedding is transient and never written, so its dimension
+    is not index-coupled). The Atlas Vector Search index under
+    ``docker/mongot/`` must reflect
+    ``app_config.models.search_embedding.dimensions`` — a mismatch silently
+    corrupts every ``$vectorSearch`` write. This helper inspects the live
+    ``vector_index`` definition for ``database.knowledge_graph`` and:
 
     * Returns ``None`` if ``numDimensions`` on the live index equals
       ``app_config.models.search_embedding.dimensions``.
     * Raises :class:`RuntimeError` (with both numbers in the message) on
       mismatch. The literal substring ``Embedding dimension mismatch``
-      is preserved as a grep anchor for the #036 runbook.
+      is preserved as a grep anchor for the rebuild runbook.
     * Raises :class:`RuntimeError` (``"vector_index not found"``) when no
       index named ``vector_index`` is present — caller decides whether to
       bootstrap one via :func:`ensure_indexes` or fail.
 
-    Intended call site: indexing-pipeline boot, before any embedding
-    write. See ``tracker/034-voyage-3-yaml-default.groomed.md``.
+    Intended call site: indexing-pipeline boot, before any embedding write.
     """
 
     expected_dim = app_config.models.search_embedding.dimensions

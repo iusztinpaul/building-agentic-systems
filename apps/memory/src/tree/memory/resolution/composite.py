@@ -156,16 +156,14 @@ class CompositeResolver:
 
         entity_list = list(entities)
 
-        # #044: pre-warm the semantic resolver's embedding cache with ONE
-        # batched request covering every input name AND every candidate name,
-        # instead of letting ``SemanticMatchResolver._embed_cached`` issue a
-        # separate Voyage request per name during the cosine loop. Only the
-        # semantic stage uses embeddings, so this is a no-op when the semantic
-        # resolver is disabled (no embedding model supplied). The alias / exact
-        # / fuzzy stages short-circuit ahead of semantic, so most names are
-        # never actually compared — but pre-warming the full set keeps the
-        # request count to ``ceil(total_names / cap)`` regardless of which
-        # stage wins, which is the rate-limit win the operator asked for.
+        # Pre-warm the semantic resolver's embedding cache with one batched
+        # request covering every input name AND every candidate name, instead
+        # of letting ``SemanticMatchResolver._embed_cached`` issue a separate
+        # request per name during the cosine loop. Only the semantic stage
+        # uses embeddings, so this is a no-op when the semantic resolver is
+        # disabled. The alias / exact / fuzzy stages may short-circuit ahead
+        # of semantic, but pre-warming the full set keeps the request count to
+        # ``ceil(total_names / cap)`` regardless of which stage wins.
         if self._semantic is not None:
             prewarm_names: list[str] = [name for name, _ in entity_list]
             for bucket in existing_entities.values():

@@ -216,20 +216,19 @@ async def add_entity(
     # Step 2 — dedup (vector-search; read-only).
     # ------------------------------------------------------------------
     #
-    # #042: the dedup query vector and the persisted node vector are now
-    # the SAME node-text-via-search-model vector for GENERIC node types
-    # (built from ``node_to_embedding_text`` over the prospective node
-    # dict). This puts the dedup decision in the same vector space as the
-    # persisted corpus (indexing's backfill routes through the same #041
-    # function) and lets us reuse the vector on the non-merged path so
-    # ``indexing.embed_nodes`` never recomputes it.
+    # The dedup query vector and the persisted node vector are the SAME
+    # node-text vector for GENERIC node types (built from
+    # ``node_to_embedding_text`` over the prospective node dict). This puts
+    # the dedup decision in the same vector space as the persisted corpus
+    # (indexing's backfill builds the identical text) and lets the
+    # non-merged path reuse the vector, so ``indexing.embed_nodes`` never
+    # recomputes it.
     #
-    # PREFERENCE / FACT keep the #032 statement/object embedding on BOTH
-    # the dedup vector and the persisted vector — the supersession
-    # resolver compares statement<->statement (resp. object<->object), so
-    # routing those types through the generic node-text builder would
-    # silently break supersession. ``_embeddable_text`` picks the right
-    # text per type.
+    # PREFERENCE / FACT instead embed statement/object on BOTH the dedup
+    # vector and the persisted vector: supersession compares
+    # statement<->statement (resp. object<->object), so routing those types
+    # through the generic node-text builder would silently break it.
+    # ``_embeddable_text`` picks the right text per type.
 
     embedding: list[float] = []
     if deduplicate and dedup_config.enabled:
@@ -310,7 +309,7 @@ async def add_entity(
 
 
 # ---------------------------------------------------------------------------
-# Internals — embeddable-text selection (#042)
+# Internals — embeddable-text selection
 # ---------------------------------------------------------------------------
 
 
@@ -323,25 +322,18 @@ def _embeddable_text(
 ) -> str:
     """Pick the text the prospective entity is embedded on for dedup + persist.
 
-    GENERIC node types (PERSON, TASK, ORGANIZATION, …) embed their
-    **node-text** — the shared :func:`node_to_embedding_text` builder from
-    #041, so the dedup query vector lives in the SAME space as the
-    persisted corpus (indexing's backfill embeds the identical text) and
-    the vector can be reused verbatim as the new node's ``embedding``.
+    GENERIC node types embed their **node-text** (the shared
+    :func:`node_to_embedding_text` builder), so the dedup query vector lives
+    in the SAME space as the persisted corpus (indexing's backfill embeds
+    the identical text) and the vector is reused verbatim as the new node's
+    ``embedding``.
 
-    PREFERENCE / FACT keep the #032 special-case: PREFERENCE embeds
-    ``properties.statement`` and FACT embeds ``properties.object`` so the
-    supersession resolver's statement<->statement (resp. object<->object)
-    comparison stays apples-to-apples. The statement text wins ONLY when
-    present and non-empty; otherwise the type falls back to the generic
-    node-text builder (a malformed preference/fact with no statement is
-    still embeddable rather than blank).
-
-    The node dict passed to :func:`node_to_embedding_text` mirrors the
-    persisted node shape (``type`` + ``name`` + ``canonical_name`` +
-    ``properties``) so the text matches what indexing would later build
-    from the stored row — that identity is what keeps the dedup-created
-    vector and the backfill vector from drifting.
+    PREFERENCE embeds ``properties.statement`` and FACT embeds
+    ``properties.object`` so supersession's statement<->statement (resp.
+    object<->object) comparison stays apples-to-apples. The statement text
+    wins only when present and non-empty; otherwise the type falls back to
+    the generic node-text builder so a malformed preference/fact is still
+    embeddable rather than blank.
     """
 
     if entity_type == NodeType.PREFERENCE:
@@ -357,7 +349,7 @@ def _embeddable_text(
     # promoted to top-level columns by ``_upsert_node`` and never live under
     # ``properties`` on the stored row, so strip them here too. Otherwise the
     # dedup-time node-text would carry properties the backfill's text (built
-    # from the stored row) does not, and the two #041 call sites would drift.
+    # from the stored row) does not, and the two would drift.
     node = {
         "type": entity_type.value,
         "name": name,
