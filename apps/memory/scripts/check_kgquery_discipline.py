@@ -98,6 +98,15 @@ _ALLOWLIST: frozenset[str] = frozenset(
         "src/tree/memory/extraction/pipeline.py",
         "src/tree/memory/indexing/core.py",
         "src/tree/memory/review/core.py",
+        # #050: watermark helpers for the dream/consolidation pipeline.
+        # This file touches the SEPARATE ``knowledge_graph_meta_state``
+        # collection (NOT ``knowledge_graph``) — the lint's local-handle
+        # heuristic (a var named ``collection``) flags it as a false
+        # positive. Every read/write keys off the tenant-scoped
+        # deterministic ``_id = "{user_id}:{job}"`` and threads ``user_id``
+        # in, so cross-tenant access is impossible by construction. Covered
+        # by tests/integration/memory/test_meta_state.py (tenant-isolation).
+        "src/tree/memory/consolidation/meta_state.py",
         # --- Operator / exploration scripts (audited, tenant-aware) ---
         "scripts/query_graph.py",  # CLI: every find() carries user_id
         "scripts/demo_graphrag.py",  # throwaway exploration; not prod.
