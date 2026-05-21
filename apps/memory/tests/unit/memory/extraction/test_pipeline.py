@@ -26,6 +26,7 @@ from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResul
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.pipeline import (
     _CachedSingleEmbedding,
+    _chunk_documents,
     _dedupe_entities,
     _dispatch_entity_write,
     _embed_entities,
@@ -33,6 +34,7 @@ from tree.memory.extraction.pipeline import (
     _extract_chunks_and_structural,
     _llm_extract_entities,
     _resolve_entities,
+    _validate_raws,
     embed_entities_task,
     extract_chunks_and_structural_task,
     llm_extract_entities_task,
@@ -748,6 +750,346 @@ class TestDedupeEntitiesParallelization:
         # ``dedupe_entity`` was called only for the two keys that had vectors.
         called_names = {call.kwargs["name"] for call in dedupe_spy.call_args_list}
         assert called_names == {"name0", "name2"}
+
+
+# ---------------------------------------------------------------------------
+# R7 (#059) — doc-level chunking fan-out
+# ---------------------------------------------------------------------------
+
+
+def _chunked_for(doc_id: str) -> ChunkedDocument:
+    """A trivial, identity-tagged ChunkedDocument for the chunking fan-out tests."""
+
+    return ChunkedDocument(
+        document_id=doc_id,
+        source_uri=f"u-{doc_id}",
+        source_type="huggingface",
+        chunk_texts=[f"chunk-{doc_id}"],
+        chunk_ids=[f"cid-{doc_id}"],
+    )
+
+
+class TestChunkDocumentsFanout:
+    """#059 R7 — the per-doc chunking task ① is fanned out under a bounded
+    semaphore sized by ``doc_concurrency``. Output ORDER + contents must stay
+    byte-identical to the sequential path; the LLM task ② loop is untouched."""
+
+    async def test_default_concurrency_one_preserves_order_and_contents(
+        self, mocker, monkeypatch
+    ) -> None:
+        # Arrange: default doc_concurrency=1 (serial-equivalent).
+        monkeypatch.delenv("TREE_EXTRACTION__DOC_CONCURRENCY", raising=False)
+        docs = [_make_document(doc_id=f"d{i}") for i in range(5)]
+
+        async def _fake_task(doc: Any) -> ChunkedDocument:
+            return _chunked_for(str(doc.id))
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            new=AsyncMock(side_effect=_fake_task),
+        )
+
+        # Act
+        chunked_docs = await _chunk_documents(docs)
+
+        # Assert: same order + contents as a straight sequential map.
+        expected = [_chunked_for(str(d.id)) for d in docs]
+        assert chunked_docs == expected
+        assert [c.document_id for c in chunked_docs] == [str(d.id) for d in docs]
+
+    async def test_concurrency_above_one_runs_concurrently_bounded(
+        self, mocker, monkeypatch
+    ) -> None:
+        # Arrange: bound concurrency to 4; track max simultaneous in-flight.
+        monkeypatch.setenv("TREE_EXTRACTION__DOC_CONCURRENCY", "4")
+        docs = [_make_document(doc_id=f"d{i}") for i in range(12)]
+
+        in_flight = 0
+        max_in_flight = 0
+        gate = asyncio.Event()
+        started = 0
+
+        async def _slow_task(doc: Any) -> ChunkedDocument:
+            nonlocal in_flight, max_in_flight, started
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            started += 1
+            # Once the first wave (== concurrency) is in flight, release.
+            if started >= 4:
+                gate.set()
+            await gate.wait()
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return _chunked_for(str(doc.id))
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            new=AsyncMock(side_effect=_slow_task),
+        )
+
+        # Act
+        chunked_docs = await _chunk_documents(docs)
+
+        # Assert: ran in parallel up to — but never beyond — the bound.
+        assert max_in_flight == 4
+        # Determinism: order + contents identical to the sequential result.
+        assert chunked_docs == [_chunked_for(str(d.id)) for d in docs]
+
+    async def test_concurrency_above_one_identical_to_sequential(
+        self, mocker, monkeypatch
+    ) -> None:
+        # Even when tasks finish OUT of dispatch order, gather preserves input
+        # order, so the result is byte-identical to a sequential map.
+        monkeypatch.setenv("TREE_EXTRACTION__DOC_CONCURRENCY", "4")
+        docs = [_make_document(doc_id=f"d{i}") for i in range(8)]
+
+        async def _jittered_task(doc: Any) -> ChunkedDocument:
+            # Later docs finish first (reverse-skewed delay) to expose any
+            # ordering bug in result collection.
+            idx = int(str(doc.id)[1:])
+            await asyncio.sleep((len(docs) - idx) * 0.001)
+            return _chunked_for(str(doc.id))
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            new=AsyncMock(side_effect=_jittered_task),
+        )
+
+        chunked_docs = await _chunk_documents(docs)
+
+        assert chunked_docs == [_chunked_for(str(d.id)) for d in docs]
+
+    async def test_empty_docs_returns_empty_list(self, mocker) -> None:
+        task_spy = mocker.patch(
+            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            new=AsyncMock(),
+        )
+
+        out = await _chunk_documents([])
+
+        assert out == []
+        task_spy.assert_not_called()
+
+    async def test_uses_gather_and_semaphore_gated_by_doc_concurrency(self) -> None:
+        # Diff-guard: the chunking fan-out must use asyncio.gather + a Semaphore
+        # sized by ``doc_concurrency`` — not a bare sequential await loop.
+        import inspect
+
+        from tree.memory.extraction.pipeline import _chunk_documents as fn
+
+        src = inspect.getsource(fn)
+        assert "asyncio.gather" in src
+        assert "Semaphore" in src
+        assert "doc_concurrency" in src
+
+    async def test_llm_task_loop_left_sequential(self) -> None:
+        # R6 is OUT OF SCOPE: the LLM task ② loop in the flow body must remain a
+        # plain sequential ``for chunked in chunked_docs`` await loop with NO
+        # added fan-out around ``llm_extract_entities_task``.
+        import inspect
+
+        from tree.memory.extraction.pipeline import memory_extraction
+
+        # ``memory_extraction`` is a Prefect ``@flow`` — the original function
+        # body lives on ``.fn``.
+        src = inspect.getsource(memory_extraction.fn)
+        assert "for chunked in chunked_docs:" in src
+        assert "raws.append(await llm_extract_entities_task(chunked))" in src
+        # The chunking task ① loop is now the bounded gather helper.
+        assert "_chunk_documents(docs)" in src
+
+
+# ---------------------------------------------------------------------------
+# R4 (#059) — _validate_raws audit writes via a single insert_many
+# ---------------------------------------------------------------------------
+
+
+class TestValidateRawsInsertMany:
+    """#059 R4 — audit/rejection rows are accumulated and written with a single
+    ``insert_many`` per collection. The row CONTENTS and the SET of rows written
+    must match the prior per-row ``insert_one`` behavior."""
+
+    @staticmethod
+    def _make_database() -> Any:
+        """A database mock whose collections record insert_one/insert_many."""
+
+        def _collection(_name: str) -> Any:
+            col = MagicMock(name=f"col-{_name}")
+            col.insert_one = AsyncMock(return_value=MagicMock())
+            col.insert_many = AsyncMock(return_value=MagicMock())
+            return col
+
+        cols: dict[str, Any] = {}
+
+        def _getitem(name: str) -> Any:
+            if name not in cols:
+                cols[name] = _collection(name)
+            return cols[name]
+
+        database = MagicMock(name="database")
+        database.__getitem__.side_effect = _getitem
+        database._cols = cols  # expose for assertions
+        return database
+
+    @staticmethod
+    def _extractor() -> Any:
+        from tree.entities.knowledge_graph import ExtractorInfo
+
+        return ExtractorInfo(name="fake-llm", version="tree-memory-0.0.0+test")
+
+    def _raw_with_rejections_and_drops(self) -> RawExtraction:
+        from tree.memory.types import RawRejection
+
+        # One parser-level raw_rejection, one envelope-invalid node, one valid
+        # node with a dropped field, one envelope-invalid edge, one valid edge
+        # with a dropped field — exercises every audit-write branch.
+        bad_node = ExtractedNode(
+            name="",  # empty name -> envelope invalid
+            type=NodeType.PERSON,
+            subtype=None,
+            properties={},
+            chunk_id="c1",
+        )
+        good_node = ExtractedNode(
+            name="Alice",
+            type=NodeType.PERSON,
+            subtype="individual",  # passes the envelope (subtype required)
+            properties={"email": "a@x.com", "bogus_field": 5},
+            chunk_id="c1",
+        )
+        result = ExtractionResult(
+            nodes=[bad_node, good_node],
+            edges=[],
+            raw_rejections=[
+                RawRejection(
+                    kind="node",
+                    reason="unknown_type",
+                    raw={"type": "weird", "name": "x"},
+                    chunk_id="c1",
+                )
+            ],
+        )
+        return RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="u1",
+            chunked=ChunkedDocument(
+                document_id="507f1f77bcf86cd799439011",
+                source_uri="u1",
+                source_type="huggingface",
+            ),
+            extracted=result,
+        )
+
+    async def test_writes_one_insert_many_per_collection_no_insert_one(self) -> None:
+        database = self._make_database()
+        raw = self._raw_with_rejections_and_drops()
+
+        await _validate_raws(
+            raws=[raw],
+            database=database,
+            user_id=_USER_ID,
+            extractor=self._extractor(),
+        )
+
+        rej = database["extraction_rejections"]
+        dropped = database["extraction_dropped_fields"]
+        # Per-row insert_one is gone; a single insert_many per collection.
+        rej.insert_one.assert_not_called()
+        dropped.insert_one.assert_not_called()
+        rej.insert_many.assert_called_once()
+        dropped.insert_many.assert_called_once()
+
+    async def test_rejection_rows_match_prior_per_row_contents(self) -> None:
+        database = self._make_database()
+        raw = self._raw_with_rejections_and_drops()
+
+        await _validate_raws(
+            raws=[raw],
+            database=database,
+            user_id=_USER_ID,
+            extractor=self._extractor(),
+        )
+
+        rows = database["extraction_rejections"].insert_many.call_args.args[0]
+        # Two rejections: the parser raw_rejection + the empty-name envelope drop.
+        reasons = [r["rejection_reason"] for r in rows]
+        assert "unknown_type" in reasons
+        assert len(rows) == 2
+        # Every row carries the expected scalar fields (contents preserved).
+        for r in rows:
+            assert r["user_id"] == _USER_ID
+            assert r["rejected_at_stage"] == "envelope"
+            assert "raw_row" in r and "extractor" in r and "timestamp" in r
+            assert "_id" not in r
+
+    async def test_dropped_field_rows_match_prior_per_row_contents(self) -> None:
+        database = self._make_database()
+        raw = self._raw_with_rejections_and_drops()
+
+        await _validate_raws(
+            raws=[raw],
+            database=database,
+            user_id=_USER_ID,
+            extractor=self._extractor(),
+        )
+
+        rows = database["extraction_dropped_fields"].insert_many.call_args.args[0]
+        # The good node's "bogus_field" is dropped -> exactly one dropped row.
+        assert len(rows) == 1
+        assert rows[0]["dropped_field"] == "bogus_field"
+        assert rows[0]["user_id"] == _USER_ID
+        assert "_id" not in rows[0]
+
+    async def test_empty_input_writes_nothing(self) -> None:
+        database = self._make_database()
+
+        out = await _validate_raws(
+            raws=[],
+            database=database,
+            user_id=_USER_ID,
+            extractor=self._extractor(),
+        )
+
+        assert out == []
+        # No collections touched at all — no insert_one, no insert_many.
+        assert database._cols == {}
+
+    async def test_clean_raws_write_no_audit_rows(self) -> None:
+        # A raw with only valid nodes/edges must produce NO insert_many calls
+        # (empty accumulator -> no-op, no crash).
+        database = self._make_database()
+        clean = RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="u1",
+            chunked=ChunkedDocument(
+                document_id="507f1f77bcf86cd799439011",
+                source_uri="u1",
+                source_type="huggingface",
+            ),
+            extracted=ExtractionResult(
+                nodes=[
+                    ExtractedNode(
+                        name="Alice",
+                        type=NodeType.PERSON,
+                        subtype="individual",  # passes envelope; no drops
+                        properties={"email": "a@x.com"},
+                        chunk_id="c1",
+                    )
+                ],
+                edges=[],
+            ),
+        )
+
+        await _validate_raws(
+            raws=[clean],
+            database=database,
+            user_id=_USER_ID,
+            extractor=self._extractor(),
+        )
+
+        for col in database._cols.values():
+            col.insert_many.assert_not_called()
+            col.insert_one.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

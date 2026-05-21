@@ -299,6 +299,33 @@ extract_chunks_and_structural_task = task(
 )
 
 
+async def _chunk_documents(docs: list[Any]) -> list[ChunkedDocument]:
+    """Run task ① (chunk + structural) over every document, fanned out under a
+    bounded semaphore sized by ``doc_concurrency`` (#059 R7).
+
+    Task ① is purely CPU/DB-bound — no shared LLM quota, no read-after-write —
+    so the per-doc calls parallelize safely. ``doc_concurrency`` defaults to 1
+    (serial-equivalent = today's exact behavior); operators opt into overlap via
+    ``TREE_EXTRACTION__DOC_CONCURRENCY``.
+
+    ``asyncio.gather`` preserves INPUT order, so ``chunked_docs`` comes back in
+    the same order (and with the same contents) as the prior sequential loop —
+    downstream per-doc iteration stays deterministic. We keep the underlying
+    Prefect task call (not ``.map()``) so its ``INPUTS`` cache still applies.
+    """
+
+    if not docs:
+        return []
+
+    semaphore = asyncio.Semaphore(_live_app_config().extraction.doc_concurrency)
+
+    async def _one(doc: Any) -> ChunkedDocument:
+        async with semaphore:
+            return await extract_chunks_and_structural_task(doc)
+
+    return list(await asyncio.gather(*[_one(doc) for doc in docs]))
+
+
 # ---------------------------------------------------------------------------
 # Task ② — LLM extraction
 # ---------------------------------------------------------------------------
@@ -402,21 +429,20 @@ def _make_extractor_info() -> ExtractorInfo:
     return ExtractorInfo(name=llm_name, version=f"tree-memory-{pkg_version}")
 
 
-async def _write_envelope_rejection(
+def _build_envelope_rejection_row(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     document_id: PydanticObjectId | None,
     chunk_id: str | None,
     raw_row: dict[str, Any],
     reason: str,
     extractor: ExtractorInfo,
-) -> None:
-    """Insert one ``extraction_rejections`` audit row.
+) -> dict[str, Any]:
+    """Build one ``extraction_rejections`` audit row (no DB write).
 
-    Uses the raw Mongo collection (not Beanie's ``.insert()``) so the
-    write is scoped to the same ``database`` handle the rest of the
-    pipeline uses — keeps test patches uniform.
+    Rows are accumulated by :func:`_validate_raws` and flushed with a single
+    ``insert_many`` (#059 R4) — the row contents are identical to the prior
+    per-row ``insert_one`` path.
     """
 
     rejection = ExtractionRejection(
@@ -429,14 +455,11 @@ async def _write_envelope_rejection(
         raw_row=truncate_raw_row(raw_row),
         extractor=extractor,
     )
-    await database["extraction_rejections"].insert_one(
-        rejection.model_dump(by_alias=True, exclude={"id"})
-    )
+    return rejection.model_dump(by_alias=True, exclude={"id"})
 
 
-async def _write_dropped_field(
+def _build_dropped_field_row(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     document_id: PydanticObjectId | None,
     chunk_id: str | None,
@@ -447,8 +470,8 @@ async def _write_dropped_field(
     raw_value: Any,
     reason: str,
     extractor: ExtractorInfo,
-) -> None:
-    """Insert one ``extraction_dropped_fields`` audit row."""
+) -> dict[str, Any]:
+    """Build one ``extraction_dropped_fields`` audit row (no DB write)."""
 
     dropped = ExtractionDroppedField(
         user_id=user_id,
@@ -463,9 +486,7 @@ async def _write_dropped_field(
         reason=reason,
         extractor=extractor,
     )
-    await database["extraction_dropped_fields"].insert_one(
-        dropped.model_dump(by_alias=True, exclude={"id"})
-    )
+    return dropped.model_dump(by_alias=True, exclude={"id"})
 
 
 async def _validate_raws(
@@ -494,6 +515,11 @@ async def _validate_raws(
     """
 
     log = _get_run_logger()
+    # #059 R4: accumulate audit rows and flush each collection with a single
+    # ``insert_many`` instead of per-row ``insert_one`` writes. The row contents
+    # and the SET of rows written are unchanged.
+    rejection_rows: list[dict[str, Any]] = []
+    dropped_field_rows: list[dict[str, Any]] = []
     for raw in raws:
         document_id: PydanticObjectId | None
         try:
@@ -505,14 +531,15 @@ async def _validate_raws(
         # invalid endpoints, ...) flow through ``raw_rejections``. Surface
         # each one as an ``extraction_rejections`` row.
         for rejection in raw.extracted.raw_rejections:
-            await _write_envelope_rejection(
-                database=database,
-                user_id=user_id,
-                document_id=document_id,
-                chunk_id=rejection.chunk_id or None,
-                raw_row=rejection.raw,
-                reason=rejection.reason,
-                extractor=extractor,
+            rejection_rows.append(
+                _build_envelope_rejection_row(
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=rejection.chunk_id or None,
+                    raw_row=rejection.raw,
+                    reason=rejection.reason,
+                    extractor=extractor,
+                )
             )
         raw.extracted.raw_rejections = []
 
@@ -528,19 +555,20 @@ async def _validate_raws(
                 name=node.name,
             )
             if not envelope.ok:
-                await _write_envelope_rejection(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=node.chunk_id or None,
-                    raw_row={
-                        "type": type_value,
-                        "subtype": node.subtype,
-                        "name": node.name,
-                        "properties": node.properties,
-                    },
-                    reason=envelope.reason or "envelope_invalid",
-                    extractor=extractor,
+                rejection_rows.append(
+                    _build_envelope_rejection_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=node.chunk_id or None,
+                        raw_row={
+                            "type": type_value,
+                            "subtype": node.subtype,
+                            "name": node.name,
+                            "properties": node.properties,
+                        },
+                        reason=envelope.reason or "envelope_invalid",
+                        extractor=extractor,
+                    )
                 )
                 log.info(
                     "envelope_rejection node type=%s name=%r reason=%s",
@@ -557,18 +585,19 @@ async def _validate_raws(
                 node.properties or {}, parent_schema, extras_schema
             )
             for drop in drops:
-                await _write_dropped_field(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=node.chunk_id or None,
-                    row_type=type_value,
-                    row_subtype=node.subtype,
-                    semantic_type=None,
-                    dropped_field=drop.field,
-                    raw_value=drop.value,
-                    reason=drop.reason,
-                    extractor=extractor,
+                dropped_field_rows.append(
+                    _build_dropped_field_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=node.chunk_id or None,
+                        row_type=type_value,
+                        row_subtype=node.subtype,
+                        semantic_type=None,
+                        dropped_field=drop.field,
+                        raw_value=drop.value,
+                        reason=drop.reason,
+                        extractor=extractor,
+                    )
                 )
             node.properties = validated_props
             validated_nodes.append(node)
@@ -596,22 +625,23 @@ async def _validate_raws(
                 semantic_type=edge.semantic_type,
             )
             if not envelope.ok:
-                await _write_envelope_rejection(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=edge.chunk_id or None,
-                    raw_row={
-                        "type": type_value,
-                        "semantic_type": edge.semantic_type,
-                        "source_type": src_type,
-                        "source_node_id": edge.source_node_id,
-                        "target_type": tgt_type,
-                        "target_node_id": edge.target_node_id,
-                        "properties": edge.properties,
-                    },
-                    reason=envelope.reason or "envelope_invalid",
-                    extractor=extractor,
+                rejection_rows.append(
+                    _build_envelope_rejection_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=edge.chunk_id or None,
+                        raw_row={
+                            "type": type_value,
+                            "semantic_type": edge.semantic_type,
+                            "source_type": src_type,
+                            "source_node_id": edge.source_node_id,
+                            "target_type": tgt_type,
+                            "target_node_id": edge.target_node_id,
+                            "properties": edge.properties,
+                        },
+                        reason=envelope.reason or "envelope_invalid",
+                        extractor=extractor,
+                    )
                 )
                 log.info(
                     "envelope_rejection edge type=%s semantic=%s reason=%s",
@@ -628,24 +658,32 @@ async def _validate_raws(
                 edge.properties or {}, edge_schema, None
             )
             for drop in drops:
-                await _write_dropped_field(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=edge.chunk_id or None,
-                    row_type=type_value,
-                    row_subtype=None,
-                    semantic_type=edge.semantic_type,
-                    dropped_field=drop.field,
-                    raw_value=drop.value,
-                    reason=drop.reason,
-                    extractor=extractor,
+                dropped_field_rows.append(
+                    _build_dropped_field_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=edge.chunk_id or None,
+                        row_type=type_value,
+                        row_subtype=None,
+                        semantic_type=edge.semantic_type,
+                        dropped_field=drop.field,
+                        raw_value=drop.value,
+                        reason=drop.reason,
+                        extractor=extractor,
+                    )
                 )
             edge.properties = validated_props
             validated_edges.append(edge)
 
         raw.extracted.nodes = validated_nodes
         raw.extracted.edges = validated_edges
+
+    # #059 R4: one ``insert_many`` per collection. Skip the call entirely when
+    # nothing accumulated (empty/clean input) — ``insert_many([])`` would raise.
+    if rejection_rows:
+        await database["extraction_rejections"].insert_many(rejection_rows)
+    if dropped_field_rows:
+        await database["extraction_dropped_fields"].insert_many(dropped_field_rows)
 
     return raws
 
@@ -1498,9 +1536,10 @@ async def memory_extraction(
         raise ValueError(f"User {user_id} not found; cannot run extraction.")
 
     # ----- Tasks ① and ② — per-doc fan-out ---------------------------------
-    chunked_docs: list[ChunkedDocument] = []
-    for doc in docs:
-        chunked_docs.append(await extract_chunks_and_structural_task(doc))
+    # Task ① (chunk + structural) fans out under a bounded semaphore sized by
+    # ``doc_concurrency`` (#059 R7, default 1 = serial-equivalent). gather
+    # preserves order so ``chunked_docs`` stays deterministic for the loop below.
+    chunked_docs: list[ChunkedDocument] = await _chunk_documents(docs)
 
     raws: list[RawExtraction] = []
     for chunked in chunked_docs:
