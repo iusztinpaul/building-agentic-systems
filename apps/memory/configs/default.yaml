@@ -66,14 +66,16 @@ models:
   # now it mirrors search_embedding so behavior is unchanged.
   resolution_embedding:
     provider: voyage
-    model: voyage-multimodal-3
+    model: voyage-3.5
     dimensions: 1024
   # Persisted embedding used for dedup + search/query. Its output is the
   # node `embedding` field and the live mongot `vector_index` is
-  # dimension-coupled to its `dimensions`.
+  # dimension-coupled to its `dimensions`. voyage-3.5 is a TEXT model routed
+  # to /v1/embeddings (#048); 1024-d is unchanged from voyage-multimodal-3 so
+  # the vector index numDimensions and the dim-guard are unaffected.
   search_embedding:
     provider: voyage
-    model: voyage-multimodal-3
+    model: voyage-3.5
     dimensions: 1024
   # #044 real-time request-batching caps for /v1/multimodalembeddings.
   # Pack many texts into FEWER synchronous embed calls (resolution + dedup
@@ -113,6 +115,27 @@ query:
   max_hops: 1
   rrf_k: 60
   embedding_batch_size: 64
+
+# Dream-consolidation pipeline (#051): an incremental, watermark-bounded
+# re-run of the three-tier dedup across the whole knowledge graph, catching
+# near-duplicate nodes that parallel ingestion's inline dedup missed.
+# Thresholds (auto_merge/flag/fuzzy) are NOT duplicated here — they stay in
+# extraction.dedup so the inline and dream surfaces can never drift.
+dream:
+  enabled: true
+  # Schedule consumed by the dream-consolidation-etl deployment (#052):
+  # the parent fan-out flow runs once per cron tick across all active users.
+  cron: "0 4 * * *"
+  # Report-only first rollout; flip to false to enable mutating consolidation.
+  dry_run: true
+  # Cap on candidate pairs examined per run. Once hit, the sweep stops
+  # driving and records cap_hit=True in its stats.
+  max_pairs: 10000
+  # Gate for the LLM contradiction/supersession sweep (#052). Off by
+  # default: prefs/facts get the normal semantic + fuzzy dedup with ZERO
+  # LLM calls. Flip to true to run the Gemini contradiction judge over the
+  # incremental delta (cost: bounded LLM calls per partition).
+  enable_supersession_judge: false
 
 mcp:
   max_retries: 1

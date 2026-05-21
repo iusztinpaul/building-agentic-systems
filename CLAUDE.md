@@ -121,6 +121,30 @@ which is tested only via integration tests.
 
 **Diagnosis tip.** If `make memory-serve-workflows` logs an embedding-dimension-mismatch error, the YAML is the source of truth — fix `apps/memory/configs/default.yaml`'s `models.search_embedding.dimensions` (and rebuild the mongot vector index if needed), do not add an env override. The persisted vectors come from the **search** embedding (#039); the transient `models.resolution_embedding` is not index-coupled.
 
+> [!CAUTION]
+> **Vector-space change (same dimension, different model) — re-extraction required.**
+>
+> Changing `models.search_embedding.model` (or `models.resolution_embedding.model`) to a model that produces the **same** `dimensions` but in a **different vector space** is a silent-corruption hazard. The worked example is the #048 default flip: `voyage-multimodal-3 → voyage-3.5`. Both are **1024-dimensional**, so the index dimension is unchanged — but the two models embed text into geometrically incomparable vector spaces.
+>
+> **Why nothing fires.** The boot-time dim-guard `assert_settings_match_live_vector_index` (`apps/memory/src/tree/memory/indexing/core.py`) only compares the live index's `numDimensions` against the configured `dimensions`. Because the dimension is identical (1024 → 1024), the guard returns `None` and the service starts cleanly. There is **no crash, no warning, no automatic signal**. The *only* symptom is degraded semantic search and dedup: `$vectorSearch` returns wrong-but-superficially-plausible results, because every persisted node `embedding` was written under the *old* model and is now stale relative to query vectors computed under the *new* model. This runbook IS the signal — there is no other.
+>
+> Contrast with the **Diagnosis tip** above: that covers a *dimension* change, which the dim-guard *does* catch and refuse to boot on. This section covers the silent same-dimension case the guard misses.
+>
+> **Trigger.** Any change to `models.search_embedding.model` (or `resolution_embedding.model`) that keeps `dimensions` constant. If you change the model and the dimension also changes, the dim-guard catches it and you follow the Diagnosis tip instead.
+>
+> **Recovery — re-extract, do not just re-index.** Re-running the indexing pipeline alone is **INSUFFICIENT**: `embed_nodes` (`apps/memory/src/tree/memory/indexing/core.py`) is a backfill — it only embeds nodes whose `embedding` is missing/`None`/empty (`embedding: {"$in": [[], None]}`) and **skips rows that already have an embedding**. The stale vectors already exist, so re-indexing leaves them untouched. The canonical full refresh is the `RESET_ONTOLOGY=1` migration, which drops `knowledge_graph` and re-extracts every node under the new model:
+>
+> 1. **Rehearse first** with `DRY_RUN=1` to preview the drop without mutating anything:
+>    ```bash
+>    make memory-migrate-multi-tenancy USER_IDENTIFIER=p.b.iusztin@gmail.com RESET_ONTOLOGY=1 DRY_RUN=1
+>    ```
+> 2. **Run for real** (drops `knowledge_graph`, re-creates `person:self`, ensures indexes, triggers extraction + indexing under the new model):
+>    ```bash
+>    make memory-migrate-multi-tenancy USER_IDENTIFIER=p.b.iusztin@gmail.com RESET_ONTOLOGY=1
+>    ```
+>    (`make memory-serve-workflows` must be running so the Prefect worker picks up the triggered deployments. See `apps/memory/scripts/migrate_multi_tenancy.py` for the full Phase-2-5 contract.)
+> 3. **Convergence window.** After re-extraction repopulates and re-embeds the index, allow the mongot vector index ~30-90s to converge before trusting `$vectorSearch` results — queries against a still-converging index can return empty or partial result sets.
+
 ### macOS torch / TMPDIR shim
 
 `apps/memory/Makefile` exports `TMPDIR := $(shell getconf DARWIN_USER_TEMP_DIR)` on Darwin so every `make memory-*` target inherits a sub-104-byte tmpdir. Background: macOS `sockaddr_un.sun_path` is only 104 bytes, and torch's `torch_shm_manager` constructs `<TMPDIR>/torch_<pid>_<rand>/manager.sock`; long inherited `TMPDIR`s (some agent shells inherit an ~81-char `com.apple.shortcuts.mac-helper` path) overflow that buffer and SIGABRT the helper, surfacing as `RuntimeError: no response from torch_shm_manager`. If you run memory-app scripts **outside** `make` (e.g. directly via `uv run ...`), set `TMPDIR=$(getconf DARWIN_USER_TEMP_DIR)` manually. The regression sentinel is `apps/memory/tests/integration/test_torch_shared_memory.py`; see `tracker/done/035-pin-torch-version-py314-arm64.md` for the full diagnostic.
@@ -261,6 +285,8 @@ Two **orthogonal** pytest markers gate test selection:
 CI runs `pytest tests/integration -m "not requires_mongot" --timeout=300`. The Tester's acceptance-gate target `make memory-integration-tests-all` runs everything, including mongot — so before signing off on a feature, run it locally with the full stack up.
 
 `pytest-xdist` is installed in dev deps but **not enabled in CI**: the autouse `_clean_collections` fixture in `tests/integration/conftest.py` wipes every collection between tests, so parallel workers race against each other. If we ever need parallelization we'd need per-worker test DB names (`PYTEST_XDIST_WORKER` suffix).
+
+**Run `requires_mongot` suites in ISOLATION — the docker stack is shared across worktrees.** The local `tree-mongodb` / `tree-mongot` / `tree-prefect` containers are shared by every git worktree on this machine. Running two integration suites — or `make memory-integration-tests-all` plus ad-hoc adversarial probes — against the stack **at the same time** corrupts the shared mongot vector index. Symptoms: `indexed with N dimensions but queried with M`, `DuplicateKeyError` on `users.identifier`, `$vectorSearch` `INITIAL_SYNC` errors. These are **dev-infra contention, not code regressions** — an isolated re-run is clean. So: run the acceptance suite to completion on a quiesced stack first, run any extra probes separately against throwaway DB names, and never run two integration suites against the shared stack concurrently. Don't chase these flakes as bugs.
 
 ## Running Pipelines
 

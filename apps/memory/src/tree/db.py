@@ -7,11 +7,13 @@ from tree.entities.extraction_audit import (
     ExtractionRejection,
 )
 from tree.entities.knowledge_graph import KnowledgeGraphEntry
+from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.users import User
 
 ALL_DOCUMENT_MODELS = [
     Document,
     KnowledgeGraphEntry,
+    KnowledgeGraphMetaState,
     User,
     ExtractionRejection,
     ExtractionDroppedField,

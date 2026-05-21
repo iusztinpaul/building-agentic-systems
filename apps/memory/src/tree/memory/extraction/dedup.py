@@ -225,18 +225,56 @@ async def dedupe_entity(
     if not candidates:
         return DeduplicationResult(action="none")
 
-    # Atlas $vectorSearch returns hits ordered by score descending, but we
-    # re-rank every candidate so a lower-vec hit with a strong fuzzy match
-    # can still win — matching the reference ``_check_for_duplicates`` loop
-    # in ``long_term.py``. Atlas' cosine score ``(1 + cos) / 2`` is converted
-    # back to raw cosine per candidate so the tier thresholds (and the
-    # public ``similarity_score`` field) speak raw cosine — matching
-    # ``resolution.semantic._cosine_similarity`` and the rest of the codebase.
+    return decide_from_candidates(name=name, candidates=candidates, config=config)
+
+
+def decide_from_candidates(
+    *,
+    name: str,
+    candidates: list[dict[str, Any]],
+    config: DeduplicationConfig,
+    exclude_ids: frozenset[str] | set[str] | None = None,
+) -> DeduplicationResult:
+    """Re-rank ``candidates`` and return the tiered :class:`DeduplicationResult`.
+
+    Factored out of :func:`dedupe_entity` so callers that already hold a
+    candidate list (or that must drop one or more ``_id``\\ s before deciding)
+    reuse the *exact same* re-rank + tier logic rather than re-implementing
+    it. The dream-consolidation sweep (#051) uses ``exclude_ids`` to drop the
+    driving node's own self-match (cos≈1.0) before re-deciding over the
+    remaining candidates — the self-exclusion ``dedupe_entity`` documents as
+    the caller's job.
+
+    Atlas $vectorSearch returns hits ordered by score descending, but we
+    re-rank every candidate so a lower-vec hit with a strong fuzzy match can
+    still win — matching the reference ``_check_for_duplicates`` loop. Atlas'
+    cosine score ``(1 + cos) / 2`` is converted back to raw cosine per
+    candidate so the tier thresholds (and ``similarity_score``) speak raw
+    cosine.
+
+    Args:
+        name: The prospective entity's surface form (drives the fuzzy boost).
+        candidates: The ``$vectorSearch`` hits (each carries
+            ``similarity_score`` from ``$meta: vectorSearchScore``).
+        config: A validated :class:`DeduplicationConfig`.
+        exclude_ids: ``_id`` strings to skip entirely (e.g. the self node).
+            ``None`` excludes nothing.
+
+    Returns:
+        A :class:`DeduplicationResult`; ``candidates`` always echoes the
+        full input list (excluded ids included) so callers keep the audit
+        trail.
+    """
+
+    excluded = exclude_ids or frozenset()
     best_match: dict[str, Any] | None = None
     best_score: float = 0.0
     best_match_type: Literal["embedding", "both"] = "embedding"
 
     for candidate in candidates:
+        if str(candidate.get("_id")) in excluded:
+            continue
+
         raw_atlas_score = float(candidate.get("similarity_score", 0.0))
         semantic_score = 2.0 * raw_atlas_score - 1.0
         semantic_score = max(-1.0, min(1.0, semantic_score))

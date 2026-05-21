@@ -147,6 +147,16 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
 	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
 
+
+# --- Dream Consolidation ---
+#
+# The scheduled fan-out parent flow takes NO USER_ID — it enumerates active
+# users itself and runs one per-user dream each. dry_run is controlled by
+# app_config.dream.dry_run (YAML), not a flag.
+
+run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefect (all active users). No USER_ID.
+	uv run python scripts/run_dream_consolidation.py
+
 # --- Migration (Phase 1 one-shot + Phase 2-5 reset-ontology) ---
 
 migrate-multi-tenancy: # Multi-tenancy migration. Default = Phase-1 bootstrap. RESET_ONTOLOGY=1 = Phase 2-5 wipe-and-rebuild. Requires USER_IDENTIFIER=<email|sub>. Optional NAME="Display Name", DRY_RUN=1, NO_TRIGGER_PIPELINES=1, RESET_ONTOLOGY=1.

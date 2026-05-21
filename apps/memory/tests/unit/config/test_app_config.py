@@ -3,6 +3,7 @@ from collections import Counter
 
 from tree.config.app_config import (
     AppConfig,
+    DreamConfig,
     HuggingFaceDatasetSource,
     SubstackArticleSource,
     SubstackRssSource,
@@ -23,19 +24,19 @@ class TestLoadAppConfig:
         # live YAML value so the unit suite stays green; bumping the
         # model in YAML requires a single matching change here.
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # default.yaml is now authoritative for embedding (#034). After
-        # #038 the project consolidated on a single Voyage client backed
-        # by the multimodal endpoint; ``voyage-multimodal-3`` is also
-        # 1024-d, so the dim stays put while the model identifier
-        # changes. #039 split the single ``embedding`` block into a
-        # transient ``resolution_embedding`` and a persisted
-        # ``search_embedding``; both still point at the same model/dim so
-        # this task is behavior-preserving.
+        # default.yaml is authoritative for embedding (#034). #048 flipped the
+        # default from the multimodal ``voyage-multimodal-3`` to the TEXT model
+        # ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5`` is also
+        # 1024-d, so the dim stays put — the vector index numDimensions and the
+        # dim-guard are unaffected — while the model identifier changes. #039
+        # split the single ``embedding`` block into a transient
+        # ``resolution_embedding`` and a persisted ``search_embedding``; both
+        # point at the same model/dim.
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.model == "voyage-3.5"
         assert config.models.resolution_embedding.dimensions == 1024
         assert config.models.search_embedding.provider == "voyage"
-        assert config.models.search_embedding.model == "voyage-multimodal-3"
+        assert config.models.search_embedding.model == "voyage-3.5"
         assert config.models.search_embedding.dimensions == 1024
         # #044: real-time request-batching caps default to the Voyage
         # per-request limits for voyage-multimodal-3.
@@ -103,6 +104,58 @@ class TestLoadAppConfig:
             "YouTubeVideoSource": 1,
         }
         assert sum(counts.values()) == 20
+
+    def test_dream_block_loaded_from_default_yaml(self):
+        """The #051 ``dream:`` block is read into the typed :class:`DreamConfig`.
+
+        Thresholds are NOT duplicated here — they stay in
+        ``extraction.dedup``; ``DreamConfig`` carries no threshold field.
+        """
+
+        config = load_app_config()
+
+        assert config.dream.enabled is True
+        assert config.dream.cron == "0 4 * * *"
+        # default.yaml ships dry_run: true (report-only first rollout per the
+        # approved plan), agreeing with the safer Pydantic model default.
+        assert config.dream.dry_run is True
+        assert config.dream.max_pairs == 10_000
+        assert config.dream.enable_supersession_judge is False
+
+    def test_dream_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``dream`` block falls back to the typed defaults."""
+
+        custom = tmp_path / "no_dream.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.dream == DreamConfig()
+        assert config.dream.enabled is True
+        assert config.dream.dry_run is True  # safe model default
+        assert config.dream.max_pairs == 10_000
+        assert config.dream.enable_supersession_judge is False
+
+    def test_dream_block_loaded_from_custom_yaml(self, tmp_path):
+        """Operator-tuned dream knobs in YAML are read into the typed model."""
+
+        custom = tmp_path / "dream.yaml"
+        custom.write_text(
+            "dream:\n"
+            "  enabled: false\n"
+            '  cron: "30 2 * * *"\n'
+            "  dry_run: true\n"
+            "  max_pairs: 42\n"
+            "  enable_supersession_judge: true\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.dream.enabled is False
+        assert config.dream.cron == "30 2 * * *"
+        assert config.dream.dry_run is True
+        assert config.dream.max_pairs == 42
+        assert config.dream.enable_supersession_judge is True
 
     def test_loads_default_yaml_huggingface_dataset_entry(self):
         """The HF arxiv entry preserves the parameters from the legacy YAML."""
@@ -202,9 +255,10 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.provider == "voyage"
         assert config.models.search_embedding.model == "voyage-multimodal-3"
         assert config.models.search_embedding.dimensions == 1024
-        # resolution_embedding falls back to the EmbeddingConfig defaults.
+        # resolution_embedding falls back to the EmbeddingConfig defaults
+        # (#048 flipped the code-level default model to the text ``voyage-3.5``).
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-multimodal-3"
+        assert config.models.resolution_embedding.model == "voyage-3.5"
         assert config.models.resolution_embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):
