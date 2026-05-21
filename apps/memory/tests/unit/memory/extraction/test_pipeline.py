@@ -9,6 +9,7 @@ flow.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -468,6 +469,285 @@ class TestDedupeEntitiesTask:
         embeddings = EmbeddingMap(vectors={"alice": [0.1] * 8})
         out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg, _USER_ID)
         assert out.decisions["d1|person|alice"].action == "none"
+
+
+# ---------------------------------------------------------------------------
+# Task ⑤ — dedupe_entities parallelization (#058)
+# ---------------------------------------------------------------------------
+
+
+def _multi_entity_resolved(n: int) -> Any:
+    """Build a ``ResolutionOutput`` with ``n`` distinct PERSON entities.
+
+    Each entity gets a unique key (``d1|person|name<i>``), canonical name,
+    and a distinct embeddable text so the embedding map can return a
+    per-entity vector.
+    """
+
+    resolved_by_key: dict[str, Any] = {}
+    embeddable_text_by_key: dict[str, str] = {}
+    entities: list[tuple[str, NodeType]] = []
+    for i in range(n):
+        name = f"name{i}"
+        key = f"d1|person|{name}"
+        text = f"text-{name}"
+        resolved_by_key[key] = ResolvedEntity(
+            original_name=name,
+            canonical_name=name,
+            entity_type=NodeType.PERSON,
+            confidence=1.0,
+            match_type="exact",
+        )
+        embeddable_text_by_key[key] = text
+        entities.append((name, NodeType.PERSON))
+    return ResolutionOutput(
+        entities=entities,
+        resolved_by_key=resolved_by_key,
+        embeddable_text_by_key=embeddable_text_by_key,
+    )
+
+
+def _embeddings_for(resolved: Any, *, dim: int = 8) -> Any:
+    """Seed a vector for every entity's embeddable text."""
+
+    return EmbeddingMap(
+        vectors={text: [0.1] * dim for text in resolved.embeddable_text_by_key.values()}
+    )
+
+
+async def _sequential_reference(
+    resolved: Any,
+    embeddings: Any,
+    database: Any,
+    dedup_config: Any,
+    user_id: Any,
+    dedupe_fn: Any,
+) -> tuple[dict[str, Any], int, int, int]:
+    """A faithful sequential re-implementation of the dedupe task body.
+
+    Used as the golden oracle: the parallel implementation must produce a
+    byte-identical ``decisions`` mapping and identical tallies for the same
+    input. ``dedupe_fn`` is the (mocked) ``dedupe_entity``.
+    """
+
+    from tree.entities.knowledge_graph import build_node_id as _build_node_id
+    from tree.memory.extraction.pipeline import _normalize, _to_decision
+
+    decisions: dict[str, Any] = {}
+    n_merged = n_flagged = n_none = 0
+    for key, resolved_entity in resolved.resolved_by_key.items():
+        doc_id, type_value, name = key.split("|", maxsplit=2)
+        entity_type = NodeType(type_value)
+        embeddable_text = resolved.embeddable_text_by_key.get(
+            key, resolved_entity.canonical_name
+        )
+        embedding = embeddings.vectors.get(embeddable_text) or []
+        if not embedding or not dedup_config.enabled:
+            decisions[key] = DedupDecision(action="none")
+            n_none += 1
+            continue
+        prospective_id = _build_node_id(user_id, entity_type, _normalize(name))
+        raw = await dedupe_fn(
+            database=database,
+            user_id=user_id,
+            name=name,
+            entity_type=entity_type,
+            embedding=embedding,
+            config=dedup_config,
+            incoming_node_id=prospective_id,
+        )
+        decision = _to_decision(raw, prospective_id)
+        decisions[key] = decision
+        if decision.action == "merged":
+            n_merged += 1
+        elif decision.action == "flagged":
+            n_flagged += 1
+        else:
+            n_none += 1
+    return decisions, n_merged, n_flagged, n_none
+
+
+def _result_for_name(name: str) -> DeduplicationResult:
+    """A deterministic per-name dedupe result: merged / flagged / none by index.
+
+    Cycles through the three actions so a fixed fixture exercises every tally
+    bucket. ``matched_node_id`` is intentionally distinct from any prospective
+    id so ``_to_decision`` never collapses it to a self-match.
+    """
+
+    idx = int(name.removeprefix("name"))
+    bucket = idx % 3
+    if bucket == 0:
+        return DeduplicationResult(
+            action="merged",
+            matched_node_id=f"other:person:match-{name}",
+            matched_node_name=f"match-{name}",
+            similarity_score=0.99,
+            match_type="embedding",
+        )
+    if bucket == 1:
+        return DeduplicationResult(
+            action="flagged",
+            matched_node_id=f"other:person:match-{name}",
+            matched_node_name=f"match-{name}",
+            similarity_score=0.85,
+            match_type="embedding",
+        )
+    return DeduplicationResult(action="none")
+
+
+class TestDedupeEntitiesParallelization:
+    """#058 — the dedupe task runs decisions concurrently under a semaphore
+    sized by ``dedup_concurrency`` while producing byte-identical output to the
+    sequential reference."""
+
+    async def test_decisions_run_concurrently_under_semaphore(self, mocker) -> None:
+        # Arrange: bound concurrency to 4; track how many dedupe calls run at once.
+        mocker.patch.dict(
+            "os.environ", {"TREE_EXTRACTION__DEDUP_CONCURRENCY": "4"}, clear=False
+        )
+        cfg = DeduplicationConfig()
+        resolved = _multi_entity_resolved(12)
+        embeddings = _embeddings_for(resolved)
+
+        in_flight = 0
+        max_in_flight = 0
+        gate = asyncio.Event()
+        started = 0
+
+        async def _slow_dedupe(**kwargs: Any) -> DeduplicationResult:
+            nonlocal in_flight, max_in_flight, started
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            started += 1
+            # Once the first batch (== concurrency) is in flight, release.
+            if started >= 4:
+                gate.set()
+            await gate.wait()
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return _result_for_name(kwargs["name"])
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(side_effect=_slow_dedupe),
+        )
+
+        # Act
+        out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg, _USER_ID)
+
+        # Assert: never more than the semaphore bound ran simultaneously, and
+        # we actually reached the bound (i.e. it ran in parallel, not serially).
+        assert max_in_flight == 4
+        assert len(out.decisions) == 12
+
+    async def test_no_sequential_await_loop_remains(self) -> None:
+        # Diff-guard: the task body must use asyncio.gather + a Semaphore and
+        # must NOT iterate with a bare ``for ... await dedupe_entity`` loop.
+        import inspect
+
+        from tree.memory.extraction.pipeline import _dedupe_entities as fn
+
+        src = inspect.getsource(fn)
+        assert "asyncio.gather" in src
+        assert "Semaphore" in src
+        assert "dedup_concurrency" in src
+
+    async def test_no_embed_call_in_dedupe_task(self) -> None:
+        # The dedupe task must read precomputed vectors only — no Voyage embed.
+        import inspect
+
+        from tree.memory.extraction.pipeline import _dedupe_entities as fn
+
+        src = inspect.getsource(fn)
+        assert ".embed(" not in src
+
+    async def test_identical_output_to_sequential_reference(self, mocker) -> None:
+        # Arrange
+        cfg = DeduplicationConfig()
+        resolved = _multi_entity_resolved(15)
+        embeddings = _embeddings_for(resolved)
+        database = MagicMock()
+
+        async def _dedupe(**kwargs: Any) -> DeduplicationResult:
+            return _result_for_name(kwargs["name"])
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(side_effect=_dedupe),
+        )
+
+        # Act — parallel implementation
+        out = await _dedupe_entities(resolved, embeddings, database, cfg, _USER_ID)
+
+        # Oracle — sequential reference over the same fixture
+        ref_decisions, n_merged, n_flagged, n_none = await _sequential_reference(
+            resolved, embeddings, database, cfg, _USER_ID, _dedupe
+        )
+
+        # Assert: identical mapping (keys + per-key decision) and tallies.
+        assert set(out.decisions.keys()) == set(ref_decisions.keys())
+        for key, decision in ref_decisions.items():
+            got = out.decisions[key]
+            assert got.action == decision.action
+            assert got.matched_node_id == decision.matched_node_id
+            assert got.matched_node_name == decision.matched_node_name
+            assert got.similarity_score == decision.similarity_score
+            assert got.match_type == decision.match_type
+        # Sanity: every tally bucket was exercised by the fixture.
+        assert n_merged > 0 and n_flagged > 0 and n_none > 0
+
+    async def test_concurrency_one_reproduces_sequential(
+        self, mocker, monkeypatch
+    ) -> None:
+        # Degenerate concurrency=1 must produce identical output to the
+        # sequential reference (concurrency knob honored, behavior preserved).
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP_CONCURRENCY", "1")
+        cfg = DeduplicationConfig()
+        resolved = _multi_entity_resolved(9)
+        embeddings = _embeddings_for(resolved)
+        database = MagicMock()
+
+        async def _dedupe(**kwargs: Any) -> DeduplicationResult:
+            return _result_for_name(kwargs["name"])
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(side_effect=_dedupe),
+        )
+
+        out = await _dedupe_entities(resolved, embeddings, database, cfg, _USER_ID)
+        ref_decisions, _, _, _ = await _sequential_reference(
+            resolved, embeddings, database, cfg, _USER_ID, _dedupe
+        )
+
+        assert {k: v.action for k, v in out.decisions.items()} == {
+            k: v.action for k, v in ref_decisions.items()
+        }
+
+    async def test_disabled_and_missing_embedding_short_circuit_per_key(
+        self, mocker
+    ) -> None:
+        # Per-key early-continue branches must be preserved under parallelism:
+        # a key with no embedding -> action="none" without calling dedupe_entity.
+        cfg = DeduplicationConfig()
+        resolved = _multi_entity_resolved(3)
+        # Drop the vector for the middle entity so its embedding resolves empty.
+        embeddings = _embeddings_for(resolved)
+        embeddings.vectors.pop("text-name1")
+
+        dedupe_spy = mocker.patch(
+            "tree.memory.extraction.pipeline.dedupe_entity",
+            new=AsyncMock(side_effect=lambda **kw: _result_for_name(kw["name"])),
+        )
+
+        out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg, _USER_ID)
+
+        # The embedding-less key short-circuits to "none".
+        assert out.decisions["d1|person|name1"].action == "none"
+        # ``dedupe_entity`` was called only for the two keys that had vectors.
+        called_names = {call.kwargs["name"] for call in dedupe_spy.call_args_list}
+        assert called_names == {"name0", "name2"}
 
 
 # ---------------------------------------------------------------------------

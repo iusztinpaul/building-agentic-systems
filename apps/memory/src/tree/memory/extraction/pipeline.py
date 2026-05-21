@@ -893,10 +893,17 @@ async def _dedupe_entities(
     decision under a stable per-entity key."""
 
     log = _get_run_logger()
-    decisions: dict[str, DedupDecision] = {}
-    n_merged = n_flagged = n_none = 0
 
-    for key, resolved_entity in resolved.resolved_by_key.items():
+    # ``dedupe_entity`` is a read-only ``$vectorSearch`` on PRECOMPUTED vectors
+    # (no Voyage call, independent per entity), so the per-key decisions
+    # parallelize safely. We gather them under a bounded semaphore sized by the
+    # ``dedup_concurrency`` knob (#058). The per-key decision is a pure function
+    # of its key, so concurrent evaluation cannot change any value; we rebuild
+    # the ``decisions`` mapping and tallies in the original key order below so
+    # the output is byte-identical to the prior sequential implementation.
+    semaphore = asyncio.Semaphore(_live_app_config().extraction.dedup_concurrency)
+
+    async def _one(key: str, resolved_entity: ResolvedEntity) -> DedupDecision:
         doc_id, type_value, name = key.split("|", maxsplit=2)
         entity_type = NodeType(type_value)
 
@@ -910,21 +917,29 @@ async def _dedupe_entities(
         embedding = embeddings.vectors.get(embeddable_text) or []
 
         if not embedding or not dedup_config.enabled:
-            decisions[key] = DedupDecision(action="none")
-            n_none += 1
-            continue
+            return DedupDecision(action="none")
 
         prospective_id = build_node_id(user_id, entity_type, _normalize(name))
-        raw = await dedupe_entity(
-            database=database,
-            user_id=user_id,
-            name=name,
-            entity_type=entity_type,
-            embedding=embedding,
-            config=dedup_config,
-            incoming_node_id=prospective_id,
-        )
-        decision = _to_decision(raw, prospective_id)
+        async with semaphore:
+            raw = await dedupe_entity(
+                database=database,
+                user_id=user_id,
+                name=name,
+                entity_type=entity_type,
+                embedding=embedding,
+                config=dedup_config,
+                incoming_node_id=prospective_id,
+            )
+        return _to_decision(raw, prospective_id)
+
+    items = list(resolved.resolved_by_key.items())
+    results = await asyncio.gather(
+        *[_one(key, resolved_entity) for key, resolved_entity in items]
+    )
+
+    decisions: dict[str, DedupDecision] = {}
+    n_merged = n_flagged = n_none = 0
+    for (key, _resolved_entity), decision in zip(items, results):
         decisions[key] = decision
         if decision.action == "merged":
             n_merged += 1
