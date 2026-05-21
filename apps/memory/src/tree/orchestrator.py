@@ -27,6 +27,7 @@ from tree.data.pipeline import data_pipeline
 from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.memory.consolidation.dream import dream_consolidation_all_users
+from tree.memory.extraction.fanout import memory_extraction_sharded
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.memory.indexing.pipeline import memory_indexing
 
@@ -68,4 +69,16 @@ if __name__ == "__main__":
             cron=app_config.dream.cron,
             tags=["dream"],
         ),
+        # Document-shard fan-out parent flow (#056 / ADR-002 §3): partitions
+        # ONE user's pending documents into shards and launches one
+        # ``memory-extraction-etl`` child run per shard, then a single
+        # ``memory-indexing-etl`` run afterwards.
+        memory_extraction_sharded.to_deployment(
+            name="memory-extraction-fanout-etl",
+            tags=["memory-pipeline", "extraction", "fanout"],
+        ),
+        # Admission control (ADR-002 §4): cap how many flow runs the server
+        # admits concurrently, kept close to ``concurrency.voyage_rpm`` so we
+        # never admit far more runs than the shared embed budget can feed.
+        global_limit=app_config.concurrency.runner_global_limit,
     )

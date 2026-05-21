@@ -150,6 +150,10 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
 	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
 
+run-memory-pipeline-extraction-fanout: # Trigger the document-shard extraction fan-out via Prefect (#056). Fans out one extraction run per shard, then indexes once. Requires USER_ID=<oid>. Optional NUM_SHARDS=<n>.
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction-fanout USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
+	uv run python scripts/run_extraction_fanout.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+
 
 # --- Dream Consolidation ---
 #
