@@ -286,6 +286,8 @@ CI runs `pytest tests/integration -m "not requires_mongot" --timeout=300`. The T
 
 `pytest-xdist` is installed in dev deps but **not enabled in CI**: the autouse `_clean_collections` fixture in `tests/integration/conftest.py` wipes every collection between tests, so parallel workers race against each other. If we ever need parallelization we'd need per-worker test DB names (`PYTEST_XDIST_WORKER` suffix).
 
+**Run `requires_mongot` suites in ISOLATION — the docker stack is shared across worktrees.** The local `tree-mongodb` / `tree-mongot` / `tree-prefect` containers are shared by every git worktree on this machine. Running two integration suites — or `make memory-integration-tests-all` plus ad-hoc adversarial probes — against the stack **at the same time** corrupts the shared mongot vector index. Symptoms: `indexed with N dimensions but queried with M`, `DuplicateKeyError` on `users.identifier`, `$vectorSearch` `INITIAL_SYNC` errors. These are **dev-infra contention, not code regressions** — an isolated re-run is clean. So: run the acceptance suite to completion on a quiesced stack first, run any extra probes separately against throwaway DB names, and never run two integration suites against the shared stack concurrently. Don't chase these flakes as bugs.
+
 ## Running Pipelines
 
 To test a pipeline after making changes:
