@@ -2,6 +2,10 @@
 
 **Tree: Your Rooted Personal Assistant.** Build a personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
+## Key Principles You Will Respect All Over Your Work
+
+- Always prioritize removing instructions over adding more.
+
 # The What 
 
 ## Key Components
