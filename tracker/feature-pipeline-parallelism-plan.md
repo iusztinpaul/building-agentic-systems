@@ -82,3 +82,60 @@ real (rate-paced) Voyage key, so they are marked `[HUMAN]` in the task specs:
 ## Open questions
 - None blocking. The plan is fully specified and pre-researched; all ambiguities
   (fan-out axis, TPM mitigation order, what NOT to do) are resolved in the source plan.
+
+## Log
+
+### [PM] 2026-05-21 — Acceptance Review (whole feature, user POV)
+
+**VERDICT: ACCEPT**
+
+Reviewed all 7 task tracker logs (#054–#060) against the diff, the amended ADR-002,
+and the plan's intentional-deferral list. Spot-checked source rather than trusting
+the Tester's PASS. Acceptance gate (`make memory-integration-tests-all`) was run
+green per-task by the Tester on a quiesced+isolated stack — latest tip (#059):
+266 passed / 1 skipped / 0 failed / 0 warnings in 621s. Did NOT re-run: the shared
+docker stack is currently contended (two stale cross-worktree serve-workflows
+processes live — `building-agentic-systems` @11:45AM, `…-dream-consolidation`
+@1:31AM), and CLAUDE.md forbids running an integration suite against a contended
+shared stack. A re-run was optional per the review brief; relying on the Tester's
+isolated-stack evidence instead.
+
+**Amended ADR-002 §1 conformance — VERIFIED in shipped code:**
+- `rate_limit(_VOYAGE_EMBED_LIMIT, occupy=1, strict=False)` lives ONLY in the two
+  Voyage clients (`voyage_embedding.py:213`, `voyage_multimodal_embedding.py:188`),
+  as the first statement inside the `while True` 429-backoff loop, immediately
+  before `session.post(...)`, after the `if not texts: return []` short-circuit.
+- `embedding_text.py` has ZERO `rate_limit` references (grep -c = 0); `add_entity.py`
+  has none. Cache hits via `_CachedSingleEmbedding` never reach a client → not
+  throttled. The unit conftest no-op patches BOTH client modules, matching the
+  relocation. This is exactly the amended decision (limiter at the network POST, not
+  `_embed_chunk_resilient`).
+
+**Intentional-deferral list — all VERIFIED deliberate, none silently missed:**
+- R5 (parallel embed dispatch): `dispatch_concurrency: 1` in YAML; `embed_in_batches`
+  loop stays a sequential `for` (embedding_text.py:142). Seam present, off.
+- R6 (LLM task ② fan-out): `for chunked in chunked_docs: …llm_extract_entities_task`
+  loop (pipeline.py:1545-1546) byte-for-byte unchanged.
+- voyage-tokens second limiter: absent (grep none); TPM held by
+  `max_total_tokens: 10000` (was 320000), comment notes the deferral.
+- apply-writes node loop: still sequential read-after-write via `add_entity`
+  (pipeline.py:1290) feeding `name_to_target_id`.
+- data-pipeline fan-out: untouched (diff does not modify `data_pipeline`).
+
+**User-facing surface confirmed:** `make memory-sync-concurrency-limits` and
+`make memory-run-memory-pipeline-extraction-fanout USER_ID=<oid> [NUM_SHARDS=<n>]`
+both present with USER_ID guards; fan-out deployment `memory-extraction-fanout-etl`
+registered with `serve(global_limit=runner_global_limit)` admission control;
+`concurrency:` YAML block discoverable with explanatory comments. Both new entry
+scripts call `init_logger()` at module level per CLAUDE.md.
+
+**Residual [HUMAN] live-verification (NOT a reason to reject — surfaced for the user
+to run on a QUIESCED stack before/after merge):** see the checklist handed to the
+orchestrator. The in-process integration suite proves the no-timeout fix, the
+fan-out/single-index contract, and behavior-preservation, but exercises fake
+embedding models (no real Voyage POST) and a mocked `run_deployment` — the live
+4-way fan-out observation, the limiter negative-check, and the deployment-triggered
+behavior-preservation e2e remain genuinely unverified.
+
+SWE may keep the commits; the feature is accepted. The orchestrator must surface the
+[HUMAN] checklist to the user so they have no false confidence about the live path.
