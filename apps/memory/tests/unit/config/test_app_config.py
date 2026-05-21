@@ -116,9 +116,9 @@ class TestLoadAppConfig:
 
         assert config.dream.enabled is True
         assert config.dream.cron == "0 4 * * *"
-        # default.yaml sets dry_run: false (the model default is the safer
-        # True, but the shipped YAML opts into real runs).
-        assert config.dream.dry_run is False
+        # default.yaml ships dry_run: true (report-only first rollout per the
+        # approved plan), agreeing with the safer Pydantic model default.
+        assert config.dream.dry_run is True
         assert config.dream.max_pairs == 10_000
         assert config.dream.enable_supersession_judge is False
 

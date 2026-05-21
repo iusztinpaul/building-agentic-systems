@@ -126,7 +126,8 @@ dream:
   # Schedule consumed by the dream-consolidation-etl deployment (#052):
   # the parent fan-out flow runs once per cron tick across all active users.
   cron: "0 4 * * *"
-  dry_run: false
+  # Report-only first rollout; flip to false to enable mutating consolidation.
+  dry_run: true
   # Cap on candidate pairs examined per run. Once hit, the sweep stops
   # driving and records cap_hit=True in its stats.
   max_pairs: 10000
