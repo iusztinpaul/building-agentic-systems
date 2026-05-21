@@ -16,12 +16,15 @@ dedup, Mongo writes) runs in `for` loops. We want up to **4 memory-extraction
 runs to execute concurrently** to overlap the CPU/DB-bound phases.
 
 The gating constraint is the Voyage embedding API: ONE shared free-tier key
-capped at **3 RPM / 10K TPM** (no payment method). Two call sites touch Voyage:
-the batched chokepoint `_embed_chunk_resilient` (`embedding_text.py`) and an
-inline dedup embed in `add_entity` that today bypasses the batcher. Running
-4 runs in parallel does NOT speed embedding — it stays serialized at 3 RPM. The
-win is overlapping the non-embedding phases; the risk is 4 runs collectively
-429-storming Voyage.
+capped at **3 RPM / 10K TPM** (no payment method). Two code paths reach Voyage:
+the batched embed path through `_embed_chunk_resilient` (`embedding_text.py`)
+and an inline dedup embed in `add_entity`. The single point every real Voyage
+request funnels through is the HTTP POST inside the Voyage provider clients'
+`embed` method (`VoyageTextEmbeddingModel` / `VoyageMultimodalEmbeddingModel`);
+non-Voyage models (mock, sentence-transformers, the `_CachedSingleEmbedding`
+cache-hit shim) never issue a network request. Running 4 runs in parallel does
+NOT speed embedding — it stays serialized at 3 RPM. The win is overlapping the
+non-embedding phases; the risk is 4 runs collectively 429-storming Voyage.
 
 ## Decision
 
@@ -29,11 +32,37 @@ win is overlapping the non-embedding phases; the risk is 4 runs collectively
    slot decay**, named `voyage-embeddings` (limit = `concurrency.voyage_rpm`,
    slot-decay-per-second = `voyage_rpm / 60`). It is the only primitive that
    spans separate flow runs (a per-process `asyncio.Semaphore` cannot). Acquired
-   via `rate_limit("voyage-embeddings", occupy=1, strict=False)` wrapped tightly
-   around the single real POST inside `_embed_chunk_resilient`. `strict=False`
-   makes a missing limit a no-op (graceful degradation for unit tests / fresh
-   dev boxes). The `add_entity` inline embed is routed through
-   `_embed_chunk_resilient` so there is exactly ONE guarded chokepoint.
+   via `rate_limit("voyage-embeddings", occupy=1, strict=False)` immediately
+   before each real Voyage network POST, inside the Voyage provider clients
+   (`VoyageTextEmbeddingModel.embed` in `models/voyage_embedding.py` and
+   `VoyageMultimodalEmbeddingModel.embed` in `models/voyage_multimodal_embedding.py`).
+   `strict=False` makes a missing limit a no-op (graceful degradation for unit
+   tests / fresh dev boxes). The slot is acquired per real POST *attempt*, so a
+   429-retry inside the client's backoff loop re-acquires a fresh slot. The
+   `add_entity` inline dedup embed still routes through `_embed_chunk_resilient`
+   for the Voyage-400 bisect-and-skip resilience, but no longer holds the rate
+   limit there — the limit lives at the network boundary instead.
+
+   **Amendment (#055 implementation).** The chokepoint was originally specified
+   at `_embed_chunk_resilient` (`embedding_text.py`) on the premise "one wrap ==
+   one real POST". Implementation surfaced a counterexample: the extraction hot
+   path injects a `_CachedSingleEmbedding` into `add_entity`
+   (`extraction/pipeline.py`) so the per-entity dedup embed REUSES the vector
+   already computed upstream and issues NO network POST on a cache hit. With the
+   rate limit at `_embed_chunk_resilient`, every such cache-hit dedup acquired a
+   `voyage-embeddings` slot — serializing ~40 zero-POST lookups behind the
+   ~20s/slot throttle and timing out a normal extraction. That directly
+   contradicts this section's own principle ("one wrap == one real POST"; do not
+   throttle non-embedding phases). Relocating the wrap down to the real HTTP POST
+   inside each Voyage client gates **exactly** real Voyage requests at the same
+   granularity (one slot per `.embed(chunk)` POST as before), is robust to
+   caching (a `_CachedSingleEmbedding` hit never reaches a Voyage client, so it
+   is never throttled), and is provider-correct (mock / sentence-transformers /
+   local models carry no wrap and are not throttled). A cache *miss* still
+   reaches the real Voyage `.embed()` and is throttled. This is a refinement of
+   the same cross-flow-GCL-with-slot-decay decision — the limiter, its name, its
+   decay, and the YAML-derived limit are unchanged — so the ADR stays `Accepted`
+   rather than being superseded; only the documented location of the wrap moves.
 
 2. **The TPM cap is held by config, not a second limiter (for now):**
    `models.embedding_batch.max_total_tokens` drops 320000 → 10000 so no single

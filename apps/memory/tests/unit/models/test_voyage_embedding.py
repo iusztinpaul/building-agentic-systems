@@ -365,6 +365,95 @@ class TestVoyageTextEmbed:
         assert payload["input"] == ["a", "b", "c"]
 
 
+class TestVoyageTextRateLimitChokepoint:
+    """ADR-002 §1 (amended): the shared ``voyage-embeddings`` slot is acquired
+    immediately before each real network POST *attempt*, inside the 429-backoff
+    ``while True`` loop, so a 429-retry re-acquires a fresh slot.
+
+    The autouse ``_noop_voyage_rate_limit`` conftest fixture stubs
+    ``tree.models.voyage_embedding.rate_limit`` so unit boxes don't hit a Prefect
+    server; these tests re-patch the same target with a spy to assert the call
+    count and arguments.
+    """
+
+    async def test_acquires_one_slot_per_successful_post(
+        self, mocker, model: VoyageTextEmbeddingModel
+    ) -> None:
+        # Arrange: a clean 200 — exactly one real POST.
+        rate_limit = mocker.patch(
+            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        )
+        response_data = {"data": [{"embedding": [0.1]}]}
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            await model.embed(["hello"])
+
+        # Assert: one POST -> one slot, with the documented args.
+        rate_limit.assert_awaited_once_with("voyage-embeddings", occupy=1, strict=False)
+
+    async def test_429_retry_reacquires_a_fresh_slot(self, mocker) -> None:
+        # Arrange: 429, 429, then 200 — three real POST attempts, so the slot
+        # must be acquired three times (the proactive limiter is per-attempt).
+        mocker.patch(
+            "tree.models.voyage_embedding.asyncio.sleep", new_callable=AsyncMock
+        )
+        rate_limit = mocker.patch(
+            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        )
+        m = VoyageTextEmbeddingModel(
+            api_key="key",
+            model="voyage-3.5",
+            rate_limit_backoff_seconds=(0.1, 0.2, 0.4),
+        )
+        responses = [
+            _mock_aiohttp_response(status=429, json_data={"detail": "throttled"}),
+            _mock_aiohttp_response(status=429, json_data={"detail": "throttled"}),
+            _mock_aiohttp_response(
+                status=200, json_data={"data": [{"embedding": [0.1, 0.2]}]}
+            ),
+        ]
+
+        def _make_session_for_call(call_idx: int):
+            sess = AsyncMock()
+            sess.post = MagicMock(return_value=responses[call_idx])
+            sess.__aenter__ = AsyncMock(return_value=sess)
+            sess.__aexit__ = AsyncMock(return_value=False)
+            return sess
+
+        sessions = [_make_session_for_call(i) for i in range(3)]
+
+        # Act
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.side_effect = sessions
+            result = await m.embed(["hello"])
+
+        # Assert: one slot per real POST attempt (incl. each 429 retry).
+        assert result == [[0.1, 0.2]]
+        assert rate_limit.await_count == 3
+        for call in rate_limit.await_args_list:
+            assert call.args == ("voyage-embeddings",)
+            assert call.kwargs == {"occupy": 1, "strict": False}
+
+    async def test_empty_input_acquires_no_slot(
+        self, mocker, model: VoyageTextEmbeddingModel
+    ) -> None:
+        # Arrange: the ``if not texts: return []`` short-circuit fires before any
+        # POST and so must NOT acquire a slot.
+        rate_limit = mocker.patch(
+            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        )
+
+        # Act
+        result = await model.embed([])
+
+        # Assert
+        assert result == []
+        rate_limit.assert_not_awaited()
+
+
 class TestVoyageTextComposesWithEmbeddingTextResilience:
     """Composition: the real text client, run through ``embed_in_batches``,
     inherits the ``tree.memory.embedding_text`` resilience layer for free.

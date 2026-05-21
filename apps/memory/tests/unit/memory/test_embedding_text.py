@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from tree.memory.embedding_text import (
+    _embed_chunk_resilient,
     embed_in_batches,
     embed_node_texts,
     estimate_tokens,
@@ -551,6 +552,75 @@ class TestEmbedInBatchesAlignmentAdversarial:
             await embed_in_batches(
                 ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
             )
+
+
+class TestEmbedChunkResilientDoesNotRateLimit:
+    """ADR-002 §1 (amended): the ``voyage-embeddings`` rate limit lives at the
+    real network POST inside the Voyage clients, NOT in ``embedding_text``.
+
+    ``_embed_chunk_resilient`` must NOT import or call ``rate_limit`` — gating it
+    here throttled zero-POST ``_CachedSingleEmbedding`` cache hits and timed out
+    extraction. The per-client acquisition is asserted in the Voyage client test
+    modules (``test_voyage_embedding.py`` / ``test_voyage_multimodal_embedding.py``).
+    """
+
+    def test_embedding_text_module_has_no_rate_limit_symbol(self) -> None:
+        # Arrange / Act: import the module the chokepoint used to live in.
+        import tree.memory.embedding_text as embedding_text_module
+
+        # Assert: the rate-limit symbol and import are gone from this module —
+        # the wrap relocated to the Voyage clients.
+        assert not hasattr(embedding_text_module, "rate_limit")
+        assert not hasattr(embedding_text_module, "_VOYAGE_EMBED_LIMIT")
+
+    async def test_cached_model_chunk_issues_no_real_post_and_no_throttle(
+        self,
+    ) -> None:
+        # Arrange: a no-network model (the ``_CachedSingleEmbedding`` shape) —
+        # returns a pre-computed vector for every input, no Voyage client reached.
+        class _CachedModel(BaseEmbeddingModel):
+            @property
+            def dimensions(self) -> int:
+                return 2
+
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[9.0, 9.0] for _ in texts]
+
+        model = _CachedModel()
+
+        # Act: route through the resilient chokepoint as the dedup path does.
+        vectors = await _embed_chunk_resilient(model, ["entity text"])
+
+        # Assert: the cached vector returns unchanged; because no Voyage client
+        # is reached, no ``voyage-embeddings`` slot is ever acquired (the timeout
+        # regression). The per-client acquisition is asserted in the client tests.
+        assert vectors == [[9.0, 9.0]]
+
+
+class TestDispatchConcurrencyDefault:
+    """``dispatch_concurrency=1`` (default) keeps dispatch sequential.
+
+    The knob is the seam to flip on only after the Voyage cap is lifted; at the
+    default it must not change request count or ordering vs the pre-task code.
+    """
+
+    async def test_default_one_preserves_request_count_and_order(self) -> None:
+        # Arrange: confirm the wired-in default is 1, then drive a multi-chunk
+        # batch and assert the request count + global ordering are unchanged.
+        from tree.config.app_config import app_config
+
+        assert app_config.models.embedding_batch.dispatch_concurrency == 1
+
+        model = _OrderEncodingEmbeddingModel()
+        texts = [f"t{i}" for i in range(7)]
+
+        # Act
+        vectors = await embed_in_batches(texts, model, max_inputs=3)
+
+        # Assert: identical to the pre-task sequential batcher — 3 + 3 + 1
+        # requests, vectors in global input order.
+        assert [len(c) for c in model.calls] == [3, 3, 1]
+        assert vectors == [[float(i)] for i in range(7)]
 
 
 class TestSanitizeForEmbedding:

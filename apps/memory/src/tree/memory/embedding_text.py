@@ -120,13 +120,22 @@ async def embed_in_batches(
         max_total_tokens=max_total_tokens,
         max_input_tokens=max_input_tokens,
     )
+
+    # ADR-002 §1: ``dispatch_concurrency`` is the local fan-out seam. Default 1
+    # keeps dispatch strictly sequential (today's exact request count + order);
+    # the cross-flow ``voyage-embeddings`` GCL is the real throttle. The knob is
+    # flipped >1 only after the Voyage cap is lifted — do NOT default it higher.
+    from tree.config.app_config import app_config
+
+    dispatch_concurrency = app_config.models.embedding_batch.dispatch_concurrency
     logger.info(
         "embed_in_batches: %d texts -> %d request(s) "
-        "(max_inputs=%d, max_total_tokens=%d)",
+        "(max_inputs=%d, max_total_tokens=%d, dispatch_concurrency=%d)",
         len(texts),
         len(chunks),
         max_inputs,
         max_total_tokens,
+        dispatch_concurrency,
     )
 
     vectors: list[list[float]] = []
@@ -155,6 +164,12 @@ async def _embed_chunk_resilient(
     """
 
     try:
+        # ADR-002 §1: the shared ``voyage-embeddings`` rate limit lives at the
+        # real network POST inside the Voyage provider clients, NOT here. Routing
+        # the inline dedup embed through this function still earns the Voyage-400
+        # bisect-and-skip resilience, but a ``_CachedSingleEmbedding`` cache hit
+        # (extraction hot path) never reaches a Voyage client, so it acquires no
+        # slot — that was the timeout this relocation fixes.
         return await embedding_model.embed(chunk)
     except ExtractionError as exc:
         # Only a structured HTTP 400 is a content rejection we skip; everything
