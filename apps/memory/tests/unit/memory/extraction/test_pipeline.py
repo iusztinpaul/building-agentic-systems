@@ -15,7 +15,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.knowledge_graph import (
+    EdgeType,
+    NodeType,
+    build_edge_id,
+    build_node_id,
+)
 from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.pipeline import (
@@ -39,7 +44,9 @@ from tree.models.base import BaseEmbeddingModel
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
+    DedupMap,
     EmbeddingMap,
+    ExtractedEdge,
     ExtractedNode,
     ExtractionResult,
     RawExtraction,
@@ -52,6 +59,9 @@ from tree.memory.types import (
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _PH = str(_USER_ID)
+# The KG collection key; the bulk-write DB mock returns the same collection
+# for any subscript, so the exact string is irrelevant to the assertions.
+_KG_COLLECTION_SENTINEL = "knowledge_graph"
 
 
 # ---------------------------------------------------------------------------
@@ -1038,3 +1048,272 @@ class TestFlowEmbeddingModelSplit:
         )
         assert injected_search_model in apply_writes.await_args.args
         assert resolution_model not in apply_writes.await_args.args
+
+
+# ---------------------------------------------------------------------------
+# Task ⑥ — _apply_writes bulk_write batching (#057)
+# ---------------------------------------------------------------------------
+
+
+def _make_bulk_write_database() -> Any:
+    """Build a database mock whose KG collection records bulk_write/update_one.
+
+    ``bulk_write`` returns a benign result; ``update_one`` is present so a
+    regression that re-introduces per-item round-trips is caught (the test
+    asserts it is never awaited).
+    """
+
+    collection = MagicMock(name="kg_collection")
+    collection.bulk_write = AsyncMock(return_value=MagicMock())
+    collection.update_one = AsyncMock(return_value=MagicMock())
+
+    database = MagicMock(name="database")
+    database.__getitem__.return_value = collection
+    return database
+
+
+def _structural_only_raw(
+    *,
+    doc_id: str = "507f1f77bcf86cd799439011",
+    source_uri: str = "https://example.com/a",
+) -> RawExtraction:
+    """A RawExtraction carrying two structural nodes + one structural edge.
+
+    No LLM-extracted nodes — keeps ``_apply_writes`` on the structural path
+    so the test isolates the two bulk_write loops without exercising
+    ``add_entity``.
+    """
+
+    doc_node = ExtractedNode(name=source_uri, type=NodeType.DOCUMENT)
+    chunk_node = ExtractedNode(name=f"{source_uri}#0", type=NodeType.CHUNK)
+    part_of = ExtractedEdge(
+        source_node_id=f"{source_uri}#0",
+        source_type=NodeType.CHUNK,
+        target_node_id=source_uri,
+        target_type=NodeType.DOCUMENT,
+        type=EdgeType.PART_OF,
+    )
+    structural = ExtractionResult(nodes=[doc_node, chunk_node], edges=[part_of])
+    chunked = ChunkedDocument(
+        document_id=doc_id,
+        source_uri=source_uri,
+        source_type="huggingface",
+        chunk_texts=["chunk text"],
+        chunk_ids=[f"{source_uri}#0"],
+        structural=structural,
+    )
+    return RawExtraction(
+        document_id=doc_id,
+        source_uri=source_uri,
+        chunked=chunked,
+        extracted=ExtractionResult(),
+    )
+
+
+async def _run_apply_writes(
+    database: Any,
+    raws: list[RawExtraction],
+    *,
+    extractor: Any = None,
+) -> WriteSummary:
+    """Invoke the bare ``_apply_writes`` body with stubbed collaborators."""
+
+    from tree.memory.extraction.pipeline import _apply_writes
+
+    return await _apply_writes(
+        raws=raws,
+        resolved=ResolutionOutput(),
+        embeddings=EmbeddingMap(),
+        dedup_results=DedupMap(),
+        database=database,
+        resolver=MagicMock(spec=CompositeResolver),
+        dedup_config=DeduplicationConfig(),
+        embedding_model=MagicMock(spec=BaseEmbeddingModel),
+        user_id=_USER_ID,
+        extractor=extractor,
+    )
+
+
+class TestApplyWritesBulkBatching:
+    """#057 — the structural-node and edge loops each issue ONE bulk_write."""
+
+    async def test_structural_nodes_use_single_bulk_write_no_update_one(self) -> None:
+        # Arrange — two docs, each with two structural nodes (4 nodes total).
+        database = _make_bulk_write_database()
+        collection = database[_KG_COLLECTION_SENTINEL]
+        raws = [
+            _structural_only_raw(
+                doc_id="507f1f77bcf86cd799439011",
+                source_uri="https://example.com/a",
+            ),
+            _structural_only_raw(
+                doc_id="507f1f77bcf86cd799439012",
+                source_uri="https://example.com/b",
+            ),
+        ]
+
+        # Act
+        summary = await _run_apply_writes(database, raws)
+
+        # Assert — no per-item update_one anywhere in the two loops.
+        collection.update_one.assert_not_awaited()
+        # One bulk_write for the structural nodes + one for the edges.
+        assert collection.bulk_write.await_count == 2
+        # Every bulk_write was issued unordered.
+        for call in collection.bulk_write.await_args_list:
+            assert call.kwargs.get("ordered") is False
+        # nodes_written counts every structural node (4), unchanged.
+        assert summary.nodes_written == 4
+
+    async def test_node_and_edge_counts_match_golden(self) -> None:
+        # Arrange — single doc: 2 structural nodes, 1 PART_OF edge.
+        database = _make_bulk_write_database()
+        raws = [_structural_only_raw()]
+
+        # Act
+        summary = await _run_apply_writes(database, raws)
+
+        # Assert — golden counts for this fixed input.
+        assert summary.nodes_written == 2
+        assert summary.edges_written == 1
+
+    async def test_empty_input_issues_no_bulk_write(self) -> None:
+        # Arrange — no documents → no nodes, no edges.
+        database = _make_bulk_write_database()
+        collection = database[_KG_COLLECTION_SENTINEL]
+
+        # Act
+        summary = await _run_apply_writes(database, [])
+
+        # Assert — pymongo errors on an empty bulk_write, so we must skip it.
+        collection.bulk_write.assert_not_awaited()
+        collection.update_one.assert_not_awaited()
+        assert summary.nodes_written == 0
+        assert summary.edges_written == 0
+
+    async def test_extractor_stamped_only_on_related_to_edges(self, mocker) -> None:
+        # Arrange — capture the ops the edge bulk_write receives.
+        from tree.entities.extraction_audit import ExtractorInfo
+
+        extractor = ExtractorInfo(name="gemini", version="2.5")
+
+        # A doc carrying a structural PART_OF edge and an LLM related_to edge
+        # between two PERSON nodes that resolve via name_to_target_id.
+        doc_node = ExtractedNode(name="https://example.com/a", type=NodeType.DOCUMENT)
+        alice = ExtractedNode(name="Alice", type=NodeType.PERSON)
+        bob = ExtractedNode(name="Bob", type=NodeType.PERSON)
+        related = ExtractedEdge(
+            source_node_id="Alice",
+            source_type=NodeType.PERSON,
+            target_node_id="Bob",
+            target_type=NodeType.PERSON,
+            type=EdgeType.RELATED_TO,
+            semantic_type="knows",
+        )
+        part_of = ExtractedEdge(
+            source_node_id="https://example.com/a#0",
+            source_type=NodeType.CHUNK,
+            target_node_id="https://example.com/a",
+            target_type=NodeType.DOCUMENT,
+            type=EdgeType.PART_OF,
+        )
+        chunked = ChunkedDocument(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            source_type="huggingface",
+            chunk_texts=["t"],
+            chunk_ids=["https://example.com/a#0"],
+            structural=ExtractionResult(nodes=[doc_node], edges=[part_of]),
+        )
+        raw = RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            chunked=chunked,
+            extracted=ExtractionResult(nodes=[alice, bob], edges=[related]),
+        )
+
+        database = _make_bulk_write_database()
+        collection = database[_KG_COLLECTION_SENTINEL]
+
+        # Stub the LLM-entity write so Alice/Bob get registered in
+        # name_to_target_id (the remap source for the related_to edge).
+        async def _dispatch(**kwargs: Any) -> str:
+            node = kwargs["node"]
+            return build_node_id(_USER_ID, node.type, node.name)
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline._dispatch_entity_write",
+            side_effect=_dispatch,
+        )
+
+        # Act
+        await _run_apply_writes(database, [raw], extractor=extractor)
+
+        # Assert — locate the edge bulk_write (the second call) and inspect ops.
+        edge_call = collection.bulk_write.await_args_list[-1]
+        ops = edge_call.args[0]
+        stamped = {}
+        for op in ops:
+            # pymongo UpdateOne exposes the match under ._filter and the
+            # aggregation-pipeline update under ._doc.
+            filter_id = op._filter["_id"]
+            set_stage = op._doc[0]["$set"]
+            stamped[filter_id] = "extractor" in set_stage
+
+        related_id = build_edge_id(
+            build_node_id(_USER_ID, NodeType.PERSON, "Alice"),
+            EdgeType.RELATED_TO,
+            build_node_id(_USER_ID, NodeType.PERSON, "Bob"),
+        )
+        # related_to carries extractor; every structural edge does not.
+        assert stamped[related_id] is True
+        assert any(v is False for k, v in stamped.items() if k != related_id)
+
+    async def test_name_to_target_id_resolves_mentions_edges(self, mocker) -> None:
+        # Arrange — a doc with a PERSON node produces a MENTIONS edge whose
+        # endpoints must resolve through name_to_target_id / structural_node_ids.
+        doc_node = ExtractedNode(name="https://example.com/a", type=NodeType.DOCUMENT)
+        person = ExtractedNode(name="Alice", type=NodeType.PERSON)
+        chunked = ChunkedDocument(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            source_type="huggingface",
+            chunk_texts=["t"],
+            chunk_ids=["https://example.com/a#0"],
+            structural=ExtractionResult(nodes=[doc_node], edges=[]),
+        )
+        raw = RawExtraction(
+            document_id="507f1f77bcf86cd799439011",
+            source_uri="https://example.com/a",
+            chunked=chunked,
+            extracted=ExtractionResult(nodes=[person], edges=[]),
+        )
+
+        database = _make_bulk_write_database()
+        collection = database[_KG_COLLECTION_SENTINEL]
+
+        # Stub the LLM-entity write so the PERSON registers a target id.
+        async def _dispatch(**kwargs: Any) -> str:
+            node = kwargs["node"]
+            return build_node_id(_USER_ID, node.type, node.name)
+
+        mocker.patch(
+            "tree.memory.extraction.pipeline._dispatch_entity_write",
+            side_effect=_dispatch,
+        )
+
+        # Act
+        summary = await _run_apply_writes(database, [raw])
+
+        # Assert — the MENTIONS edge (document -> person) was emitted, which
+        # only happens when name_to_target_id resolved both endpoints.
+        edge_call = collection.bulk_write.await_args_list[-1]
+        ops = edge_call.args[0]
+        edge_ids = [op._filter["_id"] for op in ops]
+        mentions_id = build_edge_id(
+            build_node_id(_USER_ID, NodeType.DOCUMENT, "https://example.com/a"),
+            "mentions",
+            build_node_id(_USER_ID, NodeType.PERSON, "Alice"),
+        )
+        assert mentions_id in edge_ids
+        assert summary.edges_written == len(edge_ids)

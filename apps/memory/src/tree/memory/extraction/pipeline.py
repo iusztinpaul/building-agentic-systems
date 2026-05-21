@@ -29,6 +29,7 @@ from uuid import uuid4
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import INPUTS, NO_CACHE
+from pymongo import UpdateOne
 
 from tree.config.app_config import load_app_config
 from tree.config.settings import settings
@@ -1001,15 +1002,21 @@ async def _apply_writes(
     # to the final target ids.
     structural_node_ids: set[str] = set()
     structural_edges: list[ExtractedEdge] = []
+    # #057: accumulate every structural-node upsert and flush them in a
+    # single ``bulk_write(ordered=False)`` instead of one awaited round-trip
+    # per node. ``_id``s are deterministic (``build_node_id``) and distinct,
+    # so ordering is irrelevant.
+    structural_node_ops: list[UpdateOne] = []
     for raw in raws:
         for node in raw.chunked.structural.nodes:
             node_id = build_node_id(user_id, node.type, node.name)
-            await _upsert_structural_node(
-                database=database,
-                user_id=user_id,
-                node=node,
-                node_id=node_id,
-                source_document_id=raw.document_id,
+            structural_node_ops.append(
+                _build_structural_node_op(
+                    user_id=user_id,
+                    node=node,
+                    node_id=node_id,
+                    source_document_id=raw.document_id,
+                )
             )
             structural_node_ids.add(node_id)
             summary.nodes_written += 1
@@ -1017,6 +1024,9 @@ async def _apply_writes(
             # MENTIONS edges (built later) can find them.
             name_to_target_id[make_type_name_key(node.type, node.name)] = node_id
         structural_edges.extend(raw.chunked.structural.edges)
+
+    if structural_node_ops:
+        await database[_KG_COLLECTION].bulk_write(structural_node_ops, ordered=False)
 
     # ----- LLM-extracted entities → add_entity ----------------------------------
     for raw in raws:
@@ -1094,7 +1104,12 @@ async def _apply_writes(
             chunk_id=edge.chunk_id,
         )
 
-    # Upsert each collapsed edge.
+    # Upsert each collapsed edge. #057: accumulate every edge upsert and
+    # flush them in a single ``bulk_write(ordered=False)`` instead of one
+    # awaited round-trip per edge. ``seen_edge_ids`` already collapsed edges
+    # to distinct ``_id``s with no read-after-write, so ordering is safe.
+    edge_ops: list[UpdateOne] = []
+    source_document_ids = [PydanticObjectId(raw.document_id) for raw in raws]
     for edge_id, edge in seen_edge_ids.items():
         # Only stamp ``extractor`` on LLM-extractable edges (today only
         # ``related_to``). Structural edges (``part_of``, ``next``,
@@ -1104,15 +1119,19 @@ async def _apply_writes(
             edge.type.value if hasattr(edge.type, "value") else str(edge.type)
         )
         edge_extractor = extractor if edge_type_value == "related_to" else None
-        await _upsert_edge(
-            database=database,
-            user_id=user_id,
-            edge=edge,
-            edge_id=edge_id,
-            source_document_ids=[PydanticObjectId(raw.document_id) for raw in raws],
-            extractor=edge_extractor,
+        edge_ops.append(
+            _build_edge_op(
+                user_id=user_id,
+                edge=edge,
+                edge_id=edge_id,
+                source_document_ids=source_document_ids,
+                extractor=edge_extractor,
+            )
         )
         summary.edges_written += 1
+
+    if edge_ops:
+        await database[_KG_COLLECTION].bulk_write(edge_ops, ordered=False)
 
     log.info(
         "apply_writes: nodes_written=%d edges_written=%d same_as_emitted=%d "
@@ -1268,22 +1287,23 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
         return [self._vector for _ in texts]
 
 
-async def _upsert_structural_node(
+def _build_structural_node_op(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     node: ExtractedNode,
     node_id: str,
     source_document_id: str,
-) -> None:
-    """Upsert a structural node (DOCUMENT or CHUNK). No resolution, no dedup."""
+) -> UpdateOne:
+    """Build the upsert op for a structural node (DOCUMENT or CHUNK).
 
-    from datetime import UTC, datetime
+    No resolution, no dedup. Returns the :class:`UpdateOne` op so the
+    caller can accumulate every structural-node write into a single
+    ``bulk_write(ops, ordered=False)`` round-trip (#057).
+    """
 
-    collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
     props = node.properties.copy()
-    await collection.update_one(
+    return UpdateOne(
         {"_id": node_id},
         [
             {
@@ -1317,25 +1337,25 @@ async def _upsert_structural_node(
     )
 
 
-async def _upsert_edge(
+def _build_edge_op(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     edge: ExtractedEdge,
     edge_id: str,
     source_document_ids: list[PydanticObjectId],
     extractor: ExtractorInfo | None = None,
-) -> None:
-    """Upsert one collapsed edge document.
+) -> UpdateOne:
+    """Build the upsert op for one collapsed edge document.
 
     #030: ``extractor`` is stamped on LLM-extracted edges (today only
     ``related_to`` rows). Structural edges pass ``extractor=None`` and
     leave the column unset on the row.
+
+    Returns the :class:`UpdateOne` op so the caller can accumulate every
+    edge write into a single ``bulk_write(ops, ordered=False)`` round-trip
+    (#057).
     """
 
-    from datetime import UTC, datetime
-
-    collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
     set_stage: dict[str, Any] = {
         "user_id": user_id,
@@ -1364,7 +1384,7 @@ async def _upsert_edge(
     }
     if extractor is not None:
         set_stage["extractor"] = extractor.model_dump()
-    await collection.update_one(
+    return UpdateOne(
         {"_id": edge_id},
         [{"$set": set_stage}],
         upsert=True,
