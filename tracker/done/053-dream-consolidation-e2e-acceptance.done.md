@@ -349,3 +349,63 @@ ruff check Passed / ruff format Passed / KGQuery discipline Passed
   isolated run agreeing with the full-suite run.
 
 **VERDICT: PASS**
+
+### [PM] 2026-05-21 18:05 — Acceptance Review (whole feature)
+
+**VERDICT: ACCEPT**
+
+Walked the feature from the operator's perspective by reading the code +
+tests (not just the task logs). All seven operator-visible outcomes verified:
+
+1. **Text-embedding default + routing** — `default.yaml` search/resolution
+   embedding = `voyage-3.5`/1024; `EmbeddingConfig` Pydantic default matches.
+   `get_model._build_embedding_model` routes `voyage-multimodal-*` →
+   `VoyageMultimodalEmbeddingModel`, everything else → `VoyageTextEmbeddingModel`
+   (`/v1/embeddings`, flat `{"input":[...],"model":...}`). Both clients coexist.
+   E2e asserts `get_search_embedding_model()` is the text client.
+2. **Watermark optimization correct + reduces work** — driving set filtered to
+   `updated_at > last_run_at` (`_iter_driving_nodes`); search space is the full
+   graph inside `dedupe_entity` (never watermark-filtered — the two-set rule).
+   `record_dream_run` writes `last_run_at = run_start` (no-gap). Keyed
+   per `(user_id, job)` via `_id="{user_id}:{job}"`. Catch-up test proves a
+   node ingested after run 1 finds its older twin in run 2.
+3. **Default = semantic+fuzzy, auto-merge high + flag mid** — reuses
+   `dedupe_entity` + `decide_from_candidates` + `review_duplicate(CONFIRM,
+   reviewed_by="dream")` + `_upsert_pending_same_as_edge`; thresholds read from
+   `extraction.dedup` (no drift). Auto-merge tombstones loser + confirms edge;
+   flag upserts pending. E2e proves both bands.
+4. **LLM judge behind flag, OFF by default, zero LLM on default path** —
+   `_supersession_sweep` only called when `enable_supersession_judge=true`
+   (default false); LLM/embedder constructed only inside it after dry-run+delta
+   guards. `_no_cost_guard` tripwire turns any LLM/embedder construction into a
+   hard failure; all default-path tests pass.
+5. **Scheduled + fan-out** — `orchestrator.py` serves `dream-consolidation-etl`
+   with `cron=app_config.dream.cron`; `dream_consolidation_all_users` enumerates
+   `person:self` with `properties.is_active_user=True` and isolates per-user
+   failures.
+6. **dry_run + idempotency** — dry_run short-circuits all writes + holds the
+   watermark; collapse-then-noop e2e proves the 2nd run is a near-noop;
+   `id1<id2` + `seen` set + skip-existing-SAME_AS; `review_duplicate(CONFIRM)`
+   idempotent.
+7. **Migration safety** — CLAUDE.md `[!CAUTION]` runbook documents the
+   same-dim-different-vector-space hazard (dim-guard miss) + `RESET_ONTOLOGY=1`
+   recovery with DRY_RUN rehearsal + convergence window. E2e asserts presence.
+
+**Operator-decision divergence (re-confirm at merge, NOT a blocker):**
+`default.yaml` ships `dream.dry_run: false` — the scheduled cron runs a REAL,
+mutating fan-out from its first tick. The plan's Step-3 decision point #4
+proposed `dry_run=True` as the safe first-rollout default; the `DreamConfig`
+Pydantic default is still `True`, but YAML overrides it to `false`. This is a
+deliberate operator choice recorded in #052's log, consistent across config +
+tests, surfaced at the human-approved plan gate — so it is an approved decision,
+not a silent descope. Carried to the PR description so the merger re-confirms.
+
+Evidence basis: Tester PASS (260 passed / 1 skipped full suite in isolation;
+e2e 9 passed; 1327 unit; pre-commit clean) plus my own read of dream.py,
+meta_state.py, get_model.py, voyage_embedding.py, default.yaml, app_config.py,
+orchestrator.py, run_dream_consolidation.py, and the e2e test.
+
+If the operator triggers `make memory-run-dream-consolidation` right now, the
+fan-out collapses parallel-ingest duplicates for active users with zero LLM /
+zero Voyage on the default path, advancing per-user watermarks. User
+satisfaction guaranteed. SWE may commit / proceed to push.
