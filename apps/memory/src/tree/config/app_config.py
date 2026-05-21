@@ -59,7 +59,9 @@ class EmbeddingBatchConfig(BaseModel):
     per-request caps for ``voyage-multimodal-3``:
 
     * ``max_inputs`` — max 1,000 inputs per request.
-    * ``max_total_tokens`` — total across all inputs ≤ 320,000 per request.
+    * ``max_total_tokens`` — total across all inputs per request. Defaults to
+      10,000 (the shared free-tier Voyage TPM window, #054); the model's hard
+      per-request ceiling is 320,000.
     * ``max_input_tokens`` — each single input ≤ 32,000. The model sends
       ``truncation=True`` so an oversized input is truncated server-side
       rather than 400-ing; this bound only governs how the batcher
@@ -72,8 +74,16 @@ class EmbeddingBatchConfig(BaseModel):
     """
 
     max_inputs: int = Field(default=1000)
-    max_total_tokens: int = Field(default=320_000)
+    # Dropped 320_000 → 10_000 (#054 / ADR-002): the shared free-tier Voyage key
+    # is capped at 10K TPM, so no single synchronous request may exceed the
+    # per-minute token window. The TPM cap is held by this config knob, not a
+    # second token-weighted limiter (an explicit deferred follow-up).
+    max_total_tokens: int = Field(default=10_000)
     max_input_tokens: int = Field(default=32_000)
+    # YAML-only fan-out knob (#054): how many embed requests a single stage may
+    # dispatch concurrently. Default 1 keeps dispatch serial; the cross-flow
+    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out.
+    dispatch_concurrency: int = Field(default=1)
 
 
 class ModelsConfig(BaseModel):
@@ -142,6 +152,15 @@ class ExtractionConfig(BaseModel):
     chunk_size: int = 512
     chunk_overlap: int = 64
     llm_concurrency: int = 5
+    # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
+    # override hatch via :func:`_apply_env_overrides`.
+    # ``doc_concurrency`` — how many documents one extraction run processes in
+    # parallel (default 1 = serial; the cross-run fan-out lives in the sharded
+    # parent flow, see ADR-002).
+    doc_concurrency: int = 1
+    # ``dedup_concurrency`` — how many entities the dedup stage may resolve in
+    # parallel within a run.
+    dedup_concurrency: int = 8
     resolution: ResolutionConfig = ResolutionConfig()
     dedup: DedupConfig = DedupConfig()
 
@@ -197,6 +216,32 @@ class DreamConfig(BaseModel):
     dry_run: bool = True
     max_pairs: int = 10_000
     enable_supersession_judge: bool = False
+
+
+class ConcurrencyConfig(BaseModel):
+    """Pipeline-parallelism + Voyage rate-limiting knobs (#054 / ADR-002).
+
+    These govern how aggressively the memory pipeline runs concurrently and
+    how the shared free-tier Voyage embedding key is throttled across separate
+    flow runs:
+
+    * ``voyage_rpm`` — requests/minute the shared free-tier Voyage key allows.
+      Drives the server-side ``voyage-embeddings`` Prefect global concurrency
+      limit (limit = ``voyage_rpm``, slot-decay-per-second = ``voyage_rpm / 60``)
+      created via ``make memory-sync-concurrency-limits``.
+    * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
+      ``max_total_tokens`` cap), not yet a second token-weighted limiter.
+    * ``runner_global_limit`` — admission control for ``serve(global_limit=...)``;
+      kept close to ``voyage_rpm`` so we don't admit far more runs than the
+      embed budget can feed.
+    * ``fanout_max_parallel`` — max document-shard runs the sharded parent flow
+      launches concurrently.
+    """
+
+    voyage_rpm: int = 3
+    voyage_tpm: int = 10_000
+    runner_global_limit: int = 4
+    fanout_max_parallel: int = 4
 
 
 class QueryConfig(BaseModel):
@@ -422,6 +467,7 @@ class AppConfig(BaseModel):
     query: QueryConfig = QueryConfig()
     mcp: MCPConfig = MCPConfig()
     dream: DreamConfig = DreamConfig()
+    concurrency: ConcurrencyConfig = ConcurrencyConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}

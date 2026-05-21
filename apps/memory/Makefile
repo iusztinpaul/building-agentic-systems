@@ -121,6 +121,9 @@ deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
 serve-workflows: # Serve Prefect workflow deployments.
 	uv run python -m tree.orchestrator
 
+sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global concurrency limit from app_config.concurrency (#054 / ADR-002). Requires a running Prefect server.
+	uv run python scripts/sync_concurrency_limits.py
+
 
 # --- Data Pipelines ---
 #
