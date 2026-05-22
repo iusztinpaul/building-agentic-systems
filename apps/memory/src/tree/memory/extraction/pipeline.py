@@ -29,6 +29,7 @@ from uuid import uuid4
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import INPUTS, NO_CACHE
+from prefect.deployments import run_deployment
 from pymongo import UpdateOne
 
 from tree.config.app_config import load_app_config
@@ -68,6 +69,13 @@ from tree.memory.extraction.preference_supersession import (
     canonicalize_preference_names,
     resolve_supersessions,
     write_self_has_preference_edges,
+)
+from tree.memory.extraction.sharding import (
+    FanOutStats,
+    _fan_out_extraction,
+    _partition_into_shards,
+    _resolve_num_shards,
+    _resolve_pending_document_ids,
 )
 from tree.memory.extraction.validation import (
     get_edge_property_schema,
@@ -1454,6 +1462,82 @@ apply_writes_task = task(
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator path — document-shard fan-out via recursive self-dispatch (#061)
+# ---------------------------------------------------------------------------
+
+
+async def _orchestrate_sharded_extraction(
+    *,
+    user_id: PydanticObjectId,
+    document_ids: list[str] | None,
+    num_shards: int,
+) -> FanOutStats:
+    """Run the orchestrator path: resolve pending docs, partition, fan out, index.
+
+    Reached only when ``memory_extraction`` is called with ``num_shards > 1``.
+    Resolves the user's pending documents when ``document_ids is None`` (an
+    explicit list is used verbatim), partitions them into ``min(num_shards, N)``
+    balanced shards, then self-dispatches one ``memory-extraction-etl`` child run
+    per shard (each with ``num_shards=1`` → worker path → recursion terminates at
+    one level) under ``asyncio.gather(return_exceptions=True)``, and finally fires
+    exactly ONE trailing ``memory-indexing-etl`` run after the gather settles.
+
+    An empty resolved/explicit doc set is a clean no-op: zero self-dispatch, zero
+    indexing run, ``FanOutStats(shards_total=0)``.
+    """
+
+    log = _get_run_logger()
+    cfg = _live_app_config()
+    effective_num_shards = _resolve_num_shards(
+        num_shards, default=cfg.concurrency.fanout_max_parallel
+    )
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    database = client[settings.mongo.mongo_initdb_database]
+
+    if document_ids is None:
+        ids = await _resolve_pending_document_ids(database=database, user_id=user_id)
+        log.info(
+            "extraction fan-out: resolved %d pending document(s) for user_id=%s",
+            len(ids),
+            user_id,
+        )
+    else:
+        ids = list(document_ids)
+        log.info(
+            "extraction fan-out: using %d explicit document_id(s) for user_id=%s",
+            len(ids),
+            user_id,
+        )
+
+    if not ids:
+        log.info(
+            "extraction fan-out: no pending documents for user_id=%s — nothing "
+            "to do (no child runs, no indexing run)",
+            user_id,
+        )
+        return FanOutStats(shards_total=0)
+
+    shards = _partition_into_shards(ids, effective_num_shards)
+    log.info(
+        "extraction fan-out: partitioned %d document(s) into %d shard(s) "
+        "(num_shards=%d)",
+        len(ids),
+        len(shards),
+        effective_num_shards,
+    )
+
+    return await _fan_out_extraction(
+        user_id=user_id,
+        shards=shards,
+        run_deployment=run_deployment,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Flow
 # ---------------------------------------------------------------------------
 
@@ -1462,13 +1546,34 @@ apply_writes_task = task(
 async def memory_extraction(
     user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
-) -> WriteSummary:
+    num_shards: int = 1,
+) -> WriteSummary | FanOutStats:
     """Extract knowledge-graph entries from documents for ``user_id``.
 
     ``user_id`` is a required, non-Optional Prefect parameter. Every task
     in the six-task pipeline receives the value; candidate fetches and
     writes are scoped to ``user_id`` end-to-end. Cross-tenant rows are
     invisible to resolution / dedup.
+
+    ``num_shards`` selects between two paths (ADR-002 §3, amended #061), keeping
+    ONE deployment for both via recursive self-dispatch:
+
+    * ``num_shards <= 1`` (the default) — the **WORKER** path. Runs today's
+      extraction logic directly and unchanged: fetch the user-scoped documents,
+      the six-task pipeline, return :class:`WriteSummary`. It does NOT resolve a
+      pending-doc fan-out set, does NOT partition, does NOT ``run_deployment``
+      (no self-dispatch), and does NOT trigger indexing. ``num_shards=1`` (and
+      the omitted default) is byte-for-byte equivalent to ``memory_extraction``
+      before #061.
+    * ``num_shards > 1`` — the **ORCHESTRATOR** path. Resolves the user's pending
+      documents (when ``document_ids is None``), partitions into
+      ``min(num_shards, N)`` balanced shards, self-dispatches one
+      ``memory-extraction-etl`` run per shard with ``num_shards=1`` (so children
+      take the worker path — recursion terminates after one level) under
+      ``asyncio.gather(return_exceptions=True)``, then fires exactly ONE trailing
+      ``memory-indexing-etl`` run. Returns a :class:`FanOutStats` report. An empty
+      resolved/explicit set is a clean no-op (zero self-dispatch, zero indexing
+      run, ``shards_total=0``).
 
     Cross-key config validation runs at import time (``settings = Settings()``
     in ``app_config.py``). If the validator raises, the flow never starts;
@@ -1478,6 +1583,15 @@ async def memory_extraction(
 
     log = _get_run_logger()
 
+    # ----- Orchestrator path (num_shards > 1): partition + fan out + index ----
+    if num_shards > 1:
+        return await _orchestrate_sharded_extraction(
+            user_id=user_id,
+            document_ids=document_ids,
+            num_shards=num_shards,
+        )
+
+    # ----- Worker path (num_shards <= 1): TODAY'S extraction, unchanged -------
     # Validate config invariants up-front (also re-checked on every dedup call).
     # We re-load so env-var changes since import-time are honored — gives tests
     # a deterministic seam for the "misconfig fails at flow entry" AC.

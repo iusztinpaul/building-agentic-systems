@@ -142,17 +142,13 @@ run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks al
 # --- Memory Pipelines ---
 # Pattern: run-<memory-pipeline-name>-memory-pipeline
 
-run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2".
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",)
+run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (>1 fans out document-shards + indexes once; default 1 = plain worker extraction).
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
+	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Requires USER_ID=<oid>.
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
 	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
-
-run-memory-pipeline-extraction-fanout: # Trigger the document-shard extraction fan-out via Prefect (#056). Fans out one extraction run per shard, then indexes once. Requires USER_ID=<oid>. Optional NUM_SHARDS=<n>.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction-fanout USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
-	uv run python scripts/run_extraction_fanout.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 
 # --- Dream Consolidation ---

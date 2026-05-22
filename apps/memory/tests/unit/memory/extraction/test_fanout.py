@@ -1,14 +1,20 @@
-"""Unit tests for the document-shard fan-out parent flow (#056, ADR-002 §3/§4).
+"""Unit tests for the in-flow document-shard fan-out (#061, ADR-002 §3 amended).
 
-These exercise the PURE logic of ``tree.memory.extraction.fanout`` with no
-Prefect server and ``run_deployment`` mocked:
+#061 folded the #056 standalone fan-out parent flow into the single
+``memory_extraction`` flow via a ``num_shards`` parameter using
+recursive self-dispatch. These exercise the PURE logic with no Prefect server and
+``run_deployment`` mocked:
 
-* ``_partition_into_shards`` — contiguous, disjoint shard partitioning;
+* ``_partition_into_shards`` — contiguous, disjoint, balanced shard partitioning;
+* ``_resolve_num_shards`` — the non-positive→1 clamp;
 * ``_fan_out_extraction`` — the gather + failure-isolation + single-index core,
-  driven through a fake ``run_deployment`` so we never touch a real deployment.
+  with each child carrying ``num_shards=1`` (recursion terminates after one
+  level), driven through a fake ``run_deployment`` so we never touch a real
+  deployment.
 
-Pending-doc resolution against Mongo and the live flow wiring are covered by the
-integration test (``tests/integration/memory/test_extraction_fanout.py``).
+The orchestrator-vs-worker BRANCH inside ``memory_extraction(num_shards=…)`` and
+pending-doc resolution against Mongo are covered by the integration test
+(``tests/integration/memory/test_extraction_fanout.py``).
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from __future__ import annotations
 import pytest
 from beanie import PydanticObjectId
 
-from tree.memory.extraction.fanout import (
+from tree.memory.extraction.sharding import (
     FanOutStats,
     _fan_out_extraction,
     _partition_into_shards,
@@ -207,6 +213,31 @@ async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
     # The union of every shard's document_ids equals the input ids.
     flat = [doc_id for p in extraction_params for doc_id in p["document_ids"]]
     assert flat == ids
+
+
+async def test_fan_out_children_carry_num_shards_one(mocker) -> None:
+    """Every extraction self-dispatch carries ``num_shards == 1``.
+
+    This is what makes children take the WORKER path — recursion terminates
+    after exactly one level (no infinite self-dispatch).
+    """
+
+    user_id = PydanticObjectId()
+    ids = [str(PydanticObjectId()) for _ in range(6)]
+    shards = _partition_into_shards(ids, 4)
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
+
+    extraction_params = [p for name, p in calls if "extraction" in name]
+    assert len(extraction_params) == len(shards)
+    assert all(p["num_shards"] == 1 for p in extraction_params)
 
 
 async def test_fan_out_indexing_carries_user_id_only(mocker) -> None:

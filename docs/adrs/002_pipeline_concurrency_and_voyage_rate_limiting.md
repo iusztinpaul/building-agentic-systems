@@ -69,12 +69,57 @@ non-embedding phases; the risk is 4 runs collectively 429-storming Voyage.
    request can exceed the 10K TPM window. A token-weighted `voyage-tokens`
    limit is an explicit deferred follow-up, added only if 429s persist.
 
-3. **The fan-out axis is document-shards of one user.** A parent flow
-   `memory_extraction_sharded` partitions a user's pending documents into N
-   contiguous shards and launches one `memory-extraction-etl` run per shard via
-   `run_deployment` under `asyncio.gather(return_exceptions=True)`, then triggers
-   ONE `memory-indexing-etl` run after all shards finish (indexing is a global
-   backfill over unembedded nodes — running it per-shard would race 4 writers).
+3. **The fan-out axis is document-shards of one user.** A user's pending
+   documents are partitioned into N contiguous shards; one `memory-extraction-etl`
+   run is launched per shard via `run_deployment` under
+   `asyncio.gather(return_exceptions=True)`, then ONE `memory-indexing-etl` run is
+   triggered after all shards finish (indexing is a global backfill over unembedded
+   nodes — running it per-shard would race 4 writers).
+
+   **Amendment (#061 — fold fan-out into the single extraction deployment).** The
+   #056 implementation realised the fan-out as a SEPARATE parent flow
+   `memory_extraction_sharded` registered as a SECOND deployment
+   `memory-extraction-fanout-etl`. On review (open PR #24, before merge) the project
+   owner rejected the two-entrypoint shape: it forces operators to know which of two
+   extraction commands to run, and the worker deployment (`memory-extraction-etl`)
+   and the orchestrator deployment (`memory-extraction-fanout-etl`) are otherwise the
+   same logical pipeline. The fan-out axis, the document-shard partitioning, the
+   `asyncio.gather(return_exceptions=True)` failure-isolation, and the
+   single-trailing-index rule are all **unchanged** — only the deployment topology is
+   amended:
+
+   - The fan-out is folded INTO the existing `memory_extraction` flow (the single
+     `memory-extraction-etl` deployment) via a new `num_shards: int = 1` parameter,
+     using **recursive self-dispatch**. There is exactly ONE extraction deployment.
+   - `num_shards <= 1` (the default) → the flow runs TODAY'S extraction logic
+     directly, unchanged — the "worker" path. It does NOT self-dispatch and does NOT
+     trigger indexing (exactly the prior `memory_extraction` behaviour). `num_shards=1`
+     is therefore byte-for-byte equivalent to extraction before this feature.
+   - `num_shards > 1` → the flow takes the "orchestrator" path: resolve the user's
+     pending documents (when `document_ids is None`), partition into
+     `min(num_shards, N)` contiguous balanced shards, then `run_deployment(
+     "memory-extraction-etl/memory-extraction-etl", parameters={"user_id": …,
+     "document_ids": shard, "num_shards": 1})` once per shard under
+     `asyncio.gather(return_exceptions=True)`, and finally ONE trailing
+     `run_deployment("memory-indexing-etl/memory-indexing-etl", parameters={"user_id":
+     …})`.
+   - Children are ALWAYS dispatched with `num_shards=1`, so each child takes the
+     worker path — recursion terminates after exactly one level (no infinite
+     self-dispatch).
+   - The trailing single index runs ONLY on the orchestrator path (`num_shards > 1`).
+     The worker path (`num_shards <= 1`) is pure extraction with no indexing trigger,
+     matching the prior `memory_extraction` contract.
+
+   The reusable pure helpers (`_partition_into_shards`, pending-doc resolution,
+   `_resolve_num_shards` with its non-positive→1 clamp, the `FanOutStats`-shaped
+   report) are RETAINED — they move so `memory_extraction` consumes them — but the
+   standalone parent FLOW `memory_extraction_sharded` and its
+   `memory-extraction-fanout-etl` deployment registration are DELETED. There is no
+   second extraction entrypoint. This is a topology refinement of the same
+   document-shard fan-out decision (axis, partitioning, failure-isolation,
+   single-trailing-index all unchanged), so the ADR stays `Accepted` rather than being
+   superseded; #056's separate-entrypoint design is superseded by this in-flow
+   `num_shards` design.
 
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
