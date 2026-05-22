@@ -139,3 +139,37 @@ behavior-preservation e2e remain genuinely unverified.
 
 SWE may keep the commits; the feature is accepted. The orchestrator must surface the
 [HUMAN] checklist to the user so they have no false confidence about the live path.
+
+### [PM] 2026-05-22 — Rework groom (#061)
+
+**Trigger:** the project owner reviewed the shipped #056 fan-out on open PR #24
+(before merge) and requested a DESIGN CHANGE: do NOT introduce a second extraction
+entrypoint (`memory-extraction-fanout-etl`). Instead the SAME `memory-extraction-etl`
+deployment should gain a `num_shards` knob — `num_shards=1` (default) == today's
+extraction; `num_shards>1` orchestrates the fan-out via recursive self-dispatch and a
+single trailing index.
+
+**#056's separate-entrypoint design is SUPERSEDED.** The standalone parent flow
+`memory_extraction_sharded`, its `memory-extraction-fanout-etl` deployment,
+`scripts/run_extraction_fanout.py`, and the `run-memory-pipeline-extraction-fanout`
+Make target are all to be DELETED. The fan-out semantics #056 verified (document-shard
+axis, balanced contiguous partition, `gather(return_exceptions=True)`
+failure-isolation, exactly one trailing index) are PRESERVED — only the topology
+changes from "two deployments" to "one deployment + a `num_shards` parameter using
+one-level recursive self-dispatch".
+
+**ADR-002 §3 amended (#061)** — recorded the in-flow `num_shards` recursive
+self-dispatch topology, why (owner wants one entrypoint; `num_shards=1` == prior
+behavior; trailing index only on the orchestrator path; children always
+`num_shards=1` so recursion terminates after one level). Status stays `Accepted`
+(topology refinement, same fan-out decision); the cross-flow GCL limiter (§1),
+document-shard axis (§3), `serve(global_limit=…)` admission control (§4), and the
+same-user write-interleaving tradeoff (Consequences) are UNCHANGED.
+
+**Filed rework task:** `tracker/061-fold-fanout-into-extraction-deployment.groomed.md`
+(depends on #054/#056; supersedes #056's separate-entrypoint design). 16 ACs (incl. 4
+`[HUMAN]` live ACs now run via `make memory-run-memory-pipeline-extraction USER_ID=…
+NUM_SHARDS=4`) + 6 user stories. The #056 unit + integration fan-out tests are to be
+reworked to target `memory_extraction(num_shards=…)`.
+
+Pipeline re-runs the inner loop on #061; on green, re-run acceptance on the feature.
