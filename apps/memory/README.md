@@ -93,7 +93,7 @@ make memory-local-test
 
 ### Serving workflows
 
-The Dockerized `prefect-worker` container (started by `make local-start`) runs `python -m tree.orchestrator`, which serves all 5 deployments. If you're iterating on pipeline code and want live reloads without rebuilding the container, run the orchestrator locally instead:
+The Dockerized `prefect-worker` container (started by `make local-start`) runs `python -m tree.orchestrator`, which serves all deployments. If you're iterating on pipeline code and want live reloads without rebuilding the container, run the orchestrator locally instead:
 
 ```bash
 make memory-serve-workflows
@@ -101,11 +101,17 @@ make memory-serve-workflows
 
 **Pick one — don't run both.** Running both serves duplicate workers that race for the same deployments.
 
-The 5 deployments registered by `src/tree/orchestrator.py`:
+The deployments registered by `src/tree/orchestrator.py`:
 
-- `data-pipeline-etl`
+- `data-etl-orchestrator`, `data-etl-worker` (data ingestion is split into an
+  operator-facing orchestrator that shards the configured `sources:` list and a
+  worker that ingests one shard — #068)
 - `ingest-file-etl`, `ingest-conversation-etl`
-- `memory-extraction-etl`, `memory-indexing-etl`
+- `ingest-youtube-video-batch-etl`, `ingest-youtube-rss-feed-batch-etl`
+- `memory-extract-etl-orchestrator`, `memory-extract-etl-worker` (memory extraction
+  is split into an orchestrator that shards pending docs + indexes once and a worker
+  that runs the six-task extraction body — #067), `memory-indexing-etl`
+- `dream-consolidation-etl`
 
 ### Data pipelines
 
@@ -113,7 +119,7 @@ Each target streams logs from the local `make memory-serve-workflows` (or the Do
 
 | Target | What it does | Reads from `default.yaml` |
 |---|---|---|
-| `make memory-run-data-pipeline` | Walks every entry in `sources.sources` and dispatches each to the right sub-flow (Substack RSS / article batches, HuggingFace arXiv, web URLs) | `sources.sources` |
+| `make memory-run-data-pipeline` | Triggers `data-etl-orchestrator`: partitions every entry in `sources.sources` into `min(NUM_SHARDS, N)` balanced shards and dispatches one `data-etl-worker` per shard (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Optional `NUM_SHARDS=<n>` (default 1 = one worker with all sources). | `sources.sources` |
 
 ### Memory extraction
 

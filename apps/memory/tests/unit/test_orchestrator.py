@@ -74,7 +74,10 @@ def test_serve_deployments_registers_all_deployments(mocker):
     call = spy.call_args
     deployment_names = {dep.name for dep in call.args}
     assert deployment_names == {
-        "data-pipeline-etl",
+        # #068: the single ``data-pipeline-etl`` deployment is split into the
+        # orchestrator + worker. The old name is GONE.
+        "data-etl-orchestrator",
+        "data-etl-worker",
         # #067: the single ``memory-extraction-etl`` deployment is split into the
         # orchestrator + worker. The old name is GONE.
         "memory-extract-etl-orchestrator",
@@ -87,3 +90,4 @@ def test_serve_deployments_registers_all_deployments(mocker):
         "dream-consolidation-etl",
     }
     assert "memory-extraction-etl" not in deployment_names
+    assert "data-pipeline-etl" not in deployment_names

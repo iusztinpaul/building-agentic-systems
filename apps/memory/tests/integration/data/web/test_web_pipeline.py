@@ -20,7 +20,7 @@ from prefect import tags as prefect_tags
 
 from tree.config.app_config import HuggingFaceDatasetSource, WebSource
 from tree.data.core.ingest import ingest_url
-from tree.data.pipeline import data_pipeline
+from tree.data.pipeline import data_etl_worker
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
 
@@ -195,7 +195,7 @@ class TestDataPipelinePicksUpWebEntries:
             return_value=mongo_client,
         )
 
-        # Stub the arxiv batch generator so ``data_pipeline`` doesn't
+        # Stub the arxiv batch generator so the worker doesn't
         # touch the real HuggingFace dataset during this test.
         def _empty_batches(max_samples, batch_size):
             return
@@ -208,7 +208,9 @@ class TestDataPipelinePicksUpWebEntries:
 
         try:
             with prefect_tags("tests"):
-                result = await data_pipeline(_USER_ID)
+                # #068: the worker now owns per-variant dispatch and takes its
+                # sources as an argument rather than reading ``app_config``.
+                result = await data_etl_worker(_USER_ID, mock_config.sources.sources)
 
             web_docs = [d for d in result if d.source_type == SourceType.WEB]
             assert len(web_docs) == 1

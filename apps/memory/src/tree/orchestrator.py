@@ -24,7 +24,7 @@ from prefect import serve
 from tree.config.app_config import app_config
 from tree.data.conversation_pipeline import ingest_conversation
 from tree.data.file_pipeline import ingest_file
-from tree.data.pipeline import data_pipeline
+from tree.data.pipeline import data_etl_orchestrator, data_etl_worker
 from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.memory.consolidation.dream import dream_consolidation_all_users
@@ -46,9 +46,22 @@ def serve_deployments(limit: int) -> None:
     """
 
     serve(
-        data_pipeline.to_deployment(
-            name="data-pipeline-etl",
-            tags=["data-pipeline"],
+        # Data ingestion orchestrator/worker split (#068 / ADR-002 §3 amended #066).
+        # Operators trigger the ORCHESTRATOR; it reads the configured ``sources:``
+        # list, partitions it into ``min(num_shards, N)`` balanced shards, and
+        # dispatches one ``data-etl-worker`` run per shard (NO recursion — a distinct
+        # worker deployment). There is NO trailing step — the data pipeline only
+        # produces ``documents``; there is no index. The WORKER ingests one shard of
+        # sources (reusing the per-source-type batch logic); it is the orchestrator's
+        # internal dispatch target but may also be triggered directly for a bare
+        # shard ingestion.
+        data_etl_orchestrator.to_deployment(
+            name="data-etl-orchestrator",
+            tags=["data-pipeline", "orchestrator"],
+        ),
+        data_etl_worker.to_deployment(
+            name="data-etl-worker",
+            tags=["data-pipeline", "worker"],
         ),
         # Memory extraction orchestrator/worker split (#067 / ADR-002 §3 amended
         # #066). Operators trigger the ORCHESTRATOR; it resolves the user's pending

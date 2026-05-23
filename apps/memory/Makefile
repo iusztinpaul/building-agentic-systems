@@ -134,9 +134,9 @@ sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global co
 #
 # Wired in #020; there is no silent fallback to a default user.
 
-run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks all entries in configs/default.yaml sources. Requires USER_ID=<oid>.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)"
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Requires USER_ID=<oid>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
+	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 
 # --- Memory Pipelines ---
