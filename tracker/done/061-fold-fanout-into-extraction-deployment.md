@@ -533,3 +533,23 @@ $ run_memory_pipeline.py --user-id <oid> --num-shards 0   → exit 1
   orchestrator path, where it is still correct). Both behaviors verified.
 
 **VERDICT: PASS**
+
+### [PR Reviewer] 2026-05-22 12:05 — Re-review (after #061 rework)
+
+**VERDICT: NO BLOCKERS**
+
+Re-reviewed the full diff (`git diff $(git merge-base HEAD origin/main)...HEAD`), with fresh scrutiny on the #061 delta (commit `331a6fa`). 34 files; concurrency + recursive dispatch areas examined directly.
+
+- Blockers: 0
+- Nits: 1 NEW (doc-drift, appended to PR #24 description as item 2) + 1 carried over (`dispatch_concurrency` read-but-unwired, unchanged, already on PR description as item 1).
+
+Key verifications (all confirmed):
+- **Recursion termination — SAFE.** The sole `run_deployment(_EXTRACTION_DEPLOYMENT, ...)` (sharding.py:230) hardcodes `"num_shards": 1`. No path lets a child receive `num_shards>1`. Children fall through the `if num_shards > 1` guard to the worker path; recursion terminates at one level. Asserted by `test_fan_out_children_carry_num_shards_one` (unit) + `test_orchestrator_fans_out_per_shard_then_indexes_once` (integration).
+- **Worker-path equivalence — byte-for-byte.** `git diff 1da6b65 HEAD -- pipeline.py` shows the worker body + MCP shim entirely unchanged; only additive insertions (import, `_orchestrate_sharded_extraction` helper, param, docstring, early-return guard). Covered by `test_worker_path_*` (zero `run_deployment` calls).
+- **Orchestrator correctness.** Exactly one trailing index after the gather; `return_exceptions=True` failure isolation; `_resolve_num_shards` non-positive→1 clamp; balanced `_partition_into_shards`; empty-docs no-op (`shards_total=0`, zero dispatch). All unit + integration tested.
+- **No dangling refs** to deleted `fanout.py` / `memory_extraction_sharded` / `memory-extraction-fanout-etl`. The only mentions are in ADR-002's "Amendment (#061)" supersession narrative (correctly labels them DELETED) — that is documentation discipline, not a live claim.
+- `make memory-unit-tests` → 1413 passed (firsthand). No debug statements, no ownerless TODOs, no stray artifacts in the diff.
+
+NEW Nit (PR #24 description, item 2): stale "sharded parent flow" wording for `fanout_max_parallel` (`app_config.py:237-238`) + the `fanout_max_parallel`/`doc_concurrency` comments in `default.yaml` — they reference the deleted standalone flow. Values/behavior correct; prose only.
+
+No rollup task filed (zero Blockers). Pipeline may advance to hand-off.

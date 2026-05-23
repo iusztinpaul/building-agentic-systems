@@ -173,3 +173,82 @@ NUM_SHARDS=4`) + 6 user stories. The #056 unit + integration fan-out tests are t
 reworked to target `memory_extraction(num_shards=…)`.
 
 Pipeline re-runs the inner loop on #061; on green, re-run acceptance on the feature.
+
+### [PM] 2026-05-22 — Acceptance (post-#061 rework)
+
+**VERDICT: ACCEPT**
+
+Re-reviewed the feature after the #061 design change (commit `331a6fa`) landed, from
+the project owner's verbatim intent: "I don't want another entrypoint such as
+`memory-extraction-fanout-etl`; just tweak the code to have the SAME
+`memory-extraction-etl` with a fanout option when fanout>1; fanout=1 == what we had
+before." Spot-checked source + git, did NOT trust the Tester's PASS blindly. Did NOT
+re-run the integration suite — the shared docker stack is contended across worktrees
+(CLAUDE.md), and the Tester's `make memory-integration-tests-all` was green at 268
+passed / 1 skipped / 0 warnings on a quiesced+isolated stack; relied on that per the
+brief.
+
+**1. Owner's intent delivered EXACTLY — verified in shipped code:**
+- ONE deployment. `orchestrator.py` registers a single `memory-extraction-etl`
+  (`memory_extraction.to_deployment`, no `_sharded`), keeps
+  `serve(global_limit=app_config.concurrency.runner_global_limit)`. `import
+  tree.orchestrator` → OK.
+- `memory_extraction(user_id, document_ids=None, num_shards=1)` —
+  `pipeline.py:1546-1550`, `num_shards` non-Optional int default 1, return
+  `WriteSummary | FanOutStats`.
+- `num_shards <= 1` == prior behavior. Worker path branch at `pipeline.py:1587`
+  (`if num_shards > 1: return …`) returns BEFORE the worker body, so the worker body
+  (1594+) is the unchanged extraction. No `run_deployment`, no `memory-indexing-etl`
+  reference anywhere after line 1594 (grep clean).
+- `num_shards > 1` shards via recursive self-dispatch + one trailing index.
+  `_orchestrate_sharded_extraction` (1469) → resolve pending (or explicit verbatim) →
+  `_partition_into_shards(min(num_shards,N))` → `_fan_out_extraction` dispatches each
+  child `{user_id, document_ids: shard, num_shards: 1}` under
+  `gather(return_exceptions=True)` → ONE trailing `memory-indexing-etl` after the
+  gather, regardless of failures. Children carry `num_shards=1` → worker path →
+  recursion terminates at one level (`sharding.py:235`).
+
+**Independent confirmation of the "worker path byte-for-byte identical to HEAD" claim
+(did not just trust the Tester):** `git show 331a6fa -- …/pipeline.py` removed
+EXACTLY ONE line — the return annotation `) -> WriteSummary:`. Every other change is
+pure addition (the `num_shards: int = 1` param, the `WriteSummary | FanOutStats`
+return type, the orchestrator early-branch, `_orchestrate_sharded_extraction`,
+docstring). Zero deletions inside the worker body. The parity is provable at the diff
+level, not just by assertion.
+
+**2. No second entrypoint remains:**
+`grep -rn "memory_extraction_sharded|memory-extraction-fanout-etl|run_extraction_fanout|run-memory-pipeline-extraction-fanout"`
+across `apps/memory/src apps/memory/scripts apps/memory/Makefile` (and the whole
+`apps/memory/` incl. tests) → NOTHING (exit 1). `fanout.py` and
+`run_extraction_fanout.py` deleted (renamed → `sharding.py`, which carries NO `@flow`
+/ `to_deployment`). Single Make target `run-memory-pipeline-extraction` threads
+`NUM_SHARDS` → `--num-shards`; script targets `memory-extraction-etl/memory-extraction-etl`
+(no new deployment name), `init_logger()` at module level, `--num-shards < 1` guard
+exits 1 (exercised: `0` and `-3` both → exit 1). KGQuery discipline allowlist
+re-pointed `fanout.py` → `sharding.py`.
+
+**3. No regression to the rest of the feature:** #061 (`331a6fa`) touched only the
+fan-out topology files (extraction pipeline/sharding, orchestrator, fanout
+script/Makefile/tests, discipline allowlist, ADR, tracker). It did NOT touch the
+Voyage rate-limiter clients, `embedding_text.py`, `add_entity.py`, the
+bulk_write/dedupe/chunking refactors, or `indexing/pipeline.py` — those #055/#057/#058/#059
+changes are frozen. The Tester's acceptance gate (`integration-tests-all`, mongot up,
+isolated) was 268 passed / 1 skipped / 0 warnings; trusted per the contention rule.
+Independent spot-check: 37 unit fanout tests pass mongot-free.
+
+**4. No silent descoping vs the plan's "Out of scope (intentional)" list:** R5, R6,
+the `voyage-tokens` second limiter, apply-writes node-loop parallelization, and
+data-pipeline fan-out remain intentionally deferred (verified in the 2026-05-21
+acceptance; #061 touched none of those files). The fan-out semantics #056 verified
+(document-shard axis, balanced contiguous partition, gather failure-isolation, single
+trailing index) are all preserved — only the topology changed.
+
+**Residual [HUMAN] live-verification — refreshed for the NEW entrypoint** (not a
+reason to reject; surfaced for the user to run on a QUIESCED stack). The in-process
+suite mocks `run_deployment` + fake embedding models, so the live 4-way fan-out, the
+limiter negative-check, and deployment-triggered worker parity are genuinely
+unverified. See the checklist handed to the orchestrator.
+
+SWE may keep the commits; the reworked feature is accepted with no regression. The
+orchestrator must surface the refreshed [HUMAN] checklist so the user has no false
+confidence about the live path.
