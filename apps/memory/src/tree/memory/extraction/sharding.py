@@ -8,6 +8,14 @@ reusable PURE helpers that the orchestrator path of that flow consumes — there
 NO Prefect ``@flow`` and NO deployment here (the #056 standalone parent flow + its
 separate fan-out deployment were deleted in #061).
 
+The pure, pipeline-agnostic partitioning math (``_partition_into_shards`` /
+``_resolve_num_shards``) now lives in the neutral :mod:`tree.sharding` module
+(ADR-002 §3 Amendment #066) so the data orchestrator (#068) reuses the IDENTICAL
+helpers without copy-paste. They are re-exported here so memory call sites and
+tests keep their existing import paths; the MEMORY-specific helpers
+(``_resolve_pending_document_ids``, ``_fan_out_extraction``, ``FanOutStats``)
+remain in this module.
+
 The fan-out axis is document-shards of ONE user. Topology (orchestrator path,
 ``num_shards > 1``):
 
@@ -44,7 +52,22 @@ from prefect import get_run_logger
 
 from tree.entities.documents import Document
 
+# The balanced-contiguous partitioning math now lives in the neutral, pipeline-
+# agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
+# and data orchestrators import the IDENTICAL helpers without copy-paste. Memory
+# extraction keeps importing them through this module (behaviour unchanged); the
+# functions are re-exported so existing call sites and tests are untouched.
+from tree.sharding import _partition_into_shards, _resolve_num_shards
+
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "FanOutStats",
+    "_fan_out_extraction",
+    "_partition_into_shards",
+    "_resolve_num_shards",
+    "_resolve_pending_document_ids",
+]
 
 _KG_COLLECTION = "knowledge_graph"
 _EXTRACTION_DEPLOYMENT = "memory-extraction-etl/memory-extraction-etl"
@@ -91,58 +114,6 @@ class FanOutStats:
             "failed": self.failed,
             "failures": self.failures,
         }
-
-
-# ---------------------------------------------------------------------------
-# Pure partitioning
-# ---------------------------------------------------------------------------
-
-
-def _resolve_num_shards(num_shards: int) -> int:
-    """Resolve the effective shard count, clamped to ``>= 1``.
-
-    The shard count is always an explicit per-run choice
-    (``NUM_SHARDS`` / ``--num-shards`` / ``-p num_shards``). A non-positive value
-    — 0 or negative, only reachable via a DIRECT Prefect API/UI trigger that
-    bypasses the guarded ``--num-shards`` script path — clamps to ``1`` so the
-    run shards everything into a single shard instead of becoming a silent
-    zero-shard no-op (``_partition_into_shards``'s ``min(num_shards, N)`` would
-    otherwise go non-positive on a truthy negative).
-    """
-
-    return max(1, num_shards)
-
-
-def _partition_into_shards(document_ids: list[str], num_shards: int) -> list[list[str]]:
-    """Split ``document_ids`` into exactly ``min(num_shards, N)`` shards.
-
-    The shards are contiguous (preserve input order), disjoint, and balanced:
-    sizes differ by at most one, with the larger (``ceil(N / shards)``-sized)
-    shards leading. The in-order union reconstructs the input exactly.
-
-    * ``N == 0`` ⇒ ``[]`` (no shards, no-op upstream).
-    * ``N < num_shards`` ⇒ ``N`` singleton shards (we never emit empty shards).
-
-    Example: ``N=6, num_shards=4`` ⇒ sizes ``2, 2, 1, 1`` (4 shards), NOT
-    ``2, 2, 2`` (a fixed ``ceil``-chunk would under-shard).
-    """
-
-    n = len(document_ids)
-    if n == 0:
-        return []
-
-    effective = min(num_shards, n)
-    # Balanced contiguous split into exactly ``effective`` shards: the first
-    # ``remainder`` shards get the larger ``ceil`` size, the rest the floor.
-    base, remainder = divmod(n, effective)
-
-    shards: list[list[str]] = []
-    start = 0
-    for i in range(effective):
-        size = base + (1 if i < remainder else 0)
-        shards.append(document_ids[start : start + size])
-        start += size
-    return shards
 
 
 # ---------------------------------------------------------------------------

@@ -127,6 +127,85 @@ shared Voyage budget.
    superseded; #056's separate-entrypoint design is superseded by this in-flow
    `num_shards` design.
 
+   **Amendment (#066 — orchestrator/worker two-deployment topology for both
+   pipelines).** The fan-out is now realized as TWO SEPARATE NAMED deployments per
+   pipeline — an `…-orchestrator` (the operator entrypoint) and an `…-worker` (the
+   orchestrator's internal `run_deployment` dispatch target) — REPLACING #061's
+   single-deployment + recursive-self-dispatch design. #061's in-flow `num_shards`
+   recursive self-dispatch (one `memory-extraction-etl` deployment that re-dispatches
+   to itself with `num_shards=1`) is hereby **SUPERSEDED** by this two-deployment
+   topology.
+
+   - **Why.** The owner wants the orchestrator-vs-worker boundary to be explicit and
+     visible in the Prefect UI: the parent run shows as `…-orchestrator` and its
+     children as `…-worker`, instead of every node being the same recursively
+     self-dispatched `memory-extraction-etl` run. This is **NOT** the #061 "two
+     operator entrypoints" problem that was rejected in the #061 amendment —
+     operators still run exactly ONE entrypoint per pipeline (the orchestrator). The
+     worker is purely the orchestrator's internal dispatch target, never a second
+     operator command.
+
+   - **Memory topology (target).**
+     - Worker flow `memory-extract-etl-worker` `(user_id, document_ids=None)` — the
+       actual six-task extraction body. NO `num_shards`, NO orchestrator branch, NO
+       indexing trigger. Registered as deployment `memory-extract-etl-worker`.
+     - Orchestrator flow `memory-extract-etl-orchestrator`
+       `(user_id, document_ids=None, num_shards=1)` — resolve pending docs (when
+       `document_ids is None`), partition into `min(num_shards, N)` balanced shards,
+       dispatch ONE `memory-extract-etl-worker` run per shard via `run_deployment`
+       under `asyncio.gather(return_exceptions=True)`, then ONE trailing
+       `memory-indexing-etl` run. Dispatches to the WORKER deployment — NO recursion.
+       Registered as deployment `memory-extract-etl-orchestrator`.
+     - `memory-indexing-etl` is UNCHANGED (name + behavior); the orchestrator still
+       triggers it exactly once after the gather settles.
+
+   - **Data topology (target).**
+     - Worker flow `data-etl-worker` `(user_id, sources: list[...])` — ingest a SUBSET
+       (shard) of the configured sources, reusing the existing per-source-type batch
+       logic. Registered as deployment `data-etl-worker`.
+     - Orchestrator flow `data-etl-orchestrator` `(user_id, num_shards=1)` — read the
+       configured `sources:` list, partition into N balanced shards, dispatch one
+       `data-etl-worker` per shard via `run_deployment` under
+       `asyncio.gather(return_exceptions=True)`. NO trailing step (the data pipeline
+       only produces `documents`; there is no index). Registered as deployment
+       `data-etl-orchestrator`.
+
+   - **`num_shards=1` semantics CHANGE.** On the memory orchestrator, `num_shards=1`
+     now dispatches 1 worker run + 1 index run — it is NO LONGER a byte-identical
+     in-process "plain" extraction run as it was under #061. A bare extraction (no
+     index) is available by triggering `memory-extract-etl-worker` directly. This is
+     an accepted consequence of making the worker a real, separately named deployment.
+
+   - **What is UNCHANGED (so Status stays `Accepted`, not `Superseded`).** The
+     document-shard axis (memory), balanced contiguous partitioning, the
+     `asyncio.gather(return_exceptions=True)` failure-isolation, the
+     single-trailing-index rule (memory only), the cross-flow `voyage-embeddings` GCL
+     (§1), and the `serve(limit=runner_global_limit)` admission control (§4) are all
+     unchanged. The data fan-out axis shifts from #056's in-process per-type to a
+     source-shard fan-out across worker deployments, but the partitioning math and
+     failure-isolation are the same primitive. This is therefore a topology
+     refinement of the same fan-out decision, not a new decision.
+
+   - **Shared partitioning helper.** The pure partitioning math
+     (`_partition_into_shards`, generic over the element type, and
+     `_resolve_num_shards` with its non-positive→1 clamp) is relocated to the neutral
+     `tree.sharding` module (#066) so BOTH orchestrators import the IDENTICAL helpers
+     with no copy-paste. The memory-specific helpers (`_resolve_pending_document_ids`,
+     `_fan_out_extraction`, `FanOutStats`) stay in `tree.memory.extraction.sharding`.
+
+   - **Ops note — stale deployments.** After #067/#068 rename the deployments, the
+     server-side definitions for the old names become orphaned and must be deleted
+     with `prefect deployment delete <name>` on each environment:
+     - `prefect deployment delete memory-extraction-etl`
+     - `prefect deployment delete data-pipeline-etl`
+     - `prefect deployment delete memory-extraction-fanout-etl` (the long-gone #056
+       fan-out deployment).
+
+   This amendment is DOC-ONLY: #066 changes zero deployment topology. The actual
+   orchestrator/worker split lands in #067 (memory) and #068 (data); the current
+   `memory-extraction-etl` deployment and `memory_extraction(num_shards)` flow remain
+   functional and behavior-identical until then.
+
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
    budget can feed.
