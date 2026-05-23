@@ -11,7 +11,7 @@ from tree.config.app_config import (
     SubstackRssSource,
     load_app_config,
 )
-from tree.data.pipeline import data_pipeline
+from tree.data.pipeline import data_etl_worker
 from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -112,9 +112,10 @@ def _make_full_config(
 ) -> MagicMock:
     """Patch ``app_config`` with a flat list of typed source entries.
 
-    ``data_pipeline`` walks ``app_config.sources.sources`` and dispatches
-    by variant; the arxiv connector also reads its defaults from the same
-    flat list. Both modules patched so they see the same view.
+    The ``data-etl-worker`` is handed ``mock_config.sources.sources`` directly
+    (#068 moved the per-variant dispatch into the worker, which takes its sources
+    as an argument rather than reading ``app_config``). The arxiv connector still
+    reads its defaults from ``app_config``, so that module is patched too.
     """
 
     sources: list[SourceEntry] = []
@@ -190,7 +191,7 @@ class TestDataPipeline:
         _mock_rss_source(mocker)
         _mock_article_source(mocker)
         _mock_arxiv_source(mocker)
-        _make_full_config(
+        config = _make_full_config(
             mocker,
             substack_feeds=["https://blog.example.com/feed"],
             substack_articles=[
@@ -200,7 +201,7 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline(_USER_ID)
+            result = await data_etl_worker(_USER_ID, config.sources.sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -218,14 +219,14 @@ class TestDataPipeline:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_rss_source(mocker)
         _mock_arxiv_source(mocker)
-        _make_full_config(
+        config = _make_full_config(
             mocker,
             substack_feeds=["https://blog.example.com/feed"],
             substack_articles=[],
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline(_USER_ID)
+            result = await data_etl_worker(_USER_ID, config.sources.sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -239,14 +240,14 @@ class TestDataPipeline:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_article_source(mocker)
         _mock_arxiv_source(mocker)
-        _make_full_config(
+        config = _make_full_config(
             mocker,
             substack_feeds=[],
             substack_articles=["https://blog.example.com/p/article-1"],
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline(_USER_ID)
+            result = await data_etl_worker(_USER_ID, config.sources.sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -256,14 +257,14 @@ class TestDataPipeline:
     async def test_runs_only_arxiv_when_no_substack(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_arxiv_source(mocker)
-        _make_full_config(
+        config = _make_full_config(
             mocker,
             substack_feeds=[],
             substack_articles=[],
         )
 
         with prefect_tags("tests"):
-            result = await data_pipeline(_USER_ID)
+            result = await data_etl_worker(_USER_ID, config.sources.sources)
 
         assert all(d.source_type == SourceType.HUGGINGFACE for d in result)
         assert len(result) == 2
@@ -271,7 +272,7 @@ class TestDataPipeline:
     async def test_dispatches_all_five_source_variants(
         self, mongo_client, mocker, tmp_path
     ) -> None:
-        """Single ``data_pipeline()`` invocation against a YAML fixture covering
+        """Single ``data_etl_worker()`` invocation against a YAML fixture covering
         all five ``SourceEntry`` variants (substack_rss, substack_article,
         huggingface_dataset, explicit web, untyped → web fallback).
 
@@ -385,20 +386,16 @@ sources:
             side_effect=_fake_ingest_url,
         )
 
-        # Point ``app_config.sources.sources`` (read at flow-time by
-        # ``data_pipeline``) at the freshly-loaded fixture.
-        mock_app_config = MagicMock()
-        mock_app_config.sources.sources = loaded.sources.sources
-        mocker.patch("tree.data.pipeline.app_config", mock_app_config)
-
         # Skip the real Mongo init.
         mocker.patch(
             "tree.data.pipeline.init_mongodb", new=AsyncMock(return_value=mongo_client)
         )
 
-        # --- Run the pipeline ---
+        # --- Run the worker against the loaded fixture's sources ---
+        # #068 moved the per-variant dispatch into ``data-etl-worker``, which takes
+        # its sources as an argument rather than reading ``app_config``.
         with prefect_tags("tests"):
-            result = await data_pipeline(_USER_ID)
+            result = await data_etl_worker(_USER_ID, loaded.sources.sources)
 
         # --- Assert each sub-flow was dispatched exactly as expected ---
 

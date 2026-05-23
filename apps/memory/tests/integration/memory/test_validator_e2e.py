@@ -23,7 +23,7 @@ from prefect import tags as prefect_tags
 from tree.entities.documents import Document, SourceType
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
@@ -149,7 +149,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # No audit rows.
         assert await _rejection_rows(mongo_client) == []
@@ -193,7 +193,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         rejections = await _rejection_rows(mongo_client)
         assert len(rejections) == 1
@@ -252,7 +252,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         rejections = await _rejection_rows(mongo_client)
         assert len(rejections) == 1
@@ -291,7 +291,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         rejections = await _rejection_rows(mongo_client)
         assert len(rejections) == 1
@@ -332,7 +332,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Row landed (lenient policy) with ONLY the valid field.
         kg = await _kg_rows(mongo_client)
@@ -389,7 +389,7 @@ class TestValidatorEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Row landed with an empty user-provided properties subset.
         kg = await _kg_rows(mongo_client)
@@ -435,7 +435,7 @@ class TestValidatorEnd2End:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         kg = await _kg_rows(mongo_client)
         # Structural rows: document + chunk → extractor absent / null.
@@ -497,7 +497,9 @@ class TestValidatorEnd2End:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_a.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user_a.id, document_ids=[str(doc_a.id)]
+            )
 
         _patch_pipeline_deps(
             mocker,
@@ -506,7 +508,9 @@ class TestValidatorEnd2End:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_b.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user_b.id, document_ids=[str(doc_b.id)]
+            )
 
         rows = await _rejection_rows(mongo_client)
         # Each tenant gets one rejection row pinned to their user_id.

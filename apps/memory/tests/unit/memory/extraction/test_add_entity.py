@@ -665,3 +665,217 @@ class TestAddEntityNodeTextEmbedding:
         )
 
         assert model.embedded_texts == [obj]
+
+
+# ---------------------------------------------------------------------------
+# #055 — dedup embed routed through the single guarded chokepoint
+# ---------------------------------------------------------------------------
+
+
+class TestAddEntityRoutesThroughChokepoint:
+    """ADR-002 §1 (amended): the dedup embed goes through ``_embed_chunk_resilient``.
+
+    ``add_entity`` must NOT call ``embedding_model.embed(...)`` directly — it
+    routes through ``_embed_chunk_resilient`` for the Voyage-400 bisect-and-skip
+    resilience. The shared ``voyage-embeddings`` rate limit lives at the real
+    network POST inside the Voyage clients, NOT in this path. Routing must
+    preserve the previous degrade semantics.
+    """
+
+    async def test_routes_through_embed_chunk_resilient_not_direct_embed(
+        self, mocker
+    ) -> None:
+        # Arrange — spy the chokepoint; keep dedup on so the embed path runs.
+        database, _collection = _make_database(mocker)
+        model = _make_embedding_model()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+        chokepoint = mocker.patch(
+            "tree.memory.extraction.add_entity._embed_chunk_resilient",
+            new=AsyncMock(return_value=[[0.0] * 8]),
+        )
+
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Andrej Karpathy"),
+            user_id=_USER_ID,
+            name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — embed went through the chokepoint, not a direct .embed call.
+        chokepoint.assert_awaited_once()
+        passed_model, passed_texts = chokepoint.await_args.args
+        assert passed_model is model
+        assert isinstance(passed_texts, list) and len(passed_texts) == 1
+        model.embed.assert_not_called()
+
+    async def test_voyage_400_placeholder_degrades_to_empty_embedding(
+        self, mocker
+    ) -> None:
+        # Arrange — a poison input: the chokepoint bisects to a singleton and
+        # returns the aligned empty placeholder ``[[]]`` (Voyage 400 skip). The
+        # previous inline behavior degraded such a result to ``embedding = []``;
+        # that must be preserved now that the call routes through the chokepoint.
+        database, _collection = _make_database(mocker)
+        model = _make_embedding_model()
+        dedupe = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+        mocker.patch(
+            "tree.memory.extraction.add_entity._embed_chunk_resilient",
+            new=AsyncMock(return_value=[[]]),
+        )
+
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="poison-entity"),
+            user_id=_USER_ID,
+            name="poison-entity",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — the empty placeholder degraded to embedding = [] (unchanged
+        # behavior), and dedupe still ran with that empty embedding.
+        assert dedupe.await_args.kwargs["embedding"] == []
+
+    async def test_empty_chokepoint_result_also_degrades_to_empty(self, mocker) -> None:
+        # Arrange — defensive: a falsy result (``[]``) must also degrade to
+        # ``embedding = []`` exactly as ``embedded[0] if embedded else []`` did.
+        database, _collection = _make_database(mocker)
+        model = _make_embedding_model()
+        dedupe = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+        mocker.patch(
+            "tree.memory.extraction.add_entity._embed_chunk_resilient",
+            new=AsyncMock(return_value=[]),
+        )
+
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="empty-entity"),
+            user_id=_USER_ID,
+            name="empty-entity",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert
+        assert dedupe.await_args.kwargs["embedding"] == []
+
+
+# ---------------------------------------------------------------------------
+# #055 — HEADLINE regression: a cache-hit dedup acquires NO rate-limit slot
+# (the timeout the amendment fixes), a cache-miss DOES.
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_voyage_session():
+    """Build an aiohttp session double that 200s with a 1-dim vector per input."""
+
+    def _post(_url, *, json, headers):  # noqa: A002 - aiohttp kwarg name
+        n = len(json.get("input") or json.get("inputs") or [])
+        resp = AsyncMock()
+        resp.status = 200
+        resp.json = AsyncMock(return_value={"data": [{"embedding": [0.7]}] * n})
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        return resp
+
+    sess = AsyncMock()
+    sess.post = MagicMock(side_effect=_post)
+    sess.__aenter__ = AsyncMock(return_value=sess)
+    sess.__aexit__ = AsyncMock(return_value=False)
+    return sess
+
+
+class TestCachedDedupAcquiresNoRateLimitSlot:
+    """ADR-002 §1 amendment: the extraction hot path injects a
+    ``_CachedSingleEmbedding`` into ``add_entity`` so the per-entity dedup embed
+    reuses a pre-computed vector with ZERO network I/O.
+
+    A cache HIT must therefore acquire NO ``voyage-embeddings`` slot — gating it
+    serialized ~40 zero-POST lookups behind the 3-RPM throttle and timed out
+    extraction. A cache MISS (a real Voyage client) DOES acquire a slot. The
+    ``rate_limit`` symbol lives only in the Voyage client modules now, so we spy
+    on it there and drive the full ``add_entity`` dedup path with each model.
+    """
+
+    async def test_cache_hit_via_cached_single_embedding_acquires_no_slot(
+        self, mocker
+    ) -> None:
+        # Arrange — the real cache shim the pipeline injects on a cache hit.
+        from tree.memory.extraction.pipeline import _CachedSingleEmbedding
+
+        text_rate_limit = mocker.patch(
+            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        )
+        mm_rate_limit = mocker.patch(
+            "tree.models.voyage_multimodal_embedding.rate_limit",
+            new_callable=AsyncMock,
+        )
+        database, _collection = _make_database(mocker)
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+        cached_model = _CachedSingleEmbedding([0.42] * 8)
+
+        # Act — drive the dedup embed path with the cached (no-network) model.
+        await add_entity(
+            database=database,
+            embedding_model=cached_model,
+            resolver=_make_resolver(canonical_name="Cached Entity"),
+            user_id=_USER_ID,
+            name="Cached Entity",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — the cached vector never reached a Voyage client, so NO slot
+        # was acquired in either client (the timeout regression is fixed).
+        text_rate_limit.assert_not_awaited()
+        mm_rate_limit.assert_not_awaited()
+
+    async def test_cache_miss_via_real_voyage_client_acquires_a_slot(
+        self, mocker
+    ) -> None:
+        # Arrange — a real Voyage text client (cache miss): the dedup embed must
+        # reach the network POST and acquire exactly one slot.
+        from tree.models.voyage_embedding import VoyageTextEmbeddingModel
+
+        text_rate_limit = mocker.patch(
+            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        )
+        database, _collection = _make_database(mocker)
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+        real_model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        sess = _make_mock_voyage_session()
+        mocker.patch("aiohttp.ClientSession", return_value=sess)
+
+        # Act
+        await add_entity(
+            database=database,
+            embedding_model=real_model,
+            resolver=_make_resolver(canonical_name="Fresh Entity"),
+            user_id=_USER_ID,
+            name="Fresh Entity",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # Assert — the real POST acquired exactly one slot, with documented args.
+        text_rate_limit.assert_awaited_once_with(
+            "voyage-embeddings", occupy=1, strict=False
+        )

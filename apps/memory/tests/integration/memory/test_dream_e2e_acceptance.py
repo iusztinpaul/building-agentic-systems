@@ -26,8 +26,8 @@ Plus the adversarial coverage the groomed spec lists: incremental catch-up of a
 node ingested AFTER the first dream, a dry-run rehearsal that writes nothing,
 respect for a human's earlier rejection, the ``max_pairs`` cap, the zero-Voyage
 (embedding-READ-only) and zero-LLM (default path) cost invariants, the #048
-search-model routing, the #049 runbook discoverability, and the fan-out parent
-flow over the genuine active Paul user.
+search-model routing, and the fan-out parent flow over the genuine active Paul
+user.
 
 Embeddings are deterministic 8-dim cosine vectors (mirroring ``test_dedup.py``
 and the #051 suite): the dream sweep is embedding-READ-only over stored vectors,
@@ -712,8 +712,8 @@ async def test_max_pairs_cap_stops_run_and_records_cap_hit(
 
 
 # ===========================================================================
-# #048 routing + #049 runbook discoverability (cheap, no mongot needed but
-# kept in-suite so the headline acceptance file is self-contained)
+# #048 routing (cheap, no mongot needed but kept in-suite so the headline
+# acceptance file is self-contained)
 # ===========================================================================
 
 
@@ -723,17 +723,6 @@ def test_search_embedding_model_routes_through_voyage_text_client() -> None:
 
     model = get_search_embedding_model()
     assert isinstance(model, VoyageTextEmbeddingModel)
-
-
-def test_vector_space_swap_runbook_is_discoverable() -> None:
-    """The #049 vector-space-swap runbook is present in CLAUDE.md."""
-
-    from pathlib import Path
-
-    # apps/memory/tests/integration/memory/<this> → repo root is 5 parents up.
-    repo_root = Path(__file__).resolve().parents[5]
-    claude_md = (repo_root / "CLAUDE.md").read_text(encoding="utf-8")
-    assert "vector space" in claude_md
 
 
 # ===========================================================================

@@ -44,6 +44,7 @@ import logging
 from typing import Literal
 
 import aiohttp
+from prefect.concurrency.asyncio import rate_limit
 
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError, ModelError
@@ -51,6 +52,15 @@ from tree.models.exceptions import ExtractionError, ModelError
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.voyageai.com/v1/embeddings"
+
+# The Prefect global concurrency limit (ADR-002 §1) that throttles every real
+# Voyage embed POST across separate flow runs. Acquired immediately before each
+# real network POST attempt (inside the 429-backoff loop, so a 429-retry
+# re-acquires a fresh slot). ``strict=False`` makes a missing limit a no-op, so
+# unit tests and fresh dev boxes without a synced ``voyage-embeddings`` GCL
+# behave exactly as before. A ``_CachedSingleEmbedding`` cache hit never reaches
+# this client, so it is never throttled.
+_VOYAGE_EMBED_LIMIT = "voyage-embeddings"
 
 # Default exponential-backoff schedule for HTTP 429 rate limits. Kept tight
 # (8 attempts, capped at 60s each) so a real outage still surfaces inside a few
@@ -194,6 +204,13 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
         backoff_iter = iter(self._rate_limit_backoff_seconds)
         while True:
             try:
+                # ADR-002 §1: acquire one shared ``voyage-embeddings`` slot per
+                # real POST attempt. Placed inside the 429-backoff loop so a
+                # 429-retry re-acquires a fresh slot; ``strict=False`` no-ops
+                # when the limit is absent. The early ``if not texts: return []``
+                # above short-circuits before this, so an empty call never
+                # occupies a slot.
+                await rate_limit(_VOYAGE_EMBED_LIMIT, occupy=1, strict=False)
                 timeout = aiohttp.ClientTimeout(total=self._timeout)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(

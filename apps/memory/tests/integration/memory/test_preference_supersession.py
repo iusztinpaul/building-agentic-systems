@@ -1,7 +1,7 @@
 """End-to-end integration tests for the preference / fact
 supersession resolver branch (#032).
 
-Each test runs ``memory_extraction`` against the live test database
+Each test runs ``memory_extract_etl_worker`` against the live test database
 with the LLM, embedding model, and the contradiction judge stubbed
 out. The supersession-resolver branch reads / writes Mongo directly
 so the integration coverage proves the wiring is correct end-to-end:
@@ -31,7 +31,7 @@ from tree.entities.knowledge_graph import EdgeType, NodeType, build_node_id
 from tree.entities.ontology import PreferenceCategory
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.query.kgquery import KGQuery
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
@@ -185,7 +185,9 @@ class TestPreferenceSupersessionE2E:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_a.id)]
+            )
 
         # The dark-mode preference landed; has edge from self exists.
         rows = await _kg_rows(mongo_client)
@@ -244,7 +246,9 @@ class TestPreferenceSupersessionE2E:
 
         t_before = datetime.now(tz=UTC)
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_b.id)]
+            )
         t_after = datetime.now(tz=UTC)
 
         # Both preferences exist; light is current, dark is superseded.
@@ -359,7 +363,9 @@ class TestFactSupersessionE2E:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_a.id)]
+            )
 
         rows = await _kg_rows(mongo_client)
         facts = [r for r in rows if r["kind"] == "node" and r["type"] == "fact"]
@@ -398,7 +404,9 @@ class TestFactSupersessionE2E:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_b.id)]
+            )
 
         rows = await _kg_rows(mongo_client)
         facts = {
@@ -493,7 +501,9 @@ class TestPreferenceSupersessionLiveEmbedderE2E:
             new=AsyncMock(return_value=(True, 0.93)),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_a.id)]
+            )
         assert judge_mock.await_count == 0, (
             "no candidate in the partition - judge MUST NOT be called"
         )
@@ -529,7 +539,9 @@ class TestPreferenceSupersessionLiveEmbedderE2E:
             new=AsyncMock(return_value=(True, 0.93)),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc_b.id)]
+            )
 
         # The judge MUST have been called even though cosine on the
         # real MiniLM embedder is ~0.64 (below pre-fix 0.85 gate).
@@ -634,7 +646,7 @@ class TestStrictPreferencePolicyE2E:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         rows = await _kg_rows(mongo_client)
         # has edge: person:self -> preference

@@ -29,7 +29,7 @@ from prefect import tags as prefect_tags
 from tree.entities.documents import Document, SourceType
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.query.kgquery import KGQuery
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
@@ -187,7 +187,7 @@ class TestFactIslandEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # The fact landed as a node row with its properties intact.
         kg = await _kg_rows(mongo_client)
@@ -284,7 +284,7 @@ class TestFactIslandEnd2End:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         kg = KGQuery(user.id)
 
@@ -349,7 +349,9 @@ class TestFactIslandEnd2End:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_a.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user_a.id, document_ids=[str(doc_a.id)]
+            )
 
         # And again for user B.
         _patch_pipeline_deps(
@@ -359,7 +361,9 @@ class TestFactIslandEnd2End:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_b.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user_b.id, document_ids=[str(doc_b.id)]
+            )
 
         # Each user sees exactly their own fact.
         a_facts = await KGQuery(user_a.id).find_facts(object="y")

@@ -6,7 +6,18 @@ resolver + dedup config ONCE at entry; the cross-key validator on
 :class:`tree.config.app_config.ExtractionConfig` raises before any work runs
 when the resolver and dedup type-strictness disagree.
 
-External interface unchanged: ``memory_extraction(document_ids=...)``.
+Two Prefect flows live here (#067, ADR-002 §3 amended #066):
+
+* ``memory_extract_etl_worker`` (deployment ``memory-extract-etl-worker``) — the
+  pure six-task extraction body. NO ``num_shards``, NO orchestrator branch, NO
+  ``run_deployment``, NO indexing trigger. Returns a :class:`WriteSummary`.
+* ``memory_extract_etl_orchestrator`` (deployment
+  ``memory-extract-etl-orchestrator``) — resolve pending docs → partition into
+  ``min(num_shards, N)`` balanced shards → dispatch ONE
+  ``memory-extract-etl-worker`` run per shard under
+  ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory-indexing-etl``
+  run. Dispatches to the WORKER (no recursion). Returns a :class:`FanOutStats`.
+
 Internal task topology (per the §7 spec in
 ``tracker/012-extraction-pipeline-six-tasks.groomed.md``):
 
@@ -29,6 +40,8 @@ from uuid import uuid4
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import INPUTS, NO_CACHE
+from prefect.deployments import run_deployment
+from pymongo import UpdateOne
 
 from tree.config.app_config import load_app_config
 from tree.config.settings import settings
@@ -67,6 +80,13 @@ from tree.memory.extraction.preference_supersession import (
     canonicalize_preference_names,
     resolve_supersessions,
     write_self_has_preference_edges,
+)
+from tree.memory.extraction.sharding import (
+    FanOutStats,
+    _fan_out_extraction,
+    _partition_into_shards,
+    _resolve_num_shards,
+    _resolve_pending_document_ids,
 )
 from tree.memory.extraction.validation import (
     get_edge_property_schema,
@@ -298,6 +318,33 @@ extract_chunks_and_structural_task = task(
 )
 
 
+async def _chunk_documents(docs: list[Any]) -> list[ChunkedDocument]:
+    """Run task ① (chunk + structural) over every document, fanned out under a
+    bounded semaphore sized by ``doc_concurrency`` (#059 R7).
+
+    Task ① is purely CPU/DB-bound — no shared LLM quota, no read-after-write —
+    so the per-doc calls parallelize safely. ``doc_concurrency`` defaults to 1
+    (serial-equivalent = today's exact behavior); operators opt into overlap via
+    ``TREE_EXTRACTION__DOC_CONCURRENCY``.
+
+    ``asyncio.gather`` preserves INPUT order, so ``chunked_docs`` comes back in
+    the same order (and with the same contents) as the prior sequential loop —
+    downstream per-doc iteration stays deterministic. We keep the underlying
+    Prefect task call (not ``.map()``) so its ``INPUTS`` cache still applies.
+    """
+
+    if not docs:
+        return []
+
+    semaphore = asyncio.Semaphore(_live_app_config().extraction.doc_concurrency)
+
+    async def _one(doc: Any) -> ChunkedDocument:
+        async with semaphore:
+            return await extract_chunks_and_structural_task(doc)
+
+    return list(await asyncio.gather(*[_one(doc) for doc in docs]))
+
+
 # ---------------------------------------------------------------------------
 # Task ② — LLM extraction
 # ---------------------------------------------------------------------------
@@ -401,21 +448,20 @@ def _make_extractor_info() -> ExtractorInfo:
     return ExtractorInfo(name=llm_name, version=f"tree-memory-{pkg_version}")
 
 
-async def _write_envelope_rejection(
+def _build_envelope_rejection_row(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     document_id: PydanticObjectId | None,
     chunk_id: str | None,
     raw_row: dict[str, Any],
     reason: str,
     extractor: ExtractorInfo,
-) -> None:
-    """Insert one ``extraction_rejections`` audit row.
+) -> dict[str, Any]:
+    """Build one ``extraction_rejections`` audit row (no DB write).
 
-    Uses the raw Mongo collection (not Beanie's ``.insert()``) so the
-    write is scoped to the same ``database`` handle the rest of the
-    pipeline uses — keeps test patches uniform.
+    Rows are accumulated by :func:`_validate_raws` and flushed with a single
+    ``insert_many`` (#059 R4) — the row contents are identical to the prior
+    per-row ``insert_one`` path.
     """
 
     rejection = ExtractionRejection(
@@ -428,14 +474,11 @@ async def _write_envelope_rejection(
         raw_row=truncate_raw_row(raw_row),
         extractor=extractor,
     )
-    await database["extraction_rejections"].insert_one(
-        rejection.model_dump(by_alias=True, exclude={"id"})
-    )
+    return rejection.model_dump(by_alias=True, exclude={"id"})
 
 
-async def _write_dropped_field(
+def _build_dropped_field_row(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     document_id: PydanticObjectId | None,
     chunk_id: str | None,
@@ -446,8 +489,8 @@ async def _write_dropped_field(
     raw_value: Any,
     reason: str,
     extractor: ExtractorInfo,
-) -> None:
-    """Insert one ``extraction_dropped_fields`` audit row."""
+) -> dict[str, Any]:
+    """Build one ``extraction_dropped_fields`` audit row (no DB write)."""
 
     dropped = ExtractionDroppedField(
         user_id=user_id,
@@ -462,9 +505,7 @@ async def _write_dropped_field(
         reason=reason,
         extractor=extractor,
     )
-    await database["extraction_dropped_fields"].insert_one(
-        dropped.model_dump(by_alias=True, exclude={"id"})
-    )
+    return dropped.model_dump(by_alias=True, exclude={"id"})
 
 
 async def _validate_raws(
@@ -493,6 +534,11 @@ async def _validate_raws(
     """
 
     log = _get_run_logger()
+    # #059 R4: accumulate audit rows and flush each collection with a single
+    # ``insert_many`` instead of per-row ``insert_one`` writes. The row contents
+    # and the SET of rows written are unchanged.
+    rejection_rows: list[dict[str, Any]] = []
+    dropped_field_rows: list[dict[str, Any]] = []
     for raw in raws:
         document_id: PydanticObjectId | None
         try:
@@ -504,14 +550,15 @@ async def _validate_raws(
         # invalid endpoints, ...) flow through ``raw_rejections``. Surface
         # each one as an ``extraction_rejections`` row.
         for rejection in raw.extracted.raw_rejections:
-            await _write_envelope_rejection(
-                database=database,
-                user_id=user_id,
-                document_id=document_id,
-                chunk_id=rejection.chunk_id or None,
-                raw_row=rejection.raw,
-                reason=rejection.reason,
-                extractor=extractor,
+            rejection_rows.append(
+                _build_envelope_rejection_row(
+                    user_id=user_id,
+                    document_id=document_id,
+                    chunk_id=rejection.chunk_id or None,
+                    raw_row=rejection.raw,
+                    reason=rejection.reason,
+                    extractor=extractor,
+                )
             )
         raw.extracted.raw_rejections = []
 
@@ -527,19 +574,20 @@ async def _validate_raws(
                 name=node.name,
             )
             if not envelope.ok:
-                await _write_envelope_rejection(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=node.chunk_id or None,
-                    raw_row={
-                        "type": type_value,
-                        "subtype": node.subtype,
-                        "name": node.name,
-                        "properties": node.properties,
-                    },
-                    reason=envelope.reason or "envelope_invalid",
-                    extractor=extractor,
+                rejection_rows.append(
+                    _build_envelope_rejection_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=node.chunk_id or None,
+                        raw_row={
+                            "type": type_value,
+                            "subtype": node.subtype,
+                            "name": node.name,
+                            "properties": node.properties,
+                        },
+                        reason=envelope.reason or "envelope_invalid",
+                        extractor=extractor,
+                    )
                 )
                 log.info(
                     "envelope_rejection node type=%s name=%r reason=%s",
@@ -556,18 +604,19 @@ async def _validate_raws(
                 node.properties or {}, parent_schema, extras_schema
             )
             for drop in drops:
-                await _write_dropped_field(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=node.chunk_id or None,
-                    row_type=type_value,
-                    row_subtype=node.subtype,
-                    semantic_type=None,
-                    dropped_field=drop.field,
-                    raw_value=drop.value,
-                    reason=drop.reason,
-                    extractor=extractor,
+                dropped_field_rows.append(
+                    _build_dropped_field_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=node.chunk_id or None,
+                        row_type=type_value,
+                        row_subtype=node.subtype,
+                        semantic_type=None,
+                        dropped_field=drop.field,
+                        raw_value=drop.value,
+                        reason=drop.reason,
+                        extractor=extractor,
+                    )
                 )
             node.properties = validated_props
             validated_nodes.append(node)
@@ -595,22 +644,23 @@ async def _validate_raws(
                 semantic_type=edge.semantic_type,
             )
             if not envelope.ok:
-                await _write_envelope_rejection(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=edge.chunk_id or None,
-                    raw_row={
-                        "type": type_value,
-                        "semantic_type": edge.semantic_type,
-                        "source_type": src_type,
-                        "source_node_id": edge.source_node_id,
-                        "target_type": tgt_type,
-                        "target_node_id": edge.target_node_id,
-                        "properties": edge.properties,
-                    },
-                    reason=envelope.reason or "envelope_invalid",
-                    extractor=extractor,
+                rejection_rows.append(
+                    _build_envelope_rejection_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=edge.chunk_id or None,
+                        raw_row={
+                            "type": type_value,
+                            "semantic_type": edge.semantic_type,
+                            "source_type": src_type,
+                            "source_node_id": edge.source_node_id,
+                            "target_type": tgt_type,
+                            "target_node_id": edge.target_node_id,
+                            "properties": edge.properties,
+                        },
+                        reason=envelope.reason or "envelope_invalid",
+                        extractor=extractor,
+                    )
                 )
                 log.info(
                     "envelope_rejection edge type=%s semantic=%s reason=%s",
@@ -627,24 +677,32 @@ async def _validate_raws(
                 edge.properties or {}, edge_schema, None
             )
             for drop in drops:
-                await _write_dropped_field(
-                    database=database,
-                    user_id=user_id,
-                    document_id=document_id,
-                    chunk_id=edge.chunk_id or None,
-                    row_type=type_value,
-                    row_subtype=None,
-                    semantic_type=edge.semantic_type,
-                    dropped_field=drop.field,
-                    raw_value=drop.value,
-                    reason=drop.reason,
-                    extractor=extractor,
+                dropped_field_rows.append(
+                    _build_dropped_field_row(
+                        user_id=user_id,
+                        document_id=document_id,
+                        chunk_id=edge.chunk_id or None,
+                        row_type=type_value,
+                        row_subtype=None,
+                        semantic_type=edge.semantic_type,
+                        dropped_field=drop.field,
+                        raw_value=drop.value,
+                        reason=drop.reason,
+                        extractor=extractor,
+                    )
                 )
             edge.properties = validated_props
             validated_edges.append(edge)
 
         raw.extracted.nodes = validated_nodes
         raw.extracted.edges = validated_edges
+
+    # #059 R4: one ``insert_many`` per collection. Skip the call entirely when
+    # nothing accumulated (empty/clean input) — ``insert_many([])`` would raise.
+    if rejection_rows:
+        await database["extraction_rejections"].insert_many(rejection_rows)
+    if dropped_field_rows:
+        await database["extraction_dropped_fields"].insert_many(dropped_field_rows)
 
     return raws
 
@@ -892,10 +950,17 @@ async def _dedupe_entities(
     decision under a stable per-entity key."""
 
     log = _get_run_logger()
-    decisions: dict[str, DedupDecision] = {}
-    n_merged = n_flagged = n_none = 0
 
-    for key, resolved_entity in resolved.resolved_by_key.items():
+    # ``dedupe_entity`` is a read-only ``$vectorSearch`` on PRECOMPUTED vectors
+    # (no Voyage call, independent per entity), so the per-key decisions
+    # parallelize safely. We gather them under a bounded semaphore sized by the
+    # ``dedup_concurrency`` knob (#058). The per-key decision is a pure function
+    # of its key, so concurrent evaluation cannot change any value; we rebuild
+    # the ``decisions`` mapping and tallies in the original key order below so
+    # the output is byte-identical to the prior sequential implementation.
+    semaphore = asyncio.Semaphore(_live_app_config().extraction.dedup_concurrency)
+
+    async def _one(key: str, resolved_entity: ResolvedEntity) -> DedupDecision:
         doc_id, type_value, name = key.split("|", maxsplit=2)
         entity_type = NodeType(type_value)
 
@@ -909,21 +974,29 @@ async def _dedupe_entities(
         embedding = embeddings.vectors.get(embeddable_text) or []
 
         if not embedding or not dedup_config.enabled:
-            decisions[key] = DedupDecision(action="none")
-            n_none += 1
-            continue
+            return DedupDecision(action="none")
 
         prospective_id = build_node_id(user_id, entity_type, _normalize(name))
-        raw = await dedupe_entity(
-            database=database,
-            user_id=user_id,
-            name=name,
-            entity_type=entity_type,
-            embedding=embedding,
-            config=dedup_config,
-            incoming_node_id=prospective_id,
-        )
-        decision = _to_decision(raw, prospective_id)
+        async with semaphore:
+            raw = await dedupe_entity(
+                database=database,
+                user_id=user_id,
+                name=name,
+                entity_type=entity_type,
+                embedding=embedding,
+                config=dedup_config,
+                incoming_node_id=prospective_id,
+            )
+        return _to_decision(raw, prospective_id)
+
+    items = list(resolved.resolved_by_key.items())
+    results = await asyncio.gather(
+        *[_one(key, resolved_entity) for key, resolved_entity in items]
+    )
+
+    decisions: dict[str, DedupDecision] = {}
+    n_merged = n_flagged = n_none = 0
+    for (key, _resolved_entity), decision in zip(items, results):
         decisions[key] = decision
         if decision.action == "merged":
             n_merged += 1
@@ -1001,15 +1074,21 @@ async def _apply_writes(
     # to the final target ids.
     structural_node_ids: set[str] = set()
     structural_edges: list[ExtractedEdge] = []
+    # #057: accumulate every structural-node upsert and flush them in a
+    # single ``bulk_write(ordered=False)`` instead of one awaited round-trip
+    # per node. ``_id``s are deterministic (``build_node_id``) and distinct,
+    # so ordering is irrelevant.
+    structural_node_ops: list[UpdateOne] = []
     for raw in raws:
         for node in raw.chunked.structural.nodes:
             node_id = build_node_id(user_id, node.type, node.name)
-            await _upsert_structural_node(
-                database=database,
-                user_id=user_id,
-                node=node,
-                node_id=node_id,
-                source_document_id=raw.document_id,
+            structural_node_ops.append(
+                _build_structural_node_op(
+                    user_id=user_id,
+                    node=node,
+                    node_id=node_id,
+                    source_document_id=raw.document_id,
+                )
             )
             structural_node_ids.add(node_id)
             summary.nodes_written += 1
@@ -1017,6 +1096,9 @@ async def _apply_writes(
             # MENTIONS edges (built later) can find them.
             name_to_target_id[make_type_name_key(node.type, node.name)] = node_id
         structural_edges.extend(raw.chunked.structural.edges)
+
+    if structural_node_ops:
+        await database[_KG_COLLECTION].bulk_write(structural_node_ops, ordered=False)
 
     # ----- LLM-extracted entities → add_entity ----------------------------------
     for raw in raws:
@@ -1094,7 +1176,12 @@ async def _apply_writes(
             chunk_id=edge.chunk_id,
         )
 
-    # Upsert each collapsed edge.
+    # Upsert each collapsed edge. #057: accumulate every edge upsert and
+    # flush them in a single ``bulk_write(ordered=False)`` instead of one
+    # awaited round-trip per edge. ``seen_edge_ids`` already collapsed edges
+    # to distinct ``_id``s with no read-after-write, so ordering is safe.
+    edge_ops: list[UpdateOne] = []
+    source_document_ids = [PydanticObjectId(raw.document_id) for raw in raws]
     for edge_id, edge in seen_edge_ids.items():
         # Only stamp ``extractor`` on LLM-extractable edges (today only
         # ``related_to``). Structural edges (``part_of``, ``next``,
@@ -1104,15 +1191,19 @@ async def _apply_writes(
             edge.type.value if hasattr(edge.type, "value") else str(edge.type)
         )
         edge_extractor = extractor if edge_type_value == "related_to" else None
-        await _upsert_edge(
-            database=database,
-            user_id=user_id,
-            edge=edge,
-            edge_id=edge_id,
-            source_document_ids=[PydanticObjectId(raw.document_id) for raw in raws],
-            extractor=edge_extractor,
+        edge_ops.append(
+            _build_edge_op(
+                user_id=user_id,
+                edge=edge,
+                edge_id=edge_id,
+                source_document_ids=source_document_ids,
+                extractor=edge_extractor,
+            )
         )
         summary.edges_written += 1
+
+    if edge_ops:
+        await database[_KG_COLLECTION].bulk_write(edge_ops, ordered=False)
 
     log.info(
         "apply_writes: nodes_written=%d edges_written=%d same_as_emitted=%d "
@@ -1268,22 +1359,23 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
         return [self._vector for _ in texts]
 
 
-async def _upsert_structural_node(
+def _build_structural_node_op(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     node: ExtractedNode,
     node_id: str,
     source_document_id: str,
-) -> None:
-    """Upsert a structural node (DOCUMENT or CHUNK). No resolution, no dedup."""
+) -> UpdateOne:
+    """Build the upsert op for a structural node (DOCUMENT or CHUNK).
 
-    from datetime import UTC, datetime
+    No resolution, no dedup. Returns the :class:`UpdateOne` op so the
+    caller can accumulate every structural-node write into a single
+    ``bulk_write(ops, ordered=False)`` round-trip (#057).
+    """
 
-    collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
     props = node.properties.copy()
-    await collection.update_one(
+    return UpdateOne(
         {"_id": node_id},
         [
             {
@@ -1317,25 +1409,25 @@ async def _upsert_structural_node(
     )
 
 
-async def _upsert_edge(
+def _build_edge_op(
     *,
-    database: Any,
     user_id: PydanticObjectId,
     edge: ExtractedEdge,
     edge_id: str,
     source_document_ids: list[PydanticObjectId],
     extractor: ExtractorInfo | None = None,
-) -> None:
-    """Upsert one collapsed edge document.
+) -> UpdateOne:
+    """Build the upsert op for one collapsed edge document.
 
     #030: ``extractor`` is stamped on LLM-extracted edges (today only
     ``related_to`` rows). Structural edges pass ``extractor=None`` and
     leave the column unset on the row.
+
+    Returns the :class:`UpdateOne` op so the caller can accumulate every
+    edge write into a single ``bulk_write(ops, ordered=False)`` round-trip
+    (#057).
     """
 
-    from datetime import UTC, datetime
-
-    collection = database[_KG_COLLECTION]
     now = datetime.now(tz=UTC)
     set_stage: dict[str, Any] = {
         "user_id": user_id,
@@ -1364,7 +1456,7 @@ async def _upsert_edge(
     }
     if extractor is not None:
         set_stage["extractor"] = extractor.model_dump()
-    await collection.update_one(
+    return UpdateOne(
         {"_id": edge_id},
         [{"$set": set_stage}],
         upsert=True,
@@ -1381,21 +1473,140 @@ apply_writes_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Flow
+# Orchestrator path — document-shard fan-out dispatching the worker (#067)
 # ---------------------------------------------------------------------------
 
 
-@flow(name="memory-extraction-etl", log_prints=True)
-async def memory_extraction(
+async def _orchestrate_sharded_extraction(
+    *,
+    user_id: PydanticObjectId,
+    document_ids: list[str] | None,
+    num_shards: int,
+) -> FanOutStats:
+    """Run the orchestrator path: resolve pending docs, partition, fan out, index.
+
+    The body of the ``memory-extract-etl-orchestrator`` flow. Resolves the user's
+    pending documents when ``document_ids is None`` (an explicit list is used
+    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
+    dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
+    ``{user_id, document_ids}`` — NO ``num_shards`` key, the worker has no such
+    param) under ``asyncio.gather(return_exceptions=True)``, and finally fires
+    exactly ONE trailing ``memory-indexing-etl`` run after the gather settles.
+    Dispatches to the WORKER deployment — there is NO recursion.
+
+    An empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
+    zero indexing run, ``FanOutStats(shards_total=0)``.
+    """
+
+    log = _get_run_logger()
+    effective_num_shards = _resolve_num_shards(num_shards)
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    database = client[settings.mongo.mongo_initdb_database]
+
+    if document_ids is None:
+        ids = await _resolve_pending_document_ids(database=database, user_id=user_id)
+        log.info(
+            "extraction fan-out: resolved %d pending document(s) for user_id=%s",
+            len(ids),
+            user_id,
+        )
+    else:
+        ids = list(document_ids)
+        log.info(
+            "extraction fan-out: using %d explicit document_id(s) for user_id=%s",
+            len(ids),
+            user_id,
+        )
+
+    if not ids:
+        log.info(
+            "extraction fan-out: no pending documents for user_id=%s — nothing "
+            "to do (no child runs, no indexing run)",
+            user_id,
+        )
+        return FanOutStats(shards_total=0)
+
+    shards = _partition_into_shards(ids, effective_num_shards)
+    log.info(
+        "extraction fan-out: partitioned %d document(s) into %d shard(s) "
+        "(num_shards=%d)",
+        len(ids),
+        len(shards),
+        effective_num_shards,
+    )
+
+    return await _fan_out_extraction(
+        user_id=user_id,
+        shards=shards,
+        run_deployment=run_deployment,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator flow — memory-extract-etl-orchestrator (#067)
+# ---------------------------------------------------------------------------
+
+
+@flow(name="memory-extract-etl-orchestrator", log_prints=True)
+async def memory_extract_etl_orchestrator(
+    user_id: PydanticObjectId,
+    document_ids: list[str] | None = None,
+    num_shards: int = 1,
+) -> FanOutStats:
+    """Resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once.
+
+    The operator entrypoint for memory extraction (ADR-002 §3, amended #066). Resolves
+    the user's pending documents when ``document_ids is None`` (an explicit list is used
+    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, and dispatches
+    ONE ``memory-extract-etl-worker`` run per shard via ``run_deployment`` under
+    ``asyncio.gather(return_exceptions=True)``. Each worker dispatch carries only
+    ``{user_id, document_ids}`` — there is NO ``num_shards`` child key (the worker has no
+    such param) and NO recursion (it dispatches a DISTINCT worker deployment). After the
+    gather settles, fires exactly ONE trailing ``memory-indexing-etl`` run, regardless of
+    how many shards failed (a partial extraction is still indexed). One shard's failure is
+    isolated and recorded in :class:`FanOutStats.failures`.
+
+    ``num_shards=1`` (the default) dispatches 1 worker run + 1 index run — it is NOT a
+    byte-identical in-process extraction (that is the worker, triggered directly). An
+    empty resolved/explicit doc set is a clean no-op: zero worker dispatch, zero index
+    run, ``FanOutStats(shards_total=0)``.
+    """
+
+    return await _orchestrate_sharded_extraction(
+        user_id=user_id,
+        document_ids=document_ids,
+        num_shards=num_shards,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Worker flow — memory-extract-etl-worker (#067)
+# ---------------------------------------------------------------------------
+
+
+@flow(name="memory-extract-etl-worker", log_prints=True)
+async def memory_extract_etl_worker(
     user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
 ) -> WriteSummary:
-    """Extract knowledge-graph entries from documents for ``user_id``.
+    """Extract knowledge-graph entries from documents for ``user_id`` (pure worker).
 
-    ``user_id`` is a required, non-Optional Prefect parameter. Every task
-    in the six-task pipeline receives the value; candidate fetches and
-    writes are scoped to ``user_id`` end-to-end. Cross-tenant rows are
-    invisible to resolution / dedup.
+    The six-task extraction body. ``user_id`` is a required, non-Optional Prefect
+    parameter. Every task receives the value; candidate fetches and writes are scoped
+    to ``user_id`` end-to-end. Cross-tenant rows are invisible to resolution / dedup.
+
+    Fetch semantics: explicit ``document_ids`` → fetch those user-scoped docs;
+    ``document_ids is None`` → fetch all ``content != None`` docs for the user; zero
+    docs → ``WriteSummary(documents_processed=0)``.
+
+    This is PURE extraction: NO ``num_shards``, NO orchestrator branch, NO
+    ``run_deployment`` (no self-dispatch), NO ``memory-indexing-etl`` trigger. It is the
+    orchestrator's internal dispatch target, but may also be triggered directly for a
+    bare extraction with no trailing index (e.g. debugging).
 
     Cross-key config validation runs at import time (``settings = Settings()``
     in ``app_config.py``). If the validator raises, the flow never starts;
@@ -1463,9 +1674,10 @@ async def memory_extraction(
         raise ValueError(f"User {user_id} not found; cannot run extraction.")
 
     # ----- Tasks ① and ② — per-doc fan-out ---------------------------------
-    chunked_docs: list[ChunkedDocument] = []
-    for doc in docs:
-        chunked_docs.append(await extract_chunks_and_structural_task(doc))
+    # Task ① (chunk + structural) fans out under a bounded semaphore sized by
+    # ``doc_concurrency`` (#059 R7, default 1 = serial-equivalent). gather
+    # preserves order so ``chunked_docs`` stays deterministic for the loop below.
+    chunked_docs: list[ChunkedDocument] = await _chunk_documents(docs)
 
     raws: list[RawExtraction] = []
     for chunked in chunked_docs:
@@ -1555,7 +1767,8 @@ async def memory_extraction(
     )
 
     log.info(
-        "memory_extraction complete: documents=%d nodes_written=%d edges_written=%d "
+        "memory_extract_etl_worker complete: documents=%d nodes_written=%d "
+        "edges_written=%d "
         "nodes_merged=%d nodes_flagged=%d same_as_edges_emitted=%d",
         summary.documents_processed,
         summary.nodes_written,
@@ -1583,7 +1796,7 @@ async def run_extraction_for_documents(
 ) -> WriteSummary:
     """Convenience entry point for callers that already hold an open client.
 
-    Mirrors :func:`memory_extraction` but reuses caller-owned handles
+    Mirrors :func:`memory_extract_etl_worker` but reuses caller-owned handles
     instead of opening a new one (the MCP ingest path holds its own client
     from the FastMCP lifespan). The flow itself is short-circuited — we
     re-implement the same pipeline shape inline so we don't have to start a
@@ -1602,7 +1815,7 @@ async def run_extraction_for_documents(
     except Exception as exc:
         raise _unwrap_validation_error(exc) from exc
     dedup_config = _build_dedup_config()
-    # Split the embedding handles exactly like ``memory_extraction``:
+    # Split the embedding handles exactly like ``memory_extract_etl_worker``:
     #   * The injected ``embedding_model`` (the MCP lifespan's caller-owned
     #     handle) is the SEARCH / persisted model — it drives supersession, the
     #     node-text embed, and the apply-writes node ``embedding``. Falls back
@@ -1651,7 +1864,7 @@ async def run_extraction_for_documents(
     )
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
-    # Embed at node-text grain (see ``memory_extraction`` task ④). The MCP
+    # Embed at node-text grain (see ``memory_extract_etl_worker`` task ④). The MCP
     # ingest path injects a caller-owned SEARCH/persisted handle; use it
     # directly here rather than the ``get_search_embedding_model`` factory so
     # the injected model actually drives the embed step. (The resolution model

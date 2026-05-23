@@ -86,13 +86,28 @@ models:
   # multimodal endpoint). See tracker/044.
   embedding_batch:
     max_inputs: 1000
-    max_total_tokens: 320000
+    # Dropped 320000 → 10000 (#054 / ADR-002): the shared free-tier Voyage key
+    # is capped at 10K TPM, so no single synchronous request may exceed the
+    # per-minute token window. The model's hard per-request ceiling is 320000.
+    max_total_tokens: 10000
     max_input_tokens: 32000
+    # How many embed requests a single stage may dispatch concurrently (#054).
+    # 1 = serial dispatch; the cross-flow voyage-embeddings GCL is the real
+    # throttle, this just bounds local fan-out.
+    dispatch_concurrency: 1
 
 extraction:
   chunk_size: 512
   chunk_overlap: 64
   llm_concurrency: 5
+  # Intra-run fan-out knobs (#054 / ADR-002). Overridable via
+  # TREE_EXTRACTION__DOC_CONCURRENCY / TREE_EXTRACTION__DEDUP_CONCURRENCY.
+  # doc_concurrency: documents processed in parallel within one run (1 =
+  # serial; cross-run fan-out is the orchestrator path of memory_extraction
+  # (num_shards>1)).
+  doc_concurrency: 1
+  # dedup_concurrency: entities resolved in parallel within a run.
+  dedup_concurrency: 8
   resolution:
     fuzzy_threshold: 0.85
     semantic_threshold: 0.80
@@ -136,6 +151,23 @@ dream:
   # LLM calls. Flip to true to run the Gemini contradiction judge over the
   # incremental delta (cost: bounded LLM calls per partition).
   enable_supersession_judge: false
+
+# Pipeline-parallelism + Voyage rate-limiting (#054 / ADR-002). Governs how
+# aggressively the memory pipeline runs concurrently and how the shared
+# free-tier Voyage embedding key is throttled across separate flow runs.
+concurrency:
+  # Requests/minute the shared free-tier Voyage key allows. Drives the
+  # server-side `voyage-embeddings` Prefect global concurrency limit
+  # (limit = voyage_rpm, slot-decay-per-second = voyage_rpm / 60) created via
+  # `make memory-sync-concurrency-limits`. Raise this + re-run the target after
+  # adding a payment method — no code change needed.
+  voyage_rpm: 3
+  # Tokens/minute the key allows. Held by config (the embedding_batch
+  # max_total_tokens cap), not yet a second token-weighted limiter.
+  voyage_tpm: 10000
+  # Admission control for serve(global_limit=...); kept close to voyage_rpm so
+  # we don't admit far more runs than the embed budget can feed.
+  runner_global_limit: 4
 
 mcp:
   max_retries: 1

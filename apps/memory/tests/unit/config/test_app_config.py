@@ -3,6 +3,7 @@ from collections import Counter
 
 from tree.config.app_config import (
     AppConfig,
+    ConcurrencyConfig,
     DreamConfig,
     HuggingFaceDatasetSource,
     SubstackArticleSource,
@@ -38,17 +39,22 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.provider == "voyage"
         assert config.models.search_embedding.model == "voyage-3.5"
         assert config.models.search_embedding.dimensions == 1024
-        # #044: real-time request-batching caps default to the Voyage
-        # per-request limits for voyage-multimodal-3.
+        # #044: real-time request-batching caps. #054/ADR-002 dropped
+        # max_total_tokens 320_000 → 10_000 (the shared free-tier Voyage TPM
+        # window) and added dispatch_concurrency.
         assert config.models.embedding_batch.max_inputs == 1000
-        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
+        assert config.models.embedding_batch.dispatch_concurrency == 1
         assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
+        # #054: intra-run fan-out knobs.
+        assert config.extraction.doc_concurrency == 1
+        assert config.extraction.dedup_concurrency == 8
 
     def test_embedding_batch_defaults_when_absent(self, tmp_path):
         """A YAML with no ``models.embedding_batch`` block falls back to the
-        typed defaults (the Voyage per-request caps) — #044."""
+        typed defaults — #044, with the #054/ADR-002 max_total_tokens drop."""
 
         custom = tmp_path / "no_batch.yaml"
         custom.write_text(
@@ -62,8 +68,9 @@ class TestLoadAppConfig:
         config = load_app_config(custom)
 
         assert config.models.embedding_batch.max_inputs == 1000
-        assert config.models.embedding_batch.max_total_tokens == 320_000
+        assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
+        assert config.models.embedding_batch.dispatch_concurrency == 1
 
     def test_embedding_batch_caps_loaded_from_yaml(self, tmp_path):
         """Operator-tuned batching caps in YAML are read into the typed
@@ -282,3 +289,89 @@ class TestLoadAppConfig:
         config = load_app_config()
 
         assert config.extraction.chunk_size == 1024
+
+
+class TestConcurrencyConfig:
+    """#054 / ADR-002: the top-level ``concurrency:`` block."""
+
+    def test_concurrency_block_loaded_from_default_yaml(self):
+        """The concurrency knobs are read from default.yaml into the
+        typed :class:`ConcurrencyConfig`."""
+
+        config = load_app_config()
+
+        assert config.concurrency.voyage_rpm == 3
+        assert config.concurrency.voyage_tpm == 10_000
+        assert config.concurrency.runner_global_limit == 4
+
+    def test_concurrency_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``concurrency`` block falls back to the typed
+        defaults."""
+
+        custom = tmp_path / "no_concurrency.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.concurrency == ConcurrencyConfig()
+        assert config.concurrency.voyage_rpm == 3
+        assert config.concurrency.voyage_tpm == 10_000
+        assert config.concurrency.runner_global_limit == 4
+
+    def test_concurrency_block_loaded_from_custom_yaml(self, tmp_path):
+        """Operator-tuned concurrency knobs in YAML are read into the typed
+        model."""
+
+        custom = tmp_path / "concurrency.yaml"
+        custom.write_text(
+            "concurrency:\n"
+            "  voyage_rpm: 60\n"
+            "  voyage_tpm: 1000000\n"
+            "  runner_global_limit: 8\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.concurrency.voyage_rpm == 60
+        assert config.concurrency.voyage_tpm == 1_000_000
+        assert config.concurrency.runner_global_limit == 8
+
+
+class TestExtractionConcurrencyKnobs:
+    """#054: the new intra-run fan-out knobs on ``extraction`` +
+    ``models.embedding_batch``, including the env-override hatch."""
+
+    def test_extraction_fanout_knobs_loaded_from_default_yaml(self):
+        config = load_app_config()
+
+        assert config.extraction.doc_concurrency == 1
+        assert config.extraction.dedup_concurrency == 8
+
+    def test_dispatch_concurrency_loaded_from_default_yaml(self):
+        config = load_app_config()
+
+        assert config.models.embedding_batch.dispatch_concurrency == 1
+        assert config.models.embedding_batch.max_total_tokens == 10_000
+
+    def test_dedup_concurrency_env_override(self, tmp_path, monkeypatch):
+        """``TREE_EXTRACTION__DEDUP_CONCURRENCY=4`` overrides the YAML default
+        (8) — proves the existing override hatch reaches the new knob."""
+
+        custom = tmp_path / "extraction.yaml"
+        custom.write_text("extraction:\n  dedup_concurrency: 8\n")
+        monkeypatch.setenv("TREE_EXTRACTION__DEDUP_CONCURRENCY", "4")
+
+        config = load_app_config(custom)
+
+        assert config.extraction.dedup_concurrency == 4
+
+    def test_doc_concurrency_env_override(self, tmp_path, monkeypatch):
+        """The override hatch also reaches ``doc_concurrency``."""
+
+        custom = tmp_path / "extraction.yaml"
+        custom.write_text("extraction:\n  doc_concurrency: 1\n")
+        monkeypatch.setenv("TREE_EXTRACTION__DOC_CONCURRENCY", "3")
+
+        config = load_app_config(custom)
+
+        assert config.extraction.doc_concurrency == 3

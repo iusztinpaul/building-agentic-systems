@@ -25,7 +25,7 @@ Per-strategy procedure (see :func:`run_smoke`):
    incoming embedding with the canonical's vector before dedup runs, so
    dedup always sees similarity ~1.0 and auto-merges), so the smoke
    plants the soft-join scenario directly.
-4. **Pass 1.** Seed doc A. Invoke ``memory_extraction.fn(...)`` in
+4. **Pass 1.** Seed doc A. Invoke ``memory_extract_etl_worker.fn(...)`` in
    process driven by a :class:`FakeLLM` with canned output
    (``_LLM_RESPONSE_DOC_A``). Run indexing. The in-process invocation
    bypasses Prefect-worker env-var propagation so the
@@ -507,7 +507,7 @@ async def _seed_doc(*, uri: str, title: str, content: str) -> Document:
 async def _run_extraction_inproc(
     document_ids: list[str], *, llm_response: dict[str, Any] | None = None
 ) -> Any:
-    """Invoke ``memory_extraction.fn(...)`` in-process.
+    """Invoke ``memory_extract_etl_worker.fn(...)`` in-process.
 
     Imported lazily so the env-var override set by the CLI ``run`` command
     is in place before ``load_app_config()`` reads it.
@@ -524,13 +524,17 @@ async def _run_extraction_inproc(
     from tree.models.fake_model import FakeLLM
 
     if llm_response is None:
-        return await extraction_pipeline.memory_extraction.fn(document_ids=document_ids)
+        return await extraction_pipeline.memory_extract_etl_worker.fn(
+            document_ids=document_ids
+        )
 
     fake_llm = FakeLLM(responses=[llm_response])
     original_get_llm = extraction_pipeline.get_llm
     extraction_pipeline.get_llm = lambda: fake_llm  # type: ignore[assignment]
     try:
-        return await extraction_pipeline.memory_extraction.fn(document_ids=document_ids)
+        return await extraction_pipeline.memory_extract_etl_worker.fn(
+            document_ids=document_ids
+        )
     finally:
         extraction_pipeline.get_llm = original_get_llm  # type: ignore[assignment]
 
@@ -865,9 +869,9 @@ async def run_smoke(*, strategy: MergeStrategy, restart_infra: bool) -> int:
         # NOTE (#023): the smoke script does not yet wire user_id through
         # the extraction/indexing/review chain. The smoke is already
         # broken w.r.t. multi-tenancy (it calls
-        # ``memory_extraction.fn(document_ids=...)`` without ``user_id``)
-        # — this call is updated to keep the file compilable. A separate
-        # task should rebuild the smoke around a fixture user.
+        # ``memory_extract_etl_worker.fn(document_ids=...)`` without
+        # ``user_id``) — this call is updated to keep the file compilable. A
+        # separate task should rebuild the smoke around a fixture user.
         _SMOKE_USER_ID = PydanticObjectId("000000000000000000000023")
         pending = await find_pending_duplicates(
             client[database_name],

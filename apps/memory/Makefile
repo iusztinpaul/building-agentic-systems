@@ -121,6 +121,9 @@ deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
 serve-workflows: # Serve Prefect workflow deployments.
 	uv run python -m tree.orchestrator
 
+sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global concurrency limit from app_config.concurrency (#054 / ADR-002). Requires a running Prefect server.
+	uv run python scripts/sync_concurrency_limits.py
+
 
 # --- Data Pipelines ---
 #
@@ -131,17 +134,17 @@ serve-workflows: # Serve Prefect workflow deployments.
 #
 # Wired in #020; there is no silent fallback to a default user.
 
-run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks all entries in configs/default.yaml sources. Requires USER_ID=<oid>.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)"
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Requires USER_ID=<oid>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
+	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 
 # --- Memory Pipelines ---
 # Pattern: run-<memory-pipeline-name>-memory-pipeline
 
-run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2".
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",)
+run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
+	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
+	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Requires USER_ID=<oid>.
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi

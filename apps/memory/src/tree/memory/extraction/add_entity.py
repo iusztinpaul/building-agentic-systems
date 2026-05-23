@@ -39,7 +39,7 @@ from tree.entities.knowledge_graph import (
     build_edge_id,
     build_node_id,
 )
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import _embed_chunk_resilient, node_to_embedding_text
 from tree.memory.extraction.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -238,7 +238,16 @@ async def add_entity(
             canonical_name=resolved.canonical_name,
             properties=properties,
         )
-        embedded = await embedding_model.embed([embeddable_text])
+        # Route through ``_embed_chunk_resilient`` (ADR-002 §1) instead of
+        # calling ``embedding_model.embed`` directly: the dedup embed gains the
+        # Voyage-400 bisect-and-skip resilience for free. The shared
+        # ``voyage-embeddings`` rate limit lives at the real network POST inside
+        # the Voyage clients, NOT here — so a ``_CachedSingleEmbedding`` cache
+        # hit (extraction hot path) acquires no slot. A skipped (un-embeddable)
+        # input comes back as the empty placeholder ``[]``, which degrades to
+        # ``embedding = []`` exactly as the previous
+        # ``embedded[0] if embedded else []`` did.
+        embedded = await _embed_chunk_resilient(embedding_model, [embeddable_text])
         embedding = embedded[0] if embedded else []
         raw_result = await dedupe_entity(
             database=database,

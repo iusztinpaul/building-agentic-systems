@@ -40,7 +40,7 @@ from tree.entities.knowledge_graph import EdgeType
 from tree.entities.ontology import RELATION_SEMANTICS
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
@@ -246,7 +246,7 @@ class TestPOLEOMultiTypeExtractionE2E:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc.id)]
             )
 
@@ -380,7 +380,9 @@ class TestPOLEOMultiTypeExtractionE2E:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_a.id, document_ids=[str(doc_a.id)])
+            await memory_extract_etl_worker(
+                user_id=user_a.id, document_ids=[str(doc_a.id)]
+            )
 
         # User B: same payload (intentionally collides on names) — the
         # tenant prefix must keep them disjoint.
@@ -396,7 +398,9 @@ class TestPOLEOMultiTypeExtractionE2E:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user_b.id, document_ids=[str(doc_b.id)])
+            await memory_extract_etl_worker(
+                user_id=user_b.id, document_ids=[str(doc_b.id)]
+            )
 
         rows = await _kg_rows(mongo_client)
 

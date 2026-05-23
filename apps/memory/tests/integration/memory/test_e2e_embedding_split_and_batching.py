@@ -7,7 +7,7 @@ prove each behaviour in isolation — usually with dedup stubbed or a helper
 called directly — this test runs the WHOLE chain a single time and asserts
 the five things the feature must demonstrate together:
 
-1. **Full chain runs** — ``memory_extraction`` (extraction) →
+1. **Full chain runs** — ``memory_extract_etl_worker`` (extraction) →
    ``memory_indexing`` (indexing backfill + index reconcile) → live
    ``$vectorSearch`` via ``query_memory`` (query), against the live mongot
    stack for one seed user.
@@ -49,7 +49,7 @@ from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import NodeType, build_node_id
 from tree.entities.users import User
 from tree.memory.embedding_text import node_to_embedding_text
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.core import embed_nodes
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.memory.query.core import query_memory, search_nodes
@@ -333,7 +333,7 @@ class TestEmbeddingSplitAndBatchingE2E:
 
         # --- Act 1: extraction ----------------------------------------------
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc.id)]
             )
 

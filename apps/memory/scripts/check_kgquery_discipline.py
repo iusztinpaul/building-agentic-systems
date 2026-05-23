@@ -107,6 +107,16 @@ _ALLOWLIST: frozenset[str] = frozenset(
         # in, so cross-tenant access is impossible by construction. Covered
         # by tests/integration/memory/test_meta_state.py (tenant-isolation).
         "src/tree/memory/consolidation/meta_state.py",
+        # #056/#061/#067: document-shard extraction fan-out helpers. The
+        # orchestrator (``memory-extract-etl-orchestrator``) consumes these to
+        # dispatch ``memory-extract-etl-worker`` runs. The single
+        # ``knowledge_graph`` read (``_resolve_pending_document_ids``'s
+        # ``kg.find`` over the ``sources`` provenance) threads ``user_id``
+        # into its filter, so a cross-tenant doc can never be marked
+        # ingested. Tenant isolation is covered by
+        # tests/integration/memory/test_extraction_fanout.py
+        # (``test_resolution_is_tenant_scoped``).
+        "src/tree/memory/extraction/sharding.py",
         # #051: dream-consolidation sweep. Every ``knowledge_graph`` read
         # (the driving-set ``find`` and the SAME_AS-existence ``find_one``)
         # threads ``user_id`` into its filter, and ``dedupe_entity`` /

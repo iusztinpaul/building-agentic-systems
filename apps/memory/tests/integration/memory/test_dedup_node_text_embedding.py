@@ -1,6 +1,6 @@
 """Integration tests for #042 — dedup on node-text embedding + vector reuse.
 
-These tests exercise the full extraction flow (``memory_extraction.fn``)
+These tests exercise the full extraction flow (``memory_extract_etl_worker.fn``)
 against the local MongoDB and assert the persisted node ``embedding``:
 
 * AC #5 — a newly-created PERSON node's persisted vector equals the
@@ -36,7 +36,7 @@ from tree.memory.extraction.dedup import (
     DeduplicationResult,
     dedupe_entity,
 )
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.core import embed_nodes, ensure_indexes
 from tree.models.base import BaseEmbeddingModel
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
@@ -208,7 +208,7 @@ class TestNewNodePersistsNodeTextVector:
 
         # Act
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Assert — the PERSON node carries the node-text vector.
         person_id = build_node_id(user.id, NodeType.PERSON, name)
@@ -258,7 +258,7 @@ class TestNewNodePersistsNodeTextVector:
         model = _PerTextEmbeddingModel(dimensions=_DIMS)
         _patch_pipeline_deps(mocker, mongo_client, llm=llm, embedding_model=model)
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         person_id = build_node_id(user.id, NodeType.PERSON, name)
         before = await _kg_collection.find_one({"_id": person_id})
@@ -345,7 +345,7 @@ class TestPreferenceStillStoresStatementEmbedding:
 
         # Act
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Assert — persisted vector is the STATEMENT embedding, not node-text.
         # The preference ``_id`` is a slug of the (now unique) statement, so
@@ -437,7 +437,7 @@ class TestResolutionModelIsNameOnlyAndTransient:
 
         # Act
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Assert — the persisted vector is the SEARCH model's node-text vector.
         person_id = build_node_id(user.id, NodeType.PERSON, name)
@@ -554,7 +554,9 @@ class TestNearDuplicateAutoMergesInSameSpace:
             user_id=user.id,
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc1.id)])
+            await memory_extract_etl_worker(
+                user_id=user.id, document_ids=[str(doc1.id)]
+            )
 
         assert len(await _non_self_persons()) == 1
 
@@ -588,7 +590,7 @@ class TestNearDuplicateAutoMergesInSameSpace:
             user_id=user.id,
         )
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc2.id)]
             )
 
