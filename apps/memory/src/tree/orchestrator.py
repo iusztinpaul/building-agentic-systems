@@ -30,7 +30,17 @@ from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import memory_extraction
 from tree.memory.indexing.pipeline import memory_indexing
 
-if __name__ == "__main__":
+
+def serve_deployments(limit: int) -> None:
+    """Register and serve every workflow deployment with admission control.
+
+    Extracted from ``__main__`` so the ``serve(...)`` invocation is importable
+    and unit-testable (#065). ``limit`` is forwarded to ``prefect.serve`` as its
+    ``limit`` parameter — admission control (ADR-002 §4) capping how many flow
+    runs the server admits concurrently, kept close to ``concurrency.voyage_rpm``
+    so we never admit far more runs than the shared embed budget can feed.
+    """
+
     serve(
         data_pipeline.to_deployment(
             name="data-pipeline-etl",
@@ -74,8 +84,9 @@ if __name__ == "__main__":
             cron=app_config.dream.cron,
             tags=["dream"],
         ),
-        # Admission control (ADR-002 §4): cap how many flow runs the server
-        # admits concurrently, kept close to ``concurrency.voyage_rpm`` so we
-        # never admit far more runs than the shared embed budget can feed.
-        global_limit=app_config.concurrency.runner_global_limit,
+        limit=limit,
     )
+
+
+if __name__ == "__main__":
+    serve_deployments(app_config.concurrency.runner_global_limit)

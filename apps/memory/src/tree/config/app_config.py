@@ -231,7 +231,7 @@ class ConcurrencyConfig(BaseModel):
       created via ``make memory-sync-concurrency-limits``.
     * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
       ``max_total_tokens`` cap), not yet a second token-weighted limiter.
-    * ``runner_global_limit`` — admission control for ``serve(global_limit=...)``;
+    * ``runner_global_limit`` — admission control for ``serve(limit=...)``;
       kept close to ``voyage_rpm`` so we don't admit far more runs than the
       embed budget can feed.
     """
