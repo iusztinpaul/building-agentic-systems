@@ -98,20 +98,18 @@ class FanOutStats:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_num_shards(num_shards: int | None, *, default: int) -> int:
+def _resolve_num_shards(num_shards: int) -> int:
     """Resolve the effective shard count, clamped to ``>= 1``.
 
-    ``None`` falls back to ``default`` (the configured
-    ``concurrency.fanout_max_parallel``). An explicit non-positive value — 0 or
-    negative, only reachable via a DIRECT Prefect API/UI trigger that bypasses
-    the guarded ``--num-shards`` script path — clamps to ``1`` so the run shards
-    everything into a single shard instead of becoming a silent zero-shard no-op
-    (``_partition_into_shards``'s ``min(num_shards, N)`` would otherwise go
-    non-positive on a truthy negative).
+    The shard count is always an explicit per-run choice
+    (``NUM_SHARDS`` / ``--num-shards`` / ``-p num_shards``). A non-positive value
+    — 0 or negative, only reachable via a DIRECT Prefect API/UI trigger that
+    bypasses the guarded ``--num-shards`` script path — clamps to ``1`` so the
+    run shards everything into a single shard instead of becoming a silent
+    zero-shard no-op (``_partition_into_shards``'s ``min(num_shards, N)`` would
+    otherwise go non-positive on a truthy negative).
     """
 
-    if num_shards is None:
-        return default
     return max(1, num_shards)
 
 

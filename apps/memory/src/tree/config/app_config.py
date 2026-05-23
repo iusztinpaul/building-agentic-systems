@@ -155,8 +155,8 @@ class ExtractionConfig(BaseModel):
     # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
     # override hatch via :func:`_apply_env_overrides`.
     # ``doc_concurrency`` — how many documents one extraction run processes in
-    # parallel (default 1 = serial; the cross-run fan-out lives in the sharded
-    # parent flow, see ADR-002).
+    # parallel (default 1 = serial; the cross-run fan-out is the orchestrator
+    # path of ``memory_extraction`` (``num_shards > 1``), see ADR-002).
     doc_concurrency: int = 1
     # ``dedup_concurrency`` — how many entities the dedup stage may resolve in
     # parallel within a run.
@@ -234,14 +234,11 @@ class ConcurrencyConfig(BaseModel):
     * ``runner_global_limit`` — admission control for ``serve(global_limit=...)``;
       kept close to ``voyage_rpm`` so we don't admit far more runs than the
       embed budget can feed.
-    * ``fanout_max_parallel`` — max document-shard runs the sharded parent flow
-      launches concurrently.
     """
 
     voyage_rpm: int = 3
     voyage_tpm: int = 10_000
     runner_global_limit: int = 4
-    fanout_max_parallel: int = 4
 
 
 class QueryConfig(BaseModel):

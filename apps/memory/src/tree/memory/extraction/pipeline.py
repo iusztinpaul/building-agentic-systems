@@ -1487,10 +1487,7 @@ async def _orchestrate_sharded_extraction(
     """
 
     log = _get_run_logger()
-    cfg = _live_app_config()
-    effective_num_shards = _resolve_num_shards(
-        num_shards, default=cfg.concurrency.fanout_max_parallel
-    )
+    effective_num_shards = _resolve_num_shards(num_shards)
 
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),

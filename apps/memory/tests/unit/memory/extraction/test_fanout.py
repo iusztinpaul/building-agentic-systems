@@ -125,16 +125,12 @@ def test_resolve_num_shards_clamps_nonpositive_to_one(bad) -> None:
     ``min(num_shards, N)`` would go non-positive on a truthy negative.
     """
 
-    assert _resolve_num_shards(bad, default=4) == 1
+    assert _resolve_num_shards(bad) == 1
 
 
-def test_resolve_num_shards_none_falls_back_to_default() -> None:
-    assert _resolve_num_shards(None, default=4) == 4
-
-
-@pytest.mark.parametrize("good", [1, 2, 7])
+@pytest.mark.parametrize("good", [1, 2, 4, 7])
 def test_resolve_num_shards_positive_is_unchanged(good) -> None:
-    assert _resolve_num_shards(good, default=4) == good
+    assert _resolve_num_shards(good) == good
 
 
 @pytest.mark.parametrize("bad", [0, -3])
@@ -144,7 +140,7 @@ def test_clamped_nonpositive_shards_into_one_shard_with_all_ids(bad) -> None:
 
     ids = [str(PydanticObjectId()) for _ in range(6)]
 
-    effective = _resolve_num_shards(bad, default=4)
+    effective = _resolve_num_shards(bad)
     shards = _partition_into_shards(ids, effective)
 
     # One shard, containing every id in order — not a zero-shard no-op.

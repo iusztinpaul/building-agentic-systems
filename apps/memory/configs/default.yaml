@@ -103,7 +103,8 @@ extraction:
   # Intra-run fan-out knobs (#054 / ADR-002). Overridable via
   # TREE_EXTRACTION__DOC_CONCURRENCY / TREE_EXTRACTION__DEDUP_CONCURRENCY.
   # doc_concurrency: documents processed in parallel within one run (1 =
-  # serial; cross-run fan-out lives in the sharded parent flow).
+  # serial; cross-run fan-out is the orchestrator path of memory_extraction
+  # (num_shards>1)).
   doc_concurrency: 1
   # dedup_concurrency: entities resolved in parallel within a run.
   dedup_concurrency: 8
@@ -167,8 +168,6 @@ concurrency:
   # Admission control for serve(global_limit=...); kept close to voyage_rpm so
   # we don't admit far more runs than the embed budget can feed.
   runner_global_limit: 4
-  # Max document-shard runs the sharded parent flow launches concurrently.
-  fanout_max_parallel: 4
 
 mcp:
   max_retries: 1

@@ -295,7 +295,7 @@ class TestConcurrencyConfig:
     """#054 / ADR-002: the top-level ``concurrency:`` block."""
 
     def test_concurrency_block_loaded_from_default_yaml(self):
-        """The four concurrency knobs are read from default.yaml into the
+        """The concurrency knobs are read from default.yaml into the
         typed :class:`ConcurrencyConfig`."""
 
         config = load_app_config()
@@ -303,7 +303,6 @@ class TestConcurrencyConfig:
         assert config.concurrency.voyage_rpm == 3
         assert config.concurrency.voyage_tpm == 10_000
         assert config.concurrency.runner_global_limit == 4
-        assert config.concurrency.fanout_max_parallel == 4
 
     def test_concurrency_defaults_when_absent(self, tmp_path):
         """A YAML with no ``concurrency`` block falls back to the typed
@@ -318,7 +317,6 @@ class TestConcurrencyConfig:
         assert config.concurrency.voyage_rpm == 3
         assert config.concurrency.voyage_tpm == 10_000
         assert config.concurrency.runner_global_limit == 4
-        assert config.concurrency.fanout_max_parallel == 4
 
     def test_concurrency_block_loaded_from_custom_yaml(self, tmp_path):
         """Operator-tuned concurrency knobs in YAML are read into the typed
@@ -330,7 +328,6 @@ class TestConcurrencyConfig:
             "  voyage_rpm: 60\n"
             "  voyage_tpm: 1000000\n"
             "  runner_global_limit: 8\n"
-            "  fanout_max_parallel: 6\n"
         )
 
         config = load_app_config(custom)
@@ -338,7 +335,6 @@ class TestConcurrencyConfig:
         assert config.concurrency.voyage_rpm == 60
         assert config.concurrency.voyage_tpm == 1_000_000
         assert config.concurrency.runner_global_limit == 8
-        assert config.concurrency.fanout_max_parallel == 6
 
 
 class TestExtractionConcurrencyKnobs:
