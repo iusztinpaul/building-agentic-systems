@@ -56,7 +56,7 @@ from prefect import tags as prefect_tags
 
 from tree.entities.knowledge_graph import EdgeType, KnowledgeGraphEntry, NodeType
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.memory.query.core import (
     _text_search,
@@ -339,7 +339,7 @@ class TestTwoUserIsolation:
             embedding_model=self.embedding_model,
         )
         with prefect_tags("tests"):
-            await memory_extraction(
+            await memory_extract_etl_worker(
                 user_id=self.user_a.id,
                 document_ids=[str(self.content.doc_a.id)],
             )
@@ -351,7 +351,7 @@ class TestTwoUserIsolation:
             embedding_model=self.embedding_model,
         )
         with prefect_tags("tests"):
-            await memory_extraction(
+            await memory_extract_etl_worker(
                 user_id=self.user_b.id,
                 document_ids=[str(self.content.doc_b.id)],
             )

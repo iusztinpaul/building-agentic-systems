@@ -142,7 +142,7 @@ run-data-pipeline: # Trigger the unified data pipeline ETL via Prefect. Walks al
 # --- Memory Pipelines ---
 # Pattern: run-<memory-pipeline-name>-memory-pipeline
 
-run-memory-pipeline-extraction: # Trigger memory extraction pipeline via Prefect. Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (>1 fans out document-shards + indexes once; default 1 = plain worker extraction).
+run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
 	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 

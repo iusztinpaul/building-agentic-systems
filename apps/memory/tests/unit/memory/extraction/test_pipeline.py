@@ -38,7 +38,7 @@ from tree.memory.extraction.pipeline import (
     embed_entities_task,
     extract_chunks_and_structural_task,
     llm_extract_entities_task,
-    memory_extraction,
+    memory_extract_etl_worker,
     run_extraction_for_documents,
 )
 from tree.memory.resolution.composite import CompositeResolver
@@ -888,11 +888,11 @@ class TestChunkDocumentsFanout:
         # added fan-out around ``llm_extract_entities_task``.
         import inspect
 
-        from tree.memory.extraction.pipeline import memory_extraction
+        from tree.memory.extraction.pipeline import memory_extract_etl_worker
 
-        # ``memory_extraction`` is a Prefect ``@flow`` — the original function
+        # ``memory_extract_etl_worker`` is a Prefect ``@flow`` — the original function
         # body lives on ``.fn``.
-        src = inspect.getsource(memory_extraction.fn)
+        src = inspect.getsource(memory_extract_etl_worker.fn)
         assert "for chunked in chunked_docs:" in src
         assert "raws.append(await llm_extract_entities_task(chunked))" in src
         # The chunking task ① loop is now the bounded gather helper.
@@ -1173,9 +1173,14 @@ class TestPipelineExports:
     def test_flow_exported(self) -> None:
         from tree.memory.extraction import pipeline
 
-        assert hasattr(pipeline, "memory_extraction")
-        # External name unchanged (referenced by the orchestrator deployment).
-        assert memory_extraction.name == "memory-extraction-etl"
+        assert hasattr(pipeline, "memory_extract_etl_worker")
+        # The worker flow name (referenced by the worker deployment, #067).
+        assert memory_extract_etl_worker.name == "memory-extract-etl-worker"
+        assert hasattr(pipeline, "memory_extract_etl_orchestrator")
+        assert (
+            pipeline.memory_extract_etl_orchestrator.name
+            == "memory-extract-etl-orchestrator"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1193,7 +1198,7 @@ class TestRequiredUserIdSignature:
 
     async def test_flow_missing_user_id_raises_type_error(self) -> None:
         with pytest.raises(TypeError, match="user_id"):
-            await memory_extraction.fn(document_ids=["x"])  # type: ignore[call-arg]
+            await memory_extract_etl_worker.fn(document_ids=["x"])  # type: ignore[call-arg]
 
     async def test_run_helper_missing_user_id_raises_type_error(self) -> None:
         with pytest.raises(TypeError, match="user_id"):
@@ -1419,7 +1424,7 @@ class TestFlowEmbeddingModelSplit:
             return_value=MagicMock(to_list=AsyncMock(return_value=[])),
         )
 
-        await memory_extraction.fn(user_id=_USER_ID)
+        await memory_extract_etl_worker.fn(user_id=_USER_ID)
 
         # The resolver is built from the RESOLUTION model, never the search model.
         res_factory.assert_called_once()
@@ -1522,7 +1527,7 @@ class TestFlowEmbeddingModelSplit:
             new=AsyncMock(return_value=WriteSummary()),
         )
 
-        await memory_extraction.fn(
+        await memory_extract_etl_worker.fn(
             user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
         )
 

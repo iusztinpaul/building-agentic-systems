@@ -1,19 +1,20 @@
-"""Unit tests for the in-flow document-shard fan-out (#061, ADR-002 §3 amended).
+"""Unit tests for the document-shard fan-out (#067, ADR-002 §3 amended #066).
 
-#061 folded the #056 standalone fan-out parent flow into the single
-``memory_extraction`` flow via a ``num_shards`` parameter using
-recursive self-dispatch. These exercise the PURE logic with no Prefect server and
-``run_deployment`` mocked:
+#067 split extraction into an orchestrator flow
+(``memory-extract-etl-orchestrator``) that dispatches a DISTINCT worker deployment
+(``memory-extract-etl-worker``) per shard — there is NO recursion. These exercise
+the PURE logic with no Prefect server and ``run_deployment`` mocked:
 
 * ``_partition_into_shards`` — contiguous, disjoint, balanced shard partitioning;
 * ``_resolve_num_shards`` — the non-positive→1 clamp;
-* ``_fan_out_extraction`` — the gather + failure-isolation + single-index core,
-  with each child carrying ``num_shards=1`` (recursion terminates after one
-  level), driven through a fake ``run_deployment`` so we never touch a real
+* ``_fan_out_extraction`` — the gather + failure-isolation + single-index core. Each
+  child dispatch targets the WORKER deployment and carries only
+  ``{user_id, document_ids}`` (NO ``num_shards`` key — the worker has no such
+  param), driven through a fake ``run_deployment`` so we never touch a real
   deployment.
 
-The orchestrator-vs-worker BRANCH inside ``memory_extraction(num_shards=…)`` and
-pending-doc resolution against Mongo are covered by the integration test
+The orchestrator flow ``memory_extract_etl_orchestrator(...)`` and pending-doc
+resolution against Mongo are covered by the integration test
 (``tests/integration/memory/test_extraction_fanout.py``).
 """
 
@@ -154,7 +155,7 @@ def test_clamped_nonpositive_shards_into_one_shard_with_all_ids(bad) -> None:
 
 
 async def test_fan_out_issues_one_run_per_shard_then_single_index(mocker) -> None:
-    """Each shard fans out one extraction run; exactly one index run follows."""
+    """Each shard fans out one worker run; exactly one index run follows."""
 
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(6)]
@@ -171,11 +172,11 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(mocker) -> Non
         user_id=user_id, shards=shards, run_deployment=runner
     )
 
-    extraction_calls = [c for c in calls if "extraction" in c[0]]
+    worker_calls = [c for c in calls if "worker" in c[0]]
     indexing_calls = [c for c in calls if "indexing" in c[0]]
 
-    # One extraction call per shard; exactly one indexing call.
-    assert len(extraction_calls) == len(shards)
+    # One worker call per shard; exactly one indexing call.
+    assert len(worker_calls) == len(shards)
     assert len(indexing_calls) == 1
 
     # The single index run is the LAST call (fired after the gather).
@@ -188,8 +189,34 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(mocker) -> Non
     assert stats.failures == {}
 
 
+async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
+    """Every shard dispatch targets the WORKER deployment (no recursion/self).
+
+    The dispatched name contains ``worker`` and NOT ``orchestrator`` — the #067
+    split replaced #061's recursive self-dispatch with a distinct worker deployment.
+    """
+
+    user_id = PydanticObjectId()
+    shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(6)], 4)
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
+
+    # Every non-index dispatch targets the worker; none target an orchestrator.
+    dispatch_names = [name for name, _p in calls if "indexing" not in name]
+    assert len(dispatch_names) == len(shards)
+    assert all("worker" in name for name in dispatch_names)
+    assert all("orchestrator" not in name for name in dispatch_names)
+
+
 async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
-    """Each extraction run carries str(user_id) + its shard's document_ids."""
+    """Each worker run carries str(user_id) + its shard's document_ids."""
 
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(6)]
@@ -204,18 +231,19 @@ async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
 
     await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
 
-    extraction_params = [p for name, p in calls if "extraction" in name]
-    assert all(p["user_id"] == str(user_id) for p in extraction_params)
+    worker_params = [p for name, p in calls if "worker" in name]
+    assert all(p["user_id"] == str(user_id) for p in worker_params)
     # The union of every shard's document_ids equals the input ids.
-    flat = [doc_id for p in extraction_params for doc_id in p["document_ids"]]
+    flat = [doc_id for p in worker_params for doc_id in p["document_ids"]]
     assert flat == ids
 
 
-async def test_fan_out_children_carry_num_shards_one(mocker) -> None:
-    """Every extraction self-dispatch carries ``num_shards == 1``.
+async def test_fan_out_children_carry_no_num_shards_key(mocker) -> None:
+    """Every worker dispatch carries ONLY ``{user_id, document_ids}``.
 
-    This is what makes children take the WORKER path — recursion terminates
-    after exactly one level (no infinite self-dispatch).
+    The worker has no ``num_shards`` param — passing one would be a Prefect
+    parameter error. There is no recursion (a distinct worker deployment), so the
+    ``num_shards=1`` child key from #061 is gone.
     """
 
     user_id = PydanticObjectId()
@@ -231,9 +259,10 @@ async def test_fan_out_children_carry_num_shards_one(mocker) -> None:
 
     await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
 
-    extraction_params = [p for name, p in calls if "extraction" in name]
-    assert len(extraction_params) == len(shards)
-    assert all(p["num_shards"] == 1 for p in extraction_params)
+    worker_params = [p for name, p in calls if "worker" in name]
+    assert len(worker_params) == len(shards)
+    assert all("num_shards" not in p for p in worker_params)
+    assert all(set(p) == {"user_id", "document_ids"} for p in worker_params)
 
 
 async def test_fan_out_indexing_carries_user_id_only(mocker) -> None:
@@ -264,13 +293,13 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
     shards = _partition_into_shards(ids, 4)
 
     calls: list[tuple[str, dict]] = []
-    # The 2nd extraction shard blows up.
+    # The 2nd worker shard blows up.
     failing_shard_ids = tuple(shards[1])
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
         params = parameters or {}
-        if "extraction" in name and tuple(params.get("document_ids", [])) == (
+        if "worker" in name and tuple(params.get("document_ids", [])) == (
             failing_shard_ids
         ):
             raise RuntimeError("shard blew up")
@@ -281,11 +310,11 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
         user_id=user_id, shards=shards, run_deployment=runner
     )
 
-    extraction_calls = [c for c in calls if "extraction" in c[0]]
+    worker_calls = [c for c in calls if "worker" in c[0]]
     indexing_calls = [c for c in calls if "indexing" in c[0]]
 
     # Every shard was attempted; the failure is isolated and recorded.
-    assert len(extraction_calls) == len(shards)
+    assert len(worker_calls) == len(shards)
     assert stats.shards_total == len(shards)
     assert stats.succeeded == len(shards) - 1
     assert stats.failed == 1
@@ -312,8 +341,8 @@ async def test_fan_out_no_shards_is_noop(mocker) -> None:
     assert stats.failed == 0
 
 
-async def test_fan_out_all_extraction_runs_precede_the_index_run(mocker) -> None:
-    """Call ORDER: every extraction run is issued before the indexing run."""
+async def test_fan_out_all_worker_runs_precede_the_index_run(mocker) -> None:
+    """Call ORDER: every worker run is issued before the indexing run."""
 
     user_id = PydanticObjectId()
     shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(5)], 4)
@@ -321,13 +350,13 @@ async def test_fan_out_all_extraction_runs_precede_the_index_run(mocker) -> None
     order: list[str] = []
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
-        order.append("index" if "indexing" in name else "extract")
+        order.append("index" if "indexing" in name else "worker")
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
     await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
 
-    # All extracts come first, exactly one index last.
+    # All worker runs come first, exactly one index last.
     assert order.count("index") == 1
     assert order[-1] == "index"
-    assert order[:-1] == ["extract"] * len(shards)
+    assert order[:-1] == ["worker"] * len(shards)

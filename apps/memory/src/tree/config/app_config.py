@@ -155,8 +155,8 @@ class ExtractionConfig(BaseModel):
     # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
     # override hatch via :func:`_apply_env_overrides`.
     # ``doc_concurrency`` — how many documents one extraction run processes in
-    # parallel (default 1 = serial; the cross-run fan-out is the orchestrator
-    # path of ``memory_extraction`` (``num_shards > 1``), see ADR-002).
+    # parallel (default 1 = serial; the cross-run fan-out is the
+    # ``memory-extract-etl-orchestrator`` dispatching worker shards, see ADR-002).
     doc_concurrency: int = 1
     # ``dedup_concurrency`` — how many entities the dedup stage may resolve in
     # parallel within a run.

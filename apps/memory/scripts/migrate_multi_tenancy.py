@@ -37,7 +37,7 @@ Phase-1 default path (no ``--reset-ontology``):
        unindexed collection until the fire-and-forget indexing
        deployment in step 5 caught up — this step makes the migration
        script's exit state self-sufficient (#023 Nit 4).
-    5. Trigger Prefect deployments (``memory-extraction-etl``,
+    5. Trigger Prefect deployments (``memory-extract-etl-orchestrator``,
        ``memory-indexing-etl``) for ``user_id=seed.id``. The script prints
        deployment-run IDs and the Prefect-UI links so the operator can
        poll progress. We do NOT block on completion — the operator can
@@ -121,7 +121,11 @@ logger = logging.getLogger(__name__)
 _KG_COLLECTION = "knowledge_graph"
 _EXTRACTION_REJECTIONS_COLLECTION = "extraction_rejections"
 _EXTRACTION_DROPPED_FIELDS_COLLECTION = "extraction_dropped_fields"
-_EXTRACTION_DEPLOYMENT = "memory-extraction-etl/memory-extraction-etl"
+# Operators trigger the orchestrator (#067, ADR-002 §3 amended #066); it dispatches
+# the worker shards + one trailing index run.
+_EXTRACTION_DEPLOYMENT = (
+    "memory-extract-etl-orchestrator/memory-extract-etl-orchestrator"
+)
 _INDEXING_DEPLOYMENT = "memory-indexing-etl/memory-indexing-etl"
 
 

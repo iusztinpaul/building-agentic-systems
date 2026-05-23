@@ -5,7 +5,8 @@ Registers and serves all workflow deployments. Every flow now exposes
 ``user_id`` as a required, non-Optional parameter — operators MUST pass
 it when triggering the deployment, e.g.::
 
-    prefect deployment run memory-extraction-etl/memory-extraction-etl \\
+    prefect deployment run \\
+        memory-extract-etl-orchestrator/memory-extract-etl-orchestrator \\
         -p user_id=507f1f77bcf86cd799439011
 
 Omitting ``user_id`` raises a ``TypeError`` at flow entry before any
@@ -27,7 +28,10 @@ from tree.data.pipeline import data_pipeline
 from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.memory.consolidation.dream import dream_consolidation_all_users
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import (
+    memory_extract_etl_orchestrator,
+    memory_extract_etl_worker,
+)
 from tree.memory.indexing.pipeline import memory_indexing
 
 
@@ -46,15 +50,21 @@ def serve_deployments(limit: int) -> None:
             name="data-pipeline-etl",
             tags=["data-pipeline"],
         ),
-        # Single extraction deployment for BOTH paths (#061 / ADR-002 §3):
-        # ``num_shards <= 1`` (default) runs the worker extraction directly;
-        # ``num_shards > 1`` takes the orchestrator path — partitions the user's
-        # pending docs into shards and self-dispatches one ``memory-extraction-etl``
-        # child run per shard (each ``num_shards=1``), then a single
-        # ``memory-indexing-etl`` run afterwards.
-        memory_extraction.to_deployment(
-            name="memory-extraction-etl",
-            tags=["memory-pipeline", "extraction"],
+        # Memory extraction orchestrator/worker split (#067 / ADR-002 §3 amended
+        # #066). Operators trigger the ORCHESTRATOR; it resolves the user's pending
+        # docs, partitions them into ``min(num_shards, N)`` shards, dispatches one
+        # ``memory-extract-etl-worker`` run per shard (NO recursion — a distinct
+        # worker deployment), then one trailing ``memory-indexing-etl`` run. The
+        # WORKER is the pure six-task extraction body (no fan-out, no indexing); it
+        # is the orchestrator's internal dispatch target but may also be triggered
+        # directly for a bare extraction with no index.
+        memory_extract_etl_orchestrator.to_deployment(
+            name="memory-extract-etl-orchestrator",
+            tags=["memory-pipeline", "extraction", "orchestrator"],
+        ),
+        memory_extract_etl_worker.to_deployment(
+            name="memory-extract-etl-worker",
+            tags=["memory-pipeline", "extraction", "worker"],
         ),
         memory_indexing.to_deployment(
             name="memory-indexing-etl",

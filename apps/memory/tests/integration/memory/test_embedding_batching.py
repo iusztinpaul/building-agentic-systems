@@ -27,7 +27,7 @@ from prefect import tags as prefect_tags
 from tree.entities.documents import Document, SourceType
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.core import embed_nodes
 from tree.models.base import BaseEmbeddingModel
 
@@ -233,7 +233,7 @@ class TestExtractionTaskFourBatches:
 
         # Act
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Assert — task ④ embedded ALL node-texts. The default 1000-input cap
         # is far above 40 distinct node-texts, so they all go in ONE request.
@@ -347,7 +347,7 @@ class TestResolutionPrewarmBatches:
 
         # Act
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Assert — the resolution model issued FEWER requests than the
         # one-per-name baseline. The pre-warm packs the input name + every

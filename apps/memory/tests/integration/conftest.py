@@ -70,7 +70,7 @@ class TwoUserContent:
 
     Holds the two seed users plus the ``Document`` rows the fixture
     inserted for each. The isolation test inspects the documents' ids
-    when calling ``memory_extraction.fn(document_ids=...)`` and asserts
+    when calling ``memory_extract_etl_worker.fn(document_ids=...)`` and asserts
     no row of either tenant leaks into the other tenant's queries.
 
     Distinct unique tokens (``antelope``/``amber`` for User A,

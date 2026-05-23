@@ -1,6 +1,6 @@
 """Integration tests for the six-task memory-extraction pipeline.
 
-Tests drive ``memory_extraction.fn(...)`` directly so we get the flow's
+Tests drive ``memory_extract_etl_worker.fn(...)`` directly so we get the flow's
 config validation + DB plumbing without spinning up a full Prefect run.
 ``mocker.patch`` swaps the LLM and embedding factories for fakes; the
 ``knowledge_graph`` collection is asserted directly with ``mongo_client``.
@@ -23,7 +23,7 @@ from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import EdgeType, NodeType
 from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationResult
-from tree.memory.extraction.pipeline import memory_extraction
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 
@@ -93,7 +93,7 @@ def _patch_pipeline_deps(
     llm: FakeLLM,
     embedding_model: FakeEmbeddingModel,
 ) -> None:
-    """Patch the heavy dependencies of ``memory_extraction``.
+    """Patch the heavy dependencies of ``memory_extract_etl_worker``.
 
     Importantly, we patch ``get_embedding_model`` in the pipeline module so
     the resolver / dedup / task ④ paths all share one fake model — and patch
@@ -193,7 +193,7 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc.id)]
             )
 
@@ -240,7 +240,7 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc.id)]
             )
 
@@ -276,7 +276,7 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            summary = await memory_extraction(
+            summary = await memory_extract_etl_worker(
                 user_id=user.id, document_ids=[str(doc1.id), str(doc2.id)]
             )
 
@@ -299,7 +299,7 @@ class TestMemoryExtractionPipeline:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         _, edge_entries = await _kg_entries(mongo_client, doc.id)
         edge_types = {e["type"] for e in edge_entries}
@@ -333,7 +333,7 @@ class TestIdempotency:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         first_nodes, first_edges = await _kg_entries(mongo_client, doc.id)
         first_count = len(first_nodes) + len(first_edges)
@@ -347,7 +347,7 @@ class TestIdempotency:
             embedding_model=FakeEmbeddingModel(dimensions=8),
         )
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         second_nodes, second_edges = await _kg_entries(mongo_client, doc.id)
         assert len(second_nodes) + len(second_edges) == first_count
@@ -399,7 +399,7 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         persons = [n for n in node_entries if n["type"] == NodeType.PERSON]
@@ -440,7 +440,7 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         node_entries, _ = await _kg_entries(mongo_client, doc.id)
         person = [n for n in node_entries if n["type"] == NodeType.PERSON]
@@ -519,7 +519,7 @@ class TestRewiredNormalizeNodesScenarios:
         )
 
         with prefect_tags("tests"):
-            await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+            await memory_extract_etl_worker(user_id=user.id, document_ids=[str(doc.id)])
 
         # Post-#029: legacy ``todo`` LLM emissions re-route to
         # ``related_to + semantic_type='has_task'``; endpoint type
@@ -561,4 +561,6 @@ class TestMisconfigurationFailsFast:
 
         with pytest.raises(ValueError, match="type_strict.*match_same_type_only"):
             with prefect_tags("tests"):
-                await memory_extraction(user_id=user.id, document_ids=[str(doc.id)])
+                await memory_extract_etl_worker(
+                    user_id=user.id, document_ids=[str(doc.id)]
+                )

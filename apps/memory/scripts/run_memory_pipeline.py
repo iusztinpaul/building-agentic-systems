@@ -1,6 +1,15 @@
 """
 Trigger the memory extraction pipeline via Prefect.
 
+Triggers the ``memory-extract-etl-orchestrator`` deployment (#067, ADR-002 §3
+amended #066). Operators always run the ORCHESTRATOR: it resolves the user's pending
+docs, partitions them into ``min(num_shards, N)`` balanced shards, dispatches one
+``memory-extract-etl-worker`` run per shard (a DISTINCT worker deployment — NO
+recursion), then fires a single trailing ``memory-indexing-etl`` run. ``num_shards=1``
+(the default) dispatches 1 worker run + 1 index run; ``> 1`` fans out across multiple
+workers. A bare extraction with no index is available by triggering
+``memory-extract-etl-worker`` directly (not via this script).
+
 Every Prefect deployment registered by ``tree.orchestrator`` requires a
 ``user_id`` parameter (#020). Pass it via ``--user-id <ObjectId>`` or
 the ``USER_ID`` env var (the Makefile wires this for you).
@@ -9,13 +18,7 @@ Requires:
     - Prefect server running (make local-start)
     - Workflows served (make memory-serve-workflows)
 
-``--num-shards`` (optional, ``>= 1``) selects the in-flow document-shard fan-out
-(#061): omitted or ``1`` runs the plain WORKER extraction (a single
-``memory-extraction-etl`` run, no child runs, no trailing indexing run);
-``> 1`` takes the ORCHESTRATOR path — the flow partitions the user's pending docs
-into shards, self-dispatches one ``memory-extraction-etl`` child run per shard
-(each ``num_shards=1``), then fires a single ``memory-indexing-etl`` run. There is
-ONE extraction deployment for both paths.
+``--num-shards`` (optional, ``>= 1``) sets the document-shard fan-out width.
 
 Usage:
     make memory-run-memory-pipeline-extraction USER_ID=507f1f77bcf86cd799439011
@@ -40,7 +43,7 @@ from tree.logging import init_logger
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = "memory-extraction-etl/memory-extraction-etl"
+DEPLOYMENT_NAME = "memory-extract-etl-orchestrator/memory-extract-etl-orchestrator"
 POLL_INTERVAL_SECONDS = 2
 
 
@@ -115,15 +118,14 @@ async def _run(
     default=None,
     type=int,
     help=(
-        "Optional document-shard fan-out (#061). Omit or 1 → plain worker "
-        "extraction (no child runs, no trailing indexing run). ``> 1`` → the "
-        "flow partitions pending docs into shards, self-dispatches one "
-        "``memory-extraction-etl`` child run per shard, then indexes once. "
-        "Must be ``>= 1``."
+        "Optional document-shard fan-out width (#067). The orchestrator partitions "
+        "pending docs into ``min(num_shards, N)`` shards and dispatches one "
+        "``memory-extract-etl-worker`` run per shard, then indexes once. Omit or 1 "
+        "→ 1 worker run + 1 index run. Must be ``>= 1``."
     ),
 )
 def main(user_id: str | None, doc_ids: str | None, num_shards: int | None) -> None:
-    """Trigger the memory-extraction-etl Prefect deployment for ``user_id``."""
+    """Trigger the memory-extract-etl-orchestrator Prefect deployment for ``user_id``."""
 
     raw = user_id or os.environ.get("USER_ID")
     if not raw:

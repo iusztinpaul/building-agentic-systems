@@ -6,7 +6,18 @@ resolver + dedup config ONCE at entry; the cross-key validator on
 :class:`tree.config.app_config.ExtractionConfig` raises before any work runs
 when the resolver and dedup type-strictness disagree.
 
-External interface unchanged: ``memory_extraction(document_ids=...)``.
+Two Prefect flows live here (#067, ADR-002 §3 amended #066):
+
+* ``memory_extract_etl_worker`` (deployment ``memory-extract-etl-worker``) — the
+  pure six-task extraction body. NO ``num_shards``, NO orchestrator branch, NO
+  ``run_deployment``, NO indexing trigger. Returns a :class:`WriteSummary`.
+* ``memory_extract_etl_orchestrator`` (deployment
+  ``memory-extract-etl-orchestrator``) — resolve pending docs → partition into
+  ``min(num_shards, N)`` balanced shards → dispatch ONE
+  ``memory-extract-etl-worker`` run per shard under
+  ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory-indexing-etl``
+  run. Dispatches to the WORKER (no recursion). Returns a :class:`FanOutStats`.
+
 Internal task topology (per the §7 spec in
 ``tracker/012-extraction-pipeline-six-tasks.groomed.md``):
 
@@ -1462,7 +1473,7 @@ apply_writes_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator path — document-shard fan-out via recursive self-dispatch (#061)
+# Orchestrator path — document-shard fan-out dispatching the worker (#067)
 # ---------------------------------------------------------------------------
 
 
@@ -1474,16 +1485,17 @@ async def _orchestrate_sharded_extraction(
 ) -> FanOutStats:
     """Run the orchestrator path: resolve pending docs, partition, fan out, index.
 
-    Reached only when ``memory_extraction`` is called with ``num_shards > 1``.
-    Resolves the user's pending documents when ``document_ids is None`` (an
-    explicit list is used verbatim), partitions them into ``min(num_shards, N)``
-    balanced shards, then self-dispatches one ``memory-extraction-etl`` child run
-    per shard (each with ``num_shards=1`` → worker path → recursion terminates at
-    one level) under ``asyncio.gather(return_exceptions=True)``, and finally fires
+    The body of the ``memory-extract-etl-orchestrator`` flow. Resolves the user's
+    pending documents when ``document_ids is None`` (an explicit list is used
+    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
+    dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
+    ``{user_id, document_ids}`` — NO ``num_shards`` key, the worker has no such
+    param) under ``asyncio.gather(return_exceptions=True)``, and finally fires
     exactly ONE trailing ``memory-indexing-etl`` run after the gather settles.
+    Dispatches to the WORKER deployment — there is NO recursion.
 
-    An empty resolved/explicit doc set is a clean no-op: zero self-dispatch, zero
-    indexing run, ``FanOutStats(shards_total=0)``.
+    An empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
+    zero indexing run, ``FanOutStats(shards_total=0)``.
     """
 
     log = _get_run_logger()
@@ -1535,42 +1547,66 @@ async def _orchestrate_sharded_extraction(
 
 
 # ---------------------------------------------------------------------------
-# Flow
+# Orchestrator flow — memory-extract-etl-orchestrator (#067)
 # ---------------------------------------------------------------------------
 
 
-@flow(name="memory-extraction-etl", log_prints=True)
-async def memory_extraction(
+@flow(name="memory-extract-etl-orchestrator", log_prints=True)
+async def memory_extract_etl_orchestrator(
     user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
     num_shards: int = 1,
-) -> WriteSummary | FanOutStats:
-    """Extract knowledge-graph entries from documents for ``user_id``.
+) -> FanOutStats:
+    """Resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once.
 
-    ``user_id`` is a required, non-Optional Prefect parameter. Every task
-    in the six-task pipeline receives the value; candidate fetches and
-    writes are scoped to ``user_id`` end-to-end. Cross-tenant rows are
-    invisible to resolution / dedup.
+    The operator entrypoint for memory extraction (ADR-002 §3, amended #066). Resolves
+    the user's pending documents when ``document_ids is None`` (an explicit list is used
+    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, and dispatches
+    ONE ``memory-extract-etl-worker`` run per shard via ``run_deployment`` under
+    ``asyncio.gather(return_exceptions=True)``. Each worker dispatch carries only
+    ``{user_id, document_ids}`` — there is NO ``num_shards`` child key (the worker has no
+    such param) and NO recursion (it dispatches a DISTINCT worker deployment). After the
+    gather settles, fires exactly ONE trailing ``memory-indexing-etl`` run, regardless of
+    how many shards failed (a partial extraction is still indexed). One shard's failure is
+    isolated and recorded in :class:`FanOutStats.failures`.
 
-    ``num_shards`` selects between two paths (ADR-002 §3, amended #061), keeping
-    ONE deployment for both via recursive self-dispatch:
+    ``num_shards=1`` (the default) dispatches 1 worker run + 1 index run — it is NOT a
+    byte-identical in-process extraction (that is the worker, triggered directly). An
+    empty resolved/explicit doc set is a clean no-op: zero worker dispatch, zero index
+    run, ``FanOutStats(shards_total=0)``.
+    """
 
-    * ``num_shards <= 1`` (the default) — the **WORKER** path. Runs today's
-      extraction logic directly and unchanged: fetch the user-scoped documents,
-      the six-task pipeline, return :class:`WriteSummary`. It does NOT resolve a
-      pending-doc fan-out set, does NOT partition, does NOT ``run_deployment``
-      (no self-dispatch), and does NOT trigger indexing. ``num_shards=1`` (and
-      the omitted default) is byte-for-byte equivalent to ``memory_extraction``
-      before #061.
-    * ``num_shards > 1`` — the **ORCHESTRATOR** path. Resolves the user's pending
-      documents (when ``document_ids is None``), partitions into
-      ``min(num_shards, N)`` balanced shards, self-dispatches one
-      ``memory-extraction-etl`` run per shard with ``num_shards=1`` (so children
-      take the worker path — recursion terminates after one level) under
-      ``asyncio.gather(return_exceptions=True)``, then fires exactly ONE trailing
-      ``memory-indexing-etl`` run. Returns a :class:`FanOutStats` report. An empty
-      resolved/explicit set is a clean no-op (zero self-dispatch, zero indexing
-      run, ``shards_total=0``).
+    return await _orchestrate_sharded_extraction(
+        user_id=user_id,
+        document_ids=document_ids,
+        num_shards=num_shards,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Worker flow — memory-extract-etl-worker (#067)
+# ---------------------------------------------------------------------------
+
+
+@flow(name="memory-extract-etl-worker", log_prints=True)
+async def memory_extract_etl_worker(
+    user_id: PydanticObjectId,
+    document_ids: list[str] | None = None,
+) -> WriteSummary:
+    """Extract knowledge-graph entries from documents for ``user_id`` (pure worker).
+
+    The six-task extraction body. ``user_id`` is a required, non-Optional Prefect
+    parameter. Every task receives the value; candidate fetches and writes are scoped
+    to ``user_id`` end-to-end. Cross-tenant rows are invisible to resolution / dedup.
+
+    Fetch semantics: explicit ``document_ids`` → fetch those user-scoped docs;
+    ``document_ids is None`` → fetch all ``content != None`` docs for the user; zero
+    docs → ``WriteSummary(documents_processed=0)``.
+
+    This is PURE extraction: NO ``num_shards``, NO orchestrator branch, NO
+    ``run_deployment`` (no self-dispatch), NO ``memory-indexing-etl`` trigger. It is the
+    orchestrator's internal dispatch target, but may also be triggered directly for a
+    bare extraction with no trailing index (e.g. debugging).
 
     Cross-key config validation runs at import time (``settings = Settings()``
     in ``app_config.py``). If the validator raises, the flow never starts;
@@ -1580,15 +1616,6 @@ async def memory_extraction(
 
     log = _get_run_logger()
 
-    # ----- Orchestrator path (num_shards > 1): partition + fan out + index ----
-    if num_shards > 1:
-        return await _orchestrate_sharded_extraction(
-            user_id=user_id,
-            document_ids=document_ids,
-            num_shards=num_shards,
-        )
-
-    # ----- Worker path (num_shards <= 1): TODAY'S extraction, unchanged -------
     # Validate config invariants up-front (also re-checked on every dedup call).
     # We re-load so env-var changes since import-time are honored — gives tests
     # a deterministic seam for the "misconfig fails at flow entry" AC.
@@ -1740,7 +1767,8 @@ async def memory_extraction(
     )
 
     log.info(
-        "memory_extraction complete: documents=%d nodes_written=%d edges_written=%d "
+        "memory_extract_etl_worker complete: documents=%d nodes_written=%d "
+        "edges_written=%d "
         "nodes_merged=%d nodes_flagged=%d same_as_edges_emitted=%d",
         summary.documents_processed,
         summary.nodes_written,
@@ -1768,7 +1796,7 @@ async def run_extraction_for_documents(
 ) -> WriteSummary:
     """Convenience entry point for callers that already hold an open client.
 
-    Mirrors :func:`memory_extraction` but reuses caller-owned handles
+    Mirrors :func:`memory_extract_etl_worker` but reuses caller-owned handles
     instead of opening a new one (the MCP ingest path holds its own client
     from the FastMCP lifespan). The flow itself is short-circuited — we
     re-implement the same pipeline shape inline so we don't have to start a
@@ -1787,7 +1815,7 @@ async def run_extraction_for_documents(
     except Exception as exc:
         raise _unwrap_validation_error(exc) from exc
     dedup_config = _build_dedup_config()
-    # Split the embedding handles exactly like ``memory_extraction``:
+    # Split the embedding handles exactly like ``memory_extract_etl_worker``:
     #   * The injected ``embedding_model`` (the MCP lifespan's caller-owned
     #     handle) is the SEARCH / persisted model — it drives supersession, the
     #     node-text embed, and the apply-writes node ``embedding``. Falls back
@@ -1836,7 +1864,7 @@ async def run_extraction_for_documents(
     )
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
     resolved = await _resolve_entities(raws, database, resolver, user_id)
-    # Embed at node-text grain (see ``memory_extraction`` task ④). The MCP
+    # Embed at node-text grain (see ``memory_extract_etl_worker`` task ④). The MCP
     # ingest path injects a caller-owned SEARCH/persisted handle; use it
     # directly here rather than the ``get_search_embedding_model`` factory so
     # the injected model actually drives the embed step. (The resolution model
