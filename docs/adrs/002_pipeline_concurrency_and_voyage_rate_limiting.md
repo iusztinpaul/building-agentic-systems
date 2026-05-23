@@ -26,6 +26,12 @@ cache-hit shim) never issue a network request. Running 4 runs in parallel does
 NOT speed embedding — it stays serialized at 3 RPM. The win is overlapping the
 non-embedding phases; the risk is 4 runs collectively 429-storming Voyage.
 
+§1–§5 below cover the **cross-flow** half (rate-limiter, fan-out topology,
+admission control). §6 documents the orthogonal **intra-run** concurrency
+shipped in #057/#058/#059 — bounded fan-out and write-batching *inside* a single
+extraction run, which overlap the same non-embedding phases without touching the
+shared Voyage budget.
+
 ## Decision
 
 1. **Cross-flow rate limiting uses a Prefect global concurrency limit with
@@ -129,6 +135,47 @@ non-embedding phases; the risk is 4 runs collectively 429-storming Voyage.
    A `make memory-sync-concurrency-limits` target creates/updates the
    `voyage-embeddings` GCL from `app_config.concurrency`. Raising the cap after a
    payment method is added is: edit `voyage_rpm`, re-run the target — no code change.
+
+## §6 — Intra-run concurrency
+
+§1–§5 govern how runs relate to each other. This section documents the concurrency
+shipped *within* a single `memory_extraction` run (#057/#058/#059). All three changes
+preserve their stages' outputs exactly; they only overlap round-trips or batch them.
+None of them touch the `voyage-embeddings` budget — the embedding stage (④) is
+unchanged.
+
+1. **`doc_concurrency` (default `1`) bounds the chunking stage.** The
+   `extract-chunks-and-structural` task (① in `extraction/pipeline.py`) is fanned out
+   over the run's documents under an `asyncio.Semaphore(doc_concurrency)` +
+   `asyncio.gather` in `_chunk_documents`. The stage is purely CPU/DB-bound — no shared
+   LLM/embed quota, no read-after-write — so the per-document calls parallelize safely.
+   The default of `1` is serial = the prior behavior exactly. `gather` preserves input
+   order, so the returned `chunked_docs` list is identical (order and contents) to the
+   prior sequential loop and downstream per-document iteration stays deterministic.
+
+2. **`dedup_concurrency` (default `8`) parallelizes the dedup stage.** The per-entity
+   dedup decisions in `_dedupe_entities` (⑤) run concurrently under an
+   `asyncio.Semaphore(dedup_concurrency)` + `asyncio.gather`. This is safe because
+   `dedupe_entity` (`extraction/dedup.py`) is a READ-ONLY `$vectorSearch` over the
+   PRECOMPUTED vectors from stage ④ — it issues no Voyage embed call, performs no writes,
+   and is independent per entity. Results are rebuilt in the original key order, so the
+   `decisions` mapping and the `n_merged` / `n_flagged` / `n_none` tallies are identical
+   to the sequential version. This independence from Voyage is precisely why this stage
+   parallelizes freely under the cross-flow limiter: it never acquires a
+   `voyage-embeddings` slot (per §1, the slot is held only at the real Voyage network
+   POST, which dedup never reaches).
+
+3. **`bulk_write` batching (#057).** The two per-item `update_one`-in-a-loop write paths
+   in `_apply_writes` (⑥) — the edge upserts and the structural-node upserts — were each
+   collapsed into a single `bulk_write(ops, ordered=False)`. This is behavior-preserving:
+   the `_id`s are deterministic, the `$set` payloads are identical, and the written counts
+   are unchanged; only the Mongo round-trips are batched. It mirrors the existing
+   `bulk_write` pattern in `indexing/core.py`.
+
+The defaults (`doc_concurrency: 1`, `dedup_concurrency: 8`) live in
+`apps/memory/configs/default.yaml` under `extraction:`, typed on `ExtractionConfig` in
+`app_config.py`, and are overridable via `TREE_EXTRACTION__DOC_CONCURRENCY` /
+`TREE_EXTRACTION__DEDUP_CONCURRENCY`.
 
 ## Consequences
 
