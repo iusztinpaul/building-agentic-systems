@@ -13,9 +13,6 @@ from fastmcp import Context
 from tree.data.conversation_pipeline import ingest_conversation as _ingest_conversation
 from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.file_pipeline import ingest_file as _ingest_file
-from tree.data.web.web_search_ingest import (
-    trigger_url_batch_ingest as _trigger_url_batch_ingest,
-)
 from tree.data.web.web_scrape import (
     DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
 )
@@ -25,27 +22,49 @@ from tree.data.web.web_scrape import (
 from tree.data.web.web_scrape import (
     scrape_one as _scrape_one,
 )
+from tree.data.web.web_search_ingest import (
+    trigger_url_batch_ingest as _trigger_url_batch_ingest,
+)
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
+from tree.entities.knowledge_graph import NodeType
+
+# graph_app: side-effect import — registers the read-only Sigma graph MCP App
+# (visualize_memory_graph tool + ui:// resource).
+from tree.mcp import graph_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.ingest import run_ingestion_pipeline
 from tree.mcp.server import mcp
-from tree.entities.knowledge_graph import NodeType
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
 from tree.memory.query.visualize import build_networkx_graph, render_html
 from tree.memory.review import (
     MergeStrategy,
     ReviewDecision,
+)
+from tree.memory.review import (
     find_pending_duplicates as _find_pending_duplicates,
+)
+from tree.memory.review import (
     review_duplicate as _review_duplicate,
 )
 from tree.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
+
+# dashboard_app: side-effect import — registers the Prefab / FastMCPApp /
+# Generative-UI dashboards. Guarded: these need the ``fastmcp[apps]`` extra
+# (prefab-ui); if it's absent we skip them rather than crash the whole server
+# (the custom-HTML graph tool above has no such dependency).
+try:
+    from tree.mcp import dashboard_app  # noqa: F401
+except ImportError as _exc:  # pragma: no cover - exercised only without the extra
+    logger.warning(
+        "Dashboard MCP Apps not registered (install fastmcp[apps]): %s", _exc
+    )
 
 
 def _serialize(docs: list[dict[str, Any]]) -> str:
