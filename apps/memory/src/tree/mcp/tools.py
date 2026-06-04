@@ -55,9 +55,9 @@ from tree.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
 
-# dashboard_app: side-effect import — registers the Prefab / FastMCPApp /
-# Generative-UI dashboards. Guarded: these need the ``fastmcp[apps]`` extra
-# (prefab-ui); if it's absent we skip them rather than crash the whole server
+# dashboard_app: side-effect import — registers the Prefab interactive-tool
+# dashboard (memory_dashboard). Guarded: it needs the ``fastmcp[apps]`` extra
+# (prefab-ui); if it's absent we skip it rather than crash the whole server
 # (the custom-HTML graph tool above has no such dependency).
 try:
     from tree.mcp import dashboard_app  # noqa: F401

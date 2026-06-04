@@ -4,6 +4,7 @@ Only the pure ``to_graph_payload`` transform is unit-tested here; the tool and
 ``ui://`` resource handlers are exercised end-to-end in integration tests.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tree.config.paths import GRAPHS_DIR
@@ -52,7 +53,9 @@ def test_payload_maps_nodes_and_edges() -> None:
 
     # Assert
     assert {n["id"] for n in payload["nodes"]} == {alice, paper}
-    assert payload["edges"] == [{"source": alice, "target": paper, "type": "mentions"}]
+    assert payload["edges"] == [
+        {"source": alice, "target": paper, "type": "mentions", "meta": {}}
+    ]
 
 
 def test_label_strips_user_and_type_prefix() -> None:
@@ -94,6 +97,95 @@ def test_canonical_name_property_wins_over_id() -> None:
 
     # Assert
     assert payload["nodes"][0]["label"] == "Alice Smith"
+
+
+def test_node_carries_curated_metadata() -> None:
+    # Arrange: a node row with the curated top-level metadata fields.
+    created = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    node = {
+        "_id": f"{_UID}:person:alice",
+        "kind": "node",
+        "type": "person",
+        "properties": {"canonical_name": "Alice"},
+        "subtype": "engineer",
+        "confidence": 0.876543,
+        "description": "An engineer.",
+        "aliases": ["Ali", "Al"],
+        "created_at": created,
+    }
+
+    # Act
+    meta = to_graph_payload(QueryResult(nodes=[node], edges=[]))["nodes"][0]["meta"]
+
+    # Assert: floats rounded, lists joined, datetimes ISO-formatted.
+    assert meta["subtype"] == "engineer"
+    assert meta["confidence"] == 0.877
+    assert meta["description"] == "An engineer."
+    assert meta["aliases"] == "Ali, Al"
+    assert meta["created_at"] == created.isoformat()
+
+
+def test_edge_carries_curated_metadata() -> None:
+    # Arrange
+    alice, bob = f"{_UID}:person:alice", f"{_UID}:person:bob"
+    edge = {
+        "_id": f"{alice}|knows|{bob}",
+        "kind": "edge",
+        "type": "knows",
+        "source_node_id": alice,
+        "target_node_id": bob,
+        "semantic_type": "social",
+        "confidence": 0.5,
+        "description": "They met in 2024.",
+    }
+    result = QueryResult(
+        nodes=[_node(alice, "person"), _node(bob, "person")], edges=[edge]
+    )
+
+    # Act
+    meta = to_graph_payload(result)["edges"][0]["meta"]
+
+    # Assert
+    assert meta == {
+        "semantic_type": "social",
+        "confidence": 0.5,
+        "description": "They met in 2024.",
+    }
+
+
+def test_curated_meta_drops_empty_and_null_fields() -> None:
+    # Arrange: empty string / None / empty list must be dropped, real values kept.
+    node = {
+        "_id": f"{_UID}:person:x",
+        "kind": "node",
+        "type": "person",
+        "properties": {},
+        "subtype": "",
+        "description": None,
+        "aliases": [],
+        "confidence": 1.0,
+    }
+
+    # Act
+    meta = to_graph_payload(QueryResult(nodes=[node], edges=[]))["nodes"][0]["meta"]
+
+    # Assert
+    assert meta == {"confidence": 1.0}
+
+
+def test_dangling_endpoint_has_empty_meta() -> None:
+    # Arrange: a node materialised only from an edge endpoint has no metadata.
+    alice, ghost = f"{_UID}:person:alice", f"{_UID}:document:ghost"
+    result = QueryResult(
+        nodes=[_node(alice, "person")], edges=[_edge(alice, "mentions", ghost)]
+    )
+
+    # Act
+    payload = to_graph_payload(result)
+
+    # Assert
+    ghost_node = next(n for n in payload["nodes"] if n["id"] == ghost)
+    assert ghost_node["meta"] == {}
 
 
 def test_dangling_edge_endpoints_are_materialised_as_nodes() -> None:
@@ -178,6 +270,27 @@ def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
     assert "ontoolresult" not in html
     # The actual node id made it into the embedded data.
     assert alice in html
+
+
+def test_render_graph_file_wires_metadata_and_edge_hover(tmp_path: Path) -> None:
+    # Arrange
+    alice, bob = f"{_UID}:person:alice", f"{_UID}:person:bob"
+    payload = to_graph_payload(
+        QueryResult(
+            nodes=[_node(alice, "person"), _node(bob, "person")],
+            edges=[_edge(alice, "knows", bob)],
+        )
+    )
+    out = tmp_path / "graph.html"
+
+    # Act
+    _render_graph_file(payload, output=out)
+
+    # Assert: the metadata-card + edge-hover JS made it into the rendered file.
+    html = out.read_text(encoding="utf-8")
+    assert "function metaRows" in html
+    assert "enableEdgeEvents" in html
+    assert 'renderer.on("enterEdge"' in html
 
 
 def test_slugify_makes_filesystem_safe_stem() -> None:

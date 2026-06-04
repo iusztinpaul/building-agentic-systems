@@ -1,33 +1,26 @@
-"""MCP App dashboards — three FastMCP app paradigms over the same data.
+"""MCP App dashboard — a Prefab interactive tool over the knowledge graph.
 
 A companion to the custom-HTML Sigma graph view (``graph_app``). Where the
-graph view shows topology, these show a **dashboard**: a bar chart counting
-each node type + a searchable table of the returned nodes. The point is to
-compare, in practice, the three higher-level FastMCP app styles:
+graph view shows topology, this shows a **dashboard**: a bar chart counting
+each node type + searchable/sortable tables of the returned nodes and
+relationships, each row carrying the curated metadata from ``_curated_meta``.
 
-1. ``memory_dashboard``      — Prefab "interactive tool": ``@mcp.tool(app=True)``
-   returning a ``PrefabApp`` (declarative Python components, client-side
-   Pyodide render). https://gofastmcp.com/apps/prefab
-2. ``memory_dashboard_app``  — same UI, built via a ``FastMCPApp`` provider and
-   its ``@app.ui()`` entry point. https://gofastmcp.com/apps/fastmcp-app
-3. Generative UI             — ``GenerativeUI`` provider registers
-   ``generate_prefab_ui`` + ``search_prefab_components`` so the model can author
-   Prefab UIs at runtime. https://gofastmcp.com/apps/generative
+``memory_dashboard`` is a Prefab "interactive tool": ``@mcp.tool(app=True)``
+returning a ``PrefabApp`` (declarative Python components, client-side Pyodide
+render). https://gofastmcp.com/apps/prefab — the right paradigm here because
+the dashboard is read-only: the server renders once, and all interactivity
+(sort / search / paginate) is client-side state with no backend round-trip.
 
-All three need the ``fastmcp[apps]`` extra (``prefab-ui``); the import is guarded
+This needs the ``fastmcp[apps]`` extra (``prefab-ui``); the import is guarded
 at the call site (``tools.py``) so a missing extra degrades gracefully rather
 than taking down the custom-HTML graph tool.
-
-Generative UI also needs **Deno** at runtime (auto-installs on first use) for
-server-side validation of the generated code.
 """
 
 import logging
 from collections import Counter
 from typing import Any
 
-from fastmcp import Context, FastMCPApp
-from fastmcp.apps.generative import GenerativeUI
+from fastmcp import Context
 from fastmcp.tools import ToolResult
 from prefab_ui import PrefabApp
 from prefab_ui.components import (
@@ -77,12 +70,56 @@ def node_type_counts(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _node_rows(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten each node + its curated ``meta`` into a flat DataTable row."""
+
+    rows: list[dict[str, Any]] = []
+    for n in nodes:
+        meta = n.get("meta") or {}
+        rows.append(
+            {
+                "name": n["name"],
+                "type": n["type"],
+                "subtype": meta.get("subtype", ""),
+                "confidence": meta.get("confidence"),
+                "description": meta.get("description", ""),
+                "aliases": meta.get("aliases", ""),
+            }
+        )
+    return rows
+
+
+def _edge_rows(
+    edges: list[dict[str, Any]], name_by_id: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Flatten each edge + its curated ``meta`` into a flat DataTable row.
+
+    Endpoints are shown by display name (falling back to the raw id for
+    endpoints not present among the returned nodes).
+    """
+
+    rows: list[dict[str, Any]] = []
+    for e in edges:
+        meta = e.get("meta") or {}
+        rows.append(
+            {
+                "source": name_by_id.get(e["source"], e["source"]),
+                "type": e["type"],
+                "target": name_by_id.get(e["target"], e["target"]),
+                "semantic_type": meta.get("semantic_type", ""),
+                "confidence": meta.get("confidence"),
+                "description": meta.get("description", ""),
+            }
+        )
+    return rows
+
+
 def build_dashboard(payload: dict[str, list[dict[str, Any]]], query: str) -> PrefabApp:
-    """Compose the dashboard: KPI metrics + node-type bar chart + node table."""
+    """Compose the dashboard: KPI metrics + node-type bar chart + node/edge tables."""
 
     nodes, edges = payload["nodes"], payload["edges"]
     counts = node_type_counts(nodes)
-    rows = [{"name": n["name"], "type": n["type"]} for n in nodes]
+    name_by_id = {n["id"]: n["name"] for n in nodes if n.get("id")}
 
     with PrefabApp(title="Tree Memory Dashboard", mode="light") as app:
         with Column(gap=4, css_class="p-6"):
@@ -101,16 +138,56 @@ def build_dashboard(payload: dict[str, list[dict[str, Any]]], query: str) -> Pre
                     height=280,
                 )
                 Separator()
+                Heading("Nodes")
                 DataTable(
                     columns=[
                         DataTableColumn(key="name", header="Name", sortable=True),
                         DataTableColumn(key="type", header="Type", sortable=True),
+                        DataTableColumn(key="subtype", header="Subtype", sortable=True),
+                        DataTableColumn(
+                            key="confidence",
+                            header="Confidence",
+                            sortable=True,
+                            format="number:2",
+                            align="right",
+                        ),
+                        DataTableColumn(key="description", header="Description"),
+                        DataTableColumn(key="aliases", header="Aliases"),
                     ],
-                    rows=rows,
+                    rows=_node_rows(nodes),
                     search=True,
                     paginated=True,
                     pageSize=10,
                 )
+                if edges:
+                    Separator()
+                    Heading("Relationships")
+                    DataTable(
+                        columns=[
+                            DataTableColumn(
+                                key="source", header="Source", sortable=True
+                            ),
+                            DataTableColumn(key="type", header="Type", sortable=True),
+                            DataTableColumn(
+                                key="target", header="Target", sortable=True
+                            ),
+                            DataTableColumn(
+                                key="semantic_type", header="Semantic", sortable=True
+                            ),
+                            DataTableColumn(
+                                key="confidence",
+                                header="Confidence",
+                                sortable=True,
+                                format="number:2",
+                                align="right",
+                            ),
+                            DataTableColumn(key="description", header="Description"),
+                        ],
+                        rows=_edge_rows(edges, name_by_id),
+                        search=True,
+                        paginated=True,
+                        pageSize=10,
+                    )
     return app
 
 
@@ -127,7 +204,7 @@ def _summary(payload: dict[str, list[dict[str, Any]]], query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. Prefab interactive tool — @mcp.tool(app=True) returning a PrefabApp.
+# Prefab interactive tool — @mcp.tool(app=True) returning a PrefabApp.
 # ---------------------------------------------------------------------------
 @mcp.tool(app=True)
 async def memory_dashboard(
@@ -153,45 +230,3 @@ async def memory_dashboard(
         content=_summary(payload, query),
         structured_content=build_dashboard(payload, query),
     )
-
-
-# ---------------------------------------------------------------------------
-# 2. FastMCPApp provider — same UI via an @app.ui() entry point.
-# ---------------------------------------------------------------------------
-dashboard_provider = FastMCPApp("Tree Memory Dashboard")
-
-
-@dashboard_provider.ui()
-async def memory_dashboard_app(
-    query: str,
-    ctx: Context,
-    top_k: int = 20,
-    max_hops: int = 2,
-) -> PrefabApp:
-    """Open the Tree Memory dashboard (FastMCPApp variant of memory_dashboard).
-
-    Same node-type bar chart + node table, built through the FastMCPApp
-    provider pattern instead of a bare ``@mcp.tool(app=True)``.
-
-    Args:
-        query: Search query text — seeds which nodes the dashboard covers.
-        top_k: Number of seed nodes to retrieve (default 20).
-        max_hops: Hops of graph expansion around the seeds (default 2).
-    """
-
-    payload = await _fetch_payload(ctx, query, top_k, max_hops)
-    return build_dashboard(payload, query)
-
-
-def register_providers() -> None:
-    """Mount the FastMCPApp dashboard and the Generative UI provider on ``mcp``.
-
-    Generative UI registers ``generate_prefab_ui`` + ``search_prefab_components``
-    so the model can author Prefab UIs at runtime (needs Deno at runtime).
-    """
-
-    mcp.add_provider(dashboard_provider)
-    mcp.add_provider(GenerativeUI())
-
-
-register_providers()

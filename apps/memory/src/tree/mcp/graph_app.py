@@ -13,10 +13,11 @@ low-level MCP Apps pattern (https://gofastmcp.com/apps/low-level):
 **Rendering stack.** The browser side uses graphology (graph data structure),
 graphology-layout-forceatlas2 (computes node positions), and Sigma.js (WebGL
 renderer) — loaded as ESM from jsdelivr. The UI is themed after the "Tree
-Memory" design: a header with live counts + node search, a per-type legend, a
-node-detail panel (label + type + id on click), and zoom controls. Node labels
-show only the name; the type is revealed on click. Edge labels show the
-relationship type.
+Memory" design: a header with live counts + node search, a per-type legend, and
+zoom controls. Node labels show only the name. Hovering a node or an edge shows
+a tooltip with its name / relationship type plus a curated metadata card (node
+type + subtype + the fields from ``_curated_meta``); clicking a node only
+highlights it. Edge labels show the relationship type.
 
 **Fallback (Option B).** Not every client renders MCP App UIs (e.g. the
 Claude Code terminal, or agentic surfaces that only consume tool text). The
@@ -46,6 +47,7 @@ from fastmcp.tools import ToolResult
 from mcp import types
 
 from tree.config.paths import GRAPHS_DIR
+from tree.entities.colours import Colours
 from tree.mcp.server import mcp
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.visualize import (
@@ -57,27 +59,25 @@ from tree.memory.types import QueryResult
 logger = logging.getLogger(__name__)
 
 GRAPH_VIEW_URI = "ui://tree-memory/graph.html"
-_FALLBACK_COLOUR = "#9aa6b2"  # unknown / unmapped node types
+_FALLBACK_COLOUR = Colours.BLACK_LEVEL_1  # unknown / unmapped node types
 
-# Node-type palette tuned for a WHITE background. Three hue families:
-# brown = entities, blue = documents/structure, orange = knowledge/events.
-# Defined locally so visualize.py's dark-theme palette (used by the pyvis
-# renderer) is left untouched.
+# Node-type palette tuned for a WHITE background, drawn from the brand palette
+# (``Colours``). Three hue families: brown = entities, blue = documents/
+# structure, orange = knowledge/events. Defined locally so visualize.py's
+# dark-theme palette (used by the pyvis renderer) is left untouched.
 _NODE_COLOURS: dict[str, str] = {
-    # Blue — documents & structural nodes
-    "document": "#0060b1",
-    "chunk": "#c5dfef",
-    "episode": "#6ba5d7",
-    # Brown — entities
-    "person": "#834622",
-    "organization": "#591f06",
-    "location": "#d1a672",
-    "object": "#ecd5b8",
-    # Orange — knowledge & events
-    "event": "#ffb458",
-    "preference": "#cc4e01",
-    "fact": "#fee3ac",
-    "task": "#e37b45",
+    # Structural
+    "document": Colours.GREEN_LEVEL_3,
+    "chunk": Colours.GREEN_LEVEL_2,
+    # POLE+O
+    "person": Colours.ORANGE_LEVEL_4,
+    "object": Colours.ORANGE_LEVEL_2,
+    "location": Colours.BROWN_LEVEL_4,
+    "event": Colours.BROWN_LEVEL_2,
+    "organization": Colours.BROWN_LEVEL_1,
+    # Others
+    "preference": Colours.BLUE_LEVEL_2,
+    "fact": Colours.BLUE_LEVEL_4,
 }
 
 # Browser deps, pinned. graphology-layout-forceatlas2 ships CJS-only and Sigma
@@ -89,6 +89,44 @@ _FA2_CDN = "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+e
 _EXT_APPS_CDN = "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps"
 
 
+# Curated metadata surfaced on node / edge hover + the dashboard table. Kept
+# small on purpose: the full ``properties`` dump is left out so tooltips and
+# table cells stay legible. Mirrors the hover lines the pyvis renderer builds.
+_NODE_META_FIELDS = ("subtype", "description", "confidence", "aliases", "created_at")
+_EDGE_META_FIELDS = (
+    "semantic_type",
+    "confidence",
+    "description",
+    "valid_from",
+    "valid_until",
+)
+
+
+def _curated_meta(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """Pull a curated, JSON-safe metadata subset off a node / edge row.
+
+    Empty / null / empty-list values are dropped so the hover card and table
+    cells stay sparse. Datetimes are ISO-8601 strings (the payload is
+    ``json.dumps``-ed for the HTML file variant), floats are rounded for
+    display, and lists are comma-joined.
+    """
+
+    meta: dict[str, Any] = {}
+    for key in fields:
+        value = row.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        if isinstance(value, datetime):
+            meta[key] = value.isoformat()
+        elif isinstance(value, float):
+            meta[key] = round(value, 3)
+        elif isinstance(value, list):
+            meta[key] = ", ".join(str(v) for v in value)
+        else:
+            meta[key] = value
+    return meta
+
+
 def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
     """Flatten a ``QueryResult`` into a graph ``{nodes, edges}`` payload.
 
@@ -97,12 +135,21 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
     edges with a dangling endpoint. Endpoints discovered only via edges are
     added with type ``"unknown"``; the leading-prefix display-name logic is
     reused from ``visualize`` so labels match the pyvis renderer.
+
+    Each node and edge carries a curated ``meta`` dict (see ``_curated_meta``)
+    surfaced on hover and in the dashboard table; nodes materialised only from a
+    dangling edge endpoint get an empty ``meta``.
     """
 
     nodes: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def _add_node(node_id: str, node_type: str, props: dict[str, Any]) -> None:
+    def _add_node(
+        node_id: str,
+        node_type: str,
+        props: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+    ) -> None:
         if not node_id or node_id in seen:
             return
         seen.add(node_id)
@@ -114,6 +161,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
                 "name": name,  # full, untruncated — shown on hover / click
                 "label": _truncate(name, 40),  # shown on the canvas
                 "color": _NODE_COLOURS.get(node_type, _FALLBACK_COLOUR),
+                "meta": meta or {},
             }
         )
 
@@ -122,6 +170,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
             str(node["_id"]),
             node.get("type", "unknown"),
             node.get("properties") or {},
+            _curated_meta(node, _NODE_META_FIELDS),
         )
 
     edges: list[dict[str, Any]] = []
@@ -132,7 +181,14 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
             continue
         _add_node(src, "unknown", {})
         _add_node(tgt, "unknown", {})
-        edges.append({"source": src, "target": tgt, "type": edge.get("type", "")})
+        edges.append(
+            {
+                "source": src,
+                "target": tgt,
+                "type": edge.get("type", ""),
+                "meta": _curated_meta(edge, _EDGE_META_FIELDS),
+            }
+        )
 
     return {"nodes": nodes, "edges": edges}
 
@@ -331,27 +387,19 @@ _GRAPH_STYLE = """\
     #legend div.row { display: flex; align-items: center; gap: 7px; margin: 3px 0; }
     #legend span.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
-    /* Node detail panel */
-    /* Positioned next to the clicked node in JS (left/top set at click time). */
-    #detail { position: absolute; left: 0; top: 0; z-index: 4; display: none;
-      min-width: 200px; max-width: 300px; background: rgba(255,255,255,0.97);
-      border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px;
-      box-shadow: 0 6px 24px rgba(0,0,0,0.15); pointer-events: auto; }
-    #detail.show { display: block; }
-    #detail-close { position: absolute; top: 8px; right: 10px; cursor: pointer;
-      color: var(--muted); font-size: 14px; line-height: 1; border: none; background: none; }
-    #detail-label { font-size: 14px; font-weight: 600; margin: 0 18px 8px 0; word-break: break-word; }
-    #detail-type { display: inline-block; font-size: 11px; font-weight: 600; color: #0b0d14;
-      padding: 2px 9px; border-radius: 999px; }
-    #detail-id { margin-top: 9px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 10px; color: var(--muted); word-break: break-all; }
-
-    /* Hover tooltip: full, untruncated name. */
+    /* Hover tooltip: full, untruncated name + type/subtype + curated metadata. */
     #tooltip { position: absolute; z-index: 5; display: none; pointer-events: none;
-      max-width: 280px; background: rgba(255,255,255,0.97); border: 1px solid var(--border);
-      color: var(--text); font-size: 12px; padding: 6px 9px; border-radius: 8px;
+      max-width: 300px; background: rgba(255,255,255,0.97); border: 1px solid var(--border);
+      color: var(--text); font-size: 12px; padding: 7px 10px; border-radius: 8px;
       box-shadow: 0 4px 16px rgba(0,0,0,0.18); word-break: break-word; }
     #tooltip.show { display: block; }
+    #tooltip .tt-title { font-weight: 600; }
+
+    /* Key/value metadata rows shown inside the tooltip. */
+    #tooltip .meta { margin-top: 5px; }
+    .meta-row { display: flex; gap: 8px; font-size: 11px; margin: 2px 0; }
+    .meta-k { color: var(--muted); flex: 0 0 auto; min-width: 62px; text-transform: capitalize; }
+    .meta-v { color: var(--text); flex: 1; word-break: break-word; }
 
     /* Zoom controls */
     #zoom { position: absolute; right: 12px; bottom: 12px; z-index: 3;
@@ -373,12 +421,6 @@ _BODY_MARKUP = """\
     <div id="stage">
       <div id="sigma-container"></div>
       <div id="legend"></div>
-      <div id="detail">
-        <button id="detail-close" title="Close">✕</button>
-        <div id="detail-label"></div>
-        <span id="detail-type"></span>
-        <div id="detail-id"></div>
-      </div>
       <div id="tooltip"></div>
       <div id="zoom">
         <button id="zoom-in" title="Zoom in">+</button>
@@ -392,6 +434,21 @@ _BODY_MARKUP = """\
 # Graph / Sigma / forceAtlas2 imported above, and the _BODY_MARKUP DOM present.
 _RENDER_JS = """\
     const countsEl = document.getElementById("counts");
+
+    // HTML-escape user-controlled metadata before it reaches innerHTML.
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    // Render a curated {key: value} meta dict as key/value rows (or "").
+    function metaRows(meta) {
+      const keys = meta ? Object.keys(meta) : [];
+      if (!keys.length) return "";
+      return '<div class="meta">' + keys.map((k) =>
+        '<div class="meta-row"><span class="meta-k">' + esc(k) +
+        '</span><span class="meta-v">' + esc(meta[k]) + "</span></div>"
+      ).join("") + "</div>";
+    }
 
     function render({ nodes, edges }) {
       const container = document.getElementById("sigma-container");
@@ -417,7 +474,10 @@ _RENDER_JS = """\
       }
       for (const e of edges) {
         if (graph.hasNode(e.source) && graph.hasNode(e.target)) {
-          graph.addEdge(e.source, e.target, { label: e.type, type: "arrow", size: 1.2, color: "#c2c8d2" });
+          graph.addEdge(e.source, e.target, {
+            label: e.type, type: "arrow", size: 1.2, color: "#c2c8d2",
+            relType: e.type, meta: e.meta || {},   // carried for the edge hover card
+          });
         }
       }
 
@@ -426,10 +486,11 @@ _RENDER_JS = """\
       forceAtlas2.assign(graph, { iterations: 300, settings });
 
       // Interaction state, applied via reducers.
-      const state = { search: "", selected: null, hovered: null };
+      const state = { search: "", selected: null, hovered: null, hoveredEdge: null };
 
       const renderer = new Sigma(graph, container, {
         renderEdgeLabels: true,        // relationship labels
+        enableEdgeEvents: true,        // needed for enterEdge / leaveEdge hover
         defaultEdgeType: "arrow",
         labelColor: { color: "#1f2430" },
         edgeLabelColor: { color: "#6b7280" },
@@ -456,71 +517,43 @@ _RENDER_JS = """\
         },
       });
 
-      // --- Node detail panel (label + type + id on click) ---
-      const detail = document.getElementById("detail");
-      // Black or white pill text depending on the node colour's luminance.
-      function pillText(hex) {
-        const c = hex.replace("#", "");
-        const r = parseInt(c.slice(0, 2), 16), g = parseInt(c.slice(2, 4), 16), b = parseInt(c.slice(4, 6), 16);
-        return (0.299 * r + 0.587 * g + 0.114 * b) > 140 ? "#1f2430" : "#ffffff";
-      }
-      function showDetail(n) {
-        document.getElementById("detail-label").textContent = n.name;  // full name
-        const typeEl = document.getElementById("detail-type");
-        typeEl.textContent = n.type;
-        typeEl.style.background = n.color;
-        typeEl.style.color = pillText(n.color);
-        // Show the qualified name (type:label), not the user-id-prefixed _id.
-        document.getElementById("detail-id").textContent = n.type + ":" + n.name;
-        detail.classList.add("show");
-      }
-      function hideDetail() { detail.classList.remove("show"); }
+      // --- Click only highlights a node; all details are shown on hover. ---
+      renderer.on("clickNode", ({ node }) => { state.selected = node; renderer.refresh(); });
+      renderer.on("clickStage", () => { state.selected = null; renderer.refresh(); });
 
-      // Pin the detail card beside the selected node; clamp inside the stage.
-      // Re-run on every frame so it tracks pan / zoom / drag.
-      function positionDetail() {
-        if (!state.selected || !detail.classList.contains("show")) return;
-        const a = graph.getNodeAttributes(state.selected);
-        const vp = renderer.graphToViewport({ x: a.x, y: a.y });
-        const rect = container.getBoundingClientRect();
-        const pw = detail.offsetWidth, ph = detail.offsetHeight, gap = 16;
-        let left = vp.x + gap;
-        if (left + pw > rect.width - 8) left = vp.x - pw - gap;   // flip to the left
-        left = Math.max(8, Math.min(left, rect.width - pw - 8));
-        let top = Math.max(8, Math.min(vp.y - ph / 2, rect.height - ph - 8));
-        detail.style.left = left + "px";
-        detail.style.top = top + "px";
-      }
-
-      renderer.on("clickNode", ({ node }) => {
-        state.selected = node;
-        const n = nodeById.get(node);
-        if (n) { showDetail(n); positionDetail(); }
-        renderer.refresh();
-      });
-      renderer.on("clickStage", () => { state.selected = null; hideDetail(); renderer.refresh(); });
-      renderer.on("afterRender", positionDetail);
-      document.getElementById("detail-close").onclick = () => {
-        state.selected = null; hideDetail(); renderer.refresh();
-      };
-
-      // --- Hover tooltip: full, untruncated name (canvas labels are clipped) ---
+      // --- Hover tooltip: full name + type/subtype + curated metadata. ---
+      // Shared by node hover and edge hover; positioned at the node, or at the
+      // midpoint of the hovered edge.
       const tooltip = document.getElementById("tooltip");
-      function positionTooltip() {
-        if (!state.hovered) return;
-        const a = graph.getNodeAttributes(state.hovered);
-        const vp = renderer.graphToViewport({ x: a.x, y: a.y });
+      function placeTooltipAt(vp, above) {
         const rect = container.getBoundingClientRect();
         const tw = tooltip.offsetWidth, th = tooltip.offsetHeight, gap = 12;
         const left = Math.max(8, Math.min(vp.x + gap, rect.width - tw - 8));
-        const top = Math.max(8, vp.y - th - gap);   // above the node
+        const top = above
+          ? Math.max(8, vp.y - th - gap)                               // above the node
+          : Math.max(8, Math.min(vp.y - th / 2, rect.height - th - 8)); // beside the edge
         tooltip.style.left = left + "px";
         tooltip.style.top = top + "px";
+      }
+      function edgeMidViewport(edge) {
+        const [s, t] = graph.extremities(edge);
+        const a = graph.getNodeAttributes(s), b = graph.getNodeAttributes(t);
+        return renderer.graphToViewport({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+      }
+      function positionTooltip() {
+        if (state.hovered) {
+          const a = graph.getNodeAttributes(state.hovered);
+          placeTooltipAt(renderer.graphToViewport({ x: a.x, y: a.y }), true);
+        } else if (state.hoveredEdge) {
+          placeTooltipAt(edgeMidViewport(state.hoveredEdge), false);
+        }
       }
       renderer.on("enterNode", ({ node }) => {
         const n = nodeById.get(node);
         if (!n) return;
-        tooltip.textContent = n.name;
+        // Lead with type (+ subtype, already in meta), then the rest of the meta.
+        const card = Object.assign({ type: n.type }, n.meta);
+        tooltip.innerHTML = '<div class="tt-title">' + esc(n.name) + "</div>" + metaRows(card);
         tooltip.classList.add("show");
         state.hovered = node;
         positionTooltip();
@@ -531,6 +564,21 @@ _RENDER_JS = """\
         state.hovered = null;
         tooltip.classList.remove("show");
         renderer.refresh();
+        container.style.cursor = "default";
+      });
+      // --- Edge hover: relationship type + curated edge metadata ---
+      renderer.on("enterEdge", ({ edge }) => {
+        const a = graph.getEdgeAttributes(edge);
+        const title = a.relType || a.label || "related";
+        tooltip.innerHTML = '<div class="tt-title">' + esc(title) + "</div>" + metaRows(a.meta);
+        tooltip.classList.add("show");
+        state.hoveredEdge = edge;
+        positionTooltip();
+        container.style.cursor = "pointer";
+      });
+      renderer.on("leaveEdge", () => {
+        state.hoveredEdge = null;
+        tooltip.classList.remove("show");
         container.style.cursor = "default";
       });
       renderer.on("afterRender", positionTooltip);
