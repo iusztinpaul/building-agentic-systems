@@ -1,3 +1,4 @@
+from tree.entities.colours import Colours
 from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import (
     EdgeType,
@@ -13,6 +14,7 @@ from tree.entities.meta_state import (
 from tree.entities.users import User
 
 __all__ = [
+    "Colours",
     "Document",
     "EdgeType",
     "KnowledgeGraphEntry",

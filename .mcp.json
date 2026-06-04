@@ -6,6 +6,8 @@
         "--directory",
         "apps/memory",
         "run",
+        "--env-file",
+        "../../.env",
         "python",
         "scripts/serve_mcp.py"
       ],

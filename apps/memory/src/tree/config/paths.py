@@ -15,3 +15,6 @@ TREE_WORKING_DIR: Path = _PROJECT_ROOT / ".tree"
 
 MEMORY_DIR: Path = TREE_WORKING_DIR / "memory"
 """Directory for deep-search session files (`.tree/memory/`)."""
+
+GRAPHS_DIR: Path = TREE_WORKING_DIR / "graphs"
+"""Directory for rendered knowledge-graph HTML files (`.tree/graphs/`)."""

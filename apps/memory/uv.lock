@@ -761,6 +761,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/67/684fa2d2de1e7504549d4ca457b4f854ccec3cd3be03bd86b33b599fbf58/fastmcp-3.2.0-py3-none-any.whl", hash = "sha256:e71aba3df16f86f546a4a9e513261d3233bcc92bef0dfa647bac3fa33623f681", size = 705550, upload-time = "2026-03-30T20:25:35.499Z" },
 ]
 
+[package.optional-dependencies]
+apps = [
+    { name = "prefab-ui" },
+]
+
 [[package]]
 name = "feedparser"
 version = "6.0.12"
@@ -2221,6 +2226,20 @@ wheels = [
 ]
 
 [[package]]
+name = "prefab-ui"
+version = "0.20.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cyclopts" },
+    { name = "pydantic" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/41/99/4e61eb3d3f8b09bdaa28bda3c99971264555f486a485333cb8e6f56c7d8c/prefab_ui-0.20.2.tar.gz", hash = "sha256:4ac17ebf8ec1c5a918a188625837fc608157907430a59c4feb8adac80e01262b", size = 4118979, upload-time = "2026-06-03T02:13:49.312Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/d0/59b697dd5a44e632fcc4aba42ff5f88224df672ffea1f5e9a5a9e9e50698/prefab_ui-0.20.2-py3-none-any.whl", hash = "sha256:861d4914e4d9120996b4d5c6753788beeca433754d7bb3cfbd13f9dba7ea8e85", size = 1852274, upload-time = "2026-06-03T02:13:47.539Z" },
+]
+
+[[package]]
 name = "prefect"
 version = "3.6.19"
 source = { registry = "https://pypi.org/simple" }
@@ -3575,7 +3594,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "click" },
     { name = "datasets" },
-    { name = "fastmcp" },
+    { name = "fastmcp", extra = ["apps"] },
     { name = "feedparser" },
     { name = "google-genai" },
     { name = "httpx" },
@@ -3613,7 +3632,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.13" },
     { name = "click", specifier = ">=8.0" },
     { name = "datasets", specifier = ">=3.0" },
-    { name = "fastmcp", specifier = ">=3.1.0" },
+    { name = "fastmcp", extras = ["apps"], specifier = ">=3.1.0" },
     { name = "feedparser", specifier = ">=6.0" },
     { name = "google-genai", specifier = ">=1.65.0" },
     { name = "httpx", specifier = ">=0.28" },
