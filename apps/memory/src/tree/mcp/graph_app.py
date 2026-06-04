@@ -364,9 +364,7 @@ _GRAPH_STYLE = """\
     /* Header */
     #header { display: flex; align-items: center; gap: 14px; padding: 9px 14px;
       background: var(--panel); border-bottom: 1px solid var(--border); z-index: 3; }
-    #brand { font-weight: 700; font-size: 15px; letter-spacing: 0.2px;
-      background: linear-gradient(90deg, var(--accent1), var(--accent2));
-      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+    #brand { font-weight: 700; font-size: 15px; letter-spacing: 0.2px; color: #000000; }
     #counts { font-size: 12px; color: var(--muted); }
     #search { margin-left: auto; width: 240px; max-width: 45%; padding: 6px 10px;
       background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
@@ -414,7 +412,7 @@ _GRAPH_STYLE = """\
 _BODY_MARKUP = """\
   <div id="wrap">
     <div id="header">
-      <span id="brand">Tree Memory</span>
+      <span id="brand">Tree: Your Rooted Memory</span>
       <span id="counts">loading…</span>
       <input id="search" type="search" placeholder="Search nodes…" autocomplete="off" />
     </div>
