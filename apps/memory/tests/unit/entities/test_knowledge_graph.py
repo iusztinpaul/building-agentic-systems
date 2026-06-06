@@ -461,10 +461,10 @@ class TestTypeFieldValidator:
 
     async def test_accepts_every_registered_node_type(self):
         # Phase-3 #028: iterate the **registry**, not the enum. The
-        # ``NodeType.TASK`` / ``EPISODE`` legacy aliases survive on
-        # the enum but they are no longer top-level types — their
-        # construction triggers the legacy → POLE+O reroute (covered
-        # by :class:`TestLegacyNodeTypeReroute`).
+        # ``NodeType.TASK`` legacy alias survives on the enum but it is
+        # no longer a top-level type — its construction triggers the
+        # legacy → POLE+O reroute (covered by
+        # :class:`TestLegacyNodeTypeReroute`).
         from tree.entities.ontology import NODE_REGISTRY
 
         user_id = _user_id()
@@ -644,7 +644,6 @@ class TestKnowledgeGraphEntrySubtype:
             ("location", "country"),
             ("event", "meeting"),
             ("event", "incident"),
-            ("event", "episode"),  # Tree extension
             ("object", "vehicle"),
             ("object", "software"),
             ("object", "task"),  # Tree extension
@@ -690,14 +689,13 @@ class TestKnowledgeGraphEntrySubtype:
 
 
 class TestLegacyNodeTypeReroute:
-    """Phase-3 #028: legacy node rows of ``type=task`` / ``type=episode``
-    are silently re-routed at validator time to the new POLE+O
-    subtype shape — ``type='object', subtype='task'`` and
-    ``type='event', subtype='episode'`` respectively. This keeps
-    code paths that still construct with ``NodeType.TASK`` working
-    (user prompt explicitly preserves the enum aliases for read
-    paths) while ensuring writes always land in the POLE+O storage
-    form. The actual DB-row migration is #033's job."""
+    """Phase-3 #028: legacy node rows of ``type=task`` are silently
+    re-routed at validator time to the new POLE+O subtype shape —
+    ``type='object', subtype='task'``. This keeps code paths that
+    still construct with ``NodeType.TASK`` working (user prompt
+    explicitly preserves the enum alias for read paths) while
+    ensuring writes always land in the POLE+O storage form. The
+    actual DB-row migration is #033's job."""
 
     def _build(self, user_id, **overrides):
         defaults = dict(
@@ -723,28 +721,6 @@ class TestLegacyNodeTypeReroute:
         entry = self._build(user_id, type="task")
         assert entry.type == "object"
         assert entry.subtype == "task"
-
-    async def test_legacy_episode_enum_reroutes_to_event_episode(self):
-        user_id = _user_id()
-        entry = self._build(
-            user_id,
-            id=f"{user_id}:event:first day",
-            type=NodeType.EPISODE,
-            name="first day",
-        )
-        assert entry.type == "event"
-        assert entry.subtype == "episode"
-
-    async def test_legacy_episode_raw_string_reroutes_to_event_episode(self):
-        user_id = _user_id()
-        entry = self._build(
-            user_id,
-            id=f"{user_id}:event:first day",
-            type="episode",
-            name="first day",
-        )
-        assert entry.type == "event"
-        assert entry.subtype == "episode"
 
     async def test_explicit_subtype_overrides_default_reroute_value(self):
         # Defensive: a caller may pre-populate subtype with a richer
@@ -820,8 +796,8 @@ class TestOntologyTreeExtensionsModuleApplied:
 
     * ``object`` parent now has the 6 canonical POLE+O subtypes plus
       Tree's ``task`` / ``topic`` / ``project`` extensions (9 total).
-    * ``event`` parent now has the 7 canonical POLE+O subtypes plus
-      Tree's ``episode`` extension (8 total).
+    * ``event`` parent has the 7 canonical POLE+O subtypes (no Tree
+      extension).
     * ``SUBTYPE_EXTRAS`` carries the ``ProjectExtras`` model under
       ``("object", "project")``.
     """
@@ -846,12 +822,13 @@ class TestOntologyTreeExtensionsModuleApplied:
             assert canonical in object_spec.subtypes
         assert len(object_spec.subtypes) == 9
 
-    def test_event_subtypes_include_episode_extension(self):
+    def test_event_subtypes_are_canonical_only(self):
         from tree.entities.ontology import NODE_REGISTRY
 
         event_spec = NODE_REGISTRY["event"]
         assert event_spec.subtypes is not None
-        assert "episode" in event_spec.subtypes
+        # ``episode`` was removed — ``event`` carries no Tree extension.
+        assert "episode" not in event_spec.subtypes
         for canonical in {
             "incident",
             "meeting",
@@ -862,7 +839,7 @@ class TestOntologyTreeExtensionsModuleApplied:
             "observation",
         }:
             assert canonical in event_spec.subtypes
-        assert len(event_spec.subtypes) == 8
+        assert len(event_spec.subtypes) == 7
 
     def test_project_extras_registered_in_subtype_extras(self):
         from tree.entities.ontology import SUBTYPE_EXTRAS

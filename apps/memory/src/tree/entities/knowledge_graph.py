@@ -32,14 +32,12 @@ from pymongo import IndexModel
 class NodeType(StrEnum):
     """Backward-compat shim built from ``NODE_REGISTRY`` (#027, extended #028).
 
-    Members map 1:1 to registered node-type names — **except** ``TASK``
-    and ``EPISODE``, which are retained as **legacy aliases** after #028.
-    The strings ``"task"`` and ``"episode"`` are no longer registered as
-    top-level node types; they're re-routed by
-    :class:`KnowledgeGraphEntry`'s ``mode="before"`` validator to
-    ``(type="object", subtype="task")`` and
-    ``(type="event", subtype="episode")``. Reading those enum members in
-    consumer code still works (StrEnum -> str), but any
+    Members map 1:1 to registered node-type names — **except** ``TASK``,
+    which is retained as a **legacy alias** after #028. The string
+    ``"task"`` is no longer registered as a top-level node type; it's
+    re-routed by :class:`KnowledgeGraphEntry`'s ``mode="before"``
+    validator to ``(type="object", subtype="task")``. Reading the enum
+    member in consumer code still works (StrEnum -> str), but any
     ``KnowledgeGraphEntry`` constructed with ``type=NodeType.TASK``
     silently re-shapes to the new POLE+O storage form.
 
@@ -60,9 +58,8 @@ class NodeType(StrEnum):
     # Island-style: facts participate in no edges (the envelope validator
     # rejects every edge whose source or target is a ``fact``).
     FACT = "fact"
-    # --- Legacy aliases (#028) — re-routed at write time ---
+    # --- Legacy alias (#028) — re-routed at write time ---
     TASK = "task"
-    EPISODE = "episode"
 
 
 class EdgeType(StrEnum):
@@ -266,12 +263,12 @@ class KnowledgeGraphEntry(BeanieDocument):
             )
         return value
 
-    # --- Phase-3 #028: legacy (type=task|episode) → (parent, subtype) ---
+    # --- Phase-3 #028: legacy (type=task) → (parent, subtype) ---
     # Re-routes legacy node rows at construction time so the rest of the
     # validator chain sees the new POLE+O shape. Runs in ``mode="before"``
     # because the downstream type-vs-registry check would otherwise
-    # reject ``"task"`` / ``"episode"`` (they're no longer registered as
-    # top-level node types after #028).
+    # reject ``"task"`` (no longer registered as a top-level node type
+    # after #028).
     #
     # Idempotent: a row that already carries ``type="object",
     # subtype="task"`` is untouched. If the caller has already set
@@ -280,13 +277,12 @@ class KnowledgeGraphEntry(BeanieDocument):
     _LEGACY_NODE_REWRITES: ClassVar[dict[str, tuple[str, str]]] = {
         # legacy type -> (new parent, subtype)
         "task": ("object", "task"),
-        "episode": ("event", "episode"),
     }
 
     @model_validator(mode="before")
     @classmethod
     def _reroute_legacy_node_types(cls, data: Any) -> Any:
-        """Rewrite legacy ``(type=task|episode)`` to the POLE+O subtype shape.
+        """Rewrite legacy ``(type=task)`` to the POLE+O subtype shape.
 
         Only touches ``kind="node"`` rows. Edge rows keep their legacy
         ``source_type`` / ``target_type`` columns untouched — those are

@@ -89,7 +89,7 @@ class TestQueryMemoryTool:
             [
                 {
                     "pipeline": [
-                        {"$match": {"kind": "node", "type": "episode"}},
+                        {"$match": {"kind": "node", "name": "__no_such_node__"}},
                         {"$limit": 10},
                     ]
                 }
@@ -101,7 +101,7 @@ class TestQueryMemoryTool:
             user_id=seed_graph["user_id"],
         )
 
-        result = await query_memory("find episodes", ctx)
+        result = await query_memory("find a nonexistent entity", ctx)
 
         parsed = json.loads(result)
         assert parsed == []

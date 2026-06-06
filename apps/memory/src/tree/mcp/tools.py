@@ -536,7 +536,7 @@ async def ingest_conversation(
     """Extract knowledge from a conversation and add it to the knowledge graph.
 
     Processes conversation text through the extraction pipeline to identify
-    people, tasks, episodes, preferences, and relationships.
+    people, tasks, preferences, and relationships.
 
     Args:
         conversation_text: The full conversation text to process.
@@ -655,7 +655,7 @@ async def review_list_pending(
 
     Args:
         entity_type: Optional NodeType value (e.g. "person", "task",
-            "episode", "preference"). ``None`` returns pairs of every
+            "preference"). ``None`` returns pairs of every
             type.
         limit: Maximum number of pairs to return (default 50).
     """

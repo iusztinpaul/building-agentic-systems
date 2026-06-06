@@ -165,7 +165,7 @@
               "event"
             ]
           ],
-          "description": "Tree extension: a person experienced an event (commonly an event with subtype ``episode``). Re-routes the legacy ``EdgeType.EXPERIENCED`` semantics.",
+          "description": "Tree extension: a person experienced an event. Re-routes the legacy ``EdgeType.EXPERIENCED`` semantics.",
           "properties": {
             "role": {
               "anyOf": [
@@ -552,7 +552,6 @@
       "subtypes": [
         "communication",
         "employment",
-        "episode",
         "incident",
         "meeting",
         "observation",

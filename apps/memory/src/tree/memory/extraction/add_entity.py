@@ -119,8 +119,8 @@ async def add_entity(
         resolver: The composite resolver chain (Alias → Exact → Fuzzy →
             Semantic).
         name: Surface form of the prospective entity (raw input).
-        entity_type: One of :class:`NodeType` — typically PERSON/TASK/
-            EPISODE/PREFERENCE (the four LLM-extractable types).
+        entity_type: One of :class:`NodeType` — typically
+            PERSON/TASK/PREFERENCE (LLM-extractable types).
         properties: Caller-supplied properties dict. Subject to the merge
             strategy when an existing canonical is hit.
         source_id: Provenance id (typically the document ObjectId as a
