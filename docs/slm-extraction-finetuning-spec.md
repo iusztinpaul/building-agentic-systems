@@ -853,7 +853,7 @@ for thin cells. Re-run whenever the ontology snapshot changes.
 ## 17. Real samples from the production graph
 
 These are **actual rows** from the live `knowledge_graph` collection (teacher
-`gemini-3.1-flash-lite`, 818 LLM-extracted rows), projected back to the extraction surface — IDs,
+`gemini-3.1-flash-lite`, 793 LLM-extracted rows), projected back to the extraction surface — IDs,
 embeddings, timestamps, and `sources` stripped; resolved canonical names and the model's verbatim
 (lowercased) property values kept. Use them as ground-truth examples; they show the real register the
 SLM must reproduce (slugged names, lowercase values, sparse properties).
@@ -893,9 +893,9 @@ SLM must reproduce (slugged names, lowercase values, sparse properties).
 { "source_node_id": "ai engineer", "source_type": "person",
   "target_node_id": "building rag systems", "target_type": "object",
   "type": "related_to", "semantic_type": "has_task", "properties": { "status": "in_progress" } }
-{ "source_node_id": "rtx-4090", "source_type": "object",
-  "target_node_id": "stop-wasting-electricity", "target_type": "event",
-  "type": "related_to", "semantic_type": "involved", "properties": { "role": "hardware used in benchmark" } }
+{ "source_node_id": "a100-gpu", "source_type": "object",
+  "target_node_id": "dpo-training-run", "target_type": "event",
+  "type": "related_to", "semantic_type": "involved", "properties": { "role": "hardware_requirement" } }
 { "source_node_id": "data makers fest 2026", "source_type": "event",
   "target_node_id": "porto", "target_type": "location",
   "type": "related_to", "semantic_type": "occurred_at", "properties": {} }
