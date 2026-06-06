@@ -230,14 +230,13 @@ async def extract_entities(
 
 
 # --- Phase-3 #028: legacy LLM emissions for the pre-POLE+O top-level
-# node types ``task`` / ``episode`` are silently re-routed to the new
-# (parent, subtype) shape. The LLM prompt has been updated to emit the
-# new shape directly (with a ``subtype`` field), but this rewrite keeps
-# the parser tolerant of older prompts and saved/cached examples during
-# the staging window between #028 and #033.
+# node type ``task`` are silently re-routed to the new (parent, subtype)
+# shape. The LLM prompt has been updated to emit the new shape directly
+# (with a ``subtype`` field), but this rewrite keeps the parser tolerant
+# of older prompts and saved/cached examples during the staging window
+# between #028 and #033.
 _LEGACY_NODE_TYPE_REWRITES: dict[str, tuple[NodeType, str]] = {
     "task": (NodeType.OBJECT, "task"),
-    "episode": (NodeType.EVENT, "episode"),
 }
 
 
@@ -350,17 +349,12 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
             continue
 
-        # #029: re-route legacy endpoint types ``task`` / ``episode``
-        # to the new POLE+O parents now that those types no longer
-        # exist as top-level node types.
+        # #029: re-route the legacy endpoint type ``task`` to its POLE+O
+        # parent now that it no longer exists as a top-level node type.
         if src_type_value == "task":
             src_type_value = "object"
-        elif src_type_value == "episode":
-            src_type_value = "event"
         if tgt_type_value == "task":
             tgt_type_value = "object"
-        elif tgt_type_value == "episode":
-            tgt_type_value = "event"
 
         try:
             src_type = NodeType(src_type_value)

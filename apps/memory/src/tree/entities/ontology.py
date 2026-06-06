@@ -452,9 +452,9 @@ class ObjectProperties(BaseModel):
     )
 
 
-# --- Retained legacy property schemas (kept importable by callers; the
-# top-level ``task`` / ``episode`` registrations are removed in #028 in
-# favor of subtype extensions on ``object`` / ``event``). ---
+# --- Retained legacy property schema (kept importable by callers; the
+# top-level ``task`` registration is removed in #028 in favor of a
+# subtype extension on ``object``). ---
 
 
 class TaskProperties(BaseModel):
@@ -471,21 +471,6 @@ class TaskProperties(BaseModel):
     date: str | None = Field(
         default=None,
         description="Due date or mentioned date (ISO 8601 format)",
-    )
-
-
-class EpisodeProperties(BaseModel):
-    """A life or work episode experienced by a person.
-
-    **Deprecated** as a top-level POLE+O type after #028; ``episode``
-    now lives as a Tree subtype under ``event`` (see
-    :mod:`tree.entities.ontology_tree_extensions`).
-    """
-
-    content: str = Field(description="Description of the episode or experience")
-    date: str | None = Field(
-        default=None,
-        description="When the episode occurred (ISO 8601 format)",
     )
 
 
@@ -1020,8 +1005,7 @@ register_node_type(
         name="event",
         properties_schema=EventProperties,
         description=EventProperties.__doc__ or "",
-        # Canonical POLE+O subtypes only; Tree's ``episode`` extension
-        # is registered downstream in ``ontology_tree_extensions``.
+        # Canonical POLE+O event subtypes only.
         subtypes=frozenset(
             {
                 "incident",
@@ -1254,9 +1238,8 @@ register_relation_semantic(
         allowed_pairs=[("person", "event")],
         properties_schema=ExperiencedByProperties,
         description=(
-            "Tree extension: a person experienced an event (commonly an "
-            "event with subtype ``episode``). Re-routes the legacy "
-            "``EdgeType.EXPERIENCED`` semantics."
+            "Tree extension: a person experienced an event. Re-routes the "
+            "legacy ``EdgeType.EXPERIENCED`` semantics."
         ),
     )
 )

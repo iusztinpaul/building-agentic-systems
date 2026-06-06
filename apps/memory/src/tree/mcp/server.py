@@ -180,7 +180,7 @@ mcp = FastMCP(
     "Tree Memory",
     instructions=(
         "Query and build a personal knowledge graph of documents, people, tasks, "
-        "episodes, and preferences. Use 'query_memory' for flexible natural language "
+        "and preferences. Use 'query_memory' for flexible natural language "
         "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
         "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
         "returns a lightweight index; read individual files for details. "

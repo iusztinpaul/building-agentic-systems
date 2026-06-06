@@ -21,7 +21,6 @@ _NODE_COLOURS: dict[str, str] = {
     "document": "#3498db",
     "chunk": "#95a5a6",
     "task": "#2ecc71",
-    "episode": "#f39c12",
     "preference": "#9b59b6",
 }
 

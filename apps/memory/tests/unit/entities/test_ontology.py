@@ -61,9 +61,8 @@ from tree.entities.ontology import (
 # node type with ``FactProperties``; #032 replaces the free-form
 # preference ``content: str`` field with the typed-slot
 # ``PreferenceProperties`` and registers the ``superseded_by``
-# structural edge. The v1-v5 snapshots are kept on disk for
-# historical-diff review but no test reads them.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v6.json"
+# structural edge.
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema.json"
 
 
 # ---------------------------------------------------------------------------
@@ -293,9 +292,9 @@ class TestRetrofitRegistries:
         # Post-#028: 8 entries — 5 POLE+O LLM-extractable (person,
         # organization, location, event, object) + preference (still
         # freeform) + 2 structural (document, chunk). The legacy
-        # ``task`` / ``episode`` top-level rows are GONE and live as
-        # subtypes under ``object`` / ``event`` (see
-        # ``test_tree_extensions_self_application``).
+        # ``task`` top-level row is GONE and lives as a subtype under
+        # ``object`` (see ``test_tree_extensions_self_application``);
+        # ``episode`` has been removed entirely.
         # Post-#031: ``fact`` joins as a 9th entry — the LLM-extractable
         # escape-hatch node type.
         assert set(NODE_REGISTRY) == {
@@ -331,9 +330,9 @@ class TestRetrofitRegistries:
         # Post-#031: ``fact`` joins the LLM-extractable set as the
         # POLE+O escape-hatch for propositions that don't fit any
         # registered relation semantic.
-        # ``NodeType.TASK`` / ``NodeType.EPISODE`` enum members survive
-        # as legacy aliases but are no longer registered as top-level
-        # extractable types — they live as subtypes under object/event.
+        # ``NodeType.TASK`` enum member survives as a legacy alias but is
+        # no longer registered as a top-level extractable type — it lives
+        # as a subtype under object.
         assert LLM_EXTRACTABLE_NODE_TYPES == {
             NodeType.PERSON,
             NodeType.ORGANIZATION,
@@ -379,19 +378,18 @@ class TestRetrofitRegistries:
 class TestBackwardCompatViews:
     def test_every_registered_node_type_has_properties(self):
         # Post-#028: ``NODE_PROPERTIES`` is built from
-        # :data:`NODE_REGISTRY`, so ``NodeType.TASK`` / ``EPISODE``
-        # (which survive only as legacy aliases) are intentionally
-        # absent. Iterate the registry, not the enum.
+        # :data:`NODE_REGISTRY`, so ``NodeType.TASK`` (which survives
+        # only as a legacy alias) is intentionally absent. Iterate the
+        # registry, not the enum.
         for type_name in NODE_REGISTRY:
             node_type = NodeType(type_name)
             assert node_type in NODE_PROPERTIES, f"Missing properties for {node_type}"
 
     def test_legacy_node_type_aliases_absent_from_properties(self):
-        # The enum still exposes TASK/EPISODE for code-path compat,
-        # but ``NODE_PROPERTIES`` mirrors the registry — which no
-        # longer holds those entries.
+        # The enum still exposes TASK for code-path compat, but
+        # ``NODE_PROPERTIES`` mirrors the registry — which no longer
+        # holds that entry.
         assert NodeType.TASK not in NODE_PROPERTIES
-        assert NodeType.EPISODE not in NODE_PROPERTIES
 
     def test_every_edge_type_has_constraint(self):
         for edge_type in EdgeType:
@@ -400,9 +398,8 @@ class TestBackwardCompatViews:
     def test_same_as_constraints_cover_post_029_pole_o_self_pairs(self):
         # #029: ``same_as`` broadened from the legacy 4-pair set to
         # every POLE+O LLM-extractable type (self-pair only). The
-        # legacy task↔task / episode↔episode pairs are GONE — task and
-        # episode now live as node subtypes and never carry their own
-        # ``same_as`` edge.
+        # legacy task↔task pairs are GONE — task now lives as a node
+        # subtype and never carries its own ``same_as`` edge.
         same_as = EDGE_CONSTRAINTS[EdgeType.SAME_AS]
         pairs = {(c.source_type.value, c.target_type.value) for c in same_as}
         assert pairs == {
@@ -422,16 +419,15 @@ class TestBackwardCompatViews:
 
 class TestEnumShim:
     def test_node_type_members_match_node_registry_plus_legacy_aliases(self):
-        # Post-#028: the enum has the 6 registry entries the LLM cares
-        # about (+ DOCUMENT/CHUNK) PLUS two legacy aliases — ``TASK``
-        # and ``EPISODE`` — that the :class:`KnowledgeGraphEntry`
-        # mode=before validator silently re-routes to the new
-        # (parent, subtype) shape. The aliases are intentionally NOT
-        # in :data:`NODE_REGISTRY`.
+        # Post-#028: the enum has the registry entries the LLM cares
+        # about (+ DOCUMENT/CHUNK) PLUS one legacy alias — ``TASK`` —
+        # that the :class:`KnowledgeGraphEntry` mode=before validator
+        # silently re-routes to the new (parent, subtype) shape. The
+        # alias is intentionally NOT in :data:`NODE_REGISTRY`.
         # Post-#031: ``FACT`` joins the enum + registry as the POLE+O
         # escape-hatch node type.
         enum_values = {member.value for member in NodeType}
-        legacy_aliases = {"task", "episode"}
+        legacy_aliases = {"task"}
         assert enum_values == set(NODE_REGISTRY) | legacy_aliases
 
     def test_edge_type_members_match_edge_registry(self):
@@ -450,7 +446,6 @@ class TestEnumShim:
             "EVENT",
             "OBJECT",
             "TASK",
-            "EPISODE",
             "PREFERENCE",
             "FACT",
         ]:
@@ -655,7 +650,6 @@ class TestPoleOCanonicalTypes:
                     "travel",
                     "employment",
                     "observation",
-                    "episode",  # Tree extension
                 },
             ),
             (
@@ -733,9 +727,9 @@ class TestPoleOCanonicalTypes:
             )
 
     def test_task_and_episode_not_top_level(self):
-        # The legacy ``task`` / ``episode`` rows are GONE from
-        # the top-level registry; they live as subtypes under
-        # ``object`` / ``event`` now.
+        # The legacy ``task`` / ``episode`` rows are GONE from the
+        # top-level registry: ``task`` lives as a subtype under
+        # ``object``; ``episode`` has been removed entirely.
         assert "task" not in NODE_REGISTRY
         assert "episode" not in NODE_REGISTRY
 
@@ -746,19 +740,16 @@ class TestPoleOCanonicalTypes:
 
 
 class TestTreeExtensionsSelfApplication:
-    """Pin the four Tree extensions registered in
+    """Pin the three Tree extensions registered in
     :mod:`tree.entities.ontology_tree_extensions`. The whole point of
     the extension API is that Tree's domain concepts (``task`` /
-    ``episode`` / ``topic`` / ``project``) ride on top of the
-    POLE+O canonical parents — they look indistinguishable from
-    canonical subtypes to downstream consumers.
+    ``topic`` / ``project``) ride on top of the POLE+O canonical
+    parent ``object`` — they look indistinguishable from canonical
+    subtypes to downstream consumers.
     """
 
     def test_object_task_extension(self):
         assert "task" in NODE_REGISTRY["object"].subtypes
-
-    def test_event_episode_extension(self):
-        assert "episode" in NODE_REGISTRY["event"].subtypes
 
     def test_object_topic_extension(self):
         # ``topic`` is Tree-only — NEVER a canonical POLE+O subtype.

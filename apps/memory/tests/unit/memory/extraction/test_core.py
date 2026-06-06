@@ -114,7 +114,7 @@ class TestParseExtraction:
                     "source_node_id": "alice",
                     "source_type": "person",
                     "target_node_id": "first day",
-                    "target_type": "episode",
+                    "target_type": "event",
                     "type": "experienced",
                 }
             ],
