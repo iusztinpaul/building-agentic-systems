@@ -755,6 +755,90 @@ a *rejected* row (§12), (b) the three-way decision cell, (c) synthetic Path-B c
 label; the corrected JSON replaces the teacher's. Track inter-annotator agreement on the three-way
 decision — it is the metric most predictive of downstream graph quality.
 
+## 16. End-to-end driver (turnkey)
+
+This is §10 + §11 + §12 + §14 glued into one runnable script — the whole Path-A loop. It reads a
+documents export, chunks each doc, calls the configured teacher, cleans to a label, and writes one
+training record per chunk. (Verified: the loop below runs as written; with a stub teacher it produces
+valid `system/user/assistant` JSONL records with the 32 KB frozen prompt as the system message and
+auto-cleaned labels.)
+
+Get the corpus with one `mongoexport` (the source field is `documents.content`, §14):
+
+```bash
+mongoexport --uri "$MONGO_URI" --collection documents --fields content \
+  --type json --out documents.jsonl
+```
+
+```python
+# generate_dataset.py — Path-A distillation: documents export -> training JSONL.
+# Run from apps/memory with the project venv:
+#   uv run python generate_dataset.py documents.jsonl > train.jsonl
+import asyncio, json, sys
+
+from tree.entities.ontology import get_ontology_schema
+from tree.memory.extraction.core import _SYSTEM_PROMPT, chunk_document, _parse_extraction
+from tree.memory.extraction.validation import (
+    validate_envelope, validate_properties,
+    get_node_property_schemas, get_edge_property_schema,
+)
+from tree.models.get_model import get_llm  # builds the configured teacher (reads the API key)
+
+# Frozen for the whole run — identical system message on every record (§10.1, §11).
+SYSTEM = _SYSTEM_PROMPT.format(ontology=json.dumps(get_ontology_schema(), indent=2))
+
+
+def build_label(raw: dict) -> dict:  # = §12.0
+    parsed = _parse_extraction(raw)
+    nodes = []
+    for n in parsed.nodes:
+        t = n.type.value
+        if not validate_envelope(kind="node", type=t, subtype=n.subtype, name=n.name).ok:
+            continue
+        parent, extras = get_node_property_schemas(type=t, subtype=n.subtype)
+        props, _ = validate_properties(n.properties or {}, parent, extras)
+        nodes.append({"name": n.name, "type": t, "subtype": n.subtype, "properties": props})
+    edges = []
+    for e in parsed.edges:
+        t, st, tt = e.type.value, e.source_type.value, e.target_type.value
+        if not validate_envelope(kind="edge", type=t, source_type=st,
+                                 target_type=tt, semantic_type=e.semantic_type).ok:
+            continue
+        schema = get_edge_property_schema(type=t, semantic_type=e.semantic_type)
+        props, _ = validate_properties(e.properties or {}, schema, None)
+        edges.append({"source_node_id": e.source_node_id, "source_type": st,
+                      "target_node_id": e.target_node_id, "target_type": tt,
+                      "type": t, "semantic_type": e.semantic_type, "properties": props})
+    return {"nodes": nodes, "edges": edges}
+
+
+async def main(path: str) -> None:
+    teacher = get_llm()  # gemini-3.1-flash-lite per configs/default.yaml
+    with open(path) as fh:
+        for line in fh:
+            text = (json.loads(line).get("content") or "").strip()
+            if not text:
+                continue
+            for chunk in chunk_document(text):  # 512-token / 64-overlap, cl100k_base
+                raw = await teacher.generate_json(chunk, system=SYSTEM)
+                label = build_label(raw)
+                record = {"messages": [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": chunk},
+                    {"role": "assistant",
+                     "content": json.dumps(label, separators=(",", ":"), ensure_ascii=False)},
+                ]}
+                print(json.dumps(record, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    asyncio.run(main(sys.argv[1]))
+```
+
+That `train.jsonl` is the fine-tuning set. Then: keep negatives in (don't filter empty-label
+records — §14), route the §15 review sample for human correction, and layer Path-B synthetic chunks
+for thin cells. Re-run whenever the ontology snapshot changes.
+
 ---
 
 ## Appendix — the exact ontology JSON injected into the prompt
