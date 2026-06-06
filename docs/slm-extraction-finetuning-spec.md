@@ -703,16 +703,27 @@ chunk)` in `core.py` does the LLM call **and** `_parse_extraction` in one step, 
 ## 13. Naming & shape conventions (must be reproduced — no code derives them)
 
 The pipeline only **lowercases and strips** `name`; it does **not** slugify. So the teacher/label
-must already carry the right surface form. These conventions live only in the prompt + examples:
+must already carry the right surface form. The exact slug style is **model behaviour, not a hard
+rule** — the conventions below are what the production graph actually shows (§17), so reproduce these
+tendencies rather than treating them as a strict grammar:
 
-- **Entity nodes** (`person`/`organization`/`location`/`event`/`object`): `name` = lowercase,
-  whitespace-trimmed surface form, **spaces preserved** — `"san francisco"`, `"macbook pro m3"`.
-- **`fact`**: `name` = a kebab-slug summarizing subject–predicate–object — `"earth-orbits-sun"`.
-- **`preference`**: `name` = a kebab-slug of the `statement` — `"prefers-dark-mode"`.
+- **The one hard invariant:** `name` is lowercased, and every `edges[].source_node_id` /
+  `target_node_id` must **string-match** a `name` emitted in the same record (that is how the
+  pipeline wires them) — keep them byte-identical to the node `name`.
+- **`person` / `organization` / `location`:** lowercase surface form, spaces preserved —
+  `"jeremy howard"`, `"openai"`, `"san francisco"`.
+- **`event` / `object`:** often kebab-slugged in practice (`"ainews-recap"`,
+  `"finetuning-deprecation"`, `"building rag systems"` shows both styles coexist) — the model slugs
+  multi-word phrase-y names and spaces short ones; either is accepted.
+- **`preference`:** kebab-slug of the `statement` — `"prefers-custom-task-tracker-over-current-fragmented-setup"`.
+- **`fact`:** a short slug, in practice prefixed `fact-` and sometimes just numbered —
+  `"fact-saturating-benchmarks"`, `"fact-1"`. (Not a `subject-predicate-object` slug.)
 - Every entity node carries a **non-null subtype** from its closed set (§8). `preference`/`fact`
   use `subtype: null`.
-- `edges[].source_node_id` / `target_node_id` must **string-match** a `name` emitted in the same
-  record (that is how the pipeline later wires them). Keep them byte-identical to the node `name`.
+- **Property values come back lowercased free text**, not normalized — real rows store
+  `"city": "san francisco"`, `"country": "united states"` (not ISO `US`), `"role": "founder"`. The
+  §4 field descriptions are guidance to the model, not post-hoc normalization; the label is whatever
+  the model emits.
 
 ## 14. Coverage, balance, and the two input paths
 
@@ -838,6 +849,72 @@ if __name__ == "__main__":
 That `train.jsonl` is the fine-tuning set. Then: keep negatives in (don't filter empty-label
 records — §14), route the §15 review sample for human correction, and layer Path-B synthetic chunks
 for thin cells. Re-run whenever the ontology snapshot changes.
+
+## 17. Real samples from the production graph
+
+These are **actual rows** from the live `knowledge_graph` collection (teacher
+`gemini-3.1-flash-lite`, 818 LLM-extracted rows), projected back to the extraction surface — IDs,
+embeddings, timestamps, and `sources` stripped; resolved canonical names and the model's verbatim
+(lowercased) property values kept. Use them as ground-truth examples; they show the real register the
+SLM must reproduce (slugged names, lowercase values, sparse properties).
+
+**Nodes — one per type:**
+
+```json
+{ "name": "jeremy howard", "type": "person", "subtype": "individual",
+  "properties": { "occupation": "ai researcher" } }
+{ "name": "anthropic", "type": "organization", "subtype": "company", "properties": {} }
+{ "name": "san francisco", "type": "location", "subtype": "city",
+  "properties": { "city": "san francisco", "country": "united states" } }
+{ "name": "finetuning-deprecation", "type": "event", "subtype": "transaction",
+  "properties": { "outcome": "openai deprecation of finetuning apis" } }
+{ "name": "ainews", "type": "object", "subtype": "project", "properties": {} }
+{ "name": "building rag systems", "type": "object", "subtype": "task", "properties": {} }
+{ "name": "prefers-custom-task-tracker-over-current-fragmented-setup",
+  "type": "preference", "subtype": null,
+  "properties": { "statement": "prefers custom task tracker over current fragmented setup",
+                  "category": "work_style", "target": "custom solution",
+                  "over": "trello, spreadsheets, and telegram bot", "strength": "moderate" } }
+{ "name": "fact-saturating-benchmarks", "type": "fact", "subtype": null,
+  "properties": { "subject": "polynoamial", "predicate": "argues",
+                  "object": "benchmarks with uniformly high scores should be retired in favor of frontier-challenging tests" } }
+```
+
+**Edges — real `related_to` rows** (shown on the extraction surface, `*_node_id` = the matched node
+`name`):
+
+```json
+{ "source_node_id": "demis hassabis", "source_type": "person",
+  "target_node_id": "isomorphic labs", "target_type": "organization",
+  "type": "related_to", "semantic_type": "member_of", "properties": { "role": "leader" } }
+{ "source_node_id": "alexey", "source_type": "person",
+  "target_node_id": "ai shipping labs", "target_type": "organization",
+  "type": "related_to", "semantic_type": "employed_by", "properties": { "role": "founder" } }
+{ "source_node_id": "ai engineer", "source_type": "person",
+  "target_node_id": "building rag systems", "target_type": "object",
+  "type": "related_to", "semantic_type": "has_task", "properties": { "status": "in_progress" } }
+{ "source_node_id": "rtx-4090", "source_type": "object",
+  "target_node_id": "stop-wasting-electricity", "target_type": "event",
+  "type": "related_to", "semantic_type": "involved", "properties": { "role": "hardware used in benchmark" } }
+{ "source_node_id": "data makers fest 2026", "source_type": "event",
+  "target_node_id": "porto", "target_type": "location",
+  "type": "related_to", "semantic_type": "occurred_at", "properties": {} }
+{ "source_node_id": "openai", "source_type": "organization",
+  "target_node_id": "finetuning-deprecation", "target_type": "event",
+  "type": "related_to", "semantic_type": "participated_in", "properties": { "role": "initiator" } }
+{ "source_node_id": "anthropic", "source_type": "organization",
+  "target_node_id": "san francisco", "target_type": "location",
+  "type": "related_to", "semantic_type": "headquarters_at", "properties": {} }
+{ "source_node_id": "rag agent", "source_type": "object",
+  "target_node_id": "faq automation bot", "target_type": "object",
+  "type": "related_to", "semantic_type": "alias_of", "properties": {} }
+```
+
+**What the real distribution tells you** (counts from this graph; scale your synthetic Path-B
+accordingly — §14): node types are dominated by `object` (343) and `fact` (126); `location` is rare
+(4). Among the 16 semantics, `owns`/`involved`/`participated_in`/`uses` dominate while
+`headquarters_at`/`alias_of` appear once each — so the tail semantics are exactly the cells to
+over-sample synthetically.
 
 ---
 
