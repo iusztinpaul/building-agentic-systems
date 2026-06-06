@@ -46,7 +46,7 @@ Source of truth in the repo:
 - Tree subtype extensions: `apps/memory/src/tree/entities/ontology_tree_extensions.py`
 - Transit schema (parsed output): `apps/memory/src/tree/memory/types.py`
 - **Exact ontology JSON injected into the prompt:**
-  `apps/memory/tests/unit/entities/snapshots/ontology_schema_v6.json` ← *train against this file*
+  `apps/memory/tests/unit/entities/snapshots/ontology_schema.json` ← *train against this file*
 
 ---
 
@@ -93,7 +93,7 @@ Rules:
 
 > The `{ontology}` block is `json.dumps(get_ontology_schema(), indent=2)`. It is deterministic
 > (alphabetically sorted) and pinned by a golden-file test, so it is **byte-stable** across runs.
-> The current frozen copy is `ontology_schema_v6.json` (see appendix). When the ontology changes,
+> The current frozen copy is `ontology_schema.json` (see appendix). When the ontology changes,
 > this snapshot changes and the SLM must be re-trained — which is the accepted trade-off of the
 > "in-context, full-parity" choice.
 
@@ -201,7 +201,7 @@ ISO-8601 (`PT1H30M`), coordinates a `"lat,lon"` string.
 - **fact** — **required:** `subject`, `predicate`, `object` (all free-text strings)
 
 The exact JSON-Schema (anyOf/null shapes, descriptions, `required` arrays) the model sees is in
-`ontology_schema_v6.json` — see appendix. Train field-shape against that file, not this prose
+`ontology_schema.json` — see appendix. Train field-shape against that file, not this prose
 summary.
 
 ---
@@ -510,7 +510,7 @@ never learns to emit rows the pipeline would reject.
   `semantic_type` + `allowed_pairs` selection; subtype selection; property extraction of dates/roles;
   correctly returning empty lists for chunks with no entities.
 - **Label = post-validator JSON**, not raw teacher output (see §8).
-- **Determinism:** the ontology block is byte-stable; freeze the exact `ontology_schema_v6.json`
+- **Determinism:** the ontology block is byte-stable; freeze the exact `ontology_schema.json`
   version used for a training run alongside the dataset, since any ontology change invalidates a
   "baked-in"-flavored model and shifts the in-context one.
 
@@ -710,7 +710,7 @@ The model receives this verbatim (pretty-printed, alphabetically sorted) inside 
 section of the system prompt. Train and evaluate against this file:
 
 ```
-apps/memory/tests/unit/entities/snapshots/ontology_schema_v6.json
+apps/memory/tests/unit/entities/snapshots/ontology_schema.json
 ```
 
 It contains three top-level keys: `node_types` (the 7 extractable types with full JSON-Schema

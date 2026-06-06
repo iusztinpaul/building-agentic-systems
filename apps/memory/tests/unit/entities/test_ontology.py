@@ -61,9 +61,8 @@ from tree.entities.ontology import (
 # node type with ``FactProperties``; #032 replaces the free-form
 # preference ``content: str`` field with the typed-slot
 # ``PreferenceProperties`` and registers the ``superseded_by``
-# structural edge. The v1-v5 snapshots are kept on disk for
-# historical-diff review but no test reads them.
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema_v6.json"
+# structural edge.
+SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "ontology_schema.json"
 
 
 # ---------------------------------------------------------------------------
