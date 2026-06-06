@@ -598,6 +598,57 @@ chain the pipeline uses and keep only what survives — that is the label:
 order the pipeline applies them, including dropping any non-LLM-extractable edge type the teacher
 leaks.)
 
+> ⚠️ The production clean lives **inside a Prefect/DB flow** (`extraction/pipeline.py`, ~L565–694) —
+> there is no standalone "clean this JSON" function to import. Reuse the snippet below; it is a
+> faithful, dependency-free extract of that block (verified to reproduce §12.1 byte-for-byte). The
+> two-step order matters: `_parse_extraction` coerces enums + drops the grossly-malformed rows, then
+> `validate_envelope` adds the **strict subtype check** (`_parse_extraction` alone is lenient on
+> subtype, so a POLE+O node the teacher emits with no subtype only gets dropped here).
+
+### 12.0 Reference cleaner — run this on every teacher emission
+
+```python
+# build_label.py — turn one raw teacher JSON emission into a training label.
+# Mirrors apps/memory/src/tree/memory/extraction/pipeline.py:565-694.
+from tree.memory.extraction.core import _parse_extraction
+from tree.memory.extraction.validation import (
+    validate_envelope, validate_properties,
+    get_node_property_schemas, get_edge_property_schema,
+)
+
+def build_label(raw: dict) -> dict:
+    parsed = _parse_extraction(raw)  # enum-coerce + drop grossly-invalid rows
+
+    nodes = []
+    for n in parsed.nodes:
+        t = n.type.value
+        if not validate_envelope(kind="node", type=t, subtype=n.subtype, name=n.name).ok:
+            continue  # e.g. missing/unknown subtype -> whole node dropped
+        parent, extras = get_node_property_schemas(type=t, subtype=n.subtype)
+        props, _drops = validate_properties(n.properties or {}, parent, extras)
+        nodes.append({"name": n.name, "type": t, "subtype": n.subtype, "properties": props})
+
+    edges = []
+    for e in parsed.edges:
+        t, st, tt = e.type.value, e.source_type.value, e.target_type.value
+        if not validate_envelope(kind="edge", type=t, source_type=st,
+                                 target_type=tt, semantic_type=e.semantic_type).ok:
+            continue  # disallowed pair / unknown semantic / fact endpoint -> dropped
+        schema = get_edge_property_schema(type=t, semantic_type=e.semantic_type)
+        props, _drops = validate_properties(e.properties or {}, schema, None)
+        edges.append({"source_node_id": e.source_node_id, "source_type": st,
+                      "target_node_id": e.target_node_id, "target_type": tt,
+                      "type": t, "semantic_type": e.semantic_type, "properties": props})
+
+    return {"nodes": nodes, "edges": edges}  # <- the assistant-message label (§11)
+```
+
+Run from `apps/memory` with the project venv (`uv run python build_label.py`). `_drops` is the
+per-field diagnostic list — aggregate it across the corpus to see which keys the teacher hallucinates
+most (prompt-iteration signal). If you'd rather not cache raw teacher JSON, `extract_entities(llm,
+chunk)` in `core.py` does the LLM call **and** `_parse_extraction` in one step, returning the same
+`parsed` object — then apply the two validation loops above.
+
 ### 12.1 Worked raw → cleaned example
 
 **Teacher raw output** (note three defects):
@@ -668,10 +719,12 @@ must already carry the right surface form. These conventions live only in the pr
 You chose "both" for input sourcing. Use distill-over-real-corpus as the spine and synthetic inputs
 as a booster for thin cells.
 
-**Path A — distill over the real corpus (primary).** Chunk real documents with the production
-chunker — `chunk_document(text, chunk_size=512, chunk_overlap=64)`, `cl100k_base` tokenizer
-(`core.py`) — sampling across all sources (Substack / YouTube / custom sites / markdown / arxiv /
-conversations) so register and length match inference. Run teacher → clean (§12) → record (§11).
+**Path A — distill over the real corpus (primary).** The source text is the `content` field of the
+`documents` collection (the `Document` ODM in `tree.entities.documents`; one row per ingested
+article/video/file). Pull `documents.content`, chunk it with the production chunker —
+`chunk_document(text, chunk_size=512, chunk_overlap=64)`, `cl100k_base` tokenizer (`core.py`) —
+sampling across all sources (Substack / YouTube / custom sites / markdown / arxiv / conversations) so
+register and length match inference. Run teacher → clean (§12) → record (§11).
 
 **Path B — synthesize inputs for rare cells (booster).** Real corpora under-represent some
 (type, subtype) and (semantic, allowed_pair) cells. For each thin cell, prompt a generator LLM to
