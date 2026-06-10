@@ -8,6 +8,7 @@ from google.genai.types import GenerateContentConfig
 from tree.config.app_config import app_config
 from tree.models.base import BaseLLM, BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError
+from tree.observability import track_genai_client
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,10 @@ class GeminiLLM(BaseLLM):
 
     def __init__(self, api_key: str, model: str | None = None) -> None:
         model = model or app_config.models.llm.model
-        self._client = genai.Client(api_key=api_key)
+        # Wrap with Opik's genai integration for automatic spans + native
+        # Gemini token usage / cost. No-op passthrough when Opik is unconfigured
+        # (see :func:`tree.observability.track_genai_client`).
+        self._client = track_genai_client(genai.Client(api_key=api_key))
         self._model = model
 
     async def generate_json(
@@ -61,7 +65,8 @@ class GeminiEmbeddingModel(BaseEmbeddingModel):
     ) -> None:
         model = model or app_config.models.search_embedding.model
         dimensions = dimensions or app_config.models.search_embedding.dimensions
-        self._client = genai.Client(api_key=api_key)
+        # Wrap with Opik's genai integration (no-op passthrough without a key).
+        self._client = track_genai_client(genai.Client(api_key=api_key))
         self._model = model
         self._dimensions = dimensions
 

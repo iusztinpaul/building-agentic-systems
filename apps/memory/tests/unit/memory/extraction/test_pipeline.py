@@ -781,7 +781,7 @@ class TestChunkDocumentsFanout:
         monkeypatch.delenv("TREE_EXTRACTION__DOC_CONCURRENCY", raising=False)
         docs = [_make_document(doc_id=f"d{i}") for i in range(5)]
 
-        async def _fake_task(doc: Any) -> ChunkedDocument:
+        async def _fake_task(doc: Any, **_kwargs: Any) -> ChunkedDocument:
             return _chunked_for(str(doc.id))
 
         mocker.patch(
@@ -809,7 +809,7 @@ class TestChunkDocumentsFanout:
         gate = asyncio.Event()
         started = 0
 
-        async def _slow_task(doc: Any) -> ChunkedDocument:
+        async def _slow_task(doc: Any, **_kwargs: Any) -> ChunkedDocument:
             nonlocal in_flight, max_in_flight, started
             in_flight += 1
             max_in_flight = max(max_in_flight, in_flight)
@@ -843,7 +843,7 @@ class TestChunkDocumentsFanout:
         monkeypatch.setenv("TREE_EXTRACTION__DOC_CONCURRENCY", "4")
         docs = [_make_document(doc_id=f"d{i}") for i in range(8)]
 
-        async def _jittered_task(doc: Any) -> ChunkedDocument:
+        async def _jittered_task(doc: Any, **_kwargs: Any) -> ChunkedDocument:
             # Later docs finish first (reverse-skewed delay) to expose any
             # ordering bug in result collection.
             idx = int(str(doc.id)[1:])
@@ -888,15 +888,16 @@ class TestChunkDocumentsFanout:
         # added fan-out around ``llm_extract_entities_task``.
         import inspect
 
-        from tree.memory.extraction.pipeline import memory_extract_etl_worker
+        # The six-task body now lives in ``_run_extraction_worker_body`` (the
+        # flow wraps it in the worker's root Opik span). The loop shape is
+        # unchanged; only the headers kwarg is threaded through each task call.
+        from tree.memory.extraction.pipeline import _run_extraction_worker_body
 
-        # ``memory_extract_etl_worker`` is a Prefect ``@flow`` — the original function
-        # body lives on ``.fn``.
-        src = inspect.getsource(memory_extract_etl_worker.fn)
+        src = inspect.getsource(_run_extraction_worker_body)
         assert "for chunked in chunked_docs:" in src
-        assert "raws.append(await llm_extract_entities_task(chunked))" in src
+        assert "llm_extract_entities_task(chunked, opik_trace_headers=headers)" in src
         # The chunking task ① loop is now the bounded gather helper.
-        assert "_chunk_documents(docs)" in src
+        assert "_chunk_documents(" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1944,3 +1945,43 @@ class TestApplyWritesBulkBatching:
         )
         assert mentions_id in edge_ids
         assert summary.edges_written == len(edge_ids)
+
+
+# ---------------------------------------------------------------------------
+# Observability — cache-policy exclusion of opik_trace_headers
+# ---------------------------------------------------------------------------
+
+
+class TestTraceHeadersCacheExclusion:
+    """The ``opik_trace_headers`` parameter MUST be excluded from the cache key
+    of every cached task — otherwise a new run's headers bust the cache every
+    time, defeating the INPUTS cache on the expensive chunk / LLM / embed tasks
+    (the CRITICAL Prefect-caching concern in the monitoring fix)."""
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [
+            extract_chunks_and_structural_task,
+            llm_extract_entities_task,
+            embed_entities_task,
+        ],
+    )
+    def test_cache_policy_excludes_trace_headers(self, cached_task) -> None:
+        # The task's cache policy is ``INPUTS - "opik_trace_headers"`` — i.e. an
+        # ``Inputs`` policy whose exclude list contains the headers param.
+        policy = cached_task.cache_policy
+        assert "opik_trace_headers" in (policy.exclude or [])
+
+    def test_task_fn_accepts_trace_headers_kwarg(self) -> None:
+        # Every instrumented task body accepts the optional headers kwarg so the
+        # flow can thread it through without a Prefect parameter error.
+        import inspect
+
+        for fn in (
+            _extract_chunks_and_structural,
+            _llm_extract_entities,
+            _embed_entities,
+        ):
+            params = inspect.signature(fn).parameters
+            assert "opik_trace_headers" in params
+            assert params["opik_trace_headers"].default is None

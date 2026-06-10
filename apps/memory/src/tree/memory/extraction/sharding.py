@@ -169,6 +169,7 @@ async def _fan_out_extraction(
     user_id: PydanticObjectId,
     shards: list[list[str]],
     run_deployment: Any,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
     """Fan one worker dispatch out per shard, isolate failures, index ONCE.
 
@@ -188,6 +189,12 @@ async def _fan_out_extraction(
       never per-shard (indexing is a global backfill; per-shard would race
       writers). The index run fires regardless of how many shards failed, so a
       partial extraction is still indexed.
+
+    ``opik_trace_headers`` (the orchestrator's distributed-trace headers) is
+    forwarded to every worker AND the indexing run as a flow parameter, so the
+    whole orchestrated run renders as ONE Opik trace across the process hops that
+    ``run_deployment`` introduces. ``None`` (Opik off / no active trace) is
+    simply not forwarded — each child then starts its own trace.
     """
 
     log = _get_run_logger()
@@ -197,6 +204,10 @@ async def _fan_out_extraction(
         log.info("extraction fan-out: 0 shards — nothing to do (no-op)")
         return stats
 
+    worker_params: dict[str, Any] = {}
+    if opik_trace_headers is not None:
+        worker_params["opik_trace_headers"] = opik_trace_headers
+
     results = await asyncio.gather(
         *[
             run_deployment(
@@ -204,6 +215,7 @@ async def _fan_out_extraction(
                 parameters={
                     "user_id": str(user_id),
                     "document_ids": shard,
+                    **worker_params,
                 },
             )
             for shard in shards
@@ -235,7 +247,7 @@ async def _fan_out_extraction(
     log.info("extraction fan-out: triggering single memory-indexing-etl run")
     await run_deployment(
         _INDEXING_DEPLOYMENT,
-        parameters={"user_id": str(user_id)},
+        parameters={"user_id": str(user_id), **worker_params},
     )
 
     return stats

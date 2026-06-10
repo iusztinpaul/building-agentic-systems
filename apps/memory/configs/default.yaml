@@ -172,3 +172,24 @@ concurrency:
 mcp:
   max_retries: 1
   max_results: 10
+
+# Opik observability (monitoring only — cost breakdown + retrieval threads).
+# NO evals, NO datasets/experiments, NO guardrails. The hard on/off switch is
+# the presence of OPIK_API_KEY in .env; with no key the whole layer no-ops.
+observability:
+  enabled: true
+  # Per-model USD price per 1,000,000 tokens. Used to compute the manual
+  # total_cost on Voyage embedding spans (Opik does not natively cost Voyage).
+  # Verified against https://docs.voyageai.com/docs/pricing (June 2026).
+  # A model absent from this map yields total_cost=0 (usage still recorded).
+  embedding_price_per_1m_tokens:
+    voyage-3.5: 0.06
+    voyage-3: 0.06
+    voyage-3.5-lite: 0.02
+    voyage-3-large: 0.18
+    voyage-3-lite: 0.02
+    voyage-code-3: 0.18
+    voyage-finance-2: 0.12
+    voyage-law-2: 0.12
+    voyage-multimodal-3: 0.12
+    voyage-multimodal-3.5: 0.12

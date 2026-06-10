@@ -360,3 +360,68 @@ async def test_fan_out_all_worker_runs_precede_the_index_run(mocker) -> None:
     assert order.count("index") == 1
     assert order[-1] == "index"
     assert order[:-1] == ["worker"] * len(shards)
+
+
+# ---------------------------------------------------------------------------
+# Distributed-trace header forwarding (observability monitoring fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_fan_out_forwards_trace_headers_to_workers_and_index(mocker) -> None:
+    """When the orchestrator owns a trace, its headers are forwarded to every
+    worker AND the trailing indexing run, so the whole run is ONE Opik trace."""
+
+    user_id = PydanticObjectId()
+    shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(6)], 3)
+    headers = {"opik_trace_id": "t1", "opik_parent_span_id": "s1"}
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_extraction(
+        user_id=user_id,
+        shards=shards,
+        run_deployment=runner,
+        opik_trace_headers=headers,
+    )
+
+    worker_params = [p for name, p in calls if "worker" in name]
+    assert len(worker_params) == len(shards)
+    assert all(p["opik_trace_headers"] == headers for p in worker_params)
+    assert all(
+        set(p) == {"user_id", "document_ids", "opik_trace_headers"}
+        for p in worker_params
+    )
+
+    index_name, index_params = calls[-1]
+    assert "indexing" in index_name
+    assert index_params["opik_trace_headers"] == headers
+    assert index_params["user_id"] == str(user_id)
+
+
+async def test_fan_out_omits_headers_when_none(mocker) -> None:
+    """No active trace (Opik off) ⇒ no ``opik_trace_headers`` key on any child,
+    so the worker/indexing flow-run parameter validation stays exactly as before."""
+
+    user_id = PydanticObjectId()
+    shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(4)], 2)
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_extraction(
+        user_id=user_id,
+        shards=shards,
+        run_deployment=runner,
+        opik_trace_headers=None,
+    )
+
+    assert all("opik_trace_headers" not in p for _name, p in calls)

@@ -108,7 +108,14 @@ async def test_each_worker_carries_user_id_and_serialized_sources(mocker) -> Non
         assert params["user_id"] == str(_USER_ID)
         # Sources are plain JSON-safe dicts (carry the ``type`` discriminator).
         assert all(isinstance(s, dict) and "type" in s for s in params["sources"])
-        assert set(params) == {"user_id", "sources"}
+        # ``user_id`` + ``sources`` are always present. ``opik_trace_headers`` is
+        # forwarded only when Opik is active (a real OPIK_API_KEY in the env);
+        # it must be a JSON-safe dict when present so it round-trips as a
+        # Prefect flow-run parameter across the worker process hop.
+        assert {"user_id", "sources"} <= set(params)
+        assert set(params) <= {"user_id", "sources", "opik_trace_headers"}
+        if "opik_trace_headers" in params:
+            assert isinstance(params["opik_trace_headers"], dict)
 
 
 async def test_default_num_shards_dispatches_single_worker_with_all_sources(

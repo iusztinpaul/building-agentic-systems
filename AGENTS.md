@@ -252,15 +252,6 @@ The `make memory-serve-workflows` process must be running for pipeline triggers 
 
 Always use these Make commands instead of `prefect deployment run` directly, as the scripts stream all logs (including errors) back to the current process so you can debug without checking the Prefect UI.
 
-## Running Custom Commands for Project Level Dependencies
-
-Use `uv` to run any custom command that is not present in the @Makefile or @apps/memory/Makefile, but uses Python or other dependency installed through uv, usually available in @apps/memory/pyproject.toml.
-
-Run them from the repo root with `uv --directory apps/memory run ...`, or from `apps/memory/` with `uv run ...`. Examples:
-- Python: `uv --directory apps/memory run python ...`
-- Prefect: `uv --directory apps/memory run prefect ...`
-- Modal: `uv --directory apps/memory run modal ...`
-
 ## Running Custom Commands for Accessing Infrastructure and External Services 
 
 Always use the following CLIs installed directly on the system:
@@ -268,3 +259,14 @@ Always use the following CLIs installed directly on the system:
 - MongoDB: `mongosh` CLI for accessing the local MongoDB instance.
 - GitHub: `gh` CLI to interact with the remote GitHub repository this project is attached to (e.g., accessing PRs, issues or GitHub Actions)
 - Git: `git` CLI for generic Git operations.
+
+## Running Custom Commands for Project Level Dependencies
+
+Use `uv` to run any CLI that installed via the `uv` virutal environment, rather than as a binary on the host. Available in @apps/memory/pyproject.toml.
+
+Run them from the repo root with `uv --directory apps/memory run ...`, or from `apps/memory/` with `uv run ...`.
+
+- Python: `uv --directory apps/memory run python ...` to run any Python script or module
+- Prefect: `uv --directory apps/memory run prefect ...` to run any Prefect CLI command
+- Modal: `uv --directory apps/memory run modal ...` to run any Modal CLI command
+- Opik: `uv --directory apps/memory run opik ...` to run any Opik CLI command

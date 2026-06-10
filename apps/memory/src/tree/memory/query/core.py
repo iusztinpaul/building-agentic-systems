@@ -22,6 +22,7 @@ from pymongo import AsyncMongoClient
 from tree.config.app_config import app_config
 from tree.memory.types import QueryResult
 from tree.models.base import BaseEmbeddingModel
+from tree.observability import track
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ _KG_COLLECTION = "knowledge_graph"
 # ---------------------------------------------------------------------------
 
 
+@track(name="search_nodes")
 async def search_nodes(
     client: AsyncMongoClient,
     database: str,
@@ -71,6 +73,7 @@ async def search_nodes(
     return [item["doc"] for _, item in ranked]
 
 
+@track(name="_vector_search")
 async def _vector_search(
     collection: Any,
     query: str,
@@ -178,6 +181,7 @@ def _rrf_fuse(
 # ---------------------------------------------------------------------------
 
 
+@track(name="expand_graph")
 async def expand_graph(
     client: AsyncMongoClient,
     database: str,
@@ -290,6 +294,7 @@ async def expand_graph(
 # ---------------------------------------------------------------------------
 
 
+@track(name="query_memory")
 async def query_memory(
     client: AsyncMongoClient,
     database: str,

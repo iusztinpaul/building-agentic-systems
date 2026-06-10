@@ -29,12 +29,41 @@ from typing import Literal
 import aiohttp
 from prefect.concurrency.asyncio import rate_limit
 
+from tree.config.app_config import app_config
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.voyageai.com/v1/multimodalembeddings"
+
+
+def _record_voyage_cost(model: str, body: dict) -> None:
+    """Record Voyage multimodal usage + manual cost on the current Opik span.
+
+    Fully exception-safe. The multimodal response carries ``usage.total_tokens``
+    (text token count); cost is ``total_tokens × price_per_token`` from the YAML
+    price map. Models absent from the map record usage with ``total_cost=0``.
+    """
+
+    try:
+        usage = body.get("usage") or {}
+        total_tokens = usage.get("total_tokens")
+        cost = (
+            app_config.observability.cost_for(model, total_tokens)
+            if total_tokens is not None
+            else 0.0
+        )
+        record_embedding_usage(
+            provider="voyage",
+            model=model,
+            total_tokens=total_tokens,
+            total_cost=cost,
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break embed
+        logger.debug("Opik Voyage cost recording no-op: %s", exc)
+
 
 # The Prefect global concurrency limit (ADR-002 §1) that throttles every real
 # Voyage embed POST across separate flow runs. Acquired immediately before each
@@ -140,6 +169,7 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
     # Embedding
     # ------------------------------------------------------------------
 
+    @track(type="llm", name="voyage-multimodal-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed text strings via the Voyage multimodal API.
 
@@ -147,6 +177,9 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
         ``self._rate_limit_backoff_seconds``; fails fast on every other
         non-200 status. Raises ``ExtractionError`` when the backoff
         schedule is exhausted or any non-rate-limit failure occurs.
+
+        Wrapped in an Opik ``llm``-type span; on success records
+        ``usage.total_tokens`` and a manual ``total_cost`` (fail-open).
         """
 
         if not texts:
@@ -225,6 +258,7 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
                                 f"Voyage multimodal API returned unexpected response: {body}"
                             )
 
+                        _record_voyage_cost(self._model, body)
                         return [item["embedding"] for item in data]
             except ExtractionError:
                 raise

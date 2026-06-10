@@ -198,3 +198,54 @@ async def test_fan_out_no_shards_is_noop(mocker) -> None:
     assert stats == DataFanOutStats(shards_total=0)
     assert stats.succeeded == 0
     assert stats.failed == 0
+
+
+async def test_fan_out_data_forwards_trace_headers(mocker) -> None:
+    """When the data orchestrator owns a trace, its headers are forwarded to
+    every worker so the orchestrated run renders as ONE Opik trace."""
+
+    user_id = PydanticObjectId()
+    shards = _partition_into_shards(
+        [_shard(f"https://e{i}.example") for i in range(4)], 2
+    )
+    headers = {"opik_trace_id": "t1", "opik_parent_span_id": "s1"}
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_data(
+        user_id=user_id,
+        shards=shards,
+        run_deployment=runner,
+        opik_trace_headers=headers,
+    )
+
+    assert len(calls) == len(shards)
+    assert all(p["opik_trace_headers"] == headers for _name, p in calls)
+    assert all(
+        set(p) == {"user_id", "sources", "opik_trace_headers"} for _name, p in calls
+    )
+
+
+async def test_fan_out_data_omits_headers_when_none(mocker) -> None:
+    """No active trace ⇒ no ``opik_trace_headers`` key on any worker dispatch."""
+
+    user_id = PydanticObjectId()
+    shards = _partition_into_shards([_shard("https://e.example")], 1)
+
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        calls.append((name, parameters or {}))
+
+    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+    await _fan_out_data(
+        user_id=user_id, shards=shards, run_deployment=runner, opik_trace_headers=None
+    )
+
+    assert all("opik_trace_headers" not in p for _name, p in calls)

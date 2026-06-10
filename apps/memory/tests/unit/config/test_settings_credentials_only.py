@@ -93,6 +93,8 @@ class TestSettingsCredentialsOnlySurface:
         fields = set(module.Settings.model_fields.keys())
 
         # Assert — exactly the credential + infra fields, nothing else.
+        # Opik credentials (api key, workspace, project name) are infra/creds
+        # too — they belong here, not in the YAML behavior config.
         assert fields == {
             "mongo",
             "google_api_key",
@@ -101,6 +103,9 @@ class TestSettingsCredentialsOnlySurface:
             "brightdata_api_key",
             "brightdata_unlocker_zone",
             "brightdata_serp_zone",
+            "opik_api_key",
+            "opik_workspace",
+            "opik_project_name",
         }
 
 

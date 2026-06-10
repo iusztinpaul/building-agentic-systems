@@ -32,6 +32,7 @@ dependencies = [
     "fastmcp[apps]>=3.1.0",
     "youtube-transcript-api>=1.2.4",
     "rapidfuzz>=3",
+    "opik>=2.0.60",
 ]
 
 [tool.hatch.build.targets.wheel]

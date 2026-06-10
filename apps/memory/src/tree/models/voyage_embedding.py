@@ -46,12 +46,43 @@ from typing import Literal
 import aiohttp
 from prefect.concurrency.asyncio import rate_limit
 
+from tree.config.app_config import app_config
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.voyageai.com/v1/embeddings"
+
+
+def _record_voyage_cost(model: str, body: dict) -> None:
+    """Record Voyage embedding usage + manual cost on the current Opik span.
+
+    Fully exception-safe: a failure to read usage or look up the price map must
+    NEVER fail the embed call. The Voyage response carries
+    ``usage.total_tokens``; cost is ``total_tokens × price_per_token`` from the
+    YAML price map (Opik does not natively cost Voyage). Models absent from the
+    map record usage with ``total_cost=0``.
+    """
+
+    try:
+        usage = body.get("usage") or {}
+        total_tokens = usage.get("total_tokens")
+        cost = (
+            app_config.observability.cost_for(model, total_tokens)
+            if total_tokens is not None
+            else 0.0
+        )
+        record_embedding_usage(
+            provider="voyage",
+            model=model,
+            total_tokens=total_tokens,
+            total_cost=cost,
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break embed
+        logger.debug("Opik Voyage cost recording no-op: %s", exc)
+
 
 # The Prefect global concurrency limit (ADR-002 §1) that throttles every real
 # Voyage embed POST across separate flow runs. Acquired immediately before each
@@ -169,6 +200,7 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
     # Embedding
     # ------------------------------------------------------------------
 
+    @track(type="llm", name="voyage-text-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed text strings via the Voyage **text** embeddings API.
 
@@ -177,6 +209,10 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
         non-200 status. Raises ``ExtractionError`` (carrying ``status_code``)
         when the backoff schedule is exhausted or any non-rate-limit failure
         occurs.
+
+        Wrapped in an Opik ``llm``-type span. On success the response's
+        ``usage.total_tokens`` and a manual ``total_cost`` (from the YAML price
+        map) are recorded on the span; recording is fully fail-open.
         """
 
         if not texts:
@@ -252,6 +288,7 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
                                 f"unexpected response: {body}"
                             )
 
+                        _record_voyage_cost(self._model, body)
                         return [item["embedding"] for item in data]
             except ExtractionError:
                 raise

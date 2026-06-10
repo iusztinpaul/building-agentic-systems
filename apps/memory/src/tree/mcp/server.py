@@ -17,6 +17,7 @@ needs to change.
 
 import logging
 import os
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -32,6 +33,7 @@ from tree.memory.indexing.core import (
     ensure_indexes,
 )
 from tree.models.get_model import get_embedding_model, get_llm
+from tree.observability import configure_opik, flush_opik
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,9 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     index) surfaces at boot rather than at first vector query.
     """
 
+    # Configure Opik observability once at boot (no-op without OPIK_API_KEY).
+    configure_opik()
+
     database = settings.mongo.mongo_initdb_database
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
@@ -144,6 +149,13 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     )
     llm = get_llm()
     embedding_model = get_embedding_model()
+
+    # Server-instance thread id: one harness session = one long-lived MCP server
+    # process = one Opik thread. FastMCP's Context does not expose a stable
+    # per-session id we can rely on across tool calls, so retrieval tools group
+    # their traces under this UUID (mirrored onto the lifespan context). See the
+    # SWE report for the thread-identity decision.
+    thread_id = f"mcp-session-{uuid.uuid4()}"
 
     # ``_SERVER_USER_ID`` is normally pinned by ``serve_mcp.py`` before
     # ``mcp.run()`` ever fires the lifespan. If that didn't happen
@@ -162,7 +174,12 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     )
     await assert_settings_match_live_vector_index(client, database)
 
-    logger.info("MCP server ready (database=%s, user_id=%s)", database, user_id)
+    logger.info(
+        "MCP server ready (database=%s, user_id=%s, thread_id=%s)",
+        database,
+        user_id,
+        thread_id,
+    )
     try:
         yield {
             "client": client,
@@ -170,9 +187,12 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
             "llm": llm,
             "embedding_model": embedding_model,
             "user_id": user_id,
+            "thread_id": thread_id,
         }
     finally:
         await client.close()
+        # Flush batched Opik telemetry before the process exits (fail-open).
+        flush_opik()
         logger.info("MCP server shut down")
 
 

@@ -79,6 +79,21 @@ from tree.memory.types import (
     RawExtraction,
 )
 from tree.models.get_model import get_llm, get_search_embedding_model
+from tree.observability import (
+    TAGS_INGESTION_BATCH,
+    configure_opik,
+    flush_opik,
+    get_distributed_trace_headers,
+    pipeline_metadata,
+    span,
+    tracked_span,
+)
+
+# Four-tag family: dream consolidation writes into memory offline via Prefect =
+# ``["ingestion", "batch"]``. The former ``"dream-consolidation"`` /
+# ``"dream"`` pipeline-name tags are now span metadata.
+_DREAM_TAGS = TAGS_INGESTION_BATCH
+_DREAM_METADATA = pipeline_metadata("dream")
 
 if TYPE_CHECKING:
     from pymongo.asynchronous.database import AsyncDatabase
@@ -321,6 +336,7 @@ async def _iter_driving_nodes(
 # ---------------------------------------------------------------------------
 
 
+@tracked_span("_collect_dream_candidates", tags=_DREAM_TAGS)
 async def _collect_dream_candidates(
     *,
     database: AsyncDatabase,
@@ -328,6 +344,7 @@ async def _collect_dream_candidates(
     last_run_at: datetime,
     dedup_config: DeduplicationConfig,
     max_pairs: int,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> tuple[list[DreamPair], DreamStats]:
     """Run the two-set sweep and return the actionable pairs + stats.
 
@@ -713,6 +730,7 @@ async def dream_consolidation(
     user_id: PydanticObjectId,
     *,
     dry_run: bool | None = None,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> DreamReport:
     """Incremental dream-consolidation sweep for ``user_id``.
 
@@ -738,11 +756,42 @@ async def dream_consolidation(
             decisions and writes nothing (no merges, no SAME_AS, no watermark
             advance).
 
+    Observability: configures Opik at entry (subprocess-safe) and owns ONE
+    trace. ``opik_trace_headers`` is forwarded by the scheduled fan-out parent so
+    each per-user dream nests under the parent's trace; ``None`` (direct trigger)
+    starts a fresh trace. The sweep task span nests under this trace.
+
     Returns:
         A :class:`DreamReport` describing the run.
     """
 
+    configure_opik()
+    try:
+        with span(
+            "dream-consolidation",
+            tags=_DREAM_TAGS,
+            trace_headers=opik_trace_headers,
+            metadata=_DREAM_METADATA,
+        ):
+            return await _run_dream_body(user_id=user_id, dry_run=dry_run)
+    finally:
+        # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
+        flush_opik()
+
+
+async def _run_dream_body(
+    *,
+    user_id: PydanticObjectId,
+    dry_run: bool | None,
+) -> DreamReport:
+    """The dream-consolidation body, run inside the flow's root Opik span.
+
+    Grabs the run's distributed-trace headers once and threads them to the sweep
+    task so its span nests under the dream trace.
+    """
+
     log = _get_run_logger()
+    headers = get_distributed_trace_headers()
     app_cfg = _live_app_config()
     dream_cfg = app_cfg.dream
     effective_dry_run = dream_cfg.dry_run if dry_run is None else dry_run
@@ -782,6 +831,7 @@ async def dream_consolidation(
         last_run_at=last_run_at,
         dedup_config=dedup_config,
         max_pairs=dream_cfg.max_pairs,
+        opik_trace_headers=headers,
     )
 
     # --- Step 3: apply decisions ----------------------------------------------
@@ -905,6 +955,7 @@ async def _fan_out_dreams(
     user_ids: list[PydanticObjectId],
     dry_run: bool | None,
     runner: Any,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
     """Run ``runner(user_id=..., dry_run=...)`` once per user, isolating failures.
 
@@ -914,13 +965,20 @@ async def _fan_out_dreams(
     (:func:`dream_consolidation` in the flow; a fake in tests). A single
     user's exception is caught, logged, recorded in ``stats.failures``, and
     the loop continues — one tenant's failure must never abort the others.
+
+    ``opik_trace_headers`` (the parent flow's trace headers) is forwarded to
+    every per-user runner so each per-user dream nests under the parent's Opik
+    trace. ``None`` is simply not forwarded.
     """
 
     log = _get_run_logger()
     stats = FanOutStats(users_total=len(user_ids))
+    runner_kwargs: dict[str, Any] = {}
+    if opik_trace_headers is not None:
+        runner_kwargs["opik_trace_headers"] = opik_trace_headers
     for user_id in user_ids:
         try:
-            await runner(user_id=user_id, dry_run=dry_run)
+            await runner(user_id=user_id, dry_run=dry_run, **runner_kwargs)
         except Exception as exc:  # noqa: BLE001 — isolate one tenant's failure
             stats.failed += 1
             stats.failures[str(user_id)] = str(exc)
@@ -959,6 +1017,7 @@ async def dream_consolidation_all_users() -> FanOutStats:
     """
 
     log = _get_run_logger()
+    configure_opik()
     dream_cfg = _live_app_config().dream
 
     if not dream_cfg.enabled:
@@ -968,21 +1027,33 @@ async def dream_consolidation_all_users() -> FanOutStats:
         )
         return FanOutStats(enabled=False)
 
-    client = await init_mongodb(
-        settings.mongo.mongo_uri.get_secret_value(),
-        settings.mongo.mongo_initdb_database,
-    )
-    database = client[settings.mongo.mongo_initdb_database]
+    try:
+        with span(
+            "dream-consolidation-all-users",
+            tags=_DREAM_TAGS,
+            metadata=_DREAM_METADATA,
+        ):
+            headers = get_distributed_trace_headers()
+            client = await init_mongodb(
+                settings.mongo.mongo_uri.get_secret_value(),
+                settings.mongo.mongo_initdb_database,
+            )
+            database = client[settings.mongo.mongo_initdb_database]
 
-    user_ids = await _select_active_user_ids(database=database)
-    log.info(
-        "dream_consolidation_all_users: %d active user(s) to fan out (dry_run=%s)",
-        len(user_ids),
-        dream_cfg.dry_run,
-    )
+            user_ids = await _select_active_user_ids(database=database)
+            log.info(
+                "dream_consolidation_all_users: %d active user(s) to fan out "
+                "(dry_run=%s)",
+                len(user_ids),
+                dream_cfg.dry_run,
+            )
 
-    return await _fan_out_dreams(
-        user_ids=user_ids,
-        dry_run=dream_cfg.dry_run,
-        runner=dream_consolidation,
-    )
+            return await _fan_out_dreams(
+                user_ids=user_ids,
+                dry_run=dream_cfg.dry_run,
+                runner=dream_consolidation,
+                opik_trace_headers=headers,
+            )
+    finally:
+        # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
+        flush_opik()

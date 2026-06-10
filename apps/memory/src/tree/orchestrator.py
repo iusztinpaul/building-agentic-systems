@@ -33,6 +33,7 @@ from tree.memory.extraction.pipeline import (
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
+from tree.observability import configure_opik
 
 
 def serve_deployments(limit: int) -> None:
@@ -43,8 +44,13 @@ def serve_deployments(limit: int) -> None:
     ``limit`` parameter — admission control (ADR-002 §4) capping how many flow
     runs the server admits concurrently, kept close to ``concurrency.voyage_rpm``
     so we never admit far more runs than the shared embed budget can feed.
+
+    Configures Opik observability once at serve startup (no-op without
+    ``OPIK_API_KEY``) so pipeline task spans / cost are recorded across every
+    flow run this worker executes.
     """
 
+    configure_opik()
     serve(
         # Data ingestion orchestrator/worker split (#068 / ADR-002 §3 amended #066).
         # Operators trigger the ORCHESTRATOR; it reads the configured ``sources:``

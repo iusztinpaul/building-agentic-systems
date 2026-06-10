@@ -52,8 +52,35 @@ from tree.memory.review import (
     review_duplicate as _review_duplicate,
 )
 from tree.memory.types import QueryResult
+from tree.observability import (
+    TAGS_INGESTION_MCP,
+    TAGS_MCP,
+    TAGS_RETRIEVAL_MCP,
+    track,
+    update_current_trace,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _set_retrieval_thread(ctx: Context, tool: str) -> None:
+    """Group this tool's trace under the server-instance thread, fail-open.
+
+    Reads the lifespan ``thread_id`` (a server-instance UUID minted at boot —
+    one harness session = one thread) and tags the current Opik trace with it
+    plus ``user_id`` metadata. No-ops when Opik is unconfigured or the context
+    lacks a thread_id.
+    """
+
+    try:
+        lc = ctx.lifespan_context
+        update_current_trace(
+            thread_id=lc.get("thread_id"),
+            metadata={"user_id": str(lc.get("user_id")), "tool": tool},
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break the tool
+        logger.debug("Opik retrieval-thread tagging no-op: %s", exc)
+
 
 # dashboard_app: side-effect import — registers the Prefab interactive-tool
 # dashboard (memory_dashboard). Guarded: it needs the ``fastmcp[apps]`` extra
@@ -99,6 +126,7 @@ def _visualize(docs: list[dict[str, Any]]) -> str:
 
 
 @mcp.tool
+@track(tags=TAGS_RETRIEVAL_MCP, name="query_memory", create_duplicate_root_span=False)
 async def query_memory(
     query: str,
     ctx: Context,
@@ -117,6 +145,7 @@ async def query_memory(
         max_results: Maximum number of documents to return (default 10).
     """
 
+    _set_retrieval_thread(ctx, "query_memory")
     lc = ctx.lifespan_context
     results = await execute_nl_query(
         client=lc["client"],
@@ -136,6 +165,7 @@ async def query_memory(
 
 
 @mcp.tool
+@track(tags=TAGS_RETRIEVAL_MCP, name="search_memory", create_duplicate_root_span=False)
 async def search_memory(
     query: str,
     ctx: Context,
@@ -157,6 +187,7 @@ async def search_memory(
         visualize: If true, also render an interactive HTML graph visualization.
     """
 
+    _set_retrieval_thread(ctx, "search_memory")
     lc = ctx.lifespan_context
     result = await structured_query_memory(
         client=lc["client"],
@@ -179,6 +210,9 @@ async def search_memory(
 
 
 @mcp.tool
+@track(
+    tags=TAGS_RETRIEVAL_MCP, name="deep_search_memory", create_duplicate_root_span=False
+)
 async def deep_search_memory(
     query: str,
     ctx: Context,
@@ -202,6 +236,7 @@ async def deep_search_memory(
         session_id: Optional session identifier for the output directory.
     """
 
+    _set_retrieval_thread(ctx, "deep_search_memory")
     lc = ctx.lifespan_context
     result = await structured_query_memory(
         client=lc["client"],
@@ -227,6 +262,7 @@ async def deep_search_memory(
 
 
 @mcp.tool
+@track(tags=TAGS_INGESTION_MCP, name="ingest_url", create_duplicate_root_span=False)
 async def ingest_url(url: str, ctx: Context) -> str:
     """Fetch a web page and ingest its content into the knowledge graph.
 
@@ -270,6 +306,7 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
 
 @mcp.tool
+@track(tags=TAGS_INGESTION_MCP, name="ingest_file", create_duplicate_root_span=False)
 async def ingest_file(
     file_path: str,
     ctx: Context,
@@ -312,6 +349,7 @@ async def ingest_file(
 
 
 @mcp.tool
+@track(tags=TAGS_INGESTION_MCP, name="search_web", create_duplicate_root_span=False)
 async def search_web(
     query: str,
     ctx: Context,
@@ -457,6 +495,7 @@ async def _build_ingest_block(
 
 
 @mcp.tool
+@track(tags=TAGS_MCP, name="scrape_web", create_duplicate_root_span=False)
 async def scrape_web(
     urls: list[str],
     ctx: Context,
@@ -526,6 +565,11 @@ async def scrape_web(
 
 
 @mcp.tool
+@track(
+    tags=TAGS_INGESTION_MCP,
+    name="ingest_conversation",
+    create_duplicate_root_span=False,
+)
 async def ingest_conversation(
     conversation_text: str,
     ctx: Context,
@@ -641,6 +685,11 @@ def _serialize_review_result(r: Any) -> dict[str, Any]:
 
 
 @mcp.tool(name="review_list_pending")
+# Review tools are human-in-the-loop curation of the dedup queue, not user-facing
+# retrieval. Per the four-tag family they carry only ``mcp`` (no ``retrieval`` /
+# ``ingestion``) even though list reads and confirm/reject mutate the graph — the
+# curation surface is its own thing, kept off the read/write spend dashboards.
+@track(tags=TAGS_MCP, name="review_list_pending", create_duplicate_root_span=False)
 async def review_list_pending(
     ctx: Context,
     entity_type: str | None = None,
@@ -677,6 +726,7 @@ async def review_list_pending(
 
 
 @mcp.tool(name="review_confirm")
+@track(tags=TAGS_MCP, name="review_confirm", create_duplicate_root_span=False)
 async def review_confirm(
     source_node_id: str,
     target_node_id: str,
@@ -726,6 +776,7 @@ async def review_confirm(
 
 
 @mcp.tool(name="review_reject")
+@track(tags=TAGS_MCP, name="review_reject", create_duplicate_root_span=False)
 async def review_reject(
     source_node_id: str,
     target_node_id: str,

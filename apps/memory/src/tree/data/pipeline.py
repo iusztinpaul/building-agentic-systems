@@ -74,6 +74,20 @@ from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
+from tree.observability import (
+    TAGS_INGESTION_BATCH,
+    configure_opik,
+    flush_opik,
+    get_distributed_trace_headers,
+    pipeline_metadata,
+    span,
+    tracked_span,
+)
+
+# Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
+# former ``"data-pipeline"`` pipeline-name tag is now span metadata.
+_DATA_TAGS = TAGS_INGESTION_BATCH
+_DATA_METADATA = pipeline_metadata("data")
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +134,19 @@ def _coerce_sources(sources: list[Any]) -> list[SourceEntry]:
     return _SOURCES_ADAPTER.validate_python(sources)
 
 
+@tracked_span("_ingest_sources", tags=_DATA_TAGS)
 async def _ingest_sources(
-    sources: list[SourceEntry], user_id: PydanticObjectId
+    sources: list[SourceEntry],
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> list[Document]:
     """Ingest a list of typed source entries by grouping them by variant.
 
     Reuses the existing per-source-type batch logic, scoped to the entries handed in
     (a shard, or the full configured list). A variant absent from ``sources`` is
     skipped with a scoped "skipped: no X entries" log line.
+
+    ``opik_trace_headers`` attaches this task's span to the worker flow's trace.
     """
 
     all_ingested: list[Document] = []
@@ -234,6 +253,7 @@ async def _ingest_sources(
 async def data_etl_worker(
     user_id: PydanticObjectId,
     sources: list[Any],
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> list[Document]:
     """Ingest a SUBSET (shard) of the configured sources under ``user_id``.
 
@@ -248,36 +268,56 @@ async def data_etl_worker(
     orchestrator (Prefect JSON-serializes flow-run parameters); already-typed
     ``SourceEntry`` objects pass through unchanged. The shard is re-parsed to the
     typed discriminated union before grouping.
+
+    Observability: configures Opik at entry (subprocess-safe) and owns ONE trace.
+    ``opik_trace_headers`` is forwarded by the data orchestrator so the worker
+    nests under the orchestrator's trace; ``None`` (standalone trigger) starts a
+    fresh trace.
     """
 
-    client = await init_mongodb(
-        settings.mongo.mongo_uri.get_secret_value(),
-        settings.mongo.mongo_initdb_database,
-    )
-
-    # Boot-time gate: refuse to run if
-    # ``app_config.models.search_embedding.dimensions`` disagrees with the
-    # live Atlas Vector Search index. The data pipeline itself does not write
-    # vectors, but it produces the documents the indexing pipeline will embed —
-    # a silent dim drift here corrupts every downstream embedding write.
-    # ``vector_index not found`` is non-fatal at this layer (first-ever run,
-    # indexing hasn't bootstrapped the index yet) — only a real dim **mismatch**
-    # hard-fails.
+    configure_opik()
     try:
-        await assert_settings_match_live_vector_index(
-            client, settings.mongo.mongo_initdb_database
-        )
-    except RuntimeError as exc:
-        if "vector_index not found" in str(exc):
-            logger.info(
-                "vector_index not yet provisioned; skipping dim-check at "
-                "data_etl_worker boot. The indexing pipeline will bootstrap it."
+        with span(
+            "data-etl-worker",
+            tags=_DATA_TAGS,
+            trace_headers=opik_trace_headers,
+            metadata=_DATA_METADATA,
+        ):
+            client = await init_mongodb(
+                settings.mongo.mongo_uri.get_secret_value(),
+                settings.mongo.mongo_initdb_database,
             )
-        else:
-            raise
 
-    typed_sources = _coerce_sources(sources)
-    return await _ingest_sources(typed_sources, user_id)
+            # Boot-time gate: refuse to run if
+            # ``app_config.models.search_embedding.dimensions`` disagrees with
+            # the live Atlas Vector Search index. The data pipeline itself does
+            # not write vectors, but it produces the documents the indexing
+            # pipeline will embed — a silent dim drift here corrupts every
+            # downstream embedding write. ``vector_index not found`` is non-fatal
+            # at this layer (first-ever run, indexing hasn't bootstrapped the
+            # index yet) — only a real dim **mismatch** hard-fails.
+            try:
+                await assert_settings_match_live_vector_index(
+                    client, settings.mongo.mongo_initdb_database
+                )
+            except RuntimeError as exc:
+                if "vector_index not found" in str(exc):
+                    logger.info(
+                        "vector_index not yet provisioned; skipping dim-check at "
+                        "data_etl_worker boot. The indexing pipeline will "
+                        "bootstrap it."
+                    )
+                else:
+                    raise
+
+            headers = get_distributed_trace_headers()
+            typed_sources = _coerce_sources(sources)
+            return await _ingest_sources(
+                typed_sources, user_id, opik_trace_headers=headers
+            )
+    finally:
+        # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
+        flush_opik()
 
 
 # ---------------------------------------------------------------------------
@@ -306,30 +346,42 @@ async def data_etl_orchestrator(
     :class:`DataFanOutStats.failures`.
     """
 
-    effective_num_shards = _resolve_num_shards(num_shards)
+    # Configure Opik in this flow-run process and own ONE trace whose
+    # distributed headers are forwarded to every worker run, so the orchestrated
+    # data run renders as a single trace across ``run_deployment``'s process hop.
+    configure_opik()
+    try:
+        with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
+            effective_num_shards = _resolve_num_shards(num_shards)
 
-    sources = app_config.sources.sources
-    if not sources:
-        logger.info(
-            "data fan-out: no configured sources for user_id=%s — nothing to do "
-            "(no child runs, no index run)",
-            user_id,
-        )
-        return DataFanOutStats(shards_total=0)
+            sources = app_config.sources.sources
+            if not sources:
+                logger.info(
+                    "data fan-out: no configured sources for user_id=%s — nothing "
+                    "to do (no child runs, no index run)",
+                    user_id,
+                )
+                return DataFanOutStats(shards_total=0)
 
-    # Serialize each source entry to a JSON-safe dict so it round-trips through the
-    # ``run_deployment`` flow-run parameters. The worker re-parses to ``SourceEntry``.
-    serialized = [s.model_dump() for s in sources]
-    shards = _partition_into_shards(serialized, effective_num_shards)
-    logger.info(
-        "data fan-out: partitioned %d source(s) into %d shard(s) (num_shards=%d)",
-        len(sources),
-        len(shards),
-        effective_num_shards,
-    )
+            # Serialize each source entry to a JSON-safe dict so it round-trips
+            # through the ``run_deployment`` flow-run parameters. The worker
+            # re-parses to ``SourceEntry``.
+            serialized = [s.model_dump() for s in sources]
+            shards = _partition_into_shards(serialized, effective_num_shards)
+            logger.info(
+                "data fan-out: partitioned %d source(s) into %d shard(s) "
+                "(num_shards=%d)",
+                len(sources),
+                len(shards),
+                effective_num_shards,
+            )
 
-    return await _fan_out_data(
-        user_id=user_id,
-        shards=shards,
-        run_deployment=run_deployment,
-    )
+            headers = get_distributed_trace_headers()
+            return await _fan_out_data(
+                user_id=user_id,
+                shards=shards,
+                run_deployment=run_deployment,
+                opik_trace_headers=headers,
+            )
+    finally:
+        flush_opik()

@@ -12,8 +12,33 @@ from openai import AsyncOpenAI
 
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
+
+
+def _record_modal_usage(model: str, response: object) -> None:
+    """Record Modal/vLLM embedding token usage on the current Opik span.
+
+    Self-hosted, so ``total_cost=0`` — the user explicitly wants the token
+    counts logged even without a dollar cost. vLLM's OpenAI-compatible response
+    carries a ``usage`` object with ``total_tokens``; when it is absent the span
+    is recorded without usage. Fully exception-safe — telemetry must never break
+    the embed call.
+    """
+
+    try:
+        usage = getattr(response, "usage", None)
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        record_embedding_usage(
+            provider="modal",
+            model=model,
+            total_tokens=total_tokens,
+            total_cost=0.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never break embed
+        logger.debug("Opik Modal usage recording no-op: %s", exc)
+
 
 _DEFAULT_APP_NAME = "vllm-embedding-models"
 _DEFAULT_FUNCTION_NAME = "voyageai-voyage-4-nano"
@@ -176,8 +201,14 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
     # Embedding
     # ------------------------------------------------------------------
 
+    @track(type="llm", name="modal-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts via the Modal-hosted vLLM server."""
+        """Embed texts via the Modal-hosted vLLM server.
+
+        Wrapped in an Opik ``llm``-type span; on success the vLLM ``usage``
+        token counts are recorded with ``total_cost=0`` (self-hosted). Recording
+        is fully fail-open.
+        """
 
         await self._ensure_initialised()
         assert self._client is not None  # guaranteed by _ensure_initialised
@@ -194,4 +225,5 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         except Exception as exc:
             raise ExtractionError(f"Embedding call failed: {exc}") from exc
 
+        _record_modal_usage(self._model_name, response)
         return [item.embedding for item in response.data]

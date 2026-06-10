@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     brightdata_api_key: SecretStr = SecretStr("")
     brightdata_unlocker_zone: str = ""
     brightdata_serp_zone: str = ""
+    # Opik observability (monitoring only). All optional: with no
+    # ``opik_api_key`` the observability layer no-ops cleanly (decorators
+    # inert, nothing breaks). ``opik_workspace`` is optional (defaults to the
+    # API key's default workspace); ``opik_project_name`` defaults to
+    # ``"tree-memory"``.
+    opik_api_key: SecretStr = SecretStr("")
+    opik_workspace: str = ""
+    opik_project_name: str = "tree-memory"
 
 
 settings = Settings()

@@ -15,6 +15,29 @@ from tree.models.exceptions import PipelineValidationError
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
+def _spy_spans(mocker) -> list[str]:
+    """Patch ``nl_query.span`` with a no-op CM that records the span names it
+    opens. Returns the list the test asserts against.
+
+    The real :func:`tree.observability.span` is a fail-open context manager;
+    here we replace it with an inert one so the instrumentation points
+    (``build_system_prompt`` / ``embed_query_vector`` / ``execute_aggregation``)
+    can be asserted without a live Opik backend.
+    """
+
+    import contextlib
+
+    names: list[str] = []
+
+    @contextlib.contextmanager
+    def _recording_span(name: str, **kwargs):
+        names.append(name)
+        yield
+
+    mocker.patch("tree.memory.query.nl_query.span", _recording_span)
+    return names
+
+
 class TestValidatePipeline:
     def test_allowed_stages_pass(self):
         pipeline = [
@@ -428,6 +451,43 @@ class TestReplaceEmbeddingPlaceholder:
         assert result == pipeline
         mock_model.embed.assert_not_called()
 
+    async def test_opens_embed_span_when_placeholder_present(self, mocker):
+        # Arrange — a $vectorSearch placeholder means an embedding call happens,
+        # so it must run inside the named ``embed_query_vector`` span (under
+        # which the embedding model's own usage/cost span nests).
+        spans = _spy_spans(mocker)
+        mock_model = mocker.AsyncMock()
+        mock_model.embed.return_value = [[0.1, 0.2]]
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "queryVector": "__EMBED__",
+                    "queryText": "semantic",
+                    "limit": 10,
+                }
+            },
+            {"$limit": 10},
+        ]
+
+        # Act
+        await _replace_embedding_placeholder(pipeline, mock_model)
+
+        # Assert
+        assert "embed_query_vector" in spans
+
+    async def test_no_embed_span_when_no_placeholder(self, mocker):
+        # Arrange — no embedding call → no empty embed node cluttering the trace.
+        spans = _spy_spans(mocker)
+        mock_model = mocker.AsyncMock()
+        pipeline = [{"$match": {"kind": "node"}}, {"$limit": 10}]
+
+        # Act
+        await _replace_embedding_placeholder(pipeline, mock_model)
+
+        # Assert
+        assert "embed_query_vector" not in spans
+        mock_model.embed.assert_not_called()
+
     async def test_missing_query_text_raises(self, mocker):
         mock_model = mocker.AsyncMock()
 
@@ -511,6 +571,19 @@ class TestNlToPipeline:
 
         assert any("$match" in s for s in result)
 
+    async def test_opens_build_system_prompt_span(self, mocker):
+        # Arrange — the ontology-schema assembly is its own named span so its
+        # cost is visible separately from the LLM latency in the NL-query trace.
+        spans = _spy_spans(mocker)
+        mock_llm = mocker.AsyncMock()
+        mock_llm.generate_json.return_value = {"pipeline": [{"$match": {}}]}
+
+        # Act
+        await nl_to_pipeline(mock_llm, "find nodes")
+
+        # Assert
+        assert "build_system_prompt" in spans
+
 
 class _AsyncCursorStub:
     """Minimal async iterator that yields documents from a list."""
@@ -575,6 +648,27 @@ class TestExecuteNlQuery:
         assert len(results) == 1
         assert results[0]["_id"] == "person:alice"
         mock_deps["collection"].aggregate.assert_called_once()
+
+    async def test_opens_execute_aggregation_span(self, mock_deps, mocker):
+        # Arrange — the Mongo aggregation runs inside a named span so its
+        # latency is visible separately from the LLM / embedding spans.
+        spans = _spy_spans(mocker)
+        mock_deps["llm"].generate_json.return_value = {
+            "pipeline": [{"$match": {"kind": "node"}}, {"$limit": 10}]
+        }
+
+        # Act
+        await execute_nl_query(
+            client=mock_deps["client"],
+            database=mock_deps["database"],
+            query="find all people",
+            llm=mock_deps["llm"],
+            embedding_model=mock_deps["embedding_model"],
+            user_id=_USER_ID,
+        )
+
+        # Assert
+        assert "execute_aggregation" in spans
 
     async def test_retries_on_validation_error(self, mock_deps):
         mock_deps["llm"].generate_json.side_effect = [

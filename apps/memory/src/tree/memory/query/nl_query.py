@@ -13,6 +13,7 @@ from tree.entities.knowledge_graph import EdgeType, NodeType
 from tree.entities.ontology import EDGE_CONSTRAINTS, NODE_PROPERTIES
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.exceptions import PipelineValidationError
+from tree.observability import span, track
 
 logger = logging.getLogger(__name__)
 
@@ -392,24 +393,41 @@ async def _replace_embedding_placeholder(
     pipeline: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
 ) -> list[dict[str, Any]]:
-    """Replace the ``__EMBED__`` placeholder with the actual embedding vector."""
+    """Replace the ``__EMBED__`` placeholder with the actual embedding vector.
 
-    for stage in pipeline:
-        if "$vectorSearch" not in stage:
-            continue
+    When the LLM emitted a ``$vectorSearch`` stage, the query text is embedded
+    here inside an ``embed_query_vector`` span so the embedding model's own
+    ``llm``-type span (Voyage usage + cost, or Modal usage) nests as a named
+    child of the NL-query trace. Pipelines with no ``$vectorSearch`` stage open
+    no span (no embedding call happens), so a pure text/graph query isn't
+    cluttered with an empty embed node.
+    """
 
-        vs = stage["$vectorSearch"]
-        if vs.get("queryVector") != _EMBED_PLACEHOLDER:
-            continue
+    needs_embedding = any(
+        "$vectorSearch" in stage
+        and stage["$vectorSearch"].get("queryVector") == _EMBED_PLACEHOLDER
+        for stage in pipeline
+    )
+    if not needs_embedding:
+        return pipeline
 
-        query_text = vs.pop("queryText", None)
-        if not query_text:
-            raise PipelineValidationError(
-                "$vectorSearch has __EMBED__ placeholder but no queryText field"
-            )
+    with span("embed_query_vector"):
+        for stage in pipeline:
+            if "$vectorSearch" not in stage:
+                continue
 
-        vectors = await embedding_model.embed([query_text])
-        vs["queryVector"] = vectors[0]
+            vs = stage["$vectorSearch"]
+            if vs.get("queryVector") != _EMBED_PLACEHOLDER:
+                continue
+
+            query_text = vs.pop("queryText", None)
+            if not query_text:
+                raise PipelineValidationError(
+                    "$vectorSearch has __EMBED__ placeholder but no queryText field"
+                )
+
+            vectors = await embedding_model.embed([query_text])
+            vs["queryVector"] = vectors[0]
 
     return pipeline
 
@@ -419,13 +437,26 @@ async def _replace_embedding_placeholder(
 # ---------------------------------------------------------------------------
 
 
+@track(name="nl_to_pipeline")
 async def nl_to_pipeline(
     llm: BaseLLM,
     query: str,
 ) -> list[dict[str, Any]]:
-    """Translate a natural language query to a MongoDB aggregation pipeline."""
+    """Translate a natural language query to a MongoDB aggregation pipeline.
 
-    system_prompt = build_nl_query_system_prompt()
+    Wrapped in an Opik ``nl_to_pipeline`` span so the headline NL→aggregation
+    LLM call nests as a named child of the ``query_memory`` tool trace. The
+    Gemini ``generate_content`` call below runs through the
+    ``track_genai``-wrapped client (see :class:`tree.models.gemini.GeminiLLM`),
+    so a nested ``llm``-type span with native Gemini token usage + cost attaches
+    under THIS span — that is where Paul sees the NL-translation spend. The
+    system-prompt build is its own short ``build_system_prompt`` span so the
+    (cheap but non-trivial) ontology-schema assembly is visible separately from
+    the model latency.
+    """
+
+    with span("build_system_prompt"):
+        system_prompt = build_nl_query_system_prompt()
     result = await llm.generate_json(query, system=system_prompt)
 
     pipeline = result.get("pipeline")
@@ -442,6 +473,7 @@ async def nl_to_pipeline(
 # ---------------------------------------------------------------------------
 
 
+@track(name="execute_nl_query")
 async def execute_nl_query(
     client: AsyncMongoClient,
     database: str,
@@ -478,10 +510,11 @@ async def execute_nl_query(
                 json.dumps(pipeline, default=str),
             )
 
-            cursor = await collection.aggregate(pipeline, maxTimeMS=10_000)
-            results: list[dict[str, Any]] = []
-            async for doc in cursor:
-                results.append(doc)
+            with span("execute_aggregation"):
+                cursor = await collection.aggregate(pipeline, maxTimeMS=10_000)
+                results: list[dict[str, Any]] = []
+                async for doc in cursor:
+                    results.append(doc)
 
             logger.info("NL query returned %d documents", len(results))
             return results

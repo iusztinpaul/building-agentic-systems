@@ -4,6 +4,7 @@ from sentence_transformers import SentenceTransformer
 
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError
+from tree.observability import track
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class SentenceTransformerEmbeddingModel(BaseEmbeddingModel):
             return self._dimensions
         return int(self._model.get_sentence_embedding_dimension())
 
+    @track(name="sentence-transformer-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []

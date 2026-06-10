@@ -248,6 +248,53 @@ class QueryConfig(BaseModel):
     embedding_batch_size: int = 64
 
 
+class ObservabilityConfig(BaseModel):
+    """Opik observability tuning (monitoring only — cost + retrieval threads).
+
+    * ``enabled`` — master flag for the YAML side of observability. The actual
+      no-op gate is the absence of ``OPIK_API_KEY`` (see
+      :mod:`tree.observability`); this flag is the operator's documented YAML
+      switch.
+    * ``embedding_price_per_1m_tokens`` — per-model USD price per 1,000,000
+      tokens, used to compute the manual ``total_cost`` on Voyage embedding
+      spans (Opik does not natively cost Voyage). Prices verified against
+      https://docs.voyageai.com/docs/pricing (June 2026): voyage-3.5 $0.06,
+      voyage-3 $0.06, voyage-3.5-lite $0.02, voyage-3-large $0.18,
+      voyage-3-lite $0.02, voyage-code-3 $0.18, voyage-multimodal-3 $0.12,
+      voyage-finance-2 $0.12, voyage-law-2 $0.12. A model absent from the map
+      yields ``total_cost=0`` (token usage is still recorded) rather than an
+      error — telemetry is fail-open.
+    """
+
+    enabled: bool = True
+    embedding_price_per_1m_tokens: dict[str, float] = Field(
+        default_factory=lambda: {
+            "voyage-3.5": 0.06,
+            "voyage-3": 0.06,
+            "voyage-3.5-lite": 0.02,
+            "voyage-3-large": 0.18,
+            "voyage-3-lite": 0.02,
+            "voyage-code-3": 0.18,
+            "voyage-finance-2": 0.12,
+            "voyage-law-2": 0.12,
+            "voyage-multimodal-3": 0.12,
+            "voyage-multimodal-3.5": 0.12,
+        }
+    )
+
+    def cost_for(self, model: str, total_tokens: int) -> float:
+        """USD cost for ``total_tokens`` of ``model``.
+
+        Returns ``0.0`` when the model is not in the price map (self-hosted or
+        unknown) — the span still carries token usage, just no cost.
+        """
+
+        price_per_1m = self.embedding_price_per_1m_tokens.get(model)
+        if price_per_1m is None:
+            return 0.0
+        return (total_tokens / 1_000_000) * price_per_1m
+
+
 # --- Source variants (discriminated union) ---
 
 
@@ -465,6 +512,7 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = MCPConfig()
     dream: DreamConfig = DreamConfig()
     concurrency: ConcurrencyConfig = ConcurrencyConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}

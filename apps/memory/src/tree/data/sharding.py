@@ -120,6 +120,7 @@ async def _fan_out_data(
     user_id: PydanticObjectId,
     shards: list[list[dict[str, Any]]],
     run_deployment: Any,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> DataFanOutStats:
     """Fan one worker dispatch out per shard, isolate failures, NO trailing step.
 
@@ -137,6 +138,11 @@ async def _fan_out_data(
     * NO trailing/index run — the data pipeline only produces ``documents``;
       there is no index. This function fires EXACTLY ``len(shards)`` worker runs
       and nothing else.
+
+    ``opik_trace_headers`` (the orchestrator's distributed-trace headers) is
+    forwarded to every worker as a flow parameter so the orchestrated data run
+    renders as ONE Opik trace across ``run_deployment``'s process hop. ``None``
+    is simply not forwarded — each worker then starts its own trace.
     """
 
     log = _get_run_logger()
@@ -146,6 +152,10 @@ async def _fan_out_data(
         log.info("data fan-out: 0 shards — nothing to do (no-op)")
         return stats
 
+    worker_params: dict[str, Any] = {}
+    if opik_trace_headers is not None:
+        worker_params["opik_trace_headers"] = opik_trace_headers
+
     results = await asyncio.gather(
         *[
             run_deployment(
@@ -153,6 +163,7 @@ async def _fan_out_data(
                 parameters={
                     "user_id": str(user_id),
                     "sources": shard,
+                    **worker_params,
                 },
             )
             for shard in shards
