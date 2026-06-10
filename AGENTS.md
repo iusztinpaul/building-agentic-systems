@@ -256,9 +256,9 @@ Always use these Make commands instead of `prefect deployment run` directly, as 
 
 Always use the following CLIs installed directly on the system:
 
-- MongoDB: `mongosh` CLI for accessing the local MongoDB instance.
+- MongoDB: `mongosh` CLI for accessing any MongoDB instance.
 - GitHub: `gh` CLI to interact with the remote GitHub repository this project is attached to (e.g., accessing PRs, issues or GitHub Actions)
-- Git: `git` CLI for generic Git operations.
+- Git: `git` CLI for any Git operations.
 
 ## Running Custom Commands for Project Level Dependencies
 

@@ -1,8 +1,16 @@
-ifeq (,$(wildcard ../../.env))
-$(error Root .env file is missing. From the repo root run: "cp .env.example .env" and fill in GOOGLE_API_KEY.)
+# Env-target switch (mirrors root Makefile): .env.target == "prod" selects ../../.env.prod, otherwise ../../.env.
+ENV_TARGET := $(strip $(shell cat ../../.env.target 2>/dev/null))
+ifeq ($(ENV_TARGET),prod)
+ENV_FILE := ../../.env.prod
+else
+ENV_FILE := ../../.env
 endif
 
-include ../../.env
+ifeq (,$(wildcard $(ENV_FILE)))
+$(error Root $(notdir $(ENV_FILE)) file is missing. From the repo root run: "cp .env.example $(notdir $(ENV_FILE))" and fill in GOOGLE_API_KEY.)
+endif
+
+include $(ENV_FILE)
 export
 
 .PHONY: help install dev run typecheck tests unit-tests integration-tests test-watch format-fix format-check lint-check lint-fix build clean

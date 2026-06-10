@@ -116,7 +116,9 @@ services:
     # `environment:` block below overrides Mongo/Prefect connection params
     # so they stay container-aware (service hostnames, not localhost).
     env_file:
-      - .env
+      # ENV_FILE follows the .env.target switch (set by make); defaults to .env
+      # for bare `docker compose` invocations (e.g. CI).
+      - ${ENV_FILE:-.env}
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
       MONGO_HOST: mongodb

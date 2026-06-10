@@ -32,7 +32,7 @@ This is a monorepo. Each app owns its own build files; cross-app concerns stay a
 - [Bun](https://bun.sh/) ≥ 1.1 — runtime for the harness (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
 - [Docker](https://www.docker.com/) and Docker Compose
 - [GNU Make](https://www.gnu.org/software/make/)
-- [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/)
+- [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/) — shell for interacting with MongoDB (`brew install mongosh`)
 - A [Google AI API key](https://aistudio.google.com/apikey) (Gemini, used by both apps)
 
 **Optional**
@@ -57,6 +57,28 @@ make memory-build
 # Harness (TypeScript)
 make harness-install
 ```
+
+## Infrastructure
+
+### Environment loading with direnv
+
+The shared `.env` is the single source of truth for secrets and infra settings. The Makefiles load it on their own, but agent CLIs (Claude Code, the harness) and bare commands (`uv run pytest`) only see it if the shell exports it. We use [direnv](https://direnv.net/) for that: it auto-exports `.env` into any shell that enters the repo (and unloads it on exit), so every tool launched from here — including MCP servers spawned by agents — inherits the full environment.
+
+One-time setup:
+
+```bash
+brew install direnv
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc   # adjust for your shell
+cp .envrc.example .envrc && direnv allow
+```
+
+`.envrc` is gitignored; re-run `direnv allow` whenever it changes.
+
+### MongoDB Atlas (remote) via the MongoDB MCP server
+
+The MongoDB MCP server manages the remote Atlas environment (clusters, DB users, access lists) through the Atlas Admin API. It authenticates with an [Atlas service account](https://www.mongodb.com/docs/mcp-server/prerequisites/): in the Atlas UI, select your organization → **Identity & Access** → **Applications** → **Add new** → **Service Account** (grant Project Owner on the target project), copy the Client ID/Secret, and add your IP to the service account's **API Access List**.
+
+Put the credentials in `.env` as `MDB_MCP_API_CLIENT_ID` / `MDB_MCP_API_CLIENT_SECRET` (see `.env.example`); direnv exposes them to the MCP server. Launch your MCP client from a terminal inside the repo so it inherits them.
 
 ## End-to-end quick start
 
