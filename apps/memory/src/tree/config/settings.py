@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 from pydantic import SecretStr, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,6 +10,10 @@ _env_file = os.environ.get("ENV_FILE_PATH", ".env")
 class MongoSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", env_file=_env_file, extra="ignore")
 
+    # "mongodb" targets the local single-node replica set; "mongodb+srv"
+    # targets an Atlas cluster (TLS implied, MONGO_PORT ignored — SRV URIs
+    # forbid ports and directConnection).
+    mongo_scheme: Literal["mongodb", "mongodb+srv"] = "mongodb"
     mongo_host: str = "localhost"
     mongo_port: int = 27017
     mongo_initdb_root_username: str = "tree"
@@ -19,9 +24,15 @@ class MongoSettings(BaseSettings):
     @computed_field
     @property
     def mongo_uri(self) -> SecretStr:
+        username = self.mongo_initdb_root_username
+        password = self.mongo_initdb_root_password.get_secret_value()
+        if self.mongo_scheme == "mongodb+srv":
+            return SecretStr(
+                f"mongodb+srv://{username}:{password}@{self.mongo_host}"
+                f"/?retryWrites=true&w=majority"
+            )
         return SecretStr(
-            f"mongodb://{self.mongo_initdb_root_username}:"
-            f"{self.mongo_initdb_root_password.get_secret_value()}"
+            f"mongodb://{username}:{password}"
             f"@{self.mongo_host}:{self.mongo_port}"
             f"/?directConnection=true&authSource=admin"
         )

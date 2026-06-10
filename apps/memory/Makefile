@@ -109,6 +109,9 @@ lint-check: # Check code for linting issues without fixing them using ruff linte
 local-test: # Validate MongoDB setup (text, vector, graph search).
 	uv run python scripts/test_mongodb_setup.py
 
+check-db: # Read-only connectivity check against the configured MongoDB target (follows .env.target). Pings, lists databases + collection counts; exits non-zero on failure.
+	uv run python scripts/check_db.py
+
 
 # --- Deployment ---
 
