@@ -1,6 +1,8 @@
 """Embedding model that calls the Voyage AI multimodal embeddings API.
 
-Uses ``aiohttp`` to call ``POST https://api.voyageai.com/v1/multimodalembeddings``
+Uses ``aiohttp`` to call ``POST https://ai.mongodb.com/v1/multimodalembeddings``
+(the Atlas-hosted Voyage API — Atlas-issued ``al-`` model keys ONLY
+authenticate against ``ai.mongodb.com``, not the legacy ``api.voyageai.com``)
 directly, wrapping text inputs as multimodal content. Image support can be
 added later by extending the ``embed`` method or adding an ``embed_multimodal``
 method.
@@ -36,7 +38,7 @@ from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
 
-_API_URL = "https://api.voyageai.com/v1/multimodalembeddings"
+_API_URL = "https://ai.mongodb.com/v1/multimodalembeddings"
 
 
 def _record_voyage_cost(model: str, body: dict) -> None:

@@ -1,8 +1,10 @@
 """Embedding model that calls the Voyage AI **text** embeddings API.
 
-Uses ``aiohttp`` to call ``POST https://api.voyageai.com/v1/embeddings`` for
-text-only embedding models such as ``voyage-3``, ``voyage-3.5``,
-``voyage-3-lite``, ``voyage-code-3``, etc.
+Uses ``aiohttp`` to call ``POST https://ai.mongodb.com/v1/embeddings`` (the
+Atlas-hosted Voyage Embedding API — Atlas-issued ``al-`` model keys ONLY
+authenticate against ``ai.mongodb.com``, not the legacy
+``api.voyageai.com``) for text-only embedding models such as ``voyage-3``,
+``voyage-3.5``, ``voyage-3-lite``, ``voyage-code-3``, etc.
 
 Distinct from
 :class:`tree.models.voyage_multimodal_embedding.VoyageMultimodalEmbeddingModel`,
@@ -53,7 +55,7 @@ from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
 
-_API_URL = "https://api.voyageai.com/v1/embeddings"
+_API_URL = "https://ai.mongodb.com/v1/embeddings"
 
 
 def _record_voyage_cost(model: str, body: dict) -> None:

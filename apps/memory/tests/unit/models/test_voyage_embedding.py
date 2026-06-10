@@ -143,7 +143,7 @@ class TestVoyageTextEmbed:
         url = call_kwargs.args[0] if call_kwargs.args else call_kwargs.kwargs.get("url")
         payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
 
-        assert url == "https://api.voyageai.com/v1/embeddings"
+        assert url == "https://ai.mongodb.com/v1/embeddings"
         assert payload["model"] == "voyage-3.5"
         assert payload["input"] == ["hello"]
         assert "inputs" not in payload  # not the multimodal shape
