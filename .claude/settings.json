@@ -6,20 +6,6 @@
     ]
   },
   "enabledMcpjsonServers": ["tree-memory"],
-  "hooks": {
-    // "Stop": [
-    //   {
-    //     "hooks": [
-    //       {
-    //         "type": "command",
-    //         "command": "SESSION_ID=$(jq -r '.session_id // empty'); COUNTER_FILE=\"/tmp/.claude-twin-turns-${SESSION_ID}\"; COUNT=0; if [ -f \"$COUNTER_FILE\" ]; then COUNT=$(cat \"$COUNTER_FILE\"); fi; COUNT=$((COUNT + 1)); echo \"$COUNT\" > \"$COUNTER_FILE\"; if [ $((COUNT % 10)) -eq 0 ]; then echo '{\"decision\":\"block\",\"reason\":\"10 turns reached — please run: /twin-memory extract current conversation (use a background agent)\"}'; else echo '{}'; fi",
-    //         "timeout": 5,
-    //         "statusMessage": "Checking twin memory ingestion..."
-    //       }
-    //     ]
-    //   }
-    // ]
-  },
   "enabledPlugins": {
     "context7@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
