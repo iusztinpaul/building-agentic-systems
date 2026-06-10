@@ -82,6 +82,9 @@ services:
       - ./docker/mongot/passwordFile:/etc/mongot/secrets/passwordFile:ro
 
   prefect-server:
+    # Local-only: in prod the Prefect API is Prefect Cloud, so this service is
+    # gated behind the ``local`` profile and never starts under ``make env-prod``.
+    profiles: ["local"]
     image: prefecthq/prefect:3-latest
     container_name: tree-prefect-server
     ports:
@@ -111,6 +114,10 @@ services:
     depends_on:
       prefect-server:
         condition: service_healthy
+        # Local-only dependency: under ``make env-prod`` the ``local`` profile is
+        # off so this service never starts — ``required: false`` skips it instead
+        # of erroring. In prod the worker talks to Prefect Cloud directly.
+        required: false
       mongodb:
         condition: service_healthy
     # `environment:` block below overrides Mongo/Prefect connection params
@@ -120,7 +127,11 @@ services:
       # for bare `docker compose` invocations (e.g. CI).
       - ${ENV_FILE:-.env}
     environment:
-      PREFECT_API_URL: http://prefect-server:4200/api
+      # Local: the in-compose server is reached by service hostname (not the
+      # 127.0.0.1 the host uses). Prod: ``.env.prod`` sets PREFECT_API_URL_WORKER
+      # to the Prefect Cloud workspace URL, which resolves from inside the
+      # container too. Falls back to the local server when unset.
+      PREFECT_API_URL: ${PREFECT_API_URL_WORKER:-http://prefect-server:4200/api}
       MONGO_HOST: mongodb
       MONGO_PORT: 27017
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}

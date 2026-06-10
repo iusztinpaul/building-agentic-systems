@@ -22,18 +22,25 @@ Usage:
 from prefect import serve
 
 from tree.config.app_config import app_config
-from tree.data.conversation_pipeline import ingest_conversation
-from tree.data.file_pipeline import ingest_file
 from tree.data.pipeline import data_etl_orchestrator, data_etl_worker
-from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
-from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
-from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_orchestrator,
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.observability import configure_opik
+
+# --- [Prefect Cloud free-tier cap: 5 deployments] --------------------------
+# The free tier allows only 5 deployments per workspace, so the five flows
+# below are temporarily not served. Re-enable (uncomment these imports AND the
+# matching ``.to_deployment(...)`` blocks in ``serve_deployments``) once the
+# Cloud plan is upgraded.
+# from tree.data.conversation_pipeline import ingest_conversation
+# from tree.data.file_pipeline import ingest_file
+# from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
+# from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
+# from tree.memory.consolidation.dream import dream_consolidation_all_users
+# ---------------------------------------------------------------------------
 
 
 def serve_deployments(limit: int) -> None:
@@ -89,30 +96,35 @@ def serve_deployments(limit: int) -> None:
             name="memory-indexing-etl",
             tags=["memory-pipeline", "indexing"],
         ),
-        ingest_file.to_deployment(
-            name="ingest-file-etl",
-            tags=["data-pipeline", "file"],
-        ),
-        ingest_conversation.to_deployment(
-            name="ingest-conversation-etl",
-            tags=["data-pipeline", "conversation"],
-        ),
-        ingest_youtube_video_batch.to_deployment(
-            name="ingest-youtube-video-batch-etl",
-            tags=["data-pipeline", "youtube"],
-        ),
-        ingest_youtube_rss_feed_batch.to_deployment(
-            name="ingest-youtube-rss-feed-batch-etl",
-            tags=["data-pipeline", "youtube"],
-        ),
+        # --- [Prefect Cloud free-tier cap: 5 deployments] ------------------
+        # The five deployments below exceed the free tier's 5-deployment
+        # ceiling and are temporarily disabled. Re-enable them (and the
+        # matching imports above) once the Cloud plan is upgraded.
+        # ingest_file.to_deployment(
+        #     name="ingest-file-etl",
+        #     tags=["data-pipeline", "file"],
+        # ),
+        # ingest_conversation.to_deployment(
+        #     name="ingest-conversation-etl",
+        #     tags=["data-pipeline", "conversation"],
+        # ),
+        # ingest_youtube_video_batch.to_deployment(
+        #     name="ingest-youtube-video-batch-etl",
+        #     tags=["data-pipeline", "youtube"],
+        # ),
+        # ingest_youtube_rss_feed_batch.to_deployment(
+        #     name="ingest-youtube-rss-feed-batch-etl",
+        #     tags=["data-pipeline", "youtube"],
+        # ),
         # Scheduled dream-consolidation fan-out: one cron, fans out one
         # per-user dream run across every active user (#052). The parent
         # flow takes no ``user_id`` — it enumerates active users itself.
-        dream_consolidation_all_users.to_deployment(
-            name="dream-consolidation-etl",
-            cron=app_config.dream.cron,
-            tags=["dream"],
-        ),
+        # dream_consolidation_all_users.to_deployment(
+        #     name="dream-consolidation-etl",
+        #     cron=app_config.dream.cron,
+        #     tags=["dream"],
+        # ),
+        # -------------------------------------------------------------------
         limit=limit,
     )
 

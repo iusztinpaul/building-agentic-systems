@@ -25,7 +25,10 @@ import inspect
 import prefect
 
 from tree import orchestrator
-from tree.config.app_config import app_config
+
+# [Prefect Cloud free-tier cap] Restore together with the dream-cron assertion
+# below once ``dream-consolidation-etl`` is re-enabled in the orchestrator.
+# from tree.config.app_config import app_config
 
 
 def test_serve_deployments_passes_limit_not_global_limit(mocker):
@@ -101,11 +104,17 @@ def test_serve_deployments_registers_all_deployments(mocker):
         "memory-extract-etl-orchestrator",
         "memory-extract-etl-worker",
         "memory-indexing-etl",
-        "ingest-file-etl",
-        "ingest-conversation-etl",
-        "ingest-youtube-video-batch-etl",
-        "ingest-youtube-rss-feed-batch-etl",
-        "dream-consolidation-etl",
+        # --- [Prefect Cloud free-tier cap: 5 deployments] --------------
+        # The five names below are temporarily NOT served (free tier allows
+        # only 5 deployments). Re-enable them here together with the matching
+        # ``.to_deployment(...)`` blocks in ``orchestrator.serve_deployments``
+        # once the Cloud plan is upgraded.
+        # "ingest-file-etl",
+        # "ingest-conversation-etl",
+        # "ingest-youtube-video-batch-etl",
+        # "ingest-youtube-rss-feed-batch-etl",
+        # "dream-consolidation-etl",
+        # ---------------------------------------------------------------
     }
     # The two retired single-flow deployments must not linger in the registration.
     assert "memory-extraction-etl" not in deployment_names
@@ -141,4 +150,11 @@ def test_serve_deployments_registers_dream_with_its_cron(mocker):
         for dep in call.args
     }
     scheduled = {name: crons for name, crons in crons_by_name.items() if crons}
-    assert scheduled == {"dream-consolidation-etl": [app_config.dream.cron]}
+    # --- [Prefect Cloud free-tier cap: 5 deployments] ----------------------
+    # ``dream-consolidation-etl`` (the only scheduled deployment) is temporarily
+    # not served under the free tier, so NO deployment carries a cron. Restore
+    # the original assertion below when the dream deployment is re-enabled in
+    # ``orchestrator.serve_deployments``.
+    # assert scheduled == {"dream-consolidation-etl": [app_config.dream.cron]}
+    assert scheduled == {}
+    # -----------------------------------------------------------------------

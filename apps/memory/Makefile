@@ -136,6 +136,25 @@ sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global co
 	uv run python scripts/sync_concurrency_limits.py
 
 
+# --- Users & Session ---
+#
+# Tree has no auth yet: `signup` is how users are created and how the current
+# user is recorded (a singleton `sessions` pointer). The pipeline run-* targets
+# below still take USER_ID explicitly (no silent fallback, #020) — `whoami`
+# prints the ObjectId to pass them.
+
+signup: # Create a user (idempotent on IDENTIFIER) and set it current. Requires IDENTIFIER=<handle>. Optional NAME="Display Name".
+	@if [ -z "$(IDENTIFIER)" ]; then echo 'USAGE: make signup IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
+	uv run python scripts/signup.py signup --identifier "$(IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
+
+set-current-user: # Point the current-user session at an existing user. Requires IDENTIFIER=<handle> or USER_ID=<oid>.
+	@if [ -z "$(IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
+	uv run python scripts/signup.py set-current $(if $(IDENTIFIER),--identifier "$(IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
+
+whoami: # Print the current user (id, identifier, name).
+	uv run python scripts/signup.py whoami
+
+
 # --- Data Pipelines ---
 #
 # Every pipeline below requires a tenant USER_ID (a 24-char Mongo ObjectId).

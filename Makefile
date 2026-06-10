@@ -1,9 +1,14 @@
 ENV_TARGET := $(strip $(shell cat .env.target 2>/dev/null))
 ifeq ($(ENV_TARGET),prod)
 ENV_FILE := .env.prod
+# Prod talks to Prefect Cloud — no `local`-profile services (prefect-server).
+COMPOSE_PROFILES :=
 else
 ENV_FILE := .env
+# Local brings up the full stack including the in-compose prefect-server.
+COMPOSE_PROFILES := local
 endif
+export COMPOSE_PROFILES
 
 ifeq (,$(wildcard $(ENV_FILE)))
 $(error $(ENV_FILE) file is missing. Please create one based on .env.example. Run: "cp .env.example $(ENV_FILE)" and fill in the missing values.)
