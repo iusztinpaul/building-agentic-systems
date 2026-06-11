@@ -7,11 +7,10 @@ constructor; every method derives its ``user_id`` filter from
 ``filter=`` dicts. This eliminates the "forgot to include ``user_id``"
 class of bug at the call-site level.
 
-A CI grep (``make memory-check-kgquery-discipline``, wired into
-pre-commit) enforces that raw ``KnowledgeGraphEntry.find(...)`` /
-``KnowledgeGraphEntry.find_one(...)`` calls do not appear outside this
-module, the ``tree.entities.users`` self-person hook, and the (future)
-migration script.
+By convention, raw ``KnowledgeGraphEntry.find(...)`` /
+``KnowledgeGraphEntry.find_one(...)`` calls live only in this module and
+the ``tree.entities.users`` self-person hook; every other read goes
+through :class:`KGQuery`.
 """
 
 from __future__ import annotations

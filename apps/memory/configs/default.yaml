@@ -158,9 +158,10 @@ dream:
 concurrency:
   # Requests/minute the shared free-tier Voyage key allows. Drives the
   # server-side `voyage-embeddings` Prefect global concurrency limit
-  # (limit = voyage_rpm, slot-decay-per-second = voyage_rpm / 60) created via
-  # `make memory-sync-concurrency-limits`. Raise this + re-run the target after
-  # adding a payment method — no code change needed.
+  # (limit = voyage_rpm, slot-decay-per-second = voyage_rpm / 60). Create/update
+  # it on the Prefect server with `prefect gcl create voyage-embeddings --limit
+  # <voyage_rpm> --slot-decay-per-second <voyage_rpm/60>`. Raise this + re-run
+  # that command after adding a payment method — no code change needed.
   voyage_rpm: 3
   # Tokens/minute the key allows. Held by config (the embedding_batch
   # max_total_tokens cap), not yet a second token-weighted limiter.

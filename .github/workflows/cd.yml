@@ -10,6 +10,13 @@ on:
     types: [completed]
     branches: [main]
 
+# Serialize deploys per source branch and cancel any in-progress one: if two
+# commits land back-to-back, only the latest deploy survives. ``head_branch`` is
+# the branch whose CI completed (``github.ref`` here is just the default branch).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
 jobs:
   deploy-prefect:
     name: deploy prefect deployments

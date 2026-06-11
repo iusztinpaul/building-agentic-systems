@@ -88,9 +88,6 @@ integration-tests-ci: # Mirror the CI integration command locally: skip mongot-d
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files
 
-check-kgquery-discipline: # Enforce that raw KnowledgeGraphEntry.find(...) reads only live inside the allow-listed modules. Run by pre-commit; fails on a planted violation.
-	@uv run python scripts/check_kgquery_discipline.py
-
 format-fix: # Auto-format Python code using ruff formatter.
 	uv run ruff format $(QA_FOLDERS)
 
@@ -105,9 +102,6 @@ lint-check: # Check code for linting issues without fixing them using ruff linte
 
 
 # --- Infrastructure ---
-
-local-test: # Validate MongoDB setup (text, vector, graph search).
-	uv run python scripts/test_mongodb_setup.py
 
 check-db: # Read-only connectivity check against the configured MongoDB target (follows .env.target). Pings, lists databases + collection counts; exits non-zero on failure.
 	uv run python scripts/check_db.py
@@ -154,16 +148,13 @@ serve-workflows: # Serve Prefect workflow deployments.
 deploy-prefect: # CD entrypoint: register/update Prefect deployments on the configured API (PREFECT_API_URL/PREFECT_API_KEY) without serving. Run by .github/workflows/cd.yml on push to main.
 	uv run python deploy/prefect_pipelines.py
 
-sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global concurrency limit from app_config.concurrency (#054 / ADR-002). Requires a running Prefect server.
-	uv run python scripts/sync_concurrency_limits.py
-
 
 # --- Users & Session ---
 #
 # Tree has no auth yet: `signup` is how users are created and how the current
 # user is recorded (a singleton `sessions` pointer). The pipeline run-* targets
-# below still take USER_ID explicitly (no silent fallback, #020) — `whoami`
-# prints the ObjectId to pass them.
+# below still take USER_ID explicitly
+# `whoami` prints the ObjectId to pass them.
 
 signup: # Create a user (idempotent on IDENTIFIER) and set it current. Requires IDENTIFIER=<handle>. Optional NAME="Display Name".
 	@if [ -z "$(IDENTIFIER)" ]; then echo 'USAGE: make signup IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
@@ -178,13 +169,6 @@ whoami: # Print the current user (id, identifier, name).
 
 
 # --- Data Pipelines ---
-#
-# Every pipeline below requires a tenant USER_ID (a 24-char Mongo ObjectId).
-# Pass it on the make command line, e.g.::
-#
-#     make run-data-pipeline USER_ID=507f1f77bcf86cd799439011
-#
-# Wired in #020; there is no silent fallback to a default user.
 
 run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Requires USER_ID=<oid>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
@@ -192,7 +176,6 @@ run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (par
 
 
 # --- Memory Pipelines ---
-# Pattern: run-<memory-pipeline-name>-memory-pipeline
 
 run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
 	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
@@ -239,12 +222,3 @@ scrape-web: # On-demand scrape of one or more URLs via Bright Data Web Unlocker 
 serve-mcp: # Serve the MCP server. Requires USER_ID=<oid> OR TREE_USER_IDENTIFIER env. Optional TRANSPORT=stdio|http|sse|streamable-http.
 	@if [ -z "$(USER_ID)" ] && [ -z "$(TREE_USER_IDENTIFIER)" ]; then echo 'USAGE: make serve-mcp USER_ID=<oid>  (or set TREE_USER_IDENTIFIER=<handle>)'; exit 1; fi
 	uv run python scripts/serve_mcp.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(TRANSPORT_ARG)
-
-
-# --- Smoke ---
-
-smoke-resolution-dedup: # End-to-end resolution+dedup smoke. Pass STRATEGY=keep_primary|merge_properties|keep_aliases. Optional RESTART_INFRA=1 to run 'make local-restart' first.
-	@if [ -z "$(STRATEGY)" ]; then echo 'USAGE: make smoke-resolution-dedup STRATEGY=keep_primary|merge_properties|keep_aliases [RESTART_INFRA=1]'; exit 1; fi
-	TREE_EXTRACTION__DEDUP__MERGE_STRATEGY=$(STRATEGY) uv run python scripts/smoke_resolution_dedup.py run \
-		--strategy $(STRATEGY) \
-		$(if $(filter 1,$(RESTART_INFRA)),--restart-infra,)

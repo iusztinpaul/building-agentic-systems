@@ -85,10 +85,10 @@ make local-stop
 make local-restart
 ```
 
-Validate everything works (creates test documents, runs text / vector / graph queries, cleans up):
+Check the configured MongoDB target is reachable (pings, lists collection counts):
 
 ```bash
-make memory-local-test
+make memory-check-db
 ```
 
 ### Serving workflows
@@ -296,7 +296,7 @@ apps/memory/
     orchestrator.py     # Prefect `serve(...)` registering deployments
   configs/default.yaml  # app tuning
   deploy/               # Modal deployments (vLLM embedding)
-  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph, test_mongodb_setup)
+  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph, signup, check_db)
   tests/unit + tests/integration
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)
@@ -318,26 +318,4 @@ mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 ```
 
 Collections to inspect: `documents` (raw ingest) and `knowledge_graph` (nodes + edges).
-
-## Resolution & dedup smoke
-
-End-to-end smoke for the resolution + dedup pipeline, including the three
-merge strategies (`keep_primary`, `merge_properties`, `keep_aliases`),
-the human-review CLI (`scripts/review_duplicates.py`), and the
-`_id`-vs-`canonical_name` soft-join contract.
-
-```bash
-make memory-smoke-resolution-dedup STRATEGY=keep_primary
-make memory-smoke-resolution-dedup STRATEGY=merge_properties
-make memory-smoke-resolution-dedup STRATEGY=keep_aliases
-```
-
-The Makefile target sets `TREE_EXTRACTION__DEDUP__MERGE_STRATEGY=$(STRATEGY)`
-before invoking `scripts/smoke_resolution_dedup.py run --strategy …`. The
-smoke wipes `knowledge_graph`, seeds two test `documents`, runs extraction
-+ indexing in-process (so the env-var override is deterministically
-honored), drives the review CLI, asserts the mongosh soft-join contract
-returns ≥1 row, and verifies the strategy-specific shape on the
-post-confirm winner. See the script's module docstring for the full
-procedure.
 

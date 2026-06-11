@@ -1089,9 +1089,8 @@ class TestTwoUserIsolation:
 
         Per the task spec, raw ``KnowledgeGraphEntry.find({}).to_list()``
         is the one place that returns rows from both tenants — and that's
-        intentional for migration / review tooling. The CI grep guard
-        (``check_kgquery_discipline.py``) prevents this from leaking into
-        production query paths.
+        intentional for migration / review tooling. Production query paths
+        instead go through ``KGQuery``, which always scopes by ``user_id``.
         """
 
         col = self.mongo_client[TEST_DATABASE]["knowledge_graph"]

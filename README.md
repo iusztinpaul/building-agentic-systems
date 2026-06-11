@@ -127,10 +127,10 @@ Run everything from the repo root.
 make local-start
 ```
 
-**2. Validate the stack.** Confirms text, vector, and graph search all round-trip.
+**2. Check connectivity.** Confirms the configured MongoDB target is reachable and lists collection counts.
 
 ```bash
-make memory-local-test
+make memory-check-db
 ```
 
 **3. Ingest → extract → index → query.**

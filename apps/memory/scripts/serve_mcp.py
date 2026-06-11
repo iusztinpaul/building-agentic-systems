@@ -9,7 +9,7 @@ boot. Resolution order (first hit wins):
 3. Neither set → :class:`RuntimeError`.
 
 The user MUST already exist; the server does not auto-create (see
-``scripts/migrate_multi_tenancy.py`` for seeding).
+``scripts/signup.py`` / ``make memory-signup`` for seeding).
 
 Usage:
     make memory-serve-mcp USER_ID=507f1f77bcf86cd799439011

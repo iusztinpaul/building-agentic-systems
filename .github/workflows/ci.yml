@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Keep only the latest run per branch/PR: a new push cancels any in-progress run
+# for the same ref so we never burn runners on superseded commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # MongoDB (used by docker-compose and tests)
   MONGO_HOST: localhost

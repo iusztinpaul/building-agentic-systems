@@ -103,8 +103,8 @@ async def _resolve_server_user_id(
         if user is None:
             raise RuntimeError(
                 f"MCP server boot: no User row with identifier={identifier!r}. "
-                "Seed the user (see scripts/migrate_multi_tenancy.py) before "
-                "starting the server."
+                "Seed the user (run `make memory-signup`, see scripts/signup.py) "
+                "before starting the server."
             )
         return user.id
 

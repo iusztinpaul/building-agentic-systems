@@ -3,9 +3,8 @@
 Only the pure ``ClusterSpec`` request-shaping logic is unit-tested here — the
 ``AtlasClient`` HTTP layer is an external boundary (live Atlas Admin API) and is
 exercised manually via ``make memory-atlas-*``, not mocked here. The script is
-loaded via ``importlib.util.spec_from_file_location`` (mirroring
-``tests/unit/test_sync_concurrency_limits.py``) so ``deploy/`` need not be on
-``sys.path``.
+loaded via ``importlib.util.spec_from_file_location`` so ``deploy/`` need not be
+on ``sys.path``.
 """
 
 from __future__ import annotations
