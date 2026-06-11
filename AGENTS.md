@@ -31,7 +31,9 @@ The assistant is based on two apps:
 
 ### Memory App Specifics
 
-- Memory-app scripts (entry points in `apps/memory/scripts/`) must call `init_logger()` from `tree.logging` at module level to configure logging.
+- Memory-app entry points scripts (`apps/memory/scripts/`) + deploy scripts (`apps/memory/deploy/`):
+  - Don't implement any business logic in the scripts. Only load it from `apps/memory/src/tree/` + write necessary glue code to call the business logic.
+  - Must call `init_logger()` from `tree.logging` at module level to configure logging.
 
 ## Project Structure
 
