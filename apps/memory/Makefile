@@ -127,10 +127,32 @@ deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
 	uv run modal app stop vllm-embedding-models
 
 
+# --- MongoDB Atlas IaC ---
+# Manage the shared Atlas cluster through code. Requires Atlas service-account
+# creds MDB_MCP_API_CLIENT_ID / MDB_MCP_API_CLIENT_SECRET (in .env / .env.prod).
+# Defaults target project "Tree" / cluster "tree" (M0 free, GCP, WESTERN_EUROPE);
+# override with ATLAS_ARGS="--tier M10 --provider AWS --region US_EAST_1 ...".
+
+atlas-up: # Create the Atlas cluster (idempotent) + seed DB user + IP access list, wait until IDLE.
+	uv run python deploy/atlas_cluster.py up $(ATLAS_ARGS)
+
+atlas-update: # PATCH the Atlas cluster to match the spec (e.g. tier change), wait until IDLE.
+	uv run python deploy/atlas_cluster.py update $(ATLAS_ARGS)
+
+atlas-status: # Print the Atlas cluster state and connection strings.
+	uv run python deploy/atlas_cluster.py status $(ATLAS_ARGS)
+
+atlas-down: # Delete the Atlas cluster (irreversible; pass ATLAS_ARGS=--yes to skip the prompt).
+	uv run python deploy/atlas_cluster.py down $(ATLAS_ARGS)
+
+
 # --- Orchestration ---
 
 serve-workflows: # Serve Prefect workflow deployments.
 	uv run python -m tree.orchestrator
+
+deploy-prefect: # CD entrypoint: register/update Prefect deployments on the configured API (PREFECT_API_URL/PREFECT_API_KEY) without serving. Run by .github/workflows/cd.yml on push to main.
+	uv run python deploy/prefect_pipelines.py
 
 sync-concurrency-limits: # Create/update the voyage-embeddings Prefect global concurrency limit from app_config.concurrency (#054 / ADR-002). Requires a running Prefect server.
 	uv run python scripts/sync_concurrency_limits.py

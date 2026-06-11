@@ -1,0 +1,59 @@
+name: CD
+
+# Sync the Prefect Cloud deployment definitions with the code on every push to
+# main — but only AFTER CI has gone green for that commit. We trigger off the CI
+# workflow's completion (workflow_run) rather than a bare `push` so a failing
+# test suite never ships a broken deployment.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy-prefect:
+    name: deploy prefect deployments
+    runs-on: ubuntu-latest
+    # Run only when CI succeeded on a push (not a PR run, not a failed run).
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deploy exactly the commit that passed CI, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install
+        working-directory: apps/memory
+
+      - name: Install dependencies
+        run: uv sync
+        working-directory: apps/memory
+
+      - name: Apply Prefect deployments to Prefect Cloud
+        # `prefect_pipelines.py` only registers/updates the deployment
+        # definitions (RunnerDeployment.aapply) against PREFECT_API_URL and exits
+        # — it does not serve. The long-running worker runs separately. The mock
+        # app keys mirror CI: importing the flow modules constructs
+        # settings/clients, but `apply` only ever talks to the Prefect API.
+        run: uv run python deploy/prefect_pipelines.py
+        working-directory: apps/memory
+        env:
+          PREFECT_API_URL: ${{ secrets.PREFECT_API_URL }}
+          PREFECT_API_KEY: ${{ secrets.PREFECT_API_KEY }}
+          GOOGLE_API_KEY: mock-google-api-key
+          VOYAGE_API_KEY: mock-voyage-api-key
+          MODAL_EMBEDDING_API_KEY: mock-modal-embedding-api-key
+          MONGO_HOST: localhost
+          MONGO_PORT: "27017"
+          MONGO_INITDB_ROOT_USERNAME: tree
+          MONGO_INITDB_ROOT_PASSWORD: tree
+          MONGO_INITDB_DATABASE: tree

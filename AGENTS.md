@@ -66,7 +66,7 @@ project-root/
 │   │   │           ├── resolution/      # Entity resolution (exact, alias, fuzzy, semantic, composite)
 │   │   │           ├── review/          # Human-in-the-loop review of pending writes
 │   │   │           └── consolidation/   # Scheduled dream consolidation
-│   │   ├── deploy/                      # Cloud deployment scripts (Modal)
+│   │   ├── deploy/                      # Cloud deployment scripts (Modal, Prefect, MongoDB, FastMCP)
 │   │   ├── configs/                     # App YAML configs (default.yaml)
 │   │   ├── scripts/                     # Entrypoints (serve_mcp.py, run_*.py, ...)
 │   │   ├── tests/                       # unit/ + integration/

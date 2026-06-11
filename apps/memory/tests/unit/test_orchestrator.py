@@ -158,3 +158,48 @@ def test_serve_deployments_registers_dream_with_its_cron(mocker):
     # assert scheduled == {"dream-consolidation-etl": [app_config.dream.cron]}
     assert scheduled == {}
     # -----------------------------------------------------------------------
+
+
+def test_serve_deployments_serves_the_built_topology(mocker):
+    """``serve_deployments`` serves exactly what ``build_deployments`` returns.
+
+    Guards the refactor (#CD) that split construction out of ``serve``: the
+    served positional args must be the build_deployments() list verbatim, so the
+    serve and CD-apply paths can never diverge.
+    """
+
+    # Arrange
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    # Act
+    orchestrator.serve_deployments(limit=4)
+
+    # Assert
+    built_names = {dep.name for dep in orchestrator.build_deployments()}
+    served_names = {dep.name for dep in spy.call_args.args}
+    assert served_names == built_names
+
+
+async def test_apply_deployments_applies_each_without_serving(mocker):
+    """The CD path ``aapply()``s every built deployment and never serves.
+
+    Asserts apply_deployments returns the applied ids in order, awaits each
+    deployment's ``aapply`` exactly once, and crucially does NOT call
+    ``serve`` (CD registers definitions only — the worker runs elsewhere).
+    """
+
+    # Arrange
+    fakes = [mocker.Mock(name=f"dep{i}") for i in range(3)]
+    for i, fake in enumerate(fakes):
+        fake.aapply = mocker.AsyncMock(return_value=f"deployment-id-{i}")
+    mocker.patch("tree.orchestrator.build_deployments", return_value=fakes)
+    serve_spy = mocker.patch("tree.orchestrator.serve")
+
+    # Act
+    result = await orchestrator.apply_deployments()
+
+    # Assert
+    assert result == ["deployment-id-0", "deployment-id-1", "deployment-id-2"]
+    for fake in fakes:
+        fake.aapply.assert_awaited_once()
+    serve_spy.assert_not_called()

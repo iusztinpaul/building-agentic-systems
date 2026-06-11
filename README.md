@@ -80,6 +80,39 @@ The MongoDB MCP server manages the remote Atlas environment (clusters, DB users,
 
 Put the credentials in `.env` as `MDB_MCP_API_CLIENT_ID` / `MDB_MCP_API_CLIENT_SECRET` (see `.env.example`); direnv exposes them to the MCP server. Launch your MCP client from a terminal inside the repo so it inherits them.
 
+### Managing the Atlas cluster as code (IaC)
+
+The same `MDB_MCP_API_CLIENT_ID` / `MDB_MCP_API_CLIENT_SECRET` credentials drive an Infrastructure-as-Code CLI (`apps/memory/deploy/atlas_cluster.py`) that creates, updates, inspects, and tears down the Atlas cluster through code — no console clicking. The desired state defaults to the standard setup (an `M0` free-tier replica set on GCP `WESTERN_EUROPE` in project `Tree`); override per-command with `ATLAS_ARGS`.
+
+```bash
+make memory-atlas-up        # create cluster + seed DB user + IP access list, wait until IDLE (idempotent)
+make memory-atlas-status    # print cluster state + connection string
+make memory-atlas-update    # PATCH the cluster to match the spec, e.g. a tier change
+make memory-atlas-down      # delete the cluster (pass ATLAS_ARGS=--yes to skip the prompt)
+
+# Manage a different cluster / shape by passing flags through ATLAS_ARGS:
+make memory-atlas-up ATLAS_ARGS="--project Tree --cluster tree-staging --tier M10 --provider AWS --region US_EAST_1"
+```
+
+The seed DB user reuses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`; `atlas-up` also adds any CIDRs in the optional `ATLAS_ACCESS_CIDRS` env var (comma-separated) to the project IP access list. The service account needs Project Owner (or Cluster Manager + Database Access Admin + Network Access Manager) on the target project.
+
+### Continuous deployment of Prefect deployments
+
+`.github/workflows/cd.yml` keeps the Prefect Cloud deployments in sync with `main`: on every push, **after CI passes**, it runs `make memory-deploy-prefect` (which calls `deploy/prefect_pipelines.py`) to register/update the deployment definitions on Prefect Cloud — without serving. The long-running worker runs separately (`make memory-serve-workflows` on an always-on host, or the `prefect-worker` container); CD only syncs the definitions.
+
+One-time setup — add the Prefect Cloud credentials as GitHub repository secrets so the workflow can reach your workspace:
+
+```bash
+gh secret set PREFECT_API_URL --body "https://api.prefect.cloud/api/accounts/<account-id>/workspaces/<workspace-id>"
+gh secret set PREFECT_API_KEY --body "pnu_xxxxxxxxxxxxxxxx"
+```
+
+After that, every merge to `main` that passes CI re-applies the deployments automatically. To apply them manually (e.g. from your machine, with `.env.prod` selected via `make env-prod`):
+
+```bash
+make memory-deploy-prefect
+```
+
 ## End-to-end quick start
 
 Run everything from the repo root.

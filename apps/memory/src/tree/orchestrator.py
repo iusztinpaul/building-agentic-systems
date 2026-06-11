@@ -19,6 +19,8 @@ Usage:
     make serve-workflows   # serve workflow deployments
 """
 
+import inspect
+
 from prefect import serve
 
 from tree.config.app_config import app_config
@@ -43,22 +45,22 @@ from tree.observability import configure_opik
 # ---------------------------------------------------------------------------
 
 
-def serve_deployments(limit: int) -> None:
-    """Register and serve every workflow deployment with admission control.
+def build_deployments() -> list:
+    """Build (but neither serve nor apply) the workflow ``RunnerDeployment`` set.
 
-    Extracted from ``__main__`` so the ``serve(...)`` invocation is importable
-    and unit-testable (#065). ``limit`` is forwarded to ``prefect.serve`` as its
-    ``limit`` parameter — admission control (ADR-002 §4) capping how many flow
-    runs the server admits concurrently, kept close to ``concurrency.voyage_rpm``
-    so we never admit far more runs than the shared embed budget can feed.
+    Single source of truth for the deployment topology, consumed by two callers:
 
-    Configures Opik observability once at serve startup (no-op without
-    ``OPIK_API_KEY``) so pipeline task spans / cost are recorded across every
-    flow run this worker executes.
+    * :func:`serve_deployments` — the long-running worker (``make memory-serve-workflows``)
+      that registers AND executes these via the in-process Prefect runner.
+    * :func:`apply_deployments` — the CD path (``deploy/prefect_pipelines.py``) that
+      only registers/updates the definitions on the configured Prefect API
+      (Prefect Cloud) without serving, so pushing to ``main`` keeps the Cloud
+      deployments in sync with the code while the worker runs elsewhere.
+
+    Keeping construction here means both paths can never drift apart.
     """
 
-    configure_opik()
-    serve(
+    return [
         # Data ingestion orchestrator/worker split (#068 / ADR-002 §3 amended #066).
         # Operators trigger the ORCHESTRATOR; it reads the configured ``sources:``
         # list, partitions it into ``min(num_shards, N)`` balanced shards, and
@@ -125,8 +127,47 @@ def serve_deployments(limit: int) -> None:
         #     tags=["dream"],
         # ),
         # -------------------------------------------------------------------
-        limit=limit,
-    )
+    ]
+
+
+def serve_deployments(limit: int) -> None:
+    """Register and serve every workflow deployment with admission control.
+
+    Extracted from ``__main__`` so the ``serve(...)`` invocation is importable
+    and unit-testable (#065). ``limit`` is forwarded to ``prefect.serve`` as its
+    ``limit`` parameter — admission control (ADR-002 §4) capping how many flow
+    runs the server admits concurrently, kept close to ``concurrency.voyage_rpm``
+    so we never admit far more runs than the shared embed budget can feed.
+
+    Configures Opik observability once at serve startup (no-op without
+    ``OPIK_API_KEY``) so pipeline task spans / cost are recorded across every
+    flow run this worker executes.
+    """
+
+    configure_opik()
+    serve(*build_deployments(), limit=limit)
+
+
+async def apply_deployments() -> list[str]:
+    """Register/update the deployments on the configured Prefect API, no serving.
+
+    This is the CD entrypoint (``deploy/prefect_pipelines.py``): on every push to
+    ``main`` it upserts each deployment definition against ``PREFECT_API_URL``
+    (Prefect Cloud) via ``RunnerDeployment.aapply()`` and exits — it does NOT
+    block on a runner. The long-running worker (``serve_deployments``) executes
+    runs separately; CD only keeps the Cloud-side definitions in lock-step with
+    the code. Returns the applied deployment ids (for logging / assertions).
+    """
+
+    deployment_ids: list[str] = []
+    for deployment in build_deployments():
+        # ``flow.to_deployment`` returns a coroutine when called inside a running
+        # event loop (Prefect async-dispatch); in the sync serve path it returns
+        # the RunnerDeployment directly. Resolve either form before applying.
+        if inspect.isawaitable(deployment):
+            deployment = await deployment
+        deployment_ids.append(await deployment.aapply())
+    return deployment_ids
 
 
 if __name__ == "__main__":
