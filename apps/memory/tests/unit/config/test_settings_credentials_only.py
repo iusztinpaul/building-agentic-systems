@@ -110,6 +110,9 @@ class TestSettingsCredentialsOnlySurface:
             # serverless fast-boot toggle — infra config, not behaviour knobs.
             "tree_memory_cloud_url",
             "mcp_skip_index_bootstrap",
+            # Ephemeral ``.tree/`` working-dir location (path/infra, not a
+            # behaviour knob) — ``/tmp/.tree`` on the read-only serverless host.
+            "tree_working_dir",
         }
 
 

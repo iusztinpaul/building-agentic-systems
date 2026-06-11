@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # MCP_SKIP_INDEX_BOOTSTRAP=true on Horizon. Local default keeps the
     # self-healing boot behaviour.
     mcp_skip_index_bootstrap: bool = False
+    # Working directory for ephemeral ``.tree/`` data (deep-search session files,
+    # rendered graph HTML). Empty (default) resolves to the project's
+    # ``apps/memory/.tree`` (see :mod:`tree.config.paths`). On a serverless host
+    # whose install dir is read-only (Prefect Horizon), set
+    # ``TREE_WORKING_DIR=/tmp/.tree``.
+    tree_working_dir: str = ""
 
 
 settings = Settings()

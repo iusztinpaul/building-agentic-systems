@@ -1,35 +1,21 @@
 """Unit tests for the ``.tree`` working-dir resolution in ``tree.config.paths``.
 
-The cloud MCP server crashed rendering graphs with
-``[Errno 30] Read-only file system: '/usr/local/lib/python3.14/.tree'`` — the old
-code rooted ``.tree`` at ``Path(__file__).parents[3]``, which is the repo locally
-but a read-only ``site-packages`` parent once installed. ``_resolve_working_dir``
-fixes that: repo → in-repo ``.tree``; installed → ``/tmp/.tree``; env override wins.
+The location comes from the ``TREE_WORKING_DIR`` setting (``.env`` / ``.env.prod``):
+unset → the in-repo project ``.tree``; set → that path verbatim. Prod/serverless
+hosts whose install dir is read-only (Prefect Horizon) set
+``TREE_WORKING_DIR=/tmp/.tree`` — which is what fixes the read-only crash there.
 """
 
 from pathlib import Path
 
-from tree.config.paths import _PROD_WORKING_DIR, _resolve_working_dir
+from tree.config.paths import _resolve_working_dir
 
 
 class TestResolveWorkingDir:
-    def test_source_checkout_uses_in_repo_dot_tree(self, tmp_path):
-        # A ``src/tree`` under the root marks a source checkout (local dev).
-        (tmp_path / "src" / "tree").mkdir(parents=True)
-
-        assert _resolve_working_dir(tmp_path, None) == tmp_path / ".tree"
-
-    def test_installed_package_falls_back_to_tmp(self, tmp_path):
-        # No ``src/tree`` (installed in site-packages) → writable ``/tmp/.tree``.
-        assert _resolve_working_dir(tmp_path, None) == _PROD_WORKING_DIR
-
-    def test_explicit_override_wins_over_repo_layout(self, tmp_path):
-        (tmp_path / "src" / "tree").mkdir(parents=True)
-
-        assert _resolve_working_dir(tmp_path, "/custom/dir") == Path("/custom/dir")
-
-    def test_empty_override_is_ignored(self, tmp_path):
-        # Empty string is falsy → treated as unset, so the repo path is used.
-        (tmp_path / "src" / "tree").mkdir(parents=True)
-
+    def test_unset_defaults_to_project_root_dot_tree(self, tmp_path):
+        # Empty TREE_WORKING_DIR → write inside the project (local dev default).
         assert _resolve_working_dir(tmp_path, "") == tmp_path / ".tree"
+
+    def test_explicit_value_is_used_verbatim(self, tmp_path):
+        # Prod sets TREE_WORKING_DIR=/tmp/.tree → used as-is, ignoring the project.
+        assert _resolve_working_dir(tmp_path, "/tmp/.tree") == Path("/tmp/.tree")
