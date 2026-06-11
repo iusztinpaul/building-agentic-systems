@@ -25,8 +25,11 @@ tool checks ``ctx.client_supports_extension(UI_EXTENSION_ID)``; when the UI
 extension is absent — or when the caller explicitly asks via ``as_html_file``
 — it renders the *same* graph into a self-contained HTML file under
 ``.tree/graphs/`` (data embedded inline, no ext-apps round-trip) and returns
-the path. That keeps the slow path off the model: it never has to hand-author
-HTML from the payload.
+the path PLUS a ``graphs://<name>`` resource link. The path serves the local
+(stdio) deployment; the resource link serves remote ones (Prefect Horizon),
+where the client can't reach the server's filesystem and instead downloads
+the HTML over the MCP connection (read the resource, save the text). Either
+way the slow path stays off the model: it never hand-authors HTML.
 
 The iframe payload travels in a ``content`` JSON block (a custom HTML app reads
 the tool result's ``content`` via ``ontoolresult`` — ``structuredContent`` is
@@ -255,7 +258,7 @@ async def visualize_memory_graph(
     top_k: int = 15,
     max_hops: int = 2,
     as_html_file: bool = False,
-) -> ToolResult | str:
+) -> ToolResult:
     """Visualize the knowledge graph as an interactive graph.
 
     With a ``query``, runs semantic + text search with graph expansion (same
@@ -266,8 +269,10 @@ async def visualize_memory_graph(
 
     When the client renders MCP App UIs, the graph appears inline. Otherwise
     (or when ``as_html_file`` is set) the same graph is written to a
-    self-contained HTML file and the path is returned — do NOT re-author the
-    HTML yourself; just share the path.
+    self-contained HTML file; the result carries the server-side path AND a
+    ``graphs://`` resource link — do NOT re-author the HTML yourself. If the
+    path exists locally just share it; if the server is remote (cloud), read
+    the linked resource and save its text as a local ``.html`` file.
 
     Args:
         query: Search query text — seeds the subgraph to visualize. Omit (empty)
@@ -345,12 +350,57 @@ async def visualize_memory_graph(
     closing = (
         "Opened it in your browser."
         if opened
-        else "Open it in a browser to explore (drag nodes, zoom/pan)."
+        else (
+            "Open it in a browser to explore (drag nodes, zoom/pan). If that "
+            "path is NOT on your machine (the MCP server runs remotely, e.g. "
+            "on Prefect Horizon), read the linked MCP resource instead and "
+            "save its text locally as an .html file."
+        )
     )
-    return (
-        f"{summary}. Since {reason}, I saved a self-contained interactive "
-        f"graph to:\n{path}\n{closing}"
+    # The file lives on the SERVER's filesystem. For remote deployments the
+    # path alone is unreachable, so the same HTML is also exposed as an MCP
+    # resource (``graphs://<name>``, see :func:`graph_file`) the client can
+    # fetch over the existing connection.
+    return ToolResult(
+        content=[
+            types.TextContent(
+                type="text",
+                text=(
+                    f"{summary}. Since {reason}, I saved a self-contained "
+                    f"interactive graph to:\n{path}\n{closing}"
+                ),
+            ),
+            types.ResourceLink(
+                type="resource_link",
+                uri=f"graphs://{path.name}",  # type: ignore[arg-type]
+                name=path.name,
+                mimeType="text/html",
+                description="Self-contained interactive graph (download me)",
+            ),
+        ]
     )
+
+
+@mcp.resource("graphs://{name}", mime_type="text/html")
+def graph_file(name: str) -> str:
+    """Self-contained HTML of a previously rendered graph visualization.
+
+    Lets clients of a REMOTE server (e.g. Prefect Horizon) download the file
+    ``visualize_memory_graph`` wrote to the server-side ``.tree/graphs/`` dir:
+    read this resource and save its text locally as an ``.html`` file.
+    """
+
+    base = GRAPHS_DIR.resolve()
+    path = (base / name).resolve()
+    # Guard traversal: the rendered files are flat ``<slug>-<stamp>.html``
+    # names directly under GRAPHS_DIR.
+    if path.parent != base or path.suffix != ".html":
+        raise ValueError(f"Invalid graph file name: {name!r}")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"No rendered graph named {name!r} — run visualize_memory_graph first."
+        )
+    return path.read_text(encoding="utf-8")
 
 
 @mcp.resource(

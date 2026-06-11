@@ -32,9 +32,10 @@ from tree.data.web.web_unlocker import (
 )
 from tree.entities.knowledge_graph import NodeType
 
-# graph_app: side-effect import — registers the read-only Sigma graph MCP App
-# (visualize_memory_graph tool + ui:// resource).
-from tree.mcp import graph_app  # noqa: F401
+# graph_app / dashboard_app: side-effect imports — register the read-only
+# Sigma graph MCP App (visualize_memory_graph tool + ui:// resource) and the
+# custom-HTML dashboard (memory_dashboard tool + ui:// resource).
+from tree.mcp import dashboard_app, graph_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.ingest import submit_ingestion
 from tree.mcp.server import mcp
@@ -80,18 +81,6 @@ def _set_retrieval_thread(ctx: Context, tool: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — telemetry must never break the tool
         logger.debug("Opik retrieval-thread tagging no-op: %s", exc)
-
-
-# dashboard_app: side-effect import — registers the Prefab interactive-tool
-# dashboard (memory_dashboard). Guarded: it needs the ``fastmcp[apps]`` extra
-# (prefab-ui); if it's absent we skip it rather than crash the whole server
-# (the custom-HTML graph tool above has no such dependency).
-try:
-    from tree.mcp import dashboard_app  # noqa: F401
-except ImportError as _exc:  # pragma: no cover - exercised only without the extra
-    logger.warning(
-        "Dashboard MCP Apps not registered (install fastmcp[apps]): %s", _exc
-    )
 
 
 def _serialize(docs: list[dict[str, Any]]) -> str:

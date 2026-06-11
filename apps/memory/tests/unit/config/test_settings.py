@@ -23,16 +23,25 @@ class TestSettingsSmoke:
         # Assert
         assert settings is not None
         # Mongo URI computed field is the load-bearing helper for every
-        # init_mongodb() caller in the project.
+        # init_mongodb() caller in the project. The operator env may point
+        # at local Mongo ("mongodb") or Atlas ("mongodb+srv") — both are valid.
         uri = settings.mongo.mongo_uri.get_secret_value()
-        assert uri.startswith("mongodb://")
+        assert uri.startswith(("mongodb://", "mongodb+srv://"))
         assert "@" in uri  # creds in URI
 
 
 class TestMongoUriScheme:
-    def test_default_scheme_builds_direct_connection_uri(self) -> None:
-        # Arrange
+    def test_scheme_field_defaults_to_local_mongodb(self) -> None:
+        # Assert: the declared default targets the local replica set. Checked
+        # on the field (not an instance) so the operator's MONGO_SCHEME env
+        # cannot leak into the assertion.
+        assert MongoSettings.model_fields["mongo_scheme"].default == "mongodb"
+
+    def test_mongodb_scheme_builds_direct_connection_uri(self) -> None:
+        # Arrange: scheme passed explicitly — instances read the operator's
+        # env (e.g. MONGO_SCHEME=mongodb+srv with an Atlas .env) otherwise.
         mongo = MongoSettings(
+            mongo_scheme="mongodb",
             mongo_host="localhost",
             mongo_port=27017,
             mongo_initdb_root_username="tree",
