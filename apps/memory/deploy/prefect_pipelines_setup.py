@@ -43,6 +43,7 @@ import logging
 import os
 
 import click
+import httpx
 from prefect.blocks.system import Secret
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import WorkPoolCreate
@@ -51,6 +52,7 @@ from prefect.variables import Variable
 
 from tree.logging import init_logger
 from tree.orchestrator import (
+    GIT_URL,
     MANAGED_WORK_POOL,
     PAT_BLOCK_NAME,
     RUNTIME_CONFIG,
@@ -64,6 +66,36 @@ logger = logging.getLogger(__name__)
 
 MANAGED_POOL_TYPE = "prefect:managed"
 GITHUB_PAT_ENV = "GITHUB_PAT"
+# ``https://github.com/<owner>/<repo>.git`` → ``https://api.github.com/repos/<owner>/<repo>``
+_GITHUB_API_REPO = "https://api.github.com/repos/" + GIT_URL.removeprefix(
+    "https://github.com/"
+).removesuffix(".git")
+
+
+def _verify_pat_access(pat: str) -> None:
+    """Fail fast (with actionable guidance) if the PAT can't reach the repo.
+
+    Prefect Managed clones the private repo at deploy AND run time; a token that
+    can't read it surfaces only as a cryptic ``git clone ... exit code 128`` deep
+    inside ``from_source``. A quick GitHub API probe turns that into a clear error.
+    """
+
+    resp = httpx.get(
+        _GITHUB_API_REPO,
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != httpx.codes.OK:
+        raise click.ClickException(
+            f"{GITHUB_PAT_ENV} cannot access {_GITHUB_API_REPO} (HTTP "
+            f"{resp.status_code}). Prefect Managed must CLONE this private repo. "
+            "Use a CLASSIC PAT with the 'repo' scope, OR a FINE-GRAINED PAT whose "
+            "Resource owner is the repo owner, with this repository selected and "
+            "'Contents: Read-only' permission."
+        )
 
 
 def _seed_config_stores() -> None:
@@ -79,6 +111,7 @@ def _seed_config_stores() -> None:
             f"Set {GITHUB_PAT_ENV} (a GitHub PAT with read access to the private "
             "repo) so Prefect Managed can clone the flow code."
         )
+    _verify_pat_access(pat)
     Secret(value=pat).save(PAT_BLOCK_NAME, overwrite=True)
     logger.info("Saved Secret block %s (GitHub PAT)", PAT_BLOCK_NAME)
 
@@ -94,14 +127,29 @@ def _seed_config_stores() -> None:
 
 
 async def _ensure_work_pool(name: str) -> None:
+    """Create the Managed work pool if absent (read-first).
+
+    Read-then-create rather than create-then-catch: on the free tier the
+    workspace work-pool limit is 1, and the create endpoint enforces that limit
+    BEFORE the duplicate check — so blindly re-creating an existing pool returns
+    403 (limit reached), not the 409 we could swallow. Reading first skips the
+    create entirely when the pool already exists.
+    """
+
     async with get_client() as client:
+        try:
+            await client.read_work_pool(name)
+            logger.info("Work pool %r already exists.", name)
+            return
+        except ObjectNotFound:
+            pass
         try:
             await client.create_work_pool(
                 WorkPoolCreate(name=name, type=MANAGED_POOL_TYPE)
             )
             logger.info("Created %s work pool %r.", MANAGED_POOL_TYPE, name)
         except ObjectAlreadyExists:
-            logger.info("Work pool %r already exists.", name)
+            logger.info("Work pool %r already exists (created concurrently).", name)
 
 
 async def _status(work_pool: str) -> None:

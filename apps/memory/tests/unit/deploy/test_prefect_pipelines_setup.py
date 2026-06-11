@@ -99,6 +99,25 @@ class TestGitRefKwarg:
         assert orchestrator._git_ref_kwarg(sha) == {"commit_sha": sha}
 
 
+class TestVerifyPatAccess:
+    def test_passes_when_repo_is_reachable(self, mocker) -> None:
+        mocker.patch.object(
+            _setup.httpx, "get", return_value=mocker.Mock(status_code=200)
+        )
+
+        _setup._verify_pat_access("ghp_ok")  # no raise
+
+    def test_raises_actionable_error_when_repo_not_accessible(self, mocker) -> None:
+        import click
+
+        mocker.patch.object(
+            _setup.httpx, "get", return_value=mocker.Mock(status_code=404)
+        )
+
+        with pytest.raises(click.ClickException, match="Contents: Read-only"):
+            _setup._verify_pat_access("ghp_no_access")
+
+
 class TestSeedConfigStores:
     def test_requires_github_pat(self, mocker, monkeypatch) -> None:
         import click
@@ -114,6 +133,7 @@ class TestSeedConfigStores:
         monkeypatch.setenv("GITHUB_PAT", "ghp_token")
         monkeypatch.setenv("VOYAGE_API_KEY", "vk")
         monkeypatch.setenv("MONGO_HOST", "atlas.example")
+        mocker.patch.object(_setup, "_verify_pat_access")  # skip the network probe
         mock_secret = mocker.patch.object(_setup, "Secret")
         mock_variable = mocker.patch.object(_setup, "Variable")
 
