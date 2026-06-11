@@ -7,10 +7,11 @@ pool + config blocks), this only re-applies the deployment definitions via
 deployments track the code, while Prefect's managed workers execute the runs.
 
 It assumes ``prefect_pipelines_setup.py up`` has already created the
-``tree-managed`` work pool and the ``tree-*`` Secret blocks / Variables. Because
-the managed run env (:func:`tree.orchestrator.managed_env_templates`) is a static
-``{{ prefect.blocks/variables.* }}`` mapping — never raw values — CD needs only
-``PREFECT_API_URL`` / ``PREFECT_API_KEY``, NOT the app's secrets.
+``tree-managed`` work pool and the ``tree-*`` Secret blocks / Variables. The
+managed run env is a static ``{{ prefect.blocks/variables.* }}`` mapping (no raw
+values), and the git clone authenticates via the ``tree-github-pat`` Secret block
+(a run-time reference), so CD needs only ``PREFECT_API_URL`` / ``PREFECT_API_KEY``
+— NOT the app's secrets.
 
 ``GIT_REF`` (optional) pins the deployments to a branch or commit; defaults to
 ``main`` (branch-tracking, so merges go live without a re-deploy). The CD workflow

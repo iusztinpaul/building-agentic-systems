@@ -2,9 +2,10 @@
 
 Two surfaces:
 
-* Pure logic in :mod:`tree.orchestrator` (importable directly): the slim
-  ``WORKER_PIP_PACKAGES`` list, the static ``managed_env_templates`` mapping, the
-  ``RUNTIME_CONFIG`` coverage, the 5 deployment specs, and ``_git_ref_kwarg``.
+* Pure logic in :mod:`tree.orchestrator` (importable directly): the
+  ``_GitRepoWithPipInstall`` pull steps, the static ``managed_env_templates``
+  mapping, the ``RUNTIME_CONFIG`` coverage, the 5 deployment specs, and
+  ``_git_ref_kwarg``.
 * The ``up``-only ``_seed_config_stores`` in ``deploy/prefect_pipelines_setup.py``
   (loaded by file path like ``test_atlas_cluster.py``) — the Prefect ``Secret`` /
   ``Variable`` boundary is mocked, so no network.
@@ -32,23 +33,24 @@ sys.modules["prefect_pipelines_setup"] = _setup
 _spec.loader.exec_module(_setup)
 
 
-class TestWorkerPipPackages:
-    def test_installs_the_repo_package_at_the_requested_ref(self) -> None:
-        (spec,) = orchestrator.worker_pip_packages("main")
+class TestGitRepoPipInstallPullStep:
+    def test_appends_pip_install_after_git_clone(self) -> None:
+        repo = orchestrator._GitRepoWithPipInstall(
+            url=orchestrator.GIT_URL, branch="main"
+        )
 
-        # Installs THIS package from a git+subdirectory URL so the managed run can
-        # import ``tree`` (the heavy backends come from the opt-in extra, not here).
-        assert spec.startswith("tree-memory @ git+https://")
-        assert "@github.com/iusztinpaul/building-agentic-systems.git@main" in spec
-        assert spec.endswith("#subdirectory=apps/memory")
+        steps = repo.to_pull_step()
 
-    def test_injects_the_pat_via_a_secret_block_template(self) -> None:
-        (spec,) = orchestrator.worker_pip_packages("abc123")
-
-        # The token is a Secret-block reference resolved at run time, not a literal.
-        assert "{{ prefect.blocks.secret.tree-github-pat }}" in spec
-        assert "@build" not in spec  # ref correctly placed: ...git@abc123#...
-        assert "git@abc123#subdirectory=apps/memory" in spec
+        # A list: the standard git_clone, then a pip install of this package so the
+        # managed run can import ``tree`` — installed from the local clone, so NO
+        # token appears in any URL/step.
+        assert isinstance(steps, list)
+        keys = [next(iter(step)) for step in steps]
+        assert any("git_clone" in k for k in keys)
+        assert any("run_shell_script" in k for k in keys)
+        joined = str(steps)
+        assert "pip install ./apps/memory" in joined
+        assert orchestrator.GIT_URL in joined  # clone target, no embedded token
 
 
 class TestManagedEnvTemplates:

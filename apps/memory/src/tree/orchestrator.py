@@ -57,28 +57,36 @@ MANAGED_WORK_POOL = "tree-managed"
 PAT_BLOCK_NAME = "tree-github-pat"
 
 
-def worker_pip_packages(git_ref: str) -> list[str]:
-    """Per-run install for Prefect Managed: install THIS package from the repo.
+class _GitRepoWithPipInstall(GitRepository):
+    """``GitRepository`` whose pull steps ALSO ``pip install`` the cloned package.
 
-    Prefect Managed loads the flow's entrypoint module BEFORE the cloned repo's
-    code is importable (``env``/``PYTHONPATH`` against the clone doesn't take, and
-    ``pip_packages`` install at container setup — before ``git_clone``). So rather
-    than hand-list third-party deps and rely on ``PYTHONPATH``, install the
-    ``tree`` package itself from a git+subdirectory URL: pip clones
-    ``apps/memory`` at ``git_ref`` and installs ``tree`` + its (now slim)
-    ``[project.dependencies]`` — the heavy ``sentence-transformers``/``modal``
-    backends live in the opt-in ``local-models`` extra and are NOT pulled. The
-    GitHub PAT is injected via a Secret-block template (resolved at run time).
+    Prefect Managed loads the flow's entrypoint module after the pull steps but
+    before our code runs, and ``env``/``PYTHONPATH`` against the clone doesn't make
+    the src-layout ``tree`` package importable. So after the ``git_clone`` step we
+    add a ``pip install ./apps/memory`` step (run in the clone dir): it installs
+    ``tree`` + its now-slim ``[project.dependencies]`` (the heavy
+    ``sentence-transformers``/``modal`` backends are in the opt-in ``local-models``
+    extra, NOT pulled), so ``import tree`` works at flow load.
 
-    NOTE: the token is interpolated into the pip URL, so it appears in the run's
-    install logs (Prefect Cloud, org-scoped). It is a read-only fine-grained PAT.
+    Security: the clone authenticates via the :data:`PAT_BLOCK_NAME` Secret block
+    (a block REFERENCE in the pull step, resolved at run time — never a literal),
+    and the install runs on the local clone, so no token lands in any pip URL,
+    deployment config, or run log. ``to_pull_step`` may return a list (Prefect
+    splices it into the deployment's pull steps verbatim).
     """
 
-    token = "{{ prefect.blocks.secret.%s }}" % PAT_BLOCK_NAME
-    host_path = GIT_URL.removeprefix("https://")  # github.com/<owner>/<repo>.git
-    return [
-        f"tree-memory @ git+https://{token}@{host_path}@{git_ref}#subdirectory=apps/memory"
-    ]
+    def to_pull_step(self) -> list:  # type: ignore[override]
+        clone = super().to_pull_step()
+        steps = clone if isinstance(clone, list) else [clone]
+        return [
+            *steps,
+            {
+                "prefect.deployments.steps.run_shell_script": {
+                    "script": "pip install ./apps/memory",
+                    "stream_output": True,
+                }
+            },
+        ]
 
 
 @dataclass(frozen=True)
@@ -169,23 +177,25 @@ def deploy_cloud_pipelines(
 ) -> list[str]:
     """Deploy every pipeline to Prefect Cloud, bound to a Managed work pool.
 
-    Flow code is pulled from :data:`GIT_URL` at ``git_ref`` (a branch like
-    ``main`` or a commit SHA) using the GitHub PAT in the :data:`PAT_BLOCK_NAME`
-    Secret block. ``job_env`` is the managed-run environment (``job_variables.env``)
-    — typically :func:`prefect_pipelines_setup.managed_env_templates`, whose
-    values are ``{{ prefect.blocks.secret.* }}`` / ``{{ prefect.variables.* }}``
-    references resolved at run time (so this carries no raw secrets and the CD
-    path needs none). Returns the deployment ids.
+    Flow code is pulled from :data:`GIT_URL` at ``git_ref`` (a branch like ``main``
+    or a commit SHA) using the GitHub PAT in the :data:`PAT_BLOCK_NAME` Secret
+    block; :class:`_GitRepoWithPipInstall` adds a ``pip install`` pull step so the
+    managed run can import ``tree``. ``job_env`` is the managed-run environment
+    (``job_variables.env``) — typically :func:`managed_env_templates`, whose
+    secret/config values are ``{{ prefect.blocks.secret.* }}`` /
+    ``{{ prefect.variables.* }}`` references resolved at run time. So this carries
+    no raw secrets and the CD path needs only the Prefect API creds. Returns the
+    deployment ids.
 
     Synchronous: all the Prefect ``Flow``/``Secret`` helpers are sync in 3.6.
     """
 
-    source = GitRepository(
+    source = _GitRepoWithPipInstall(
         url=GIT_URL,
         **_git_ref_kwarg(git_ref),
         credentials={"access_token": Secret.load(PAT_BLOCK_NAME)},
     )
-    job_variables = {"pip_packages": worker_pip_packages(git_ref), "env": job_env}
+    job_variables = {"env": job_env}
 
     deployment_ids: list[str] = []
     for spec in _DEPLOYMENT_SPECS:

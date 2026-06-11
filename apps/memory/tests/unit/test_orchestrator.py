@@ -184,15 +184,14 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     """The cloud/CD path deploys every spec to the Managed pool and never serves.
 
     ``deploy_cloud_pipelines`` replaced the old served ``apply_deployments``: it
-    git-sources each flow and ``deploy()``s it bound to the work pool with our
-    slim ``pip_packages`` + the passed ``job_env``. Mocks the Prefect SDK boundary
-    (``Flow.from_source`` / ``deploy``, ``Secret``, ``GitRepository``) — no network
-    — and asserts it returns the ids, targets the pool, and does NOT serve.
+    git-sources each flow and ``deploy()``s it bound to the work pool with the
+    passed ``job_env`` (no raw secrets, no token). Mocks the Prefect SDK boundary
+    (``Flow.from_source`` / ``deploy``, ``Secret``) — no network — and asserts it
+    returns the ids, targets the pool, and does NOT serve.
     """
 
     # Arrange — every from_source(...) yields a fake flow whose deploy returns an id.
     mocker.patch("tree.orchestrator.Secret")
-    mocker.patch("tree.orchestrator.GitRepository")
     serve_spy = mocker.patch("tree.orchestrator.serve")
     fake_flow = mocker.Mock()
     fake_flow.deploy = mocker.Mock(side_effect=[f"id-{i}" for i in range(5)])
@@ -212,6 +211,5 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     for call in fake_flow.deploy.call_args_list:
         assert call.kwargs["work_pool_name"] == "tree-managed"
         assert "VOYAGE_API_KEY" in call.kwargs["job_variables"]["env"]
-        assert call.kwargs["job_variables"][
-            "pip_packages"
-        ] == orchestrator.worker_pip_packages("main")
+        # No raw token anywhere: the install is a pull step, not a pip_packages URL.
+        assert "pip_packages" not in call.kwargs["job_variables"]
