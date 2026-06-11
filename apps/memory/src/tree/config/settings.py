@@ -1,7 +1,7 @@
 import os
 from typing import Literal
 
-from pydantic import SecretStr, computed_field
+from pydantic import SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _env_file = os.environ.get("ENV_FILE_PATH", ".env")
@@ -75,6 +75,19 @@ class Settings(BaseSettings):
     opik_api_key: SecretStr = SecretStr("")
     opik_workspace: str = ""
     opik_project_name: str = "tree-memory"
+
+    @field_validator("opik_project_name", mode="after")
+    @classmethod
+    def _blank_opik_project_uses_default(cls, value: str) -> str:
+        """Treat ``OPIK_PROJECT_NAME=""`` as unset.
+
+        Prefect-managed runs always set the env var from the
+        ``tree_opik_project_name`` Variable, which may be seeded blank — an
+        empty string would otherwise OVERRIDE the default and send traces to
+        a nameless Opik project.
+        """
+
+        return value or cls.model_fields["opik_project_name"].default
     # Prefect Horizon (FastMCP Cloud) — the managed hosting for the
     # ``tree-memory`` MCP server. ``tree_memory_cloud_url`` is the deployed
     # server endpoint (``https://<name>.fastmcp.app/mcp``). The server is

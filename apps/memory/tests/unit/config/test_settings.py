@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from tree.config.settings import MongoSettings
+from tree.config.settings import MongoSettings, Settings
 
 
 class TestSettingsSmoke:
@@ -28,6 +28,31 @@ class TestSettingsSmoke:
         uri = settings.mongo.mongo_uri.get_secret_value()
         assert uri.startswith(("mongodb://", "mongodb+srv://"))
         assert "@" in uri  # creds in URI
+
+
+class TestOpikProjectName:
+    def test_blank_env_value_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: Prefect-managed runs always set OPIK_PROJECT_NAME from a
+        # Variable that may be seeded blank — it must not override the default.
+        monkeypatch.setenv("OPIK_PROJECT_NAME", "")
+
+        # Act
+        settings = Settings()
+
+        # Assert
+        assert settings.opik_project_name == "tree-memory"
+
+    def test_explicit_env_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        monkeypatch.setenv("OPIK_PROJECT_NAME", "my-project")
+
+        # Act
+        settings = Settings()
+
+        # Assert
+        assert settings.opik_project_name == "my-project"
 
 
 class TestMongoUriScheme:
