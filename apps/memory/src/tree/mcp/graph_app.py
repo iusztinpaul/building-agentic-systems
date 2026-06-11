@@ -28,9 +28,12 @@ extension is absent — or when the caller explicitly asks via ``as_html_file``
 the path. That keeps the slow path off the model: it never has to hand-author
 HTML from the payload.
 
-The iframe payload travels on ``structured_content`` (the model only sees a
-short text summary, not the full node/edge dump). The JS prefers
-``structuredContent`` and falls back to parsing a JSON text block.
+The iframe payload travels in a ``content`` JSON block (a custom HTML app reads
+the tool result's ``content`` via ``ontoolresult`` — ``structuredContent`` is
+FastMCP's *Prefab*-renderer channel and is NOT forwarded to a custom iframe).
+That block is marked ``audience=["user"]`` so the iframe gets the full node/edge
+dump while the MODEL sees only the short text summary. The JS reads ``content``
+first, then falls back to ``structuredContent`` for hosts that forward it.
 """
 
 import json
@@ -302,12 +305,23 @@ async def visualize_memory_graph(
 
     ui_supported = ctx.client_supports_extension(UI_EXTENSION_ID)
     if ui_supported and not as_html_file:
+        # A CUSTOM HTML app's iframe reads the tool result's ``content`` via
+        # ``ontoolresult`` — ``structuredContent`` is FastMCP's *Prefab*-renderer
+        # channel and is NOT forwarded to a custom iframe. So the graph payload
+        # rides in a ``content`` JSON block; it's marked ``audience=["user"]`` so
+        # the iframe gets it while the MODEL still sees only the short summary.
+        # ``structured_content`` is kept for any host that forwards it too.
         return ToolResult(
             content=[
                 types.TextContent(
                     type="text",
-                    text=f"{summary} (rendered in the interactive graph view).",
-                )
+                    text=f"{summary} (interactive graph view).",
+                ),
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(payload),
+                    annotations=types.Annotations(audience=["user"]),
+                ),
             ],
             structured_content=payload,
         )
@@ -652,10 +666,19 @@ __RENDER_JS__
     const app = new App({ name: "Tree Graph View", version: "1.0.0" });
 
     app.ontoolresult = (result) => {
-      let data = result && result.structuredContent;
-      if (!data) {
-        const txt = result && result.content && result.content.find((c) => c.type === "text");
-        if (txt) { try { data = JSON.parse(txt.text); } catch (_e) { /* not a JSON block */ } }
+      const r = result || {};
+      // A custom HTML app receives the payload via `content` (the host does not
+      // forward `structuredContent` to a custom iframe); read that first, then
+      // fall back to `structuredContent` for hosts that do forward it.
+      let data = null;
+      for (const c of (r.content || [])) {
+        if (c && c.type === "text") {
+          try { const p = JSON.parse(c.text); if (p && Array.isArray(p.nodes)) { data = p; break; } }
+          catch (_e) { /* not a JSON block (e.g. the human summary) */ }
+        }
+      }
+      if (!data && r.structuredContent && Array.isArray(r.structuredContent.nodes)) {
+        data = r.structuredContent;
       }
       if (data && Array.isArray(data.nodes)) render(data);
       else countsEl.textContent = "No graph data in tool result.";
