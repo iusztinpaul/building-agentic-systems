@@ -49,7 +49,8 @@ class TestGitRepoPipInstallPullStep:
         assert any("git_clone" in k for k in keys)
         assert any("run_shell_script" in k for k in keys)
         joined = str(steps)
-        assert "pip install ./apps/memory" in joined
+        assert "./apps/memory" in joined
+        assert "--ignore-requires-python" in joined  # install past stale 3.14 metadata
         assert orchestrator.GIT_URL in joined  # clone target, no embedded token
 
 

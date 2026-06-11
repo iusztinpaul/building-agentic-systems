@@ -55,6 +55,10 @@ GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"
 MANAGED_WORK_POOL = "tree-managed"
 # Secret block holding the GitHub PAT Prefect uses to clone this private repo.
 PAT_BLOCK_NAME = "tree-github-pat"
+# The managed-run image. Pin Python 3.14 — the default (``3-latest``) is 3.12,
+# and ``tree-memory`` is ``requires-python >= 3.14`` so the per-run install fails
+# on anything older. ``prefect-client`` (slim) matches the pool's default flavor.
+MANAGED_IMAGE = "prefecthq/prefect-client:3-python3.14"
 
 
 class _GitRepoWithPipInstall(GitRepository):
@@ -75,14 +79,26 @@ class _GitRepoWithPipInstall(GitRepository):
     splices it into the deployment's pull steps verbatim).
     """
 
+    # Pull steps run in the base working dir (NOT the clone), so the clone goes to
+    # a deterministic ``CLONE_DIR`` and the install runs there explicitly.
+    CLONE_DIR = "repo"
+
     def to_pull_step(self) -> list:  # type: ignore[override]
         clone = super().to_pull_step()
-        steps = clone if isinstance(clone, list) else [clone]
+        clone_step = clone[0] if isinstance(clone, list) else clone
+        clone_step[next(iter(clone_step))]["clone_directory_name"] = self.CLONE_DIR
         return [
-            *steps,
+            clone_step,
             {
                 "prefect.deployments.steps.run_shell_script": {
-                    "script": "pip install ./apps/memory",
+                    "directory": self.CLONE_DIR,
+                    # ``--ignore-requires-python``: on bleeding-edge Python 3.14 some
+                    # pure-Python deps (e.g. beanie 2.0.1) still declare
+                    # ``requires_python <3.14``, so pip filters them out ("No
+                    # matching distribution"). The pinned set IS 3.14-compatible
+                    # (uv installs + the suite passes on 3.14); the flag tells pip
+                    # to install past the stale metadata.
+                    "script": "pip install --ignore-requires-python ./apps/memory",
                     "stream_output": True,
                 }
             },
@@ -195,7 +211,7 @@ def deploy_cloud_pipelines(
         **_git_ref_kwarg(git_ref),
         credentials={"access_token": Secret.load(PAT_BLOCK_NAME)},
     )
-    job_variables = {"env": job_env}
+    job_variables = {"env": job_env, "image": MANAGED_IMAGE}
 
     deployment_ids: list[str] = []
     for spec in _DEPLOYMENT_SPECS:

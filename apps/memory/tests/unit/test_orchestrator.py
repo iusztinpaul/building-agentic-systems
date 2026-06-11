@@ -211,5 +211,7 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     for call in fake_flow.deploy.call_args_list:
         assert call.kwargs["work_pool_name"] == "tree-managed"
         assert "VOYAGE_API_KEY" in call.kwargs["job_variables"]["env"]
+        # Pin the Python-3.14 image (project requires >=3.14).
+        assert call.kwargs["job_variables"]["image"] == orchestrator.MANAGED_IMAGE
         # No raw token anywhere: the install is a pull step, not a pip_packages URL.
         assert "pip_packages" not in call.kwargs["job_variables"]
