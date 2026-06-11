@@ -1,6 +1,13 @@
 {
   "mcpServers": {
     "tree-memory": {
+      "type": "http",
+      "url": "https://tree-memory.fastmcp.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PREFECT_HORIZON_API_KEY}"
+      }
+    },
+    "tree-memory-local": {
       "command": "uv",
       "args": [
         "--directory",

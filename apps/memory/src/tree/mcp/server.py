@@ -169,10 +169,22 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
     # Ensure indexes (creates ``vector_index`` if absent), then assert
     # the live index dimension matches ``app_config.models.search_embedding.dimensions``. The
     # assertion is the loud-fail gate the plan calls for.
-    await ensure_indexes(
-        client, database, embedding_model=embedding_model, user_id=user_id
-    )
-    await assert_settings_match_live_vector_index(client, database)
+    #
+    # On a serverless host (Prefect Horizon / Lambda) this boot work — creating
+    # the Atlas vector index and polling mongot until it syncs — can run for
+    # minutes and blocks port-8081 readiness past the 60s window, so the server
+    # never starts. ``MCP_SKIP_INDEX_BOOTSTRAP=true`` skips it: indexes are
+    # created by the indexing pipeline, and the MCP server only queries.
+    if settings.mcp_skip_index_bootstrap:
+        logger.info(
+            "MCP_SKIP_INDEX_BOOTSTRAP set — skipping ensure_indexes + "
+            "vector-index assertion (fast serverless boot)."
+        )
+    else:
+        await ensure_indexes(
+            client, database, embedding_model=embedding_model, user_id=user_id
+        )
+        await assert_settings_match_live_vector_index(client, database)
 
     logger.info(
         "MCP server ready (database=%s, user_id=%s, thread_id=%s)",

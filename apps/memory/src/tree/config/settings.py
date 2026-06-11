@@ -75,6 +75,23 @@ class Settings(BaseSettings):
     opik_api_key: SecretStr = SecretStr("")
     opik_workspace: str = ""
     opik_project_name: str = "tree-memory"
+    # Prefect Horizon (FastMCP Cloud) — the managed hosting for the
+    # ``tree-memory`` MCP server. ``tree_memory_cloud_url`` is the deployed
+    # server endpoint (``https://<name>.fastmcp.app/mcp``) and
+    # ``prefect_horizon_api_key`` is the bearer token clients present to it.
+    # Both are placeholders locally; only required when talking to the cloud
+    # deployment (see :func:`tree.mcp.client.get_cloud_client`).
+    tree_memory_cloud_url: str = "https://tree-memory.fastmcp.app/mcp"
+    prefect_horizon_api_key: SecretStr = SecretStr("")
+    # Skip the index-bootstrap (ensure_indexes + live vector-index assertion)
+    # in the MCP lifespan. On a serverless host (Prefect Horizon / Lambda) that
+    # boot work — creating the Atlas vector index and polling mongot until it
+    # syncs — can take minutes and blocks port readiness past the host's 60s
+    # window, so the server never starts. Indexes are created by the indexing
+    # pipeline; the MCP server only queries, so it can assume they exist. Set
+    # MCP_SKIP_INDEX_BOOTSTRAP=true on Horizon. Local default keeps the
+    # self-healing boot behaviour.
+    mcp_skip_index_bootstrap: bool = False
 
 
 settings = Settings()
