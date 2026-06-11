@@ -1,4 +1,16 @@
-"""Integration tests for MCP ingestion tools — end-to-end through real MongoDB."""
+"""Integration tests for MCP ingestion tools — end-to-end through real MongoDB.
+
+The ingest tools are now ASYNC: each creates a real ``Document`` in MongoDB and
+then SUBMITS the memory-extraction pipeline to Prefect, returning immediately
+(``{"status": "submitted", "flow_run_id": ...}``) instead of running extraction
+in-process. These tests therefore exercise the real document-creation path end
+to end against MongoDB and stub only the Prefect submission boundary (an external
+infra dependency) so they don't need a live Prefect API or a served worker.
+
+Because extraction no longer runs inline, these tests no longer issue the live
+Atlas ``$vectorSearch`` that previously forced the ``requires_mongot``/``slow``
+markers — they're plain MongoDB integration tests now.
+"""
 
 import json
 
@@ -10,37 +22,29 @@ from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
 
 TEST_DATABASE = "integration_tests_twin"
 
-# Canned LLM response: one person node + one preference edge.
-_LLM_EXTRACTION = {
-    "nodes": [
-        {
-            "name": "alice",
-            "type": "person",
-            "properties": {"aliases": []},
-        },
-        {
-            "name": "likes python",
-            "type": "preference",
-            "properties": {"content": "Alice prefers Python for data work"},
-        },
-    ],
-    "edges": [
-        {
-            "source_node_id": "alice",
-            "source_type": "person",
-            "target_node_id": "likes python",
-            "target_type": "preference",
-            "type": "has",
-            "properties": {},
-        },
-    ],
-}
 
+@pytest.fixture
+def stub_prefect_submit(mocker):
+    """Stub the Prefect submission boundary used by ``submit_ingestion``.
 
-def _make_fake_llm() -> FakeLLM:
-    """FakeLLM that returns canned extraction for any number of chunks."""
+    Replaces ``tree.mcp.ingest.get_client`` with a fake async client whose
+    ``read_deployment_by_name`` / ``create_flow_run_from_deployment`` succeed, so
+    ``submit_ingestion`` returns ``status="submitted"`` without a live Prefect API
+    or worker. Yields the fake client so tests can assert the submitted params.
+    """
 
-    return FakeLLM([_LLM_EXTRACTION] * 50)
+    deployment = mocker.MagicMock(id="dep-123")
+    flow_run = mocker.MagicMock(id="fr-456")
+    fake_client = mocker.MagicMock()
+    fake_client.read_deployment_by_name = mocker.AsyncMock(return_value=deployment)
+    fake_client.create_flow_run_from_deployment = mocker.AsyncMock(
+        return_value=flow_run
+    )
+    ctx_manager = mocker.MagicMock()
+    ctx_manager.__aenter__ = mocker.AsyncMock(return_value=fake_client)
+    ctx_manager.__aexit__ = mocker.AsyncMock(return_value=False)
+    mocker.patch("tree.mcp.ingest.get_client", return_value=ctx_manager)
+    return fake_client
 
 
 # ---------------------------------------------------------------------------
@@ -48,27 +52,12 @@ def _make_fake_llm() -> FakeLLM:
 # ---------------------------------------------------------------------------
 
 
-# NOTE: every test in these MCP ingest classes drives ``tree.mcp.tools.ingest_*``,
-# which under the hood runs the memory-extraction pipeline. The pipeline's
-# ``add_entity`` step issues a live Atlas ``$vectorSearch`` (no patching of
-# ``dedupe_entity`` here, unlike ``test_extraction_pipeline.py``). On CI runners
-# mongot's Search Index Management gRPC channel is unreliable and the live
-# aggregation hangs until the per-test ``--timeout`` fires (5 min each → ~35 min
-# wasted in CI run 25989844295). We tag the whole class as ``requires_mongot``
-# so CI excludes them (``-m "not requires_mongot"``) and we still run them
-# locally where the full ``docker-compose.yml`` brings mongot up. The trivial
-# early-return error tests (``empty_text``, ``file_not_found``,
-# ``unsupported_scheme``) sit in the same class for cohesion — they're cheap to
-# rerun locally and lose nothing meaningful by being skipped in CI.
-@pytest.mark.requires_mongot
 class TestIngestConversation:
-    @pytest.mark.slow
-    async def test_creates_document_and_extracts(
-        self, make_mcp_ctx, mongo_client, test_user
+    async def test_creates_document_and_submits(
+        self, make_mcp_ctx, stub_prefect_submit, test_user
     ):
-        llm = _make_fake_llm()
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
         result = await ingest_conversation(
@@ -76,47 +65,38 @@ class TestIngestConversation:
         )
 
         parsed = json.loads(result)
-        assert parsed["status"] == "ingested"
-        assert parsed["nodes_extracted"] > 0
-        assert parsed["edges_extracted"] > 0
+        assert parsed["status"] == "submitted"
+        assert parsed["flow_run_id"] == "fr-456"
 
-        # Verify Document exists in MongoDB.
-        doc = await Document.find_one(
-            Document.source_uri == parsed["source_uri"],
-        )
+        # The Document is persisted (real e2e) and tagged with the pinned user_id.
+        doc = await Document.find_one(Document.source_uri == parsed["source_uri"])
         assert doc is not None
         assert doc.source_type == SourceType.CONVERSATION
-        # #020: the persisted row carries the boot-pinned user_id —
-        # closes the gap surfaced in plan.md 2026-05-16.
         assert doc.user_id == test_user.id
 
-        # Verify KG entries were created and tagged for this tenant only.
-        kg_col = mongo_client[TEST_DATABASE]["knowledge_graph"]
-        kg_count = await kg_col.count_documents({})
-        assert kg_count > 0
-        kg_count_other = await kg_col.count_documents(
-            {"user_id": {"$ne": test_user.id}}
+        # The submitted flow run is scoped to this user + just this document.
+        submit_kwargs = (
+            stub_prefect_submit.create_flow_run_from_deployment.await_args.kwargs
         )
-        assert kg_count_other == 0, (
-            "Conversation ingest leaked rows to a different tenant — "
-            "user_id propagation is broken."
-        )
+        params = submit_kwargs["parameters"]
+        assert params["user_id"] == str(test_user.id)
+        assert params["document_ids"] == [str(doc.id)]
 
-    @pytest.mark.slow
-    async def test_returns_summary_with_counts(self, make_mcp_ctx, test_user):
-        llm = _make_fake_llm()
+    async def test_returns_submission_summary(
+        self, make_mcp_ctx, stub_prefect_submit, test_user
+    ):
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
         result = await ingest_conversation("Bob discussed his new project.", ctx)
 
         parsed = json.loads(result)
+        assert parsed["status"] == "submitted"
         assert "document_id" in parsed
         assert "source_uri" in parsed
         assert "title" in parsed
-        assert isinstance(parsed["nodes_extracted"], int)
-        assert isinstance(parsed["edges_extracted"], int)
+        assert "flow_run_id" in parsed
 
     async def test_empty_text_returns_error(self, make_mcp_ctx):
         ctx = make_mcp_ctx(llm=FakeLLM(), embedding_model=FakeEmbeddingModel())
@@ -132,15 +112,12 @@ class TestIngestConversation:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_mongot
 class TestIngestFile:
-    @pytest.mark.slow
     async def test_ingests_txt_file(
-        self, make_mcp_ctx, tmp_path, mongo_client, test_user
+        self, make_mcp_ctx, stub_prefect_submit, tmp_path, test_user
     ):
-        llm = _make_fake_llm()
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
         txt_file = tmp_path / "notes.txt"
@@ -149,7 +126,8 @@ class TestIngestFile:
         result = await ingest_file(str(txt_file), ctx)
 
         parsed = json.loads(result)
-        assert parsed["status"] == "ingested"
+        assert parsed["status"] == "submitted"
+        assert parsed["flow_run_id"] == "fr-456"
 
         doc = await Document.find_one(
             Document.source_uri == f"file://{txt_file.resolve()}"
@@ -158,13 +136,11 @@ class TestIngestFile:
         assert doc.source_type == SourceType.FILE
         assert doc.title == "notes.txt"
 
-    @pytest.mark.slow
     async def test_ingests_html_with_conversion(
-        self, make_mcp_ctx, tmp_path, test_user
+        self, make_mcp_ctx, stub_prefect_submit, tmp_path, test_user
     ):
-        llm = _make_fake_llm()
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
         html_file = tmp_path / "page.html"
@@ -173,7 +149,7 @@ class TestIngestFile:
         result = await ingest_file(str(html_file), ctx)
 
         parsed = json.loads(result)
-        assert parsed["status"] == "ingested"
+        assert parsed["status"] == "submitted"
 
         doc = await Document.find_one(
             Document.source_uri == f"file://{html_file.resolve()}"
@@ -191,18 +167,18 @@ class TestIngestFile:
         parsed = json.loads(result)
         assert parsed["error"] == "file_error"
 
-    @pytest.mark.slow
-    async def test_duplicate_file_skipped(self, make_mcp_ctx, tmp_path, test_user):
-        llm = _make_fake_llm()
+    async def test_duplicate_file_skipped(
+        self, make_mcp_ctx, stub_prefect_submit, tmp_path, test_user
+    ):
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
         txt_file = tmp_path / "dup.txt"
         txt_file.write_text("Duplicate content test.")
 
         first = await ingest_file(str(txt_file), ctx)
-        assert json.loads(first)["status"] == "ingested"
+        assert json.loads(first)["status"] == "submitted"
 
         second = await ingest_file(str(txt_file), ctx)
         assert json.loads(second)["status"] == "already_ingested"
@@ -213,54 +189,55 @@ class TestIngestFile:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.requires_mongot
+def _mock_substack_fetch(mocker, sample_html: str) -> None:
+    mock_response = mocker.MagicMock()
+    mock_response.text = sample_html
+    mock_response.raise_for_status = mocker.MagicMock()
+    mocker.patch(
+        "tree.data.substack.substack_article.httpx.AsyncClient",
+        return_value=mocker.AsyncMock(
+            __aenter__=mocker.AsyncMock(
+                return_value=mocker.MagicMock(
+                    get=mocker.AsyncMock(return_value=mock_response),
+                )
+            ),
+            __aexit__=mocker.AsyncMock(return_value=False),
+        ),
+    )
+
+
 class TestIngestUrl:
-    @pytest.mark.slow
     async def test_ingests_substack_article(
-        self, make_mcp_ctx, mocker, mongo_client, test_user
+        self, make_mcp_ctx, stub_prefect_submit, mocker, test_user
     ):
-        llm = _make_fake_llm()
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
-        sample_html = """
-        <html>
-        <head>
-            <meta property="og:title" content="Test Article">
-            <meta property="og:description" content="A test summary">
-            <meta name="author" content="Alice">
-            <time datetime="2025-01-15T10:00:00Z">Jan 15, 2025</time>
-        </head>
-        <body>
-            <div class="body">
-                <p>Alice discusses Python best practices for data pipelines.</p>
-            </div>
-        </body>
-        </html>
-        """
-
-        mock_response = mocker.MagicMock()
-        mock_response.text = sample_html
-        mock_response.raise_for_status = mocker.MagicMock()
-
-        mocker.patch(
-            "tree.data.substack.substack_article.httpx.AsyncClient",
-            return_value=mocker.AsyncMock(
-                __aenter__=mocker.AsyncMock(
-                    return_value=mocker.MagicMock(
-                        get=mocker.AsyncMock(return_value=mock_response),
-                    )
-                ),
-                __aexit__=mocker.AsyncMock(return_value=False),
-            ),
+        _mock_substack_fetch(
+            mocker,
+            """
+            <html>
+            <head>
+                <meta property="og:title" content="Test Article">
+                <meta property="og:description" content="A test summary">
+                <meta name="author" content="Alice">
+                <time datetime="2025-01-15T10:00:00Z">Jan 15, 2025</time>
+            </head>
+            <body>
+                <div class="body">
+                    <p>Alice discusses Python best practices for data pipelines.</p>
+                </div>
+            </body>
+            </html>
+            """,
         )
 
         result = await ingest_url("https://test.substack.com/p/test-article", ctx)
 
         parsed = json.loads(result)
-        assert parsed["status"] == "ingested"
-        assert parsed["nodes_extracted"] > 0
+        assert parsed["status"] == "submitted"
+        assert parsed["flow_run_id"] == "fr-456"
 
         doc = await Document.find_one(
             Document.source_uri == "https://test.substack.com/p/test-article"
@@ -276,7 +253,6 @@ class TestIngestUrl:
         parsed = json.loads(result)
         assert parsed["error"] == "unsupported_url"
 
-    @pytest.mark.slow
     async def test_fallthrough_without_brightdata_credentials_returns_config_error(
         self, make_mcp_ctx, mocker
     ):
@@ -301,39 +277,26 @@ class TestIngestUrl:
         assert parsed["error"] == "configuration_error"
         assert "BRIGHTDATA_API_KEY" in parsed["detail"]
 
-    @pytest.mark.slow
-    async def test_duplicate_url_skipped(self, make_mcp_ctx, mocker, test_user):
-        llm = _make_fake_llm()
+    async def test_duplicate_url_skipped(
+        self, make_mcp_ctx, stub_prefect_submit, mocker, test_user
+    ):
         ctx = make_mcp_ctx(
-            llm=llm, embedding_model=FakeEmbeddingModel(), user_id=test_user.id
+            llm=FakeLLM(), embedding_model=FakeEmbeddingModel(), user_id=test_user.id
         )
 
-        sample_html = """
-        <html>
-        <head><meta property="og:title" content="Dup Article"></head>
-        <body><div class="body"><p>Content here.</p></div></body>
-        </html>
-        """
-
-        mock_response = mocker.MagicMock()
-        mock_response.text = sample_html
-        mock_response.raise_for_status = mocker.MagicMock()
-
-        mocker.patch(
-            "tree.data.substack.substack_article.httpx.AsyncClient",
-            return_value=mocker.AsyncMock(
-                __aenter__=mocker.AsyncMock(
-                    return_value=mocker.MagicMock(
-                        get=mocker.AsyncMock(return_value=mock_response),
-                    )
-                ),
-                __aexit__=mocker.AsyncMock(return_value=False),
-            ),
+        _mock_substack_fetch(
+            mocker,
+            """
+            <html>
+            <head><meta property="og:title" content="Dup Article"></head>
+            <body><div class="body"><p>Content here.</p></div></body>
+            </html>
+            """,
         )
 
         url = "https://dup-test.substack.com/p/dup-article"
         first = await ingest_url(url, ctx)
-        assert json.loads(first)["status"] == "ingested"
+        assert json.loads(first)["status"] == "submitted"
 
         second = await ingest_url(url, ctx)
         assert json.loads(second)["status"] == "already_ingested"

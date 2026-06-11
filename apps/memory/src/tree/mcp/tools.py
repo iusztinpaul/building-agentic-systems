@@ -36,7 +36,7 @@ from tree.entities.knowledge_graph import NodeType
 # (visualize_memory_graph tool + ui:// resource).
 from tree.mcp import graph_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
-from tree.mcp.ingest import run_ingestion_pipeline
+from tree.mcp.ingest import submit_ingestion
 from tree.mcp.server import mcp
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
@@ -267,7 +267,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
     """Fetch a web page and ingest its content into the knowledge graph.
 
     Routes the URL to the appropriate data pipeline (currently supports
-    Substack articles), then runs memory extraction and indexing.
+    Substack articles), then SUBMITS memory extraction + indexing to the Prefect
+    pipeline and returns immediately (async ingestion) — it does not wait for the
+    graph to be built. Returns ``{"status": "submitted", ...}`` on success.
 
     Args:
         url: The web URL to fetch and ingest.
@@ -294,15 +296,8 @@ async def ingest_url(url: str, ctx: Context) -> str:
     if document is None:
         return json.dumps({"status": "already_ingested", "url": url})
 
-    summary = await run_ingestion_pipeline(
-        document,
-        client=lc["client"],
-        database=lc["database"],
-        llm=lc["llm"],
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-    )
-    return json.dumps(summary)
+    result = await submit_ingestion(document, user_id=lc["user_id"])
+    return json.dumps(result)
 
 
 @mcp.tool
@@ -314,8 +309,9 @@ async def ingest_file(
 ) -> str:
     """Read a local file and ingest its content into the knowledge graph.
 
-    Supports .txt, .md, and .html files. Creates a Document, then runs
-    memory extraction and indexing.
+    Supports .txt, .md, and .html files. Creates a Document, then SUBMITS memory
+    extraction + indexing to the Prefect pipeline and returns immediately (async
+    ingestion). Returns ``{"status": "submitted", ...}`` on success.
 
     Args:
         file_path: Absolute path to the file to ingest.
@@ -337,15 +333,8 @@ async def ingest_file(
     if document is None:
         return json.dumps({"status": "already_ingested", "file_path": file_path})
 
-    summary = await run_ingestion_pipeline(
-        document,
-        client=lc["client"],
-        database=lc["database"],
-        llm=lc["llm"],
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-    )
-    return json.dumps(summary)
+    result = await submit_ingestion(document, user_id=lc["user_id"])
+    return json.dumps(result)
 
 
 @mcp.tool
@@ -579,8 +568,10 @@ async def ingest_conversation(
 ) -> str:
     """Extract knowledge from a conversation and add it to the knowledge graph.
 
-    Processes conversation text through the extraction pipeline to identify
-    people, tasks, preferences, and relationships.
+    Creates a Document from the conversation, then SUBMITS the extraction +
+    indexing pipeline to Prefect and returns immediately (async ingestion) —
+    people, tasks, preferences, and relationships are built out-of-band by a
+    worker. Returns ``{"status": "submitted", ...}`` on success.
 
     Args:
         conversation_text: The full conversation text to process.
@@ -637,15 +628,8 @@ async def ingest_conversation(
     if document is None:
         return json.dumps({"status": "already_ingested"})
 
-    summary = await run_ingestion_pipeline(
-        document,
-        client=lc["client"],
-        database=lc["database"],
-        llm=lc["llm"],
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-    )
-    return json.dumps(summary)
+    result = await submit_ingestion(document, user_id=lc["user_id"])
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------

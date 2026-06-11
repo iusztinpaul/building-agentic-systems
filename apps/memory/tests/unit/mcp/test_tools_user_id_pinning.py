@@ -55,9 +55,9 @@ class TestIngestConversationPropagatesUserId:
             return_value=doc,
         )
         mock_run = mocker.patch(
-            "tree.mcp.tools.run_ingestion_pipeline",
+            "tree.mcp.tools.submit_ingestion",
             new_callable=AsyncMock,
-            return_value={"status": "ingested"},
+            return_value={"status": "submitted"},
         )
 
         await mcp_tools.ingest_conversation("Some text.", ctx)
@@ -79,9 +79,9 @@ class TestIngestConversationPropagatesUserId:
             return_value=doc,
         )
         mocker.patch(
-            "tree.mcp.tools.run_ingestion_pipeline",
+            "tree.mcp.tools.submit_ingestion",
             new_callable=AsyncMock,
-            return_value={"status": "ingested"},
+            return_value={"status": "submitted"},
         )
 
         await mcp_tools.ingest_conversation("Some text.", ctx)
@@ -104,9 +104,9 @@ class TestIngestUrlPropagatesUserId:
             return_value=doc,
         )
         mock_run = mocker.patch(
-            "tree.mcp.tools.run_ingestion_pipeline",
+            "tree.mcp.tools.submit_ingestion",
             new_callable=AsyncMock,
-            return_value={"status": "ingested"},
+            return_value={"status": "submitted"},
         )
 
         await mcp_tools.ingest_url("https://example.com", ctx)
@@ -126,9 +126,9 @@ class TestIngestFilePropagatesUserId:
             return_value=doc,
         )
         mocker.patch(
-            "tree.mcp.tools.run_ingestion_pipeline",
+            "tree.mcp.tools.submit_ingestion",
             new_callable=AsyncMock,
-            return_value={"status": "ingested"},
+            return_value={"status": "submitted"},
         )
 
         await mcp_tools.ingest_file("/tmp/x.md", ctx)
