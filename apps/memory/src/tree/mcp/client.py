@@ -2,9 +2,11 @@
 
 The server is deployed to Prefect Horizon (FastMCP Cloud) and reachable at
 ``settings.tree_memory_cloud_url`` (``https://<name>.fastmcp.app/mcp``).
-Horizon secures the endpoint; programmatic clients authenticate with the
-``PREFECT_HORIZON_API_KEY`` bearer token. The interactive snippet on the
-Horizon dashboard uses OAuth instead — this helper is the headless path.
+Horizon protects it with **Horizon Authentication** (OAuth + organization
+membership): clients must be logged into Horizon and a member of the org.
+So this helper uses the OAuth flow — ``auth="oauth"`` opens the default
+browser on first use, captures the callback, and caches the token for
+subsequent calls. There is no static API key for client connections.
 
 Usage::
 
@@ -25,23 +27,15 @@ from tree.config.settings import settings
 def get_cloud_client() -> Client:
     """Build a :class:`fastmcp.Client` for the cloud ``tree-memory`` server.
 
-    Reads the endpoint and bearer token from :data:`tree.config.settings`.
-    A plain-string ``auth`` is sent by FastMCP as an ``Authorization: Bearer``
-    header. The returned client is an async context manager — open it with
-    ``async with`` before calling tools.
+    Targets ``settings.tree_memory_cloud_url`` and authenticates with the
+    Horizon OAuth flow (``auth="oauth"``): the first call opens a browser to
+    log into Horizon, then the token is cached for later calls. The returned
+    client is an async context manager — open it with ``async with`` before
+    calling tools.
 
-    Raises:
-        RuntimeError: if ``PREFECT_HORIZON_API_KEY`` is unset (placeholder
-            local config), so failures surface as a clear config error rather
-            than an opaque 401 from the cloud.
+    This is the interactive path. A headless/server-side caller would need
+    Horizon's optional *delegated authentication* (a pre-registered OAuth
+    provider or per-user API key) instead of the browser flow.
     """
 
-    token = settings.prefect_horizon_api_key.get_secret_value()
-    if not token:
-        raise RuntimeError(
-            "PREFECT_HORIZON_API_KEY is not set — required to authenticate "
-            "against the cloud tree-memory MCP server. Set it in .env (grab "
-            "the value from the Prefect Horizon dashboard's Connect tab)."
-        )
-
-    return Client(settings.tree_memory_cloud_url, auth=token)
+    return Client(settings.tree_memory_cloud_url, auth="oauth")

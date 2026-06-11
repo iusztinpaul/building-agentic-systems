@@ -106,6 +106,10 @@ class TestSettingsCredentialsOnlySurface:
             "opik_api_key",
             "opik_workspace",
             "opik_project_name",
+            # Prefect Horizon (FastMCP Cloud) deployment endpoint + the
+            # serverless fast-boot toggle — infra config, not behaviour knobs.
+            "tree_memory_cloud_url",
+            "mcp_skip_index_bootstrap",
         }
 
 
