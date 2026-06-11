@@ -96,6 +96,10 @@ make memory-atlas-up ATLAS_ARGS="--project Tree --cluster tree-staging --tier M1
 
 The seed DB user reuses `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`; `atlas-up` also adds any CIDRs in the optional `ATLAS_ACCESS_CIDRS` env var (comma-separated) to the project IP access list. The service account needs Project Owner (or Cluster Manager + Database Access Admin + Network Access Manager) on the target project.
 
+This script is the **reproducible, CI-friendly** path (no extra binary, reuses the service-account creds). For **ad-hoc, interactive** work against the cluster, the official [MongoDB Atlas CLI](https://www.mongodb.com/docs/atlas/cli/current/) (`brew install mongodb-atlas-cli`, then `atlas auth login`) is handier — e.g. `atlas clusters list`, `atlas clusters describe tree`, `atlas clusters create … --file cluster.json`, `atlas dbusers list`. Note it authenticates separately (interactive login or an API-key profile, not the service-account `MDB_MCP_*` pair), so prefer the `make memory-atlas-*` targets for anything scripted or run in CI.
+
+> **A note on scope.** This script is a deliberately simple, dependency-free take on IaC — enough to manage one cluster reproducibly from code. For true scale (many clusters/projects/environments, drift detection, state management, plan/apply review, multi-resource dependency graphs) you'd reach for a real IaC tool like [Terraform](https://registry.terraform.io/providers/mongodb/mongodbatlas/latest/docs) (the `mongodbatlas` provider) or [Pulumi](https://www.pulumi.com/registry/packages/mongodbatlas/) instead.
+
 ### Continuous deployment of Prefect deployments
 
 `.github/workflows/cd.yml` keeps the Prefect Cloud deployments in sync with `main`: on every push, **after CI passes**, it runs `make memory-deploy-prefect` (which calls `deploy/prefect_pipelines.py`) to register/update the deployment definitions on Prefect Cloud — without serving. The long-running worker runs separately (`make memory-serve-workflows` on an always-on host, or the `prefect-worker` container); CD only syncs the definitions.
