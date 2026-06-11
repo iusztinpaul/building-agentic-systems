@@ -1,14 +1,20 @@
-"""Register/update Prefect deployments on the configured API — the CD entrypoint.
+"""Push code/spec updates to the Prefect Cloud deployments — the CD entrypoint.
 
-Unlike ``make memory-serve-workflows`` (which serves AND blocks as the worker),
-this script only *applies* the deployment definitions returned by
-:func:`tree.orchestrator.build_deployments` against ``PREFECT_API_URL`` and then
-exits. It is what ``.github/workflows/cd.yml`` runs on every push to ``main`` so
-the Prefect Cloud deployments stay in lock-step with the code, while the
-long-running worker runs elsewhere.
+Unlike ``deploy/prefect_pipelines_setup.py`` (which provisions the Managed work
+pool + config blocks), this only re-applies the deployment definitions via
+:func:`tree.orchestrator.deploy_cloud_pipelines` and exits. It is what
+``.github/workflows/cd.yml`` runs on every push to ``main`` so the Cloud
+deployments track the code, while Prefect's managed workers execute the runs.
 
-Requires ``PREFECT_API_URL`` and ``PREFECT_API_KEY`` in the environment (the CD
-workflow injects them from repository secrets).
+It assumes ``prefect_pipelines_setup.py up`` has already created the
+``tree-managed`` work pool and the ``tree-*`` Secret blocks / Variables. Because
+the managed run env (:func:`tree.orchestrator.managed_env_templates`) is a static
+``{{ prefect.blocks/variables.* }}`` mapping — never raw values — CD needs only
+``PREFECT_API_URL`` / ``PREFECT_API_KEY``, NOT the app's secrets.
+
+``GIT_REF`` (optional) pins the deployments to a branch or commit; defaults to
+``main`` (branch-tracking, so merges go live without a re-deploy). The CD workflow
+can pass the tested commit SHA for reproducible deploys.
 
 Usage::
 
@@ -16,22 +22,33 @@ Usage::
     uv run python deploy/prefect_pipelines.py
 """
 
-import asyncio
 import logging
+import os
 
 from tree.logging import init_logger
-from tree.orchestrator import apply_deployments
+from tree.orchestrator import (
+    MANAGED_WORK_POOL,
+    deploy_cloud_pipelines,
+    managed_env_templates,
+)
 
 init_logger()
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    deployment_ids = asyncio.run(apply_deployments())
+    git_ref = os.environ.get("GIT_REF") or "main"
+    deployment_ids = deploy_cloud_pipelines(
+        work_pool_name=MANAGED_WORK_POOL,
+        git_ref=git_ref,
+        job_env=managed_env_templates(),
+    )
     logger.info(
-        "Applied %d Prefect deployment(s): %s",
+        "Applied %d Prefect deployment(s) on %s @ %s: %s",
         len(deployment_ids),
-        ", ".join(str(d) for d in deployment_ids),
+        MANAGED_WORK_POOL,
+        git_ref,
+        ", ".join(deployment_ids),
     )
 
 

@@ -142,11 +142,23 @@ atlas-down: # Delete the Atlas cluster (irreversible; pass ATLAS_ARGS=--yes to s
 
 # --- Orchestration ---
 
-serve-workflows: # Serve Prefect workflow deployments.
+serve-workflows: # LOCAL dev: serve workflow deployments from local code (point PREFECT_API_URL at the local server via make local-start). Do NOT run against the Cloud workspace managed by deploy-prefect-setup-up.
 	uv run python -m tree.orchestrator
 
-deploy-prefect: # CD entrypoint: register/update Prefect deployments on the configured API (PREFECT_API_URL/PREFECT_API_KEY) without serving. Run by .github/workflows/cd.yml on push to main.
+deploy-prefect: # CD entrypoint: push code/spec updates to the Cloud managed deployments (needs only PREFECT_API_URL/PREFECT_API_KEY). Assumes deploy-prefect-setup-up has run. Used by .github/workflows/cd.yml on push to main.
 	uv run python deploy/prefect_pipelines.py
+
+deploy-prefect-setup-up: # IaC: provision the Prefect Cloud Managed work pool + config blocks + deployments (idempotent). Needs PREFECT_API_URL/KEY, GITHUB_PAT, and the app runtime env (Mongo creds, VOYAGE/GOOGLE/BRIGHTDATA/OPIK keys).
+	uv run python deploy/prefect_pipelines_setup.py up
+
+deploy-prefect-setup-update: # IaC: re-deploy code/spec only to the managed pool (assumes the pool + blocks exist).
+	uv run python deploy/prefect_pipelines_setup.py update
+
+deploy-prefect-setup-status: # IaC: print the managed work pool + each deployment's work-pool binding.
+	uv run python deploy/prefect_pipelines_setup.py status
+
+deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Add YES=1 to skip the prompt.
+	uv run python deploy/prefect_pipelines_setup.py down $(if $(YES),--yes,)
 
 
 # --- Users & Session ---

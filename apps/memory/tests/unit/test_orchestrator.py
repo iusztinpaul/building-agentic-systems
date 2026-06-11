@@ -180,26 +180,39 @@ def test_serve_deployments_serves_the_built_topology(mocker):
     assert served_names == built_names
 
 
-async def test_apply_deployments_applies_each_without_serving(mocker):
-    """The CD path ``aapply()``s every built deployment and never serves.
+def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
+    """The cloud/CD path deploys every spec to the Managed pool and never serves.
 
-    Asserts apply_deployments returns the applied ids in order, awaits each
-    deployment's ``aapply`` exactly once, and crucially does NOT call
-    ``serve`` (CD registers definitions only — the worker runs elsewhere).
+    ``deploy_cloud_pipelines`` replaced the old served ``apply_deployments``: it
+    git-sources each flow and ``deploy()``s it bound to the work pool with our
+    slim ``pip_packages`` + the passed ``job_env``. Mocks the Prefect SDK boundary
+    (``Flow.from_source`` / ``deploy``, ``Secret``, ``GitRepository``) — no network
+    — and asserts it returns the ids, targets the pool, and does NOT serve.
     """
 
-    # Arrange
-    fakes = [mocker.Mock(name=f"dep{i}") for i in range(3)]
-    for i, fake in enumerate(fakes):
-        fake.aapply = mocker.AsyncMock(return_value=f"deployment-id-{i}")
-    mocker.patch("tree.orchestrator.build_deployments", return_value=fakes)
+    # Arrange — every from_source(...) yields a fake flow whose deploy returns an id.
+    mocker.patch("tree.orchestrator.Secret")
+    mocker.patch("tree.orchestrator.GitRepository")
     serve_spy = mocker.patch("tree.orchestrator.serve")
+    fake_flow = mocker.Mock()
+    fake_flow.deploy = mocker.Mock(side_effect=[f"id-{i}" for i in range(5)])
+    mocker.patch.object(prefect.Flow, "from_source", return_value=fake_flow)
 
     # Act
-    result = await orchestrator.apply_deployments()
+    ids = orchestrator.deploy_cloud_pipelines(
+        work_pool_name="tree-managed",
+        git_ref="main",
+        job_env={"PYTHONPATH": "apps/memory/src"},
+    )
 
-    # Assert
-    assert result == ["deployment-id-0", "deployment-id-1", "deployment-id-2"]
-    for fake in fakes:
-        fake.aapply.assert_awaited_once()
+    # Assert — one deploy per spec, ids returned in order, never served.
+    assert ids == ["id-0", "id-1", "id-2", "id-3", "id-4"]
     serve_spy.assert_not_called()
+    assert fake_flow.deploy.call_count == 5
+    for call in fake_flow.deploy.call_args_list:
+        assert call.kwargs["work_pool_name"] == "tree-managed"
+        assert call.kwargs["job_variables"]["env"] == {"PYTHONPATH": "apps/memory/src"}
+        assert (
+            call.kwargs["job_variables"]["pip_packages"]
+            is orchestrator.WORKER_PIP_PACKAGES
+        )
