@@ -40,6 +40,9 @@ Covered query paths:
     existing stages. ``validate_pipeline`` now prepends a tenant
     ``{"$match": {"user_id": ...}}`` as the leading stage in those
     cases. See ``test_nl_query_first_stage_without_match_does_not_leak``.
+18. ``tree.memory.query.core.fetch_full_graph`` — the whole-graph
+    "show everything" read behind a no-query ``visualize_memory_graph``.
+    See ``test_fetch_full_graph_returns_only_user_a``.
 
 Adding a new query path obligates the author to extend this test.
 """
@@ -62,6 +65,7 @@ from tree.memory.query.core import (
     _text_search,
     _vector_search,
     expand_graph,
+    fetch_full_graph,
     query_memory as structured_query_memory,
     search_nodes,
 )
@@ -1000,6 +1004,28 @@ class TestTwoUserIsolation:
         # /bucketed shapes are inspected too.
         self._assert_no_b_rows(results)
         self._assert_no_b_tokens(results)
+
+    # ------------------------------------------------------------------
+    # Query path 18 — fetch_full_graph (whole-graph "show everything" view)
+    # ------------------------------------------------------------------
+
+    async def test_fetch_full_graph_returns_only_user_a(self) -> None:
+        """``fetch_full_graph`` (no-query visualize / full-graph view) is tenant-locked.
+
+        It loads every ``kind:node`` / ``kind:edge`` for a user — the broadest
+        read in the codebase — so a missing ``user_id`` filter would dump the
+        whole multi-tenant collection. Must return all of A and none of B.
+        """
+
+        result = await fetch_full_graph(
+            self.mongo_client, TEST_DATABASE, self.user_a.id
+        )
+
+        assert result.nodes, "Expected User A's full graph to have nodes."
+        self._assert_no_b_rows(result.nodes)
+        self._assert_no_b_rows(result.edges)
+        self._assert_no_b_tokens(result.nodes)
+        self._assert_no_b_tokens(result.edges)
 
     # ------------------------------------------------------------------
     # Query path 13 — MCP query_memory tool

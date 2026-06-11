@@ -322,3 +322,22 @@ async def query_memory(
     seed_ids = [node["_id"] for node in seed_nodes]
 
     return await expand_graph(client, database, seed_ids, user_id, max_hops=max_hops)
+
+
+async def fetch_full_graph(
+    client: AsyncMongoClient,
+    database: str,
+    user_id: PydanticObjectId,
+) -> QueryResult:
+    """Load the ENTIRE materialized knowledge graph for ``user_id``.
+
+    Unlike :func:`query_memory` (semantic + text search expanded around seed
+    nodes), this returns every node and edge the user owns — the "show me
+    everything" view used when no search query is given. Scoped to ``user_id``,
+    so it never returns another tenant's rows.
+    """
+
+    collection = client[database][_KG_COLLECTION]
+    nodes = [doc async for doc in collection.find({"user_id": user_id, "kind": "node"})]
+    edges = [doc async for doc in collection.find({"user_id": user_id, "kind": "edge"})]
+    return QueryResult(nodes=nodes, edges=edges)

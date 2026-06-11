@@ -49,6 +49,7 @@ from mcp import types
 from tree.config.paths import GRAPHS_DIR
 from tree.entities.colours import Colours
 from tree.mcp.server import mcp
+from tree.memory.query.core import fetch_full_graph
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.visualize import (
     _extract_display_name,
@@ -246,18 +247,19 @@ def _render_graph_file(
 
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
 async def visualize_memory_graph(
-    query: str,
     ctx: Context,
+    query: str = "",
     top_k: int = 15,
     max_hops: int = 2,
     as_html_file: bool = False,
 ) -> ToolResult | str:
-    """Visualize the knowledge graph for a query as an interactive graph.
+    """Visualize the knowledge graph as an interactive graph.
 
-    Runs semantic + text search with graph expansion (same engine as
-    ``search_memory``) and renders the resulting nodes/edges in a read-only,
-    interactive Sigma.js force-directed view. Use this when the user wants to
-    *see* the graph rather than read node/edge JSON.
+    With a ``query``, runs semantic + text search with graph expansion (same
+    engine as ``search_memory``) and visualizes that subgraph. With NO query
+    (the default), visualizes the user's ENTIRE memory graph. Renders read-only
+    in an interactive Sigma.js force-directed view — use this when the user wants
+    to *see* the graph rather than read node/edge JSON.
 
     When the client renders MCP App UIs, the graph appears inline. Otherwise
     (or when ``as_html_file`` is set) the same graph is written to a
@@ -265,27 +267,38 @@ async def visualize_memory_graph(
     HTML yourself; just share the path.
 
     Args:
-        query: Search query text — seeds the subgraph to visualize.
-        top_k: Number of seed nodes to retrieve (default 15).
-        max_hops: Hops of graph expansion around the seeds (default 2).
+        query: Search query text — seeds the subgraph to visualize. Omit (empty)
+            to visualize the whole memory graph.
+        top_k: Number of seed nodes to retrieve (default 15). Ignored with no query.
+        max_hops: Hops of graph expansion around the seeds (default 2). Ignored
+            with no query.
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
     """
 
     lc = ctx.lifespan_context
-    result = await structured_query_memory(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        top_k=top_k,
-        max_hops=max_hops,
-    )
+    if query:
+        result = await structured_query_memory(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            top_k=top_k,
+            max_hops=max_hops,
+        )
+        label = repr(query)
+    else:
+        result = await fetch_full_graph(
+            client=lc["client"],
+            database=lc["database"],
+            user_id=lc["user_id"],
+        )
+        label = "your full memory"
 
     payload = to_graph_payload(result)
     n_nodes, n_edges = len(payload["nodes"]), len(payload["edges"])
-    summary = f"Knowledge graph for {query!r}: {n_nodes} nodes, {n_edges} edges"
+    summary = f"Knowledge graph for {label}: {n_nodes} nodes, {n_edges} edges"
 
     ui_supported = ctx.client_supports_extension(UI_EXTENSION_ID)
     if ui_supported and not as_html_file:

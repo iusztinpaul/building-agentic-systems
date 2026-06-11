@@ -26,34 +26,12 @@ from beanie import PydanticObjectId
 from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
-from tree.memory.query.core import query_memory
+from tree.memory.query.core import fetch_full_graph, query_memory
 from tree.memory.query.visualize import visualize_query_result
-from tree.memory.types import QueryResult
 from tree.models.get_model import get_embedding_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-_KG_COLLECTION = "knowledge_graph"
-
-
-async def _fetch_full_graph(
-    client, database: str, user_id: PydanticObjectId
-) -> QueryResult:
-    """Load the entire materialized knowledge_graph for ``user_id``."""
-
-    db = client[database]
-    collection = db[_KG_COLLECTION]
-
-    nodes: list[dict] = []
-    async for doc in collection.find({"user_id": user_id, "kind": "node"}):
-        nodes.append(doc)
-
-    edges: list[dict] = []
-    async for doc in collection.find({"user_id": user_id, "kind": "edge"}):
-        edges.append(doc)
-
-    return QueryResult(nodes=nodes, edges=edges)
 
 
 async def _run(
@@ -90,7 +68,7 @@ async def _run(
         )
     else:
         logger.info("No query provided — loading full graph for user_id=%s", user_id)
-        result = await _fetch_full_graph(client, database, user_id)
+        result = await fetch_full_graph(client, database, user_id)
 
     if not result.nodes and not result.edges:
         logger.error(
