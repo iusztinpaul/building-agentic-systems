@@ -51,6 +51,13 @@ ATLAS_ACCEPT = f"application/vnd.atlas.{ATLAS_API_VERSION}+json"
 # TENANT cluster backed by a cloud provider.
 FREE_TIER = "M0"
 
+# Prefect Horizon's serverless MCP runner connects from a dynamic egress IP that
+# cannot be pinned, so Atlas rejects its TLS handshake
+# (``[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error``) unless
+# ``0.0.0.0/0`` is on the project access list. Always allow-list it so the cloud
+# MCP deployment can reach Mongo; the DB stays protected by SCRAM auth + TLS.
+HORIZON_EGRESS_CIDR = "0.0.0.0/0"
+
 CLIENT_ID_ENV = "MDB_MCP_API_CLIENT_ID"
 CLIENT_SECRET_ENV = "MDB_MCP_API_CLIENT_SECRET"
 
@@ -256,12 +263,23 @@ def _spec_from_options(
         region=region,
         db_username=os.environ.get("MONGO_INITDB_ROOT_USERNAME"),
         db_password=os.environ.get("MONGO_INITDB_ROOT_PASSWORD"),
-        access_cidrs=tuple(
-            c.strip()
-            for c in os.environ.get("ATLAS_ACCESS_CIDRS", "").split(",")
-            if c.strip()
-        ),
+        access_cidrs=_access_cidrs(),
     )
+
+
+def _access_cidrs() -> tuple[str, ...]:
+    """Project IP access list: Horizon's egress CIDR plus any ``ATLAS_ACCESS_CIDRS``.
+
+    ``HORIZON_EGRESS_CIDR`` is always first so the cloud MCP runner can always
+    reach Atlas; extra operator-supplied CIDRs are appended and de-duplicated.
+    """
+
+    env_cidrs = tuple(
+        c.strip()
+        for c in os.environ.get("ATLAS_ACCESS_CIDRS", "").split(",")
+        if c.strip()
+    )
+    return (HORIZON_EGRESS_CIDR, *(c for c in env_cidrs if c != HORIZON_EGRESS_CIDR))
 
 
 # Shared CLI options so every command manages an arbitrary cluster, not a hardcoded one.

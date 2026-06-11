@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -39,6 +41,33 @@ def _mock_app_config(mocker) -> None:
     mock_config.models.search_embedding.model = "text-embedding-004"
     mock_config.models.search_embedding.dimensions = 256
     mocker.patch("tree.models.get_model.app_config", mock_config)
+
+
+def test_importing_get_model_does_not_eagerly_load_torch() -> None:
+    """Serverless cold-start regression guard.
+
+    Importing the model factory must NOT pull ``torch`` / ``sentence_transformers``
+    (a ~7s import). On Prefect Horizon that eager import blew the 60s port-readiness
+    window and the runner was killed mid-import. The heavy providers are lazy-imported
+    inside their dispatch branches; this asserts the common boot path stays light.
+
+    Runs in a fresh interpreter so other tests' top-level imports of
+    ``sentence_transformer`` don't pollute ``sys.modules`` and mask a regression.
+    """
+
+    probe = (
+        "import sys, tree.models.get_model; "
+        "assert 'torch' not in sys.modules, 'torch'; "
+        "assert 'sentence_transformers' not in sys.modules, 'sentence_transformers'"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, (
+        f"get_model import eagerly loaded a heavy ML lib: {result.stderr}"
+    )
 
 
 class TestGetLLM:

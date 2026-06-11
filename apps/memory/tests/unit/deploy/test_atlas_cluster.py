@@ -24,6 +24,8 @@ sys.modules["atlas_cluster"] = _module
 _spec.loader.exec_module(_module)
 
 ClusterSpec = _module.ClusterSpec
+_access_cidrs = _module._access_cidrs
+HORIZON_EGRESS_CIDR = _module.HORIZON_EGRESS_CIDR
 
 
 def test_free_tier_region_config_is_tenant_backed() -> None:
@@ -71,6 +73,30 @@ def test_create_body_is_a_replicaset_with_one_region_config() -> None:
     region_configs = body["replicationSpecs"][0]["regionConfigs"]
     assert len(region_configs) == 1
     assert region_configs[0]["providerName"] == "TENANT"
+
+
+def test_access_cidrs_always_includes_horizon_egress(monkeypatch) -> None:
+    # Arrange — no operator-supplied CIDRs.
+    monkeypatch.delenv("ATLAS_ACCESS_CIDRS", raising=False)
+
+    # Act
+    cidrs = _access_cidrs()
+
+    # Assert — the cloud MCP runner's open CIDR is always allow-listed.
+    assert cidrs == (HORIZON_EGRESS_CIDR,)
+
+
+def test_access_cidrs_appends_and_dedupes_env_cidrs(monkeypatch) -> None:
+    # Arrange — env supplies extra CIDRs, one duplicating the Horizon default.
+    monkeypatch.setenv(
+        "ATLAS_ACCESS_CIDRS", f"10.0.0.0/8, {HORIZON_EGRESS_CIDR} ,1.2.3.4/32"
+    )
+
+    # Act
+    cidrs = _access_cidrs()
+
+    # Assert — Horizon first, env extras appended in order, no duplicate.
+    assert cidrs == (HORIZON_EGRESS_CIDR, "10.0.0.0/8", "1.2.3.4/32")
 
 
 def test_db_user_body_grants_read_write_on_admin() -> None:

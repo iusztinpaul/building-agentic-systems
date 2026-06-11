@@ -5,10 +5,16 @@ from tree.config.settings import settings
 from tree.models.base import BaseLLM, BaseEmbeddingModel
 from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
-from tree.models.modal_embedding import ModalEmbeddingModel
-from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
 from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
+
+# NOTE: ``sentence_transformers`` (→ transformers/torch/sklearn, ~7s import) and
+# ``modal_embedding`` are imported LAZILY inside their dispatch branches below,
+# never at module level. The cloud MCP server runs ``voyage``/``gemini`` and must
+# bind its port within Horizon's 60s readiness window; dragging torch into every
+# boot blew that budget on cold serverless containers and the process was killed
+# mid-import. Keeping these provider imports inside their branches means the
+# common boot path never pays for them.
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +56,17 @@ def _build_embedding_model(
             dimensions=cfg.dimensions,
         )
     if provider == "sentence-transformers":
+        # Lazy import: pulls transformers/torch/sklearn (~7s). See module note.
+        from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+
         return SentenceTransformerEmbeddingModel(
             model=cfg.model,
             dimensions=cfg.dimensions,
         )
     if provider == "modal":
+        # Lazy import: keeps the Modal client off the common boot path.
+        from tree.models.modal_embedding import ModalEmbeddingModel
+
         return ModalEmbeddingModel(
             api_key=settings.modal_embedding_api_key.get_secret_value(),
             model=cfg.model,
