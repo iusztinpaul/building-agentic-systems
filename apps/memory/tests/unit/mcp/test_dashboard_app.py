@@ -1,9 +1,9 @@
 """Unit tests for the custom-HTML dashboard MCP App.
 
-Covers the pure transforms (``node_type_counts``, ``_summary``), the rendering
-contract of the ``memory_dashboard`` tool (the payload MUST ride in a
-``content`` JSON block — the App-UI host does not forward ``structuredContent``
-to a custom iframe), and the invariants of the served ``ui://`` HTML.
+Covers the ``_summary`` transform, the rendering contract of the
+``memory_dashboard`` tool (the payload MUST ride in a ``content`` JSON block —
+the App-UI host does not forward ``structuredContent`` to a custom iframe),
+and the invariants of the served ``ui://`` HTML.
 """
 
 import json
@@ -17,7 +17,6 @@ from tree.mcp.dashboard_app import (
     _summary,
     dashboard_view,
     memory_dashboard,
-    node_type_counts,
 )
 from tree.memory.types import QueryResult
 
@@ -79,27 +78,6 @@ def _content_payload(result: ToolResult) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Pure transforms
 # ---------------------------------------------------------------------------
-
-
-def test_node_type_counts_descending_then_alpha() -> None:
-    # Arrange
-    nodes = [
-        {"name": "a", "type": "chunk"},
-        {"name": "b", "type": "chunk"},
-        {"name": "c", "type": "person"},
-        {"name": "d", "type": "document"},
-        {"name": "e", "type": "document"},
-    ]
-
-    # Act
-    counts = node_type_counts(nodes)
-
-    # Assert: ordered by count desc, ties broken alphabetically.
-    assert counts == [
-        {"type": "chunk", "count": 2},
-        {"type": "document", "count": 2},
-        {"type": "person", "count": 1},
-    ]
 
 
 def test_summary_includes_counts_breakdown() -> None:

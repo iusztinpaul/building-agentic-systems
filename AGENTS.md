@@ -197,6 +197,8 @@ Use Squid's plugin `/night` and `/day` skills to do any changes to the codebase.
 
 **Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
+**Run tests only with the LOCAL env target (`make env-status` → local).** With `.env.target=prod` the suite hits the Atlas cluster, where tests that create search indexes fail with "The maximum number of FTS indexes has been reached for this instance size" (M0 cap) — and tests must not write to prod anyway. direnv exports the prod vars into every shell, so switch with `make env-local` (and back with `make env-prod`) rather than relying on `--env-file` overrides, which do NOT win over already-exported vars.
+
 For the `apps/memory` Python project, we use `ruff` as our formatter and linter.
 
 ### Step-by-Step Verification Steps

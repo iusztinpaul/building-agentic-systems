@@ -22,7 +22,6 @@ dashboard therefore renders blank; a custom HTML app reading ``content`` works.
 """
 
 import json
-import logging
 from collections import Counter
 from typing import Any
 
@@ -35,8 +34,6 @@ from tree.mcp.graph_app import to_graph_payload
 from tree.mcp.server import mcp
 from tree.memory.query.core import fetch_full_graph
 from tree.memory.query.core import query_memory as structured_query_memory
-
-logger = logging.getLogger(__name__)
 
 DASHBOARD_VIEW_URI = "ui://tree-memory/dashboard.html"
 
@@ -66,16 +63,6 @@ async def _fetch_payload(
             user_id=lc["user_id"],
         )
     return to_graph_payload(result)
-
-
-def node_type_counts(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Count nodes per type, descending then alphabetical."""
-
-    counts = Counter(n["type"] for n in nodes)
-    return [
-        {"type": t, "count": c}
-        for t, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
 
 
 def _summary(payload: dict[str, list[dict[str, Any]]], label: str) -> str:

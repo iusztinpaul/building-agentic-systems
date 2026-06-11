@@ -46,11 +46,14 @@ jobs:
         working-directory: apps/memory
 
       - name: Apply Prefect deployments to Prefect Cloud
-        # `prefect_pipelines.py` only registers/updates the deployment
-        # definitions (RunnerDeployment.aapply) against PREFECT_API_URL and exits
-        # — it does not serve. The long-running worker runs separately. The mock
-        # app keys mirror CI: importing the flow modules constructs
-        # settings/clients, but `apply` only ever talks to the Prefect API.
+        # `prefect_pipelines.py` re-applies the Cloud deployment definitions
+        # (deploy_cloud_pipelines: git-sourced code, Managed work pool) and
+        # exits — Prefect hosts the workers. It needs ONLY the Prefect API
+        # creds: the managed-run env and the GitHub clone token are
+        # `{{ prefect.blocks/variables.* }}` references resolved at run time
+        # (seeded by `prefect_pipelines_setup.py up`). The mock app keys below
+        # exist because importing the flow modules constructs settings/clients;
+        # the deploy itself only talks to the Prefect API.
         run: uv run python deploy/prefect_pipelines.py
         working-directory: apps/memory
         env:

@@ -88,6 +88,7 @@ class Settings(BaseSettings):
         """
 
         return value or cls.model_fields["opik_project_name"].default
+
     # Prefect Horizon (FastMCP Cloud) — the managed hosting for the
     # ``tree-memory`` MCP server. ``tree_memory_cloud_url`` is the deployed
     # server endpoint (``https://<name>.fastmcp.app/mcp``). The server is
