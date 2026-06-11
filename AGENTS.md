@@ -123,7 +123,8 @@ project-root/
 
 ### Key Python Design Choices
 
-- We are using Python with async patterns.
+- Always Pydantic over dataclasses or typed dicts, when defining data structures.
+- Python with async patterns.
 - Loose clean architecture design decoupling infrastructure, serving, app and domain logic:
     - The `entities` folder defines shared ODM, enums or other data structures data are used all over the project. While we have local `types.py` files per app module to define data types that will be used only within that current module or layers upwards. 
     - Infrastructure exceptions we don't plan to change: MongoDB, Prefect, Opik. Thus, it doesn't make sense to make them modular. 

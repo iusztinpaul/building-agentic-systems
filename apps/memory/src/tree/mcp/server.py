@@ -17,6 +17,7 @@ needs to change.
 
 import logging
 import os
+import sys
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -222,5 +223,18 @@ mcp = FastMCP(
     ),
     lifespan=app_lifespan,
 )
+
+# FastMCP Cloud (Prefect Horizon) loads the configured entrypoint
+# ``…/server.py:mcp`` BY FILE PATH, so this module runs under the name ``server``
+# rather than the canonical package name ``tree.mcp.server``. The tool modules
+# imported just below register on ``mcp`` via ``from tree.mcp.server import mcp``;
+# without this alias that import would execute a SECOND, fresh copy of this file
+# as ``tree.mcp.server`` and register all 13 tools on a DIFFERENT ``FastMCP``
+# instance than the one Horizon serves — the deployed server then advertises 0
+# tools (it always worked locally, where every caller already reaches this module
+# through the package import). Aliasing this module as ``tree.mcp.server`` makes
+# those imports resolve back to THIS instance. ``setdefault`` is a no-op on the
+# normal package import path, where ``tree.mcp.server`` is already registered.
+sys.modules.setdefault("tree.mcp.server", sys.modules[__name__])
 
 import tree.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`

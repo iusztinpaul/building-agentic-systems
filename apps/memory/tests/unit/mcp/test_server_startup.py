@@ -8,12 +8,52 @@ to a default user.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from beanie import PydanticObjectId
 
 from tree.mcp import server as server_module
+
+_SERVER_PY = Path(server_module.__file__).resolve()
+
+
+def test_entrypoint_loaded_by_path_registers_all_tools() -> None:
+    """FastMCP Cloud loads the entrypoint ``server.py:mcp`` BY FILE PATH (module
+    name ``server``), not as the package ``tree.mcp.server``. The tool modules
+    register via ``from tree.mcp.server import mcp``; without the module alias in
+    ``server.py`` that import builds a SECOND ``FastMCP`` instance and the
+    path-loaded object Horizon serves ends up with 0 tools.
+
+    Regression guard: load the file exactly as the platform does and assert the
+    served object carries the same (non-zero) tool set as the package import.
+    Runs in a fresh interpreter so the test process's own ``tree.mcp.server``
+    import can't mask the double-import.
+    """
+
+    probe = (
+        "import importlib.util, asyncio, sys;"
+        f"spec = importlib.util.spec_from_file_location('server', r'{_SERVER_PY}');"
+        "mod = importlib.util.module_from_spec(spec);"
+        "sys.modules['server'] = mod;"
+        "spec.loader.exec_module(mod);"
+        "import tree.mcp.server as pkg;"
+        "a = len(asyncio.run(mod.mcp.list_tools()));"
+        "b = len(asyncio.run(pkg.mcp.list_tools()));"
+        "print(a, b, mod.mcp is pkg.mcp);"
+        "assert a == b and a > 0, f'path-loaded={a} package={b}'"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, (
+        f"entrypoint path-load lost its tools: {result.stderr}"
+    )
 
 
 class TestResolveServerUserId:

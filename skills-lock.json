@@ -13,6 +13,12 @@
       "skillPath": "skills/bright-data-mcp/SKILL.md",
       "computedHash": "4c8bae0bae93b5b062633f06f9fb919ab6d31287a43ce844d8717c4bd6bd6759"
     },
+    "fastmcp-client-cli": {
+      "source": "prefecthq/fastmcp",
+      "sourceType": "github",
+      "skillPath": "skills/fastmcp-client-cli/SKILL.md",
+      "computedHash": "ef06a047ab5fd88d52aa6972b274b146638ff7078cfc1b4e54aa5450212c7b32"
+    },
     "scrape": {
       "source": "brightdata/skills",
       "sourceType": "github",
