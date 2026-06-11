@@ -48,7 +48,8 @@ jobs:
         working-directory: apps/memory
 
       - name: Install dependencies
-        run: uv sync
+        # --extra local-models: the model unit tests import sentence-transformers / modal.
+        run: uv sync --extra local-models
         working-directory: apps/memory
 
       - name: Format check

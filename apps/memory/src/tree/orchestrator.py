@@ -56,35 +56,29 @@ MANAGED_WORK_POOL = "tree-managed"
 # Secret block holding the GitHub PAT Prefect uses to clone this private repo.
 PAT_BLOCK_NAME = "tree-github-pat"
 
-# Slim runtime deps installed per-run by Prefect Managed Execution: the
-# ``apps/memory/pyproject.toml`` ``[project.dependencies]`` MINUS
-# ``sentence-transformers`` (PyTorch) and ``modal`` — the cloud flows embed via
-# the Voyage API and reason via the Gemini API, never local torch/Modal models,
-# so dropping them keeps the per-run install fast. KEEP IN SYNC with pyproject;
-# ``datasets`` stays because ``huggingface_dataset`` is a configured source.
-WORKER_PIP_PACKAGES: list[str] = [
-    "beanie>=2.0.1",
-    "pymongo>=4.16.0",
-    "feedparser>=6.0",
-    "httpx>=0.28",
-    "beautifulsoup4>=4.13",
-    "pydantic-settings>=2.9",
-    "langchain-mongodb>=0.5",
-    "langchain-google-genai>=2.1",
-    "langchain-text-splitters>=0.3",
-    "tiktoken>=0.12.0",
-    "click>=8.0",
-    "pyvis>=0.3",
-    "networkx>=3.0",
-    "google-genai>=1.65.0",
-    "pyyaml>=6.0",
-    "openai>=1.0",
-    "datasets>=3.0",
-    "fastmcp[apps]>=3.1.0",
-    "youtube-transcript-api>=1.2.4",
-    "rapidfuzz>=3",
-    "opik>=2.0.60",
-]
+
+def worker_pip_packages(git_ref: str) -> list[str]:
+    """Per-run install for Prefect Managed: install THIS package from the repo.
+
+    Prefect Managed loads the flow's entrypoint module BEFORE the cloned repo's
+    code is importable (``env``/``PYTHONPATH`` against the clone doesn't take, and
+    ``pip_packages`` install at container setup — before ``git_clone``). So rather
+    than hand-list third-party deps and rely on ``PYTHONPATH``, install the
+    ``tree`` package itself from a git+subdirectory URL: pip clones
+    ``apps/memory`` at ``git_ref`` and installs ``tree`` + its (now slim)
+    ``[project.dependencies]`` — the heavy ``sentence-transformers``/``modal``
+    backends live in the opt-in ``local-models`` extra and are NOT pulled. The
+    GitHub PAT is injected via a Secret-block template (resolved at run time).
+
+    NOTE: the token is interpolated into the pip URL, so it appears in the run's
+    install logs (Prefect Cloud, org-scoped). It is a read-only fine-grained PAT.
+    """
+
+    token = "{{ prefect.blocks.secret.%s }}" % PAT_BLOCK_NAME
+    host_path = GIT_URL.removeprefix("https://")  # github.com/<owner>/<repo>.git
+    return [
+        f"tree-memory @ git+https://{token}@{host_path}@{git_ref}#subdirectory=apps/memory"
+    ]
 
 
 @dataclass(frozen=True)
@@ -191,7 +185,7 @@ def deploy_cloud_pipelines(
         **_git_ref_kwarg(git_ref),
         credentials={"access_token": Secret.load(PAT_BLOCK_NAME)},
     )
-    job_variables = {"pip_packages": WORKER_PIP_PACKAGES, "env": job_env}
+    job_variables = {"pip_packages": worker_pip_packages(git_ref), "env": job_env}
 
     deployment_ids: list[str] = []
     for spec in _DEPLOYMENT_SPECS:
@@ -240,14 +234,11 @@ def managed_env_templates() -> dict[str, str]:
     Every secret/config value is a ``{{ prefect.blocks.secret.* }}`` or
     ``{{ prefect.variables.* }}`` reference Prefect resolves at run time, so this
     reads NO environment and carries NO raw secrets — both ``up`` and the CD path
-    apply the identical mapping. ``PYTHONPATH`` makes the cloned src-layout
-    ``tree`` package importable.
+    apply the identical mapping. (No ``PYTHONPATH`` needed: ``tree`` is
+    pip-installed by :func:`worker_pip_packages`, not imported off the clone.)
     """
 
-    env: dict[str, str] = {
-        "PYTHONPATH": "apps/memory/src",
-        "MCP_SKIP_INDEX_BOOTSTRAP": "true",
-    }
+    env: dict[str, str] = {"MCP_SKIP_INDEX_BOOTSTRAP": "true"}
     for store_name, var, is_secret in RUNTIME_CONFIG:
         if is_secret:
             env[var] = "{{ prefect.blocks.secret.%s }}" % store_name

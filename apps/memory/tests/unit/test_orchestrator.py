@@ -202,7 +202,7 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     ids = orchestrator.deploy_cloud_pipelines(
         work_pool_name="tree-managed",
         git_ref="main",
-        job_env={"PYTHONPATH": "apps/memory/src"},
+        job_env={"VOYAGE_API_KEY": "{{ prefect.blocks.secret.tree-voyage-api-key }}"},
     )
 
     # Assert — one deploy per spec, ids returned in order, never served.
@@ -211,8 +211,7 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     assert fake_flow.deploy.call_count == 5
     for call in fake_flow.deploy.call_args_list:
         assert call.kwargs["work_pool_name"] == "tree-managed"
-        assert call.kwargs["job_variables"]["env"] == {"PYTHONPATH": "apps/memory/src"}
-        assert (
-            call.kwargs["job_variables"]["pip_packages"]
-            is orchestrator.WORKER_PIP_PACKAGES
-        )
+        assert "VOYAGE_API_KEY" in call.kwargs["job_variables"]["env"]
+        assert call.kwargs["job_variables"][
+            "pip_packages"
+        ] == orchestrator.worker_pip_packages("main")

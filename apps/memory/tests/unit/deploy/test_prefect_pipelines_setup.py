@@ -33,20 +33,22 @@ _spec.loader.exec_module(_setup)
 
 
 class TestWorkerPipPackages:
-    def test_drops_heavy_local_model_deps(self) -> None:
-        joined = " ".join(orchestrator.WORKER_PIP_PACKAGES)
+    def test_installs_the_repo_package_at_the_requested_ref(self) -> None:
+        (spec,) = orchestrator.worker_pip_packages("main")
 
-        # The cloud flows embed via Voyage + reason via Gemini (both APIs); the
-        # local torch/Modal model deps must be excluded to keep per-run install fast.
-        assert "sentence-transformers" not in joined
-        assert "modal" not in joined
+        # Installs THIS package from a git+subdirectory URL so the managed run can
+        # import ``tree`` (the heavy backends come from the opt-in extra, not here).
+        assert spec.startswith("tree-memory @ git+https://")
+        assert "@github.com/iusztinpaul/building-agentic-systems.git@main" in spec
+        assert spec.endswith("#subdirectory=apps/memory")
 
-    def test_keeps_api_and_hf_deps(self) -> None:
-        joined = " ".join(orchestrator.WORKER_PIP_PACKAGES)
+    def test_injects_the_pat_via_a_secret_block_template(self) -> None:
+        (spec,) = orchestrator.worker_pip_packages("abc123")
 
-        # API clients the flows need, plus ``datasets`` (huggingface_dataset source).
-        for required in ("langchain-google-genai", "google-genai", "datasets"):
-            assert required in joined
+        # The token is a Secret-block reference resolved at run time, not a literal.
+        assert "{{ prefect.blocks.secret.tree-github-pat }}" in spec
+        assert "@build" not in spec  # ref correctly placed: ...git@abc123#...
+        assert "git@abc123#subdirectory=apps/memory" in spec
 
 
 class TestManagedEnvTemplates:
@@ -66,9 +68,6 @@ class TestManagedEnvTemplates:
         env = orchestrator.managed_env_templates()
 
         assert env["MONGO_HOST"] == "{{ prefect.variables.tree_mongo_host }}"
-
-    def test_sets_pythonpath_for_src_layout_import(self) -> None:
-        assert orchestrator.managed_env_templates()["PYTHONPATH"] == "apps/memory/src"
 
     def test_covers_every_runtime_config_var(self) -> None:
         env = orchestrator.managed_env_templates()

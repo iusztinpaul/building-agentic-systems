@@ -26,13 +26,22 @@ dependencies = [
     "google-genai>=1.65.0",
     "pyyaml>=6.0",
     "openai>=1.0",
-    "sentence-transformers>=4.0",
-    "modal>=1.3.5",
     "datasets>=3.0",
     "fastmcp[apps]>=3.1.0",
     "youtube-transcript-api>=1.2.4",
     "rapidfuzz>=3",
     "opik>=2.0.60",
+]
+
+[project.optional-dependencies]
+# Local/open-source embedding backends (PyTorch-heavy). NOT needed by the cloud
+# pipelines, which embed via the Voyage API and reason via Gemini — so they live
+# in an opt-in extra to keep the Prefect Managed per-run install (a `pip install`
+# of this package from the cloned repo) slim. Install locally with
+# `uv sync --extra local-models` when you need SentenceTransformer/Modal models.
+local-models = [
+    "sentence-transformers>=4.0",
+    "modal>=1.3.5",
 ]
 
 [tool.hatch.build.targets.wheel]
