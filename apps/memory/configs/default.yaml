@@ -38,6 +38,11 @@ sources:
     fetch_content: false
     batch_size: 50
     concurrency: 10
+    # HF offset-window fan-out width (#070): #072 dispatches this many
+    # data-etl-worker runs, each ingesting one disjoint offset-window of
+    # max_samples. 1 = a single whole-max_samples window (today's behavior).
+    # `offset` is NOT authored here — it's a dispatch-time runtime coordinate.
+    num_workers: 1
   # Arbitrary URLs (blogs, news, repos, profiles) ingested via the URL
   # dispatcher; specialized pipelines (e.g. Substack) win when they match,
   # otherwise the URL falls back to Bright Data Web Unlocker.
@@ -166,9 +171,14 @@ concurrency:
   # Tokens/minute the key allows. Held by config (the embedding_batch
   # max_total_tokens cap), not yet a second token-weighted limiter.
   voyage_tpm: 10000
-  # Admission control for serve(global_limit=...); kept close to voyage_rpm so
-  # we don't admit far more runs than the embed budget can feed.
-  runner_global_limit: 4
+  # Admission control for serve(global_limit=...). Raised 4 → 6 (#070) to
+  # accommodate the platform/window data fan-out: #072 dispatches several
+  # data-etl-worker runs at once (platform buckets + HF offset-windows). Data
+  # workers are NOT Voyage-bound — they don't embed — so the cross-flow
+  # `voyage-embeddings` GCL still caps real embedding throughput and
+  # over-admitting these extra runs is safe. The typed ConcurrencyConfig
+  # default stays 4 (the fallback when YAML omits this block).
+  runner_global_limit: 6
 
 mcp:
   max_retries: 1

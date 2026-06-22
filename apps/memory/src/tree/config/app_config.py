@@ -319,6 +319,25 @@ class HuggingFaceDatasetSource(BaseModel):
     The ``uri`` is the dataset id (``namespace/name``) and is used to
     dispatch to a per-dataset ETL pipeline registered in
     ``tree.data.pipeline``. Unknown dataset ids raise at dispatch time.
+
+    Two of these fields draw an authored-vs-runtime split (#070, the config
+    foundation for HF offset-window fan-out):
+
+    * ``num_workers`` — operator-AUTHORED YAML (like ``batch_size``). The
+      offset-window fan-out width: #072 dispatches ``num_workers``
+      ``data-etl-worker`` runs, each ingesting one disjoint offset-window of the
+      dataset. Default ``1`` ⇒ a single window covering the whole
+      ``max_samples`` ⇒ today's behavior. Must be ``>= 1``.
+    * ``offset`` — a dispatch-time RUNTIME coordinate, NOT authored in YAML and
+      never present in ``default.yaml``. The orchestrator sets it ONLY at
+      dispatch via ``entry.model_copy(update={"offset": ...})`` (#072), and #071
+      makes the ingest skip the first ``offset`` rows. Default ``None`` ⇒ no
+      skip ⇒ today's behavior.
+
+    The discriminated-union round-trip MUST preserve both fields: the
+    orchestrator serializes shards through ``run_deployment`` flow-run params
+    (``model_dump()`` → JSON → ``TypeAdapter(list[SourceEntry])``), so a set
+    ``offset`` round-trips as the int and ``offset=None`` round-trips as ``None``.
     """
 
     type: Literal["huggingface_dataset"] = "huggingface_dataset"
@@ -327,6 +346,11 @@ class HuggingFaceDatasetSource(BaseModel):
     fetch_content: bool = False
     batch_size: int = 50
     concurrency: int = 10
+    # YAML-authored offset-window fan-out width (#070). See class docstring.
+    num_workers: int = Field(default=1, ge=1)
+    # Dispatch-time runtime coordinate (#070), never authored in YAML. See
+    # class docstring.
+    offset: int | None = None
 
 
 class YouTubeVideoSource(BaseModel):

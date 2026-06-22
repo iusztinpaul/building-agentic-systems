@@ -1,11 +1,17 @@
+import json
 import textwrap
 from collections import Counter
 
+import pytest
+from pydantic import TypeAdapter, ValidationError
+
 from tree.config.app_config import (
+    _DEFAULT_CONFIG_PATH,
     AppConfig,
     ConcurrencyConfig,
     DreamConfig,
     HuggingFaceDatasetSource,
+    SourceEntry,
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
@@ -328,6 +334,133 @@ class TestConcurrencyConfig:
         assert config.concurrency.voyage_rpm == 60
         assert config.concurrency.voyage_tpm == 1_000_000
         assert config.concurrency.runner_global_limit == 8
+
+
+class TestHuggingFaceWindowFields:
+    """#070: the HF offset-window fields ``num_workers`` (YAML-authored fan-out
+    width) and ``offset`` (dispatch-time runtime coordinate, never in YAML)."""
+
+    def test_defaults_preserve_todays_behavior(self):
+        """A HF source built with only a ``uri`` has ``num_workers == 1`` and
+        ``offset is None`` — a single whole-``max_samples`` window, no skip."""
+
+        entry = HuggingFaceDatasetSource(uri="librarian-bots/arxiv-metadata-snapshot")
+
+        assert entry.num_workers == 1
+        assert entry.offset is None
+
+    def test_explicit_values_are_carried(self):
+        """An explicitly-constructed HF source carries the exact authored
+        fan-out width and runtime offset."""
+
+        entry = HuggingFaceDatasetSource(
+            uri="librarian-bots/arxiv-metadata-snapshot",
+            num_workers=4,
+            offset=500,
+        )
+
+        assert entry.num_workers == 4
+        assert entry.offset == 500
+
+    def test_num_workers_must_be_at_least_one(self):
+        """``num_workers`` is a fan-out width; values below 1 are rejected."""
+
+        with pytest.raises(ValidationError):
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot", num_workers=0
+            )
+
+    def test_offset_defaults_to_none_in_yaml_authored_entry(self):
+        """An operator may author ``num_workers`` in YAML; ``offset`` stays
+        ``None`` because it is never authored — only set at dispatch."""
+
+        entry = HuggingFaceDatasetSource.model_validate(
+            {
+                "type": "huggingface_dataset",
+                "uri": "librarian-bots/arxiv-metadata-snapshot",
+                "num_workers": 4,
+            }
+        )
+
+        assert entry.num_workers == 4
+        assert entry.offset is None
+
+    def test_runtime_offset_set_via_model_copy(self):
+        """#072 sets ``offset`` ONLY at dispatch via
+        ``entry.model_copy(update={"offset": ...})`` — the authored entry is
+        left untouched."""
+
+        authored = HuggingFaceDatasetSource(
+            uri="librarian-bots/arxiv-metadata-snapshot", num_workers=4
+        )
+
+        dispatched = authored.model_copy(update={"offset": 250})
+
+        assert authored.offset is None
+        assert dispatched.offset == 250
+        assert dispatched.num_workers == 4
+
+    def test_discriminated_union_round_trip_preserves_window_fields(self):
+        """``model_dump()`` → JSON → ``TypeAdapter(list[SourceEntry])`` preserves
+        the new window fields — the round-trip the orchestrator dispatches
+        through ``run_deployment`` flow-run params. Covers both the ``None``
+        and a set-int offset case."""
+
+        adapter: TypeAdapter[list[SourceEntry]] = TypeAdapter(list[SourceEntry])
+        entries = [
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot",
+                max_samples=1000,
+                fetch_content=True,
+                batch_size=64,
+                concurrency=8,
+                num_workers=4,
+                offset=None,
+            ),
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot",
+                max_samples=1000,
+                num_workers=4,
+                offset=250,
+            ),
+        ]
+
+        serialized = json.loads(json.dumps([e.model_dump() for e in entries]))
+        reparsed = adapter.validate_python(serialized)
+
+        assert all(isinstance(e, HuggingFaceDatasetSource) for e in reparsed)
+
+        first = reparsed[0]
+        assert first.type == "huggingface_dataset"
+        assert first.uri == "librarian-bots/arxiv-metadata-snapshot"
+        assert first.max_samples == 1000
+        assert first.fetch_content is True
+        assert first.batch_size == 64
+        assert first.concurrency == 8
+        assert first.num_workers == 4
+        assert first.offset is None
+
+        second = reparsed[1]
+        assert second.num_workers == 4
+        assert second.offset == 250
+
+
+class TestRunnerGlobalLimitBump:
+    """#070: ``runner_global_limit`` is raised 4→6 in ``default.yaml`` ONLY; the
+    typed default on :class:`ConcurrencyConfig` stays at 4."""
+
+    def test_default_yaml_raises_runner_global_limit_to_six(self):
+        """The real, human-tuned ``configs/default.yaml`` admits up to 6 runs."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.concurrency.runner_global_limit == 6
+
+    def test_typed_default_runner_global_limit_unchanged(self):
+        """A bare ``ConcurrencyConfig()`` (no YAML) still reports 4 — the bump is
+        YAML-only, so configs that omit the block are unchanged."""
+
+        assert ConcurrencyConfig().runner_global_limit == 4
 
 
 class TestExtractionConcurrencyKnobs:
