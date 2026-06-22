@@ -163,7 +163,7 @@ make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the res
 make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user
 ```
 
-`run-data-pipeline` and `run-memory-pipeline-extraction` accept an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
+`run-memory-pipeline-extraction` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `default.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
 **6. Drive memory with the agent.**
 

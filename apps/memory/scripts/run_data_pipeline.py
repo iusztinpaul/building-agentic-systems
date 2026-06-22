@@ -1,15 +1,15 @@
 """
 Trigger the data pipeline via Prefect.
 
-Triggers the ``data-etl-orchestrator`` deployment (#068, ADR-002 §3 amended #066).
+Triggers the ``data-etl-orchestrator`` deployment (#072, ADR-002 §3 amended #066).
 Operators always run the ORCHESTRATOR: it reads the configured
-``configs/default.yaml`` ``sources.sources`` list, partitions it into
-``min(num_shards, N)`` balanced shards, and dispatches one ``data-etl-worker`` run
-per shard (a DISTINCT worker deployment — NO recursion). There is NO trailing step:
-the data pipeline only produces ``documents``; there is no index. ``num_shards=1``
-(the default) dispatches ONE worker run with the full source list; ``> 1`` fans the
-sources out across multiple workers. A bare single-shard ingestion is also available
-by triggering ``data-etl-worker`` directly (not via this script).
+``configs/default.yaml`` ``sources.sources`` list and groups it by PLATFORM —
+dispatching one ``data-etl-worker`` run per non-HuggingFace platform bucket present
+(``substack`` / ``youtube`` / ``custom``) plus ``num_workers`` offset-window runs per
+``HuggingFaceDatasetSource`` (the HF fan-out width is declared per-source in
+``default.yaml``, NOT via a global flag). There is NO trailing step and NO trailing
+index: the data pipeline only produces ``documents``. A bare single-shard ingestion
+is also available by triggering ``data-etl-worker`` directly (not via this script).
 
 Every deployment registered by ``tree.orchestrator`` requires a ``user_id``
 parameter (#020). It defaults to the current-session user; override with
@@ -20,14 +20,11 @@ Requires:
     - Prefect server running (make local-start)
     - Workflows served (make memory-serve-workflows)
 
-``--num-shards`` (optional, ``>= 1``) sets the source-shard fan-out width.
-
 Usage:
     make memory-run-data-pipeline                       # current-session user
     make memory-run-data-pipeline USER_ID=507f...       # override by id
     make memory-run-data-pipeline USER_IDENTIFIER=paul  # override by handle
-    make memory-run-data-pipeline NUM_SHARDS=2
-    uv run python scripts/run_data_pipeline.py --user-identifier paul --num-shards 2
+    uv run python scripts/run_data_pipeline.py --user-identifier paul
 """
 
 import asyncio
@@ -50,9 +47,7 @@ DEPLOYMENT_NAME = "data-etl-orchestrator/data-etl-orchestrator"
 POLL_INTERVAL_SECONDS = 2
 
 
-async def _run(
-    user_id: str | None, user_identifier: str | None, num_shards: int | None
-) -> None:
+async def _run(user_id: str | None, user_identifier: str | None) -> None:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
@@ -63,8 +58,6 @@ async def _run(
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
         parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
-        if num_shards is not None:
-            parameters["num_shards"] = num_shards
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
@@ -118,27 +111,10 @@ async def _run(
         "the current-session user; also reads the ``USER_IDENTIFIER`` env var."
     ),
 )
-@click.option(
-    "--num-shards",
-    default=None,
-    type=int,
-    help=(
-        "Optional source-shard fan-out width (#068). The orchestrator partitions "
-        "the configured sources into ``min(num_shards, N)`` shards and dispatches "
-        "one ``data-etl-worker`` run per shard (NO trailing index). Omit or 1 → 1 "
-        "worker run with all sources. Must be ``>= 1``."
-    ),
-)
-def main(
-    user_id: str | None, user_identifier: str | None, num_shards: int | None
-) -> None:
+def main(user_id: str | None, user_identifier: str | None) -> None:
     """Trigger the data-etl-orchestrator deployment for the resolved user."""
 
-    if num_shards is not None and num_shards < 1:
-        logger.error("--num-shards must be >= 1 (got %d)", num_shards)
-        raise SystemExit(1)
-
-    asyncio.run(_run(user_id, user_identifier, num_shards))
+    asyncio.run(_run(user_id, user_identifier))
 
 
 if __name__ == "__main__":

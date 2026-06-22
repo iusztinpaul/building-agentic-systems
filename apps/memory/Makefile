@@ -176,8 +176,8 @@ whoami: # Print the current user (id, identifier, name).
 
 # --- Data Pipelines ---
 
-run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
-	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers; no trailing index; no NUM_SHARDS flag — parallelism is per-source via platform bucketing + the HF source's num_workers in default.yaml). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Memory Pipelines ---
