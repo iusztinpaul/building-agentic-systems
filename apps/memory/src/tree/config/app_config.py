@@ -219,7 +219,7 @@ class DreamConfig(BaseModel):
 
 
 class ConcurrencyConfig(BaseModel):
-    """Pipeline-parallelism + Voyage rate-limiting knobs (#054 / ADR-002).
+    """Pipeline-parallelism + Voyage rate-limiting knobs (ADR-002).
 
     These govern how aggressively the memory pipeline runs concurrently and
     how the shared free-tier Voyage embedding key is throttled across separate

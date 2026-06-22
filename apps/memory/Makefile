@@ -162,13 +162,13 @@ deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Ad
 
 # --- Users & Session ---
 
-signup: # Create a user (idempotent on IDENTIFIER) and set it current. Requires IDENTIFIER=<handle>. Optional NAME="Display Name".
-	@if [ -z "$(IDENTIFIER)" ]; then echo 'USAGE: make signup IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
-	uv run python scripts/signup.py signup --identifier "$(IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
+signup: # Create a user (idempotent on USER_IDENTIFIER) and set it current. Requires USER_IDENTIFIER=<handle>. Optional NAME="Display Name".
+	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make signup USER_IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
+	uv run python scripts/signup.py signup --user-identifier "$(USER_IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
 
-set-current-user: # Point the current-user session at an existing user. Requires IDENTIFIER=<handle> or USER_ID=<oid>.
-	@if [ -z "$(IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
-	uv run python scripts/signup.py set-current $(if $(IDENTIFIER),--identifier "$(IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
+set-current-user: # Point the current-user session at an existing user. Requires USER_IDENTIFIER=<handle> or USER_ID=<oid>.
+	@if [ -z "$(USER_IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user USER_IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
+	uv run python scripts/signup.py set-current $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
 
 whoami: # Print the current user (id, identifier, name).
 	uv run python scripts/signup.py whoami
@@ -176,20 +176,17 @@ whoami: # Print the current user (id, identifier, name).
 
 # --- Data Pipelines ---
 
-run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Requires USER_ID=<oid>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
-	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
+	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 
 # --- Memory Pipelines ---
 
-run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
-	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
+	uv run python scripts/run_memory_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Requires USER_ID=<oid>.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
+run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/run_indexing_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Dream Consolidation ---
@@ -199,9 +196,8 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-query-graph: # Query and visualize the knowledge graph for one user. Requires USER_ID=<oid>. Pass QUERY="your query" for search, omit for full graph.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make query-graph USER_ID=<24-char Mongo ObjectId> [QUERY="..."]'; exit 1; fi
-	uv run python scripts/query_graph.py --user-id "$(USER_ID)" $(if $(QUERY),--query "$(QUERY)",)
+query-graph: # Query and visualize the knowledge graph for one user. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search, omit for full graph.
+	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
 
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi

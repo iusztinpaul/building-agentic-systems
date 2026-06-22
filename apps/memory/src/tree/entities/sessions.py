@@ -77,3 +77,51 @@ async def get_current_user() -> User | None:
     if user_id is None:
         return None
     return await User.get(user_id)
+
+
+async def get_user_by_identifier(identifier: str) -> User | None:
+    """Look up a user by their stable handle, or ``None`` if absent."""
+
+    return await User.find_one(User.identifier == identifier)
+
+
+async def resolve_user(
+    *, user_id: str | None = None, user_identifier: str | None = None
+) -> User:
+    """Resolve which user to act as, defaulting to the current-session user.
+
+    Precedence (first hit wins): explicit ``user_id`` > ``user_identifier`` >
+    the current-session user (:func:`get_current_user`). This is the shared
+    policy for the operator entrypoints: with neither override, work runs as
+    the active user pinned in the ``sessions`` collection.
+
+    Raises :class:`ValueError` with an actionable message when the requested
+    user can't be found, or when no override is given and no current user is
+    set — so callers never silently act on the wrong tenant.
+    """
+
+    if user_id:
+        try:
+            oid = PydanticObjectId(user_id)
+        except Exception as exc:  # noqa: BLE001 — surface the raw input.
+            raise ValueError(
+                f"user_id {user_id!r} is not a valid Mongo ObjectId"
+            ) from exc
+        user = await User.get(oid)
+        if user is None:
+            raise ValueError(f"No user found for user_id={user_id}")
+        return user
+
+    if user_identifier:
+        user = await get_user_by_identifier(user_identifier)
+        if user is None:
+            raise ValueError(f"No user found for identifier={user_identifier!r}")
+        return user
+
+    user = await get_current_user()
+    if user is None:
+        raise ValueError(
+            "No user_id/user_identifier given and no current user is set. "
+            "Run `make memory-signup` or `make memory-set-current-user` first."
+        )
+    return user

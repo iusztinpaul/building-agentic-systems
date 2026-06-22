@@ -2,28 +2,32 @@
 Trigger the memory indexing pipeline via Prefect.
 
 Every Prefect deployment registered by ``tree.orchestrator`` requires a
-``user_id`` parameter (#020). Pass it via ``--user-id <ObjectId>`` or
-the ``USER_ID`` env var (the Makefile wires this for you).
+``user_id`` parameter (#020). It defaults to the current-session user; override
+with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the Makefile wires
+these for you). See :mod:`scripts._users` for the resolution precedence.
 
 Requires:
     - Prefect server running (make local-start)
     - Workflows served (make memory-serve-workflows)
 
 Usage:
-    make memory-run-memory-pipeline-indexing USER_ID=507f1f77bcf86cd799439011
-    uv run python scripts/run_indexing_pipeline.py --user-id 507f...
+    make memory-run-memory-pipeline-indexing                       # current user
+    make memory-run-memory-pipeline-indexing USER_ID=507f...       # override by id
+    make memory-run-memory-pipeline-indexing USER_IDENTIFIER=paul  # override by handle
+    uv run python scripts/run_indexing_pipeline.py --user-identifier paul
 """
 
 import asyncio
 import logging
-import os
 import sys
 
 import click
-from beanie import PydanticObjectId
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
+from _users import resolve_user_id
+from tree.config.settings import settings
+from tree.db import init_mongodb
 from tree.logging import init_logger
 
 init_logger()
@@ -33,15 +37,21 @@ DEPLOYMENT_NAME = "memory-indexing-etl/memory-indexing-etl"
 POLL_INTERVAL_SECONDS = 2
 
 
-async def _run(user_id: PydanticObjectId) -> None:
+async def _run(user_id: str | None, user_identifier: str | None) -> None:
+    await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    resolved_user_id = await resolve_user_id(user_id, user_identifier)
+
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
-            parameters={"user_id": str(user_id)},
+            parameters={"user_id": str(resolved_user_id)},
         )
-        logger.info("Flow run created: %s (user_id=%s)", flow_run.id, user_id)
+        logger.info("Flow run created: %s (user_id=%s)", flow_run.id, resolved_user_id)
         base_url = str(client.api_url).rstrip("/").removesuffix("/api")
         logger.info("Track at: %s/runs/flow-run/%s", base_url, flow_run.id)
 
@@ -77,28 +87,22 @@ async def _run(user_id: PydanticObjectId) -> None:
     "--user-id",
     default=None,
     help=(
-        "Tenant id (24-char Mongo ObjectId). Required; falls back to the "
-        "``USER_ID`` env var when omitted."
+        "Override the target tenant by Mongo ObjectId. Defaults to the "
+        "current-session user; also reads the ``USER_ID`` env var."
     ),
 )
-def main(user_id: str | None) -> None:
-    """Trigger the memory-indexing-etl Prefect deployment for ``user_id``."""
+@click.option(
+    "--user-identifier",
+    default=None,
+    help=(
+        "Override the target tenant by stable handle (e.g. email). Defaults to "
+        "the current-session user; also reads the ``USER_IDENTIFIER`` env var."
+    ),
+)
+def main(user_id: str | None, user_identifier: str | None) -> None:
+    """Trigger the memory-indexing-etl deployment for the resolved user."""
 
-    raw = user_id or os.environ.get("USER_ID")
-    if not raw:
-        logger.error(
-            "--user-id is required (or set USER_ID env). No silent fallback "
-            "to a default user."
-        )
-        raise SystemExit(1)
-
-    try:
-        parsed = PydanticObjectId(raw)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("--user-id %r is not a valid Mongo ObjectId: %s", raw, exc)
-        raise SystemExit(1) from exc
-
-    asyncio.run(_run(parsed))
+    asyncio.run(_run(user_id, user_identifier))
 
 
 if __name__ == "__main__":

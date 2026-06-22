@@ -11,9 +11,10 @@ the data pipeline only produces ``documents``; there is no index. ``num_shards=1
 sources out across multiple workers. A bare single-shard ingestion is also available
 by triggering ``data-etl-worker`` directly (not via this script).
 
-Every deployment registered by ``tree.orchestrator`` requires a
-``user_id`` parameter (#020). Pass it via ``--user-id <ObjectId>`` or
-the ``USER_ID`` env var (the Makefile wires this for you).
+Every deployment registered by ``tree.orchestrator`` requires a ``user_id``
+parameter (#020). It defaults to the current-session user; override with
+``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the Makefile wires these
+for you). See :mod:`scripts._users` for the resolution precedence.
 
 Requires:
     - Prefect server running (make local-start)
@@ -22,22 +23,24 @@ Requires:
 ``--num-shards`` (optional, ``>= 1``) sets the source-shard fan-out width.
 
 Usage:
-    make memory-run-data-pipeline USER_ID=507f1f77bcf86cd799439011
-    make memory-run-data-pipeline USER_ID=507f... NUM_SHARDS=2
-    uv run python scripts/run_data_pipeline.py --user-id 507f1f77bcf86cd799439011
-    uv run python scripts/run_data_pipeline.py --user-id 507f... --num-shards 2
+    make memory-run-data-pipeline                       # current-session user
+    make memory-run-data-pipeline USER_ID=507f...       # override by id
+    make memory-run-data-pipeline USER_IDENTIFIER=paul  # override by handle
+    make memory-run-data-pipeline NUM_SHARDS=2
+    uv run python scripts/run_data_pipeline.py --user-identifier paul --num-shards 2
 """
 
 import asyncio
 import logging
-import os
 import sys
 
 import click
-from beanie import PydanticObjectId
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
+from _users import resolve_user_id
+from tree.config.settings import settings
+from tree.db import init_mongodb
 from tree.logging import init_logger
 
 init_logger()
@@ -47,11 +50,19 @@ DEPLOYMENT_NAME = "data-etl-orchestrator/data-etl-orchestrator"
 POLL_INTERVAL_SECONDS = 2
 
 
-async def _run(user_id: PydanticObjectId, num_shards: int | None) -> None:
+async def _run(
+    user_id: str | None, user_identifier: str | None, num_shards: int | None
+) -> None:
+    await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    resolved_user_id = await resolve_user_id(user_id, user_identifier)
+
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
-        parameters: dict[str, object] = {"user_id": str(user_id)}
+        parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
         if num_shards is not None:
             parameters["num_shards"] = num_shards
 
@@ -59,7 +70,7 @@ async def _run(user_id: PydanticObjectId, num_shards: int | None) -> None:
             deployment_id=deployment.id,
             parameters=parameters,
         )
-        logger.info("Flow run created: %s (user_id=%s)", flow_run.id, user_id)
+        logger.info("Flow run created: %s (user_id=%s)", flow_run.id, resolved_user_id)
         base_url = str(client.api_url).rstrip("/").removesuffix("/api")
         logger.info("Track at: %s/runs/flow-run/%s", base_url, flow_run.id)
 
@@ -95,8 +106,16 @@ async def _run(user_id: PydanticObjectId, num_shards: int | None) -> None:
     "--user-id",
     default=None,
     help=(
-        "Tenant id (24-char Mongo ObjectId) the data pipeline writes for. "
-        "Required; falls back to the ``USER_ID`` env var when omitted."
+        "Override the target tenant by Mongo ObjectId. Defaults to the "
+        "current-session user; also reads the ``USER_ID`` env var."
+    ),
+)
+@click.option(
+    "--user-identifier",
+    default=None,
+    help=(
+        "Override the target tenant by stable handle (e.g. email). Defaults to "
+        "the current-session user; also reads the ``USER_IDENTIFIER`` env var."
     ),
 )
 @click.option(
@@ -110,28 +129,16 @@ async def _run(user_id: PydanticObjectId, num_shards: int | None) -> None:
         "worker run with all sources. Must be ``>= 1``."
     ),
 )
-def main(user_id: str | None, num_shards: int | None) -> None:
-    """Trigger the data-etl-orchestrator Prefect deployment for ``user_id``."""
-
-    raw = user_id or os.environ.get("USER_ID")
-    if not raw:
-        logger.error(
-            "--user-id is required (or set USER_ID env). No silent fallback "
-            "to a default user."
-        )
-        raise SystemExit(1)
-
-    try:
-        parsed = PydanticObjectId(raw)
-    except Exception as exc:  # noqa: BLE001 — surface raw input to the user.
-        logger.error("--user-id %r is not a valid Mongo ObjectId: %s", raw, exc)
-        raise SystemExit(1) from exc
+def main(
+    user_id: str | None, user_identifier: str | None, num_shards: int | None
+) -> None:
+    """Trigger the data-etl-orchestrator deployment for the resolved user."""
 
     if num_shards is not None and num_shards < 1:
         logger.error("--num-shards must be >= 1 (got %d)", num_shards)
         raise SystemExit(1)
 
-    asyncio.run(_run(parsed, num_shards))
+    asyncio.run(_run(user_id, user_identifier, num_shards))
 
 
 if __name__ == "__main__":
