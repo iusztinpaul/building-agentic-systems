@@ -206,6 +206,71 @@ shared Voyage budget.
    `memory-extraction-etl` deployment and `memory_extraction(num_shards)` flow remain
    functional and behavior-identical until then.
 
+   **Amendment (#070–#074 — platform-grouped data fan-out + HuggingFace
+   offset-windowing).** The data fan-out axis (§3 / amendment #066's "Data
+   topology") is refined again: the `data-etl-orchestrator` STOPS partitioning the
+   configured `sources:` list by COUNT (`_partition_into_shards(sources, num_shards)`
+   → mixed-variant shards) and instead **groups sources by platform**, with a
+   **HuggingFace offset-window sub-fan-out**. The dispatch core is unchanged
+   (`asyncio.gather(return_exceptions=True)` over `data-etl-worker` runs, no trailing
+   index), so Status stays `Accepted`. Context:
+   `tracker/feature-data-platform-sharding-hf-windows-plan.md`.
+
+   - **Motivation.** Count-based balancing is skewed: one `HuggingFaceDatasetSource`
+     (millions of rows) was weighed as "1 item" against a single URL, so a count
+     partition could drop the entire arXiv dataset into one worker while others split
+     a handful of URLs. Parallelism is now declared per-source, not via a global
+     shard count.
+
+   - **Group-by-platform (non-HuggingFace).** One `data-etl-worker` run per platform
+     bucket present in config, each a HOMOGENEOUS single-platform shard. Platform map:
+     `{SubstackRssSource, SubstackArticleSource} → substack`;
+     `{YouTubeRssSource, YouTubeVideoSource} → youtube`; `WebSource → custom`;
+     `HuggingFaceDatasetSource → huggingface`. The worker's existing `_ingest_sources`
+     `isinstance` routing still batches per VARIANT inside the homogeneous shard, so
+     the worker body is unchanged.
+
+   - **HuggingFace offset-window sub-fan-out.** Each `HuggingFaceDatasetSource` fans
+     out into `num_workers` `data-etl-worker` runs, one per disjoint offset-window:
+     `window_size = max_samples // num_workers`; window `i` =
+     `(offset = i*window_size, max_samples = window_size)`, with the LAST window taking
+     the remainder so windows tile `[0, max_samples)` exactly. Realized via
+     `IterableDataset.skip(offset)` before the streaming loop. `num_workers=1` leaves
+     `offset` unset → byte-identical to the prior single HF run. New fields on
+     `HuggingFaceDatasetSource`: `num_workers: int = 1` (YAML-authored) and
+     `offset: int | None = None` (a dispatch-time runtime coordinate set ONLY via
+     `entry.model_copy(update={"offset": …})`, never in YAML). Caveat: `skip(n)` is
+     O(n) on a streaming dataset but bounded by the `max_samples` cap — this windows
+     CAPPED runs only; `split_dataset_by_node` is the documented (out-of-scope)
+     successor for a future uncapped whole-dataset run.
+
+   - **`num_shards` dropped for DATA only.** The `data_etl_orchestrator` `num_shards`
+     parameter, the `--num-shards` script flag, and the Makefile `NUM_SHARDS` thread
+     are removed. The MEMORY orchestrator keeps `num_shards` unchanged. The shared
+     `tree.sharding._partition_into_shards` / `_resolve_num_shards` helpers are NOT
+     deleted — the memory document-shard axis still uses them; the data orchestrator
+     simply stops importing them.
+
+   - **`runner_global_limit` raised 4 → 6** in `apps/memory/configs/default.yaml`
+     (§4 admission control). Data workers are NOT Voyage-bound and the
+     `voyage-embeddings` GCL (§1) still throttles every real Voyage POST, so admitting
+     more concurrent runs cannot exceed the embed budget; the bump accommodates the
+     wider data fan-out (platform buckets + HF windows) queuing through the shared
+     `serve(limit=…)` slots. The typed `ConcurrencyConfig.runner_global_limit` default
+     stays `4` (the YAML is authoritative), and the frozen test fixture
+     `frozen_config.yaml` stays at `4` by design (config tests assert against the
+     fixture, not `default.yaml`).
+
+   - **Unchanged invariants (so Status stays `Accepted`).** Exactly two deployments
+     per pipeline; **depth-1 dispatch with NO recursion** — a worker never calls
+     `run_deployment` (recursion can deadlock the serve admission limit);
+     `asyncio.gather(return_exceptions=True)` per-shard failure-isolation; NO
+     trailing/index run for the data pipeline; the cross-flow `voyage-embeddings` GCL
+     (§1) and `serve(limit=runner_global_limit)` admission control (§4); and
+     idempotency via `load_document`'s `(user_id, source_uri)` dedup (deterministic
+     `arxiv_id → source_uri`), which makes disjoint windows — and any accidental
+     overlap — safe to re-run (upsert, never double-insert).
+
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
    budget can feed.
