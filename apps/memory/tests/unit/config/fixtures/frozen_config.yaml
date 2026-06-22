@@ -1,0 +1,119 @@
+# Frozen config fixture — STRICTLY for tests. Decoupled from the human-tuned
+# configs/default.yaml (which operators edit freely). Tests assert on the
+# values here, so changes are intentional and local to the test suite.
+# Keep the source counts in sync with test_app_config.py if you edit them:
+#   5 substack_rss, 10 substack_article, 1 huggingface_dataset, 2 web,
+#   1 youtube_rss, 1 youtube_video (20 total).
+
+sources:
+  - uri: https://www.decodingai.com/feed
+    type: substack_rss
+  - uri: https://maximelabonne.substack.com/feed
+    type: substack_rss
+  - uri: https://modelcraft.substack.com/feed
+    type: substack_rss
+  - uri: https://www.latent.space/feed
+    type: substack_rss
+  - uri: https://alexeyondata.substack.com/feed
+    type: substack_rss
+  - uri: https://www.decodingai.com/p/ai-agents-foundations-course
+    type: substack_article
+  - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
+    type: substack_article
+  - uri: https://www.decodingai.com/p/context-engineering-2025s-1-skill
+    type: substack_article
+  - uri: https://www.decodingai.com/p/llm-structured-outputs-the-only-way
+    type: substack_article
+  - uri: https://www.decodingai.com/p/stop-building-ai-agents-use-these
+    type: substack_article
+  - uri: https://www.decodingai.com/p/tool-calling-from-scratch-to-production
+    type: substack_article
+  - uri: https://www.decodingai.com/p/ai-agents-planning
+    type: substack_article
+  - uri: https://www.decodingai.com/p/building-production-react-agents
+    type: substack_article
+  - uri: https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
+    type: substack_article
+  - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
+    type: substack_article
+  - uri: librarian-bots/arxiv-metadata-snapshot
+    type: huggingface_dataset
+    max_samples: 10
+    fetch_content: false
+    batch_size: 50
+    concurrency: 10
+  # Bare (untyped) entries — exercise the untyped → WebSource normalization.
+  - uri: https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
+  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
+  - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw
+    type: youtube_rss
+  - uri: https://www.youtube.com/watch?v=eYaWxljC4sA
+    type: youtube_video
+
+models:
+  llm:
+    provider: gemini
+    model: gemini-3.1-flash-lite
+  resolution_embedding:
+    provider: voyage
+    model: voyage-3.5
+    dimensions: 1024
+  search_embedding:
+    provider: voyage
+    model: voyage-3.5
+    dimensions: 1024
+  embedding_batch:
+    max_inputs: 1000
+    max_total_tokens: 10000
+    max_input_tokens: 32000
+    dispatch_concurrency: 1
+
+extraction:
+  chunk_size: 512
+  chunk_overlap: 64
+  llm_concurrency: 5
+  doc_concurrency: 1
+  dedup_concurrency: 8
+  resolution:
+    fuzzy_threshold: 0.85
+    semantic_threshold: 0.80
+    type_strict: true
+    max_candidates_per_type: 1000
+    embedding_cache_max_size: 10000
+  dedup:
+    enabled: true
+    auto_merge_threshold: 0.95
+    flag_threshold: 0.85
+    use_fuzzy_matching: true
+    fuzzy_threshold: 0.90
+    max_candidates: 10
+    match_same_type_only: true
+    merge_strategy: keep_primary
+    supersession_candidate_cap: 8
+
+query:
+  top_k: 10
+  max_hops: 1
+  rrf_k: 60
+  embedding_batch_size: 64
+
+dream:
+  enabled: true
+  cron: "0 4 * * *"
+  dry_run: true
+  max_pairs: 10000
+  enable_supersession_judge: false
+
+concurrency:
+  voyage_rpm: 3
+  voyage_tpm: 10000
+  runner_global_limit: 4
+
+mcp:
+  max_retries: 1
+  max_results: 10
+
+observability:
+  enabled: true
+  embedding_price_per_1m_tokens:
+    voyage-3.5: 0.06

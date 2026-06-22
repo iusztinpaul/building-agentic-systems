@@ -16,23 +16,16 @@ from tree.config.app_config import (
 
 
 class TestLoadAppConfig:
-    def test_loads_default_yaml(self):
-        config = load_app_config()
+    def test_loads_default_yaml(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
 
         assert config.models.llm.provider == "gemini"
-        # Bumped from gemini-2.5-flash-lite → gemini-3.1-flash-lite in
-        # commit 210f8d5 (configs/default.yaml). The test asserts the
-        # live YAML value so the unit suite stays green; bumping the
-        # model in YAML requires a single matching change here.
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # default.yaml is authoritative for embedding (#034). #048 flipped the
-        # default from the multimodal ``voyage-multimodal-3`` to the TEXT model
-        # ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5`` is also
-        # 1024-d, so the dim stays put — the vector index numDimensions and the
-        # dim-guard are unaffected — while the model identifier changes. #039
-        # split the single ``embedding`` block into a transient
-        # ``resolution_embedding`` and a persisted ``search_embedding``; both
-        # point at the same model/dim.
+        # #048 flipped the default from the multimodal ``voyage-multimodal-3`` to
+        # the TEXT model ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5``
+        # is also 1024-d, so the dim stays put. #039 split the single
+        # ``embedding`` block into a transient ``resolution_embedding`` and a
+        # persisted ``search_embedding``; both point at the same model/dim.
         assert config.models.resolution_embedding.provider == "voyage"
         assert config.models.resolution_embedding.model == "voyage-3.5"
         assert config.models.resolution_embedding.dimensions == 1024
@@ -91,14 +84,14 @@ class TestLoadAppConfig:
         assert config.models.embedding_batch.max_total_tokens == 50_000
         assert config.models.embedding_batch.max_input_tokens == 8000
 
-    def test_loads_default_yaml_sources_flat_shape(self):
-        """default.yaml uses the flat ``sources:`` list shape (post-#007).
+    def test_loads_default_yaml_sources_flat_shape(self, frozen_config_path):
+        """The config uses the flat ``sources:`` list shape (post-#007).
 
         Counts each variant; deeper per-variant assertions live in
         ``test_sources_config.py``.
         """
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         counts = Counter(type(e).__name__ for e in config.sources.sources)
 
@@ -112,19 +105,19 @@ class TestLoadAppConfig:
         }
         assert sum(counts.values()) == 20
 
-    def test_dream_block_loaded_from_default_yaml(self):
+    def test_dream_block_loaded_from_default_yaml(self, frozen_config_path):
         """The #051 ``dream:`` block is read into the typed :class:`DreamConfig`.
 
         Thresholds are NOT duplicated here — they stay in
         ``extraction.dedup``; ``DreamConfig`` carries no threshold field.
         """
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         assert config.dream.enabled is True
         assert config.dream.cron == "0 4 * * *"
-        # default.yaml ships dry_run: true (report-only first rollout per the
-        # approved plan), agreeing with the safer Pydantic model default.
+        # dry_run: true (report-only rollout), agreeing with the safer Pydantic
+        # model default.
         assert config.dream.dry_run is True
         assert config.dream.max_pairs == 10_000
         assert config.dream.enable_supersession_judge is False
@@ -164,10 +157,10 @@ class TestLoadAppConfig:
         assert config.dream.max_pairs == 42
         assert config.dream.enable_supersession_judge is True
 
-    def test_loads_default_yaml_huggingface_dataset_entry(self):
+    def test_loads_default_yaml_huggingface_dataset_entry(self, frozen_config_path):
         """The HF arxiv entry preserves the parameters from the legacy YAML."""
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         hf_entries = [
             e for e in config.sources.sources if isinstance(e, HuggingFaceDatasetSource)
@@ -180,10 +173,10 @@ class TestLoadAppConfig:
         assert entry.batch_size == 50
         assert entry.concurrency == 10
 
-    def test_loads_default_yaml_normalizes_untyped_to_web(self):
+    def test_loads_default_yaml_normalizes_untyped_to_web(self, frozen_config_path):
         """The two bare ``- uri:`` entries (Reddit, Anthropic) load as WebSource."""
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         web_entries = [e for e in config.sources.sources if isinstance(e, WebSource)]
         assert len(web_entries) == 2
@@ -191,10 +184,10 @@ class TestLoadAppConfig:
         assert any("reddit.com" in u for u in web_uris)
         assert any("anthropic.com" in u for u in web_uris)
 
-    def test_default_yaml_round_trip_preserves_typed_variants(self):
-        """Round-trip the default YAML: every entry is a typed Pydantic variant."""
+    def test_default_yaml_round_trip_preserves_typed_variants(self, frozen_config_path):
+        """Round-trip the config YAML: every entry is a typed Pydantic variant."""
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         assert all(
             isinstance(
@@ -294,11 +287,11 @@ class TestLoadAppConfig:
 class TestConcurrencyConfig:
     """#054 / ADR-002: the top-level ``concurrency:`` block."""
 
-    def test_concurrency_block_loaded_from_default_yaml(self):
-        """The concurrency knobs are read from default.yaml into the
+    def test_concurrency_block_loaded_from_default_yaml(self, frozen_config_path):
+        """The concurrency knobs are read from YAML into the
         typed :class:`ConcurrencyConfig`."""
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         assert config.concurrency.voyage_rpm == 3
         assert config.concurrency.voyage_tpm == 10_000
@@ -341,14 +334,14 @@ class TestExtractionConcurrencyKnobs:
     """#054: the new intra-run fan-out knobs on ``extraction`` +
     ``models.embedding_batch``, including the env-override hatch."""
 
-    def test_extraction_fanout_knobs_loaded_from_default_yaml(self):
-        config = load_app_config()
+    def test_extraction_fanout_knobs_loaded_from_default_yaml(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
 
         assert config.extraction.doc_concurrency == 1
         assert config.extraction.dedup_concurrency == 8
 
-    def test_dispatch_concurrency_loaded_from_default_yaml(self):
-        config = load_app_config()
+    def test_dispatch_concurrency_loaded_from_default_yaml(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
 
         assert config.models.embedding_batch.dispatch_concurrency == 1
         assert config.models.embedding_batch.max_total_tokens == 10_000

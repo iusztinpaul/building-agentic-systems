@@ -41,11 +41,11 @@ Usage:
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow
+from prefect import flow, get_run_logger
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
@@ -83,12 +83,6 @@ from tree.data.youtube.youtube_rss_pipeline import (
 from tree.data.youtube.youtube_video_pipeline import (
     ingest_youtube_video_batch,  # noqa: F401
 )
-from tree.data.sharding import (
-    DataFanOutStats,
-    _fan_out_data,
-    _partition_into_shards,
-    _resolve_num_shards,
-)
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
@@ -101,6 +95,11 @@ from tree.observability import (
     span,
     tracked_span,
 )
+
+# The balanced-contiguous partitioning math lives in the neutral, pipeline-
+# agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
+# and data orchestrators import the IDENTICAL helpers without copy-paste.
+from tree.sharding import _partition_into_shards, _resolve_num_shards
 
 # Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
 # former ``"data-pipeline"`` pipeline-name tag is now span metadata.
@@ -372,6 +371,122 @@ async def data_etl_worker(
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
         flush_opik()
+
+
+# ---------------------------------------------------------------------------
+# Source-shard fan-out (orchestrator path)
+# ---------------------------------------------------------------------------
+
+
+def _get_run_logger() -> logging.Logger:
+    """Prefect run logger inside a flow/task; the module logger otherwise.
+
+    Lets the pure helpers log through ``caplog`` when invoked outside a flow
+    run (unit tests call them directly).
+    """
+
+    try:
+        return get_run_logger()  # type: ignore[return-value]
+    except Exception:  # noqa: BLE001 — Prefect raises a typed context error
+        return logger
+
+
+@dataclass
+class DataFanOutStats:
+    """Per-run accounting for the source-shard fan-out (orchestrator path).
+
+    Mirrors the memory ``FanOutStats`` shape (``shards_total`` / ``succeeded`` /
+    ``failed`` / ``failures``) so the two splits report identically. The data
+    orchestrator does NOT collect per-shard ``Document`` lists back — the worker
+    persists documents directly, so the orchestrator only needs the fan-out
+    accounting. ``failures`` maps the failing shard index (string) to the
+    exception message so one shard's blow-up is logged and isolated, never
+    aborting the others.
+    """
+
+    shards_total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    failures: dict[str, str] = field(default_factory=dict)
+
+
+async def _fan_out_data(
+    *,
+    user_id: PydanticObjectId,
+    shards: list[list[dict[str, Any]]],
+    run_deployment: Any,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> DataFanOutStats:
+    """Fan one worker dispatch out per shard, isolate failures, NO trailing step.
+
+    Pure orchestration core (no DB, no partitioning) so the gather /
+    failure-isolation contract is unit-testable directly. ``run_deployment`` is
+    injected (the Prefect entrypoint in the flow; a fake in tests).
+
+    * One ``data-etl-worker`` run per shard under
+      ``asyncio.gather(return_exceptions=True)``, each carrying
+      ``{user_id, sources}`` — the orchestrator dispatches a DISTINCT worker
+      deployment, so there is NO recursion and NO ``num_shards`` child key (the
+      worker has no such param). A single shard's exception is caught, logged,
+      recorded in ``stats.failures``, and the gather still completes for the
+      others (ADR-002 §3).
+    * NO trailing/index run — the data pipeline only produces ``documents``;
+      there is no index. This function fires EXACTLY ``len(shards)`` worker runs
+      and nothing else.
+
+    ``opik_trace_headers`` (the orchestrator's distributed-trace headers) is
+    forwarded to every worker as a flow parameter so the orchestrated data run
+    renders as ONE Opik trace across ``run_deployment``'s process hop. ``None``
+    is simply not forwarded — each worker then starts its own trace.
+    """
+
+    log = _get_run_logger()
+    stats = DataFanOutStats(shards_total=len(shards))
+
+    if not shards:
+        log.info("data fan-out: 0 shards — nothing to do (no-op)")
+        return stats
+
+    worker_params: dict[str, Any] = {}
+    if opik_trace_headers is not None:
+        worker_params["opik_trace_headers"] = opik_trace_headers
+
+    results = await asyncio.gather(
+        *[
+            run_deployment(
+                "data-etl-worker/data-etl-worker",
+                parameters={
+                    "user_id": str(user_id),
+                    "sources": shard,
+                    **worker_params,
+                },
+            )
+            for shard in shards
+        ],
+        return_exceptions=True,
+    )
+
+    for idx, result in enumerate(results):
+        if isinstance(result, Exception):
+            stats.failed += 1
+            stats.failures[str(idx)] = str(result)
+            log.error(
+                "data fan-out: shard %d FAILED (isolated): %s",
+                idx,
+                result,
+                exc_info=result,
+            )
+            continue
+        stats.succeeded += 1
+
+    log.info(
+        "data fan-out: shards_total=%d succeeded=%d failed=%d (NO trailing index)",
+        stats.shards_total,
+        stats.succeeded,
+        stats.failed,
+    )
+
+    return stats
 
 
 # ---------------------------------------------------------------------------

@@ -4,10 +4,10 @@
 sources:
   - uri: https://www.decodingai.com/feed
     type: substack_rss
-  - uri: https://maximelabonne.substack.com/feed
-    type: substack_rss
-  - uri: https://modelcraft.substack.com/feed
-    type: substack_rss
+  # - uri: https://maximelabonne.substack.com/feed
+  #   type: substack_rss
+  # - uri: https://modelcraft.substack.com/feed
+  #   type: substack_rss
   - uri: https://www.latent.space/feed
     type: substack_rss
   - uri: https://alexeyondata.substack.com/feed
@@ -34,7 +34,7 @@ sources:
     type: substack_article
   - uri: librarian-bots/arxiv-metadata-snapshot
     type: huggingface_dataset
-    max_samples: 10
+    max_samples: 1000
     fetch_content: false
     batch_size: 50
     concurrency: 10
