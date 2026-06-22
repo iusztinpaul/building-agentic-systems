@@ -86,7 +86,17 @@ async def ingest_arxiv_dataset(
     user_id: PydanticObjectId,
     max_samples: int | None = None,
     fetch_content: bool | None = None,
+    offset: int | None = None,
 ) -> list[Document]:
+    """Ingest the arxiv HF dataset for ``user_id``.
+
+    ``offset`` (#071) selects a disjoint window of the stream: the ingest skips the
+    first ``offset`` rows and then streams ``max_samples`` rows — i.e. this run
+    persists rows ``[offset, offset + max_samples)``. ``offset=None`` (the default,
+    and what a non-windowed entry forwards) applies NO skip and reproduces today's
+    single-run ingest exactly.
+    """
+
     (
         default_max_samples,
         default_fetch_content,
@@ -106,7 +116,7 @@ async def ingest_arxiv_dataset(
     semaphore = asyncio.Semaphore(concurrency)
     ingested: list[Document] = []
 
-    for batch in _fetch_dataset_batches(max_samples, batch_size):
+    for batch in _fetch_dataset_batches(max_samples, batch_size, offset=offset):
         documents = [extract_document(entry, user_id) for entry in batch]
 
         results = await asyncio.gather(

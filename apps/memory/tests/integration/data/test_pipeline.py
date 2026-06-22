@@ -175,7 +175,7 @@ def _mock_article_source(mocker) -> None:
 
 
 def _mock_arxiv_source(mocker) -> None:
-    def batch_gen(max_samples, batch_size):
+    def batch_gen(max_samples, batch_size, offset=None):
         yield FAKE_ARXIV_ENTRIES
 
     mocker.patch(
@@ -404,7 +404,7 @@ sources:
             ["https://blog.example.com/p/test-post"], _USER_ID
         )
         arxiv_mock.assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=2, fetch_content=False
+            user_id=_USER_ID, max_samples=2, fetch_content=False, offset=None
         )
         # Two web URLs dispatched in parallel: one explicit, one untyped→web.
         assert ingest_url_mock.await_count == 2

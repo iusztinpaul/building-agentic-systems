@@ -123,6 +123,7 @@ async def _ingest_arxiv_dataset_entry(
         user_id=user_id,
         max_samples=entry.max_samples,
         fetch_content=entry.fetch_content,
+        offset=entry.offset,
     )
 
 

@@ -78,21 +78,35 @@ def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document | N
 
 
 def fetch_dataset_batches(
-    max_samples: int, batch_size: int
+    max_samples: int, batch_size: int, offset: int | None = None
 ) -> Generator[list[dict], None, None]:
     """Stream the arxiv dataset from HuggingFace and yield batches of entries.
 
     Yields lists of up to ``batch_size`` entries, stopping after ``max_samples`` total.
+
+    ``offset`` selects a disjoint window of the stream (#071): when it is a positive
+    int the first ``offset`` rows are discarded via ``IterableDataset.skip(offset)``
+    BEFORE iteration, so the yielded rows cover exactly ``[offset, offset + max_samples)``
+    (``max_samples`` is counted WITHIN the post-skip window). A falsy ``offset``
+    (``None`` or ``0``) applies NO skip — byte-for-byte today's single-run ingest. A
+    negative ``offset`` is rejected (``.skip`` is never called with a negative value).
     """
 
+    if offset is not None and offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
+
     logger.info(
-        "Streaming arxiv dataset from %s (max_samples=%d, batch_size=%d)",
+        "Streaming arxiv dataset from %s (offset=%s, max_samples=%d, batch_size=%d)",
         ARXIV_HF_DATASET,
+        offset,
         max_samples,
         batch_size,
     )
 
     ds = load_dataset(ARXIV_HF_DATASET, split="train", streaming=True)
+
+    if offset:
+        ds = ds.skip(offset)
 
     batch: list[dict] = []
     count = 0
@@ -112,7 +126,13 @@ def fetch_dataset_batches(
         logger.info("Yielding final batch of %d entries (total: %d)", len(batch), count)
         yield batch
 
-    logger.info("Finished streaming. Total entries: %d", count)
+    logger.info(
+        "Finished streaming. Window [offset=%s, count=%d] → rows [%d, %d)",
+        offset,
+        count,
+        offset or 0,
+        (offset or 0) + count,
+    )
 
 
 async def fetch_paper_content(source_uri: str) -> str:

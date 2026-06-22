@@ -112,7 +112,7 @@ class TestDataWorker:
             ["https://example.com/p/article"], _USER_ID
         )
         mock_arxiv.assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=5, fetch_content=True
+            user_id=_USER_ID, max_samples=5, fetch_content=True, offset=None
         )
         mock_ingest_url.assert_awaited_once_with(
             "https://martinfowler.com/articles/microservices.html", _USER_ID
@@ -297,7 +297,7 @@ class TestDataWorker:
 
     async def test_passes_huggingface_dataset_overrides(self, mocker) -> None:
         # Per-entry ``max_samples`` and ``fetch_content`` must be forwarded
-        # to ``ingest_arxiv_dataset``.
+        # to ``ingest_arxiv_dataset``. A non-windowed entry forwards ``offset=None``.
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
@@ -314,7 +314,30 @@ class TestDataWorker:
         await data_etl_worker(_USER_ID, sources)
 
         mock_arxiv.assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=42, fetch_content=True
+            user_id=_USER_ID, max_samples=42, fetch_content=True, offset=None
+        )
+
+    async def test_forwards_huggingface_dataset_offset_window(self, mocker) -> None:
+        # A windowed entry (``offset`` stamped by the #072 orchestrator) forwards
+        # that ``offset`` to ``ingest_arxiv_dataset`` so the worker ingests exactly
+        # rows ``[offset, offset + max_samples)``.
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+
+        sources: list[SourceEntry] = [
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot",
+                max_samples=250,
+                offset=250,
+            ),
+        ]
+
+        await data_etl_worker(_USER_ID, sources)
+
+        mock_arxiv.assert_awaited_once_with(
+            user_id=_USER_ID, max_samples=250, fetch_content=False, offset=250
         )
 
     async def test_dispatches_youtube_rss_entries(self, mocker) -> None:
@@ -428,5 +451,5 @@ class TestDataWorker:
 
         mock_rss.assert_awaited_once_with(["https://example.com/feed"], _USER_ID)
         mock_arxiv.assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=7, fetch_content=True
+            user_id=_USER_ID, max_samples=7, fetch_content=True, offset=None
         )

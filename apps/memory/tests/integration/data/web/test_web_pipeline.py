@@ -197,7 +197,7 @@ class TestDataPipelinePicksUpWebEntries:
 
         # Stub the arxiv batch generator so the worker doesn't
         # touch the real HuggingFace dataset during this test.
-        def _empty_batches(max_samples, batch_size):
+        def _empty_batches(max_samples, batch_size, offset=None):
             return
             yield  # pragma: no cover - make this a generator function
 

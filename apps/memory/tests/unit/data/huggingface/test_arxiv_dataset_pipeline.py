@@ -239,3 +239,40 @@ class TestIngestArxivDataset:
 
         assert len(result) == 4
         assert call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_forwards_offset_to_fetch_dataset_batches(self, mocker) -> None:
+        fetch_mock = mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+            return_value=iter([]),
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            new_callable=AsyncMock,
+        )
+
+        await ingest_arxiv_dataset.fn(
+            user_id=PydanticObjectId(),
+            max_samples=250,
+            fetch_content=False,
+            offset=250,
+        )
+
+        assert fetch_mock.call_args.kwargs["offset"] == 250
+
+    @pytest.mark.asyncio
+    async def test_defaults_offset_to_none(self, mocker) -> None:
+        fetch_mock = mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+            return_value=iter([]),
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            new_callable=AsyncMock,
+        )
+
+        await ingest_arxiv_dataset.fn(
+            user_id=PydanticObjectId(), max_samples=4, fetch_content=False
+        )
+
+        assert fetch_mock.call_args.kwargs["offset"] is None
