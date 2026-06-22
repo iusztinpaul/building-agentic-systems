@@ -102,12 +102,8 @@ lint-check: # Check code for linting issues without fixing them using ruff linte
 
 
 # --- Infrastructure ---
-
-check-db: # Read-only connectivity check against the configured MongoDB target (follows .env.target). Pings, lists databases + collection counts; exits non-zero on failure.
-	uv run python scripts/check_db.py
-
-
-# --- Deployment ---
+#
+### --- Modal ---
 
 deploy-embedding-model: # Deploy vLLM embedding server (voyage-4-nano) to Modal. Creates the API key secret if missing.
 	@uv run modal secret list 2>/dev/null | grep -q "vllm-embedding-api" || \
@@ -120,8 +116,12 @@ deploy-embedding-model-test: # Test the deployed vLLM embedding server on Modal.
 deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
 	uv run modal app stop vllm-embedding-models
 
+### --- MongoDB ---
 
-# --- MongoDB Atlas IaC ---
+check-db: # Read-only connectivity check against the configured MongoDB target (follows .env.target). Pings, lists databases + collection counts; exits non-zero on failure.
+	uv run python scripts/check_db.py
+
+### --- MongoDB Atlas IaC ---
 # Manage the shared Atlas cluster through code. Requires Atlas service-account
 # creds MDB_MCP_API_CLIENT_ID / MDB_MCP_API_CLIENT_SECRET (in .env / .env.prod).
 # Defaults target project "Tree" / cluster "tree" (M0 free, GCP, WESTERN_EUROPE);
@@ -139,8 +139,7 @@ atlas-status: # Print the Atlas cluster state and connection strings.
 atlas-down: # Delete the Atlas cluster (irreversible; pass ATLAS_ARGS=--yes to skip the prompt).
 	uv run python deploy/atlas_cluster.py down $(ATLAS_ARGS)
 
-
-# --- Orchestration ---
+### --- Prefect Orchestration ---
 
 serve-workflows: # LOCAL dev: serve workflow deployments from local code (point PREFECT_API_URL at the local server via make local-start). Do NOT run against the Cloud workspace managed by deploy-prefect-setup-up.
 	uv run python -m tree.orchestrator
@@ -162,11 +161,6 @@ deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Ad
 
 
 # --- Users & Session ---
-#
-# Tree has no auth yet: `signup` is how users are created and how the current
-# user is recorded (a singleton `sessions` pointer). The pipeline run-* targets
-# below still take USER_ID explicitly
-# `whoami` prints the ObjectId to pass them.
 
 signup: # Create a user (idempotent on IDENTIFIER) and set it current. Requires IDENTIFIER=<handle>. Optional NAME="Display Name".
 	@if [ -z "$(IDENTIFIER)" ]; then echo 'USAGE: make signup IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
@@ -199,10 +193,6 @@ run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (re
 
 
 # --- Dream Consolidation ---
-#
-# The scheduled fan-out parent flow takes NO USER_ID — it enumerates active
-# users itself and runs one per-user dream each. dry_run is controlled by
-# app_config.dream.dry_run (YAML), not a flag.
 
 run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefect (all active users). No USER_ID.
 	uv run python scripts/run_dream_consolidation.py

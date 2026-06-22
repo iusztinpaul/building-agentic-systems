@@ -5,11 +5,21 @@
       "mcp__plugin_context7_context7__query-docs"
     ]
   },
-  "enabledMcpjsonServers": ["tree-memory"],
+  "enabledMcpjsonServers": ["tree-memory", "tree-memory-local"],
   "enabledPlugins": {
+    "squid@iusztinpaul": true,
+    "ponytail@ponytail": true,
     "context7@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
     "commit-commands@claude-plugins-official": true,
     "mongodb@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "iusztinpaul": {
+      "source": {
+        "source": "github",
+        "repo": "iusztinpaul/squid"
+      }
+    }
   }
 }
