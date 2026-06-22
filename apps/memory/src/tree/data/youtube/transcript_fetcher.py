@@ -79,9 +79,6 @@ class YoutubeTranscriptApiFetcher:
       endpoint (`https://www.youtube.com/oembed?url=...&format=json`,
       sync HTTP via `httpx.AsyncClient`, no API key).
 
-    `proxy_config` is reserved as an extension point for the Webshare
-    rotating-proxy integration; it is not consumed in v1.
-
     `languages` defaults to `("en",)` — the human-approved default. Not
     surfaced in YAML config in v1.
     """
@@ -89,14 +86,9 @@ class YoutubeTranscriptApiFetcher:
     def __init__(
         self,
         languages: tuple[str, ...] = ("en",),
-        proxy_config: object | None = None,
         concurrency: int = 5,
     ) -> None:
         self.languages = languages
-        # Reserved; not consumed in v1. Stored on the instance so that future
-        # subclasses / Webshare integration can pick it up without changing
-        # the constructor signature.
-        self.proxy_config = proxy_config
         self.concurrency = concurrency
         self._semaphore = asyncio.Semaphore(concurrency)
 

@@ -77,7 +77,6 @@ class GeminiTranscriptFetcher:
         api_key: SecretStr | None = None,
         model: str = _DEFAULT_MODEL,
         concurrency: int = 3,
-        request_timeout_seconds: float = 120.0,
     ) -> None:
         resolved_key = api_key if api_key is not None else settings.google_api_key
         secret_value = resolved_key.get_secret_value() if resolved_key else ""
@@ -86,7 +85,6 @@ class GeminiTranscriptFetcher:
 
         self.model = model
         self.concurrency = concurrency
-        self.request_timeout_seconds = request_timeout_seconds
         self._semaphore = asyncio.Semaphore(concurrency)
         self._client = genai.Client(api_key=secret_value)
 

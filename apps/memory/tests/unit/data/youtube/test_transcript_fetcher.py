@@ -164,11 +164,6 @@ class TestYoutubeTranscriptApiFetcher:
         assert results[0].metadata.video_id == VIDEO_ID_A
         assert results[2].metadata.video_id == VIDEO_ID_C
 
-    async def test_proxy_config_is_stored_but_unused(self):
-        sentinel = object()
-        fetcher = YoutubeTranscriptApiFetcher(proxy_config=sentinel)
-        assert fetcher.proxy_config is sentinel
-
     async def test_languages_default_is_english(self):
         assert YoutubeTranscriptApiFetcher().languages == ("en",)
 

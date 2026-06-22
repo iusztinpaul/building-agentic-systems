@@ -101,14 +101,6 @@ class DataFanOutStats:
     failed: int = 0
     failures: dict[str, str] = field(default_factory=dict)
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "shards_total": self.shards_total,
-            "succeeded": self.succeeded,
-            "failed": self.failed,
-            "failures": self.failures,
-        }
-
 
 # ---------------------------------------------------------------------------
 # Fan-out core (run_deployment injected so it is unit-testable)

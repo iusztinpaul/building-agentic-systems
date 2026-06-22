@@ -41,6 +41,7 @@ Usage:
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -61,16 +62,33 @@ from tree.config.app_config import (
 from tree.config.settings import settings
 from tree.data.core.ingest import ingest_url
 from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
+
+# The batched sub-flows are referenced by NAME in ``_BATCHED_VARIANTS`` and looked
+# up at call time via ``globals()[batch_fn_name]`` (see ``_BatchedVariant.batch_fn``).
+# They MUST be imported here so those names are module globals: that's what makes
+# the lookup resolve in production AND lets ``mocker.patch("...pipeline.<name>")``
+# rebind them in tests. Each import carries a per-line F401-suppression because
+# ruff can't see the ``globals()`` use; dropping these imports turns every
+# batched-variant dispatch into a runtime ``KeyError`` (regression guarded by
+# ``test_every_batched_variant_resolves_without_mocks``).
+from tree.data.substack.substack_article_pipeline import (
+    ingest_substack_article_batch,  # noqa: F401
+)
+from tree.data.substack.substack_rss_pipeline import (
+    ingest_substack_rss_feed_batch,  # noqa: F401
+)
+from tree.data.youtube.youtube_rss_pipeline import (
+    ingest_youtube_rss_feed_batch,  # noqa: F401
+)
+from tree.data.youtube.youtube_video_pipeline import (
+    ingest_youtube_video_batch,  # noqa: F401
+)
 from tree.data.sharding import (
     DataFanOutStats,
     _fan_out_data,
     _partition_into_shards,
     _resolve_num_shards,
 )
-from tree.data.substack.substack_article_pipeline import ingest_substack_article_batch
-from tree.data.substack.substack_rss_pipeline import ingest_substack_rss_feed_batch
-from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
-from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
@@ -120,6 +138,77 @@ _HUGGINGFACE_DATASET_HANDLERS: dict[
 }
 
 
+# A batched sub-flow: takes a list of URIs + the user and returns the ingested docs.
+_BatchFn = Callable[[list[str], PydanticObjectId], Awaitable[list[Document]]]
+
+
+@dataclass(frozen=True)
+class _BatchedVariant:
+    """One source variant whose entries are batched into a single sub-flow call.
+
+    ``source_type`` selects the entries via ``isinstance``; ``batch_fn_name`` is the
+    module-global name of the batched ingestion sub-flow, resolved from
+    :func:`globals` at CALL time (NOT a captured reference) so a test that
+    ``mocker.patch``-es the module global is honoured — same late binding the old
+    per-variant ``await ingest_..._batch(...)`` calls had. ``label`` names the
+    pipeline in log lines; ``unit`` is the noun for the entry count (``feeds`` /
+    ``URLs``); ``config_key`` is the YAML source key reported in the "skipped: no
+    <key> entries" log line.
+    """
+
+    source_type: type[SourceEntry]
+    batch_fn_name: str
+    label: str
+    unit: str
+    config_key: str
+
+    @property
+    def batch_fn(self) -> _BatchFn:
+        """The batch sub-flow, looked up by name in the module namespace.
+
+        Resolved on every access so ``mocker.patch("...pipeline.<name>")`` (which
+        rebinds the module global) takes effect — a frozen reference captured at
+        import time would bypass the patch and hit the network.
+        """
+
+        return globals()[self.batch_fn_name]
+
+
+# Table for the four byte-identical batched variants. Order is load-bearing — it
+# fixes the ingestion order Substack RSS → Substack article → YouTube RSS → YouTube
+# video, and the order their log lines are emitted.
+_BATCHED_VARIANTS: list[_BatchedVariant] = [
+    _BatchedVariant(
+        SubstackRssSource,
+        "ingest_substack_rss_feed_batch",
+        "Substack RSS",
+        "feeds",
+        "substack_rss",
+    ),
+    _BatchedVariant(
+        SubstackArticleSource,
+        "ingest_substack_article_batch",
+        "Substack article",
+        "URLs",
+        "substack_article",
+    ),
+    _BatchedVariant(
+        YouTubeRssSource,
+        "ingest_youtube_rss_feed_batch",
+        "YouTube RSS",
+        "feeds",
+        "youtube_rss",
+    ),
+    _BatchedVariant(
+        YouTubeVideoSource,
+        "ingest_youtube_video_batch",
+        "YouTube video",
+        "URLs",
+        "youtube_video",
+    ),
+]
+
+
 def _coerce_sources(sources: list[Any]) -> list[SourceEntry]:
     """Coerce a worker ``sources`` argument to typed ``SourceEntry`` objects.
 
@@ -151,57 +240,27 @@ async def _ingest_sources(
 
     all_ingested: list[Document] = []
 
-    # --- Substack RSS (batched into one call) ---
-    rss_entries = [s for s in sources if isinstance(s, SubstackRssSource)]
-    if rss_entries:
-        feed_urls = [s.uri for s in rss_entries]
-        logger.info("Starting substack RSS pipeline with %d feeds", len(feed_urls))
-        rss_docs = await ingest_substack_rss_feed_batch(feed_urls, user_id)
-        all_ingested.extend(rss_docs)
-        logger.info("Substack RSS pipeline ingested %d documents", len(rss_docs))
-    else:
-        logger.info("Substack RSS pipeline skipped: no substack_rss entries configured")
-
-    # --- Substack articles (batched into one call) ---
-    article_entries = [s for s in sources if isinstance(s, SubstackArticleSource)]
-    if article_entries:
-        article_urls = [s.uri for s in article_entries]
-        logger.info(
-            "Starting substack article pipeline with %d URLs", len(article_urls)
-        )
-        article_docs = await ingest_substack_article_batch(article_urls, user_id)
-        all_ingested.extend(article_docs)
-        logger.info(
-            "Substack article pipeline ingested %d documents", len(article_docs)
-        )
-    else:
-        logger.info(
-            "Substack article pipeline skipped: no substack_article entries configured"
-        )
-
-    # --- YouTube RSS (batched into one call) ---
-    yt_rss_entries = [s for s in sources if isinstance(s, YouTubeRssSource)]
-    if yt_rss_entries:
-        yt_rss_urls = [s.uri for s in yt_rss_entries]
-        logger.info("Starting YouTube RSS pipeline with %d feeds", len(yt_rss_urls))
-        yt_rss_docs = await ingest_youtube_rss_feed_batch(yt_rss_urls, user_id)
-        all_ingested.extend(yt_rss_docs)
-        logger.info("YouTube RSS pipeline ingested %d documents", len(yt_rss_docs))
-    else:
-        logger.info("YouTube RSS pipeline skipped: no youtube_rss entries configured")
-
-    # --- YouTube videos (batched into one call) ---
-    yt_video_entries = [s for s in sources if isinstance(s, YouTubeVideoSource)]
-    if yt_video_entries:
-        yt_video_urls = [s.uri for s in yt_video_entries]
-        logger.info("Starting YouTube video pipeline with %d URLs", len(yt_video_urls))
-        yt_video_docs = await ingest_youtube_video_batch(yt_video_urls, user_id)
-        all_ingested.extend(yt_video_docs)
-        logger.info("YouTube video pipeline ingested %d documents", len(yt_video_docs))
-    else:
-        logger.info(
-            "YouTube video pipeline skipped: no youtube_video entries configured"
-        )
+    # --- Batched variants (Substack RSS/article, YouTube RSS/video) ---
+    # Ordering is preserved: Substack RSS → Substack article → YouTube RSS → YouTube video.
+    for variant in _BATCHED_VARIANTS:
+        entries = [s for s in sources if isinstance(s, variant.source_type)]
+        if entries:
+            uris = [s.uri for s in entries]
+            logger.info(
+                "Starting %s pipeline with %d %s",
+                variant.label,
+                len(uris),
+                variant.unit,
+            )
+            docs = await variant.batch_fn(uris, user_id)
+            all_ingested.extend(docs)
+            logger.info("%s pipeline ingested %d documents", variant.label, len(docs))
+        else:
+            logger.info(
+                "%s pipeline skipped: no %s entries configured",
+                variant.label,
+                variant.config_key,
+            )
 
     # --- HuggingFace datasets (one call per entry, dispatched by dataset id) ---
     hf_entries = [s for s in sources if isinstance(s, HuggingFaceDatasetSource)]
@@ -290,12 +349,7 @@ async def data_etl_worker(
 
             # Boot-time gate: refuse to run if
             # ``app_config.models.search_embedding.dimensions`` disagrees with
-            # the live Atlas Vector Search index. The data pipeline itself does
-            # not write vectors, but it produces the documents the indexing
-            # pipeline will embed — a silent dim drift here corrupts every
-            # downstream embedding write. ``vector_index not found`` is non-fatal
-            # at this layer (first-ever run, indexing hasn't bootstrapped the
-            # index yet) — only a real dim **mismatch** hard-fails.
+            # the live Atlas Vector Search index.
             try:
                 await assert_settings_match_live_vector_index(
                     client, settings.mongo.mongo_initdb_database

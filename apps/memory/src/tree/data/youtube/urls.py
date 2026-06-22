@@ -96,30 +96,6 @@ def extract_channel_id_from_rss_url(url: str) -> str | None:
     return values[0]
 
 
-def is_youtube_video_url(url: str) -> bool:
-    """True for any URL shape that resolves to a single YouTube video."""
-
-    if not url:
-        return False
-    parsed = urlparse(url)
-    host = _normalize_host(parsed.hostname)
-    if host not in _VIDEO_HOSTS:
-        return False
-    if host == "youtu.be":
-        return bool(parsed.path.lstrip("/"))
-    return (
-        parsed.path == "/watch"
-        or parsed.path.startswith("/shorts/")
-        or parsed.path.startswith("/embed/")
-    )
-
-
-def is_youtube_rss_url(url: str) -> bool:
-    """True for `https://(www.)youtube.com/feeds/videos.xml?channel_id=...`."""
-
-    return extract_channel_id_from_rss_url(url) is not None
-
-
 def canonical_video_url(video_id: str) -> str:
     """Return the canonical `Document.source_uri` form for a video ID.
 
