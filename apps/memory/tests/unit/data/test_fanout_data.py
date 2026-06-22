@@ -23,8 +23,12 @@ from beanie import PydanticObjectId
 from tree.data.pipeline import (
     DataFanOutStats,
     _fan_out_data,
-    _partition_into_shards,
 )
+
+# ``_partition_into_shards`` is only a convenience here to BUILD arbitrary
+# ``list[list[dict]]`` shards to feed ``_fan_out_data`` — the data pipeline no longer
+# imports it (#072 group-by-platform), so import it from its canonical home.
+from tree.sharding import _partition_into_shards
 
 
 def _shard(uri: str) -> dict:

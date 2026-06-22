@@ -20,6 +20,60 @@ logger = logging.getLogger(__name__)
 ARXIV_DATASET_ID = "librarian-bots/arxiv-metadata-snapshot"
 
 
+def arxiv_window_entries(
+    entry: HuggingFaceDatasetSource,
+) -> list[HuggingFaceDatasetSource]:
+    """Fan ONE HuggingFace dataset entry into its disjoint offset-**Window**s.
+
+    Pure decision logic (no DB, no Prefect) shared by the data orchestrator (#072,
+    ADR-002 §3 amendment #070–#074): the orchestrator calls this per configured
+    ``HuggingFaceDatasetSource`` and dispatches one ``data-etl-worker`` run per
+    returned window-entry. Each returned entry is a COPY of ``entry`` (the configured
+    entry is NEVER mutated — ``offset`` is a dispatch-time runtime coordinate, #070)
+    stamped with that window's ``offset`` + ``max_samples`` via ``model_copy``.
+
+    Window math (``n = entry.num_workers``, ``m = entry.max_samples``):
+
+    * ``window_size = m // n``; window ``i`` ⇒ ``offset = i * window_size`` and
+      ``max_samples = window_size``, EXCEPT the LAST window which takes the remainder
+      ``m - offset`` so the windows tile ``[0, m)`` exactly (no gap, no overlap, no
+      dropped rows when ``m`` isn't divisible by ``n``).
+    * ``num_workers == 1`` ⇒ a single window with ``offset`` left UNSET (``None``) and
+      ``max_samples`` unchanged — byte-identical to the pre-feature single HF run.
+    * ``max_samples == 0`` ⇒ NO windows (empty list — a clean no-op for that entry).
+    * ``num_workers > max_samples`` (with ``m >= 1``) ⇒ CLAMP the effective worker
+      count to ``m`` so no window has ``max_samples <= 0``: emit ``m`` windows of
+      size 1 tiling ``[0, m)``.
+
+    Returns an order-stable list (window 0 first) so callers/tests can assert exact
+    shard contents.
+    """
+
+    max_samples = entry.max_samples
+    if max_samples <= 0:
+        return []
+
+    # A single worker reproduces today's run exactly: no offset, full max_samples.
+    if entry.num_workers <= 1:
+        return [entry.model_copy()]
+
+    # Clamp so no window collapses to <= 0 rows: at most one window per row.
+    effective_workers = min(entry.num_workers, max_samples)
+    window_size = max_samples // effective_workers
+
+    windows: list[HuggingFaceDatasetSource] = []
+    for i in range(effective_workers):
+        offset = i * window_size
+        is_last = i == effective_workers - 1
+        window_max_samples = max_samples - offset if is_last else window_size
+        windows.append(
+            entry.model_copy(
+                update={"offset": offset, "max_samples": window_max_samples}
+            )
+        )
+    return windows
+
+
 @task(name="extract-arxiv-document")
 def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document | None:
     return _extract_document(raw_entry, user_id)

@@ -23,10 +23,15 @@ index — the data pipeline only produces ``documents``; there is NO index step:
   bare shard ingestion). Registered as deployment ``data-etl-worker``.
 
 * ``data_etl_orchestrator`` (deployment ``data-etl-orchestrator``) — reads the
-  configured ``sources:`` list, partitions into ``min(num_shards, N)`` balanced
-  shards, and dispatches one ``data-etl-worker`` run per shard via ``run_deployment``
-  under ``asyncio.gather(return_exceptions=True)``. NO trailing step. Empty sources ⇒
-  clean no-op (``shards_total=0``). Registered as deployment ``data-etl-orchestrator``.
+  configured ``sources:`` list and partitions it by PLATFORM (#072, ADR-002 §3
+  amendment #070–#074): one homogeneous ``data-etl-worker`` run per non-HuggingFace
+  platform bucket present (``substack`` / ``youtube`` / ``custom``), plus
+  ``num_workers`` runs per ``HuggingFaceDatasetSource`` (one per disjoint offset-window
+  of the dataset). It dispatches one ``data-etl-worker`` run per shard via
+  ``run_deployment`` under ``asyncio.gather(return_exceptions=True)``. NO trailing step.
+  Parallelism is declared per-source (platform bucketing + HF ``num_workers``), NOT via
+  a global ``num_shards``. Empty sources ⇒ clean no-op (``shards_total=0``). Registered
+  as deployment ``data-etl-orchestrator``.
 
 Source-shard serialization: ``SourceEntry`` is a Pydantic discriminated union.
 Prefect serializes flow-run parameters as JSON, so the orchestrator dumps each shard's
@@ -61,7 +66,10 @@ from tree.config.app_config import (
 )
 from tree.config.settings import settings
 from tree.data.core.ingest import ingest_url
-from tree.data.huggingface.arxiv_dataset_pipeline import ingest_arxiv_dataset
+from tree.data.huggingface.arxiv_dataset_pipeline import (
+    arxiv_window_entries,
+    ingest_arxiv_dataset,
+)
 
 # The batched sub-flows are referenced by NAME in ``_BATCHED_VARIANTS`` and looked
 # up at call time via ``globals()[batch_fn_name]`` (see ``_BatchedVariant.batch_fn``).
@@ -95,11 +103,6 @@ from tree.observability import (
     span,
     tracked_span,
 )
-
-# The balanced-contiguous partitioning math lives in the neutral, pipeline-
-# agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
-# and data orchestrators import the IDENTICAL helpers without copy-paste.
-from tree.sharding import _partition_into_shards, _resolve_num_shards
 
 # Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
 # former ``"data-pipeline"`` pipeline-name tag is now span metadata.
@@ -379,6 +382,64 @@ async def data_etl_worker(
 # ---------------------------------------------------------------------------
 
 
+# Platform buckets for the data orchestrator's GROUP-BY-PLATFORM partition
+# (ADR-002 §3 amendment #070–#074). Each non-HuggingFace source variant maps to a
+# Platform; the variants sharing a Platform land in ONE homogeneous worker shard.
+# Order is load-bearing — it fixes the dispatch order of the non-HF Platform shards
+# (substack → youtube → custom) and is asserted by the orchestrator tests. HuggingFace
+# is handled separately (offset-window sub-fan-out via :func:`arxiv_window_entries`),
+# so it is NOT in this map.
+_NON_HF_PLATFORMS: list[tuple[str, tuple[type[SourceEntry], ...]]] = [
+    ("substack", (SubstackRssSource, SubstackArticleSource)),
+    ("youtube", (YouTubeRssSource, YouTubeVideoSource)),
+    ("custom", (WebSource,)),
+]
+
+
+def _partition_sources_by_platform(
+    sources: list[SourceEntry],
+) -> list[list[SourceEntry]]:
+    """Partition the configured sources into the shards the orchestrator dispatches.
+
+    The data orchestrator's shard map (#072, ADR-002 §3 amendment #070–#074), replacing
+    the old count-based ``_partition_into_shards``. Pure decision logic (no DB, no
+    Prefect, order-stable) so it is unit-testable directly. Returns the FULL list of
+    shards — each a ``list[SourceEntry]`` — that the orchestrator ``model_dump()``s and
+    hands to the unchanged :func:`_fan_out_data` (one ``data-etl-worker`` run per shard):
+
+    * **Non-HuggingFace → one HOMOGENEOUS shard per Platform bucket present.** Variants
+      sharing a Platform are grouped (``substack_rss`` + ``substack_article`` → one
+      ``substack`` shard; ``youtube_rss`` + ``youtube_video`` → one ``youtube`` shard;
+      ``web`` → one ``custom`` shard), preserving each Platform's internal configured
+      order. The worker's existing ``_ingest_sources`` ``isinstance`` routing then
+      batches per VARIANT inside the homogeneous shard, so the worker is unchanged. A
+      Platform absent from config emits no shard.
+    * **HuggingFace → ``num_workers`` single-entry offset-Window shards per entry.** Each
+      ``HuggingFaceDatasetSource`` is expanded via :func:`arxiv_window_entries` into its
+      disjoint windows (the configured entry is never mutated); each window is its OWN
+      single-entry shard ``[windowed_entry]``. Multiple HF entries fan out independently.
+      ``max_samples == 0`` emits no shard for that entry.
+
+    Shard order: the non-HF Platform buckets first (in ``_NON_HF_PLATFORMS`` order), then
+    the HF window shards in configured-entry order. Empty sources ⇒ ``[]`` (a no-op).
+    """
+
+    shards: list[list[SourceEntry]] = []
+
+    # --- Non-HuggingFace: one homogeneous shard per Platform bucket present ---
+    for _platform, variant_types in _NON_HF_PLATFORMS:
+        bucket = [s for s in sources if isinstance(s, variant_types)]
+        if bucket:
+            shards.append(bucket)
+
+    # --- HuggingFace: num_workers disjoint offset-window shards per entry ---
+    for entry in sources:
+        if isinstance(entry, HuggingFaceDatasetSource):
+            shards.extend([window] for window in arxiv_window_entries(entry))
+
+    return shards
+
+
 def _get_run_logger() -> logging.Logger:
     """Prefect run logger inside a flow/task; the module logger otherwise.
 
@@ -498,22 +559,29 @@ async def _fan_out_data(
 @flow(name="data-etl-orchestrator", log_prints=True)
 async def data_etl_orchestrator(
     user_id: PydanticObjectId,
-    num_shards: int = 1,
 ) -> DataFanOutStats:
-    """Read configured sources → partition → dispatch ``data-etl-worker`` runs.
+    """Read configured sources → group by Platform → dispatch ``data-etl-worker`` runs.
 
-    The operator entrypoint for data ingestion (ADR-002 §3, amended #066). Reads the
-    configured ``app_config.sources.sources`` list, partitions it into
-    ``min(num_shards, N)`` balanced shards, and dispatches ONE ``data-etl-worker`` run
-    per shard via ``run_deployment`` under ``asyncio.gather(return_exceptions=True)``.
-    Each worker dispatch carries ``{user_id, sources}`` (the shard's serialized source
-    entries). There is NO recursion (a DISTINCT worker deployment) and NO trailing
-    step — the data pipeline only produces ``documents``; there is no index.
+    The operator entrypoint for data ingestion (ADR-002 §3, amended #070–#074). Reads
+    the configured ``app_config.sources.sources`` list and partitions it via
+    :func:`_partition_sources_by_platform` into:
+
+    * ONE homogeneous ``data-etl-worker`` run per non-HuggingFace **Platform** bucket
+      present (``substack`` / ``youtube`` / ``custom``), AND
+    * ``num_workers`` worker runs per ``HuggingFaceDatasetSource``, one per disjoint
+      offset-**Window** of the dataset.
+
+    Each shard is dispatched via ``run_deployment`` under
+    ``asyncio.gather(return_exceptions=True)`` carrying ``{user_id, sources}`` (the
+    shard's serialized source entries). There is NO recursion (a DISTINCT worker
+    deployment; the worker never calls ``run_deployment``) and NO trailing step — the
+    data pipeline only produces ``documents``; there is no index. Parallelism is
+    declared per-source (Platform bucketing + HF ``num_workers``), NOT via a global
+    ``num_shards`` count — that knob is gone.
 
     Empty configured sources ⇒ clean no-op: zero worker dispatch,
-    ``DataFanOutStats(shards_total=0)``. ``num_shards=1`` (the default) dispatches 1
-    worker run with all sources. One shard's failure is isolated and recorded in
-    :class:`DataFanOutStats.failures`.
+    ``DataFanOutStats(shards_total=0)``. One shard's failure is isolated and recorded in
+    :class:`DataFanOutStats.failures` while the others proceed.
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
@@ -522,8 +590,6 @@ async def data_etl_orchestrator(
     configure_opik()
     try:
         with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
-            effective_num_shards = _resolve_num_shards(num_shards)
-
             sources = app_config.sources.sources
             if not sources:
                 logger.info(
@@ -533,17 +599,16 @@ async def data_etl_orchestrator(
                 )
                 return DataFanOutStats(shards_total=0)
 
-            # Serialize each source entry to a JSON-safe dict so it round-trips
-            # through the ``run_deployment`` flow-run parameters. The worker
-            # re-parses to ``SourceEntry``.
-            serialized = [s.model_dump() for s in sources]
-            shards = _partition_into_shards(serialized, effective_num_shards)
+            typed_shards = _partition_sources_by_platform(sources)
+            # Serialize each shard's entries to JSON-safe dicts so they round-trip
+            # through the ``run_deployment`` flow-run parameters. The worker re-parses
+            # to ``SourceEntry`` (the ``type`` discriminator + HF ``offset``/
+            # ``max_samples`` window coordinates round-trip cleanly).
+            shards = [[e.model_dump() for e in shard] for shard in typed_shards]
             logger.info(
-                "data fan-out: partitioned %d source(s) into %d shard(s) "
-                "(num_shards=%d)",
+                "data fan-out: grouped %d source(s) into %d Platform/Window shard(s)",
                 len(sources),
                 len(shards),
-                effective_num_shards,
             )
 
             headers = get_distributed_trace_headers()
