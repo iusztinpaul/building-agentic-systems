@@ -4,8 +4,6 @@ from tree.data.youtube.urls import (
     canonical_video_url,
     extract_channel_id_from_rss_url,
     extract_video_id,
-    is_youtube_rss_url,
-    is_youtube_video_url,
 )
 
 VIDEO_ID = "eYaWxljC4sA"
@@ -50,44 +48,6 @@ class TestExtractChannelIdFromRssUrl:
     )
     def test_returns_none_for_non_rss_urls(self, url):
         assert extract_channel_id_from_rss_url(url) is None
-
-
-class TestIsYoutubeVideoUrl:
-    @pytest.mark.parametrize(
-        "url, expected",
-        [
-            (f"https://www.youtube.com/watch?v={VIDEO_ID}", True),
-            (f"https://youtu.be/{VIDEO_ID}", True),
-            (f"https://m.youtube.com/watch?v={VIDEO_ID}", True),
-            (f"https://www.youtube.com/shorts/{VIDEO_ID}", True),
-            (
-                "https://www.youtube.com/feeds/videos.xml?channel_id=UCfoo",
-                False,
-            ),
-            ("https://example.com/foo", False),
-            ("", False),
-        ],
-    )
-    def test_truth_table(self, url, expected):
-        assert is_youtube_video_url(url) is expected
-
-
-class TestIsYoutubeRssUrl:
-    @pytest.mark.parametrize(
-        "url, expected",
-        [
-            (
-                "https://www.youtube.com/feeds/videos.xml?channel_id=UCfoo",
-                True,
-            ),
-            ("https://www.youtube.com/feeds/videos.xml", False),
-            (f"https://www.youtube.com/watch?v={VIDEO_ID}", False),
-            ("https://example.com/feeds/videos.xml?channel_id=UCfoo", False),
-            ("", False),
-        ],
-    )
-    def test_truth_table(self, url, expected):
-        assert is_youtube_rss_url(url) is expected
 
 
 class TestCanonicalVideoUrl:

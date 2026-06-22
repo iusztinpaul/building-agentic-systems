@@ -27,9 +27,27 @@ from tree.config.app_config import (
     YouTubeRssSource,
     YouTubeVideoSource,
 )
-from tree.data.pipeline import data_etl_worker
+from tree.data.pipeline import _BATCHED_VARIANTS, data_etl_worker
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+def test_every_batched_variant_resolves_without_mocks() -> None:
+    """Each ``_BatchedVariant.batch_fn`` resolves to a real callable WITHOUT mocks.
+
+    ``batch_fn`` looks the sub-flow up by name in the module namespace
+    (``globals()[batch_fn_name]``), so the ``ingest_*_batch`` functions MUST be
+    imported at module top to be present. Dropping those imports makes every
+    resolution raise ``KeyError`` at runtime — a production crash on the first
+    configured Substack/YouTube source. The mock-based dispatch tests can't catch
+    this because ``mocker.patch`` installs the missing name for the test's
+    duration; this guard deliberately uses NO mocks so the missing import surfaces.
+    """
+
+    for variant in _BATCHED_VARIANTS:
+        assert callable(variant.batch_fn), (
+            f"{variant.batch_fn_name} is not importable as a module global"
+        )
 
 
 def _make_mock_pipeline(mocker, name: str) -> AsyncMock:
