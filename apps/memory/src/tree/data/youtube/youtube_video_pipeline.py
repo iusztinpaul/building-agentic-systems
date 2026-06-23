@@ -1,24 +1,28 @@
-"""Prefect pipeline wrappers around the single-video YouTube ETL.
+"""Single-video YouTube leaf pipeline — shared bulk core + thin MCP flow (#080).
 
-Mirrors `tree.data.substack.substack_article_pipeline` line-for-line — same
-``@task`` / ``@flow`` shape, same ``init_mongodb`` boundary in the batch
-flow, same ``log_prints=True`` so the orchestrator log stream picks up
-inner ``print(...)`` traffic from third-party libs.
+The direct-video path enriches per video via oEmbed, then runs the SHARED
+bulk-transcript core (``tree.data.youtube.youtube_ingest._bulk_build_and_load``):
+ONE ``fetcher.fetch_many(all_urls)`` for the whole batch → ``build_document`` per slot
+→ ``load_video_document`` per slot. This is the #080 fix — the batch previously did a
+PER-VIDEO ``fetch_many([url])`` inside per-URL sub-flows.
 
-The fetcher is the swap point. Production calls
-``ingest_youtube_video(url)`` and gets the default chained
-``[YoutubeTranscriptApiFetcher, GeminiTranscriptFetcher]`` (free primary +
-paid fallback). Tests inject a fake `TranscriptFetcher` to avoid network
-and Gemini auth.
+The per-item sub-flow's body is demoted to the plain async core
+``_ingest_youtube_video_one``; ``ingest_youtube_video`` remains a THIN @flow wrapper
+used ONLY by the MCP URL router (``tree.data.ingest._ingest_youtube_video``) so a
+single-URL ingest still gets its own Prefect flow run + Opik trace. The BATCH path
+calls the shared core directly — NEVER the thin wrapper (no per-item sub-flow runs).
+
+The ``fetcher`` argument is the swap point: production omits it and gets the default
+chained ``[YoutubeTranscriptApiFetcher, GeminiTranscriptFetcher]`` (free primary + paid
+fallback); tests inject a fake `TranscriptFetcher` to avoid network and Gemini auth.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from beanie import PydanticObjectId
-from prefect import flow, task
+from prefect import flow
 
 from tree.config.settings import settings
 from tree.data.youtube.transcript_fetcher import (
@@ -28,12 +32,12 @@ from tree.data.youtube.transcript_fetcher import (
     YoutubeTranscriptApiFetcher,
 )
 from tree.data.youtube.urls import canonical_video_url, extract_video_id
+from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_video import (
-    build_document,
     fetch_oembed_metadata,
-    load_video_document,
     parse_oembed_metadata,
 )
+from tree.data.youtube.types import VideoMetadata
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 
@@ -56,17 +60,15 @@ def _default_chained_fetcher() -> TranscriptFetcher:
     )
 
 
-@task(name="fetch-youtube-video", retries=2, retry_delay_seconds=5)
-async def fetch_video_task(
-    video_url: str, fetcher: TranscriptFetcher, user_id: PydanticObjectId
-) -> tuple[Document, str] | None:
-    """Resolve, transcribe, enrich, and assemble — return (doc, video_id) or None.
+async def _resolve_video_item(
+    video_url: str,
+) -> tuple[str, VideoMetadata] | None:
+    """Resolve a pasted URL to ``(canonical_url, oEmbed VideoMetadata)`` or ``None``.
 
-    Returns ``None`` when:
-    - The input URL cannot be resolved to a video ID, OR
-    - The fetcher chain returns ``None`` for the slot (no transcript even
-      after the Gemini fallback). The chain has already emitted the
-      user-facing WARNING; this layer logs nothing extra.
+    Returns ``None`` (with a WARNING) when the input cannot be resolved to a video id.
+    Otherwise canonicalises the URL and enriches metadata via the per-video oEmbed
+    round-trip (``fetch_oembed_metadata`` + ``parse_oembed_metadata``) — the
+    direct-video metadata source, kept distinct from the RSS feed-metadata path.
     """
 
     video_id = extract_video_id(video_url)
@@ -75,28 +77,31 @@ async def fetch_video_task(
         return None
 
     canonical_url = canonical_video_url(video_id)
-
-    transcripts = await fetcher.fetch_many([canonical_url])
-    transcript = transcripts[0] if transcripts else None
-    if transcript is None:
-        # Chain has already warned; no redundant pipeline-layer warning.
-        return None
-
     payload = await fetch_oembed_metadata(canonical_url)
     metadata = parse_oembed_metadata(payload, video_id=video_id)
-
-    doc = build_document(
-        video_id=video_id,
-        metadata=metadata,
-        transcript=transcript,
-        user_id=user_id,
-    )
-    return doc, video_id
+    return canonical_url, metadata
 
 
-@task(name="load-youtube-video-document", retries=1, retry_delay_seconds=2)
-async def load_video_task(doc: Document) -> Document | None:
-    return await load_video_document(doc)
+async def _ingest_youtube_video_one(
+    video_url: str,
+    user_id: PydanticObjectId,
+    fetcher: TranscriptFetcher,
+) -> Document | None:
+    """Ingest a SINGLE video via the shared bulk core (plain async core, NO decorators).
+
+    Resolves the id → canonical URL → per-video oEmbed metadata, then runs the SHARED
+    ``_bulk_build_and_load`` over the one-item list (the single-item bulk fetch + build
+    + load). Shared by the thin MCP flow; the batch path calls the shared core directly
+    with the whole URL list instead. Returns the persisted Document, or ``None`` for an
+    unresolvable id / missing transcript / duplicate.
+    """
+
+    resolved = await _resolve_video_item(video_url)
+    if resolved is None:
+        return None
+
+    ingested = await _bulk_build_and_load([resolved], user_id, fetcher)
+    return ingested[0] if ingested else None
 
 
 @flow(name="ingest-youtube-video-etl", log_prints=True, validate_parameters=False)
@@ -105,21 +110,15 @@ async def ingest_youtube_video(
     user_id: PydanticObjectId,
     fetcher: TranscriptFetcher | None = None,
 ) -> Document | None:
-    """Ingest a single YouTube video URL into the documents collection.
+    """Thin MCP-only @flow: ingest ONE YouTube video via the core.
 
-    The ``fetcher`` argument is the swap point: tests inject a fake
-    `TranscriptFetcher` to avoid network + Gemini auth; production callers
-    omit it and get the default chained primary+Gemini implementation.
+    The MCP ``ingest_url`` router (``tree.data.ingest._ingest_youtube_video``) calls
+    this so single-URL ingest still gets its own Prefect flow run + Opik trace. The
+    BATCH path does NOT call this — it runs the shared bulk core directly.
     """
 
     fetcher = fetcher or _default_chained_fetcher()
-
-    fetched = await fetch_video_task(video_url, fetcher, user_id)
-    if fetched is None:
-        return None
-
-    doc, _ = fetched
-    return await load_video_task(doc)
+    return await _ingest_youtube_video_one(video_url, user_id, fetcher)
 
 
 @flow(
@@ -132,10 +131,13 @@ async def ingest_youtube_video_batch(
     user_id: PydanticObjectId,
     fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
-    """Batch-ingest a list of video URLs.
+    """Batch-ingest a list of video URLs via ONE bulk transcript fetch.
 
-    Mirrors `ingest_substack_article_batch`: bring up the Mongo connection
-    once at the flow boundary, then `asyncio.gather` over individual ingests.
+    Brings up the Mongo connection once, resolves each URL → ``(canonical_url, oEmbed
+    metadata)``, then runs the SHARED bulk core ONCE so there is exactly ONE
+    ``fetch_many(all_urls)`` for the whole batch (the #080 fix — previously per-video
+    ``fetch_many([url])`` inside per-URL sub-flows). The batch path NEVER calls the
+    thin ``ingest_youtube_video`` flow, so it produces no per-item sub-flow runs.
     """
 
     await init_mongodb(
@@ -145,11 +147,13 @@ async def ingest_youtube_video_batch(
 
     fetcher = fetcher or _default_chained_fetcher()
 
-    results = await asyncio.gather(
-        *[ingest_youtube_video(url, user_id, fetcher=fetcher) for url in video_urls]
-    )
+    items: list[tuple[str, VideoMetadata]] = []
+    for video_url in video_urls:
+        resolved = await _resolve_video_item(video_url)
+        if resolved is not None:
+            items.append(resolved)
 
-    ingested = [doc for doc in results if doc is not None]
+    ingested = await _bulk_build_and_load(items, user_id, fetcher)
     logger.info("Ingested %d videos out of %d URLs", len(ingested), len(video_urls))
 
     return ingested

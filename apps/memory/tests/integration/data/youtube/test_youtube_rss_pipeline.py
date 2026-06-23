@@ -1,4 +1,4 @@
-"""Integration tests for the YouTube RSS-feed ETL.
+"""Integration tests for the YouTube RSS-feed ETL (#080 shared bulk core).
 
 Persists real `Document`s against the local MongoDB fixture (`mongo_client`
 from `tests/integration/conftest.py`). Mocks:
@@ -7,9 +7,10 @@ from `tests/integration/conftest.py`). Mocks:
 - The `TranscriptFetcher` (no `youtube-transcript-api`, no Gemini calls) —
   injected via the flow's `fetcher=` kwarg.
 
-Mirrors patterns from
-`tests/integration/data/substack/test_substack_rss_pipeline.py` and
-`tests/integration/data/youtube/test_youtube_video_pipeline.py`.
+The per-feed sub-flow collapsed into the shared bulk core: every test drives the
+public `ingest_youtube_rss_feed_batch` (with one or more feed URLs). Each feed still
+does ONE feed fetch + ONE bulk `fetch_many` with FEED metadata (no oEmbed) — guarded by
+a call-count assertion on the fake fetcher.
 """
 
 from __future__ import annotations
@@ -25,10 +26,7 @@ from tree.data.youtube.types import (
     TranscriptSegment,
     VideoMetadata,
 )
-from tree.data.youtube.youtube_rss_pipeline import (
-    ingest_youtube_rss_feed,
-    ingest_youtube_rss_feed_batch,
-)
+from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 from tree.entities.documents import Document, SourceType
 
 PIPELINE_LOGGER = "tree.data.youtube.youtube_rss_pipeline"
@@ -124,26 +122,28 @@ def _patch_feed(mocker, entries: list[dict]) -> object:
     return mock_client
 
 
-class TestIngestYoutubeRssFeedFlow:
-    async def test_ingests_videos_via_prefect_flow(
+def _ban_oembed(mocker) -> object:
+    """Fail loudly if the RSS path ever reaches into the oEmbed metadata fetch."""
+
+    return mocker.patch(
+        "tree.data.youtube.youtube_video.fetch_oembed_metadata",
+        side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
+    )
+
+
+class TestIngestYoutubeRssFeedBatchFlow:
+    async def test_ingests_videos_with_one_bulk_fetch_and_feed_metadata(
         self, mongo_client, mocker, caplog
     ) -> None:
-        # Fail loudly if the pipeline ever tries to call the youtube_video
-        # oEmbed path — the RSS pipeline must use feed-side metadata.
-        oembed_spy = mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        oembed_spy = _ban_oembed(mocker)
         feed_client = _patch_feed(mocker, FAKE_FEED_ENTRIES)
-
         fake = _FakeFetcher({vid: _make_transcript(video_id=vid) for vid in VIDEO_IDS})
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(
-                FEED_URL, PydanticObjectId(), fetcher=fake
+            result = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], PydanticObjectId(), fetcher=fake
             )
 
         assert len(result) == 3
@@ -176,24 +176,22 @@ class TestIngestYoutubeRssFeedFlow:
         assert len(db_docs) == 3
 
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
-        mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        _ban_oembed(mocker)
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
-
         fake = _FakeFetcher({vid: _make_transcript(video_id=vid) for vid in VIDEO_IDS})
 
         user_id = PydanticObjectId()
         with prefect_tags("tests"):
-            first = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
+            first = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], user_id, fetcher=fake
+            )
         assert len(first) == 3
 
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
-
         with prefect_tags("tests"):
-            second = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
+            second = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], user_id, fetcher=fake
+            )
         assert len(second) == 0
 
         db_docs = await Document.find(
@@ -212,16 +210,14 @@ class TestIngestYoutubeRssFeedFlow:
         )
         await latent.insert()
 
-        mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        _ban_oembed(mocker)
         _patch_feed(mocker, [FAKE_FEED_ENTRIES[0]])
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(FEED_URL, user_id, fetcher=fake)
+            result = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], user_id, fetcher=fake
+            )
 
         assert len(result) == 1
         assert result[0].id == latent.id
@@ -238,13 +234,8 @@ class TestIngestYoutubeRssFeedFlow:
         """Middle slot returns None (chain exhausted). 2 docs persist; the
         pipeline emits NO WARNING of its own — the chain owns that warning."""
 
-        mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        _ban_oembed(mocker)
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
-
         fake = _FakeFetcher(
             {
                 VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0]),
@@ -256,8 +247,8 @@ class TestIngestYoutubeRssFeedFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(
-                FEED_URL, PydanticObjectId(), fetcher=fake
+            result = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], PydanticObjectId(), fetcher=fake
             )
 
         assert len(result) == 2
@@ -268,6 +259,10 @@ class TestIngestYoutubeRssFeedFlow:
                 f"https://www.youtube.com/watch?v={VIDEO_IDS[2]}",
             ]
         )
+
+        # Still ONE bulk fetch over all 3 feed URLs.
+        assert len(fake.calls) == 1
+        assert len(fake.calls[0]) == 3
 
         # Spec: pipeline-layer logger emits NO WARNING for the missing slot.
         pipeline_warnings = [
@@ -283,11 +278,7 @@ class TestIngestYoutubeRssFeedFlow:
         """An Atom entry with no resolvable video id is skipped with a
         pipeline-layer WARNING, while remaining entries still ingest."""
 
-        mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        _ban_oembed(mocker)
         bad_entry = {
             "title": "Bad Entry",
             "author": "Test Channel",
@@ -300,7 +291,6 @@ class TestIngestYoutubeRssFeedFlow:
             FAKE_FEED_ENTRIES[2],
         ]
         _patch_feed(mocker, entries)
-
         fake = _FakeFetcher(
             {
                 VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0]),
@@ -311,8 +301,8 @@ class TestIngestYoutubeRssFeedFlow:
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(
-                FEED_URL, PydanticObjectId(), fetcher=fake
+            result = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], PydanticObjectId(), fetcher=fake
             )
 
         assert len(result) == 2
@@ -326,7 +316,7 @@ class TestIngestYoutubeRssFeedFlow:
         ]
         assert len(skip_warnings) == 1
 
-        # The bulk fetcher was called with exactly the 2 valid URLs.
+        # The bulk fetcher was called once with exactly the 2 valid URLs.
         assert len(fake.calls) == 1
         assert len(fake.calls[0]) == 2
 
@@ -336,18 +326,13 @@ class TestIngestYoutubeRssFeedFlow:
         """Acceptance criterion: title/channel/publish_date come from the
         Atom entry; the oEmbed endpoint is never hit."""
 
-        oembed_spy = mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        oembed_spy = _ban_oembed(mocker)
         feed_client = _patch_feed(mocker, [FAKE_FEED_ENTRIES[0]])
-
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed(
-                FEED_URL, PydanticObjectId(), fetcher=fake
+            result = await ingest_youtube_rss_feed_batch(
+                [FEED_URL], PydanticObjectId(), fetcher=fake
             )
 
         assert len(result) == 1
@@ -363,16 +348,10 @@ class TestIngestYoutubeRssFeedFlow:
         assert feed_client.get.call_count == 1
         oembed_spy.assert_not_called()
 
-
-class TestIngestYoutubeRssFeedBatchFlow:
     async def test_batch_combines_results_and_inits_mongo_once(
         self, mongo_client, mocker
     ) -> None:
-        mocker.patch(
-            "tree.data.youtube.youtube_video.httpx.AsyncClient",
-            side_effect=AssertionError("oEmbed must NOT be called for RSS ingest"),
-        )
-
+        _ban_oembed(mocker)
         _patch_feed(mocker, FAKE_FEED_ENTRIES[:1])
 
         init_mongo_spy = mocker.patch(
@@ -392,6 +371,8 @@ class TestIngestYoutubeRssFeedBatchFlow:
         # Both feeds return the same single entry → second is a duplicate.
         assert len(result) == 1
         assert init_mongo_spy.call_count == 1
+        # One bulk fetch PER feed.
+        assert len(fake.calls) == 2
 
 
 @pytest.fixture(autouse=True)

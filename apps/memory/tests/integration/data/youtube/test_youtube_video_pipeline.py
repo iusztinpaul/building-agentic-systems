@@ -1,12 +1,15 @@
-"""Integration tests for the single-video YouTube ETL.
+"""Integration tests for the single-video YouTube ETL (#080 shared bulk core).
 
 Persists real Documents against the local MongoDB fixture (`mongo_client`
 from `tests/integration/conftest.py`). Mocks:
 
-- The transcript fetcher (no `youtube-transcript-api`, no Gemini calls).
+- The transcript fetcher (no `youtube-transcript-api`, no Gemini calls), injected
+  via the flow's `fetcher=` kwarg.
 - The oEmbed HTTP call (no live network to youtube.com).
 
 Mirrors the patterns in `tests/integration/data/substack/test_substack_rss_pipeline.py`.
+The batch path now issues ONE bulk `fetch_many(all_urls)` for the whole batch — a
+call-count assertion on the fake fetcher guards the #080 fix.
 """
 
 from __future__ import annotations
@@ -35,9 +38,11 @@ SHORT_URL = f"https://youtu.be/{VIDEO_ID}"
 PIPELINE_LOGGER = "tree.data.youtube.youtube_video_pipeline"
 
 
-def _make_transcript(plain_text: str = "Some spoken words here.") -> FetchedTranscript:
+def _make_transcript(
+    *, video_id: str = VIDEO_ID, plain_text: str = "Some spoken words here."
+) -> FetchedTranscript:
     return FetchedTranscript(
-        metadata=VideoMetadata(video_id=VIDEO_ID),
+        metadata=VideoMetadata(video_id=video_id),
         segments=[
             TranscriptSegment(text=plain_text, start_seconds=0.0, duration_seconds=1.0)
         ],
@@ -47,21 +52,29 @@ def _make_transcript(plain_text: str = "Some spoken words here.") -> FetchedTran
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` for the integration tests."""
+    """Programmable `TranscriptFetcher` recording every ``fetch_many`` call.
 
-    def __init__(self, results: list[FetchedTranscript | None]) -> None:
-        self._results = results
+    Returns one element per input slot, mirroring the real chain contract, by
+    substring-matching each URL against the supplied ``results_per_id`` map.
+    """
+
+    def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
+        self._results_per_id = results_per_id
         self.calls: list[list[str]] = []
 
     async def fetch_many(
         self, video_urls_or_ids: list[str]
     ) -> list[FetchedTranscript | None]:
         self.calls.append(list(video_urls_or_ids))
-        # Mirror length to input slot count, like the real chain does.
-        if len(self._results) == len(video_urls_or_ids):
-            return list(self._results)
-        # Allow passing a single template and broadcasting it.
-        return [self._results[0] for _ in video_urls_or_ids]
+        results: list[FetchedTranscript | None] = []
+        for url in video_urls_or_ids:
+            match: FetchedTranscript | None = None
+            for vid, payload in self._results_per_id.items():
+                if vid in url:
+                    match = payload
+                    break
+            results.append(match)
+        return results
 
 
 def _patch_oembed(mocker, payload: dict | None = None, *, status_code: int = 200):
@@ -95,11 +108,13 @@ def _patch_oembed(mocker, payload: dict | None = None, *, status_code: int = 200
 
 
 class TestIngestYoutubeVideoFlow:
+    """The thin MCP-only @flow ingests a single video with oEmbed metadata."""
+
     async def test_ingests_document_via_prefect_flow(
         self, mongo_client, mocker
     ) -> None:
         _patch_oembed(mocker)
-        fake = _FakeFetcher([_make_transcript("hello transcript")])
+        fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="hello transcript")})
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video(
@@ -119,7 +134,7 @@ class TestIngestYoutubeVideoFlow:
 
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         _patch_oembed(mocker)
-        fake = _FakeFetcher([_make_transcript()])
+        fake = _FakeFetcher({VIDEO_ID: _make_transcript()})
 
         with prefect_tags("tests"):
             user_id = PydanticObjectId()
@@ -136,7 +151,7 @@ class TestIngestYoutubeVideoFlow:
         self, mongo_client, mocker
     ) -> None:
         _patch_oembed(mocker)
-        fake = _FakeFetcher([_make_transcript()])
+        fake = _FakeFetcher({VIDEO_ID: _make_transcript()})
 
         with prefect_tags("tests"):
             user_id = PydanticObjectId()
@@ -163,7 +178,7 @@ class TestIngestYoutubeVideoFlow:
         await latent.insert()
 
         _patch_oembed(mocker)
-        fake = _FakeFetcher([_make_transcript("transcript text")])
+        fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="transcript text")})
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
@@ -183,7 +198,7 @@ class TestIngestYoutubeVideoFlow:
         # oEmbed should not even be called when the chain returned None,
         # but patch defensively so a regression doesn't hit the network.
         _patch_oembed(mocker)
-        fake = _FakeFetcher([None])
+        fake = _FakeFetcher({VIDEO_ID: None})
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
@@ -211,7 +226,7 @@ class TestIngestYoutubeVideoFlow:
         # Some videos disable oEmbed; we must still land a document with the
         # transcript-derived title fallback.
         _patch_oembed(mocker, payload={}, status_code=404)
-        fake = _FakeFetcher([_make_transcript("transcript only")])
+        fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="transcript only")})
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video(
@@ -225,19 +240,25 @@ class TestIngestYoutubeVideoFlow:
 
 
 class TestIngestYoutubeVideoBatchFlow:
-    async def test_ingests_multiple_videos(self, mongo_client, mocker) -> None:
+    """The batch path issues ONE bulk transcript fetch for the whole batch."""
+
+    async def test_ingests_multiple_videos_with_one_bulk_fetch(
+        self, mongo_client, mocker
+    ) -> None:
         _patch_oembed(mocker)
         mocker.patch(
             "tree.data.youtube.youtube_video_pipeline.init_mongodb",
             return_value=mongo_client,
         )
 
-        # Two distinct videos → two transcripts; the fake returns one slot
-        # per call (each `ingest_youtube_video` invokes `fetch_many([url])`).
-        fake = _FakeFetcher([_make_transcript("hello")])
-
         url_a = "https://www.youtube.com/watch?v=eYaWxljC4sA"
         url_b = "https://www.youtube.com/watch?v=AAAaaaBBBcc"
+        fake = _FakeFetcher(
+            {
+                "eYaWxljC4sA": _make_transcript(video_id="eYaWxljC4sA"),
+                "AAAaaaBBBcc": _make_transcript(video_id="AAAaaaBBBcc"),
+            }
+        )
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
@@ -248,6 +269,10 @@ class TestIngestYoutubeVideoBatchFlow:
         sources = sorted(doc.source_uri for doc in result)
         assert sources == sorted([url_a, url_b])
 
+        # #080: ONE bulk fetch_many with BOTH canonical URLs — NOT per-video.
+        assert len(fake.calls) == 1
+        assert sorted(fake.calls[0]) == sorted([url_a, url_b])
+
     async def test_batch_handles_missing_transcript_slot(
         self, mongo_client, mocker
     ) -> None:
@@ -257,23 +282,27 @@ class TestIngestYoutubeVideoBatchFlow:
             return_value=mongo_client,
         )
 
-        # First ingest gets a transcript, second does not.
         url_good = "https://www.youtube.com/watch?v=eYaWxljC4sA"
         url_bad = "https://www.youtube.com/watch?v=AAAaaaBBBcc"
-
-        class _PerUrlFakeFetcher:
-            async def fetch_many(self, urls):
-                return [_make_transcript() if url_good in u else None for u in urls]
+        fake = _FakeFetcher(
+            {
+                "eYaWxljC4sA": _make_transcript(video_id="eYaWxljC4sA"),
+                "AAAaaaBBBcc": None,  # chain exhausted for the second slot
+            }
+        )
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
                 video_urls=[url_good, url_bad],
                 user_id=PydanticObjectId(),
-                fetcher=_PerUrlFakeFetcher(),
+                fetcher=fake,
             )
 
         assert len(result) == 1
         assert result[0].source_uri == url_good
+        # Still ONE bulk fetch over both URLs.
+        assert len(fake.calls) == 1
+        assert len(fake.calls[0]) == 2
 
 
 @pytest.fixture(autouse=True)
