@@ -6,6 +6,7 @@ from prefect import flow, task
 
 from tree.config.app_config import HuggingFaceDatasetSource, app_config
 from tree.config.settings import settings
+from tree.data.batch import gather_isolated
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
     fetch_dataset_batches as _fetch_dataset_batches,
@@ -151,28 +152,15 @@ async def enrich_batch(docs: list[Document], concurrency: int) -> list[Document]
 async def load_batch(docs: list[Document]) -> list[Document]:
     """Dedup + persist one chunk via a SINGLE ``gather(return_exceptions=True)``.
 
-    Awaits the pure ``arxiv_dataset.load_document`` per element and returns the
-    successful, non-``None`` subset (duplicates drop out as ``None``). A per-element
-    load failure is logged at WARNING + skipped, NOT propagated — so one bad row
-    never sinks the chunk. Retried whole-batch on a batch-WIDE infra failure
-    (``retries=1``), safe via the ``(user_id, source_uri)`` dedup.
+    Awaits the pure ``arxiv_dataset.load_document`` per element via the shared
+    ``gather_isolated`` helper and returns the successful, non-``None`` subset
+    (duplicates drop out as ``None``). A per-element load failure is logged at WARNING +
+    skipped, NOT propagated — so one bad row never sinks the chunk. Retried whole-batch
+    on a batch-WIDE infra failure (``retries=1``), safe via the
+    ``(user_id, source_uri)`` dedup.
     """
 
-    results = await asyncio.gather(
-        *[_load_document(doc) for doc in docs], return_exceptions=True
-    )
-
-    ingested: list[Document] = []
-    failures = 0
-    for doc, result in zip(docs, results, strict=True):
-        if isinstance(result, BaseException):
-            failures += 1
-            logger.warning(
-                "Failed to load %s; skipping", doc.source_uri, exc_info=result
-            )
-        elif result is not None:
-            ingested.append(result)
-
+    ingested, failures = await gather_isolated(docs, _load_document)
     if failures:
         logger.warning("load_batch: %d/%d elements failed", failures, len(docs))
     return ingested

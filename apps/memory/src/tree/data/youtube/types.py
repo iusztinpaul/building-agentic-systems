@@ -15,8 +15,8 @@ class VideoMetadata(BaseModel):
     """Metadata describing a single YouTube video.
 
     `video_id` is always the bare 11-character YouTube identifier — never the
-    full URL. All other fields are optional: the primary
-    `YoutubeTranscriptApiFetcher` only populates `video_id`, and downstream
+    full URL. All other fields are optional: the sole
+    `GeminiTranscriptFetcher` only populates `video_id`, and downstream
     pipelines enrich the rest from feed entries (#004) or oEmbed (#003).
     """
 

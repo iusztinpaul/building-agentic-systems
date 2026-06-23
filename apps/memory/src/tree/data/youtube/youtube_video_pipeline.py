@@ -1,6 +1,7 @@
 """Single-video YouTube leaf pipeline — shared bulk core + thin MCP flow (#080).
 
-The direct-video path enriches per video via oEmbed, then runs the SHARED
+The direct-video path enriches videos via oEmbed CONCURRENTLY (the batch resolves all
+URLs at once via ``tree.data.batch.gather_isolated``), then runs the SHARED
 bulk-transcript core (``tree.data.youtube.youtube_ingest._bulk_build_and_load``):
 ONE bulk ``fetch_many(all_urls)`` for the whole batch → ``build_document`` per slot
 → ``load_video_document`` per slot. This is the #080 fix — the batch previously did a
@@ -26,6 +27,7 @@ from beanie import PydanticObjectId
 from prefect import flow
 
 from tree.config.settings import settings
+from tree.data.batch import gather_isolated
 from tree.data.youtube.urls import canonical_video_url, extract_video_id
 from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_video import (
@@ -108,8 +110,10 @@ async def ingest_youtube_video_batch(
 ) -> list[Document]:
     """Batch-ingest a list of video URLs via ONE bulk transcript fetch.
 
-    Brings up the Mongo connection once, resolves each URL → ``(canonical_url, oEmbed
-    metadata)``, then runs the SHARED bulk core ONCE so there is exactly ONE
+    Brings up the Mongo connection once, resolves all URLs CONCURRENTLY → ``[(canonical_url,
+    oEmbed metadata), ...]`` via the shared ``gather_isolated`` helper (one oEmbed failure is
+    isolated + skipped instead of sinking the batch; unresolvable ids return ``None`` and are
+    dropped), then runs the SHARED bulk core ONCE so there is exactly ONE
     ``fetch_many(all_urls)`` for the whole batch (the #080 fix — previously per-video
     ``fetch_many([url])`` inside per-URL sub-flows). The batch path NEVER calls the
     thin ``ingest_youtube_video`` flow, so it produces no per-item sub-flow runs.
@@ -120,11 +124,11 @@ async def ingest_youtube_video_batch(
         settings.mongo.mongo_initdb_database,
     )
 
-    items: list[tuple[str, VideoMetadata]] = []
-    for video_url in video_urls:
-        resolved = await _resolve_video_item(video_url)
-        if resolved is not None:
-            items.append(resolved)
+    items, failures = await gather_isolated(video_urls, _resolve_video_item)
+    if failures:
+        logger.warning(
+            "oEmbed resolution failed for %d/%d URLs", failures, len(video_urls)
+        )
 
     ingested = await _bulk_build_and_load(items, user_id)
     logger.info("Ingested %d videos out of %d URLs", len(ingested), len(video_urls))

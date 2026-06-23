@@ -1,19 +1,15 @@
-"""Paid-fallback YouTube transcript fetcher backed by Gemini 2.5 Flash.
+"""YouTube transcript fetcher backed by Gemini 3.5 Flash.
 
-This module ships the second link of the default
-`ChainedTranscriptFetcher`: when `YoutubeTranscriptApiFetcher` returns
-`None` for a video (CC disabled, age-gated, language unsupported, ...),
-the chain advances to `GeminiTranscriptFetcher`, which sends the canonical
-YouTube URL straight to Gemini via the multimodal `Part.from_uri(...)` API
-and asks the model for a verbatim transcript.
+This is the SOLE transcript backend: `GeminiTranscriptFetcher` sends the
+canonical YouTube URL straight to Gemini via the multimodal
+`Part.from_uri(...)` API and asks the model for a verbatim transcript.
 
-Costs money per call. Only invoked for videos the primary cannot
-transcribe. Returns `None` only on Gemini-side errors (auth, quota,
-refusal, malformed response, empty body); a successful Gemini response
-always yields a `FetchedTranscript`.
+Costs money per call. Returns `None` only on Gemini-side errors (auth,
+quota, refusal, malformed response, empty body); a successful Gemini
+response always yields a `FetchedTranscript`.
 
 Design notes:
-- The model id is hard-coded at the constructor (`gemini-2.5-flash`).
+- The model id is hard-coded at the constructor (`gemini-3.5-flash`).
   Surface as a YAML knob in a follow-up task only if a user asks; the v1
   shape is intentionally minimal.
 - This fetcher only fills `VideoMetadata.video_id`. Per-source pipelines
@@ -21,7 +17,8 @@ Design notes:
   channel enrichment — Gemini may include that prose in the response body,
   but we deliberately don't parse it.
 - Per-slot failures return `None`; this layer NEVER emits a WARNING. The
-  `ChainedTranscriptFetcher` wrapper owns the user-facing log line.
+  `None`-slot WARNING lives in `fetch_transcripts_batch`
+  (`tree.data.youtube.youtube_ingest`), which names the skipped video.
 """
 
 from __future__ import annotations
@@ -55,17 +52,15 @@ _TRANSCRIPT_PROMPT = (
 
 
 class GeminiTranscriptFetcher:
-    """Paid fallback transcript fetcher.
+    """The sole (default) YouTube transcript fetcher.
 
-    Sends the YouTube video URL directly to Gemini 2.5 Flash via
+    Sends the YouTube video URL directly to Gemini 3.5 Flash via
     ``Part.from_uri(file_uri=<youtube_url>, mime_type="video/*")`` and asks
-    the model to return a verbatim transcript. Used as the second link in
-    `ChainedTranscriptFetcher` after `YoutubeTranscriptApiFetcher`.
+    the model to return a verbatim transcript.
 
-    Costs money per call. Only invoked for videos the primary couldn't
-    transcribe. Returns ``None`` only on Gemini-side errors (auth, quota,
-    refusal, malformed response, empty body); a successful Gemini response
-    always yields a `FetchedTranscript`.
+    Costs money per call. Returns ``None`` only on Gemini-side errors (auth,
+    quota, refusal, malformed response, empty body); a successful Gemini
+    response always yields a `FetchedTranscript`.
 
     Metadata note: only ``VideoMetadata.video_id`` is populated here. Other
     fields (title, channel, ...) are filled by per-source pipelines: oEmbed
@@ -109,8 +104,8 @@ class GeminiTranscriptFetcher:
     async def _fetch_one(self, url_or_id: str) -> FetchedTranscript | None:
         video_id = extract_video_id(url_or_id)
         if video_id is None:
-            # Unresolvable input: silent at this layer; the chain wrapper
-            # owns the user-facing log message.
+            # Unresolvable input: silent at this layer; the user-facing
+            # `None`-slot WARNING lives in `fetch_transcripts_batch`.
             logger.debug("Could not resolve video id from input: %r", url_or_id)
             return None
 

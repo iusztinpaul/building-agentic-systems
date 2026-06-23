@@ -15,6 +15,8 @@ rather than injecting a fetcher (the flows no longer carry a ``fetcher`` arg).
 
 from __future__ import annotations
 
+import asyncio
+
 import tree.data.youtube.youtube_ingest as youtube_ingest
 import tree.data.youtube.youtube_video_pipeline as video_pipeline
 from beanie import PydanticObjectId
@@ -270,6 +272,51 @@ class TestIngestYoutubeVideoBatch:
 
         # No per-item sub-flow runs: the batch path never calls the thin wrapper.
         thin_spy.assert_not_awaited()
+
+    async def test_oembed_resolution_dispatched_concurrently(self, mocker) -> None:
+        # Regression (PR #28): the batch must resolve all N oEmbed round-trips
+        # CONCURRENTLY (was a sequential ``for`` loop). We make each oEmbed call
+        # block on a shared barrier sized to N: the gather can only complete if
+        # all N calls reach the barrier at once. A sequential loop would deadlock
+        # the first call (it alone can never trip an N-party barrier), so the flow
+        # would hang — the assertion that it RETURNS at all proves concurrency.
+        mocker.patch.object(video_pipeline, "init_mongodb", mocker.AsyncMock())
+        mocker.patch.object(
+            youtube_ingest,
+            "load_video_document",
+            mocker.AsyncMock(side_effect=lambda doc: doc),
+        )
+        barrier = asyncio.Barrier(len(VIDEO_IDS))
+        in_flight_peak = 0
+        in_flight = 0
+
+        async def _resolve_with_barrier(url: str) -> dict[str, str]:
+            nonlocal in_flight, in_flight_peak
+            in_flight += 1
+            in_flight_peak = max(in_flight_peak, in_flight)
+            # Blocks until ALL N resolutions are simultaneously in flight.
+            await barrier.wait()
+            in_flight -= 1
+            return {"title": "T", "author_name": "C"}
+
+        mocker.patch.object(
+            video_pipeline,
+            "fetch_oembed_metadata",
+            mocker.AsyncMock(side_effect=_resolve_with_barrier),
+        )
+        fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
+
+        result = await asyncio.wait_for(
+            ingest_youtube_video_batch.fn(
+                [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId()
+            ),
+            timeout=5.0,
+        )
+
+        # All N were in flight together (only possible if dispatched concurrently).
+        assert in_flight_peak == len(VIDEO_IDS)
+        assert len(result) == len(VIDEO_IDS)
 
     async def test_missing_transcript_slot_isolated(self, mocker) -> None:
         mocker.patch.object(video_pipeline, "init_mongodb", mocker.AsyncMock())

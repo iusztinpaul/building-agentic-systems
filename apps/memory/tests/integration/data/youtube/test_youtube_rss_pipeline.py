@@ -4,7 +4,7 @@ Persists real `Document`s against the local MongoDB fixture (`mongo_client`
 from `tests/integration/conftest.py`). Mocks:
 
 - `httpx.AsyncClient` and `feedparser.parse` for the feed fetch.
-- The `TranscriptFetcher` (no `youtube-transcript-api`, no Gemini calls) —
+- The transcript backend (no real Gemini calls) —
   injected by patching `tree.data.youtube.youtube_ingest.GeminiTranscriptFetcher`
   (the construction point inside the shared bulk core), since the flow no longer
   carries a `fetcher` arg. Patching the class is REQUIRED because
