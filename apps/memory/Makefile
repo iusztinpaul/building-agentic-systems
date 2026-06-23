@@ -79,11 +79,25 @@ integration-tests: # Fast inner-loop integration tests (excludes @pytest.mark.sl
 integration-tests-slow: # Run only the slow integration tests (vector-index convergence + full Prefect e2e).
 	uv run pytest tests/integration -m "slow"
 
-integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot). Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
-	uv run pytest tests/integration
+# --- Integration tests run SPLIT BY AREA, one pytest PROCESS per area
+# (data / memory / mcp / rest). The suite shares one session-scoped DB, and a
+# fire-and-forget async write from one area (the MCP `search_web` background
+# ingest) was landing during a LATER area's test and polluting it — a write that
+# arrives after the per-test wipe can't be cleaned. Separate processes give each
+# area its own DB lifecycle so a stray async write can't cross the boundary. Each
+# area passes on its own; only the mixed single-process run failed. Still
+# sequential (no `-n auto`) — the shared-DB cleanup fixture collides in parallel.
 
-integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests. Useful for reproducing CI behavior. Runs sequentially because the shared-DB cleanup fixture makes parallel runs collide.
-	uv run pytest tests/integration -m "not requires_mongot" --timeout=300
+INTEGRATION_AREAS = tests/integration/data tests/integration/memory tests/integration/mcp
+INTEGRATION_REST = tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
+
+integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot), one process per area. Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
+	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area || exit 1; done
+	uv run pytest $(INTEGRATION_REST)
+
+integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests, one process per area (see comment above).
+	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area -m "not requires_mongot" --timeout=300 || exit 1; done
+	uv run pytest $(INTEGRATION_REST) -m "not requires_mongot" --timeout=300
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files
@@ -162,13 +176,13 @@ deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Ad
 
 # --- Users & Session ---
 
-signup: # Create a user (idempotent on IDENTIFIER) and set it current. Requires IDENTIFIER=<handle>. Optional NAME="Display Name".
-	@if [ -z "$(IDENTIFIER)" ]; then echo 'USAGE: make signup IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
-	uv run python scripts/signup.py signup --identifier "$(IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
+signup: # Create a user (idempotent on USER_IDENTIFIER) and set it current. Requires USER_IDENTIFIER=<handle>. Optional NAME="Display Name".
+	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make signup USER_IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
+	uv run python scripts/signup.py signup --user-identifier "$(USER_IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
 
-set-current-user: # Point the current-user session at an existing user. Requires IDENTIFIER=<handle> or USER_ID=<oid>.
-	@if [ -z "$(IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
-	uv run python scripts/signup.py set-current $(if $(IDENTIFIER),--identifier "$(IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
+set-current-user: # Point the current-user session at an existing user. Requires USER_IDENTIFIER=<handle> or USER_ID=<oid>.
+	@if [ -z "$(USER_IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user USER_IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
+	uv run python scripts/signup.py set-current $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
 
 whoami: # Print the current user (id, identifier, name).
 	uv run python scripts/signup.py whoami
@@ -176,20 +190,17 @@ whoami: # Print the current user (id, identifier, name).
 
 # --- Data Pipelines ---
 
-run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (partitions configs/default.yaml sources into shards + dispatches one data-etl-worker per shard; NO trailing index). Requires USER_ID=<oid>. Optionally pass NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker with all sources).
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-data-pipeline USER_ID=<24-char Mongo ObjectId> [NUM_SHARDS=<n>]'; exit 1; fi
-	uv run python scripts/run_data_pipeline.py --user-id "$(USER_ID)" $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers; no trailing index; no NUM_SHARDS flag — parallelism is per-source via platform bucketing + the HF source's num_workers in default.yaml). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Memory Pipelines ---
 
-run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Requires USER_ID=<oid>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-extraction USER_ID=<24-char Mongo ObjectId> [DOC_IDS="id1,id2"] [NUM_SHARDS=<n>]'; exit 1; fi
-	uv run python scripts/run_memory_pipeline.py --user-id "$(USER_ID)" $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
+run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
+	uv run python scripts/run_memory_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Requires USER_ID=<oid>.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make run-memory-pipeline-indexing USER_ID=<24-char Mongo ObjectId>'; exit 1; fi
-	uv run python scripts/run_indexing_pipeline.py --user-id "$(USER_ID)"
+run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/run_indexing_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Dream Consolidation ---
@@ -199,9 +210,8 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-query-graph: # Query and visualize the knowledge graph for one user. Requires USER_ID=<oid>. Pass QUERY="your query" for search, omit for full graph.
-	@if [ -z "$(USER_ID)" ]; then echo 'USAGE: make query-graph USER_ID=<24-char Mongo ObjectId> [QUERY="..."]'; exit 1; fi
-	uv run python scripts/query_graph.py --user-id "$(USER_ID)" $(if $(QUERY),--query "$(QUERY)",)
+query-graph: # Query and visualize the knowledge graph for one user. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search, omit for full graph.
+	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
 
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi

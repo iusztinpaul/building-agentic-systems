@@ -175,7 +175,7 @@ def _mock_article_source(mocker) -> None:
 
 
 def _mock_arxiv_source(mocker) -> None:
-    def batch_gen(max_samples, batch_size):
+    def batch_gen(max_samples, batch_size, offset=None):
         yield FAKE_ARXIV_ENTRIES
 
     mocker.patch(
@@ -282,9 +282,11 @@ class TestDataPipeline:
               article URL.
             - The arxiv sub-flow is invoked once with the YAML's
               ``max_samples`` / ``fetch_content`` values.
-            - The URL dispatcher is invoked twice (once for the explicit
-              ``web`` entry, once for the untyped Reddit entry which the
-              load-time validator normalizes to ``WebSource``).
+            - The web batch sub-flow (``ingest_web_url_batch``) is invoked ONCE
+              with BOTH web URLs as a single list (the explicit ``web`` entry plus
+              the untyped Reddit entry the load-time validator normalizes to
+              ``WebSource``) — web is now the last batched variant (#075), not a
+              per-URL ``ingest_url`` dispatch.
         """
 
         # --- YAML fixture with all 5 variants ---
@@ -374,16 +376,28 @@ sources:
             new=AsyncMock(return_value=[arxiv_doc]),
         )
 
-        async def _fake_ingest_url(url: str, user_id: PydanticObjectId) -> Document:
-            if "anthropic.com" in url:
-                return web_doc_anthropic
-            if "reddit.com" in url:
-                return web_doc_reddit
-            raise AssertionError(f"Unexpected URL routed to ingest_url: {url}")
+        # Web is the last batched variant (#075): both web URLs are handed to a
+        # SINGLE ``ingest_web_url_batch`` call, which returns the ingested docs
+        # (the batch flow owns ``None``-filtering, so the worker just extends).
+        async def _fake_ingest_web_url_batch(
+            urls: list[str], user_id: PydanticObjectId
+        ) -> list[Document]:
+            docs: list[Document] = []
+            for url in urls:
+                if "anthropic.com" in url:
+                    docs.append(web_doc_anthropic)
+                elif "reddit.com" in url:
+                    docs.append(web_doc_reddit)
+                else:
+                    raise AssertionError(
+                        f"Unexpected URL routed to ingest_web_url_batch: {url}"
+                    )
+            return docs
 
-        ingest_url_mock = mocker.patch(
-            "tree.data.pipeline.ingest_url",
-            side_effect=_fake_ingest_url,
+        web_batch_mock = mocker.patch(
+            "tree.data.pipeline.ingest_web_url_batch",
+            new_callable=AsyncMock,
+            side_effect=_fake_ingest_web_url_batch,
         )
 
         # Skip the real Mongo init.
@@ -404,16 +418,16 @@ sources:
             ["https://blog.example.com/p/test-post"], _USER_ID
         )
         arxiv_mock.assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=2, fetch_content=False
+            user_id=_USER_ID, max_samples=2, fetch_content=False, offset=None
         )
-        # Two web URLs dispatched in parallel: one explicit, one untyped→web.
-        assert ingest_url_mock.await_count == 2
-        called_urls = sorted(c.args[0] for c in ingest_url_mock.await_args_list)
-        assert called_urls == sorted(
+        # Both web URLs (explicit + untyped→web) batched into ONE call as a single
+        # list, in configured order — web is the last batched variant (#075).
+        web_batch_mock.assert_awaited_once_with(
             [
                 "https://www.anthropic.com/engineering/some-page",
                 "https://www.reddit.com/r/AI_Agents/comments/example",
-            ]
+            ],
+            _USER_ID,
         )
 
         # --- Aggregated result holds one doc per dispatched call ---

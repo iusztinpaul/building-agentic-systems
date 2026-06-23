@@ -1,4 +1,4 @@
-"""Unit tests for tree.data.core.ingest — URL dispatcher."""
+"""Unit tests for tree.data.ingest — URL dispatcher."""
 
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +13,7 @@ from tree.config.app_config import (
     SubstackRssSource,
     WebSource,
 )
-from tree.data.core.ingest import (
+from tree.data.ingest import (
     _get_configured_substack_domains,
     ingest_url,
 )
@@ -35,7 +35,7 @@ def _patch_sources(mocker, entries: list) -> None:
 
     mock_config = MagicMock()
     mock_config.sources = SourcesConfig(sources=entries)
-    mocker.patch("tree.data.core.ingest.app_config", mock_config)
+    mocker.patch("tree.data.ingest.app_config", mock_config)
 
 
 class TestGetConfiguredSubstackDomains:
@@ -138,7 +138,7 @@ class TestIngestUrl:
     async def test_routes_substack_url(self, mocker) -> None:
         mock_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "tree.data.core.ingest._URL_HANDLERS",
+            "tree.data.ingest._URL_HANDLERS",
             [("substack.com", mock_handler)],
         )
 
@@ -151,17 +151,17 @@ class TestIngestUrl:
     async def test_routes_custom_substack_domain(self, mocker) -> None:
         mock_substack = AsyncMock(return_value=MagicMock())
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.core.ingest._get_configured_substack_domains",
+            "tree.data.ingest._get_configured_substack_domains",
             return_value={"decodingai.com"},
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_substack_article",
+            "tree.data.ingest._ingest_substack_article",
             mock_substack,
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
@@ -175,11 +175,11 @@ class TestIngestUrl:
     async def test_static_registry_takes_precedence(self, mocker) -> None:
         static_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "tree.data.core.ingest._URL_HANDLERS",
+            "tree.data.ingest._URL_HANDLERS",
             [("example.com", static_handler)],
         )
         mocker.patch(
-            "tree.data.core.ingest._get_configured_substack_domains",
+            "tree.data.ingest._get_configured_substack_domains",
             return_value={"example.com"},
         )
 
@@ -189,13 +189,13 @@ class TestIngestUrl:
 
     async def test_falls_through_to_web_for_unmatched_http_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.core.ingest._get_configured_substack_domains",
+            "tree.data.ingest._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
@@ -209,13 +209,13 @@ class TestIngestUrl:
 
     async def test_falls_through_to_web_for_github_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.core.ingest._get_configured_substack_domains",
+            "tree.data.ingest._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
@@ -227,18 +227,18 @@ class TestIngestUrl:
 
     async def test_fallback_emits_info_log(self, mocker, caplog) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.core.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.core.ingest._get_configured_substack_domains",
+            "tree.data.ingest._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
         url = "https://martinfowler.com/articles/microservices.html"
-        with caplog.at_level(logging.INFO, logger="tree.data.core.ingest"):
+        with caplog.at_level(logging.INFO, logger="tree.data.ingest"):
             await ingest_url(url, _USER_ID)
 
         expected = f"Routing URL to 'web (Bright Data fallback)' pipeline: {url}"
@@ -257,11 +257,11 @@ class TestIngestUrl:
         mock_fallback = AsyncMock()
         mock_substack = AsyncMock()
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_substack_article",
+            "tree.data.ingest._ingest_substack_article",
             mock_substack,
         )
 
@@ -287,7 +287,7 @@ class TestIngestUrl:
         # The static registry captures handler references at module load,
         # so we replace it wholesale to inject the mocked YouTube handler.
         mocker.patch(
-            "tree.data.core.ingest._URL_HANDLERS",
+            "tree.data.ingest._URL_HANDLERS",
             [
                 ("youtube.com", mock_youtube),
                 ("youtu.be", mock_youtube),
@@ -295,7 +295,7 @@ class TestIngestUrl:
             ],
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
@@ -317,11 +317,11 @@ class TestIngestUrl:
         mock_youtube = AsyncMock()
         mock_fallback = AsyncMock()
         mocker.patch(
-            "tree.data.core.ingest._ingest_youtube_video",
+            "tree.data.ingest._ingest_youtube_video",
             mock_youtube,
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
 
@@ -343,11 +343,11 @@ class TestIngestUrl:
         mock_fallback = AsyncMock()
         mock_substack = AsyncMock()
         mocker.patch(
-            "tree.data.core.ingest._ingest_web_url",
+            "tree.data.ingest._ingest_web_url",
             mock_fallback,
         )
         mocker.patch(
-            "tree.data.core.ingest._ingest_substack_article",
+            "tree.data.ingest._ingest_substack_article",
             mock_substack,
         )
 

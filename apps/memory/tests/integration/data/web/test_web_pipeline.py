@@ -19,7 +19,7 @@ from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.config.app_config import HuggingFaceDatasetSource, WebSource
-from tree.data.core.ingest import ingest_url
+from tree.data.ingest import ingest_url
 from tree.data.pipeline import data_etl_worker
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
@@ -197,7 +197,7 @@ class TestDataPipelinePicksUpWebEntries:
 
         # Stub the arxiv batch generator so the worker doesn't
         # touch the real HuggingFace dataset during this test.
-        def _empty_batches(max_samples, batch_size):
+        def _empty_batches(max_samples, batch_size, offset=None):
             return
             yield  # pragma: no cover - make this a generator function
 

@@ -1,19 +1,15 @@
-"""Paid-fallback YouTube transcript fetcher backed by Gemini 2.5 Flash.
+"""YouTube transcript fetcher backed by Gemini 3.5 Flash.
 
-This module ships the second link of the default
-`ChainedTranscriptFetcher`: when `YoutubeTranscriptApiFetcher` returns
-`None` for a video (CC disabled, age-gated, language unsupported, ...),
-the chain advances to `GeminiTranscriptFetcher`, which sends the canonical
-YouTube URL straight to Gemini via the multimodal `Part.from_uri(...)` API
-and asks the model for a verbatim transcript.
+This is the SOLE transcript backend: `GeminiTranscriptFetcher` sends the
+canonical YouTube URL straight to Gemini via the multimodal
+`Part.from_uri(...)` API and asks the model for a verbatim transcript.
 
-Costs money per call. Only invoked for videos the primary cannot
-transcribe. Returns `None` only on Gemini-side errors (auth, quota,
-refusal, malformed response, empty body); a successful Gemini response
-always yields a `FetchedTranscript`.
+Costs money per call. Returns `None` only on Gemini-side errors (auth,
+quota, refusal, malformed response, empty body); a successful Gemini
+response always yields a `FetchedTranscript`.
 
 Design notes:
-- The model id is hard-coded at the constructor (`gemini-2.5-flash`).
+- The model id is hard-coded at the constructor (`gemini-3.5-flash`).
   Surface as a YAML knob in a follow-up task only if a user asks; the v1
   shape is intentionally minimal.
 - This fetcher only fills `VideoMetadata.video_id`. Per-source pipelines
@@ -21,7 +17,8 @@ Design notes:
   channel enrichment — Gemini may include that prose in the response body,
   but we deliberately don't parse it.
 - Per-slot failures return `None`; this layer NEVER emits a WARNING. The
-  `ChainedTranscriptFetcher` wrapper owns the user-facing log line.
+  `None`-slot WARNING lives in `fetch_transcripts_batch`
+  (`tree.data.youtube.youtube_ingest`), which names the skipped video.
 """
 
 from __future__ import annotations
@@ -40,11 +37,12 @@ from tree.data.youtube.types import (
     VideoMetadata,
 )
 from tree.data.youtube.urls import canonical_video_url, extract_video_id
+from tree.observability import track_genai_client
 
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+_DEFAULT_MODEL = "gemini-3.5-flash"
 
 _TRANSCRIPT_PROMPT = (
     "Return the verbatim spoken transcript of this YouTube video in English. "
@@ -54,17 +52,15 @@ _TRANSCRIPT_PROMPT = (
 
 
 class GeminiTranscriptFetcher:
-    """Paid fallback transcript fetcher.
+    """The sole (default) YouTube transcript fetcher.
 
-    Sends the YouTube video URL directly to Gemini 2.5 Flash via
+    Sends the YouTube video URL directly to Gemini 3.5 Flash via
     ``Part.from_uri(file_uri=<youtube_url>, mime_type="video/*")`` and asks
-    the model to return a verbatim transcript. Used as the second link in
-    `ChainedTranscriptFetcher` after `YoutubeTranscriptApiFetcher`.
+    the model to return a verbatim transcript.
 
-    Costs money per call. Only invoked for videos the primary couldn't
-    transcribe. Returns ``None`` only on Gemini-side errors (auth, quota,
-    refusal, malformed response, empty body); a successful Gemini response
-    always yields a `FetchedTranscript`.
+    Costs money per call. Returns ``None`` only on Gemini-side errors (auth,
+    quota, refusal, malformed response, empty body); a successful Gemini
+    response always yields a `FetchedTranscript`.
 
     Metadata note: only ``VideoMetadata.video_id`` is populated here. Other
     fields (title, channel, ...) are filled by per-source pipelines: oEmbed
@@ -86,7 +82,12 @@ class GeminiTranscriptFetcher:
         self.model = model
         self.concurrency = concurrency
         self._semaphore = asyncio.Semaphore(concurrency)
-        self._client = genai.Client(api_key=secret_value)
+        # Wrap with Opik's genai integration for automatic spans + native Gemini
+        # token usage / cost on the transcription calls (video tokens are the main
+        # data-pipeline model spend, and these calls were previously untracked). No-op
+        # passthrough when Opik is unconfigured — mirrors ``GeminiLLM``; see
+        # :func:`tree.observability.track_genai_client`.
+        self._client = track_genai_client(genai.Client(api_key=secret_value))
 
     async def fetch_many(
         self, video_urls_or_ids: list[str]
@@ -103,8 +104,8 @@ class GeminiTranscriptFetcher:
     async def _fetch_one(self, url_or_id: str) -> FetchedTranscript | None:
         video_id = extract_video_id(url_or_id)
         if video_id is None:
-            # Unresolvable input: silent at this layer; the chain wrapper
-            # owns the user-facing log message.
+            # Unresolvable input: silent at this layer; the user-facing
+            # `None`-slot WARNING lives in `fetch_transcripts_batch`.
             logger.debug("Could not resolve video id from input: %r", url_or_id)
             return None
 

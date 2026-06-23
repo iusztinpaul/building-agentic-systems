@@ -122,11 +122,11 @@ class TestAppConfigDedupSupersessionCandidateCap:
     #034. Default must remain ``8``.
     """
 
-    def test_default_is_eight(self) -> None:
+    def test_default_is_eight(self, frozen_config_path) -> None:
         # Arrange / Act
         from tree.config.app_config import load_app_config
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         # Assert
         assert config.extraction.dedup.supersession_candidate_cap == 8
@@ -138,7 +138,7 @@ class TestTreeEnvOverrideEscapeHatch:
     behavior knob path that still lives in env vars."""
 
     def test_dedup_auto_merge_threshold_override(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, frozen_config_path
     ) -> None:
         # Arrange
         monkeypatch.setenv("TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD", "0.99")
@@ -146,13 +146,13 @@ class TestTreeEnvOverrideEscapeHatch:
         # Act
         from tree.config.app_config import load_app_config
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         # Assert
         assert config.extraction.dedup.auto_merge_threshold == 0.99
 
     def test_dedup_supersession_candidate_cap_override(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, frozen_config_path
     ) -> None:
         # Arrange
         monkeypatch.setenv("TREE_EXTRACTION__DEDUP__SUPERSESSION_CANDIDATE_CAP", "4")
@@ -160,7 +160,7 @@ class TestTreeEnvOverrideEscapeHatch:
         # Act
         from tree.config.app_config import load_app_config
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
         # Assert
         assert config.extraction.dedup.supersession_candidate_cap == 4
@@ -182,7 +182,7 @@ class TestDecommissionedDedupPrefixIsInert:
     """
 
     def test_legacy_dedup_auto_merge_threshold_is_ignored(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, frozen_config_path
     ) -> None:
         # Arrange
         monkeypatch.setenv("DEDUP_AUTO_MERGE_THRESHOLD", "0.97")
@@ -190,13 +190,13 @@ class TestDecommissionedDedupPrefixIsInert:
         # Act
         from tree.config.app_config import load_app_config
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
-        # Assert — YAML default wins (0.95), NOT 0.97.
+        # Assert — YAML value wins (0.95), NOT 0.97.
         assert config.extraction.dedup.auto_merge_threshold == 0.95
 
     def test_legacy_dedup_supersession_candidate_cap_is_ignored(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, frozen_config_path
     ) -> None:
         # Arrange
         monkeypatch.setenv("DEDUP_SUPERSESSION_CANDIDATE_CAP", "4")
@@ -204,7 +204,7 @@ class TestDecommissionedDedupPrefixIsInert:
         # Act
         from tree.config.app_config import load_app_config
 
-        config = load_app_config()
+        config = load_app_config(frozen_config_path)
 
-        # Assert — YAML default wins (8), NOT 4.
+        # Assert — YAML value wins (8), NOT 4.
         assert config.extraction.dedup.supersession_candidate_cap == 8

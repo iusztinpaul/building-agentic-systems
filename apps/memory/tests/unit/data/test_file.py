@@ -1,11 +1,11 @@
-"""Unit tests for tree.data.file — read_file and load_file_document."""
+"""Unit tests for tree.data.file.file — read_file and load_file_document."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
 
-from tree.data.file import _SUPPORTED_EXTENSIONS, read_file
+from tree.data.file.file import _SUPPORTED_EXTENSIONS, read_file
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -72,15 +72,15 @@ class TestLoadFileDocument:
         txt.write_text("Some content", encoding="utf-8")
 
         mock_find_one = mocker.patch(
-            "tree.data.file.Document.find_one",
+            "tree.data.file.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
         mock_insert = mocker.patch(
-            "tree.data.file.Document.insert", new_callable=AsyncMock
+            "tree.data.file.file.Document.insert", new_callable=AsyncMock
         )
 
-        from tree.data.file import load_file_document
+        from tree.data.file.file import load_file_document
 
         doc = await load_file_document(str(txt), _USER_ID)
 
@@ -101,12 +101,12 @@ class TestLoadFileDocument:
         existing.source_type = SourceType.FILE
 
         mocker.patch(
-            "tree.data.file.Document.find_one",
+            "tree.data.file.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=existing,
         )
 
-        from tree.data.file import load_file_document
+        from tree.data.file.file import load_file_document
 
         result = await load_file_document(str(txt), _USER_ID)
         assert result is None
@@ -116,13 +116,13 @@ class TestLoadFileDocument:
         txt.write_text("text", encoding="utf-8")
 
         mocker.patch(
-            "tree.data.file.Document.find_one",
+            "tree.data.file.file.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.file.Document.insert", new_callable=AsyncMock)
+        mocker.patch("tree.data.file.file.Document.insert", new_callable=AsyncMock)
 
-        from tree.data.file import load_file_document
+        from tree.data.file.file import load_file_document
 
         doc = await load_file_document(str(txt), _USER_ID, title="My Custom Title")
         assert doc.title == "My Custom Title"

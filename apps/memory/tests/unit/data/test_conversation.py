@@ -1,4 +1,4 @@
-"""Unit tests for tree.data.conversation — load_conversation_document."""
+"""Unit tests for tree.data.conversation.conversation — load_conversation_document."""
 
 from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.data.conversation import _content_hash, load_conversation_document
+from tree.data.conversation.conversation import (
+    _content_hash,
+    load_conversation_document,
+)
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -35,11 +38,14 @@ class TestLoadConversationDocument:
 
     async def test_creates_document_for_new_conversation(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc = await load_conversation_document("Alice likes Python.", _USER_ID)
 
@@ -49,11 +55,14 @@ class TestLoadConversationDocument:
 
     async def test_source_uri_is_deterministic(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc1 = await load_conversation_document("Same text", _USER_ID)
         doc2 = await load_conversation_document("Same text", _USER_ID)
@@ -63,7 +72,7 @@ class TestLoadConversationDocument:
     async def test_returns_none_for_duplicate(self, mocker) -> None:
         existing = MagicMock()
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=existing,
         )
@@ -73,22 +82,28 @@ class TestLoadConversationDocument:
 
     async def test_custom_title_used(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc = await load_conversation_document("Text", _USER_ID, title="My Title")
         assert doc.title == "My Title"
 
     async def test_default_title_contains_timestamp(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc = await load_conversation_document("Text", _USER_ID)
         assert doc.title.startswith("Conversation ")
@@ -97,12 +112,12 @@ class TestLoadConversationDocument:
         from pymongo.errors import DuplicateKeyError
 
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
         mocker.patch(
-            "tree.data.conversation.Document.insert",
+            "tree.data.conversation.conversation.Document.insert",
             new_callable=AsyncMock,
             side_effect=DuplicateKeyError("duplicate"),
         )
@@ -116,11 +131,14 @@ class TestSourceUriDerivation:
 
     async def test_session_uri_used_verbatim_when_provided(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc = await load_conversation_document(
             "Alice likes Python.",
@@ -135,11 +153,14 @@ class TestSourceUriDerivation:
 
     async def test_session_uri_none_falls_back_to_content_hash(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         text = "Alice likes Python."
         doc = await load_conversation_document(text, _USER_ID, session_uri=None)
@@ -160,11 +181,14 @@ class TestSourceUriDerivation:
         # Second call: find_one returns the previously-inserted doc → None.
         existing = MagicMock()
         find_one_mock = mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             side_effect=[None, existing],
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         first = await load_conversation_document(
             "Same text", _USER_ID, session_uri="claude-session://abc"
@@ -186,11 +210,14 @@ class TestSourceUriDerivation:
         # Both queries return None — distinct source_uris mean distinct
         # rows under the (user_id, source_type, source_uri) unique index.
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         text = "byte-identical transcript"
         doc_a = await load_conversation_document(
@@ -223,11 +250,14 @@ class TestSessionStartedAt:
 
     async def test_tz_aware_utc_roundtrips_to_metadata(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         started_at = datetime(2026, 5, 17, 14, 30, 0, tzinfo=UTC)
         doc = await load_conversation_document(
@@ -245,11 +275,14 @@ class TestSessionStartedAt:
 
     async def test_non_utc_tz_aware_normalized_to_utc(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         # 14:30 in UTC+02:00 == 12:30 UTC.
         plus_two = timezone(timedelta(hours=2))
@@ -267,11 +300,14 @@ class TestSessionStartedAt:
 
     async def test_no_session_started_at_means_empty_metadata(self, mocker) -> None:
         mocker.patch(
-            "tree.data.conversation.Document.find_one",
+            "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,
             return_value=None,
         )
-        mocker.patch("tree.data.conversation.Document.insert", new_callable=AsyncMock)
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
 
         doc = await load_conversation_document("Alice likes Python.", _USER_ID)
 

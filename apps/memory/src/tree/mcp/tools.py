@@ -10,9 +10,11 @@ from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
 
-from tree.data.conversation_pipeline import ingest_conversation as _ingest_conversation
-from tree.data.core.ingest import ingest_url as _ingest_url_dispatch
-from tree.data.file_pipeline import ingest_file as _ingest_file
+from tree.data.conversation.conversation_pipeline import (
+    ingest_conversation as _ingest_conversation,
+)
+from tree.data.file.file_pipeline import ingest_file as _ingest_file
+from tree.data.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.web.web_scrape import (
     DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
 )

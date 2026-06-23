@@ -1,28 +1,31 @@
 """
 Query and visualize the materialized knowledge graph.
 
-Every read is scoped to a single ``user_id`` (#020). Pass it via
-``--user-id <ObjectId>`` or the ``USER_ID`` env var (the Makefile wires
-this for you).
+Every read is scoped to a single ``user_id`` (#020). It defaults to the
+current-session user; override with ``USER_ID=<ObjectId>`` or
+``USER_IDENTIFIER=<handle>`` (the Makefile wires these for you). See
+:mod:`scripts._users` for the resolution precedence.
 
 Usage:
-    # Visualize the entire graph for a user
-    make memory-query-graph USER_ID=507f1f77bcf86cd799439011
+    # Visualize the entire graph for the current-session user
+    make memory-query-graph
 
     # Query and visualize matching subgraph
-    make memory-query-graph USER_ID=507f... QUERY="What does Paul work on?"
+    make memory-query-graph QUERY="What does Paul work on?"
+
+    # Override the user by id or handle
+    make memory-query-graph USER_IDENTIFIER=paul QUERY="MLOps"
 
     # Direct invocation
-    uv run python scripts/query_graph.py --user-id 507f... --query "MLOps" --top-k 5
+    uv run python scripts/query_graph.py --user-identifier paul --query "MLOps" --top-k 5
 """
 
 import asyncio
 import logging
-import os
 
 import click
-from beanie import PydanticObjectId
 
+from _users import resolve_user_id
 from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
@@ -35,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 
 async def _run(
-    user_id: PydanticObjectId,
+    user_id: str | None,
+    user_identifier: str | None,
     query: str | None,
     top_k: int,
     max_hops: int,
@@ -47,6 +51,7 @@ async def _run(
         settings.mongo.mongo_initdb_database,
     )
     database = settings.mongo.mongo_initdb_database
+    user_id = await resolve_user_id(user_id, user_identifier)
 
     if query:
         logger.info(
@@ -87,8 +92,16 @@ async def _run(
     "--user-id",
     default=None,
     help=(
-        "Tenant id (24-char Mongo ObjectId) whose KG to query. Required; "
-        "falls back to the ``USER_ID`` env var when omitted."
+        "Override the tenant whose KG to query by Mongo ObjectId. Defaults to "
+        "the current-session user; also reads the ``USER_ID`` env var."
+    ),
+)
+@click.option(
+    "--user-identifier",
+    default=None,
+    help=(
+        "Override the tenant by stable handle (e.g. email). Defaults to the "
+        "current-session user; also reads the ``USER_IDENTIFIER`` env var."
     ),
 )
 @click.option(
@@ -126,29 +139,16 @@ async def _run(
 )
 def main(
     user_id: str | None,
+    user_identifier: str | None,
     query: str | None,
     top_k: int,
     max_hops: int,
     output: str,
     no_open: bool,
 ) -> None:
-    """Query and visualize the knowledge graph for one ``user_id``."""
+    """Query and visualize the knowledge graph for the resolved user."""
 
-    raw = user_id or os.environ.get("USER_ID")
-    if not raw:
-        logger.error(
-            "--user-id is required (or set USER_ID env). No silent fallback "
-            "to a default user."
-        )
-        raise SystemExit(1)
-
-    try:
-        parsed = PydanticObjectId(raw)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("--user-id %r is not a valid Mongo ObjectId: %s", raw, exc)
-        raise SystemExit(1) from exc
-
-    asyncio.run(_run(parsed, query, top_k, max_hops, output, no_open))
+    asyncio.run(_run(user_id, user_identifier, query, top_k, max_hops, output, no_open))
 
 
 if __name__ == "__main__":

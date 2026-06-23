@@ -1,16 +1,12 @@
-# Application configuration for Tree (Your Rooted Personal Assistant).
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 
 sources:
+  # Substack
   - uri: https://www.decodingai.com/feed
     type: substack_rss
   - uri: https://maximelabonne.substack.com/feed
     type: substack_rss
-  - uri: https://modelcraft.substack.com/feed
-    type: substack_rss
   - uri: https://www.latent.space/feed
-    type: substack_rss
-  - uri: https://alexeyondata.substack.com/feed
     type: substack_rss
   - uri: https://www.decodingai.com/p/ai-agents-foundations-course
     type: substack_article
@@ -32,29 +28,22 @@ sources:
     type: substack_article
   - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
     type: substack_article
+  # HuggingFace datasets
   - uri: librarian-bots/arxiv-metadata-snapshot
     type: huggingface_dataset
-    max_samples: 10
+    max_samples: 1000
     fetch_content: false
+    num_workers: 2
     batch_size: 50
-    concurrency: 10
-  # Arbitrary URLs (blogs, news, repos, profiles) ingested via the URL
-  # dispatcher; specialized pipelines (e.g. Substack) win when they match,
-  # otherwise the URL falls back to Bright Data Web Unlocker.
-  - uri: https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
-  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
-  # YouTube channel feed (Atom). Recent videos on the channel are ingested
-  # one by one via a chained transcript fetcher: the free `youtube-transcript-api`
-  # primary, then a paid Gemini 2.5 Flash fallback for videos the primary
-  # cannot transcribe (CC disabled, age-gated, region-locked). A WARNING is
-  # logged when the chain advances to Gemini, and a final WARNING is logged
-  # only if BOTH backends fail (the video is then skipped, not retried).
-  - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw
-    type: youtube_rss
-  # Single YouTube video (transcript via the same chained fetcher;
-  # best-effort metadata via oEmbed).
-  - uri: https://www.youtube.com/watch?v=eYaWxljC4sA
+    concurrency: 25
+  # YouTube
+  # - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA
+  #   type: youtube_rss
+  - uri: https://www.youtube.com/watch?v=Sntj4HmuykI
     type: youtube_video
+  # Arbitrary URLs (blogs, reddit threads, news, profiles)
+  - uri: https://www.reddit.com/r/LLMDevs/comments/1ts3qc3/a_year_building_agent_memory_on_knowledge_graphs/
+  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
 
 models:
   llm:
@@ -62,51 +51,27 @@ models:
     model: gemini-3.1-flash-lite
   # Transient embedding used only by resolution's semantic stage
   # (computed on the entity NAME, dropped afterward, never persisted).
-  # Split out in #039 so a lighter model can be configured later; for
-  # now it mirrors search_embedding so behavior is unchanged.
   resolution_embedding:
     provider: voyage
     model: voyage-3.5
     dimensions: 1024
   # Persisted embedding used for dedup + search/query. Its output is the
-  # node `embedding` field and the live mongot `vector_index` is
-  # dimension-coupled to its `dimensions`. voyage-3.5 is a TEXT model routed
-  # to /v1/embeddings (#048); 1024-d is unchanged from voyage-multimodal-3 so
-  # the vector index numDimensions and the dim-guard are unaffected.
+  # node `embedding` field and the live mongot `vector_index`
   search_embedding:
     provider: voyage
     model: voyage-3.5
     dimensions: 1024
-  # #044 real-time request-batching caps for /v1/multimodalembeddings.
-  # Pack many texts into FEWER synchronous embed calls (resolution + dedup
-  # + indexing). Defaults sit at the Voyage per-request caps for
-  # voyage-multimodal-3; lowering them yields smaller requests (e.g. to stay
-  # under a tighter rate budget). NOT Voyage's async Batch API — that path is
-  # rejected (12h window can't drive mid-flow dedup; it doesn't support the
-  # multimodal endpoint). See tracker/044.
   embedding_batch:
     max_inputs: 1000
-    # Dropped 320000 → 10000 (#054 / ADR-002): the shared free-tier Voyage key
-    # is capped at 10K TPM, so no single synchronous request may exceed the
-    # per-minute token window. The model's hard per-request ceiling is 320000.
     max_total_tokens: 10000
     max_input_tokens: 32000
-    # How many embed requests a single stage may dispatch concurrently (#054).
-    # 1 = serial dispatch; the cross-flow voyage-embeddings GCL is the real
-    # throttle, this just bounds local fan-out.
     dispatch_concurrency: 1
 
 extraction:
   chunk_size: 512
   chunk_overlap: 64
   llm_concurrency: 5
-  # Intra-run fan-out knobs (#054 / ADR-002). Overridable via
-  # TREE_EXTRACTION__DOC_CONCURRENCY / TREE_EXTRACTION__DEDUP_CONCURRENCY.
-  # doc_concurrency: documents processed in parallel within one run (1 =
-  # serial; cross-run fan-out is the orchestrator path of memory_extraction
-  # (num_shards>1)).
   doc_concurrency: 1
-  # dedup_concurrency: entities resolved in parallel within a run.
   dedup_concurrency: 8
   resolution:
     fuzzy_threshold: 0.85
@@ -131,17 +96,9 @@ query:
   rrf_k: 60
   embedding_batch_size: 64
 
-# Dream-consolidation pipeline (#051): an incremental, watermark-bounded
-# re-run of the three-tier dedup across the whole knowledge graph, catching
-# near-duplicate nodes that parallel ingestion's inline dedup missed.
-# Thresholds (auto_merge/flag/fuzzy) are NOT duplicated here — they stay in
-# extraction.dedup so the inline and dream surfaces can never drift.
 dream:
   enabled: true
-  # Schedule consumed by the dream-consolidation-etl deployment (#052):
-  # the parent fan-out flow runs once per cron tick across all active users.
   cron: "0 4 * * *"
-  # Report-only first rollout; flip to false to enable mutating consolidation.
   dry_run: true
   # Cap on candidate pairs examined per run. Once hit, the sweep stops
   # driving and records cap_hit=True in its stats.
@@ -152,9 +109,7 @@ dream:
   # incremental delta (cost: bounded LLM calls per partition).
   enable_supersession_judge: false
 
-# Pipeline-parallelism + Voyage rate-limiting (#054 / ADR-002). Governs how
-# aggressively the memory pipeline runs concurrently and how the shared
-# free-tier Voyage embedding key is throttled across separate flow runs.
+# Pipeline-parallelism + Voyage rate-limiting
 concurrency:
   # Requests/minute the shared free-tier Voyage key allows. Drives the
   # server-side `voyage-embeddings` Prefect global concurrency limit
@@ -166,17 +121,13 @@ concurrency:
   # Tokens/minute the key allows. Held by config (the embedding_batch
   # max_total_tokens cap), not yet a second token-weighted limiter.
   voyage_tpm: 10000
-  # Admission control for serve(global_limit=...); kept close to voyage_rpm so
-  # we don't admit far more runs than the embed budget can feed.
-  runner_global_limit: 4
+  # Prefect runner global concurrency limit
+  runner_global_limit: 6
 
 mcp:
   max_retries: 1
   max_results: 10
 
-# Opik observability (monitoring only — cost breakdown + retrieval threads).
-# NO evals, NO datasets/experiments, NO guardrails. The hard on/off switch is
-# the presence of OPIK_API_KEY in .env; with no key the whole layer no-ops.
 observability:
   enabled: true
   # Per-model USD price per 1,000,000 tokens. Used to compute the manual

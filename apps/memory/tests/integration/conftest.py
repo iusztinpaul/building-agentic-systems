@@ -53,10 +53,21 @@ async def _skip_without_mongot(mongot_available) -> None:
 
 @pytest.fixture(autouse=True)
 async def _clean_collections(mongo_client):
-    yield
+    """Guarantee a clean DB at the START of every integration test.
+
+    Wipes BEFORE the test because the suite shares one session-scoped database
+    run sequentially: a teardown-only wipe left every test at the mercy of the
+    previous test's teardown completing fully, so a test that asserts on a whole
+    collection (``all nodes belong to my user``, ``the self node exists``) would
+    intermittently see another tenant's rows or a half-wiped graph. Wiping in
+    setup makes each test deterministically start from empty; the session
+    ``mongo_client`` fixture drops the whole DB at the end, so no teardown wipe
+    is needed.
+    """
 
     for model in ALL_DOCUMENT_MODELS:
         await model.find_all().delete()
+    yield
 
 
 # ---------------------------------------------------------------------------

@@ -1,23 +1,28 @@
-"""Prefect pipeline wrappers around the YouTube RSS-feed ETL.
+"""YouTube RSS-feed leaf pipeline — shared bulk core + feed metadata (#080).
 
-Mirrors `tree.data.substack.substack_rss_pipeline` line-for-line — same
-``@task`` / ``@flow`` shape, same ``init_mongodb`` boundary in the batch
-flow, same ``log_prints=True``.
+The RSS path derives ``VideoMetadata`` from the Atom feed entry itself
+(``feed_entry_to_metadata`` — the feed already carries title / channel / publish
+date, so there is NO per-video oEmbed round-trip), then runs the SHARED
+bulk-transcript core (``tree.data.youtube.youtube_ingest._bulk_build_and_load``):
+ONE bulk ``fetch_many(all_urls)`` per feed → ``build_document`` per slot →
+``load_video_document`` per slot. The bulk fetch + build + load are identical to the
+direct-video path — only the metadata SOURCE differs (feed here, oEmbed there).
 
-Differences vs the Substack RSS pipeline are forced by YouTube semantics:
+Per feed the batch flow runs ``fetch_feed_task`` (Extract, ``retries=2``) then routes
+the resolved ``(canonical_url, feed metadata)`` items through the shared core's
+``fetch_transcripts_batch`` → ``build_batch`` → ``load_batch`` ETL-phase tasks. There
+are no per-row tasks and no per-feed sub-flow runs.
 
-- We perform a single bulk transcript fetch via
-  `TranscriptFetcher.fetch_many(...)` over all canonical URLs from the feed,
-  rather than one HTTP call per entry. The chain wrapper handles per-slot
-  primary→Gemini fallback transparently.
-- We skip the oEmbed round-trip used by #003 because Atom feed entries
-  already carry title / channel / publish_date. One feed fetch + one bulk
-  transcript fetch instead of (1 + 2N) HTTP calls.
-- One missing transcript (chain returns ``None`` for that slot) does NOT
-  sink the batch; the chain wrapper has already emitted the WARNING. We do
-  emit a pipeline-layer WARNING for the *unrelated* class of failure where
-  an Atom entry has no resolvable video id (a feed-parsing problem the
-  chain never sees).
+Two skip behaviours are preserved exactly:
+
+- An Atom entry with no resolvable video id is skipped with a pipeline-layer WARNING
+  (a feed-parsing problem the transcript fetch never sees).
+- A missing transcript (the bulk fetch returns ``None`` for that slot) is skipped inside
+  the shared core's ``fetch_transcripts_batch`` with a per-slot WARNING.
+
+Transcripts are fetched via Gemini inside the shared core's ``fetch_transcripts_batch``
+task, which constructs the ``GeminiTranscriptFetcher`` itself — no fetcher is threaded
+through this flow, so task inputs stay fully serializable.
 """
 
 from __future__ import annotations
@@ -29,15 +34,13 @@ from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
-from tree.data.youtube.transcript_fetcher import TranscriptFetcher
-from tree.data.youtube.urls import extract_video_id
+from tree.data.youtube.types import VideoMetadata
+from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_rss import (
     extract_video_url,
     feed_entry_to_metadata,
     fetch_feed,
 )
-from tree.data.youtube.youtube_video import build_document, load_video_document
-from tree.data.youtube.youtube_video_pipeline import _default_chained_fetcher
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 
@@ -49,73 +52,44 @@ async def fetch_feed_task(feed_url: str) -> list[dict]:
     return await fetch_feed(feed_url)
 
 
-@task(name="load-youtube-rss-document", retries=1, retry_delay_seconds=2)
-async def load_video_task(doc: Document) -> Document | None:
-    return await load_video_document(doc)
+def _resolve_feed_items(
+    entries: list[dict],
+) -> list[tuple[str, VideoMetadata]]:
+    """Resolve Atom entries to ``(canonical_url, feed VideoMetadata)`` items.
 
-
-@flow(name="ingest-youtube-rss-feed-etl", log_prints=True, validate_parameters=False)
-async def ingest_youtube_rss_feed(
-    feed_url: str,
-    user_id: PydanticObjectId,
-    fetcher: TranscriptFetcher | None = None,
-) -> list[Document]:
-    """Ingest every video referenced by a YouTube channel RSS feed.
-
-    Steps:
-    1. ``fetch_feed_task(feed_url)`` → Atom entries.
-    2. For each entry, derive ``(canonical_video_url, VideoMetadata)`` from
-       feed-side fields. Entries with no resolvable video id are skipped with
-       a pipeline-layer WARNING.
-    3. ``fetcher.fetch_many([canonical_url, ...])`` — ONE bulk call.
-    4. For each ``(video_url, metadata, transcript)``: if the transcript is
-       ``None`` (chain exhausted), continue silently — the chain wrapper has
-       already warned. Otherwise build the `Document` and persist it.
-    5. Return the list of newly-persisted (or upgraded-from-LATENT) Documents.
+    Skips entries with no resolvable video id, emitting the pipeline-layer WARNING
+    (preserved behaviour). Metadata comes from ``feed_entry_to_metadata`` (the feed),
+    NOT oEmbed — the RSS metadata source.
     """
 
-    fetcher = fetcher or _default_chained_fetcher()
-
-    entries = await fetch_feed_task(feed_url)
-
-    resolved: list[tuple[str, dict]] = []
+    items: list[tuple[str, VideoMetadata]] = []
     for entry in entries:
         video_url = extract_video_url(entry)
         if video_url is None:
             logger.warning("Skipping entry with no resolvable video id")
             continue
-        resolved.append((video_url, entry))
+        items.append((video_url, feed_entry_to_metadata(entry)))
+    return items
 
-    if not resolved:
+
+async def _ingest_one_feed(
+    feed_url: str,
+    user_id: PydanticObjectId,
+) -> list[Document]:
+    """Ingest a single feed through the shared bulk core (plain async, NO sub-flow).
+
+    ``fetch_feed_task`` (Extract) → resolve ``(canonical_url, feed metadata)`` items →
+    the SHARED ``_bulk_build_and_load`` (ONE bulk ``fetch_many`` for the feed + build +
+    load). Folded into the batch loop — there is no per-feed sub-flow run.
+    """
+
+    entries = await fetch_feed_task(feed_url)
+    items = _resolve_feed_items(entries)
+    if not items:
         logger.info("Ingested 0 new videos from %s", feed_url)
         return []
 
-    video_urls = [url for url, _ in resolved]
-    transcripts = await fetcher.fetch_many(video_urls)
-
-    ingested: list[Document] = []
-    for (video_url, entry), transcript in zip(resolved, transcripts):
-        if transcript is None:
-            # Chain wrapper has already emitted the user-facing WARNING.
-            continue
-
-        # `extract_video_url` already validated the id; this is just the
-        # bare 11-char form for `build_document`.
-        video_id = extract_video_id(video_url)
-        if video_id is None:  # pragma: no cover — defensive
-            continue
-
-        metadata = feed_entry_to_metadata(entry)
-        doc = build_document(
-            video_id=video_id,
-            metadata=metadata,
-            transcript=transcript,
-            user_id=user_id,
-        )
-        result = await load_video_task(doc)
-        if result is not None:
-            ingested.append(result)
-
+    ingested = await _bulk_build_and_load(items, user_id)
     logger.info("Ingested %d new videos from %s", len(ingested), feed_url)
     return ingested
 
@@ -128,12 +102,13 @@ async def ingest_youtube_rss_feed(
 async def ingest_youtube_rss_feed_batch(
     feed_urls: list[str],
     user_id: PydanticObjectId,
-    fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
-    """Batch-ingest a list of YouTube channel feeds.
+    """Batch-ingest a list of YouTube channel feeds via the shared bulk core.
 
-    Mirrors `ingest_substack_rss_feed_batch`: bring up the Mongo connection
-    once at the flow boundary, then `asyncio.gather` over per-feed ingests.
+    Brings up the Mongo connection once, then runs the per-feed body (one feed fetch +
+    ONE bulk ``fetch_many`` + build + load) for every feed under
+    ``asyncio.gather(return_exceptions=True)`` so one bad feed is logged + skipped and
+    never sinks the others. No per-feed sub-flow runs — the per-feed body is inlined.
     """
 
     await init_mongodb(
@@ -141,13 +116,18 @@ async def ingest_youtube_rss_feed_batch(
         settings.mongo.mongo_initdb_database,
     )
 
-    fetcher = fetcher or _default_chained_fetcher()
-
     results = await asyncio.gather(
-        *[
-            ingest_youtube_rss_feed(feed_url, user_id, fetcher=fetcher)
-            for feed_url in feed_urls
-        ]
+        *[_ingest_one_feed(feed_url, user_id) for feed_url in feed_urls],
+        return_exceptions=True,
     )
 
-    return [doc for docs in results for doc in docs]
+    all_ingested: list[Document] = []
+    for feed_url, result in zip(feed_urls, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to ingest feed %s; skipping", feed_url, exc_info=result
+            )
+            continue
+        all_ingested.extend(result)
+
+    return all_ingested

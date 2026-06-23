@@ -104,8 +104,8 @@ make memory-serve-workflows
 The deployments registered by `src/tree/orchestrator.py`:
 
 - `data-etl-orchestrator`, `data-etl-worker` (data ingestion is split into an
-  operator-facing orchestrator that shards the configured `sources:` list and a
-  worker that ingests one shard — #068)
+  operator-facing orchestrator that groups the configured `sources:` list by platform
+  and windows HuggingFace, and a worker that ingests one shard — #072)
 - `ingest-file-etl`, `ingest-conversation-etl`
 - `ingest-youtube-video-batch-etl`, `ingest-youtube-rss-feed-batch-etl`
 - `memory-extract-etl-orchestrator`, `memory-extract-etl-worker` (memory extraction
@@ -119,7 +119,7 @@ Each target streams logs from the local `make memory-serve-workflows` (or the Do
 
 | Target | What it does | Reads from `default.yaml` |
 |---|---|---|
-| `make memory-run-data-pipeline` | Triggers `data-etl-orchestrator`: partitions every entry in `sources.sources` into `min(NUM_SHARDS, N)` balanced shards and dispatches one `data-etl-worker` per shard (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Optional `NUM_SHARDS=<n>` (default 1 = one worker with all sources). | `sources.sources` |
+| `make memory-run-data-pipeline` | Triggers `data-etl-orchestrator`: groups `sources.sources` by platform and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index, no trailing-index suffix. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `default.yaml`, not a global flag. | `sources.sources` |
 
 ### Memory extraction
 

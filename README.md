@@ -121,30 +121,59 @@ make memory-deploy-prefect
 
 Run everything from the repo root.
 
-**1. Start shared infra.** MongoDB (replica set), mongot (Atlas Search locally), Prefect server + worker.
+**1. Select the local env target.** Pipelines and tests run against whatever `.env.target` points at; for local dev that must be local infra, not Atlas.
+
+```bash
+make env-status      # show the active target; switch with `make env-local`
+```
+
+**2. Start shared infra.** MongoDB (replica set), mongot (Atlas Search locally), Prefect server + worker.
 
 ```bash
 make local-start
 ```
 
-**2. Check connectivity.** Confirms the configured MongoDB target is reachable and lists collection counts.
+**3. Check connectivity.** Confirms the configured MongoDB target is reachable and lists collection counts.
 
 ```bash
 make memory-check-db
 ```
 
-**3. Ingest → extract → index → query.**
+**4. Create your user.** Every pipeline runs under a `user_id`, and a fresh database has none. `signup` is idempotent and pins the new user as the **current user** — the singleton session pointer (`whoami`) that every pipeline and the harness default to, so you don't pass an id on each command.
 
 ```bash
-make memory-run-data-pipeline             # walks sources.sources in configs/default.yaml (Substack RSS + articles + arXiv + web)
-make memory-run-memory-pipeline-extraction # LLM → nodes + edges → knowledge_graph collection
-make memory-run-memory-pipeline-indexing   # reverse edges, embeddings, search indexes
-make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
+make memory-signup USER_IDENTIFIER=paul NAME="Paul Iusztin"
+make memory-whoami            # prints the current user (id, identifier, name)
 ```
 
-The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
+Already signed up (or juggling several users)? Skip `signup` and just repoint the current-user pointer at an existing user — by handle or id:
 
-**4. Drive memory with the agent.**
+```bash
+make memory-set-current-user USER_IDENTIFIER=paul    # or: USER_ID=<oid>
+```
+
+**5. Serve the Prefect workers.** The pipelines are Prefect *deployments* — registered definitions that don't run until a worker is serving them, so start one before triggering anything below. The simplest path also reloads your local pipeline code on every (re)serve:
+
+```bash
+make memory-serve-workflows &   # in-process worker; (re)serve to load local code edits
+```
+
+(Step 2's Dockerized `prefect-worker` already serves every deployment from the in-container code, so if you're not iterating on pipeline code you can rely on that instead — just don't run both, or you'll get duplicate workers.)
+
+**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the knowledge graph.
+
+```bash
+make memory-run-data-pipeline              # walks sources.sources in configs/default.yaml (Substack RSS + articles + arXiv + web) → documents
+make memory-run-memory-pipeline-extraction # documents → LLM → nodes + edges → knowledge_graph collection
+make memory-run-memory-pipeline-indexing   # reverse edges, embeddings, search indexes
+make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
+
+make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user
+```
+
+`run-memory-pipeline-extraction` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `default.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
+
+**7. Drive memory with the agent.**
 
 ```bash
 # Interactive Ink REPL

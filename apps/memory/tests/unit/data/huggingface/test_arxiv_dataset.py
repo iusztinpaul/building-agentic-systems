@@ -280,3 +280,122 @@ class TestFetchDatasetBatches:
 
         assert len(batches) == 2
         assert all(len(b) == 3 for b in batches)
+
+
+class _FakeStreamingDataset:
+    """Minimal stand-in for a streaming ``IterableDataset``.
+
+    Holds an indexed list of rows and exposes ``.skip(n)`` (mirroring
+    ``IterableDataset.skip`` — discards the first ``n`` rows and returns a new
+    dataset) so the offset/window math can be exercised without the live HF API.
+    Records every ``.skip`` call on the ROOT instance so tests can assert it was
+    (or was not) applied.
+    """
+
+    def __init__(
+        self, rows: list[dict], *, _root: "_FakeStreamingDataset | None" = None
+    ) -> None:
+        self._rows = rows
+        self._root = _root or self
+        if _root is None:
+            self.skip_calls: list[int] = []
+
+    def skip(self, n: int) -> "_FakeStreamingDataset":
+        self._root.skip_calls.append(n)
+        return _FakeStreamingDataset(self._rows[n:], _root=self._root)
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class TestFetchDatasetBatchesOffset:
+    """The #071 offset window: ``[offset, offset + max_samples)``."""
+
+    def test_offset_none_never_skips(self, mocker) -> None:
+        fake = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(20)])
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=fake,
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=10, batch_size=5, offset=None))
+        rows = [r for b in batches for r in b]
+
+        assert fake.skip_calls == []
+        assert len(batches) == 2
+        assert [r["id"] for r in rows] == [f"2103.{i:05d}" for i in range(10)]
+
+    def test_offset_zero_never_skips(self, mocker) -> None:
+        fake = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(20)])
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=fake,
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=10, batch_size=5, offset=0))
+        rows = [r for b in batches for r in b]
+
+        assert fake.skip_calls == []
+        assert [r["id"] for r in rows] == [f"2103.{i:05d}" for i in range(10)]
+
+    def test_offset_default_matches_pre_feature_stream(self, mocker) -> None:
+        # With no ``offset`` argument at all, the result is byte-for-byte the
+        # pre-feature single-run ingest (the first ``max_samples`` rows, no skip).
+        fake_with = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(20)])
+        fake_without = _FakeStreamingDataset(
+            [{"id": f"2103.{i:05d}"} for i in range(20)]
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            side_effect=[fake_without, fake_with],
+        )
+
+        without_offset = list(fetch_dataset_batches(max_samples=10, batch_size=5))
+        with_offset_zero = list(
+            fetch_dataset_batches(max_samples=10, batch_size=5, offset=0)
+        )
+
+        assert without_offset == with_offset_zero
+        assert fake_without.skip_calls == []
+        assert fake_with.skip_calls == []
+
+    def test_offset_skips_then_windows(self, mocker) -> None:
+        fake = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(30)])
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=fake,
+        )
+
+        batches = list(fetch_dataset_batches(max_samples=10, batch_size=5, offset=5))
+        rows = [r for b in batches for r in b]
+
+        # ``.skip(5)`` applied once, before iteration; window is [5, 15).
+        assert fake.skip_calls == [5]
+        assert len(rows) == 10
+        assert [r["id"] for r in rows] == [f"2103.{i:05d}" for i in range(5, 15)]
+
+    def test_window_log_line_includes_offset(self, mocker, caplog) -> None:
+        fake = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(30)])
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=fake,
+        )
+
+        with caplog.at_level("INFO", logger="tree.data.huggingface.arxiv_dataset"):
+            list(fetch_dataset_batches(max_samples=10, batch_size=5, offset=5))
+
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "offset=5" in messages
+
+    def test_negative_offset_raises(self, mocker) -> None:
+        fake = _FakeStreamingDataset([{"id": f"2103.{i:05d}"} for i in range(30)])
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset.load_dataset",
+            return_value=fake,
+        )
+
+        with pytest.raises(ValueError, match="offset"):
+            list(fetch_dataset_batches(max_samples=10, batch_size=5, offset=-1))
+
+        # ``.skip`` must NEVER be called with a negative value.
+        assert fake.skip_calls == []

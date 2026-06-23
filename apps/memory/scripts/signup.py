@@ -15,8 +15,8 @@ pipeline ``run-*`` targets need as ``USER_ID``.
 
 Usage::
 
-    make memory-signup IDENTIFIER=me@example.com NAME="Paul Iusztin"
-    make memory-set-current-user IDENTIFIER=me@example.com
+    make memory-signup USER_IDENTIFIER=me@example.com NAME="Paul Iusztin"
+    make memory-set-current-user USER_IDENTIFIER=me@example.com
     make memory-whoami
 """
 
@@ -101,28 +101,28 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--identifier", required=True, help="Stable handle (e.g. email).")
+@click.option("--user-identifier", required=True, help="Stable handle (e.g. email).")
 @click.option("--name", default=None, help="Display name stored in attributes.name.")
 @click.option(
     "--set-current/--no-set-current",
     default=True,
     help="Set the new user as the current user (default: yes).",
 )
-def signup(identifier: str, name: str | None, set_current: bool) -> None:
+def signup(user_identifier: str, name: str | None, set_current: bool) -> None:
     """Create a user (idempotent on identifier) and optionally set it current."""
 
-    asyncio.run(_signup(identifier, name, set_current))
+    asyncio.run(_signup(user_identifier, name, set_current))
 
 
 @cli.command("set-current")
-@click.option("--identifier", default=None, help="Select the user by identifier.")
+@click.option("--user-identifier", default=None, help="Select the user by identifier.")
 @click.option("--user-id", default=None, help="Select the user by ObjectId.")
-def set_current_command(identifier: str | None, user_id: str | None) -> None:
+def set_current_command(user_identifier: str | None, user_id: str | None) -> None:
     """Point the current-user session at an existing user."""
 
-    if not identifier and not user_id:
-        raise click.UsageError("Pass --identifier or --user-id.")
-    asyncio.run(_set_current(identifier, user_id))
+    if not user_identifier and not user_id:
+        raise click.UsageError("Pass --user-identifier or --user-id.")
+    asyncio.run(_set_current(user_identifier, user_id))
 
 
 @cli.command()
