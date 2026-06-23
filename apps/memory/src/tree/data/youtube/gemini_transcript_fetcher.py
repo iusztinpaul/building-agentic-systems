@@ -40,11 +40,12 @@ from tree.data.youtube.types import (
     VideoMetadata,
 )
 from tree.data.youtube.urls import canonical_video_url, extract_video_id
+from tree.observability import track_genai_client
 
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+_DEFAULT_MODEL = "gemini-3.5-flash"
 
 _TRANSCRIPT_PROMPT = (
     "Return the verbatim spoken transcript of this YouTube video in English. "
@@ -86,7 +87,12 @@ class GeminiTranscriptFetcher:
         self.model = model
         self.concurrency = concurrency
         self._semaphore = asyncio.Semaphore(concurrency)
-        self._client = genai.Client(api_key=secret_value)
+        # Wrap with Opik's genai integration for automatic spans + native Gemini
+        # token usage / cost on the transcription calls (video tokens are the main
+        # data-pipeline model spend, and these calls were previously untracked). No-op
+        # passthrough when Opik is unconfigured — mirrors ``GeminiLLM``; see
+        # :func:`tree.observability.track_genai_client`.
+        self._client = track_genai_client(genai.Client(api_key=secret_value))
 
     async def fetch_many(
         self, video_urls_or_ids: list[str]

@@ -4,7 +4,7 @@ The RSS path derives ``VideoMetadata`` from the Atom feed entry itself
 (``feed_entry_to_metadata`` — the feed already carries title / channel / publish
 date, so there is NO per-video oEmbed round-trip), then runs the SHARED
 bulk-transcript core (``tree.data.youtube.youtube_ingest._bulk_build_and_load``):
-ONE ``fetcher.fetch_many(all_urls)`` per feed → ``build_document`` per slot →
+ONE bulk ``fetch_many(all_urls)`` per feed → ``build_document`` per slot →
 ``load_video_document`` per slot. The bulk fetch + build + load are identical to the
 direct-video path — only the metadata SOURCE differs (feed here, oEmbed there).
 
@@ -16,13 +16,13 @@ are no per-row tasks and no per-feed sub-flow runs.
 Two skip behaviours are preserved exactly:
 
 - An Atom entry with no resolvable video id is skipped with a pipeline-layer WARNING
-  (a feed-parsing problem the transcript chain never sees).
-- A missing transcript (chain returns ``None`` for that slot) is skipped silently
-  inside the shared core; the chain wrapper has already emitted the WARNING.
+  (a feed-parsing problem the transcript fetch never sees).
+- A missing transcript (the bulk fetch returns ``None`` for that slot) is skipped inside
+  the shared core's ``fetch_transcripts_batch`` with a per-slot WARNING.
 
-The ``fetcher`` argument is the swap point: tests inject a fake `TranscriptFetcher` to
-avoid network + Gemini auth; production omits it and gets the default chained
-implementation.
+Transcripts are fetched via Gemini inside the shared core's ``fetch_transcripts_batch``
+task, which constructs the ``GeminiTranscriptFetcher`` itself — no fetcher is threaded
+through this flow, so task inputs stay fully serializable.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
-from tree.data.youtube.transcript_fetcher import TranscriptFetcher
 from tree.data.youtube.types import VideoMetadata
 from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_rss import (
@@ -42,7 +41,6 @@ from tree.data.youtube.youtube_rss import (
     feed_entry_to_metadata,
     fetch_feed,
 )
-from tree.data.youtube.youtube_video_pipeline import _default_chained_fetcher
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 
@@ -77,7 +75,6 @@ def _resolve_feed_items(
 async def _ingest_one_feed(
     feed_url: str,
     user_id: PydanticObjectId,
-    fetcher: TranscriptFetcher,
 ) -> list[Document]:
     """Ingest a single feed through the shared bulk core (plain async, NO sub-flow).
 
@@ -92,7 +89,7 @@ async def _ingest_one_feed(
         logger.info("Ingested 0 new videos from %s", feed_url)
         return []
 
-    ingested = await _bulk_build_and_load(items, user_id, fetcher)
+    ingested = await _bulk_build_and_load(items, user_id)
     logger.info("Ingested %d new videos from %s", len(ingested), feed_url)
     return ingested
 
@@ -105,7 +102,6 @@ async def _ingest_one_feed(
 async def ingest_youtube_rss_feed_batch(
     feed_urls: list[str],
     user_id: PydanticObjectId,
-    fetcher: TranscriptFetcher | None = None,
 ) -> list[Document]:
     """Batch-ingest a list of YouTube channel feeds via the shared bulk core.
 
@@ -120,10 +116,8 @@ async def ingest_youtube_rss_feed_batch(
         settings.mongo.mongo_initdb_database,
     )
 
-    fetcher = fetcher or _default_chained_fetcher()
-
     results = await asyncio.gather(
-        *[_ingest_one_feed(feed_url, user_id, fetcher) for feed_url in feed_urls],
+        *[_ingest_one_feed(feed_url, user_id) for feed_url in feed_urls],
         return_exceptions=True,
     )
 

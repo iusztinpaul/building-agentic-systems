@@ -107,7 +107,7 @@ class TestInit:
 
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
 
-        assert fetcher.model == "gemini-2.5-flash"
+        assert fetcher.model == "gemini-3.5-flash"
 
     def test_settings_key_used_when_no_explicit_key(self, mocker):
         mocker.patch(
@@ -119,7 +119,7 @@ class TestInit:
         # Should not raise.
         fetcher = GeminiTranscriptFetcher()
 
-        assert fetcher.model == "gemini-2.5-flash"
+        assert fetcher.model == "gemini-3.5-flash"
 
 
 # --- Happy path & call-site shape -------------------------------------------
@@ -150,7 +150,7 @@ class TestFetchMany:
         # Verify the call shape: Part.from_uri(file_uri=<canonical>, mime_type="video/*")
         assert len(client.aio.models.calls) == 1
         call = client.aio.models.calls[0]
-        assert call["model"] == "gemini-2.5-flash"
+        assert call["model"] == "gemini-3.5-flash"
         contents = call["contents"]
         # contents is expected to be a list[Content] OR list[Part]; check parts.
         flat_parts: list[Any] = []

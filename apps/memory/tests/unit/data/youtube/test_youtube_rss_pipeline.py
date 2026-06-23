@@ -4,7 +4,13 @@ The RSS path derives ``VideoMetadata`` from the Atom feed entry (no oEmbed), the
 the SHARED bulk core (``youtube_ingest._bulk_build_and_load``): ONE ``fetch_many``
 per feed → ``build_document`` per slot → ``load_video_document`` per slot. There are no
 per-row tasks and no per-feed sub-flow runs. Two skips are preserved: an unresolvable
-feed id WARNs + is dropped; a ``None``-transcript slot is dropped silently by the core.
+feed id WARNs + is dropped; a ``None``-transcript slot is dropped by the core with a
+WARNING.
+
+The transcript backend is constructed inside the shared core's
+``fetch_transcripts_batch`` task, so these tests PATCH
+``youtube_ingest.GeminiTranscriptFetcher`` with a fake rather than injecting a fetcher
+(the flow no longer carries a ``fetcher`` arg).
 """
 
 from __future__ import annotations
@@ -72,7 +78,11 @@ def _make_doc(video_id: str) -> Document:
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` recording every ``fetch_many`` call."""
+    """Programmable stand-in for ``GeminiTranscriptFetcher``.
+
+    Same ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
+    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
+    """
 
     def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
         self._results_per_id = results_per_id
@@ -93,6 +103,16 @@ class _FakeFetcher:
         return results
 
 
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
+    """Patch the construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+
+    Patching the class (not an injected arg) sidesteps the ``GOOGLE_API_KEY`` guard in
+    ``GeminiTranscriptFetcher.__init__`` — no key/network needed.
+    """
+
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
+
+
 class TestTaskAndFlowMetadata:
     """Retry grain on ``fetch_feed_task``; per-row load task removed."""
 
@@ -111,11 +131,11 @@ class TestTaskAndFlowMetadata:
         # The per-feed sub-flow collapsed into ``_ingest_one_feed`` (a plain core).
         assert not hasattr(rss_pipeline, "ingest_youtube_rss_feed")
 
-    def test_batch_flow_signature_unchanged(self) -> None:
+    def test_batch_flow_signature_has_no_fetcher(self) -> None:
         import inspect
 
         params = list(inspect.signature(ingest_youtube_rss_feed_batch).parameters)
-        assert params == ["feed_urls", "user_id", "fetcher"]
+        assert params == ["feed_urls", "user_id"]
 
 
 class TestResolveFeedItems:
@@ -176,10 +196,9 @@ class TestIngestYoutubeRssFeedBatch:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
         fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
-        result = await ingest_youtube_rss_feed_batch.fn(
-            [FEED_URL], PydanticObjectId(), fetcher=fake
-        )
+        result = await ingest_youtube_rss_feed_batch.fn([FEED_URL], PydanticObjectId())
 
         # ONE bulk fetch_many over all 3 feed URLs; no oEmbed call.
         assert len(fake.calls) == 1
@@ -204,14 +223,13 @@ class TestIngestYoutubeRssFeedBatch:
             "load_video_document",
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
-        # Middle slot has no transcript (chain exhausted).
+        # Middle slot has no transcript (fetch returns None).
         results = {vid: _make_transcript(vid) for vid in VIDEO_IDS}
         results[VIDEO_IDS[1]] = None
         fake = _FakeFetcher(results)
+        _patch_fetcher(mocker, fake)
 
-        result = await ingest_youtube_rss_feed_batch.fn(
-            [FEED_URL], PydanticObjectId(), fetcher=fake
-        )
+        result = await ingest_youtube_rss_feed_batch.fn([FEED_URL], PydanticObjectId())
 
         # Still ONE bulk fetch; the missing slot dropped, the other 2 persist.
         assert len(fake.calls) == 1
@@ -231,9 +249,10 @@ class TestIngestYoutubeRssFeedBatch:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0])})
+        _patch_fetcher(mocker, fake)
 
         await ingest_youtube_rss_feed_batch.fn(
-            [FEED_URL, FEED_URL + "&x=2"], PydanticObjectId(), fetcher=fake
+            [FEED_URL, FEED_URL + "&x=2"], PydanticObjectId()
         )
 
         # Mongo initialised once at the flow boundary; one fetch_many PER feed.
@@ -257,11 +276,11 @@ class TestIngestYoutubeRssFeedBatch:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0])})
+        _patch_fetcher(mocker, fake)
 
         result = await ingest_youtube_rss_feed_batch.fn(
             [FEED_URL, "https://www.youtube.com/feeds/videos.xml?channel_id=bad"],
             PydanticObjectId(),
-            fetcher=fake,
         )
 
         # The good feed still ingests its one doc despite the bad feed raising.

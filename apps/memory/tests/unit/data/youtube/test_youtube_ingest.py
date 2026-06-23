@@ -3,11 +3,18 @@
 ``tree.data.youtube.youtube_ingest`` is the single tail BOTH YouTube pipelines run:
 "(url, metadata) list → ONE bulk ``fetch_many`` → ``build_document`` per non-``None``
 slot → ``load_video_document`` per slot (isolated)". These tests prove the bulk-fetch
-grain, the ``None``-slot skip, the per-element load isolation, and the ETL-phase task
-retry metadata — all with a fake `TranscriptFetcher` (no network, no Gemini).
+grain, the ``None``-slot skip + WARNING, the per-element load isolation, and the
+ETL-phase task retry metadata.
+
+The transcript backend is now CONSTRUCTED inside ``fetch_transcripts_batch`` rather than
+passed in, so the tests PATCH the construction point
+(``youtube_ingest.GeminiTranscriptFetcher``) with a fake whose ``fetch_many`` returns
+canned transcripts — no ``GOOGLE_API_KEY``, no network, no Gemini.
 """
 
 from __future__ import annotations
+
+import logging
 
 import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
@@ -58,7 +65,12 @@ def _make_doc(video_id: str) -> Document:
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` recording every ``fetch_many`` call."""
+    """Programmable transcript fetcher recording every ``fetch_many`` call.
+
+    Stands in for ``GeminiTranscriptFetcher``: it exposes the same
+    ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract and is
+    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
+    """
 
     def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
         self._results_per_id = results_per_id
@@ -77,6 +89,17 @@ class _FakeFetcher:
                     break
             results.append(match)
         return results
+
+
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
+    """Patch the in-task construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+
+    Patching the CLASS (not an injected arg) is required because
+    ``GeminiTranscriptFetcher.__init__`` raises without ``GOOGLE_API_KEY``; the patch
+    replaces it so the task needs no key/network.
+    """
+
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
 
 
 class TestTaskMetadata:
@@ -98,30 +121,47 @@ class TestTaskMetadata:
 
 
 class TestFetchTranscriptsBatch:
-    """ONE bulk ``fetch_many`` per batch; ``None`` slots dropped silently."""
+    """ONE bulk ``fetch_many`` per batch; ``None`` slots dropped with a WARNING."""
 
-    async def test_one_bulk_fetch_over_all_urls(self) -> None:
+    async def test_one_bulk_fetch_over_all_urls(self, mocker) -> None:
         items = [(_canonical(vid), VideoMetadata(video_id=vid)) for vid in VIDEO_IDS]
         fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
-        resolved = await fetch_transcripts_batch.fn(items, fake)
+        resolved = await fetch_transcripts_batch.fn(items)
 
         # Exactly ONE call to fetch_many, with all 3 canonical URLs.
         assert len(fake.calls) == 1
         assert fake.calls[0] == [_canonical(vid) for vid in VIDEO_IDS]
         assert [url for url, _, _ in resolved] == [_canonical(vid) for vid in VIDEO_IDS]
 
-    async def test_none_transcript_slot_dropped(self) -> None:
+    async def test_constructs_fetcher_inside_the_task(self, mocker) -> None:
+        # The fetcher is built IN the task body, not threaded in as an argument.
+        items = [(_canonical(VIDEO_IDS[0]), VideoMetadata(video_id=VIDEO_IDS[0]))]
+        fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0])})
+        ctor = mocker.patch.object(
+            youtube_ingest, "GeminiTranscriptFetcher", return_value=fake
+        )
+
+        await fetch_transcripts_batch.fn(items)
+
+        ctor.assert_called_once_with()
+
+    async def test_none_transcript_slot_dropped_with_warning(
+        self, mocker, caplog
+    ) -> None:
         items = [(_canonical(vid), VideoMetadata(video_id=vid)) for vid in VIDEO_IDS]
         fake = _FakeFetcher(
             {
                 VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0]),
-                VIDEO_IDS[1]: None,  # chain exhausted on the middle slot
+                VIDEO_IDS[1]: None,  # no transcript for the middle slot
                 VIDEO_IDS[2]: _make_transcript(VIDEO_IDS[2]),
             }
         )
+        _patch_fetcher(mocker, fake)
 
-        resolved = await fetch_transcripts_batch.fn(items, fake)
+        with caplog.at_level(logging.WARNING, logger=youtube_ingest.logger.name):
+            resolved = await fetch_transcripts_batch.fn(items)
 
         # The middle slot is dropped; still ONE bulk fetch.
         assert len(fake.calls) == 1
@@ -129,14 +169,23 @@ class TestFetchTranscriptsBatch:
             _canonical(VIDEO_IDS[0]),
             _canonical(VIDEO_IDS[2]),
         ]
+        # The dropped slot emits the user-facing WARNING naming the video.
+        warnings = [
+            r
+            for r in caplog.records
+            if "No transcript for" in r.getMessage() and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert _canonical(VIDEO_IDS[1]) in warnings[0].getMessage()
 
-    async def test_empty_items_no_fetch(self) -> None:
-        fake = _FakeFetcher({})
+    async def test_empty_items_no_fetch(self, mocker) -> None:
+        ctor = mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher")
 
-        resolved = await fetch_transcripts_batch.fn([], fake)
+        resolved = await fetch_transcripts_batch.fn([])
 
         assert resolved == []
-        assert fake.calls == []
+        # No fetcher is even constructed for an empty batch.
+        ctor.assert_not_called()
 
 
 class TestBuildBatch:
@@ -220,6 +269,7 @@ class TestBulkBuildAndLoad:
         user_id = PydanticObjectId()
         items = [(_canonical(vid), VideoMetadata(video_id=vid)) for vid in VIDEO_IDS]
         fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
         built_docs = [_make_doc(vid) for vid in VIDEO_IDS]
         # Load drops the middle element (duplicate / failure) via side_effect.
@@ -237,7 +287,7 @@ class TestBulkBuildAndLoad:
             mocker.Mock(side_effect=built_docs),
         )
 
-        result = await _bulk_build_and_load(items, user_id, fake)
+        result = await _bulk_build_and_load(items, user_id)
 
         # ONE bulk transcript fetch over all 3 canonical URLs.
         assert len(fake.calls) == 1

@@ -1,33 +1,3 @@
-"""Shared bulk-transcript ingest core for BOTH YouTube leaf pipelines (#080).
-
-The two YouTube pipelines (direct-video #003, RSS #004) differ ONLY in where the
-``VideoMetadata`` comes from — oEmbed per video for the direct path, the Atom feed
-entry for RSS. Everything downstream is identical: ONE bulk transcript fetch, then
-``build_document`` per slot, then ``load_video_document`` per slot. This module
-factors that shared tail so both callers route through it.
-
-The contract is "(canonical_video_url, VideoMetadata) list → ONE bulk
-``fetcher.fetch_many(...)`` → ``build_document`` per non-``None`` slot →
-``load_video_document`` per slot (isolated)". The three batch-grain ETL-phase
-``@task``s appear in the Prefect UI per feed/batch (NOT per video):
-
-* ``fetch_transcripts_batch`` (network Extract, ``retries=2``) — the SINGLE bulk
-  ``fetch_many`` over all canonical URLs; zips transcripts back to their
-  ``(url, metadata)`` and drops the ``None`` slots (the chain wrapper already warned).
-* ``build_batch`` (pure map, ``retries=0``) — ``build_document`` per resolved triple.
-* ``load_batch`` (DB Load, ``retries=1``) — dedups + persists each Document via the
-  shared ``load_video_document`` under ``tree.data.batch.gather_isolated`` (per-element
-  failures logged + skipped, NEVER propagated).
-
-``_bulk_build_and_load`` is the thin async orchestration both pipelines call; the
-per-video fetch regression (``fetch_many([url])`` inside per-URL sub-flows) is gone —
-there is exactly ONE bulk fetch per feed/batch.
-
-Result persistence is OFF by default in Prefect 3.6 (the repo sets no ``persist_result``
-/ ``result_storage`` / ``cache_policy``), so these side-effecting tasks already do NOT
-persist results — no flag is added.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -36,7 +6,7 @@ from beanie import PydanticObjectId
 from prefect import task
 
 from tree.data.batch import gather_isolated
-from tree.data.youtube.transcript_fetcher import TranscriptFetcher
+from tree.data.youtube.gemini_transcript_fetcher import GeminiTranscriptFetcher
 from tree.data.youtube.types import FetchedTranscript, VideoMetadata
 from tree.data.youtube.urls import extract_video_id
 from tree.data.youtube.youtube_video import build_document, load_video_document
@@ -49,31 +19,39 @@ logger = logging.getLogger(__name__)
 _TranscribedItem = tuple[str, VideoMetadata, FetchedTranscript]
 
 
-@task(name="fetch-youtube-transcripts-batch", retries=2, retry_delay_seconds=5)
+@task(
+    name="fetch-youtube-transcripts-batch",
+    retries=2,
+    retry_delay_seconds=5,
+)
 async def fetch_transcripts_batch(
-    items: list[tuple[str, VideoMetadata]], fetcher: TranscriptFetcher
+    items: list[tuple[str, VideoMetadata]],
 ) -> list[_TranscribedItem]:
     """Fetch every video's transcript in ONE bulk ``fetch_many`` call.
 
+    Constructs the ``GeminiTranscriptFetcher`` HERE (inside the task body) instead of
+    receiving it as an argument, so the genai-client-holding, unpicklable fetcher is
+    never a task input and Prefect's default cache policy can hash the inputs cleanly.
     Issues a SINGLE ``fetcher.fetch_many([url for url, _ in items])`` — the bulk
     transcript fetch shared by both pipelines (NO per-video re-fetch). Zips the
     transcripts back onto their ``(url, metadata)`` and returns only the slots whose
-    transcript is non-``None``; a ``None`` slot is skipped silently because the chain
-    wrapper has already emitted the user-facing WARNING. Network → ``retries=2`` (the
-    whole batch retries on a batch-WIDE failure; the bulk fetch already gives per-slot
-    resilience, so we add no extra per-transcript retry).
+    transcript is non-``None``; a ``None`` slot is logged at WARNING (naming the video)
+    and skipped — the user-facing signal the pipelines rely on. Network → ``retries=2``
+    (the whole batch retries on a batch-WIDE failure; the bulk fetch already gives
+    per-slot resilience, so we add no extra per-transcript retry).
     """
 
     if not items:
         return []
 
+    fetcher = GeminiTranscriptFetcher()
     video_urls = [url for url, _ in items]
     transcripts = await fetcher.fetch_many(video_urls)
 
     resolved: list[_TranscribedItem] = []
     for (url, metadata), transcript in zip(items, transcripts, strict=True):
         if transcript is None:
-            # Chain wrapper has already emitted the user-facing WARNING.
+            logger.warning("No transcript for %s; skipping", url)
             continue
         resolved.append((url, metadata, transcript))
     return resolved
@@ -127,14 +105,14 @@ async def load_batch(docs: list[Document]) -> list[Document]:
 async def _bulk_build_and_load(
     items: list[tuple[str, VideoMetadata]],
     user_id: PydanticObjectId,
-    fetcher: TranscriptFetcher,
 ) -> list[Document]:
     """Shared core: "(url, metadata) list → ONE bulk fetch → build → load".
 
     The single tail both YouTube pipelines run, called ONCE per feed/batch:
 
     1. ``fetch_transcripts_batch`` — the SINGLE bulk ``fetch_many`` over all URLs
-       (drops ``None``-transcript slots silently).
+       (constructs the Gemini fetcher inside the task; drops ``None``-transcript slots
+       with a per-slot WARNING).
     2. ``build_batch`` — ``build_document`` per resolved slot.
     3. ``load_batch`` — ``load_video_document`` per Document, isolated per element.
 
@@ -142,6 +120,6 @@ async def _bulk_build_and_load(
     this core never fetches metadata itself, so neither metadata source regresses.
     """
 
-    resolved = await fetch_transcripts_batch(items, fetcher)
+    resolved = await fetch_transcripts_batch(items)
     documents = await build_batch(resolved, user_id)
     return await load_batch(documents)

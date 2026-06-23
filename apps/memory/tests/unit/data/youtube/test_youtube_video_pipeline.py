@@ -7,6 +7,10 @@ sub-flow's body is demoted to the plain async core ``_ingest_youtube_video_one``
 ``ingest_youtube_video`` remains a THIN @flow wrapper used ONLY by the MCP URL router.
 The BATCH path calls the shared core directly — it MUST NOT invoke the thin wrapper,
 and it must issue EXACTLY ONE bulk transcript fetch (the #080 regression fix).
+
+The transcript backend is constructed inside the shared core's ``fetch_transcripts_batch``
+task, so the batch tests PATCH ``youtube_ingest.GeminiTranscriptFetcher`` with a fake
+rather than injecting a fetcher (the flows no longer carry a ``fetcher`` arg).
 """
 
 from __future__ import annotations
@@ -58,7 +62,11 @@ def _make_doc(video_id: str) -> Document:
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` recording every ``fetch_many`` call."""
+    """Programmable stand-in for ``GeminiTranscriptFetcher``.
+
+    Same ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
+    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
+    """
 
     def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
         self._results_per_id = results_per_id
@@ -79,6 +87,16 @@ class _FakeFetcher:
         return results
 
 
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
+    """Patch the construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+
+    Patching the class (not an injected arg) sidesteps the ``GOOGLE_API_KEY`` guard in
+    ``GeminiTranscriptFetcher.__init__`` — no key/network needed.
+    """
+
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
+
+
 class TestTaskAndFlowMetadata:
     """Per-row tasks are gone; the flow names are the stable seams."""
 
@@ -92,11 +110,17 @@ class TestTaskAndFlowMetadata:
         assert not hasattr(video_pipeline, "fetch_video_task")
         assert not hasattr(video_pipeline, "load_video_task")
 
-    def test_batch_flow_signature_unchanged(self) -> None:
+    def test_batch_flow_signature_has_no_fetcher(self) -> None:
         import inspect
 
         params = list(inspect.signature(ingest_youtube_video_batch).parameters)
-        assert params == ["video_urls", "user_id", "fetcher"]
+        assert params == ["video_urls", "user_id"]
+
+    def test_thin_flow_signature_has_no_fetcher(self) -> None:
+        import inspect
+
+        params = list(inspect.signature(ingest_youtube_video).parameters)
+        assert params == ["video_url", "user_id"]
 
 
 class TestIngestOne:
@@ -121,25 +145,21 @@ class TestIngestOne:
             "_bulk_build_and_load",
             mocker.AsyncMock(return_value=[doc]),
         )
-        fake = _FakeFetcher({})
 
-        result = await _ingest_youtube_video_one(
-            _canonical(VIDEO_IDS[0]), user_id, fake
-        )
+        result = await _ingest_youtube_video_one(_canonical(VIDEO_IDS[0]), user_id)
 
         assert result is doc
         # oEmbed metadata IS the direct-video metadata source.
         oembed_mock.assert_awaited_once_with(_canonical(VIDEO_IDS[0]))
         # The core is called with a SINGLE-item list carrying the oEmbed metadata.
         core_mock.assert_awaited_once()
-        items_arg, user_arg, fetcher_arg = core_mock.await_args.args
+        items_arg, user_arg = core_mock.await_args.args
         assert len(items_arg) == 1
         url, metadata = items_arg[0]
         assert url == _canonical(VIDEO_IDS[0])
         assert metadata.title == "T"
         assert metadata.channel == "C"
         assert user_arg == user_id
-        assert fetcher_arg is fake
 
     async def test_unresolvable_url_returns_none_without_core_call(
         self, mocker
@@ -149,7 +169,7 @@ class TestIngestOne:
         )
 
         result = await _ingest_youtube_video_one(
-            "https://example.com/not-youtube", PydanticObjectId(), _FakeFetcher({})
+            "https://example.com/not-youtube", PydanticObjectId()
         )
 
         assert result is None
@@ -168,7 +188,7 @@ class TestIngestOne:
         )
 
         result = await _ingest_youtube_video_one(
-            _canonical(VIDEO_IDS[0]), PydanticObjectId(), _FakeFetcher({})
+            _canonical(VIDEO_IDS[0]), PydanticObjectId()
         )
 
         assert result is None
@@ -185,14 +205,11 @@ class TestThinFlow:
             mocker.AsyncMock(return_value=doc),
         )
         user_id = PydanticObjectId()
-        fake = _FakeFetcher({})
 
-        result = await ingest_youtube_video.fn(
-            _canonical(VIDEO_IDS[0]), user_id, fetcher=fake
-        )
+        result = await ingest_youtube_video.fn(_canonical(VIDEO_IDS[0]), user_id)
 
         assert result is doc
-        core_mock.assert_awaited_once_with(_canonical(VIDEO_IDS[0]), user_id, fake)
+        core_mock.assert_awaited_once_with(_canonical(VIDEO_IDS[0]), user_id)
 
 
 class TestIngestYoutubeVideoBatch:
@@ -214,9 +231,10 @@ class TestIngestYoutubeVideoBatch:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
         fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
         result = await ingest_youtube_video_batch.fn(
-            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId(), fetcher=fake
+            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId()
         )
 
         # Exactly ONE bulk transcript fetch with all 5 canonical URLs.
@@ -244,9 +262,10 @@ class TestIngestYoutubeVideoBatch:
             video_pipeline, "ingest_youtube_video", mocker.AsyncMock()
         )
         fake = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
         await ingest_youtube_video_batch.fn(
-            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId(), fetcher=fake
+            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId()
         )
 
         # No per-item sub-flow runs: the batch path never calls the thin wrapper.
@@ -264,13 +283,14 @@ class TestIngestYoutubeVideoBatch:
             "load_video_document",
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
-        # The middle of 5 videos has no transcript (chain returns None).
+        # The middle of 5 videos has no transcript (fetch returns None).
         results = {vid: _make_transcript(vid) for vid in VIDEO_IDS}
         results[VIDEO_IDS[2]] = None
         fake = _FakeFetcher(results)
+        _patch_fetcher(mocker, fake)
 
         result = await ingest_youtube_video_batch.fn(
-            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId(), fetcher=fake
+            [_canonical(vid) for vid in VIDEO_IDS], PydanticObjectId()
         )
 
         # Still ONE bulk fetch; the missing slot is skipped, the other 4 persist.
