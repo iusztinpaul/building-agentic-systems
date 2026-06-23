@@ -37,9 +37,9 @@ sources:
     batch_size: 50
     concurrency: 25
   # YouTube
-  - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA
-    type: youtube_rss
-  - uri: https://www.youtube.com/watch?v=3u6M_CdAeWw
+  # - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA
+  #   type: youtube_rss
+  - uri: https://www.youtube.com/watch?v=Sntj4HmuykI
     type: youtube_video
   # Arbitrary URLs (blogs, reddit threads, news, profiles)
   - uri: https://www.reddit.com/r/LLMDevs/comments/1ts3qc3/a_year_building_agent_memory_on_knowledge_graphs/
