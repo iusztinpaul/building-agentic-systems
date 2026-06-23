@@ -134,8 +134,6 @@ async def _ingest_arxiv_dataset_entry(
 
 
 # Registry: HuggingFace dataset id → ETL handler.
-# Add a new dataset by registering its id alongside a handler that maps
-# the source entry to the right ingestion flow.
 _HUGGINGFACE_DATASET_HANDLERS: dict[
     str,
     Callable[[HuggingFaceDatasetSource, PydanticObjectId], Awaitable[list[Document]]],
@@ -599,10 +597,6 @@ async def data_etl_orchestrator(
                 return DataFanOutStats(shards_total=0)
 
             typed_shards = _partition_sources_by_platform(sources)
-            # Serialize each shard's entries to JSON-safe dicts so they round-trip
-            # through the ``run_deployment`` flow-run parameters. The worker re-parses
-            # to ``SourceEntry`` (the ``type`` discriminator + HF ``offset``/
-            # ``max_samples`` window coordinates round-trip cleanly).
             shards = [[e.model_dump() for e in shard] for shard in typed_shards]
             logger.info(
                 "data fan-out: grouped %d source(s) into %d Platform/Window shard(s)",
