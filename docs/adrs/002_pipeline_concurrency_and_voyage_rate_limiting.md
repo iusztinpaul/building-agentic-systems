@@ -271,6 +271,92 @@ shared Voyage budget.
      `arxiv_id → source_uri`), which makes disjoint windows — and any accidental
      overlap — safe to re-run (upsert, never double-insert).
 
+   **Amendment (#078–#082 — batch-grain ETL task topology for the leaf pipelines).**
+   The §3 fan-out so far governs the FLOW-level topology (orchestrator → worker →
+   per-source batch flow). This amendment refines the TASK grain *inside* a worker: each
+   leaf batch ETL flow's Prefect `@task`s now run at **Batch** grain reflecting the ETL
+   phases, NOT once per row. The flow-level topology, the fan-out axis, the deployment
+   count, the gather-failure-isolation primitive, the GCL, and admission control are all
+   unchanged — so Status stays `Accepted`; this is a finer-grained expression of the same
+   topology decision, not a new decision and not a supersession. Context:
+   `tracker/feature-batch-etl-task-topology-plan.md`.
+
+   - **Task granularity = Batch, not Document.** Each leaf flow runs ETL-phase `@task`s
+     over a **Batch** (HuggingFace `batch_size`-chunk / one feed's entries / the whole
+     handed-in URL list), never per row. The per-row `extract_document` /
+     `fetch_paper_content` / `load_document` `@task` calls (and the per-doc
+     `_process_document`) are GONE. Concrete payoff: a 1000-doc arXiv **Window** worker
+     drops from ~1000 task runs (`extract-arxiv-document` + `load-arxiv-document` per row,
+     × `fetch_content`) to a few TENS — the explosion in the owner's Prefect screenshot.
+
+   - **Pragmatic E/T/L (Load is ALWAYS its own task).** ETL vocabulary at batch grain;
+     the task COUNT follows genuinely-separable phases:
+     - **Load** is ALWAYS a separate `load_batch` task (`load-{source}-batch`, `retries=1`).
+     - **Extract+Transform FUSE** into one `extract_batch` (`retries=2`) where a single
+       scrape yields the Document: web (`extract-web-batch`), substack-article
+       (`extract-substack-article-batch`), youtube-video metadata path.
+     - A separate `transform_batch` (`retries=0`) exists ONLY where transform is a genuine
+       pure map: arXiv dict→Document (`transform-arxiv-batch`) and substack-RSS
+       feed-entry→Document (`transform-substack-rss-batch`). This asymmetry is intentional
+       (the scrape pipelines have nothing to map; arXiv/substack-RSS do).
+     - An optional network `enrich_batch` (`enrich-arxiv-batch`, `retries=2`) runs ONLY
+       when arXiv `fetch_content` is set (paper-content fetch).
+     - The streamed READ (arXiv `fetch_dataset_batches`) stays the FLOW LOOP, not a task —
+       it's a generator the flow iterates per chunk.
+
+   - **Per-item sub-flow collapse + thin MCP flow.** The three direct-link pipelines
+     demote their bodies to plain async core functions `_ingest_web_url_one` /
+     `_ingest_substack_article_one` / `_ingest_youtube_video_one`. The BATCH path calls
+     the core directly per element — NO per-item sub-flow run. A 1-line `@flow` wrapper
+     (`ingest_web_url` / `ingest_substack_article` / `ingest_youtube_video`, the
+     `ingest-{x}-etl` flows) is RETAINED solely for the MCP `ingest_url` **URL router**'s
+     single-URL path, so MCP single-URL ingest still gets its own Prefect flow run + Opik
+     trace. So under a batch worker there are no `ingest-web-url-etl` /
+     `ingest-substack-article-etl` / `ingest-youtube-video-etl` child runs.
+
+   - **Per-element isolation inside the task + the idempotency invariant.** Per-element
+     isolation lives INSIDE each batch task via the shared
+     `tree.data.batch.gather_isolated` helper (one `asyncio.gather(return_exceptions=True)`
+     — introduced once #079 crossed the 4+ call-site DRY threshold #078 named; #078 had
+     inlined it). A bad-data element is logged at WARNING + SKIPPED; the task returns the
+     successful subset + a per-batch failure COUNT, never sinking the batch on one element.
+     The task hard-fails ONLY on a batch-WIDE infra failure (raised outside the gather) →
+     Prefect retries the WHOLE batch, which is SAFE because every data-layer load dedups on
+     `(user_id, source_uri)` (upsert, never double-insert).
+
+   - **Retry relocation.** Batch-task retries gate batch-WIDE infra: fetch/extract
+     `retries=2`, load `retries=1`, pure transform `retries=0`. Per-element transient FETCH
+     retries live in the FETCH LAYER (existing httpx retry behavior / the transcript
+     chain's per-slot fallback), not the batch task — so collapsing per-row tasks does NOT
+     regress network-fetch retry behavior.
+
+   - **RSS keeps feed-obtain + shares only the build/load tail (no re-fetch).**
+     - **substack-RSS** builds from feed-EMBEDDED content (`fetch_feed_task` →
+       `transform_batch` over feed entries → `load_batch`): 1 feed fetch → N docs, NO
+       per-article re-scrape. It shares ONLY the LOAD with substack-article (which keeps
+       its own scrape `extract_batch`); RSS is NOT unified onto the article scrape path.
+     - **youtube-RSS + youtube-video** share the bulk-transcript-fetch + `build_batch` +
+       `load_batch` tail (the `_bulk_build_and_load` core in `youtube_ingest.py`): ONE bulk
+       `fetcher.fetch_many(all_urls)` per feed/batch (the #080 fix — previously per-video
+       `fetch_many([url])` inside per-URL sub-flows). The metadata SOURCE stays distinct:
+       oEmbed per video (direct) vs `feed_entry_to_metadata` (RSS).
+
+   - **Result persistence stays off.** Prefect-3 result persistence is OFF by default (the
+     repo sets no `persist_result` / `result_storage` / `cache_policy` /
+     `PREFECT_RESULTS_PERSIST_BY_DEFAULT`), so the side-effecting load/extract tasks persist
+     no results — and none was added (no cache policy is introduced).
+
+   - **Unchanged invariants (so Status stays `Accepted`).** The flow-level topology
+     (orchestrator → worker → per-source batch flow), the two-deployments-per-pipeline +
+     depth-1/no-recursion dispatch (§3 amendments #066/#070–#074), the group-by-platform
+     data fan-out + HF offset-windowing (§3 amendment #070–#074), the
+     `asyncio.gather(return_exceptions=True)` failure-isolation, NO trailing index for the
+     data pipeline, the `voyage-embeddings` GCL (§1) + `serve(limit=runner_global_limit)`
+     admission control (§4), and the batch-flow Opik trace structure (per-batch-PHASE spans
+     via the existing `span(...)`, NOT per-doc; trace-header forwarding preserved) are ALL
+     unchanged. The observability "win" is in Prefect TASK runs only — the batch flows
+     already owned ONE Opik trace with no per-doc spans, so Opik structure does not change.
+
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
    budget can feed.
