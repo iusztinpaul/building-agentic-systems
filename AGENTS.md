@@ -5,6 +5,7 @@ A personal assistant rooted in a knowledge-graph memory, powered by ontologies, 
 # Key Principles You Will Respect All Over Your Work
 
 - Always prioritize removing instructions over adding more.
+- Whenever you add a new rule within the memory (such as AGENTS.md), resources or skills, support it with a clear, concise explanation, plus a set of good and bad examples. Good examples: "a 200-token chunk size", "sub-100ms latency". Bad examples: "a powerful architecture", "a robust pipeline".
 
 # Key Components
 
@@ -93,6 +94,12 @@ We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run e
 - `make pre-commit` — pre-commit across the repo.
 - `make memory-build` — build the memory app.
 - `make help` — list all root targets.
+
+## Environments
+
+We have two environments: `local` (Docker-based, loads `.env`) and `production` (Cloud, loads `.env.production`)
+
+Run `make env-status` to see which environment is currently active. Switch between environments by running `make env-local` / `make env-production`.
 
 ## Infrastructure & external-service CLIs
 
