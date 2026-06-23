@@ -88,17 +88,16 @@ integration-tests-slow: # Run only the slow integration tests (vector-index conv
 # area passes on its own; only the mixed single-process run failed. Still
 # sequential (no `-n auto`) — the shared-DB cleanup fixture collides in parallel.
 
+INTEGRATION_AREAS = tests/integration/data tests/integration/memory tests/integration/mcp
+INTEGRATION_REST = tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
+
 integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot), one process per area. Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
-	uv run pytest tests/integration/data
-	uv run pytest tests/integration/memory
-	uv run pytest tests/integration/mcp
-	uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
+	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area || exit 1; done
+	uv run pytest $(INTEGRATION_REST)
 
 integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests, one process per area (see comment above).
-	uv run pytest tests/integration/data -m "not requires_mongot" --timeout=300
-	uv run pytest tests/integration/memory -m "not requires_mongot" --timeout=300
-	uv run pytest tests/integration/mcp -m "not requires_mongot" --timeout=300
-	uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp -m "not requires_mongot" --timeout=300
+	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area -m "not requires_mongot" --timeout=300 || exit 1; done
+	uv run pytest $(INTEGRATION_REST) -m "not requires_mongot" --timeout=300
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files
