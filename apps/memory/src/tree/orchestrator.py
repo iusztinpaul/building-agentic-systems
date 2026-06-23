@@ -43,8 +43,8 @@ from tree.observability import configure_opik
 # The free tier allows only 5 deployments per workspace, so the five flows below
 # are temporarily not served/deployed. Re-enable (uncomment these imports AND add
 # the matching ``_DeploymentSpec`` entries) once the Cloud plan is upgraded.
-# from tree.data.conversation_pipeline import ingest_conversation
-# from tree.data.file_pipeline import ingest_file
+# from tree.data.conversation.conversation_pipeline import ingest_conversation
+# from tree.data.file.file_pipeline import ingest_file
 # from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
 # from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 # from tree.memory.consolidation.dream import dream_consolidation_all_users

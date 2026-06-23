@@ -2,7 +2,7 @@
 
 Mirrors the layered structure of ``tree.data.substack.substack_article`` (extraction
 helpers + ``fetch_and_extract_*`` + ``load_*_document``) and the LATENT-promotion
-pattern from ``tree.data.file.load_file_document``.
+pattern from ``tree.data.file.file.load_file_document``.
 
 Persistence rules:
 

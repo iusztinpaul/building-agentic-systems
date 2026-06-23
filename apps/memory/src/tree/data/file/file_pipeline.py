@@ -9,7 +9,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.data.file import load_file_document
+from tree.data.file.file import load_file_document
 from tree.entities.documents import Document
 from tree.observability import (
     TAGS_INGESTION_BATCH,

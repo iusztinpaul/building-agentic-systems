@@ -10,7 +10,7 @@ from datetime import datetime
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.data.conversation import load_conversation_document
+from tree.data.conversation.conversation import load_conversation_document
 from tree.entities.documents import Document
 from tree.observability import (
     TAGS_INGESTION_BATCH,
@@ -67,7 +67,7 @@ async def ingest_conversation(
     """Ingest conversation text as a Document for ``user_id``.
 
     Forwards optional ``session_uri`` / ``session_started_at`` to
-    :func:`tree.data.conversation.load_conversation_document`. See that
+    :func:`tree.data.conversation.conversation.load_conversation_document`. See that
     function for the ``source_uri`` derivation rule and the
     ``metadata["session_started_at"]`` storage convention.
 
