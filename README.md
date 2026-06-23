@@ -152,7 +152,15 @@ Already signed up (or juggling several users)? Skip `signup` and just repoint th
 make memory-set-current-user USER_IDENTIFIER=paul    # or: USER_ID=<oid>
 ```
 
-**5. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the knowledge graph.
+**5. Serve the Prefect workers.** The pipelines are Prefect *deployments* — registered definitions that don't run until a worker is serving them, so start one before triggering anything below. The simplest path also reloads your local pipeline code on every (re)serve:
+
+```bash
+make memory-serve-workflows &   # in-process worker; (re)serve to load local code edits
+```
+
+(Step 2's Dockerized `prefect-worker` already serves every deployment from the in-container code, so if you're not iterating on pipeline code you can rely on that instead — just don't run both, or you'll get duplicate workers.)
+
+**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the knowledge graph.
 
 ```bash
 make memory-run-data-pipeline              # walks sources.sources in configs/default.yaml (Substack RSS + articles + arXiv + web) → documents
@@ -165,7 +173,7 @@ make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run
 
 `run-memory-pipeline-extraction` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `default.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
-**6. Drive memory with the agent.**
+**7. Drive memory with the agent.**
 
 ```bash
 # Interactive Ink REPL
