@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tree.config.app_config import app_config
-from tree.data.core import ingest as ingest_module
-from tree.data.core.ingest import _get_configured_substack_domains, ingest_url
+from tree.data import ingest as ingest_module
+from tree.data.ingest import _get_configured_substack_domains, ingest_url
 from beanie import PydanticObjectId
 
 from tree.entities.documents import Document, SourceType
