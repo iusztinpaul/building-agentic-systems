@@ -15,7 +15,8 @@ index — the data pipeline only produces ``documents``; there is NO index step:
   - ``HuggingFaceDatasetSource`` entries are dispatched per-entry through
     ``_HUGGINGFACE_DATASET_HANDLERS``, keyed on the dataset id (``uri``). Unknown
     dataset ids raise ``ValueError``.
-  - ``WebSource`` entries are dispatched in parallel via the ``ingest_url`` router.
+  - ``WebSource`` entries are batched into one ``ingest_web_url_batch`` — the
+    last/catch-all batched variant, ingested after the Substack/YouTube variants.
 
   A variant absent from the shard is skipped (with a scoped "skipped: no X entries"
   log line). NO partitioning, NO ``run_deployment``, NO orchestration — the worker is
@@ -65,7 +66,6 @@ from tree.config.app_config import (
     app_config,
 )
 from tree.config.settings import settings
-from tree.data.core.ingest import ingest_url
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     arxiv_window_entries,
     ingest_arxiv_dataset,
@@ -84,6 +84,9 @@ from tree.data.substack.substack_article_pipeline import (
 )
 from tree.data.substack.substack_rss_pipeline import (
     ingest_substack_rss_feed_batch,  # noqa: F401
+)
+from tree.data.web.web_pipeline import (
+    ingest_web_url_batch,  # noqa: F401
 )
 from tree.data.youtube.youtube_rss_pipeline import (
     ingest_youtube_rss_feed_batch,  # noqa: F401
@@ -177,9 +180,9 @@ class _BatchedVariant:
         return globals()[self.batch_fn_name]
 
 
-# Table for the four byte-identical batched variants. Order is load-bearing — it
+# Table for the five byte-identical batched variants. Order is load-bearing — it
 # fixes the ingestion order Substack RSS → Substack article → YouTube RSS → YouTube
-# video, and the order their log lines are emitted.
+# video → Web (last/catch-all), and the order their log lines are emitted.
 _BATCHED_VARIANTS: list[_BatchedVariant] = [
     _BatchedVariant(
         SubstackRssSource,
@@ -208,6 +211,13 @@ _BATCHED_VARIANTS: list[_BatchedVariant] = [
         "YouTube video",
         "URLs",
         "youtube_video",
+    ),
+    _BatchedVariant(
+        WebSource,
+        "ingest_web_url_batch",
+        "Web",
+        "URLs",
+        "web",
     ),
 ]
 
@@ -243,8 +253,9 @@ async def _ingest_sources(
 
     all_ingested: list[Document] = []
 
-    # --- Batched variants (Substack RSS/article, YouTube RSS/video) ---
-    # Ordering is preserved: Substack RSS → Substack article → YouTube RSS → YouTube video.
+    # --- Batched variants (Substack RSS/article, YouTube RSS/video, Web) ---
+    # Ordering is preserved: Substack RSS → Substack article → YouTube RSS →
+    # YouTube video → Web (last/catch-all).
     for variant in _BATCHED_VARIANTS:
         entries = [s for s in sources if isinstance(s, variant.source_type)]
         if entries:
@@ -288,19 +299,6 @@ async def _ingest_sources(
             "HuggingFace dataset pipeline skipped: no huggingface_dataset entries configured"
         )
 
-    # --- Generic web URLs (parallel dispatch via the URL router) ---
-    web_entries = [s for s in sources if isinstance(s, WebSource)]
-    if web_entries:
-        logger.info("Starting URL pipeline (dispatcher) with %d URLs", len(web_entries))
-        url_results = await asyncio.gather(
-            *[ingest_url(s.uri, user_id) for s in web_entries]
-        )
-        url_docs = [d for d in url_results if d is not None]
-        all_ingested.extend(url_docs)
-        logger.info("URL pipeline ingested %d documents", len(url_docs))
-    else:
-        logger.info("URL pipeline skipped: no web entries configured")
-
     logger.info("Source ingestion complete. Total ingested: %d", len(all_ingested))
 
     return all_ingested
@@ -322,8 +320,9 @@ async def data_etl_worker(
     Reuses the existing per-source-type batch logic: groups ``sources`` by
     discriminated-union variant and runs the existing batch sub-flow for each variant
     present in the shard (Substack RSS/article, YouTube RSS/video, HuggingFace dataset
-    with unknown-id ``ValueError``, web via ``ingest_url``). A variant absent from the
-    shard is skipped. This is PURE ingestion: NO partitioning, NO ``run_deployment``,
+    with unknown-id ``ValueError``, web via ``ingest_web_url_batch`` (last)). A variant
+    absent from the shard is skipped. This is PURE ingestion: NO partitioning, NO
+    ``run_deployment``,
     NO orchestration, NO trailing index.
 
     ``sources`` arrives serialized (``list[dict]``) when dispatched by the

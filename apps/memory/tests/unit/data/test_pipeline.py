@@ -79,7 +79,7 @@ class TestDataWorker:
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
-        mock_ingest_url = _make_mock_pipeline(mocker, "ingest_url")
+        mock_web = _make_mock_pipeline(mocker, "ingest_web_url_batch")
 
         doc_a, doc_b, doc_c, doc_d = (
             MagicMock(),
@@ -90,7 +90,7 @@ class TestDataWorker:
         mock_rss.return_value = [doc_a]
         mock_articles.return_value = [doc_b]
         mock_arxiv.return_value = [doc_c]
-        mock_ingest_url.return_value = doc_d
+        mock_web.return_value = [doc_d]
 
         sources: list[SourceEntry] = [
             SubstackRssSource(uri="https://example.com/feed"),
@@ -114,8 +114,8 @@ class TestDataWorker:
         mock_arxiv.assert_awaited_once_with(
             user_id=_USER_ID, max_samples=5, fetch_content=True, offset=None
         )
-        mock_ingest_url.assert_awaited_once_with(
-            "https://martinfowler.com/articles/microservices.html", _USER_ID
+        mock_web.assert_awaited_once_with(
+            ["https://martinfowler.com/articles/microservices.html"], _USER_ID
         )
 
     async def test_skips_rss_when_no_substack_rss_entries(self, mocker) -> None:
@@ -200,56 +200,87 @@ class TestDataWorker:
 
         mock_init.assert_awaited_once()
 
-    async def test_skips_web_when_no_web_entries(self, mocker) -> None:
+    async def test_skips_web_when_no_web_entries(self, mocker, caplog) -> None:
+        import logging
+
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
-        mock_ingest_url = _make_mock_pipeline(mocker, "ingest_url")
+        mock_web = _make_mock_pipeline(mocker, "ingest_web_url_batch")
 
         sources: list[SourceEntry] = [
             SubstackRssSource(uri="https://example.com/feed"),
         ]
 
-        await data_etl_worker(_USER_ID, sources)
+        with caplog.at_level(logging.INFO, logger="tree.data.pipeline"):
+            await data_etl_worker(_USER_ID, sources)
 
-        mock_ingest_url.assert_not_awaited()
+        mock_web.assert_not_awaited()
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Web pipeline skipped: no web entries configured" in m for m in messages
+        )
 
-    async def test_dispatches_each_web_entry_via_ingest_url(self, mocker) -> None:
+    async def test_batches_web_entries_into_single_call(self, mocker) -> None:
+        # Multiple web entries produce ONE call to the batch flow with all URLs as
+        # a single list — not one per-URL call (mirrors the substack-article batch).
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
-        mock_ingest_url = _make_mock_pipeline(mocker, "ingest_url")
+        mock_web = _make_mock_pipeline(mocker, "ingest_web_url_batch")
 
-        substack_doc, web_doc = MagicMock(), MagicMock()
-        mock_ingest_url.side_effect = [substack_doc, web_doc]
+        web_doc = MagicMock()
+        mock_web.return_value = [web_doc]
 
-        sources: list[SourceEntry] = [
-            WebSource(uri="https://www.decodingai.com/p/example"),
-            WebSource(uri="https://martinfowler.com/articles/microservices.html"),
-        ]
-
-        result = await data_etl_worker(_USER_ID, sources)
-
-        assert mock_ingest_url.await_count == 2
-        awaited_urls = [call.args[0] for call in mock_ingest_url.await_args_list]
-        assert awaited_urls == [
+        urls = [
             "https://www.decodingai.com/p/example",
             "https://martinfowler.com/articles/microservices.html",
         ]
-        assert substack_doc in result
+        sources: list[SourceEntry] = [WebSource(uri=uri) for uri in urls]
+
+        result = await data_etl_worker(_USER_ID, sources)
+
+        mock_web.assert_awaited_once_with(urls, _USER_ID)
         assert web_doc in result
 
-    async def test_filters_none_results_from_web_dispatcher(self, mocker) -> None:
+    async def test_web_is_dispatched_after_youtube_video(self, mocker) -> None:
+        # Web is the LAST batched variant: its batch call must be awaited AFTER the
+        # YouTube-video batch call (ingestion + log order preserved).
         mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
-        mock_ingest_url = _make_mock_pipeline(mocker, "ingest_url")
+        _make_mock_pipeline(mocker, "ingest_youtube_rss_feed_batch")
+        manager = mocker.MagicMock()
+        mock_yt_video = _make_mock_pipeline(mocker, "ingest_youtube_video_batch")
+        mock_web = _make_mock_pipeline(mocker, "ingest_web_url_batch")
+        manager.attach_mock(mock_yt_video, "youtube_video")
+        manager.attach_mock(mock_web, "web")
+
+        sources: list[SourceEntry] = [
+            WebSource(uri="https://martinfowler.com/articles/microservices.html"),
+            YouTubeVideoSource(uri="https://youtu.be/eYaWxljC4sA"),
+        ]
+
+        await data_etl_worker(_USER_ID, sources)
+
+        ordered_calls = [c[0] for c in manager.mock_calls]
+        assert ordered_calls == ["youtube_video", "web"]
+
+    async def test_returns_batch_docs_without_double_filtering(self, mocker) -> None:
+        # ``ingest_web_url_batch`` already filters ``None`` internally and returns a
+        # ``list[Document]``; the worker just extends with that list — it must NOT
+        # re-filter or otherwise transform the returned docs.
+        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
+        _make_mock_pipeline(mocker, "ingest_substack_article_batch")
+        _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
+        mock_web = _make_mock_pipeline(mocker, "ingest_web_url_batch")
 
         kept = MagicMock()
-        mock_ingest_url.side_effect = [None, kept]
+        mock_web.return_value = [kept]
 
         sources: list[SourceEntry] = [
             WebSource(uri="https://dup.example/post"),
@@ -258,8 +289,7 @@ class TestDataWorker:
 
         result = await data_etl_worker(_USER_ID, sources)
 
-        assert kept in result
-        assert None not in result
+        assert result == [kept]
 
     async def test_groups_substack_rss_entries_into_single_batch_call(
         self, mocker
