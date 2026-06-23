@@ -74,35 +74,108 @@ def arxiv_window_entries(
     return windows
 
 
-@task(name="extract-arxiv-document")
-def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document | None:
-    return _extract_document(raw_entry, user_id)
+# --- ETL-phase BATCH tasks --------------------------------------------------
+# One task per ETL phase, each operating over ONE ``batch_size``-chunk (the list
+# of raw dicts ``fetch_dataset_batches`` yields) instead of per row. This keeps a
+# window worker at a few TENS of Prefect task runs (a small constant per chunk)
+# rather than ~1000 (one per row).
+#
+# Result persistence is OFF by default in Prefect 3.6 (the repo sets no
+# ``persist_result`` / ``result_storage`` / ``cache_policy`` and no
+# ``PREFECT_RESULTS_PERSIST_BY_DEFAULT``), so these side-effecting Extract/Load
+# tasks already do NOT persist results — matching every other data-layer task. We
+# add no ``persist_result`` flag (it would only matter alongside a ``cache_policy``,
+# which we do not introduce).
+#
+# Per-element isolation (uniform across enrich + load): per-element / bad-data
+# failures are caught by ``asyncio.gather(return_exceptions=True)``, logged at
+# WARNING, and the element is skipped — the task returns the successful subset and
+# a per-batch failure count. A task hard-fails (so Prefect retries the WHOLE batch)
+# only on a batch-WIDE failure, which is SAFE because ``load_document`` dedups on
+# ``(user_id, source_uri)`` so a retried batch never double-inserts.
 
 
-@task(name="fetch-arxiv-paper-content", retries=1, retry_delay_seconds=5)
-async def fetch_paper_content(doc: Document) -> Document:
-    content = await _fetch_paper_content(doc.source_uri)
-    if content:
-        doc.content = content
-    return doc
+@task(name="transform-arxiv-batch", retries=0)
+async def transform_batch(
+    batch: list[dict], user_id: PydanticObjectId
+) -> list[Document]:
+    """Pure map ``list[dict] -> list[Document]`` over one chunk.
+
+    Runs the pure ``arxiv_dataset.extract_document`` per raw entry and drops the
+    ``None`` results (entries with no id, already warned by the core fn). No
+    network, no DB → ``retries=0``.
+    """
+
+    documents = [_extract_document(entry, user_id) for entry in batch]
+    return [doc for doc in documents if doc is not None]
 
 
-@task(name="load-arxiv-document", retries=1, retry_delay_seconds=2)
-async def load_document(doc: Document) -> Document | None:
-    return await _load_document(doc)
+@task(name="enrich-arxiv-batch", retries=2, retry_delay_seconds=5)
+async def enrich_batch(docs: list[Document], concurrency: int) -> list[Document]:
+    """Fetch paper HTML per element under ``asyncio.Semaphore(concurrency)``.
+
+    Network Extract — only invoked when ``fetch_content`` is true. Each element's
+    fetch runs under the existing concurrency bound; a per-element fetch failure is
+    logged + the doc passes through with empty content (NEVER sinks the batch).
+    Every input doc is returned (enriched in place where the fetch succeeded).
+    """
+
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _enrich(doc: Document) -> Document:
+        async with semaphore:
+            content = await _fetch_paper_content(doc.source_uri)
+        if content:
+            doc.content = content
+        return doc
+
+    results = await asyncio.gather(
+        *[_enrich(doc) for doc in docs], return_exceptions=True
+    )
+
+    enriched: list[Document] = []
+    for doc, result in zip(docs, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to fetch content for %s; passing through empty",
+                doc.source_uri,
+                exc_info=result,
+            )
+            enriched.append(doc)
+        else:
+            enriched.append(result)
+    return enriched
 
 
-async def _process_document(
-    doc: Document,
-    do_fetch_content: bool,
-    semaphore: asyncio.Semaphore,
-) -> Document | None:
-    """Process a single document: optionally fetch content, then load to DB."""
+@task(name="load-arxiv-batch", retries=1, retry_delay_seconds=2)
+async def load_batch(docs: list[Document]) -> list[Document]:
+    """Dedup + persist one chunk via a SINGLE ``gather(return_exceptions=True)``.
 
-    async with semaphore:
-        if do_fetch_content:
-            doc = await fetch_paper_content(doc)
-        return await load_document(doc)
+    Awaits the pure ``arxiv_dataset.load_document`` per element and returns the
+    successful, non-``None`` subset (duplicates drop out as ``None``). A per-element
+    load failure is logged at WARNING + skipped, NOT propagated — so one bad row
+    never sinks the chunk. Retried whole-batch on a batch-WIDE infra failure
+    (``retries=1``), safe via the ``(user_id, source_uri)`` dedup.
+    """
+
+    results = await asyncio.gather(
+        *[_load_document(doc) for doc in docs], return_exceptions=True
+    )
+
+    ingested: list[Document] = []
+    failures = 0
+    for doc, result in zip(docs, results, strict=True):
+        if isinstance(result, BaseException):
+            failures += 1
+            logger.warning(
+                "Failed to load %s; skipping", doc.source_uri, exc_info=result
+            )
+        elif result is not None:
+            ingested.append(result)
+
+    if failures:
+        logger.warning("load_batch: %d/%d elements failed", failures, len(docs))
+    return ingested
 
 
 def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
@@ -167,20 +240,17 @@ async def ingest_arxiv_dataset(
         settings.mongo.mongo_initdb_database,
     )
 
-    semaphore = asyncio.Semaphore(concurrency)
     ingested: list[Document] = []
 
+    # Extract stays the flow-level loop: ``fetch_dataset_batches`` is a streamed
+    # generator (NOT a task). Per yielded chunk we run the batch-grain ETL tasks.
     for batch in _fetch_dataset_batches(max_samples, batch_size, offset=offset):
-        documents = [extract_document(entry, user_id) for entry in batch]
+        documents = await transform_batch(batch, user_id)
 
-        results = await asyncio.gather(
-            *[
-                _process_document(doc, fetch_content, semaphore)
-                for doc in documents
-                if doc is not None
-            ]
-        )
-        ingested.extend(r for r in results if r is not None)
+        if fetch_content:
+            documents = await enrich_batch(documents, concurrency)
+
+        ingested.extend(await load_batch(documents))
 
         logger.info("Batch processed: %d ingested so far", len(ingested))
 
