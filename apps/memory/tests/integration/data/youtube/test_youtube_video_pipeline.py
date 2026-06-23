@@ -4,7 +4,10 @@ Persists real Documents against the local MongoDB fixture (`mongo_client`
 from `tests/integration/conftest.py`). Mocks:
 
 - The transcript fetcher (no `youtube-transcript-api`, no Gemini calls), injected
-  via the flow's `fetcher=` kwarg.
+  by patching `tree.data.youtube.youtube_ingest.GeminiTranscriptFetcher` (the
+  construction point inside the shared bulk core) — the flows no longer carry a
+  `fetcher` arg. Patching the class is REQUIRED because
+  `GeminiTranscriptFetcher.__init__` raises without `GOOGLE_API_KEY`.
 - The oEmbed HTTP call (no live network to youtube.com).
 
 Mirrors the patterns in `tests/integration/data/substack/test_substack_rss_pipeline.py`.
@@ -17,6 +20,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
@@ -52,10 +56,12 @@ def _make_transcript(
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` recording every ``fetch_many`` call.
+    """Programmable stand-in for ``GeminiTranscriptFetcher`` recording every call.
 
-    Returns one element per input slot, mirroring the real chain contract, by
-    substring-matching each URL against the supplied ``results_per_id`` map.
+    Same ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
+    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
+    Returns one element per input slot by substring-matching each URL against the
+    supplied ``results_per_id`` map.
     """
 
     def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
@@ -75,6 +81,16 @@ class _FakeFetcher:
                     break
             results.append(match)
         return results
+
+
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
+    """Patch the construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+
+    Patching the class (not an injected arg) sidesteps the ``GOOGLE_API_KEY`` guard in
+    ``GeminiTranscriptFetcher.__init__`` — no key/network needed.
+    """
+
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
 
 
 def _patch_oembed(mocker, payload: dict | None = None, *, status_code: int = 200):
@@ -115,11 +131,10 @@ class TestIngestYoutubeVideoFlow:
     ) -> None:
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="hello transcript")})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(
-                CANONICAL_URL, PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_video(CANONICAL_URL, PydanticObjectId())
 
         assert result is not None
         assert result.source_type == SourceType.YOUTUBE
@@ -135,11 +150,12 @@ class TestIngestYoutubeVideoFlow:
     async def test_idempotent_on_rerun(self, mongo_client, mocker) -> None:
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: _make_transcript()})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
             user_id = PydanticObjectId()
-            first = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
-            second = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
+            first = await ingest_youtube_video(CANONICAL_URL, user_id)
+            second = await ingest_youtube_video(CANONICAL_URL, user_id)
 
         assert first is not None
         assert second is None  # duplicate skipped
@@ -152,11 +168,12 @@ class TestIngestYoutubeVideoFlow:
     ) -> None:
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: _make_transcript()})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
             user_id = PydanticObjectId()
-            first = await ingest_youtube_video(SHORT_URL, user_id, fetcher=fake)
-            second = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
+            first = await ingest_youtube_video(SHORT_URL, user_id)
+            second = await ingest_youtube_video(CANONICAL_URL, user_id)
 
         assert first is not None
         # Persists with canonical URL regardless of pasted shape.
@@ -179,9 +196,10 @@ class TestIngestYoutubeVideoFlow:
 
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="transcript text")})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(CANONICAL_URL, user_id, fetcher=fake)
+            result = await ingest_youtube_video(CANONICAL_URL, user_id)
 
         assert result is not None
         assert result.id == latent.id
@@ -195,24 +213,24 @@ class TestIngestYoutubeVideoFlow:
     async def test_missing_transcript_skips_quietly(
         self, mongo_client, mocker, caplog
     ) -> None:
-        # oEmbed should not even be called when the chain returned None,
+        # oEmbed should not even be called when the bulk fetch returned None,
         # but patch defensively so a regression doesn't hit the network.
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: None})
+        _patch_fetcher(mocker, fake)
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(
-                CANONICAL_URL, PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_video(CANONICAL_URL, PydanticObjectId())
 
         assert result is None
 
         rows = await Document.find().to_list()
         assert rows == []
 
-        # Spec: pipeline emits no redundant WARNING — the chain owns it.
+        # Spec: pipeline emits no redundant WARNING — the bulk core owns the
+        # "No transcript for <url>; skipping" warning in fetch_transcripts_batch.
         pipeline_warnings = [
             r
             for r in caplog.records
@@ -227,11 +245,10 @@ class TestIngestYoutubeVideoFlow:
         # transcript-derived title fallback.
         _patch_oembed(mocker, payload={}, status_code=404)
         fake = _FakeFetcher({VIDEO_ID: _make_transcript(plain_text="transcript only")})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video(
-                CANONICAL_URL, PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_video(CANONICAL_URL, PydanticObjectId())
 
         assert result is not None
         assert result.title == f"YouTube video {VIDEO_ID}"
@@ -259,10 +276,11 @@ class TestIngestYoutubeVideoBatchFlow:
                 "AAAaaaBBBcc": _make_transcript(video_id="AAAaaaBBBcc"),
             }
         )
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
-                video_urls=[url_a, url_b], user_id=PydanticObjectId(), fetcher=fake
+                video_urls=[url_a, url_b], user_id=PydanticObjectId()
             )
 
         assert len(result) == 2
@@ -287,15 +305,15 @@ class TestIngestYoutubeVideoBatchFlow:
         fake = _FakeFetcher(
             {
                 "eYaWxljC4sA": _make_transcript(video_id="eYaWxljC4sA"),
-                "AAAaaaBBBcc": None,  # chain exhausted for the second slot
+                "AAAaaaBBBcc": None,  # bulk fetch exhausted for the second slot
             }
         )
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video_batch(
                 video_urls=[url_good, url_bad],
                 user_id=PydanticObjectId(),
-                fetcher=fake,
             )
 
         assert len(result) == 1

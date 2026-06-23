@@ -5,7 +5,10 @@ from `tests/integration/conftest.py`). Mocks:
 
 - `httpx.AsyncClient` and `feedparser.parse` for the feed fetch.
 - The `TranscriptFetcher` (no `youtube-transcript-api`, no Gemini calls) —
-  injected via the flow's `fetcher=` kwarg.
+  injected by patching `tree.data.youtube.youtube_ingest.GeminiTranscriptFetcher`
+  (the construction point inside the shared bulk core), since the flow no longer
+  carries a `fetcher` arg. Patching the class is REQUIRED because
+  `GeminiTranscriptFetcher.__init__` raises without `GOOGLE_API_KEY`.
 
 The per-feed sub-flow collapsed into the shared bulk core: every test drives the
 public `ingest_youtube_rss_feed_batch` (with one or more feed URLs). Each feed still
@@ -18,6 +21,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
@@ -65,9 +69,10 @@ def _make_transcript(
 
 
 class _FakeFetcher:
-    """Programmable `TranscriptFetcher` for integration tests.
+    """Programmable stand-in for ``GeminiTranscriptFetcher`` for integration tests.
 
-    Returns one element per input slot, mirroring the real chain contract.
+    Same ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
+    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
     """
 
     def __init__(self, results_per_id: dict[str, FetchedTranscript | None]) -> None:
@@ -88,6 +93,16 @@ class _FakeFetcher:
                     break
             results.append(match)
         return results
+
+
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
+    """Patch the construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+
+    Patching the class (not an injected arg) sidesteps the ``GOOGLE_API_KEY`` guard in
+    ``GeminiTranscriptFetcher.__init__`` — no key/network needed.
+    """
+
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
 
 
 def _patch_feed(mocker, entries: list[dict]) -> object:
@@ -138,13 +153,12 @@ class TestIngestYoutubeRssFeedBatchFlow:
         oembed_spy = _ban_oembed(mocker)
         feed_client = _patch_feed(mocker, FAKE_FEED_ENTRIES)
         fake = _FakeFetcher({vid: _make_transcript(video_id=vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_rss_feed_batch([FEED_URL], PydanticObjectId())
 
         assert len(result) == 3
         for doc in result:
@@ -179,19 +193,16 @@ class TestIngestYoutubeRssFeedBatchFlow:
         _ban_oembed(mocker)
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
         fake = _FakeFetcher({vid: _make_transcript(video_id=vid) for vid in VIDEO_IDS})
+        _patch_fetcher(mocker, fake)
 
         user_id = PydanticObjectId()
         with prefect_tags("tests"):
-            first = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], user_id, fetcher=fake
-            )
+            first = await ingest_youtube_rss_feed_batch([FEED_URL], user_id)
         assert len(first) == 3
 
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
         with prefect_tags("tests"):
-            second = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], user_id, fetcher=fake
-            )
+            second = await ingest_youtube_rss_feed_batch([FEED_URL], user_id)
         assert len(second) == 0
 
         db_docs = await Document.find(
@@ -213,11 +224,10 @@ class TestIngestYoutubeRssFeedBatchFlow:
         _ban_oembed(mocker)
         _patch_feed(mocker, [FAKE_FEED_ENTRIES[0]])
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], user_id, fetcher=fake
-            )
+            result = await ingest_youtube_rss_feed_batch([FEED_URL], user_id)
 
         assert len(result) == 1
         assert result[0].id == latent.id
@@ -231,25 +241,24 @@ class TestIngestYoutubeRssFeedBatchFlow:
     async def test_chain_exhausted_slot_skips_silently(
         self, mongo_client, mocker, caplog
     ) -> None:
-        """Middle slot returns None (chain exhausted). 2 docs persist; the
-        pipeline emits NO WARNING of its own — the chain owns that warning."""
+        """Middle slot returns None (bulk fetch exhausted). 2 docs persist; the
+        pipeline emits NO WARNING of its own — the bulk core owns that warning."""
 
         _ban_oembed(mocker)
         _patch_feed(mocker, FAKE_FEED_ENTRIES)
         fake = _FakeFetcher(
             {
                 VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0]),
-                VIDEO_IDS[1]: None,  # chain exhausted on slot 2
+                VIDEO_IDS[1]: None,  # bulk fetch exhausted on slot 2
                 VIDEO_IDS[2]: _make_transcript(video_id=VIDEO_IDS[2]),
             }
         )
+        _patch_fetcher(mocker, fake)
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_rss_feed_batch([FEED_URL], PydanticObjectId())
 
         assert len(result) == 2
         persisted_ids = sorted(doc.source_uri for doc in result)
@@ -264,7 +273,8 @@ class TestIngestYoutubeRssFeedBatchFlow:
         assert len(fake.calls) == 1
         assert len(fake.calls[0]) == 3
 
-        # Spec: pipeline-layer logger emits NO WARNING for the missing slot.
+        # Spec: pipeline-layer logger emits NO WARNING for the missing slot — the
+        # bulk core (fetch_transcripts_batch) owns the per-slot skip warning.
         pipeline_warnings = [
             r
             for r in caplog.records
@@ -297,13 +307,12 @@ class TestIngestYoutubeRssFeedBatchFlow:
                 VIDEO_IDS[2]: _make_transcript(video_id=VIDEO_IDS[2]),
             }
         )
+        _patch_fetcher(mocker, fake)
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_rss_feed_batch([FEED_URL], PydanticObjectId())
 
         assert len(result) == 2
 
@@ -329,11 +338,10 @@ class TestIngestYoutubeRssFeedBatchFlow:
         oembed_spy = _ban_oembed(mocker)
         feed_client = _patch_feed(mocker, [FAKE_FEED_ENTRIES[0]])
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_rss_feed_batch(
-                [FEED_URL], PydanticObjectId(), fetcher=fake
-            )
+            result = await ingest_youtube_rss_feed_batch([FEED_URL], PydanticObjectId())
 
         assert len(result) == 1
         doc = result[0]
@@ -360,12 +368,12 @@ class TestIngestYoutubeRssFeedBatchFlow:
         )
 
         fake = _FakeFetcher({VIDEO_IDS[0]: _make_transcript(video_id=VIDEO_IDS[0])})
+        _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
             result = await ingest_youtube_rss_feed_batch(
                 feed_urls=[FEED_URL, FEED_URL_B],
                 user_id=PydanticObjectId(),
-                fetcher=fake,
             )
 
         # Both feeds return the same single entry → second is a duplicate.
