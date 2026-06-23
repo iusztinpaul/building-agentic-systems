@@ -94,6 +94,7 @@ Use the `context7` MCP server (when connected) to look up authoritative usage fo
 - **Modal:** https://modal.com/llms.txt — full reference at https://modal.com/llms-full.txt
 - **Opik:** https://www.comet.com/docs/opik/llms.txt — also append /llms.txt to any section URL for a scoped index.
 - **Prefect:** https://docs.prefect.io/llms.txt — full reference at https://docs.prefect.io/llms-full.txt
+- **FastMCP:** https://gofastmcp.com/llms.txt — full reference at https://gofastmcp.com/llms-full.txt
 - **Bright Data:** https://docs.brightdata.com/llms.txt — full reference at https://docs.brightdata.com/llms-full.txt
 
 # Running Commands
