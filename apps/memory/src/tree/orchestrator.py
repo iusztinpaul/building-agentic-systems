@@ -45,12 +45,10 @@ from tree.observability import configure_opik
 # the matching ``_DeploymentSpec`` entries) once the Cloud plan is upgraded.
 # from tree.data.conversation.conversation_pipeline import ingest_conversation
 # from tree.data.file.file_pipeline import ingest_file
-# from tree.data.youtube.youtube_rss_pipeline import ingest_youtube_rss_feed_batch
-# from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video_batch
 # from tree.memory.consolidation.dream import dream_consolidation_all_users
 # ---------------------------------------------------------------------------
 
-# Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
+# Prefect Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
 GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"
 MANAGED_WORK_POOL = "tree-managed"
 # Secret block holding the GitHub PAT Prefect uses to clone this private repo.
@@ -79,8 +77,6 @@ class _GitRepoWithPipInstall(GitRepository):
     splices it into the deployment's pull steps verbatim).
     """
 
-    # Pull steps run in the base working dir (NOT the clone), so the clone goes to
-    # a deterministic ``CLONE_DIR`` and the install runs there explicitly.
     CLONE_DIR = "repo"
 
     def to_pull_step(self) -> list:  # type: ignore[override]
