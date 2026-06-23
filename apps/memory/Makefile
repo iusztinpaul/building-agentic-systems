@@ -79,11 +79,26 @@ integration-tests: # Fast inner-loop integration tests (excludes @pytest.mark.sl
 integration-tests-slow: # Run only the slow integration tests (vector-index convergence + full Prefect e2e).
 	uv run pytest tests/integration -m "slow"
 
-integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot). Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
-	uv run pytest tests/integration
+# --- Integration tests run SPLIT BY AREA, one pytest PROCESS per area
+# (data / memory / mcp / rest). The suite shares one session-scoped DB, and a
+# fire-and-forget async write from one area (the MCP `search_web` background
+# ingest) was landing during a LATER area's test and polluting it — a write that
+# arrives after the per-test wipe can't be cleaned. Separate processes give each
+# area its own DB lifecycle so a stray async write can't cross the boundary. Each
+# area passes on its own; only the mixed single-process run failed. Still
+# sequential (no `-n auto`) — the shared-DB cleanup fixture collides in parallel.
 
-integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests. Useful for reproducing CI behavior. Runs sequentially because the shared-DB cleanup fixture makes parallel runs collide.
-	uv run pytest tests/integration -m "not requires_mongot" --timeout=300
+integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot), one process per area. Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
+	uv run pytest tests/integration/data
+	uv run pytest tests/integration/memory
+	uv run pytest tests/integration/mcp
+	uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
+
+integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests, one process per area (see comment above).
+	uv run pytest tests/integration/data -m "not requires_mongot" --timeout=300
+	uv run pytest tests/integration/memory -m "not requires_mongot" --timeout=300
+	uv run pytest tests/integration/mcp -m "not requires_mongot" --timeout=300
+	uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp -m "not requires_mongot" --timeout=300
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files

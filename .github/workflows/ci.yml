@@ -132,13 +132,20 @@ jobs:
 
       - name: Integration tests (excludes @pytest.mark.requires_mongot)
         # ``-m "not requires_mongot"`` skips the mongot/Atlas-Search subset
-        # (see the "Start infrastructure" comment above). The remaining tests
-        # already finish in ~1 min locally; we deliberately run them
-        # sequentially because the autouse ``_clean_collections`` fixture
-        # wipes the shared test database between tests, so parallel workers
-        # (``-n auto``) collide on each other's writes. ``--timeout=300`` is a
-        # per-test safety net for true hangs.
-        run: uv run pytest tests/integration -m "not requires_mongot" --timeout=300
+        # (see the "Start infrastructure" comment above). Run SPLIT BY AREA, one
+        # pytest process per area (data / memory / mcp / rest): the suite shares
+        # one session-scoped DB and a fire-and-forget async write from one area
+        # (the MCP ``search_web`` background ingest) was landing during a LATER
+        # area's test and polluting it — a write that arrives after the per-test
+        # wipe can't be cleaned. Separate processes give each area its own DB
+        # lifecycle. Each area passes on its own; only the mixed single-process
+        # run failed. Still sequential (no ``-n auto``) — the shared-DB cleanup
+        # fixture collides in parallel. ``--timeout=300`` is a per-test hang net.
+        run: |
+          uv run pytest tests/integration/data -m "not requires_mongot" --timeout=300
+          uv run pytest tests/integration/memory -m "not requires_mongot" --timeout=300
+          uv run pytest tests/integration/mcp -m "not requires_mongot" --timeout=300
+          uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp -m "not requires_mongot" --timeout=300
         working-directory: apps/memory
         env:
           PYTHONPATH: ./src/
