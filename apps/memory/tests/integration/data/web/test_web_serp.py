@@ -29,13 +29,21 @@ def _is_real(value: str | None) -> bool:
 _API_KEY = os.environ.get("BRIGHTDATA_API_KEY")
 _SERP_ZONE = os.environ.get("BRIGHTDATA_SERP_ZONE")
 
-pytestmark = pytest.mark.skipif(
-    not (_is_real(_API_KEY) and _is_real(_SERP_ZONE)),
-    reason=(
-        "BRIGHTDATA_API_KEY / BRIGHTDATA_SERP_ZONE not configured "
-        "(or set to placeholder)"
+# ``slow`: these hit the live Bright Data SERP API and assert on drifting SERP
+# content, so they flake on "SERP weather". Mark the whole module slow so the
+# deterministic inner-loop gate (``make memory-integration-tests`` → ``-m "not
+# slow"``) is not bound to live SERP; they still run in the full
+# ``-integration-tests-all`` / ``-slow`` gates (and skip without real creds).
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not (_is_real(_API_KEY) and _is_real(_SERP_ZONE)),
+        reason=(
+            "BRIGHTDATA_API_KEY / BRIGHTDATA_SERP_ZONE not configured "
+            "(or set to placeholder)"
+        ),
     ),
-)
+]
 
 
 class TestLiveSerpSearch:
