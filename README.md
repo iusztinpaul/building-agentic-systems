@@ -68,11 +68,11 @@ One-time setup:
 
 ```bash
 brew install direnv
-echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc   # adjust for your shell
-cp .envrc.example .envrc && direnv allow
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc   # adjust for your
+direnv allow
 ```
 
-`.envrc` is gitignored; re-run `direnv allow` whenever it changes.
+re-run `direnv allow` whenever it changes.
 
 ### MongoDB Atlas (remote) via the MongoDB MCP server
 
