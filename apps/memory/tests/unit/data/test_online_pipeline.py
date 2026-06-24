@@ -18,7 +18,7 @@ from tree.data.online_pipeline import (
     FileSource,
     UrlSource,
     _get_configured_substack_domains,
-    ingest_url,
+    _ingest_url,
     online_ingest,
 )
 
@@ -146,7 +146,7 @@ class TestIngestUrl:
             [("substack.com", mock_handler)],
         )
 
-        await ingest_url("https://newsletter.substack.com/p/article", _USER_ID)
+        await _ingest_url("https://newsletter.substack.com/p/article", _USER_ID)
 
         mock_handler.assert_awaited_once_with(
             "https://newsletter.substack.com/p/article", _USER_ID
@@ -169,7 +169,7 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url("https://decodingai.com/p/my-article", _USER_ID)
+        await _ingest_url("https://decodingai.com/p/my-article", _USER_ID)
 
         mock_substack.assert_awaited_once_with(
             "https://decodingai.com/p/my-article", _USER_ID
@@ -187,7 +187,7 @@ class TestIngestUrl:
             return_value={"example.com"},
         )
 
-        await ingest_url("https://example.com/p/article", _USER_ID)
+        await _ingest_url("https://example.com/p/article", _USER_ID)
 
         static_handler.assert_awaited_once()
 
@@ -203,7 +203,7 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url(
+        await _ingest_url(
             "https://martinfowler.com/articles/microservices.html", _USER_ID
         )
 
@@ -223,7 +223,7 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url("https://github.com/anthropics/claude-code", _USER_ID)
+        await _ingest_url("https://github.com/anthropics/claude-code", _USER_ID)
 
         mock_fallback.assert_awaited_once_with(
             "https://github.com/anthropics/claude-code", _USER_ID
@@ -243,7 +243,7 @@ class TestIngestUrl:
 
         url = "https://martinfowler.com/articles/microservices.html"
         with caplog.at_level(logging.INFO, logger="tree.data.online_pipeline"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         expected = f"Routing URL to 'web (Bright Data fallback)' pipeline: {url}"
         assert any(expected in record.getMessage() for record in caplog.records)
@@ -270,7 +270,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="scheme"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()
@@ -303,7 +303,7 @@ class TestIngestUrl:
             mock_fallback,
         )
 
-        await ingest_url(url, _USER_ID)
+        await _ingest_url(url, _USER_ID)
 
         mock_youtube.assert_awaited_once_with(url, _USER_ID)
         mock_substack.assert_not_awaited()
@@ -330,7 +330,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="youtube_rss"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_youtube.assert_not_awaited()
         mock_fallback.assert_not_awaited()
@@ -356,7 +356,7 @@ class TestIngestUrl:
         )
 
         with pytest.raises(ValueError, match="missing a host"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()
@@ -368,7 +368,7 @@ class TestOnlineIngestRouting:
     async def test_url_routes_to_ingest_url(self, mocker) -> None:
         doc = MagicMock()
         mock_url = mocker.patch(
-            "tree.data.online_pipeline.ingest_url",
+            "tree.data.online_pipeline._ingest_url",
             new_callable=AsyncMock,
             return_value=doc,
         )

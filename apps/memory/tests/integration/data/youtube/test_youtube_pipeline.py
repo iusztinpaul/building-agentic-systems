@@ -10,9 +10,10 @@ from `tests/integration/conftest.py`). Mocks:
   `GeminiTranscriptFetcher.__init__` raises without `GOOGLE_API_KEY`.
 - The oEmbed HTTP call (no live network to youtube.com).
 
-Mirrors the patterns in `tests/integration/data/substack/test_substack_rss_pipeline.py`.
-The batch path now issues ONE bulk `fetch_many(all_urls)` for the whole batch — a
-call-count assertion on the fake fetcher guards the #080 fix.
+Covers both the thin single-video MCP flow (`ingest_youtube_video`) and the unified
+batch (`youtube_pipeline_batch.ingest_youtube_batch`), which issues ONE bulk
+`fetch_many(all_urls)` over the whole shard — a call-count assertion on the fake
+fetcher guards that.
 """
 
 from __future__ import annotations
@@ -29,17 +30,16 @@ from tree.data.youtube.types import (
     TranscriptSegment,
     VideoMetadata,
 )
-from tree.data.youtube.youtube_video_pipeline import (
-    ingest_youtube_video,
-    ingest_youtube_video_batch,
-)
+from tree.config.app_config import YouTubeVideoSource
+from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
+from tree.data.youtube.youtube_pipeline import ingest_youtube_video
 from tree.entities.documents import Document, SourceType
 
 VIDEO_ID = "eYaWxljC4sA"
 CANONICAL_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
 SHORT_URL = f"https://youtu.be/{VIDEO_ID}"
 
-PIPELINE_LOGGER = "tree.data.youtube.youtube_video_pipeline"
+PIPELINE_LOGGER = "tree.data.youtube.youtube_pipeline"
 
 
 def _make_transcript(
@@ -256,15 +256,15 @@ class TestIngestYoutubeVideoFlow:
         assert result.content == "transcript only"
 
 
-class TestIngestYoutubeVideoBatchFlow:
-    """The batch path issues ONE bulk transcript fetch for the whole batch."""
+class TestIngestYoutubeBatchFlow:
+    """The unified batch path issues ONE bulk transcript fetch for the whole shard."""
 
     async def test_ingests_multiple_videos_with_one_bulk_fetch(
         self, mongo_client, mocker
     ) -> None:
         _patch_oembed(mocker)
         mocker.patch(
-            "tree.data.youtube.youtube_video_pipeline.init_mongodb",
+            "tree.data.youtube.youtube_pipeline_batch.init_mongodb",
             return_value=mongo_client,
         )
 
@@ -279,15 +279,16 @@ class TestIngestYoutubeVideoBatchFlow:
         _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video_batch(
-                video_urls=[url_a, url_b], user_id=PydanticObjectId()
+            result = await ingest_youtube_batch(
+                [YouTubeVideoSource(uri=url_a), YouTubeVideoSource(uri=url_b)],
+                PydanticObjectId(),
             )
 
         assert len(result) == 2
         sources = sorted(doc.source_uri for doc in result)
         assert sources == sorted([url_a, url_b])
 
-        # #080: ONE bulk fetch_many with BOTH canonical URLs — NOT per-video.
+        # ONE bulk fetch_many with BOTH canonical URLs — NOT per-video.
         assert len(fake.calls) == 1
         assert sorted(fake.calls[0]) == sorted([url_a, url_b])
 
@@ -296,7 +297,7 @@ class TestIngestYoutubeVideoBatchFlow:
     ) -> None:
         _patch_oembed(mocker)
         mocker.patch(
-            "tree.data.youtube.youtube_video_pipeline.init_mongodb",
+            "tree.data.youtube.youtube_pipeline_batch.init_mongodb",
             return_value=mongo_client,
         )
 
@@ -311,9 +312,9 @@ class TestIngestYoutubeVideoBatchFlow:
         _patch_fetcher(mocker, fake)
 
         with prefect_tags("tests"):
-            result = await ingest_youtube_video_batch(
-                video_urls=[url_good, url_bad],
-                user_id=PydanticObjectId(),
+            result = await ingest_youtube_batch(
+                [YouTubeVideoSource(uri=url_good), YouTubeVideoSource(uri=url_bad)],
+                PydanticObjectId(),
             )
 
         assert len(result) == 1

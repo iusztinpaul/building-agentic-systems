@@ -24,6 +24,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
+from tree.config.app_config import WebSource
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.web.web import fetch_and_extract_web, load_web_document
@@ -125,3 +126,17 @@ async def ingest_web_url_batch(
     logger.info("Ingested %d web URLs out of %d", len(ingested), len(urls))
 
     return ingested
+
+
+async def ingest_web_batch(
+    entries: list[WebSource], user_id: PydanticObjectId
+) -> list[Document]:
+    """Offline-dispatch adapter: ``[WebSource] -> ingest_web_url_batch([uri, ...])``.
+
+    The unified offline dispatch (``offline_pipeline._PLATFORM_PIPELINES``) hands every
+    platform pipeline its TYPED ``entries``; web has a single source kind, so this thin
+    adapter just unwraps the URIs and runs the existing ``ingest_web_url_batch`` flow
+    (left unchanged, since ``search_web`` triggers that same deployment with raw URLs).
+    """
+
+    return await ingest_web_url_batch([e.uri for e in entries], user_id)

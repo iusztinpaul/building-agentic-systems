@@ -44,7 +44,7 @@ async def _ingest_substack_article(
 ) -> Document | None:
     """Ingest a Substack article via the Substack article pipeline."""
 
-    from tree.data.substack.substack_article_pipeline import (
+    from tree.data.substack.substack_pipeline import (
         ingest_substack_article,
     )
 
@@ -59,7 +59,7 @@ async def _ingest_youtube_video(url: str, user_id: PydanticObjectId) -> Document
     rejected up-front in :func:`ingest_url` with a clear ``ValueError``.
     """
 
-    from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video
+    from tree.data.youtube.youtube_pipeline import ingest_youtube_video
 
     return await ingest_youtube_video(url, user_id)
 
@@ -109,7 +109,7 @@ def _get_configured_substack_domains() -> set[str]:
     return domains
 
 
-async def ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
+async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Route a URL to the appropriate data pipeline and ingest it for ``user_id``.
 
     Matches against:
@@ -244,7 +244,7 @@ async def online_ingest(
 
     match source:
         case UrlSource():
-            return await ingest_url(source.uri, user_id)
+            return await _ingest_url(source.uri, user_id)
         case FileSource():
             return await _ingest_file(source, user_id)
         case ConversationSource():

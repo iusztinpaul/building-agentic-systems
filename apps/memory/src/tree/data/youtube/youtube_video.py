@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from tree.data.youtube.types import FetchedTranscript, VideoMetadata
 from tree.data.youtube.urls import canonical_video_url
@@ -153,7 +154,15 @@ async def load_video_document(doc: Document) -> Document | None:
         await doc.replace()
         logger.info("Upgraded latent document: %s", doc.source_uri)
     else:
-        await doc.insert()
+        try:
+            await doc.insert()
+        except DuplicateKeyError:
+            # Concurrent insert of the same (user_id, source_type, source_uri) — e.g.
+            # the same video resolved from both a feed and a single source in one
+            # flattened batch. The unique index lets one win; this attempt is a
+            # clean skip, not a failure.
+            logger.debug("Skipping concurrent duplicate: %s", doc.source_uri)
+            return None
         logger.info("Ingested: %s", doc.source_uri)
 
     return doc

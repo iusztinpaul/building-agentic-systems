@@ -19,8 +19,8 @@ from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
 from tree.config.app_config import HuggingFaceDatasetSource, WebSource
-from tree.data.online_pipeline import ingest_url
 from tree.data.offline_pipeline import data_etl_worker
+from tree.data.online_pipeline import _ingest_url
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch
 from tree.entities.documents import Document, SourceType
 
@@ -131,7 +131,7 @@ class TestDispatcherFallback:
     async def test_dispatcher_falls_through_to_web(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                doc = await ingest_url(_FALLBACK_URL, _USER_ID)
+                doc = await _ingest_url(_FALLBACK_URL, _USER_ID)
 
             assert doc is not None
             assert doc.source_type == SourceType.WEB
@@ -149,7 +149,7 @@ class TestDispatcherFallback:
     async def test_dispatcher_routes_substack_first(self, mongo_client) -> None:
         try:
             with prefect_tags("tests"):
-                doc = await ingest_url(_SUBSTACK_URL, _USER_ID)
+                doc = await _ingest_url(_SUBSTACK_URL, _USER_ID)
 
             assert doc is not None
             # The regression guard: a substack URL must NOT fall through to

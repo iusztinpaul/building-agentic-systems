@@ -17,9 +17,11 @@ from datetime import UTC, datetime
 import tree.data.web.web_pipeline as web_pipeline
 from beanie import PydanticObjectId
 
+from tree.config.app_config import WebSource
 from tree.data.web.web_pipeline import (
     _ingest_web_url_one,
     extract_batch,
+    ingest_web_batch,
     ingest_web_url,
     ingest_web_url_batch,
     load_batch,
@@ -45,7 +47,7 @@ def _make_doc(
 
 
 class TestTaskAndFlowMetadata:
-    """Retry grain lives on the batch tasks (mirrors substack_article_pipeline)."""
+    """Retry grain lives on the batch tasks (mirrors substack_pipeline)."""
 
     def test_extract_batch_retries(self) -> None:
         assert extract_batch.retries == 2
@@ -336,3 +338,27 @@ class TestIngestWebUrlBatch:
 
         mock_init.assert_awaited_once()
         assert result == []
+
+
+class TestIngestWebBatchAdapter:
+    """The offline-dispatch adapter unwraps typed entries to URIs."""
+
+    async def test_extracts_uris_and_calls_url_batch(self, mocker) -> None:
+        user_id = PydanticObjectId()
+        doc = _make_doc(source_uri="https://a.example/post")
+        url_batch = mocker.patch.object(
+            web_pipeline,
+            "ingest_web_url_batch",
+            mocker.AsyncMock(return_value=[doc]),
+        )
+
+        entries = [
+            WebSource(uri="https://a.example/post"),
+            WebSource(uri="https://b.example/post"),
+        ]
+        result = await ingest_web_batch(entries, user_id)
+
+        assert result == [doc]
+        url_batch.assert_awaited_once_with(
+            ["https://a.example/post", "https://b.example/post"], user_id
+        )

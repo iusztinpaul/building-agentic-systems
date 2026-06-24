@@ -1,0 +1,132 @@
+"""YouTube unified pipeline — ONE batch flow over single videos + channel RSS feeds.
+
+Flattens a YouTube shard (mixed ``YouTubeRssSource`` + ``YouTubeVideoSource``) into a
+single ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk core
+(``youtube_ingest._bulk_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
+over ALL items (feeds + loose videos), build, load. The only per-kind difference is
+the resolve step — RSS metadata comes from the feed, single-video metadata from
+oEmbed; once flattened to ``(url, VideoMetadata)`` the two are indistinguishable.
+
+Failure isolation is preserved at the flatten boundary: a feed that fails to fetch is
+logged + skipped (its items absent), an unresolvable/oEmbed-failing video is dropped,
+and ``fetch_many`` keeps its per-slot ``None``-transcript resilience. The thin
+single-video MCP flow (``youtube_pipeline.ingest_youtube_video``) and the pure
+helpers (``youtube_rss`` / ``youtube_video`` / ``youtube_ingest``) are unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from beanie import PydanticObjectId
+from prefect import flow, task
+
+from tree.config.app_config import YouTubeRssSource, YouTubeVideoSource
+from tree.config.settings import settings
+from tree.data.batch import gather_isolated
+from tree.data.youtube.types import VideoMetadata
+from tree.data.youtube.youtube_ingest import _bulk_build_and_load
+from tree.data.youtube.youtube_rss import (
+    extract_video_url,
+    feed_entry_to_metadata,
+    fetch_feed,
+)
+from tree.data.youtube.youtube_pipeline import _resolve_video_item
+from tree.db import init_mongodb
+from tree.entities.documents import Document
+
+logger = logging.getLogger(__name__)
+
+# A flattened, resolved item ready for the shared bulk core: canonical URL + metadata
+# (from the feed for RSS, from oEmbed for a single video).
+_ResolvedItem = tuple[str, VideoMetadata]
+
+
+@task(name="fetch-youtube-rss-feed", retries=2, retry_delay_seconds=5)
+async def fetch_feed_task(feed_url: str) -> list[dict]:
+    return await fetch_feed(feed_url)
+
+
+def _resolve_feed_items(entries: list[dict]) -> list[_ResolvedItem]:
+    """Resolve Atom entries to ``(canonical_url, feed VideoMetadata)`` items.
+
+    Skips entries with no resolvable video id (pipeline-layer WARNING). Metadata comes
+    from ``feed_entry_to_metadata`` (the feed), NOT oEmbed — the RSS metadata source.
+    """
+
+    items: list[_ResolvedItem] = []
+    for entry in entries:
+        video_url = extract_video_url(entry)
+        if video_url is None:
+            logger.warning("Skipping entry with no resolvable video id")
+            continue
+        items.append((video_url, feed_entry_to_metadata(entry)))
+    return items
+
+
+async def _resolve_feed(feed_url: str) -> list[_ResolvedItem]:
+    """Fetch + resolve one feed to items — the unit isolated per feed."""
+
+    return _resolve_feed_items(await fetch_feed_task(feed_url))
+
+
+@flow(name="ingest-youtube-batch-etl", log_prints=True, validate_parameters=False)
+async def ingest_youtube_batch(
+    entries: list[YouTubeRssSource | YouTubeVideoSource],
+    user_id: PydanticObjectId,
+) -> list[Document]:
+    """Batch-ingest a YouTube shard (RSS feeds + single videos) via ONE bulk core.
+
+    Flattens both source kinds into one ``[(canonical_url, VideoMetadata)]`` list —
+    RSS feeds expand to per-video items (metadata from the feed, isolated per feed),
+    single videos resolve via oEmbed (isolated per URL) — then runs the SHARED
+    ``_bulk_build_and_load`` ONCE, so there is exactly ONE ``fetch_many`` transcript
+    fetch over feeds + loose videos combined.
+    """
+
+    await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+
+    feed_urls = [e.uri for e in entries if isinstance(e, YouTubeRssSource)]
+    video_urls = [e.uri for e in entries if isinstance(e, YouTubeVideoSource)]
+
+    items: list[_ResolvedItem] = []
+
+    # RSS feeds → expand to per-video items, isolated per feed.
+    if feed_urls:
+        results = await asyncio.gather(
+            *[_resolve_feed(feed_url) for feed_url in feed_urls],
+            return_exceptions=True,
+        )
+        for feed_url, result in zip(feed_urls, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Failed to resolve feed %s; skipping", feed_url, exc_info=result
+                )
+                continue
+            items.extend(result)
+
+    # Single videos → oEmbed-resolve, isolated per URL (unresolvable ids drop).
+    if video_urls:
+        resolved, failures = await gather_isolated(video_urls, _resolve_video_item)
+        if failures:
+            logger.warning(
+                "oEmbed resolution failed for %d/%d URLs", failures, len(video_urls)
+            )
+        items.extend(resolved)
+
+    if not items:
+        logger.info("YouTube: no resolvable items in shard")
+        return []
+
+    ingested = await _bulk_build_and_load(items, user_id)
+    logger.info(
+        "YouTube: ingested %d items (%d feeds, %d single videos)",
+        len(ingested),
+        len(feed_urls),
+        len(video_urls),
+    )
+    return ingested

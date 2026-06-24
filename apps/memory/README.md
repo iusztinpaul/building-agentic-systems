@@ -101,17 +101,16 @@ make memory-serve-workflows
 
 **Pick one — don't run both.** Running both serves duplicate workers that race for the same deployments.
 
-The deployments registered by `src/tree/orchestrator.py`:
+The deployments registered by `src/tree/orchestrator.py` (the always-on core 5; the data worker dispatches each platform to one unified pipeline in-process — those are NOT separate deployments):
 
 - `data-etl-orchestrator`, `data-etl-worker` (data ingestion is split into an
   operator-facing orchestrator that groups the configured `sources:` list by platform
   and windows HuggingFace, and a worker that ingests one shard — #072)
-- `ingest-file-etl`, `ingest-conversation-etl`
-- `ingest-youtube-video-batch-etl`, `ingest-youtube-rss-feed-batch-etl`
 - `memory-extract-etl-orchestrator`, `memory-extract-etl-worker` (memory extraction
   is split into an orchestrator that shards pending docs + indexes once and a worker
   that runs the six-task extraction body — #067), `memory-indexing-etl`
-- `dream-consolidation-etl`
+
+Plus the optional `dream-consolidation-all-users` (nightly cron) when `prefect.deploy_optional: true` — see [Configuration](#configuration).
 
 ### Data pipelines
 
@@ -144,7 +143,7 @@ sources:
 #### Online — one source on demand
 
 ```bash
-make memory-run-online-ingest SOURCE="https://www.decodingai.com/p/some-post"
+make memory-run-online-ingest SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
 make memory-run-online-ingest SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
@@ -347,4 +346,3 @@ mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 ```
 
 Collections to inspect: `documents` (raw ingest) and `knowledge_graph` (nodes + edges).
-

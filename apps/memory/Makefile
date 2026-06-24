@@ -80,13 +80,7 @@ integration-tests-slow: # Run only the slow integration tests (vector-index conv
 	uv run pytest tests/integration -m "slow"
 
 # --- Integration tests run SPLIT BY AREA, one pytest PROCESS per area
-# (data / memory / mcp / rest). The suite shares one session-scoped DB, and a
-# fire-and-forget async write from one area (the MCP `search_web` background
-# ingest) was landing during a LATER area's test and polluting it — a write that
-# arrives after the per-test wipe can't be cleaned. Separate processes give each
-# area its own DB lifecycle so a stray async write can't cross the boundary. Each
-# area passes on its own; only the mixed single-process run failed. Still
-# sequential (no `-n auto`) — the shared-DB cleanup fixture collides in parallel.
+# (data / memory / mcp / rest).
 
 INTEGRATION_AREAS = tests/integration/data tests/integration/memory tests/integration/mcp
 INTEGRATION_REST = tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
