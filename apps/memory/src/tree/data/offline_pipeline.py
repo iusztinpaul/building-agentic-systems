@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow, get_run_logger
+from prefect import flow, get_run_logger, tags
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
@@ -232,7 +232,10 @@ async def offline_ingest_batch(
             logger.info(
                 "Starting %s pipeline with %d source(s)", platform.label, len(entries)
             )
-            docs = await platform.batch_fn(entries, user_id)
+            # Tag the leaf flow run "data-pipeline" — the in-process sub-flows don't
+            # inherit the worker deployment's tags, so we apply it at the call site.
+            with tags("data-pipeline"):
+                docs = await platform.batch_fn(entries, user_id)
             all_ingested.extend(docs)
             logger.info("%s pipeline ingested %d documents", platform.label, len(docs))
         else:
@@ -249,7 +252,8 @@ async def offline_ingest_batch(
                     f"Register a handler in {__name__}._HUGGINGFACE_DATASET_HANDLERS."
                 )
             logger.info("Starting HuggingFace dataset pipeline for %s", entry.uri)
-            hf_docs = await handler(entry, user_id)
+            with tags("data-pipeline"):
+                hf_docs = await handler(entry, user_id)
             all_ingested.extend(hf_docs)
             logger.info(
                 "HuggingFace dataset pipeline for %s ingested %d documents",

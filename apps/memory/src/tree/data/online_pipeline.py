@@ -24,6 +24,7 @@ from typing import Annotated, Literal, Union
 from urllib.parse import urlparse
 
 from beanie import PydanticObjectId
+from prefect import tags
 from pydantic import BaseModel, Field
 
 from tree.config.app_config import (
@@ -242,13 +243,17 @@ async def online_ingest(
     it does NOT trigger extraction — the MCP layer submits that out-of-band.
     """
 
-    match source:
-        case UrlSource():
-            return await _ingest_url(source.uri, user_id)
-        case FileSource():
-            return await _ingest_file(source, user_id)
-        case ConversationSource():
-            return await _ingest_conversation(source, user_id)
-        # ponytail: unreachable (discriminated union); guard against a silent None.
-        case _:
-            raise TypeError(f"Unsupported online source: {type(source).__name__}")
+    # Tag the realtime leaf flow run "data-pipeline" (the thin url/file/conversation
+    # @flows don't inherit a deployment's tags); ``tags`` is dynamically scoped so it
+    # reaches the flow run created deep inside the handler.
+    with tags("data-pipeline"):
+        match source:
+            case UrlSource():
+                return await _ingest_url(source.uri, user_id)
+            case FileSource():
+                return await _ingest_file(source, user_id)
+            case ConversationSource():
+                return await _ingest_conversation(source, user_id)
+            # ponytail: unreachable (discriminated union); guard a silent None.
+            case _:
+                raise TypeError(f"Unsupported online source: {type(source).__name__}")

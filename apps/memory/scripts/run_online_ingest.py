@@ -13,7 +13,7 @@ file path (``.txt`` / ``.md`` / ``.html``). Conversation ingestion stays MCP-onl
 
 Every write is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the
-Makefile wires these). See :mod:`scripts._users` for the resolution precedence.
+Makefile wires these). See :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Requires:
     - Prefect server running (make local-start)
@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 
 import click
 
-from _users import resolve_user_id
+from tree.entities.sessions import resolve_user_id
 from tree.config.settings import settings
 from tree.data.online_pipeline import (
     FileSource,
