@@ -12,7 +12,7 @@ from prefect import flow, task
 from tree.data.file.file import load_file_document
 from tree.entities.documents import Document
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
+    TAGS_DATA_ONLINE,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -23,9 +23,9 @@ from tree.observability import (
 
 logger = logging.getLogger(__name__)
 
-# Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
-# former ``"file-pipeline"`` pipeline-name tag is now span metadata.
-_FILE_TAGS = TAGS_INGESTION_BATCH
+# Online data ingest (file variant of ``online_ingest``) — pipeline-identity tags
+# shared 1:1 with this flow's Prefect flow-run tags.
+_FILE_TAGS = TAGS_DATA_ONLINE
 _FILE_METADATA = pipeline_metadata("file")
 
 

@@ -94,7 +94,7 @@ from tree.entities.documents import Document
 from tree.entities.users import select_active_user_ids
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
+    TAGS_DATA_OFFLINE,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -103,9 +103,9 @@ from tree.observability import (
     tracked_span,
 )
 
-# Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
-# former ``"data-pipeline"`` pipeline-name tag is now span metadata.
-_DATA_TAGS = TAGS_INGESTION_BATCH
+# Pipeline-identity tags, shared 1:1 with this pipeline's Prefect deployment /
+# flow-run tags (``prefect.tags(*_DATA_TAGS)`` below).
+_DATA_TAGS = TAGS_DATA_OFFLINE
 _DATA_METADATA = pipeline_metadata("data")
 
 logger = logging.getLogger(__name__)
@@ -232,9 +232,9 @@ async def offline_ingest_batch(
             logger.info(
                 "Starting %s pipeline with %d source(s)", platform.label, len(entries)
             )
-            # Tag the leaf flow run "data-pipeline" — the in-process sub-flows don't
-            # inherit the worker deployment's tags, so we apply it at the call site.
-            with tags("data-pipeline"):
+            # Tag the leaf flow run — the in-process sub-flows don't inherit the
+            # worker deployment's tags, so we apply them at the call site.
+            with tags(*_DATA_TAGS):
                 docs = await platform.batch_fn(entries, user_id)
             all_ingested.extend(docs)
             logger.info("%s pipeline ingested %d documents", platform.label, len(docs))
@@ -252,7 +252,7 @@ async def offline_ingest_batch(
                     f"Register a handler in {__name__}._HUGGINGFACE_DATASET_HANDLERS."
                 )
             logger.info("Starting HuggingFace dataset pipeline for %s", entry.uri)
-            with tags("data-pipeline"):
+            with tags(*_DATA_TAGS):
                 hf_docs = await handler(entry, user_id)
             all_ingested.extend(hf_docs)
             logger.info(

@@ -82,29 +82,48 @@ def _tracking_disabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Tag family (the ONLY four Opik tags, used as combinations)
+# Tag families
 # ---------------------------------------------------------------------------
-# The whole telemetry surface is tagged from exactly four orthogonal tags so the
-# Opik dashboard filters stay simple and stable. Two axes:
-#
-#   * WHAT the work does — ``ingestion`` (writes into memory) vs ``retrieval``
-#     (reads memory). A trace may carry one or the other (never both at the
-#     same span — a tool either reads or writes).
-#   * WHERE it runs — ``batch`` (offline via Prefect flows/tasks) vs ``mcp``
-#     (online via the MCP server tools).
-#
 # Call sites NEVER hand-write tag strings; they import a combination constant
-# from here so the family is enforced in one place. Anything that used to be a
-# pipeline name ("extraction", "memory-pipeline", "dream-consolidation", …) is
-# NOT a tag — push it into ``metadata={"pipeline": "<name>"}`` on the span/trace
-# instead (see :func:`pipeline_metadata`).
+# from here so the tags are enforced in one place. Two families:
+#
+#  1. PIPELINE-IDENTITY tags — the data / memory-extraction / memory-indexing
+#     pipelines carry these, and they match their Prefect deployment / flow-run
+#     tags 1:1: the SAME constant feeds both ``prefect.tags(...)`` and the Opik
+#     ``span(tags=...)``, so a Prefect run and its Opik trace read identically.
+#  2. The MCP-SURFACE family — two orthogonal axes for the MCP tools + dream:
+#     WHAT the work does (``ingestion`` writes vs ``retrieval`` reads) × WHERE it
+#     runs (``batch`` offline Prefect vs ``mcp`` online tool).
+#
+# ``metadata={"pipeline": "<name>"}`` still carries the finer pipeline name on
+# the span/trace (see :func:`pipeline_metadata`).
 TAG_INGESTION = "ingestion"
 TAG_RETRIEVAL = "retrieval"
 TAG_BATCH = "batch"
 TAG_MCP = "mcp"
 
-# Offline Prefect pipelines that write into memory (data ETL, extraction,
-# indexing, conversation/file ingest, dream consolidation).
+# --- Pipeline-identity tags: shared 1:1 by Prefect (deployment + flow-run tags)
+# and Opik (span/trace tags). Data ETL splits by mode (offline batch vs online
+# single-source); extraction/indexing have no mode (same deployment both ways). ---
+TAG_DATA_PIPELINE = "data-pipeline"
+TAG_MEMORY_PIPELINE = "memory-pipeline"
+TAG_EXTRACTION = "extraction"
+TAG_INDEXING = "indexing"
+TAG_OFFLINE = "offline"
+TAG_ONLINE = "online"
+
+TAGS_DATA_OFFLINE = [TAG_DATA_PIPELINE, TAG_OFFLINE]  # offline data ETL (config batch)
+TAGS_DATA_ONLINE = [
+    TAG_DATA_PIPELINE,
+    TAG_ONLINE,
+]  # online ingest (url/file/conversation)
+TAGS_EXTRACTION = [
+    TAG_MEMORY_PIPELINE,
+    TAG_EXTRACTION,
+]  # memory extraction (both modes)
+TAGS_INDEXING = [TAG_MEMORY_PIPELINE, TAG_INDEXING]  # memory indexing
+
+# Dream consolidation — the remaining batch pipeline still on the MCP-surface family.
 TAGS_INGESTION_BATCH = [TAG_INGESTION, TAG_BATCH]
 # MCP ingest tools (ingest_url / ingest_file / ingest_conversation / search_web).
 TAGS_INGESTION_MCP = [TAG_INGESTION, TAG_MCP]
@@ -117,11 +136,12 @@ TAGS_MCP = [TAG_MCP]
 
 
 def pipeline_metadata(pipeline: str, **extra: Any) -> dict[str, Any]:
-    """Build the metadata dict that replaces a pipeline-name *tag*.
+    """Build the span/trace metadata dict carrying the finer pipeline name.
 
-    The four-tag family deliberately has no per-pipeline tag, so the formerly
-    tag-encoded pipeline identity (``"extraction"``, ``"indexing"``,
-    ``"data"``, ``"dream"``, …) moves to ``metadata={"pipeline": <name>}``.
+    Complements the coarse pipeline-identity TAGS: the tag says *which* pipeline
+    (``data-pipeline`` / ``memory-pipeline`` …) for dashboard filtering, while
+    ``metadata={"pipeline": <name>}`` records the finer name (``"data"``,
+    ``"extraction"``, ``"indexing"``, ``"file"``, ``"dream"``, …) for grouping.
     Pass any additional metadata keys as keyword args.
     """
 
@@ -143,13 +163,23 @@ track = opik.track
 _R = TypeVar("_R")
 
 __all__ = [
+    "TAGS_DATA_OFFLINE",
+    "TAGS_DATA_ONLINE",
+    "TAGS_EXTRACTION",
+    "TAGS_INDEXING",
     "TAGS_INGESTION_BATCH",
     "TAGS_INGESTION_MCP",
     "TAGS_MCP",
     "TAGS_RETRIEVAL_MCP",
     "TAG_BATCH",
+    "TAG_DATA_PIPELINE",
+    "TAG_EXTRACTION",
+    "TAG_INDEXING",
     "TAG_INGESTION",
     "TAG_MCP",
+    "TAG_MEMORY_PIPELINE",
+    "TAG_OFFLINE",
+    "TAG_ONLINE",
     "TAG_RETRIEVAL",
     "configure_opik",
     "flush_opik",

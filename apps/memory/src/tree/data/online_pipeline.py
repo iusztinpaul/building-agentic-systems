@@ -33,6 +33,7 @@ from tree.config.app_config import (
     app_config,
 )
 from tree.entities.documents import Document
+from tree.observability import TAGS_DATA_ONLINE
 
 logger = logging.getLogger(__name__)
 
@@ -243,10 +244,10 @@ async def online_ingest(
     it does NOT trigger extraction — the MCP layer submits that out-of-band.
     """
 
-    # Tag the realtime leaf flow run "data-pipeline" (the thin url/file/conversation
-    # @flows don't inherit a deployment's tags); ``tags`` is dynamically scoped so it
-    # reaches the flow run created deep inside the handler.
-    with tags("data-pipeline"):
+    # Tag the realtime leaf flow run (the thin url/file/conversation @flows don't
+    # inherit a deployment's tags); ``tags`` is dynamically scoped so it reaches the
+    # flow run created deep inside the handler.
+    with tags(*TAGS_DATA_ONLINE):
         match source:
             case UrlSource():
                 return await _ingest_url(source.uri, user_id)

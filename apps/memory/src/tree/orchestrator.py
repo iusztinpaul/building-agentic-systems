@@ -40,7 +40,12 @@ from tree.memory.extraction.pipeline import (
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
-from tree.observability import configure_opik
+from tree.observability import (
+    TAGS_DATA_OFFLINE,
+    TAGS_EXTRACTION,
+    TAGS_INDEXING,
+    configure_opik,
+)
 
 # Prefect Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
 GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"
@@ -144,7 +149,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         data_etl_orchestrator,
         "data-etl-orchestrator",
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
-        ["data-pipeline", "orchestrator"],
+        TAGS_DATA_OFFLINE,
         cron=_SCHEDULED_INGEST_CRON,
         schedule_parameters={"scheduled_only": True},
     ),
@@ -152,25 +157,25 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         data_etl_worker,
         "data-etl-worker",
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
-        ["data-pipeline", "worker"],
+        TAGS_DATA_OFFLINE,
     ),
     _DeploymentSpec(
         memory_extract_etl_orchestrator,
         "memory-extract-etl-orchestrator",
         "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_orchestrator",
-        ["memory-pipeline", "extraction", "orchestrator"],
+        TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
         memory_extract_etl_worker,
         "memory-extract-etl-worker",
         "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_worker",
-        ["memory-pipeline", "extraction", "worker"],
+        TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
         memory_indexing,
         "memory-indexing-etl",
         "apps/memory/src/tree/memory/indexing/pipeline.py:memory_indexing",
-        ["memory-pipeline", "indexing"],
+        TAGS_INDEXING,
     ),
     # --- Optional (beyond the Prefect Cloud free-tier 5; gated by prefect.deploy_optional) ---
     _DeploymentSpec(
