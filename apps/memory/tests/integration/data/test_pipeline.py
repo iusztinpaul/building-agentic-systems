@@ -1,3 +1,4 @@
+import dataclasses
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,7 +12,7 @@ from tree.config.app_config import (
     SubstackRssSource,
     load_app_config,
 )
-from tree.data.offline_pipeline import data_etl_worker
+from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
 from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -357,20 +358,21 @@ sources:
         )
 
         # Substack platform pipeline gets BOTH its kinds (RSS feed + article) in one
-        # call and returns their docs.
-        substack_mock = mocker.patch(
-            "tree.data.offline_pipeline.ingest_substack_batch",
-            new=AsyncMock(return_value=[rss_doc, article_doc]),
+        # call and returns their docs; Web (last platform) gets both web URLs (explicit
+        # + untyped→web) in ONE call. Swap each platform's batch_fn in the dispatch table.
+        substack_mock = AsyncMock(return_value=[rss_doc, article_doc])
+        web_mock = AsyncMock(return_value=[web_doc_anthropic, web_doc_reddit])
+        by_label = {"Substack": substack_mock, "Web": web_mock}
+        mocker.patch(
+            "tree.data.offline_pipeline._PLATFORM_PIPELINES",
+            [
+                dataclasses.replace(p, batch_fn=by_label.get(p.label, p.batch_fn))
+                for p in _PLATFORM_PIPELINES
+            ],
         )
         arxiv_mock = mocker.patch(
             "tree.data.offline_pipeline.ingest_arxiv_dataset",
             new=AsyncMock(return_value=[arxiv_doc]),
-        )
-        # Web is the last platform: both web URLs (explicit + untyped→web) go to ONE
-        # ingest_web_batch call.
-        web_mock = mocker.patch(
-            "tree.data.offline_pipeline.ingest_web_batch",
-            new=AsyncMock(return_value=[web_doc_anthropic, web_doc_reddit]),
         )
 
         # Skip the real Mongo init.

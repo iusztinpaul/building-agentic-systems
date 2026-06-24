@@ -72,23 +72,10 @@ from tree.data.huggingface.arxiv_dataset_pipeline import (
     ingest_arxiv_dataset,
 )
 
-# The per-platform pipelines are referenced by NAME in ``_PLATFORM_PIPELINES`` and
-# looked up at call time via ``globals()[batch_fn_name]`` (see
-# ``PlatformPipeline.batch_fn``). They MUST be imported here so those names are module
-# globals: that's what makes the lookup resolve in production AND lets
-# ``mocker.patch("...offline_pipeline.<name>")`` rebind them in tests. Each import
-# carries a per-line F401-suppression because ruff can't see the ``globals()`` use;
-# dropping these imports turns every platform dispatch into a runtime ``KeyError``
-# (regression guarded by ``test_every_platform_pipeline_resolves_without_mocks``).
-from tree.data.substack.substack_pipeline_batch import (
-    ingest_substack_batch,  # noqa: F401
-)
-from tree.data.web.web_pipeline import (
-    ingest_web_batch,  # noqa: F401
-)
-from tree.data.youtube.youtube_pipeline_batch import (
-    ingest_youtube_batch,  # noqa: F401
-)
+# The per-platform unified batch flows, referenced directly in ``_PLATFORM_PIPELINES``.
+from tree.data.substack.substack_pipeline_batch import ingest_substack_batch
+from tree.data.web.web_pipeline import ingest_web_batch
+from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.entities.users import select_active_user_ids
@@ -147,26 +134,12 @@ class PlatformPipeline:
 
     ``source_types`` selects the entries via ``isinstance`` (a tuple, since a platform
     spans both its RSS and single-source kinds — e.g. Substack RSS + article).
-    ``batch_fn_name`` is the module-global name of the unified per-platform flow,
-    resolved from :func:`globals` at CALL time (NOT a captured reference) so a test
-    that ``mocker.patch``-es the module global is honoured. ``label`` names the
-    platform in log lines.
+    ``batch_fn`` is the unified per-platform flow; ``label`` names it in log lines.
     """
 
     source_types: tuple[type[SourceEntry], ...]
-    batch_fn_name: str
+    batch_fn: _BatchFn
     label: str
-
-    @property
-    def batch_fn(self) -> _BatchFn:
-        """The unified platform flow, looked up by name in the module namespace.
-
-        Resolved on every access so ``mocker.patch("...offline_pipeline.<name>")``
-        (which rebinds the module global) takes effect — a frozen reference captured
-        at import time would bypass the patch and hit the network.
-        """
-
-        return globals()[self.batch_fn_name]
 
 
 # One unified pipeline per platform. Order is load-bearing — it fixes the ingestion
@@ -175,17 +148,17 @@ class PlatformPipeline:
 _PLATFORM_PIPELINES: list[PlatformPipeline] = [
     PlatformPipeline(
         (SubstackRssSource, SubstackArticleSource),
-        "ingest_substack_batch",
+        ingest_substack_batch,
         "Substack",
     ),
     PlatformPipeline(
         (YouTubeRssSource, YouTubeVideoSource),
-        "ingest_youtube_batch",
+        ingest_youtube_batch,
         "YouTube",
     ),
     PlatformPipeline(
         (WebSource,),
-        "ingest_web_batch",
+        ingest_web_batch,
         "Web",
     ),
 ]

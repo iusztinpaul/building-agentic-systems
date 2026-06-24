@@ -14,6 +14,7 @@ unified platform pipeline's flatten+load in ``test_youtube_pipeline_batch.py`` /
 ``test_substack_pipeline_batch.py``.
 """
 
+import dataclasses
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,24 +33,6 @@ from tree.config.app_config import (
 from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
-
-
-def test_every_platform_pipeline_resolves_without_mocks() -> None:
-    """Each ``PlatformPipeline.batch_fn`` resolves to a real callable WITHOUT mocks.
-
-    ``batch_fn`` looks the flow up by name in the module namespace
-    (``globals()[batch_fn_name]``), so the ``ingest_*_batch`` functions MUST be
-    imported at module top to be present. Dropping those imports makes every
-    resolution raise ``KeyError`` at runtime — a production crash on the first
-    configured source. The mock-based dispatch tests can't catch this because
-    ``mocker.patch`` installs the missing name for the test's duration; this guard
-    deliberately uses NO mocks so a missing import surfaces.
-    """
-
-    for platform in _PLATFORM_PIPELINES:
-        assert callable(platform.batch_fn), (
-            f"{platform.batch_fn_name} is not importable as a module global"
-        )
 
 
 def _mock(mocker, name: str) -> AsyncMock:
@@ -78,12 +61,18 @@ class TestDataWorker:
     def _platforms(self, mocker) -> dict[str, AsyncMock]:
         """Mock every platform flow + the HF connector; default each to []."""
 
-        return {
-            "substack": _mock(mocker, "ingest_substack_batch"),
-            "youtube": _mock(mocker, "ingest_youtube_batch"),
-            "web": _mock(mocker, "ingest_web_batch"),
-            "arxiv": _mock(mocker, "ingest_arxiv_dataset"),
-        }
+        # Platform flows are direct refs in _PLATFORM_PIPELINES, so swap each entry's
+        # batch_fn for a mock; the HF connector is still a patchable module global.
+        labels = {"Substack": "substack", "YouTube": "youtube", "Web": "web"}
+        mocks = {key: AsyncMock(return_value=[]) for key in labels.values()}
+        mocker.patch(
+            "tree.data.offline_pipeline._PLATFORM_PIPELINES",
+            [
+                dataclasses.replace(p, batch_fn=mocks[labels[p.label]])
+                for p in _PLATFORM_PIPELINES
+            ],
+        )
+        return {**mocks, "arxiv": _mock(mocker, "ingest_arxiv_dataset")}
 
     async def test_dispatches_each_platform_with_its_typed_entries(
         self, _platforms
