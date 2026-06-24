@@ -96,6 +96,7 @@ from tree.data.youtube.youtube_video_pipeline import (
 )
 from tree.db import init_mongodb
 from tree.entities.documents import Document
+from tree.entities.users import select_active_user_ids
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
 from tree.observability import (
     TAGS_INGESTION_BATCH,
@@ -546,9 +547,33 @@ async def _fan_out_data(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_target_user_ids(
+    user_id: PydanticObjectId | None,
+) -> list[PydanticObjectId]:
+    """Resolve which tenants a data run targets.
+
+    * An explicit ``user_id`` → just that tenant (the manual
+      ``make run-data-pipeline`` path).
+    * ``None`` → every ACTIVE user (the nightly scheduled run fans the SAME
+      global sources out per tenant, mirroring dream consolidation). This branch
+      reads the DB to enumerate active users, so we connect only when needed.
+    """
+
+    if user_id is not None:
+        return [user_id]
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    database = client[settings.mongo.mongo_initdb_database]
+    return await select_active_user_ids(database=database)
+
+
 @flow(name="data-etl-orchestrator", log_prints=True)
 async def data_etl_orchestrator(
-    user_id: PydanticObjectId,
+    user_id: PydanticObjectId | None = None,
+    scheduled_only: bool = False,
 ) -> DataFanOutStats:
     """Read configured sources → group by Platform → dispatch ``data-etl-worker`` runs.
 
@@ -561,17 +586,24 @@ async def data_etl_orchestrator(
     * ``num_workers`` worker runs per ``HuggingFaceDatasetSource``, one per disjoint
       offset-**Window** of the dataset.
 
+    Two run modes share this one deployment:
+
+    * **Manual** (``user_id`` set, ``scheduled_only=False``) — ``make
+      run-data-pipeline``: ingest EVERY configured source for that one tenant.
+    * **Scheduled** (``user_id=None``, ``scheduled_only=True``) — the deployment's
+      nightly cron: ingest ONLY sources flagged ``scheduled: true`` (see
+      ``_ConfiguredSource``), fanned out across ALL active users.
+
     Each shard is dispatched via ``run_deployment`` under
     ``asyncio.gather(return_exceptions=True)`` carrying ``{user_id, sources}`` (the
     shard's serialized source entries). There is NO recursion (a DISTINCT worker
     deployment; the worker never calls ``run_deployment``) and NO trailing step — the
-    data pipeline only produces ``documents``; there is no index. Parallelism is
-    declared per-source (Platform bucketing + HF ``num_workers``), NOT via a global
-    ``num_shards`` count — that knob is gone.
+    data pipeline only produces ``documents``; there is no index.
 
-    Empty configured sources ⇒ clean no-op: zero worker dispatch,
-    ``DataFanOutStats(shards_total=0)``. One shard's failure is isolated and recorded in
-    :class:`DataFanOutStats.failures` while the others proceed.
+    Empty source set (none configured, or none flagged when ``scheduled_only``) ⇒
+    clean no-op: zero worker dispatch, ``DataFanOutStats(shards_total=0)``. One
+    shard's failure is isolated and recorded in :class:`DataFanOutStats.failures`
+    (keyed ``user_id:shard_index``) while the others proceed.
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
@@ -581,28 +613,55 @@ async def data_etl_orchestrator(
     try:
         with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
             sources = app_config.sources.sources
+            if scheduled_only:
+                sources = [s for s in sources if s.scheduled]
             if not sources:
                 logger.info(
-                    "data fan-out: no configured sources for user_id=%s — nothing "
-                    "to do (no child runs, no index run)",
-                    user_id,
+                    "data fan-out: no sources to ingest (scheduled_only=%s) — "
+                    "nothing to do (no child runs, no index run)",
+                    scheduled_only,
                 )
                 return DataFanOutStats(shards_total=0)
 
             typed_shards = _partition_sources_by_platform(sources)
             shards = [[e.model_dump() for e in shard] for shard in typed_shards]
+
+            user_ids = await _resolve_target_user_ids(user_id)
+            if not user_ids:
+                logger.info(
+                    "data fan-out: no target users (scheduled all-users run found "
+                    "no active users) — nothing to do"
+                )
+                return DataFanOutStats(shards_total=0)
+
             logger.info(
-                "data fan-out: grouped %d source(s) into %d Platform/Window shard(s)",
+                "data fan-out: grouped %d source(s) into %d Platform/Window shard(s) "
+                "for %d tenant(s) (scheduled_only=%s)",
                 len(sources),
                 len(shards),
+                len(user_ids),
+                scheduled_only,
             )
 
             headers = get_distributed_trace_headers()
-            return await _fan_out_data(
-                user_id=user_id,
-                shards=shards,
-                run_deployment=run_deployment,
-                opik_trace_headers=headers,
-            )
+            # Fan out per tenant SEQUENTIALLY — each user's shards already gather
+            # in parallel inside _fan_out_data, so a per-user loop bounds the load
+            # at one user's worth of worker runs at a time.
+            # ponytail: sequential across users; parallelize if the nightly window
+            # gets tight with many tenants.
+            aggregate = DataFanOutStats()
+            for uid in user_ids:
+                stats = await _fan_out_data(
+                    user_id=uid,
+                    shards=shards,
+                    run_deployment=run_deployment,
+                    opik_trace_headers=headers,
+                )
+                aggregate.shards_total += stats.shards_total
+                aggregate.succeeded += stats.succeeded
+                aggregate.failed += stats.failed
+                for shard_idx, message in stats.failures.items():
+                    aggregate.failures[f"{uid}:{shard_idx}"] = message
+            return aggregate
     finally:
         flush_opik()

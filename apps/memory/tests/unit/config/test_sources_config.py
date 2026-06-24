@@ -328,3 +328,56 @@ class TestSourcesConfigDefault:
         config = SourcesConfig()
 
         assert config.sources == []
+
+
+class TestScheduledFlag:
+    """The shared ``scheduled`` flag (opt-in to the nightly scheduled run)."""
+
+    def test_defaults_to_false(self):
+        config = SourcesConfig.model_validate(
+            {
+                "sources": [
+                    {"type": "substack_rss", "uri": "https://x.substack.com/feed"}
+                ]
+            }
+        )
+
+        assert config.sources[0].scheduled is False
+
+    def test_parses_true_through_the_union(self):
+        config = SourcesConfig.model_validate(
+            {
+                "sources": [
+                    {
+                        "type": "substack_rss",
+                        "uri": "https://x.substack.com/feed",
+                        "scheduled": True,
+                    },
+                ],
+            }
+        )
+
+        assert config.sources[0].scheduled is True
+
+    def test_available_on_every_variant(self):
+        # The orchestrator's ``scheduled_only`` filter reads ``.scheduled`` on
+        # every source, so the field must exist on all variants (via the base).
+        for source in (
+            SubstackRssSource(uri="u"),
+            SubstackArticleSource(uri="u"),
+            HuggingFaceDatasetSource(uri="ns/name"),
+            YouTubeVideoSource(uri="u"),
+            YouTubeRssSource(uri="u"),
+            WebSource(uri="u"),
+        ):
+            assert source.scheduled is False
+
+    def test_survives_model_dump_round_trip(self):
+        # The orchestrator serializes shards via model_dump() before dispatch, so
+        # ``scheduled`` must round-trip through the discriminated union.
+        original = SubstackRssSource(uri="https://x.substack.com/feed", scheduled=True)
+        reparsed = SourcesConfig.model_validate(
+            {"sources": [original.model_dump()]}
+        ).sources[0]
+
+        assert reparsed.scheduled is True

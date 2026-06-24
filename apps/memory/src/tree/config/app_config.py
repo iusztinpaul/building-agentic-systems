@@ -299,21 +299,36 @@ class ObservabilityConfig(BaseModel):
 # --- Source variants (discriminated union) ---
 
 
-class SubstackRssSource(BaseModel):
+class _ConfiguredSource(BaseModel):
+    """Fields shared by every configured offline source.
+
+    ``scheduled`` opts a source into the nightly scheduled run
+    (``data-etl-orchestrator``'s cron sets ``scheduled_only=True``, which ingests
+    ONLY flagged sources, for every active user). A manual ``make
+    run-data-pipeline`` ignores the flag and ingests everything. Default
+    ``false`` — set it ``true`` on feeds that gain new items over time (e.g.
+    ``substack_rss`` / ``youtube_rss``); leave it off for one-shot
+    articles/videos/datasets that never change after first ingest.
+    """
+
+    scheduled: bool = False
+
+
+class SubstackRssSource(_ConfiguredSource):
     """A Substack RSS feed URL."""
 
     type: Literal["substack_rss"] = "substack_rss"
     uri: str = Field(min_length=1)
 
 
-class SubstackArticleSource(BaseModel):
+class SubstackArticleSource(_ConfiguredSource):
     """A Substack article URL (may live on a custom domain)."""
 
     type: Literal["substack_article"] = "substack_article"
     uri: str = Field(min_length=1)
 
 
-class HuggingFaceDatasetSource(BaseModel):
+class HuggingFaceDatasetSource(_ConfiguredSource):
     """A HuggingFace dataset id (NOT a URL).
 
     The ``uri`` is the dataset id (``namespace/name``) and is used to
@@ -353,21 +368,21 @@ class HuggingFaceDatasetSource(BaseModel):
     offset: int | None = None
 
 
-class YouTubeVideoSource(BaseModel):
+class YouTubeVideoSource(_ConfiguredSource):
     """A YouTube video URL (or 11-char video id)."""
 
     type: Literal["youtube_video"] = "youtube_video"
     uri: str = Field(min_length=1)
 
 
-class YouTubeRssSource(BaseModel):
+class YouTubeRssSource(_ConfiguredSource):
     """A YouTube channel feed: ``youtube.com/feeds/videos.xml?channel_id=…``."""
 
     type: Literal["youtube_rss"] = "youtube_rss"
     uri: str = Field(min_length=1)
 
 
-class WebSource(BaseModel):
+class WebSource(_ConfiguredSource):
     """A generic web URL ingested via the URL dispatcher."""
 
     type: Literal["web"] = "web"

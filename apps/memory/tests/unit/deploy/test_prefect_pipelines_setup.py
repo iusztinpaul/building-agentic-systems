@@ -14,6 +14,7 @@ Two surfaces:
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import pathlib
 import sys
 
@@ -88,8 +89,14 @@ class TestDeploymentSpecs:
         for spec in orchestrator._DEPLOYMENT_SPECS:
             path, _, func = spec.entrypoint.partition(":")
             assert path.startswith("apps/memory/src/tree/")
-            assert path.endswith("/pipeline.py")
+            assert path.endswith("pipeline.py")
             assert func == spec.flow.fn.__name__
+            # The entrypoint file must be where the flow function actually lives,
+            # so a module rename that forgets to update the entrypoint is caught
+            # here (a bare string-suffix check would not notice the drift).
+            actual = inspect.getsourcefile(spec.flow.fn)
+            assert actual is not None
+            assert actual.endswith(path.removeprefix("apps/memory/"))
 
 
 class TestGitRefKwarg:

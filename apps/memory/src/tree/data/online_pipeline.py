@@ -249,7 +249,6 @@ async def online_ingest(
             return await _ingest_file(source, user_id)
         case ConversationSource():
             return await _ingest_conversation(source, user_id)
-        case (
-            _
-        ):  # ponytail: discriminated union makes this unreachable; guard a silent None
+        # ponytail: unreachable (discriminated union); guard against a silent None.
+        case _:
             raise TypeError(f"Unsupported online source: {type(source).__name__}")

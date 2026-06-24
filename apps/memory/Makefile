@@ -190,8 +190,12 @@ whoami: # Print the current user (id, identifier, name).
 
 # --- Data Pipelines ---
 
-run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers; no trailing index; no NUM_SHARDS flag — parallelism is per-source via platform bucketing + the HF source's num_workers in default.yaml). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers; no trailing index; no NUM_SHARDS flag — parallelism is per-source via platform bucketing + the HF source's num_workers in default.yaml). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass SCHEDULED=1 to ingest ONLY `scheduled: true` sources (the nightly cron's behaviour).
+	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(SCHEDULED),--scheduled-only,)
+
+run-online-ingest: # On-demand realtime (online) ingestion of ONE source via the same path as the MCP ingest tools. Pass SOURCE="<http(s) URL | local file path>" [TITLE="..."]. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-online-ingest SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
+	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Memory Pipelines ---

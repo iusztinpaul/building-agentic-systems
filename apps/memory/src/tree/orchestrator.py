@@ -24,11 +24,13 @@ when triggering a deployment, e.g.::
         -p user_id=507f1f77bcf86cd799439011
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from prefect import Flow, serve
 from prefect.blocks.system import Secret
 from prefect.runner.storage import GitRepository
+from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_orchestrator, data_etl_worker
@@ -101,6 +103,12 @@ class _GitRepoWithPipInstall(GitRepository):
         ]
 
 
+# Nightly schedule for the data pipeline's scheduled run (UTC). The cron fires
+# ``data-etl-orchestrator`` with ``scheduled_only=True`` and no ``user_id`` — so it
+# ingests ONLY ``scheduled: true`` sources, fanned out across all active users.
+_SCHEDULED_INGEST_CRON = "0 3 * * *"
+
+
 @dataclass(frozen=True)
 class _DeploymentSpec:
     """One deployment's topology — shared by the local-serve and cloud paths.
@@ -108,6 +116,9 @@ class _DeploymentSpec:
     ``flow`` is the imported flow object (used for local ``to_deployment`` and as
     the ``from_source`` accessor). ``entrypoint`` is the repo-relative
     ``path:function`` Prefect's managed worker loads after cloning the repo.
+    ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
+    deployment whose runs override the flow's default parameters — e.g. the data
+    orchestrator's nightly cron passes ``scheduled_only=True``.
     """
 
     flow: Flow
@@ -115,6 +126,19 @@ class _DeploymentSpec:
     entrypoint: str
     tags: list[str]
     cron: str | None = None
+    schedule_parameters: dict[str, Any] = field(default_factory=dict)
+
+    def schedules(self) -> list[Cron] | None:
+        """The deployment's schedule list, or ``None`` when it has no cron.
+
+        Each schedule carries ``schedule_parameters`` so scheduled runs differ
+        from manual ones (Prefect overrides only the listed params; the rest fall
+        back to the flow defaults).
+        """
+
+        if self.cron is None:
+            return None
+        return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
 # The deployment topology. Operators trigger the ORCHESTRATORs:
@@ -129,6 +153,8 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "data-etl-orchestrator",
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
         ["data-pipeline", "orchestrator"],
+        cron=_SCHEDULED_INGEST_CRON,
+        schedule_parameters={"scheduled_only": True},
     ),
     _DeploymentSpec(
         data_etl_worker,
@@ -166,7 +192,9 @@ def build_deployments() -> list:
     """
 
     return [
-        spec.flow.to_deployment(name=spec.name, tags=spec.tags, cron=spec.cron)
+        spec.flow.to_deployment(
+            name=spec.name, tags=spec.tags, schedules=spec.schedules()
+        )
         for spec in _DEPLOYMENT_SPECS
     ]
 
@@ -216,7 +244,7 @@ def deploy_cloud_pipelines(
             name=spec.name,
             work_pool_name=work_pool_name,
             tags=spec.tags,
-            cron=spec.cron,
+            schedules=spec.schedules(),
             job_variables=job_variables,
             build=False,
             push=False,

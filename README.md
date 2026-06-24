@@ -173,6 +173,8 @@ make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run
 
 `run-memory-pipeline-extraction` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `default.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
+The data pipeline runs in three modes — `make memory-run-data-pipeline` (all configured sources), `... SCHEDULED=1` (only `scheduled: true` sources, the same set the nightly cron ingests across all active users), and `make memory-run-online-ingest SOURCE="<url|path>"` (one source on demand, realtime). See [Data pipelines](apps/memory/README.md#data-pipelines) for all three.
+
 **7. Drive memory with the agent.**
 
 ```bash

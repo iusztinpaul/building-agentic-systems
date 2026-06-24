@@ -26,10 +26,10 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from beanie import Document as BeanieDocument
-from beanie import Indexed, Insert, after_event
+from beanie import Indexed, Insert, PydanticObjectId, after_event
 from pydantic import Field
 
 from tree.entities.knowledge_graph import (
@@ -38,7 +38,13 @@ from tree.entities.knowledge_graph import (
     build_node_id,
 )
 
+if TYPE_CHECKING:
+    from pymongo.asynchronous.database import AsyncDatabase
+
 logger = logging.getLogger(__name__)
+
+# The KG collection that carries the ``person:self`` active-user flag.
+_KG_COLLECTION = "knowledge_graph"
 
 
 # ---------------------------------------------------------------------------
@@ -132,3 +138,49 @@ class User(BeanieDocument):
             self.id,
             node_id,
         )
+
+
+# ---------------------------------------------------------------------------
+# Active-user enumeration
+# ---------------------------------------------------------------------------
+
+
+async def select_active_user_ids(
+    *,
+    database: AsyncDatabase,
+) -> list[PydanticObjectId]:
+    """Return the ``user_id`` of every active user, most-stable order.
+
+    The project's active-user signal is the KG ``person:self`` node carrying
+    ``properties.is_active_user=True`` (one per :class:`User`; see above).
+    Enumerating off that flag — rather than off the raw ``users`` collection —
+    means a user without a materialized self-person node (mid-migration,
+    soft-disabled) is skipped, matching the "who am I?" single-source-of-truth
+    contract.
+
+    Returned ids are de-duplicated and sorted by their string form so the
+    fan-out order is deterministic across runs (handy for tests / logs).
+    Shared by the scheduled dream consolidation and the scheduled data pipeline,
+    which both fan out per active tenant.
+    """
+
+    collection = database[_KG_COLLECTION]
+    cursor = collection.find(
+        {
+            "kind": "node",
+            "type": NodeType.PERSON.value,
+            "name": "self",
+            "properties.is_active_user": True,
+        },
+        {"user_id": 1},
+    )
+    seen: set[PydanticObjectId] = set()
+    out: list[PydanticObjectId] = []
+    async for doc in cursor:
+        uid = doc.get("user_id")
+        if uid is None or uid in seen:
+            continue
+        seen.add(uid)
+        out.append(uid)
+    out.sort(key=str)
+    return out

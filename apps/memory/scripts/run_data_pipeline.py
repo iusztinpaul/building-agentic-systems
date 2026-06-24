@@ -47,7 +47,9 @@ DEPLOYMENT_NAME = "data-etl-orchestrator/data-etl-orchestrator"
 POLL_INTERVAL_SECONDS = 2
 
 
-async def _run(user_id: str | None, user_identifier: str | None) -> None:
+async def _run(
+    user_id: str | None, user_identifier: str | None, scheduled_only: bool
+) -> None:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
@@ -58,6 +60,11 @@ async def _run(user_id: str | None, user_identifier: str | None) -> None:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
         parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
+        if scheduled_only:
+            # Manually exercise the nightly schedule's behaviour for this one
+            # tenant: ingest ONLY ``scheduled: true`` sources (the cron does the
+            # same across all active users with no user_id).
+            parameters["scheduled_only"] = True
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
@@ -111,10 +118,21 @@ async def _run(user_id: str | None, user_identifier: str | None) -> None:
         "the current-session user; also reads the ``USER_IDENTIFIER`` env var."
     ),
 )
-def main(user_id: str | None, user_identifier: str | None) -> None:
+@click.option(
+    "--scheduled-only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Ingest ONLY sources flagged ``scheduled: true`` (the nightly cron's "
+        "behaviour), for the resolved user. Default: ingest every source."
+    ),
+)
+def main(
+    user_id: str | None, user_identifier: str | None, scheduled_only: bool
+) -> None:
     """Trigger the data-etl-orchestrator deployment for the resolved user."""
 
-    asyncio.run(_run(user_id, user_identifier))
+    asyncio.run(_run(user_id, user_identifier, scheduled_only))
 
 
 if __name__ == "__main__":
