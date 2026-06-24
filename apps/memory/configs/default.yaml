@@ -130,6 +130,13 @@ concurrency:
   # Prefect runner global concurrency limit
   runner_global_limit: 6
 
+prefect:
+  # Register the optional deployment (the scheduled dream consolidation) on top of
+  # the 5 always-on core ones. Prefect Cloud's FREE TIER caps a workspace at 5
+  # deployments, so keep this false there; set true on a paid plan or a
+  # self-hosted Prefect server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
+  deploy_optional: false
+
 mcp:
   max_retries: 1
   max_results: 10

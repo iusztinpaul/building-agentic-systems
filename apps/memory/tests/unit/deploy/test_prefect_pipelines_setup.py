@@ -89,7 +89,7 @@ class TestDeploymentSpecs:
         for spec in orchestrator._DEPLOYMENT_SPECS:
             path, _, func = spec.entrypoint.partition(":")
             assert path.startswith("apps/memory/src/tree/")
-            assert path.endswith("pipeline.py")
+            assert path.endswith(".py")
             assert func == spec.flow.fn.__name__
             # The entrypoint file must be where the flow function actually lives,
             # so a module rename that forgets to update the entrypoint is caught

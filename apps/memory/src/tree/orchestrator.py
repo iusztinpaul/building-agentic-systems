@@ -34,21 +34,13 @@ from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_orchestrator, data_etl_worker
+from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_orchestrator,
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.observability import configure_opik
-
-# --- [Prefect Cloud free-tier cap: 5 deployments] --------------------------
-# The free tier allows only 5 deployments per workspace, so the five flows below
-# are temporarily not served/deployed. Re-enable (uncomment these imports AND add
-# the matching ``_DeploymentSpec`` entries) once the Cloud plan is upgraded.
-# from tree.data.conversation.conversation_pipeline import ingest_conversation
-# from tree.data.file.file_pipeline import ingest_file
-# from tree.memory.consolidation.dream import dream_consolidation_all_users
-# ---------------------------------------------------------------------------
 
 # Prefect Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
 GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"
@@ -118,7 +110,9 @@ class _DeploymentSpec:
     ``path:function`` Prefect's managed worker loads after cloning the repo.
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
     deployment whose runs override the flow's default parameters — e.g. the data
-    orchestrator's nightly cron passes ``scheduled_only=True``.
+    orchestrator's nightly cron passes ``scheduled_only=True``. ``optional`` marks a
+    deployment as beyond the free-tier 5 — registered only when
+    ``app_config.prefect.deploy_optional`` is true.
     """
 
     flow: Flow
@@ -127,6 +121,7 @@ class _DeploymentSpec:
     tags: list[str]
     cron: str | None = None
     schedule_parameters: dict[str, Any] = field(default_factory=dict)
+    optional: bool = False
 
     def schedules(self) -> list[Cron] | None:
         """The deployment's schedule list, or ``None`` when it has no cron.
@@ -141,12 +136,9 @@ class _DeploymentSpec:
         return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
-# The deployment topology. Operators trigger the ORCHESTRATORs:
-# - data-etl-orchestrator: partitions the configured ``sources:`` into shards and
-#   dispatches one ``data-etl-worker`` per shard (no trailing index).
-# - memory-extract-etl-orchestrator: shards the user's pending docs across
-#   ``memory-extract-etl-worker`` runs, then fires one ``memory-indexing-etl``.
-# The workers / indexing flows are also triggerable directly.
+# The first 5 are the always-on CORE set (free-tier safe). The trailing dream
+# deployment is OPTIONAL (``optional=True``): registered only when
+# ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         data_etl_orchestrator,
@@ -180,7 +172,27 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "apps/memory/src/tree/memory/indexing/pipeline.py:memory_indexing",
         ["memory-pipeline", "indexing"],
     ),
+    # --- Optional (beyond the Prefect Cloud free-tier 5; gated by prefect.deploy_optional) ---
+    _DeploymentSpec(
+        dream_consolidation_all_users,
+        "dream-consolidation-all-users",
+        "apps/memory/src/tree/memory/consolidation/dream.py:dream_consolidation_all_users",
+        ["memory-pipeline", "dream", "consolidation"],
+        cron=app_config.dream.cron,
+        optional=True,
+    ),
 ]
+
+
+def _active_deployment_specs() -> list[_DeploymentSpec]:
+    """The deployments to register: the core 5 plus the optional dream when enabled.
+
+    Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
+    YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.
+    """
+
+    deploy_optional = app_config.prefect.deploy_optional
+    return [s for s in _DEPLOYMENT_SPECS if deploy_optional or not s.optional]
 
 
 def build_deployments() -> list:
@@ -195,7 +207,7 @@ def build_deployments() -> list:
         spec.flow.to_deployment(
             name=spec.name, tags=spec.tags, schedules=spec.schedules()
         )
-        for spec in _DEPLOYMENT_SPECS
+        for spec in _active_deployment_specs()
     ]
 
 
@@ -238,7 +250,7 @@ def deploy_cloud_pipelines(
     job_variables = {"env": job_env, "image": MANAGED_IMAGE}
 
     deployment_ids: list[str] = []
-    for spec in _DEPLOYMENT_SPECS:
+    for spec in _active_deployment_specs():
         flow = spec.flow.from_source(source=source, entrypoint=spec.entrypoint)
         deployment_id = flow.deploy(
             name=spec.name,
@@ -305,7 +317,7 @@ def deployment_full_names() -> list[str]:
     ``down`` without re-listing the topology.
     """
 
-    return [f"{spec.flow.name}/{spec.name}" for spec in _DEPLOYMENT_SPECS]
+    return [f"{spec.flow.name}/{spec.name}" for spec in _active_deployment_specs()]
 
 
 def _git_ref_kwarg(git_ref: str) -> dict[str, str]:

@@ -104,23 +104,40 @@ def test_serve_deployments_registers_all_deployments(mocker):
         "memory-extract-etl-orchestrator",
         "memory-extract-etl-worker",
         "memory-indexing-etl",
-        # --- [Prefect Cloud free-tier cap: 5 deployments] --------------
-        # The five names below are temporarily NOT served (free tier allows
-        # only 5 deployments). Re-enable them here together with the matching
-        # ``.to_deployment(...)`` blocks in ``orchestrator.serve_deployments``
-        # once the Cloud plan is upgraded.
-        # "ingest-file-etl",
-        # "ingest-conversation-etl",
-        # "ingest-youtube-video-batch-etl",
-        # "ingest-youtube-rss-feed-batch-etl",
-        # "dream-consolidation-etl",
-        # ---------------------------------------------------------------
+        # The optional dream deployment is gated by ``prefect.deploy_optional``
+        # (default false) — absent here, asserted present in
+        # ``test_deploy_optional_enabled_registers_optional``.
     }
     # The two retired single-flow deployments must not linger in the registration.
     assert "memory-extraction-etl" not in deployment_names
     assert "data-pipeline-etl" not in deployment_names
     # The pre-#066 fan-out deployment is also gone.
     assert "memory-extraction-fanout-etl" not in deployment_names
+
+
+def test_deploy_optional_disabled_by_default(mocker):
+    """With ``prefect.deploy_optional`` false (default), only the core 5 register."""
+
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    orchestrator.serve_deployments(limit=4)
+
+    names = {dep.name for dep in spy.call_args.args}
+    assert len(names) == 5
+    assert "dream-consolidation-all-users" not in names
+
+
+def test_deploy_optional_enabled_registers_optional(mocker):
+    """``prefect.deploy_optional`` true adds the scheduled dream deployment."""
+
+    mocker.patch.object(orchestrator.app_config.prefect, "deploy_optional", True)
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    orchestrator.serve_deployments(limit=4)
+
+    names = {dep.name for dep in spy.call_args.args}
+    assert len(names) == 6
+    assert "dream-consolidation-all-users" in names
 
 
 def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):

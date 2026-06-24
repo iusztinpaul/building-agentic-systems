@@ -242,6 +242,21 @@ class ConcurrencyConfig(BaseModel):
     runner_global_limit: int = 4
 
 
+class PrefectConfig(BaseModel):
+    """Prefect deployment-topology knobs.
+
+    * ``deploy_optional`` — register the OPTIONAL deployment (the scheduled dream
+      consolidation) on top of the 5 always-on core ones. Prefect Cloud's **free
+      tier caps a workspace at 5 deployments**, so this defaults to ``false`` — flip
+      it to ``true`` on a paid plan or a self-hosted Prefect server. Both the local
+      serve (``make memory-serve-workflows``) and the Cloud deploy path honour it.
+      Override per-environment without editing YAML via
+      ``TREE_PREFECT__DEPLOY_OPTIONAL=true``.
+    """
+
+    deploy_optional: bool = False
+
+
 class QueryConfig(BaseModel):
     top_k: int = 10
     max_hops: int = 1
@@ -552,6 +567,7 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = MCPConfig()
     dream: DreamConfig = DreamConfig()
     concurrency: ConcurrencyConfig = ConcurrencyConfig()
+    prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
 
 

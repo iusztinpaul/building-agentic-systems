@@ -128,6 +128,33 @@ class TestLoadAppConfig:
         assert config.dream.max_pairs == 10_000
         assert config.dream.enable_supersession_judge is False
 
+    def test_prefect_deploy_optional_false_in_default_yaml(self, frozen_config_path):
+        """``prefect.deploy_optional`` is false in default.yaml (free-tier safe)."""
+
+        config = load_app_config(frozen_config_path)
+
+        assert config.prefect.deploy_optional is False
+
+    def test_prefect_deploy_optional_defaults_false_when_absent(self, tmp_path):
+        """A YAML with no ``prefect`` block defaults ``deploy_optional`` to false."""
+
+        custom = tmp_path / "no_prefect.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.prefect.deploy_optional is False
+
+    def test_prefect_deploy_optional_loaded_from_yaml(self, tmp_path):
+        """An operator can opt into the optional deployments via YAML."""
+
+        custom = tmp_path / "prefect.yaml"
+        custom.write_text("prefect:\n  deploy_optional: true\n")
+
+        config = load_app_config(custom)
+
+        assert config.prefect.deploy_optional is True
+
     def test_dream_defaults_when_absent(self, tmp_path):
         """A YAML with no ``dream`` block falls back to the typed defaults."""
 
