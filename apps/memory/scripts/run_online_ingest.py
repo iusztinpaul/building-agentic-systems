@@ -1,10 +1,12 @@
 """
-Trigger a one-off ONLINE (realtime) ingestion of a single source.
+Trigger a one-off ONLINE (realtime) DATA-pipeline ingestion of a single source.
 
-The CLI counterpart to the MCP ingest tools: routes one source through
-``online_ingest`` (the realtime data-layer router) then ``submit_ingestion``
-(fires the ``memory-extract-etl-orchestrator`` deployment) — exactly what the MCP
-``ingest_url`` / ``ingest_file`` tools do, but from the terminal.
+Routes one source through the realtime data-layer router ``online_ingest`` into the
+``documents`` collection ONLY. It does NOT extract or index — that is the memory
+pipeline's job; run ``make memory-run-memory-pipeline-extraction-online
+DOC_IDS=<id>`` with the printed document id next. (The MCP ingest tools fire
+extraction automatically as a realtime convenience; this CLI keeps the data step
+separate so the two pipelines stay decoupled.)
 
 ``--source`` is auto-detected at this CLI boundary: an ``http(s)://`` URL routes
 through the web/substack/youtube dispatcher; anything else is treated as a local
@@ -13,26 +15,24 @@ file path (``.txt`` / ``.md`` / ``.html``). Conversation ingestion stays MCP-onl
 
 Every write is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the
-Makefile wires these). See :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
+Makefile wires these). See :func:`tree.entities.sessions.resolve_user_id` for the
+resolution precedence.
 
 Requires:
-    - Prefect server running (make local-start)
-    - Workflows served (make memory-serve-workflows) — for the extraction submit
+    - Prefect server + Mongo running (make local-start)
 
 Usage:
-    make memory-run-online-ingest SOURCE="https://www.decodingai.com/p/some-post"
-    make memory-run-online-ingest SOURCE="/path/to/notes.md" TITLE="My notes"
+    make memory-run-data-pipeline-online SOURCE="https://www.decodingai.com/p/some-post"
+    make memory-run-data-pipeline-online SOURCE="/path/to/notes.md" TITLE="My notes"
     uv run python scripts/run_online_ingest.py --source https://example.com
 """
 
 import asyncio
-import json
 import logging
 from urllib.parse import urlparse
 
 import click
 
-from tree.entities.sessions import resolve_user_id
 from tree.config.settings import settings
 from tree.data.online_pipeline import (
     FileSource,
@@ -41,8 +41,8 @@ from tree.data.online_pipeline import (
     online_ingest,
 )
 from tree.db import init_mongodb
+from tree.entities.sessions import resolve_user_id
 from tree.logging import init_logger
-from tree.mcp.ingest import submit_ingestion
 
 init_logger()
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ async def _run(
 
     online_source = _build_source(source, title)
     logger.info(
-        "Online ingest: %s source for user_id=%s (%s)",
+        "Online data ingest: %s source for user_id=%s (%s)",
         online_source.type,
         resolved_user_id,
         source,
@@ -82,11 +82,23 @@ async def _run(
 
     document = await online_ingest(online_source, resolved_user_id)
     if document is None:
-        logger.info("Already ingested (duplicate); nothing submitted: %s", source)
+        logger.info("Already ingested (duplicate): %s", source)
         return
 
-    result = await submit_ingestion(document, user_id=resolved_user_id)
-    logger.info("Ingested + submitted extraction:\n%s", json.dumps(result, indent=2))
+    # Data step only — NOT extracted/indexed. Point the user at the memory step.
+    logger.info(
+        "Ingested document into `documents` (NOT extracted/indexed):\n"
+        "  id         : %s\n"
+        "  source_uri : %s\n"
+        "Next, extract it into the knowledge graph:\n"
+        "  make memory-run-memory-pipeline-extraction-online DOC_IDS=%s",
+        document.id,
+        document.source_uri,
+        document.id,
+    )
+    # The bare id on STDOUT (logs go to STDERR) so `make run-online` can capture it
+    # to chain extraction. A duplicate (document is None) prints nothing here.
+    print(document.id)
 
 
 @click.command()

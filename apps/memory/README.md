@@ -45,7 +45,7 @@ Two sources of configuration, split by concern:
 
 ### `default.yaml` sections
 
-- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `youtube_rss`, `youtube_video`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). Every entry also accepts `scheduled: true` (default `false`) to opt it into the nightly scheduled run (`make memory-run-data-pipeline SCHEDULED=1` / the cron) — see [Data pipelines](#data-pipelines). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.offline_pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the dataset ingestor.
+- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `youtube_rss`, `youtube_video`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). Every entry also accepts `scheduled: true` (default `false`) to opt it into the nightly scheduled run (`make memory-run-data-pipeline-offline SCHEDULED=1` / the cron) — see [Data pipelines](#data-pipelines). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.offline_pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the dataset ingestor.
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
 - `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
@@ -112,15 +112,39 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5; 
 
 Plus the optional `dream-consolidation-all-users` (nightly cron) when `prefect.deploy_optional: true` — see [Configuration](#configuration).
 
+### Pipelines at a glance
+
+Two stages — **data** (sources → `documents`) then **memory** (extraction → knowledge graph, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand):
+
+| stage | offline | online |
+|---|---|---|
+| **data** → `documents` | `run-data-pipeline-offline` | `run-data-pipeline-online SOURCE=…` |
+| **memory** → graph (+ trailing index) | `run-memory-pipeline-extraction-offline` | `run-memory-pipeline-extraction-online DOC_IDS=…` |
+| **index** (shared, standalone) | `run-memory-pipeline-indexing` | `run-memory-pipeline-indexing` |
+
+**Run it all in one shot** — `run-offline` / `run-online` just chain the steps above (each blocks until its Prefect run finishes; extraction fires the trailing index, so the graph is queryable when it returns):
+
+```bash
+# Offline: every configured source -> documents -> graph (+ index)
+make memory-run-offline
+make memory-run-offline USER_IDENTIFIER=paul SCHEDULED=1     # scheduled-only sources, another user
+
+# Online: one source -> document -> graph (+ index), end to end
+make memory-run-online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
+make memory-run-online SOURCE="/path/to/notes.md" TITLE="My notes"
+```
+
+`run-online` ingests the source, captures the new document id, then extracts+indexes just that document (a duplicate source skips extraction). The sections below break each step out for running them individually.
+
 ### Data pipelines
 
-The data pipeline produces `documents`. It runs in two **offline** modes (config-driven, fanned out over Prefect workers) and one **online** mode (realtime, one source at a time — the same path the MCP `ingest_url` / `ingest_file` tools use). Each target streams logs from the local `make memory-serve-workflows` (or the Dockerized worker) back to the terminal.
+The data pipeline produces `documents` **only** — it does NOT extract or index (that's the [memory pipeline](#memory-extraction), a separate step). It runs in two **offline** modes (config-driven, fanned out over Prefect workers) and one **online** mode (realtime, one source at a time). Each target streams logs from the local `make memory-serve-workflows` (or the Dockerized worker) back to the terminal.
 
 #### Offline — all sources
 
 ```bash
-make memory-run-data-pipeline                        # all sources, current user
-make memory-run-data-pipeline USER_IDENTIFIER=paul   # all sources, another user
+make memory-run-data-pipeline-offline                        # all sources, current user
+make memory-run-data-pipeline-offline USER_IDENTIFIER=paul   # all sources, another user
 ```
 
 Triggers `data-etl-orchestrator`: groups `sources.sources` by platform and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `default.yaml`, not a global flag. Ingests **every** configured source for one user (the current user; override with `USER_ID` / `USER_IDENTIFIER`).
@@ -128,7 +152,7 @@ Triggers `data-etl-orchestrator`: groups `sources.sources` by platform and dispa
 #### Offline — scheduled only
 
 ```bash
-make memory-run-data-pipeline SCHEDULED=1            # only `scheduled: true` sources, current user
+make memory-run-data-pipeline-offline SCHEDULED=1            # only `scheduled: true` sources, current user
 ```
 
 Same orchestrator, but ingests **only** sources flagged `scheduled: true` in `default.yaml`. This is what the deployment's **nightly cron** (`0 3 * * *` UTC) runs on its own — fanned out across **all active users**, no `user_id` to pass. The `SCHEDULED=1` flag manually exercises that scheduled behaviour for the current user. Flag a source for the nightly run:
@@ -143,27 +167,28 @@ sources:
 #### Online — one source on demand
 
 ```bash
-make memory-run-online-ingest SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
-make memory-run-online-ingest SOURCE="/path/to/notes.md" TITLE="My notes"
+make memory-run-data-pipeline-online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
+make memory-run-data-pipeline-online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Ingests a single URL or local file in realtime through `online_ingest` (route → fetch → submit extraction), then returns — the same router the MCP ingest tools use. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (Conversation ingestion is MCP-only — via the harness `ingest_conversation` tool.)
+Ingests a single URL or local file in realtime through `online_ingest` into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline-extraction-online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory extraction
 
-Extract knowledge-graph nodes + edges from the `documents` collection and upsert into `knowledge_graph`:
+Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both via `memory-extract-etl-orchestrator` (which also fires one trailing index run):
 
 ```bash
-# All unprocessed documents
-make memory-run-memory-pipeline-extraction
+# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
+make memory-run-memory-pipeline-extraction-offline
+make memory-run-memory-pipeline-extraction-offline DOC_IDS="507f1f77bcf86cd799439011 507f1f77bcf86cd799439012"
 
-# Specific documents
-make memory-run-memory-pipeline-extraction DOC_IDS="507f1f77bcf86cd799439011 507f1f77bcf86cd799439012"
+# Online — ONE document (e.g. the one just produced by run-data-pipeline-online)
+make memory-run-memory-pipeline-extraction-online DOC_IDS="507f1f77bcf86cd799439011"
 ```
 
 ### Memory indexing
 
-Build reverse edges for bidirectional traversal, compute node embeddings, and ensure text / vector / Atlas-search indexes on `knowledge_graph`:
+The single indexing step — works after either extraction mode. Builds reverse edges for bidirectional traversal, computes node embeddings, and ensures text / vector / Atlas-search indexes on `knowledge_graph`:
 
 ```bash
 make memory-run-memory-pipeline-indexing

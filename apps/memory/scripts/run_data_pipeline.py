@@ -21,9 +21,9 @@ Requires:
     - Workflows served (make memory-serve-workflows)
 
 Usage:
-    make memory-run-data-pipeline                       # current-session user
-    make memory-run-data-pipeline USER_ID=507f...       # override by id
-    make memory-run-data-pipeline USER_IDENTIFIER=paul  # override by handle
+    make memory-run-data-pipeline-offline                       # current-session user
+    make memory-run-data-pipeline-offline USER_ID=507f...       # override by id
+    make memory-run-data-pipeline-offline USER_IDENTIFIER=paul  # override by handle
     uv run python scripts/run_data_pipeline.py --user-identifier paul
 """
 

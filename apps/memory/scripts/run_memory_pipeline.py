@@ -22,10 +22,10 @@ Requires:
 ``--num-shards`` (optional, ``>= 1``) sets the document-shard fan-out width.
 
 Usage:
-    make memory-run-memory-pipeline-extraction                       # current user
-    make memory-run-memory-pipeline-extraction USER_ID=507f...       # override by id
-    make memory-run-memory-pipeline-extraction USER_IDENTIFIER=paul  # override by handle
-    make memory-run-memory-pipeline-extraction NUM_SHARDS=4
+    make memory-run-memory-pipeline-extraction-offline                       # current user
+    make memory-run-memory-pipeline-extraction-offline USER_ID=507f...       # override by id
+    make memory-run-memory-pipeline-extraction-offline USER_IDENTIFIER=paul  # override by handle
+    make memory-run-memory-pipeline-extraction-offline NUM_SHARDS=4
     uv run python scripts/run_memory_pipeline.py --user-identifier paul --doc-ids "id1,id2"
 """
 

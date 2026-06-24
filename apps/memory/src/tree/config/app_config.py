@@ -320,7 +320,7 @@ class _ConfiguredSource(BaseModel):
     ``scheduled`` opts a source into the nightly scheduled run
     (``data-etl-orchestrator``'s cron sets ``scheduled_only=True``, which ingests
     ONLY flagged sources, for every active user). A manual ``make
-    run-data-pipeline`` ignores the flag and ingests everything. Default
+    run-data-pipeline-offline`` ignores the flag and ingests everything. Default
     ``false`` — set it ``true`` on feeds that gain new items over time (e.g.
     ``substack_rss`` / ``youtube_rss``); leave it off for one-shot
     articles/videos/datasets that never change after first ingest.
