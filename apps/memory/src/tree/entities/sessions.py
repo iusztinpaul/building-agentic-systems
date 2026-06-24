@@ -14,6 +14,7 @@ on the ``User`` document; this collection just records the selection.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, datetime
 
@@ -22,6 +23,8 @@ from beanie import PydanticObjectId
 from pydantic import Field
 
 from tree.entities.users import User
+
+logger = logging.getLogger(__name__)
 
 # Fixed primary key of the singleton session document. There is only ever one.
 CURRENT_SESSION_ID = "current"
@@ -144,4 +147,5 @@ async def resolve_user_id(
         user_id=user_id or os.environ.get("USER_ID"),
         user_identifier=user_identifier or os.environ.get("USER_IDENTIFIER"),
     )
+    logger.info("Resolved target user: id=%s identifier=%s", user.id, user.identifier)
     return user.id

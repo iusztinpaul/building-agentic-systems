@@ -100,8 +100,10 @@ async def _run(
         document.source_uri,
         document.id,
     )
-    # The bare id on STDOUT (logs go to STDERR) so `make run-online` can capture it
-    # to chain extraction. A duplicate (document is None) prints nothing here.
+    # Deliberate machine-readable STDOUT emit (NOT a stray debug print): the bare
+    # doc id is the `run-online` chain's contract — logs go to STDERR, so this is
+    # the only thing on STDOUT for `make run-online` to capture and chain
+    # extraction. A duplicate (document is None) prints nothing here.
     print(document.id)
 
 

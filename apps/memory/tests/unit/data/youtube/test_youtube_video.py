@@ -2,8 +2,10 @@
 
 Covers oEmbed parsing, document assembly from a `FetchedTranscript`, and the
 "missing metadata" fallbacks. The dedup/upsert helper (`load_video_document`)
-is exercised in the integration suite — there is no value in mocking Beanie
-here.
+is exercised end-to-end in the integration suite; the one branch covered here
+is the `DuplicateKeyError -> None` in-batch collision skip, which the
+integration sequential-rerun tests never reach (they short-circuit on the
+`find_one` dedup check before `insert()`).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from tree.data.youtube.types import (
     FetchedTranscript,
@@ -19,9 +22,10 @@ from tree.data.youtube.types import (
 )
 from tree.data.youtube.youtube_video import (
     build_document,
+    load_video_document,
     parse_oembed_metadata,
 )
-from tree.entities.documents import SourceType
+from tree.entities.documents import Document, SourceType
 
 VIDEO_ID = "eYaWxljC4sA"
 CANONICAL_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -167,3 +171,34 @@ class TestBuildDocument:
         )
 
         assert doc.date == publish
+
+
+class TestLoadVideoDocument:
+    async def test_returns_none_on_duplicate_key_race(self, mocker) -> None:
+        """The in-batch collision path: a flattened unified batch can hold the
+        same canonical URL twice (e.g. via a feed entry and a single source).
+        Both pass `find_one` as "not present", then race on `insert()`; the
+        second `insert()` raises `DuplicateKeyError`, which the loader must
+        convert into a clean `None` skip rather than propagate.
+        """
+        doc = Document(
+            source_type=SourceType.YOUTUBE,
+            source_uri=CANONICAL_URL,
+            user_id=_USER_ID,
+        )
+
+        # No existing doc → take the insert path (not the dedup early-return).
+        mocker.patch(
+            "tree.data.youtube.youtube_video.Document.find_one",
+            new_callable=mocker.AsyncMock,
+            return_value=None,
+        )
+        mocker.patch(
+            "tree.data.youtube.youtube_video.Document.insert",
+            new_callable=mocker.AsyncMock,
+            side_effect=DuplicateKeyError("dup"),
+        )
+
+        result = await load_video_document(doc)
+
+        assert result is None

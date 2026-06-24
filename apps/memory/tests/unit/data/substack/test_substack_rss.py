@@ -1,15 +1,17 @@
 import httpx
 import pytest
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from tree.data.substack.substack_rss import (
     extract_document,
     extract_references,
     fetch_feed,
     html_to_plain_text,
+    load_document,
     parse_date,
 )
-from tree.entities.documents import SourceType
+from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -201,3 +203,35 @@ class TestFetchFeed:
         result = await fetch_feed("https://example.com/feed")
 
         assert result == []
+
+
+class TestLoadDocument:
+    async def test_returns_none_on_duplicate_key_race(self, mocker):
+        """The in-batch collision path: a flattened unified batch can hold the
+        same canonical URL twice (once via a feed entry, once via a single
+        source). Both pass `find_one` as "not present", then race on `insert()`;
+        the second `insert()` raises `DuplicateKeyError`, which the loader must
+        convert into a clean `None` skip rather than propagate.
+        """
+        doc = Document(
+            source_type=SourceType.SUBSTACK,
+            source_uri="https://example.substack.com/p/test-article",
+            user_id=_USER_ID,
+        )
+
+        # No existing doc → take the insert path (not the dedup early-return).
+        mocker.patch(
+            "tree.data.substack.substack_rss.Document.find_one",
+            new_callable=mocker.AsyncMock,
+            return_value=None,
+        )
+        mocker.patch(
+            "tree.data.substack.substack_rss.Document.insert",
+            new_callable=mocker.AsyncMock,
+            side_effect=DuplicateKeyError("dup"),
+        )
+
+        # Empty content → no references to resolve; isolates the insert branch.
+        result = await load_document(doc, {"content": [{"value": ""}]})
+
+        assert result is None
