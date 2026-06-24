@@ -13,7 +13,7 @@ Document. The batch flow runs two ETL-phase tasks over the WHOLE handed-in URL l
 
 The per-item sub-flow's body is demoted to the plain async core
 ``_ingest_substack_article_one``; ``ingest_substack_article`` remains a THIN 1-line
-@flow wrapper used ONLY by the MCP URL router (``tree.data.ingest``). The batch path
+@flow wrapper used ONLY by the MCP URL router (``tree.data.online_pipeline``). The batch path
 calls the batch tasks directly — NEVER the thin wrapper (no per-item sub-flow runs).
 
 Result persistence is OFF by default in Prefect 3.6, so these side-effecting tasks do
@@ -65,7 +65,7 @@ async def ingest_substack_article(
 ) -> Document | None:
     """Thin MCP-only @flow: ingest ONE article via the core.
 
-    The MCP ``ingest_url`` router (``tree.data.ingest._ingest_substack_article``) calls
+    The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_substack_article``) calls
     this so single-URL ingest still gets its own Prefect flow run + Opik trace. The
     BATCH path does NOT call this — it runs the batch tasks directly.
     """

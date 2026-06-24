@@ -12,7 +12,7 @@ handed-in URL list:
 
 The per-item sub-flow's body is demoted to the plain async core ``_ingest_web_url_one``;
 ``ingest_web_url`` remains a THIN 1-line @flow wrapper used ONLY by the MCP URL router
-(``tree.data.ingest``, the generic-web fallback). The batch path calls the batch tasks
+(``tree.data.online_pipeline``, the generic-web fallback). The batch path calls the batch tasks
 directly — NEVER the thin wrapper (no per-item sub-flow runs).
 
 Result persistence is OFF by default in Prefect 3.6, so these side-effecting tasks do NOT
@@ -57,7 +57,7 @@ async def _ingest_web_url_one(url: str, user_id: PydanticObjectId) -> Document |
 async def ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Thin MCP-only @flow: ingest ONE URL via the core.
 
-    The MCP ``ingest_url`` router (``tree.data.ingest._ingest_web_url``, the generic-web
+    The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_web_url``, the generic-web
     fallback) calls this so single-URL ingest still gets its own Prefect flow run + Opik
     trace. The BATCH path does NOT call this — it runs the batch tasks directly.
     """

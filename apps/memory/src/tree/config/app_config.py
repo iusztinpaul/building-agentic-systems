@@ -318,7 +318,7 @@ class HuggingFaceDatasetSource(BaseModel):
 
     The ``uri`` is the dataset id (``namespace/name``) and is used to
     dispatch to a per-dataset ETL pipeline registered in
-    ``tree.data.pipeline``. Unknown dataset ids raise at dispatch time.
+    ``tree.data.offline_pipeline``. Unknown dataset ids raise at dispatch time.
 
     Two of these fields draw an authored-vs-runtime split (#070, the config
     foundation for HF offset-window fan-out):

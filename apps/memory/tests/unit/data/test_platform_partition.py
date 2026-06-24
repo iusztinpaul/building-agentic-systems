@@ -21,7 +21,7 @@ from tree.config.app_config import (
     YouTubeVideoSource,
 )
 from tree.data.huggingface.arxiv_dataset_pipeline import ARXIV_DATASET_ID
-from tree.data.pipeline import _partition_sources_by_platform
+from tree.data.offline_pipeline import _partition_sources_by_platform
 
 
 def _platform_of(entry: SourceEntry) -> str:

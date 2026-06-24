@@ -9,7 +9,7 @@ PER-VIDEO ``fetch_many([url])`` inside per-URL sub-flows.
 
 The per-item sub-flow's body is demoted to the plain async core
 ``_ingest_youtube_video_one``; ``ingest_youtube_video`` remains a THIN @flow wrapper
-used ONLY by the MCP URL router (``tree.data.ingest._ingest_youtube_video``) so a
+used ONLY by the MCP URL router (``tree.data.online_pipeline._ingest_youtube_video``) so a
 single-URL ingest still gets its own Prefect flow run + Opik trace. The BATCH path
 calls the shared core directly — NEVER the thin wrapper (no per-item sub-flow runs).
 
@@ -91,7 +91,7 @@ async def ingest_youtube_video(
 ) -> Document | None:
     """Thin MCP-only @flow: ingest ONE YouTube video via the core.
 
-    The MCP ``ingest_url`` router (``tree.data.ingest._ingest_youtube_video``) calls
+    The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_youtube_video``) calls
     this so single-URL ingest still gets its own Prefect flow run + Opik trace. The
     BATCH path does NOT call this — it runs the shared bulk core directly.
     """

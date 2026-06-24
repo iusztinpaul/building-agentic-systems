@@ -8,7 +8,7 @@ inside each task via ``tree.data.batch.gather_isolated``.
 
 The per-item sub-flow ``ingest_web_url``'s body is demoted to a plain async core
 ``_ingest_web_url_one``; ``ingest_web_url`` remains a THIN 1-line @flow wrapper used ONLY
-by the MCP URL router (``tree.data.ingest``). The BATCH path calls the batch tasks
+by the MCP URL router (``tree.data.online_pipeline``). The BATCH path calls the batch tasks
 directly — it MUST NOT invoke the thin wrapper (no per-item sub-flow runs).
 """
 

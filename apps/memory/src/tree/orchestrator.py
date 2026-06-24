@@ -31,7 +31,7 @@ from prefect.blocks.system import Secret
 from prefect.runner.storage import GitRepository
 
 from tree.config.app_config import app_config
-from tree.data.pipeline import data_etl_orchestrator, data_etl_worker
+from tree.data.offline_pipeline import data_etl_orchestrator, data_etl_worker
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_orchestrator,
     memory_extract_etl_worker,
@@ -127,13 +127,13 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         data_etl_orchestrator,
         "data-etl-orchestrator",
-        "apps/memory/src/tree/data/pipeline.py:data_etl_orchestrator",
+        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
         ["data-pipeline", "orchestrator"],
     ),
     _DeploymentSpec(
         data_etl_worker,
         "data-etl-worker",
-        "apps/memory/src/tree/data/pipeline.py:data_etl_worker",
+        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
         ["data-pipeline", "worker"],
     ),
     _DeploymentSpec(

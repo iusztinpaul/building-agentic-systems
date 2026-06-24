@@ -27,13 +27,13 @@ from tree.config.app_config import (
     YouTubeRssSource,
     YouTubeVideoSource,
 )
-from tree.data.pipeline import _BATCHED_VARIANTS, data_etl_worker
+from tree.data.offline_pipeline import _BATCHED_SOURCES, data_etl_worker
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 def test_every_batched_variant_resolves_without_mocks() -> None:
-    """Each ``_BatchedVariant.batch_fn`` resolves to a real callable WITHOUT mocks.
+    """Each ``BatchedSource.batch_fn`` resolves to a real callable WITHOUT mocks.
 
     ``batch_fn`` looks the sub-flow up by name in the module namespace
     (``globals()[batch_fn_name]``), so the ``ingest_*_batch`` functions MUST be
@@ -44,14 +44,14 @@ def test_every_batched_variant_resolves_without_mocks() -> None:
     duration; this guard deliberately uses NO mocks so the missing import surfaces.
     """
 
-    for variant in _BATCHED_VARIANTS:
+    for variant in _BATCHED_SOURCES:
         assert callable(variant.batch_fn), (
             f"{variant.batch_fn_name} is not importable as a module global"
         )
 
 
 def _make_mock_pipeline(mocker, name: str) -> AsyncMock:
-    mock = mocker.patch(f"tree.data.pipeline.{name}", new_callable=AsyncMock)
+    mock = mocker.patch(f"tree.data.offline_pipeline.{name}", new_callable=AsyncMock)
     mock.return_value = []
     return mock
 
@@ -68,13 +68,13 @@ class TestDataWorker:
         """
 
         mocker.patch(
-            "tree.data.pipeline.assert_settings_match_live_vector_index",
+            "tree.data.offline_pipeline.assert_settings_match_live_vector_index",
             new_callable=AsyncMock,
         )
 
     async def test_dispatches_each_variant(self, mocker) -> None:
         mock_init = mocker.patch(
-            "tree.data.pipeline.init_mongodb", new_callable=AsyncMock
+            "tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock
         )
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
@@ -119,7 +119,7 @@ class TestDataWorker:
         )
 
     async def test_skips_rss_when_no_substack_rss_entries(self, mocker) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -138,7 +138,7 @@ class TestDataWorker:
     async def test_skips_articles_when_no_substack_article_entries(
         self, mocker
     ) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -155,7 +155,7 @@ class TestDataWorker:
         mock_arxiv.assert_awaited_once()
 
     async def test_skips_all_substack_variants_when_absent(self, mocker) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -175,7 +175,7 @@ class TestDataWorker:
     ) -> None:
         # The worker runs the arxiv connector iff the shard contains at least one
         # ``HuggingFaceDatasetSource``. With none, arxiv is skipped entirely.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -190,7 +190,7 @@ class TestDataWorker:
 
     async def test_initializes_mongodb(self, mocker) -> None:
         mock_init = mocker.patch(
-            "tree.data.pipeline.init_mongodb", new_callable=AsyncMock
+            "tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock
         )
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
@@ -203,7 +203,7 @@ class TestDataWorker:
     async def test_skips_web_when_no_web_entries(self, mocker, caplog) -> None:
         import logging
 
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -213,7 +213,7 @@ class TestDataWorker:
             SubstackRssSource(uri="https://example.com/feed"),
         ]
 
-        with caplog.at_level(logging.INFO, logger="tree.data.pipeline"):
+        with caplog.at_level(logging.INFO, logger="tree.data.offline_pipeline"):
             await data_etl_worker(_USER_ID, sources)
 
         mock_web.assert_not_awaited()
@@ -225,7 +225,7 @@ class TestDataWorker:
     async def test_batches_web_entries_into_single_call(self, mocker) -> None:
         # Multiple web entries produce ONE call to the batch flow with all URLs as
         # a single list — not one per-URL call (mirrors the substack-article batch).
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -248,7 +248,7 @@ class TestDataWorker:
     async def test_web_is_dispatched_after_youtube_video(self, mocker) -> None:
         # Web is the LAST batched variant: its batch call must be awaited AFTER the
         # YouTube-video batch call (ingestion + log order preserved).
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -273,7 +273,7 @@ class TestDataWorker:
         # ``ingest_web_url_batch`` already filters ``None`` internally and returns a
         # ``list[Document]``; the worker just extends with that list — it must NOT
         # re-filter or otherwise transform the returned docs.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -296,7 +296,7 @@ class TestDataWorker:
     ) -> None:
         # Five RSS entries should produce ONE call to the batch flow with
         # all five URIs as a single list — not five separate calls.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -311,7 +311,7 @@ class TestDataWorker:
     async def test_groups_substack_article_entries_into_single_batch_call(
         self, mocker
     ) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         mock_articles = _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -328,7 +328,7 @@ class TestDataWorker:
     async def test_passes_huggingface_dataset_overrides(self, mocker) -> None:
         # Per-entry ``max_samples`` and ``fetch_content`` must be forwarded
         # to ``ingest_arxiv_dataset``. A non-windowed entry forwards ``offset=None``.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -351,7 +351,7 @@ class TestDataWorker:
         # A windowed entry (``offset`` stamped by the #072 orchestrator) forwards
         # that ``offset`` to ``ingest_arxiv_dataset`` so the worker ingests exactly
         # rows ``[offset, offset + max_samples)``.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -371,7 +371,7 @@ class TestDataWorker:
         )
 
     async def test_dispatches_youtube_rss_entries(self, mocker) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -393,7 +393,7 @@ class TestDataWorker:
         assert doc in result
 
     async def test_dispatches_youtube_video_entries(self, mocker) -> None:
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -417,7 +417,7 @@ class TestDataWorker:
     async def test_skips_youtube_branches_when_absent(self, mocker, caplog) -> None:
         import logging
 
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -426,7 +426,7 @@ class TestDataWorker:
 
         sources: list[SourceEntry] = [SubstackRssSource(uri="https://example.com/feed")]
 
-        with caplog.at_level(logging.INFO, logger="tree.data.pipeline"):
+        with caplog.at_level(logging.INFO, logger="tree.data.offline_pipeline"):
             await data_etl_worker(_USER_ID, sources)
 
         mock_yt_rss.assert_not_awaited()
@@ -444,7 +444,7 @@ class TestDataWorker:
     async def test_raises_for_unknown_huggingface_dataset_id(self, mocker) -> None:
         # Unknown HF dataset ids must fail loudly so an operator notices the
         # missing registration rather than silently skipping ingestion.
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         _make_mock_pipeline(mocker, "ingest_arxiv_dataset")
@@ -462,7 +462,7 @@ class TestDataWorker:
         actually dispatches.
         """
 
-        mocker.patch("tree.data.pipeline.init_mongodb", new_callable=AsyncMock)
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
         mock_rss = _make_mock_pipeline(mocker, "ingest_substack_rss_feed_batch")
         _make_mock_pipeline(mocker, "ingest_substack_article_batch")
         mock_arxiv = _make_mock_pipeline(mocker, "ingest_arxiv_dataset")

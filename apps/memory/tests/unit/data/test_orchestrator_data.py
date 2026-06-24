@@ -1,7 +1,7 @@
 """Unit tests for the ``data-etl-orchestrator`` flow (#072, ADR-002 §3 amend #070–#074).
 
-These drive ``data_etl_orchestrator`` directly with ``tree.data.pipeline.app_config``
-patched to a known ``sources:`` list and ``tree.data.pipeline.run_deployment`` mocked,
+These drive ``data_etl_orchestrator`` directly with ``tree.data.offline_pipeline.app_config``
+patched to a known ``sources:`` list and ``tree.data.offline_pipeline.run_deployment`` mocked,
 so nothing touches a real Prefect server. They assert the orchestrator now partitions by
 PLATFORM (not by count):
 
@@ -38,7 +38,7 @@ from tree.config.app_config import (
     YouTubeVideoSource,
 )
 from tree.data.huggingface.arxiv_dataset_pipeline import ARXIV_DATASET_ID
-from tree.data.pipeline import data_etl_orchestrator
+from tree.data.offline_pipeline import data_etl_orchestrator
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -46,7 +46,7 @@ _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 def _patch_config(mocker, sources: list[SourceEntry]) -> None:
     mock_config = MagicMock()
     mock_config.sources.sources = sources
-    mocker.patch("tree.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
 
 
 def _capture_run_deployment(mocker) -> list[tuple[str, dict]]:
@@ -56,7 +56,7 @@ def _capture_run_deployment(mocker) -> list[tuple[str, dict]]:
         calls.append((name, parameters or {}))
 
     mocker.patch(
-        "tree.data.pipeline.run_deployment",
+        "tree.data.offline_pipeline.run_deployment",
         new=mocker.AsyncMock(side_effect=_fake_run_deployment),
     )
     return calls
@@ -373,7 +373,7 @@ async def test_one_shard_failure_is_isolated(mocker) -> None:
             raise RuntimeError("bright data fetch error")
 
     mocker.patch(
-        "tree.data.pipeline.run_deployment",
+        "tree.data.offline_pipeline.run_deployment",
         new=mocker.AsyncMock(side_effect=_fake_run_deployment),
     )
 

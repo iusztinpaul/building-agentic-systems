@@ -71,8 +71,8 @@ from tree.data.huggingface.arxiv_dataset_pipeline import (
     ingest_arxiv_dataset,
 )
 
-# The batched sub-flows are referenced by NAME in ``_BATCHED_VARIANTS`` and looked
-# up at call time via ``globals()[batch_fn_name]`` (see ``_BatchedVariant.batch_fn``).
+# The batched sub-flows are referenced by NAME in ``_BATCHED_SOURCES`` and looked
+# up at call time via ``globals()[batch_fn_name]`` (see ``BatchedSource.batch_fn``).
 # They MUST be imported here so those names are module globals: that's what makes
 # the lookup resolve in production AND lets ``mocker.patch("...pipeline.<name>")``
 # rebind them in tests. Each import carries a per-line F401-suppression because
@@ -142,12 +142,11 @@ _HUGGINGFACE_DATASET_HANDLERS: dict[
 }
 
 
-# A batched sub-flow: takes a list of URIs + the user and returns the ingested docs.
 _BatchFn = Callable[[list[str], PydanticObjectId], Awaitable[list[Document]]]
 
 
 @dataclass(frozen=True)
-class _BatchedVariant:
+class BatchedSource:
     """One source variant whose entries are batched into a single sub-flow call.
 
     ``source_type`` selects the entries via ``isinstance``; ``batch_fn_name`` is the
@@ -181,36 +180,36 @@ class _BatchedVariant:
 # Table for the five byte-identical batched variants. Order is load-bearing — it
 # fixes the ingestion order Substack RSS → Substack article → YouTube RSS → YouTube
 # video → Web (last/catch-all), and the order their log lines are emitted.
-_BATCHED_VARIANTS: list[_BatchedVariant] = [
-    _BatchedVariant(
+_BATCHED_SOURCES: list[BatchedSource] = [
+    BatchedSource(
         SubstackRssSource,
         "ingest_substack_rss_feed_batch",
         "Substack RSS",
         "feeds",
         "substack_rss",
     ),
-    _BatchedVariant(
+    BatchedSource(
         SubstackArticleSource,
         "ingest_substack_article_batch",
         "Substack article",
         "URLs",
         "substack_article",
     ),
-    _BatchedVariant(
+    BatchedSource(
         YouTubeRssSource,
         "ingest_youtube_rss_feed_batch",
         "YouTube RSS",
         "feeds",
         "youtube_rss",
     ),
-    _BatchedVariant(
+    BatchedSource(
         YouTubeVideoSource,
         "ingest_youtube_video_batch",
         "YouTube video",
         "URLs",
         "youtube_video",
     ),
-    _BatchedVariant(
+    BatchedSource(
         WebSource,
         "ingest_web_url_batch",
         "Web",
@@ -234,8 +233,8 @@ def _coerce_sources(sources: list[Any]) -> list[SourceEntry]:
     return _SOURCES_ADAPTER.validate_python(sources)
 
 
-@tracked_span("_ingest_sources", tags=_DATA_TAGS)
-async def _ingest_sources(
+@tracked_span("offline_ingest_batch", tags=_DATA_TAGS)
+async def offline_ingest_batch(
     sources: list[SourceEntry],
     user_id: PydanticObjectId,
     opik_trace_headers: dict[str, str] | None = None,
@@ -254,7 +253,7 @@ async def _ingest_sources(
     # --- Batched variants (Substack RSS/article, YouTube RSS/video, Web) ---
     # Ordering is preserved: Substack RSS → Substack article → YouTube RSS →
     # YouTube video → Web (last/catch-all).
-    for variant in _BATCHED_VARIANTS:
+    for variant in _BATCHED_SOURCES:
         entries = [s for s in sources if isinstance(s, variant.source_type)]
         if entries:
             uris = [s.uri for s in entries]
@@ -366,7 +365,7 @@ async def data_etl_worker(
 
             headers = get_distributed_trace_headers()
             typed_sources = _coerce_sources(sources)
-            return await _ingest_sources(
+            return await offline_ingest_batch(
                 typed_sources, user_id, opik_trace_headers=headers
             )
     finally:
@@ -380,12 +379,6 @@ async def data_etl_worker(
 
 
 # Platform buckets for the data orchestrator's GROUP-BY-PLATFORM partition
-# (ADR-002 §3 amendment #070–#074). Each non-HuggingFace source variant maps to a
-# Platform; the variants sharing a Platform land in ONE homogeneous worker shard.
-# Order is load-bearing — it fixes the dispatch order of the non-HF Platform shards
-# (substack → youtube → custom) and is asserted by the orchestrator tests. HuggingFace
-# is handled separately (offset-window sub-fan-out via :func:`arxiv_window_entries`),
-# so it is NOT in this map.
 _NON_HF_PLATFORMS: list[tuple[str, tuple[type[SourceEntry], ...]]] = [
     ("substack", (SubstackRssSource, SubstackArticleSource)),
     ("youtube", (YouTubeRssSource, YouTubeVideoSource)),
@@ -408,7 +401,7 @@ def _partition_sources_by_platform(
       sharing a Platform are grouped (``substack_rss`` + ``substack_article`` → one
       ``substack`` shard; ``youtube_rss`` + ``youtube_video`` → one ``youtube`` shard;
       ``web`` → one ``custom`` shard), preserving each Platform's internal configured
-      order. The worker's existing ``_ingest_sources`` ``isinstance`` routing then
+      order. The worker's existing ``offline_ingest_batch`` ``isinstance`` routing then
       batches per VARIANT inside the homogeneous shard, so the worker is unchanged. A
       Platform absent from config emits no shard.
     * **HuggingFace → ``num_workers`` single-entry offset-Window shards per entry.** Each

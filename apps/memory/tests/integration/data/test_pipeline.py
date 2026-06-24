@@ -11,7 +11,7 @@ from tree.config.app_config import (
     SubstackRssSource,
     load_app_config,
 )
-from tree.data.pipeline import data_etl_worker
+from tree.data.offline_pipeline import data_etl_worker
 from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -135,13 +135,13 @@ def _make_full_config(
 
     mock_config = MagicMock()
     mock_config.sources.sources = sources
-    mocker.patch("tree.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
     mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
     return mock_config
 
 
 def _mock_init_mongodb(mocker, mongo_client) -> None:
-    mocker.patch("tree.data.pipeline.init_mongodb", return_value=mongo_client)
+    mocker.patch("tree.data.offline_pipeline.init_mongodb", return_value=mongo_client)
     mocker.patch(
         "tree.data.substack.substack_rss_pipeline.init_mongodb",
         return_value=mongo_client,
@@ -364,15 +364,15 @@ sources:
         )
 
         rss_mock = mocker.patch(
-            "tree.data.pipeline.ingest_substack_rss_feed_batch",
+            "tree.data.offline_pipeline.ingest_substack_rss_feed_batch",
             new=AsyncMock(return_value=[rss_doc]),
         )
         article_mock = mocker.patch(
-            "tree.data.pipeline.ingest_substack_article_batch",
+            "tree.data.offline_pipeline.ingest_substack_article_batch",
             new=AsyncMock(return_value=[article_doc]),
         )
         arxiv_mock = mocker.patch(
-            "tree.data.pipeline.ingest_arxiv_dataset",
+            "tree.data.offline_pipeline.ingest_arxiv_dataset",
             new=AsyncMock(return_value=[arxiv_doc]),
         )
 
@@ -395,14 +395,15 @@ sources:
             return docs
 
         web_batch_mock = mocker.patch(
-            "tree.data.pipeline.ingest_web_url_batch",
+            "tree.data.offline_pipeline.ingest_web_url_batch",
             new_callable=AsyncMock,
             side_effect=_fake_ingest_web_url_batch,
         )
 
         # Skip the real Mongo init.
         mocker.patch(
-            "tree.data.pipeline.init_mongodb", new=AsyncMock(return_value=mongo_client)
+            "tree.data.offline_pipeline.init_mongodb",
+            new=AsyncMock(return_value=mongo_client),
         )
 
         # --- Run the worker against the loaded fixture's sources ---
