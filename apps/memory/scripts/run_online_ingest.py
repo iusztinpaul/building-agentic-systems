@@ -43,6 +43,7 @@ from tree.data.online_pipeline import (
 from tree.db import init_mongodb
 from tree.entities.sessions import resolve_user_id
 from tree.logging import init_logger
+from tree.observability import flush_opik
 
 init_logger()
 logger = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ async def _run(
     )
 
     document = await online_ingest(online_source, resolved_user_id)
+    # online_ingest owns the Opik span; the CLI process (no MCP/flow lifecycle)
+    # flushes it before exit so the trace actually ships.
+    flush_opik()
     if document is None:
         logger.info("Already ingested (duplicate): %s", source)
         return

@@ -33,9 +33,19 @@ from tree.config.app_config import (
     app_config,
 )
 from tree.entities.documents import Document
-from tree.observability import TAGS_DATA_ONLINE
+from tree.observability import (
+    TAGS_DATA_ONLINE,
+    configure_opik,
+    pipeline_metadata,
+    span,
+)
 
 logger = logging.getLogger(__name__)
+
+# Opik tags + metadata for the online data pipeline's trace, mirroring the offline
+# pipeline (``_DATA_TAGS`` / ``_DATA_METADATA`` there). Same ``pipeline="data"``
+# metadata as offline; the offline/online split lives in the tags.
+_ONLINE_METADATA = pipeline_metadata("data")
 
 
 _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -244,10 +254,18 @@ async def online_ingest(
     it does NOT trigger extraction — the MCP layer submits that out-of-band.
     """
 
-    # Tag the realtime leaf flow run (the thin url/file/conversation @flows don't
-    # inherit a deployment's tags); ``tags`` is dynamically scoped so it reaches the
-    # flow run created deep inside the handler.
-    with tags(*TAGS_DATA_ONLINE):
+    # Opik: own a span for the online data pipeline, mirroring the offline trace.
+    # ``configure_opik`` is idempotent so the CLI path (run_online_ingest) traces
+    # too; under the MCP ``@track`` ingest tools this span nests via contextvars
+    # (same process — no distributed headers needed). The leaf url/file/conversation
+    # spans nest under it the same way.
+    # Prefect: ``tags`` is dynamically scoped so it reaches the leaf flow run created
+    # in the handler (the thin @flows don't inherit a deployment's tags).
+    configure_opik()
+    with (
+        tags(*TAGS_DATA_ONLINE),
+        span("online_ingest", tags=TAGS_DATA_ONLINE, metadata=_ONLINE_METADATA),
+    ):
         match source:
             case UrlSource():
                 return await _ingest_url(source.uri, user_id)

@@ -1,5 +1,6 @@
 """Unit tests for tree.data.online_pipeline — URL dispatcher + online_ingest router."""
 
+import contextlib
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -405,3 +406,30 @@ class TestOnlineIngestRouting:
 
         assert result is doc
         mock_conv.assert_awaited_once_with(source, _USER_ID)
+
+    async def test_owns_opik_span_mirroring_offline(self, mocker) -> None:
+        # The online data pipeline configures Opik + opens its own span, tagged
+        # 1:1 with its Prefect flow-run tags (mirrors the offline trace).
+        mock_configure = mocker.patch("tree.data.online_pipeline.configure_opik")
+        captured: dict = {}
+
+        @contextlib.contextmanager
+        def fake_span(name, **kwargs):
+            captured.update(
+                name=name, tags=kwargs.get("tags"), meta=kwargs.get("metadata")
+            )
+            yield
+
+        mocker.patch("tree.data.online_pipeline.span", fake_span)
+        mocker.patch(
+            "tree.data.online_pipeline._ingest_url",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        )
+
+        await online_ingest(UrlSource(uri="https://example.com"), _USER_ID)
+
+        mock_configure.assert_called_once()
+        assert captured["name"] == "online_ingest"
+        assert captured["tags"] == ["data-pipeline", "online"]
+        assert captured["meta"] == {"pipeline": "data"}
