@@ -20,6 +20,7 @@ from tree.entities.sessions import (
     get_current_user_id,
     get_user_by_identifier,
     resolve_user,
+    resolve_user_id,
     set_current_user,
 )
 from tree.entities.users import User
@@ -210,3 +211,44 @@ async def test_resolve_user_raises_when_nothing_set(mongo_client) -> None:
     # Arrange / Act / Assert — no override, no current user.
     with pytest.raises(ValueError, match="no current user"):
         await resolve_user()
+
+
+# --- resolve_user_id: the CLI-facing wrapper (env fallback + returns id) ---
+
+
+async def test_resolve_user_id_returns_the_user_id(mongo_client) -> None:
+    user = User(identifier="resolve-id-fn@example.com")
+    await user.insert()
+
+    assert await resolve_user_id(str(user.id), None) == user.id
+
+
+async def test_resolve_user_id_falls_back_to_user_id_env(
+    mongo_client, monkeypatch
+) -> None:
+    user = User(identifier="env-id@example.com")
+    await user.insert()
+    monkeypatch.setenv("USER_ID", str(user.id))
+
+    # No explicit arg → reads USER_ID from the environment.
+    assert await resolve_user_id(None, None) == user.id
+
+
+async def test_resolve_user_id_explicit_arg_wins_over_env(
+    mongo_client, monkeypatch
+) -> None:
+    explicit = User(identifier="explicit@example.com")
+    other = User(identifier="env@example.com")
+    await explicit.insert()
+    await other.insert()
+    monkeypatch.setenv("USER_IDENTIFIER", "env@example.com")
+
+    # Explicit --user-id beats the USER_IDENTIFIER env var.
+    assert await resolve_user_id(str(explicit.id), None) == explicit.id
+
+
+async def test_resolve_user_id_raises_valueerror_not_systemexit(mongo_client) -> None:
+    # Library-pure: a missing user raises ValueError (the CLI owns exit handling),
+    # NOT SystemExit — so importing this never risks killing a non-CLI process.
+    with pytest.raises(ValueError):
+        await resolve_user_id(str(PydanticObjectId()), None)

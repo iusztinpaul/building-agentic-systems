@@ -1,13 +1,19 @@
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 
 sources:
+  # `scheduled: true` opts a source into the nightly run (data-etl-orchestrator
+  # cron, all active users). A manual `make run-data-pipeline` ingests everything
+  # regardless. Default false — set it on feeds (RSS), not one-shot articles.
   # Substack
   - uri: https://www.decodingai.com/feed
     type: substack_rss
+    scheduled: true
   - uri: https://maximelabonne.substack.com/feed
     type: substack_rss
+    scheduled: true
   - uri: https://www.latent.space/feed
     type: substack_rss
+    scheduled: true
   - uri: https://www.decodingai.com/p/ai-agents-foundations-course
     type: substack_article
   - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
@@ -123,6 +129,13 @@ concurrency:
   voyage_tpm: 10000
   # Prefect runner global concurrency limit
   runner_global_limit: 6
+
+prefect:
+  # Register the optional deployment (the scheduled dream consolidation) on top of
+  # the 5 always-on core ones. Prefect Cloud's FREE TIER caps a workspace at 5
+  # deployments, so keep this false there; set true on a paid plan or a
+  # self-hosted Prefect server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
+  deploy_optional: false
 
 mcp:
   max_retries: 1

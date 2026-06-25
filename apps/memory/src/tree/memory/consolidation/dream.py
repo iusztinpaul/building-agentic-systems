@@ -61,6 +61,7 @@ from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.knowledge_graph import EdgeType, NodeType
 from tree.entities.ontology import NODE_REGISTRY
+from tree.entities.users import select_active_user_ids
 from tree.memory.consolidation.meta_state import load_watermark, record_dream_run
 from tree.memory.extraction.add_entity import _upsert_pending_same_as_edge
 from tree.memory.extraction.dedup import (
@@ -911,43 +912,10 @@ class FanOutStats:
         }
 
 
-async def _select_active_user_ids(
-    *,
-    database: AsyncDatabase,
-) -> list[PydanticObjectId]:
-    """Return the ``user_id`` of every active user, most-stable order.
-
-    The project's active-user signal is the KG ``person:self`` node carrying
-    ``properties.is_active_user=True`` (one per :class:`User`; see
-    ``entities/users.py``). Enumerating off that flag — rather than off the
-    raw ``users`` collection — means a user without a materialized self-person
-    node (mid-migration, soft-disabled) is skipped, matching the
-    "who am I?" single-source-of-truth contract.
-
-    Returned ids are de-duplicated and sorted by their string form so the
-    fan-out order is deterministic across runs (handy for tests / logs).
-    """
-
-    collection = database[_KG_COLLECTION]
-    cursor = collection.find(
-        {
-            "kind": "node",
-            "type": NodeType.PERSON.value,
-            "name": "self",
-            "properties.is_active_user": True,
-        },
-        {"user_id": 1},
-    )
-    seen: set[PydanticObjectId] = set()
-    out: list[PydanticObjectId] = []
-    async for doc in cursor:
-        uid = doc.get("user_id")
-        if uid is None or uid in seen:
-            continue
-        seen.add(uid)
-        out.append(uid)
-    out.sort(key=str)
-    return out
+# Canonical active-user enumeration now lives beside the ``is_active_user``
+# contract in ``entities/users.py``; the scheduled data pipeline reuses it too.
+# Kept aliased here so the dream all-users flow and its tests are unchanged.
+_select_active_user_ids = select_active_user_ids
 
 
 async def _fan_out_dreams(

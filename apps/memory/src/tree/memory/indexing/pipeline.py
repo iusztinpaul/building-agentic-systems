@@ -22,7 +22,7 @@ from tree.memory.indexing.core import (
 )
 from tree.models.get_model import get_embedding_model
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
+    TAGS_INDEXING,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -38,9 +38,10 @@ logger = logging.getLogger(__name__)
 # so indexing nests under the same trace as the extraction it follows). Nested
 # embedding spans (Voyage/Modal) attach to the task span via contextvars.
 #
-# Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
-# former ``"memory-indexing"`` pipeline-name tag is now span metadata.
-_INDEXING_TAGS = TAGS_INGESTION_BATCH
+# Pipeline-identity tags: the memory-indexing pipeline's tags, shared 1:1 with
+# its Prefect deployment / flow-run tags. The pipeline name also rides as span
+# metadata (``pipeline="indexing"``).
+_INDEXING_TAGS = TAGS_INDEXING
 _INDEXING_METADATA = pipeline_metadata("indexing")
 
 

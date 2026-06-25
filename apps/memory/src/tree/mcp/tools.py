@@ -10,11 +10,12 @@ from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
 
-from tree.data.conversation.conversation_pipeline import (
-    ingest_conversation as _ingest_conversation,
+from tree.data.online_pipeline import (
+    ConversationSource,
+    FileSource,
+    UrlSource,
+    online_ingest,
 )
-from tree.data.file.file_pipeline import ingest_file as _ingest_file
-from tree.data.ingest import ingest_url as _ingest_url_dispatch
 from tree.data.web.web_scrape import (
     DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
 )
@@ -32,6 +33,7 @@ from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
+from tree.entities.documents import Document
 from tree.entities.knowledge_graph import NodeType
 
 # graph_app / dashboard_app: side-effect imports — register the read-only
@@ -252,6 +254,23 @@ async def deep_search_memory(
 # ---------------------------------------------------------------------------
 
 
+async def _submit(
+    document: Document | None,
+    *,
+    user_id: PydanticObjectId,
+    dup_extra: dict[str, Any],
+) -> str:
+    """Shared MCP ingest tail: dedupe-aware submit to the extraction pipeline.
+
+    ``online_ingest`` returns ``None`` for a duplicate; otherwise we fire the async
+    extraction submission. Both branches serialize to the tool's JSON string.
+    """
+
+    if document is None:
+        return json.dumps({"status": "already_ingested", **dup_extra})
+    return json.dumps(await submit_ingestion(document, user_id=user_id))
+
+
 @mcp.tool
 @track(tags=TAGS_INGESTION_MCP, name="ingest_url", create_duplicate_root_span=False)
 async def ingest_url(url: str, ctx: Context) -> str:
@@ -268,7 +287,7 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
     lc = ctx.lifespan_context
     try:
-        document = await _ingest_url_dispatch(url, lc["user_id"])
+        document = await online_ingest(UrlSource(uri=url), lc["user_id"])
     except ValueError as exc:
         return json.dumps({"error": "unsupported_url", "detail": str(exc)})
     except BrightDataConfigurationError as exc:
@@ -284,11 +303,7 @@ async def ingest_url(url: str, ctx: Context) -> str:
             {"error": "network_error", "detail": f"Could not reach {url}: {exc}"}
         )
 
-    if document is None:
-        return json.dumps({"status": "already_ingested", "url": url})
-
-    result = await submit_ingestion(document, user_id=lc["user_id"])
-    return json.dumps(result)
+    return await _submit(document, user_id=lc["user_id"], dup_extra={"url": url})
 
 
 @mcp.tool
@@ -311,7 +326,9 @@ async def ingest_file(
 
     lc = ctx.lifespan_context
     try:
-        document = await _ingest_file(file_path, lc["user_id"], title)
+        document = await online_ingest(
+            FileSource(path=file_path, title=title), lc["user_id"]
+        )
     except (
         FileNotFoundError,
         IsADirectoryError,
@@ -321,11 +338,9 @@ async def ingest_file(
     ) as exc:
         return json.dumps({"error": "file_error", "detail": str(exc)})
 
-    if document is None:
-        return json.dumps({"status": "already_ingested", "file_path": file_path})
-
-    result = await submit_ingestion(document, user_id=lc["user_id"])
-    return json.dumps(result)
+    return await _submit(
+        document, user_id=lc["user_id"], dup_extra={"file_path": file_path}
+    )
 
 
 @mcp.tool
@@ -606,21 +621,19 @@ async def ingest_conversation(
 
     lc = ctx.lifespan_context
     try:
-        document = await _ingest_conversation(
-            conversation_text,
+        document = await online_ingest(
+            ConversationSource(
+                text=conversation_text,
+                title=title,
+                session_uri=session_uri,
+                session_started_at=parsed_session_started_at,
+            ),
             lc["user_id"],
-            title=title,
-            session_uri=session_uri,
-            session_started_at=parsed_session_started_at,
         )
     except ValueError as exc:
         return json.dumps({"error": "invalid_input", "detail": str(exc)})
 
-    if document is None:
-        return json.dumps({"status": "already_ingested"})
-
-    result = await submit_ingestion(document, user_id=lc["user_id"])
-    return json.dumps(result)
+    return await _submit(document, user_id=lc["user_id"], dup_extra={})
 
 
 # ---------------------------------------------------------------------------

@@ -242,6 +242,21 @@ class ConcurrencyConfig(BaseModel):
     runner_global_limit: int = 4
 
 
+class PrefectConfig(BaseModel):
+    """Prefect deployment-topology knobs.
+
+    * ``deploy_optional`` — register the OPTIONAL deployment (the scheduled dream
+      consolidation) on top of the 5 always-on core ones. Prefect Cloud's **free
+      tier caps a workspace at 5 deployments**, so this defaults to ``false`` — flip
+      it to ``true`` on a paid plan or a self-hosted Prefect server. Both the local
+      serve (``make memory-serve-workflows``) and the Cloud deploy path honour it.
+      Override per-environment without editing YAML via
+      ``TREE_PREFECT__DEPLOY_OPTIONAL=true``.
+    """
+
+    deploy_optional: bool = False
+
+
 class QueryConfig(BaseModel):
     top_k: int = 10
     max_hops: int = 1
@@ -299,26 +314,41 @@ class ObservabilityConfig(BaseModel):
 # --- Source variants (discriminated union) ---
 
 
-class SubstackRssSource(BaseModel):
+class _ConfiguredSource(BaseModel):
+    """Fields shared by every configured offline source.
+
+    ``scheduled`` opts a source into the nightly scheduled run
+    (``data-etl-orchestrator``'s cron sets ``scheduled_only=True``, which ingests
+    ONLY flagged sources, for every active user). A manual ``make
+    run-data-pipeline-offline`` ignores the flag and ingests everything. Default
+    ``false`` — set it ``true`` on feeds that gain new items over time (e.g.
+    ``substack_rss`` / ``youtube_rss``); leave it off for one-shot
+    articles/videos/datasets that never change after first ingest.
+    """
+
+    scheduled: bool = False
+
+
+class SubstackRssSource(_ConfiguredSource):
     """A Substack RSS feed URL."""
 
     type: Literal["substack_rss"] = "substack_rss"
     uri: str = Field(min_length=1)
 
 
-class SubstackArticleSource(BaseModel):
+class SubstackArticleSource(_ConfiguredSource):
     """A Substack article URL (may live on a custom domain)."""
 
     type: Literal["substack_article"] = "substack_article"
     uri: str = Field(min_length=1)
 
 
-class HuggingFaceDatasetSource(BaseModel):
+class HuggingFaceDatasetSource(_ConfiguredSource):
     """A HuggingFace dataset id (NOT a URL).
 
     The ``uri`` is the dataset id (``namespace/name``) and is used to
     dispatch to a per-dataset ETL pipeline registered in
-    ``tree.data.pipeline``. Unknown dataset ids raise at dispatch time.
+    ``tree.data.offline_pipeline``. Unknown dataset ids raise at dispatch time.
 
     Two of these fields draw an authored-vs-runtime split (#070, the config
     foundation for HF offset-window fan-out):
@@ -353,21 +383,21 @@ class HuggingFaceDatasetSource(BaseModel):
     offset: int | None = None
 
 
-class YouTubeVideoSource(BaseModel):
+class YouTubeVideoSource(_ConfiguredSource):
     """A YouTube video URL (or 11-char video id)."""
 
     type: Literal["youtube_video"] = "youtube_video"
     uri: str = Field(min_length=1)
 
 
-class YouTubeRssSource(BaseModel):
+class YouTubeRssSource(_ConfiguredSource):
     """A YouTube channel feed: ``youtube.com/feeds/videos.xml?channel_id=…``."""
 
     type: Literal["youtube_rss"] = "youtube_rss"
     uri: str = Field(min_length=1)
 
 
-class WebSource(BaseModel):
+class WebSource(_ConfiguredSource):
     """A generic web URL ingested via the URL dispatcher."""
 
     type: Literal["web"] = "web"
@@ -537,6 +567,7 @@ class AppConfig(BaseModel):
     mcp: MCPConfig = MCPConfig()
     dream: DreamConfig = DreamConfig()
     concurrency: ConcurrencyConfig = ConcurrencyConfig()
+    prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
 
 

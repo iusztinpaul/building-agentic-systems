@@ -117,7 +117,7 @@ from tree.models.get_model import (
     get_search_embedding_model,
 )
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
+    TAGS_EXTRACTION,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -139,10 +139,10 @@ _KG_COLLECTION = "knowledge_graph"
 # The ``INPUTS`` cache policies EXCLUDE ``opik_trace_headers`` so a new run's
 # headers never bust the cache (see each ``task(...)`` ``cache_policy=``).
 #
-# Four-tag family (see ``tree.observability``): offline Prefect ingestion =
-# ``["ingestion", "batch"]``. The former ``"memory-extraction"`` pipeline-name
-# tag is now span metadata (``pipeline="extraction"``) instead of a tag.
-_EXTRACTION_TAGS = TAGS_INGESTION_BATCH
+# Pipeline-identity tags (see ``tree.observability``): the memory-extraction
+# pipeline's tags, shared 1:1 with its Prefect deployment / flow-run tags. The
+# pipeline name also rides as span metadata (``pipeline="extraction"``).
+_EXTRACTION_TAGS = TAGS_EXTRACTION
 _EXTRACTION_METADATA = pipeline_metadata("extraction")
 
 # Cache policy for the cached tasks: INPUTS minus the per-run trace-header param,

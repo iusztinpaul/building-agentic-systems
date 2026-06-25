@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from beanie import PydanticObjectId
 
-from tree.data.pipeline import (
+from tree.data.offline_pipeline import (
     DataFanOutStats,
     _fan_out_data,
 )

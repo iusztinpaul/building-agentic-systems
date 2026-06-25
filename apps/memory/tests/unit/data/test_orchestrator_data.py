@@ -1,7 +1,7 @@
 """Unit tests for the ``data-etl-orchestrator`` flow (#072, ADR-002 §3 amend #070–#074).
 
-These drive ``data_etl_orchestrator`` directly with ``tree.data.pipeline.app_config``
-patched to a known ``sources:`` list and ``tree.data.pipeline.run_deployment`` mocked,
+These drive ``data_etl_orchestrator`` directly with ``tree.data.offline_pipeline.app_config``
+patched to a known ``sources:`` list and ``tree.data.offline_pipeline.run_deployment`` mocked,
 so nothing touches a real Prefect server. They assert the orchestrator now partitions by
 PLATFORM (not by count):
 
@@ -38,7 +38,7 @@ from tree.config.app_config import (
     YouTubeVideoSource,
 )
 from tree.data.huggingface.arxiv_dataset_pipeline import ARXIV_DATASET_ID
-from tree.data.pipeline import data_etl_orchestrator
+from tree.data.offline_pipeline import data_etl_orchestrator
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -46,7 +46,7 @@ _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 def _patch_config(mocker, sources: list[SourceEntry]) -> None:
     mock_config = MagicMock()
     mock_config.sources.sources = sources
-    mocker.patch("tree.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
 
 
 def _capture_run_deployment(mocker) -> list[tuple[str, dict]]:
@@ -56,7 +56,7 @@ def _capture_run_deployment(mocker) -> list[tuple[str, dict]]:
         calls.append((name, parameters or {}))
 
     mocker.patch(
-        "tree.data.pipeline.run_deployment",
+        "tree.data.offline_pipeline.run_deployment",
         new=mocker.AsyncMock(side_effect=_fake_run_deployment),
     )
     return calls
@@ -90,7 +90,7 @@ def test_orchestrator_signature_has_no_num_shards() -> None:
 
     params = inspect.signature(data_etl_orchestrator).parameters
     assert "num_shards" not in params
-    assert list(params) == ["user_id"]
+    assert list(params) == ["user_id", "scheduled_only"]
 
 
 async def test_passing_num_shards_raises_type_error(mocker) -> None:
@@ -373,7 +373,7 @@ async def test_one_shard_failure_is_isolated(mocker) -> None:
             raise RuntimeError("bright data fetch error")
 
     mocker.patch(
-        "tree.data.pipeline.run_deployment",
+        "tree.data.offline_pipeline.run_deployment",
         new=mocker.AsyncMock(side_effect=_fake_run_deployment),
     )
 
@@ -387,3 +387,99 @@ async def test_one_shard_failure_is_isolated(mocker) -> None:
     assert "bright data fetch error" in next(iter(stats.failures.values()))
     # No index run despite the partial failure.
     assert all("indexing" not in name for name, _p in calls)
+
+
+# --- scheduled_only filter --------------------------------------------------
+
+
+async def test_scheduled_only_ingests_only_flagged_sources(mocker) -> None:
+    """``scheduled_only=True`` keeps only ``scheduled: true`` sources before partition."""
+
+    _patch_config(
+        mocker,
+        [
+            SubstackRssSource(uri="https://a.example/feed", scheduled=True),
+            SubstackArticleSource(uri="https://d.example/p/post"),  # scheduled=False
+            WebSource(uri="https://f.example/page"),  # scheduled=False
+        ],
+    )
+    calls = _capture_run_deployment(mocker)
+
+    stats = await data_etl_orchestrator(_USER_ID, scheduled_only=True)
+
+    # Only the substack platform (the lone flagged RSS feed) is dispatched.
+    assert len(calls) == 1
+    assert stats.shards_total == 1
+    assert _types_of(calls[0][1]) == {"substack_rss"}
+
+
+async def test_scheduled_only_no_flagged_sources_is_noop(mocker) -> None:
+    """``scheduled_only`` with nothing flagged ⇒ clean no-op, no dispatch."""
+
+    _patch_config(mocker, [WebSource(uri="https://f.example/page")])  # not scheduled
+    calls = _capture_run_deployment(mocker)
+
+    stats = await data_etl_orchestrator(_USER_ID, scheduled_only=True)
+
+    assert calls == []
+    assert stats.shards_total == 0
+
+
+async def test_manual_run_ignores_scheduled_flag(mocker) -> None:
+    """Default (manual) run ingests every source regardless of the flag."""
+
+    _patch_config(
+        mocker,
+        [
+            SubstackRssSource(uri="https://a.example/feed", scheduled=True),
+            WebSource(uri="https://f.example/page"),  # scheduled=False
+        ],
+    )
+    calls = _capture_run_deployment(mocker)
+
+    stats = await data_etl_orchestrator(_USER_ID)  # scheduled_only defaults False
+
+    # Both platforms dispatched — the flag is ignored outside scheduled mode.
+    assert stats.shards_total == 2
+    assert {next(iter(_types_of(p))) for _n, p in calls} == {"substack_rss", "web"}
+
+
+# --- multi-tenant (scheduled / all-users) fan-out ---------------------------
+
+
+async def test_user_id_none_fans_out_per_active_user(mocker) -> None:
+    """``user_id=None`` ingests the sources once per active user (multi-tenant)."""
+
+    user_a = PydanticObjectId("507f1f77bcf86cd799439011")
+    user_b = PydanticObjectId("507f1f77bcf86cd799439012")
+    mocker.patch(
+        "tree.data.offline_pipeline._resolve_target_user_ids",
+        new=mocker.AsyncMock(return_value=[user_a, user_b]),
+    )
+    _patch_config(mocker, [SubstackRssSource(uri="https://a.example/feed")])
+    calls = _capture_run_deployment(mocker)
+
+    stats = await data_etl_orchestrator(user_id=None)
+
+    # One shard (substack) dispatched for EACH of the two tenants.
+    dispatched_users = {p["user_id"] for _n, p in calls}
+    assert dispatched_users == {str(user_a), str(user_b)}
+    assert stats.shards_total == 2  # 1 shard x 2 users
+    assert stats.succeeded == 2
+
+
+async def test_explicit_user_id_does_not_enumerate_active_users(mocker) -> None:
+    """An explicit ``user_id`` resolves to just that tenant without a DB read."""
+
+    boom = mocker.patch(
+        "tree.data.offline_pipeline.select_active_user_ids",
+        new=mocker.AsyncMock(side_effect=AssertionError("should not enumerate")),
+    )
+    _patch_config(mocker, [SubstackRssSource(uri="https://a.example/feed")])
+    calls = _capture_run_deployment(mocker)
+
+    stats = await data_etl_orchestrator(_USER_ID)
+
+    boom.assert_not_awaited()
+    assert {p["user_id"] for _n, p in calls} == {str(_USER_ID)}
+    assert stats.shards_total == 1

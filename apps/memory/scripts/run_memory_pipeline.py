@@ -13,7 +13,7 @@ workers. A bare extraction with no index is available by triggering
 Every Prefect deployment registered by ``tree.orchestrator`` requires a
 ``user_id`` parameter (#020). It defaults to the current-session user; override
 with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the Makefile wires
-these for you). See :mod:`scripts._users` for the resolution precedence.
+these for you). See :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Requires:
     - Prefect server running (make local-start)
@@ -22,10 +22,10 @@ Requires:
 ``--num-shards`` (optional, ``>= 1``) sets the document-shard fan-out width.
 
 Usage:
-    make memory-run-memory-pipeline-extraction                       # current user
-    make memory-run-memory-pipeline-extraction USER_ID=507f...       # override by id
-    make memory-run-memory-pipeline-extraction USER_IDENTIFIER=paul  # override by handle
-    make memory-run-memory-pipeline-extraction NUM_SHARDS=4
+    make memory-run-memory-pipeline-extraction-offline                       # current user
+    make memory-run-memory-pipeline-extraction-offline USER_ID=507f...       # override by id
+    make memory-run-memory-pipeline-extraction-offline USER_IDENTIFIER=paul  # override by handle
+    make memory-run-memory-pipeline-extraction-offline NUM_SHARDS=4
     uv run python scripts/run_memory_pipeline.py --user-identifier paul --doc-ids "id1,id2"
 """
 
@@ -37,7 +37,7 @@ import click
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
-from _users import resolve_user_id
+from tree.entities.sessions import resolve_user_id
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.logging import init_logger

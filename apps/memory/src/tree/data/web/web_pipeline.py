@@ -12,7 +12,7 @@ handed-in URL list:
 
 The per-item sub-flow's body is demoted to the plain async core ``_ingest_web_url_one``;
 ``ingest_web_url`` remains a THIN 1-line @flow wrapper used ONLY by the MCP URL router
-(``tree.data.ingest``, the generic-web fallback). The batch path calls the batch tasks
+(``tree.data.online_pipeline``, the generic-web fallback). The batch path calls the batch tasks
 directly — NEVER the thin wrapper (no per-item sub-flow runs).
 
 Result persistence is OFF by default in Prefect 3.6, so these side-effecting tasks do NOT
@@ -24,6 +24,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
+from tree.config.app_config import WebSource
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.web.web import fetch_and_extract_web, load_web_document
@@ -57,7 +58,7 @@ async def _ingest_web_url_one(url: str, user_id: PydanticObjectId) -> Document |
 async def ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Thin MCP-only @flow: ingest ONE URL via the core.
 
-    The MCP ``ingest_url`` router (``tree.data.ingest._ingest_web_url``, the generic-web
+    The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_web_url``, the generic-web
     fallback) calls this so single-URL ingest still gets its own Prefect flow run + Opik
     trace. The BATCH path does NOT call this — it runs the batch tasks directly.
     """
@@ -125,3 +126,17 @@ async def ingest_web_url_batch(
     logger.info("Ingested %d web URLs out of %d", len(ingested), len(urls))
 
     return ingested
+
+
+async def ingest_web_batch(
+    entries: list[WebSource], user_id: PydanticObjectId
+) -> list[Document]:
+    """Offline-dispatch adapter: ``[WebSource] -> ingest_web_url_batch([uri, ...])``.
+
+    The unified offline dispatch (``offline_pipeline._PLATFORM_PIPELINES``) hands every
+    platform pipeline its TYPED ``entries``; web has a single source kind, so this thin
+    adapter just unwraps the URIs and runs the existing ``ingest_web_url_batch`` flow
+    (left unchanged, since ``search_web`` triggers that same deployment with raw URLs).
+    """
+
+    return await ingest_web_url_batch([e.uri for e in entries], user_id)

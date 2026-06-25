@@ -4,21 +4,22 @@ Two Prefect flows live here, mirroring the memory split (#067) minus the trailin
 index — the data pipeline only produces ``documents``; there is NO index step:
 
 * ``data_etl_worker`` (deployment ``data-etl-worker``) — ingests a SUBSET (shard) of
-  the configured ``sources:`` list, reusing the existing per-source-type batch logic.
-  It groups the shard's sources by discriminated-union variant and dispatches each
-  entry to the appropriate sub-flow:
+  the configured ``sources:`` list. It groups the shard's sources by PLATFORM and
+  dispatches each group to one unified per-platform pipeline:
 
-  - ``SubstackRssSource`` entries are batched into one ``ingest_substack_rss_feed_batch``.
-  - ``SubstackArticleSource`` entries are batched into one ``ingest_substack_article_batch``.
-  - ``YouTubeRssSource`` entries are batched into one ``ingest_youtube_rss_feed_batch``.
-  - ``YouTubeVideoSource`` entries are batched into one ``ingest_youtube_video_batch``.
+  - Substack (``SubstackRssSource`` + ``SubstackArticleSource``) → one
+    ``ingest_substack_batch``: flatten feeds + single articles into one item list,
+    then one shared load.
+  - YouTube (``YouTubeRssSource`` + ``YouTubeVideoSource``) → one
+    ``ingest_youtube_batch``: flatten feeds + single videos, then ONE shared
+    ``fetch_many`` transcript fetch.
+  - Web (``WebSource``) → ``ingest_web_batch`` (adapter over ``ingest_web_url_batch``),
+    the last/catch-all platform.
   - ``HuggingFaceDatasetSource`` entries are dispatched per-entry through
     ``_HUGGINGFACE_DATASET_HANDLERS``, keyed on the dataset id (``uri``). Unknown
     dataset ids raise ``ValueError``.
-  - ``WebSource`` entries are batched into one ``ingest_web_url_batch`` — the
-    last/catch-all batched variant, ingested after the Substack/YouTube variants.
 
-  A variant absent from the shard is skipped (with a scoped "skipped: no X entries"
+  A platform absent from the shard is skipped (with a scoped "skipped: no entries"
   log line). NO partitioning, NO ``run_deployment``, NO orchestration — the worker is
   the orchestrator's internal dispatch target (but may be triggered directly for a
   bare shard ingestion). Registered as deployment ``data-etl-worker``.
@@ -51,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow, get_run_logger
+from prefect import flow, get_run_logger, tags
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
@@ -71,34 +72,16 @@ from tree.data.huggingface.arxiv_dataset_pipeline import (
     ingest_arxiv_dataset,
 )
 
-# The batched sub-flows are referenced by NAME in ``_BATCHED_VARIANTS`` and looked
-# up at call time via ``globals()[batch_fn_name]`` (see ``_BatchedVariant.batch_fn``).
-# They MUST be imported here so those names are module globals: that's what makes
-# the lookup resolve in production AND lets ``mocker.patch("...pipeline.<name>")``
-# rebind them in tests. Each import carries a per-line F401-suppression because
-# ruff can't see the ``globals()`` use; dropping these imports turns every
-# batched-variant dispatch into a runtime ``KeyError`` (regression guarded by
-# ``test_every_batched_variant_resolves_without_mocks``).
-from tree.data.substack.substack_article_pipeline import (
-    ingest_substack_article_batch,  # noqa: F401
-)
-from tree.data.substack.substack_rss_pipeline import (
-    ingest_substack_rss_feed_batch,  # noqa: F401
-)
-from tree.data.web.web_pipeline import (
-    ingest_web_url_batch,  # noqa: F401
-)
-from tree.data.youtube.youtube_rss_pipeline import (
-    ingest_youtube_rss_feed_batch,  # noqa: F401
-)
-from tree.data.youtube.youtube_video_pipeline import (
-    ingest_youtube_video_batch,  # noqa: F401
-)
+# The per-platform unified batch flows, referenced directly in ``_PLATFORM_PIPELINES``.
+from tree.data.substack.substack_pipeline_batch import ingest_substack_batch
+from tree.data.web.web_pipeline import ingest_web_batch
+from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
+from tree.entities.users import select_active_user_ids
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
+    TAGS_DATA_OFFLINE,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -107,9 +90,9 @@ from tree.observability import (
     tracked_span,
 )
 
-# Four-tag family: offline Prefect ingestion = ``["ingestion", "batch"]``. The
-# former ``"data-pipeline"`` pipeline-name tag is now span metadata.
-_DATA_TAGS = TAGS_INGESTION_BATCH
+# Pipeline-identity tags, shared 1:1 with this pipeline's Prefect deployment /
+# flow-run tags (``prefect.tags(*_DATA_TAGS)`` below).
+_DATA_TAGS = TAGS_DATA_OFFLINE
 _DATA_METADATA = pipeline_metadata("data")
 
 logger = logging.getLogger(__name__)
@@ -142,80 +125,41 @@ _HUGGINGFACE_DATASET_HANDLERS: dict[
 }
 
 
-# A batched sub-flow: takes a list of URIs + the user and returns the ingested docs.
-_BatchFn = Callable[[list[str], PydanticObjectId], Awaitable[list[Document]]]
+_BatchFn = Callable[[list[SourceEntry], PydanticObjectId], Awaitable[list[Document]]]
 
 
 @dataclass(frozen=True)
-class _BatchedVariant:
-    """One source variant whose entries are batched into a single sub-flow call.
+class PlatformPipeline:
+    """One platform's unified pipeline, fed the shard's entries for that platform.
 
-    ``source_type`` selects the entries via ``isinstance``; ``batch_fn_name`` is the
-    module-global name of the batched ingestion sub-flow, resolved from
-    :func:`globals` at CALL time (NOT a captured reference) so a test that
-    ``mocker.patch``-es the module global is honoured — same late binding the old
-    per-variant ``await ingest_..._batch(...)`` calls had. ``label`` names the
-    pipeline in log lines; ``unit`` is the noun for the entry count (``feeds`` /
-    ``URLs``); ``config_key`` is the YAML source key reported in the "skipped: no
-    <key> entries" log line.
+    ``source_types`` selects the entries via ``isinstance`` (a tuple, since a platform
+    spans both its RSS and single-source kinds — e.g. Substack RSS + article).
+    ``batch_fn`` is the unified per-platform flow; ``label`` names it in log lines.
     """
 
-    source_type: type[SourceEntry]
-    batch_fn_name: str
+    source_types: tuple[type[SourceEntry], ...]
+    batch_fn: _BatchFn
     label: str
-    unit: str
-    config_key: str
-
-    @property
-    def batch_fn(self) -> _BatchFn:
-        """The batch sub-flow, looked up by name in the module namespace.
-
-        Resolved on every access so ``mocker.patch("...pipeline.<name>")`` (which
-        rebinds the module global) takes effect — a frozen reference captured at
-        import time would bypass the patch and hit the network.
-        """
-
-        return globals()[self.batch_fn_name]
 
 
-# Table for the five byte-identical batched variants. Order is load-bearing — it
-# fixes the ingestion order Substack RSS → Substack article → YouTube RSS → YouTube
-# video → Web (last/catch-all), and the order their log lines are emitted.
-_BATCHED_VARIANTS: list[_BatchedVariant] = [
-    _BatchedVariant(
-        SubstackRssSource,
-        "ingest_substack_rss_feed_batch",
-        "Substack RSS",
-        "feeds",
-        "substack_rss",
+# One unified pipeline per platform. Order is load-bearing — it fixes the ingestion
+# order Substack → YouTube → Web (last/catch-all) and the order their log lines are
+# emitted. Each pipeline flattens its platform's single + RSS sources into one batch.
+_PLATFORM_PIPELINES: list[PlatformPipeline] = [
+    PlatformPipeline(
+        (SubstackRssSource, SubstackArticleSource),
+        ingest_substack_batch,
+        "Substack",
     ),
-    _BatchedVariant(
-        SubstackArticleSource,
-        "ingest_substack_article_batch",
-        "Substack article",
-        "URLs",
-        "substack_article",
+    PlatformPipeline(
+        (YouTubeRssSource, YouTubeVideoSource),
+        ingest_youtube_batch,
+        "YouTube",
     ),
-    _BatchedVariant(
-        YouTubeRssSource,
-        "ingest_youtube_rss_feed_batch",
-        "YouTube RSS",
-        "feeds",
-        "youtube_rss",
-    ),
-    _BatchedVariant(
-        YouTubeVideoSource,
-        "ingest_youtube_video_batch",
-        "YouTube video",
-        "URLs",
-        "youtube_video",
-    ),
-    _BatchedVariant(
-        WebSource,
-        "ingest_web_url_batch",
+    PlatformPipeline(
+        (WebSource,),
+        ingest_web_batch,
         "Web",
-        "URLs",
-        "web",
     ),
 ]
 
@@ -234,45 +178,41 @@ def _coerce_sources(sources: list[Any]) -> list[SourceEntry]:
     return _SOURCES_ADAPTER.validate_python(sources)
 
 
-@tracked_span("_ingest_sources", tags=_DATA_TAGS)
-async def _ingest_sources(
+@tracked_span("offline_ingest_batch", tags=_DATA_TAGS)
+async def offline_ingest_batch(
     sources: list[SourceEntry],
     user_id: PydanticObjectId,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> list[Document]:
-    """Ingest a list of typed source entries by grouping them by variant.
+    """Ingest a list of typed source entries by grouping them by platform.
 
-    Reuses the existing per-source-type batch logic, scoped to the entries handed in
-    (a shard, or the full configured list). A variant absent from ``sources`` is
-    skipped with a scoped "skipped: no X entries" log line.
+    Hands each platform's entries (its RSS + single sources together) to one unified
+    per-platform pipeline, scoped to the entries handed in (a shard, or the full
+    configured list). A platform absent from ``sources`` is skipped with a scoped
+    "skipped: no entries" log line.
 
     ``opik_trace_headers`` attaches this task's span to the worker flow's trace.
     """
 
     all_ingested: list[Document] = []
 
-    # --- Batched variants (Substack RSS/article, YouTube RSS/video, Web) ---
-    # Ordering is preserved: Substack RSS → Substack article → YouTube RSS →
-    # YouTube video → Web (last/catch-all).
-    for variant in _BATCHED_VARIANTS:
-        entries = [s for s in sources if isinstance(s, variant.source_type)]
+    # --- Per-platform unified pipelines (Substack → YouTube → Web) ---
+    # Each platform flattens its single + RSS sources into a single batch; order is
+    # load-bearing (Web last/catch-all).
+    for platform in _PLATFORM_PIPELINES:
+        entries = [s for s in sources if isinstance(s, platform.source_types)]
         if entries:
-            uris = [s.uri for s in entries]
             logger.info(
-                "Starting %s pipeline with %d %s",
-                variant.label,
-                len(uris),
-                variant.unit,
+                "Starting %s pipeline with %d source(s)", platform.label, len(entries)
             )
-            docs = await variant.batch_fn(uris, user_id)
+            # Tag the leaf flow run — the in-process sub-flows don't inherit the
+            # worker deployment's tags, so we apply them at the call site.
+            with tags(*_DATA_TAGS):
+                docs = await platform.batch_fn(entries, user_id)
             all_ingested.extend(docs)
-            logger.info("%s pipeline ingested %d documents", variant.label, len(docs))
+            logger.info("%s pipeline ingested %d documents", platform.label, len(docs))
         else:
-            logger.info(
-                "%s pipeline skipped: no %s entries configured",
-                variant.label,
-                variant.config_key,
-            )
+            logger.info("%s pipeline skipped: no entries configured", platform.label)
 
     # --- HuggingFace datasets (one call per entry, dispatched by dataset id) ---
     hf_entries = [s for s in sources if isinstance(s, HuggingFaceDatasetSource)]
@@ -285,7 +225,8 @@ async def _ingest_sources(
                     f"Register a handler in {__name__}._HUGGINGFACE_DATASET_HANDLERS."
                 )
             logger.info("Starting HuggingFace dataset pipeline for %s", entry.uri)
-            hf_docs = await handler(entry, user_id)
+            with tags(*_DATA_TAGS):
+                hf_docs = await handler(entry, user_id)
             all_ingested.extend(hf_docs)
             logger.info(
                 "HuggingFace dataset pipeline for %s ingested %d documents",
@@ -366,7 +307,7 @@ async def data_etl_worker(
 
             headers = get_distributed_trace_headers()
             typed_sources = _coerce_sources(sources)
-            return await _ingest_sources(
+            return await offline_ingest_batch(
                 typed_sources, user_id, opik_trace_headers=headers
             )
     finally:
@@ -380,12 +321,6 @@ async def data_etl_worker(
 
 
 # Platform buckets for the data orchestrator's GROUP-BY-PLATFORM partition
-# (ADR-002 §3 amendment #070–#074). Each non-HuggingFace source variant maps to a
-# Platform; the variants sharing a Platform land in ONE homogeneous worker shard.
-# Order is load-bearing — it fixes the dispatch order of the non-HF Platform shards
-# (substack → youtube → custom) and is asserted by the orchestrator tests. HuggingFace
-# is handled separately (offset-window sub-fan-out via :func:`arxiv_window_entries`),
-# so it is NOT in this map.
 _NON_HF_PLATFORMS: list[tuple[str, tuple[type[SourceEntry], ...]]] = [
     ("substack", (SubstackRssSource, SubstackArticleSource)),
     ("youtube", (YouTubeRssSource, YouTubeVideoSource)),
@@ -408,7 +343,7 @@ def _partition_sources_by_platform(
       sharing a Platform are grouped (``substack_rss`` + ``substack_article`` → one
       ``substack`` shard; ``youtube_rss`` + ``youtube_video`` → one ``youtube`` shard;
       ``web`` → one ``custom`` shard), preserving each Platform's internal configured
-      order. The worker's existing ``_ingest_sources`` ``isinstance`` routing then
+      order. The worker's existing ``offline_ingest_batch`` ``isinstance`` routing then
       batches per VARIANT inside the homogeneous shard, so the worker is unchanged. A
       Platform absent from config emits no shard.
     * **HuggingFace → ``num_workers`` single-entry offset-Window shards per entry.** Each
@@ -553,9 +488,33 @@ async def _fan_out_data(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_target_user_ids(
+    user_id: PydanticObjectId | None,
+) -> list[PydanticObjectId]:
+    """Resolve which tenants a data run targets.
+
+    * An explicit ``user_id`` → just that tenant (the manual
+      ``make run-data-pipeline`` path).
+    * ``None`` → every ACTIVE user (the nightly scheduled run fans the SAME
+      global sources out per tenant, mirroring dream consolidation). This branch
+      reads the DB to enumerate active users, so we connect only when needed.
+    """
+
+    if user_id is not None:
+        return [user_id]
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    database = client[settings.mongo.mongo_initdb_database]
+    return await select_active_user_ids(database=database)
+
+
 @flow(name="data-etl-orchestrator", log_prints=True)
 async def data_etl_orchestrator(
-    user_id: PydanticObjectId,
+    user_id: PydanticObjectId | None = None,
+    scheduled_only: bool = False,
 ) -> DataFanOutStats:
     """Read configured sources → group by Platform → dispatch ``data-etl-worker`` runs.
 
@@ -568,17 +527,24 @@ async def data_etl_orchestrator(
     * ``num_workers`` worker runs per ``HuggingFaceDatasetSource``, one per disjoint
       offset-**Window** of the dataset.
 
+    Two run modes share this one deployment:
+
+    * **Manual** (``user_id`` set, ``scheduled_only=False``) — ``make
+      run-data-pipeline``: ingest EVERY configured source for that one tenant.
+    * **Scheduled** (``user_id=None``, ``scheduled_only=True``) — the deployment's
+      nightly cron: ingest ONLY sources flagged ``scheduled: true`` (see
+      ``_ConfiguredSource``), fanned out across ALL active users.
+
     Each shard is dispatched via ``run_deployment`` under
     ``asyncio.gather(return_exceptions=True)`` carrying ``{user_id, sources}`` (the
     shard's serialized source entries). There is NO recursion (a DISTINCT worker
     deployment; the worker never calls ``run_deployment``) and NO trailing step — the
-    data pipeline only produces ``documents``; there is no index. Parallelism is
-    declared per-source (Platform bucketing + HF ``num_workers``), NOT via a global
-    ``num_shards`` count — that knob is gone.
+    data pipeline only produces ``documents``; there is no index.
 
-    Empty configured sources ⇒ clean no-op: zero worker dispatch,
-    ``DataFanOutStats(shards_total=0)``. One shard's failure is isolated and recorded in
-    :class:`DataFanOutStats.failures` while the others proceed.
+    Empty source set (none configured, or none flagged when ``scheduled_only``) ⇒
+    clean no-op: zero worker dispatch, ``DataFanOutStats(shards_total=0)``. One
+    shard's failure is isolated and recorded in :class:`DataFanOutStats.failures`
+    (keyed ``user_id:shard_index``) while the others proceed.
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
@@ -588,28 +554,55 @@ async def data_etl_orchestrator(
     try:
         with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
             sources = app_config.sources.sources
+            if scheduled_only:
+                sources = [s for s in sources if s.scheduled]
             if not sources:
                 logger.info(
-                    "data fan-out: no configured sources for user_id=%s — nothing "
-                    "to do (no child runs, no index run)",
-                    user_id,
+                    "data fan-out: no sources to ingest (scheduled_only=%s) — "
+                    "nothing to do (no child runs, no index run)",
+                    scheduled_only,
                 )
                 return DataFanOutStats(shards_total=0)
 
             typed_shards = _partition_sources_by_platform(sources)
             shards = [[e.model_dump() for e in shard] for shard in typed_shards]
+
+            user_ids = await _resolve_target_user_ids(user_id)
+            if not user_ids:
+                logger.info(
+                    "data fan-out: no target users (scheduled all-users run found "
+                    "no active users) — nothing to do"
+                )
+                return DataFanOutStats(shards_total=0)
+
             logger.info(
-                "data fan-out: grouped %d source(s) into %d Platform/Window shard(s)",
+                "data fan-out: grouped %d source(s) into %d Platform/Window shard(s) "
+                "for %d tenant(s) (scheduled_only=%s)",
                 len(sources),
                 len(shards),
+                len(user_ids),
+                scheduled_only,
             )
 
             headers = get_distributed_trace_headers()
-            return await _fan_out_data(
-                user_id=user_id,
-                shards=shards,
-                run_deployment=run_deployment,
-                opik_trace_headers=headers,
-            )
+            # Fan out per tenant SEQUENTIALLY — each user's shards already gather
+            # in parallel inside _fan_out_data, so a per-user loop bounds the load
+            # at one user's worth of worker runs at a time.
+            # ponytail: sequential across users; parallelize if the nightly window
+            # gets tight with many tenants.
+            aggregate = DataFanOutStats()
+            for uid in user_ids:
+                stats = await _fan_out_data(
+                    user_id=uid,
+                    shards=shards,
+                    run_deployment=run_deployment,
+                    opik_trace_headers=headers,
+                )
+                aggregate.shards_total += stats.shards_total
+                aggregate.succeeded += stats.succeeded
+                aggregate.failed += stats.failed
+                for shard_idx, message in stats.failures.items():
+                    aggregate.failures[f"{uid}:{shard_idx}"] = message
+            return aggregate
     finally:
         flush_opik()

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
+from tree.data.online_pipeline import ConversationSource, FileSource, UrlSource
 from tree.entities.documents import Document, SourceType
 from tree.mcp import tools as mcp_tools
 
@@ -50,7 +51,7 @@ class TestIngestConversationPropagatesUserId:
         doc = _make_document(user_id)
 
         mock_ingest = mocker.patch(
-            "tree.mcp.tools._ingest_conversation",
+            "tree.mcp.tools.online_ingest",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -62,9 +63,12 @@ class TestIngestConversationPropagatesUserId:
 
         await mcp_tools.ingest_conversation("Some text.", ctx)
 
-        # The conversation flow receives the boot-pinned user_id.
+        # online_ingest receives a ConversationSource + the boot-pinned user_id.
         mock_ingest.assert_awaited_once()
-        assert mock_ingest.await_args.args[1] == user_id
+        source, passed_user_id = mock_ingest.await_args.args
+        assert isinstance(source, ConversationSource)
+        assert source.text == "Some text."
+        assert passed_user_id == user_id
         # The ingestion summary pipeline is also scoped to the same user_id.
         assert mock_run.await_args.kwargs["user_id"] == user_id
 
@@ -74,7 +78,7 @@ class TestIngestConversationPropagatesUserId:
         doc = _make_document(user_id)
 
         mocker.patch(
-            "tree.mcp.tools._ingest_conversation",
+            "tree.mcp.tools.online_ingest",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -99,7 +103,7 @@ class TestIngestUrlPropagatesUserId:
         ctx = _make_ctx(user_id)
         doc = MagicMock()
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools._ingest_url_dispatch",
+            "tree.mcp.tools.online_ingest",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -111,7 +115,9 @@ class TestIngestUrlPropagatesUserId:
 
         await mcp_tools.ingest_url("https://example.com", ctx)
 
-        mock_dispatch.assert_awaited_once_with("https://example.com", user_id)
+        mock_dispatch.assert_awaited_once_with(
+            UrlSource(uri="https://example.com"), user_id
+        )
         assert mock_run.await_args.kwargs["user_id"] == user_id
 
 
@@ -121,7 +127,7 @@ class TestIngestFilePropagatesUserId:
         ctx = _make_ctx(user_id)
         doc = MagicMock()
         mock_ingest = mocker.patch(
-            "tree.mcp.tools._ingest_file",
+            "tree.mcp.tools.online_ingest",
             new_callable=AsyncMock,
             return_value=doc,
         )
@@ -134,8 +140,11 @@ class TestIngestFilePropagatesUserId:
         await mcp_tools.ingest_file("/tmp/x.md", ctx)
 
         mock_ingest.assert_awaited_once()
-        # Positional: (file_path, user_id, title)
-        assert mock_ingest.await_args.args[1] == user_id
+        # Positional: (FileSource, user_id)
+        source, passed_user_id = mock_ingest.await_args.args
+        assert isinstance(source, FileSource)
+        assert source.path == "/tmp/x.md"
+        assert passed_user_id == user_id
 
 
 @pytest.mark.parametrize(

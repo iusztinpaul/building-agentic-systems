@@ -1,3 +1,4 @@
+import dataclasses
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,7 +12,7 @@ from tree.config.app_config import (
     SubstackRssSource,
     load_app_config,
 )
-from tree.data.pipeline import data_etl_worker
+from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
 from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -135,25 +136,20 @@ def _make_full_config(
 
     mock_config = MagicMock()
     mock_config.sources.sources = sources
-    mocker.patch("tree.data.pipeline.app_config", mock_config)
+    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
     mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
     return mock_config
 
 
 def _mock_init_mongodb(mocker, mongo_client) -> None:
-    mocker.patch("tree.data.pipeline.init_mongodb", return_value=mongo_client)
-    mocker.patch(
-        "tree.data.substack.substack_rss_pipeline.init_mongodb",
-        return_value=mongo_client,
-    )
-    mocker.patch(
-        "tree.data.substack.substack_article_pipeline.init_mongodb",
-        return_value=mongo_client,
-    )
-    mocker.patch(
-        "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
-        return_value=mongo_client,
-    )
+    for module in (
+        "tree.data.offline_pipeline",
+        "tree.data.substack.substack_pipeline_batch",
+        "tree.data.youtube.youtube_pipeline_batch",
+        "tree.data.web.web_pipeline",
+        "tree.data.huggingface.arxiv_dataset_pipeline",
+    ):
+        mocker.patch(f"{module}.init_mongodb", return_value=mongo_client)
 
 
 def _mock_rss_source(mocker) -> None:
@@ -277,16 +273,14 @@ class TestDataPipeline:
         huggingface_dataset, explicit web, untyped → web fallback).
 
         Verifies:
-            - The Substack RSS sub-flow is invoked once with the single feed.
-            - The Substack article sub-flow is invoked once with the single
-              article URL.
+            - The Substack platform pipeline is invoked ONCE with BOTH its entries
+              (the RSS feed + the article) together.
             - The arxiv sub-flow is invoked once with the YAML's
               ``max_samples`` / ``fetch_content`` values.
-            - The web batch sub-flow (``ingest_web_url_batch``) is invoked ONCE
-              with BOTH web URLs as a single list (the explicit ``web`` entry plus
-              the untyped Reddit entry the load-time validator normalizes to
-              ``WebSource``) — web is now the last batched variant (#075), not a
-              per-URL ``ingest_url`` dispatch.
+            - The web platform pipeline (``ingest_web_batch``) is invoked ONCE with
+              BOTH web entries (the explicit ``web`` entry plus the untyped Reddit
+              entry the load-time validator normalizes to ``WebSource``) — web is the
+              last platform.
         """
 
         # --- YAML fixture with all 5 variants ---
@@ -325,7 +319,7 @@ sources:
         assert isinstance(reddit_entry, _Web)
         assert "reddit.com" in reddit_entry.uri
 
-        # --- Mock the four sub-flows the unified pipeline dispatches to ---
+        # --- Mock the platform pipelines the worker dispatches to ---
 
         rss_doc = Document(
             source_type=SourceType.SUBSTACK,
@@ -363,72 +357,42 @@ sources:
             content="Reddit content",
         )
 
-        rss_mock = mocker.patch(
-            "tree.data.pipeline.ingest_substack_rss_feed_batch",
-            new=AsyncMock(return_value=[rss_doc]),
-        )
-        article_mock = mocker.patch(
-            "tree.data.pipeline.ingest_substack_article_batch",
-            new=AsyncMock(return_value=[article_doc]),
+        # Substack platform pipeline gets BOTH its kinds (RSS feed + article) in one
+        # call and returns their docs; Web (last platform) gets both web URLs (explicit
+        # + untyped→web) in ONE call. Swap each platform's batch_fn in the dispatch table.
+        substack_mock = AsyncMock(return_value=[rss_doc, article_doc])
+        web_mock = AsyncMock(return_value=[web_doc_anthropic, web_doc_reddit])
+        by_label = {"Substack": substack_mock, "Web": web_mock}
+        mocker.patch(
+            "tree.data.offline_pipeline._PLATFORM_PIPELINES",
+            [
+                dataclasses.replace(p, batch_fn=by_label.get(p.label, p.batch_fn))
+                for p in _PLATFORM_PIPELINES
+            ],
         )
         arxiv_mock = mocker.patch(
-            "tree.data.pipeline.ingest_arxiv_dataset",
+            "tree.data.offline_pipeline.ingest_arxiv_dataset",
             new=AsyncMock(return_value=[arxiv_doc]),
-        )
-
-        # Web is the last batched variant (#075): both web URLs are handed to a
-        # SINGLE ``ingest_web_url_batch`` call, which returns the ingested docs
-        # (the batch flow owns ``None``-filtering, so the worker just extends).
-        async def _fake_ingest_web_url_batch(
-            urls: list[str], user_id: PydanticObjectId
-        ) -> list[Document]:
-            docs: list[Document] = []
-            for url in urls:
-                if "anthropic.com" in url:
-                    docs.append(web_doc_anthropic)
-                elif "reddit.com" in url:
-                    docs.append(web_doc_reddit)
-                else:
-                    raise AssertionError(
-                        f"Unexpected URL routed to ingest_web_url_batch: {url}"
-                    )
-            return docs
-
-        web_batch_mock = mocker.patch(
-            "tree.data.pipeline.ingest_web_url_batch",
-            new_callable=AsyncMock,
-            side_effect=_fake_ingest_web_url_batch,
         )
 
         # Skip the real Mongo init.
         mocker.patch(
-            "tree.data.pipeline.init_mongodb", new=AsyncMock(return_value=mongo_client)
+            "tree.data.offline_pipeline.init_mongodb",
+            new=AsyncMock(return_value=mongo_client),
         )
 
         # --- Run the worker against the loaded fixture's sources ---
-        # #068 moved the per-variant dispatch into ``data-etl-worker``, which takes
-        # its sources as an argument rather than reading ``app_config``.
         with prefect_tags("tests"):
             result = await data_etl_worker(_USER_ID, loaded.sources.sources)
 
-        # --- Assert each sub-flow was dispatched exactly as expected ---
-
-        rss_mock.assert_awaited_once_with(["https://blog.example.com/feed"], _USER_ID)
-        article_mock.assert_awaited_once_with(
-            ["https://blog.example.com/p/test-post"], _USER_ID
-        )
+        # --- Each platform pipeline got its TYPED entries (RSS + single together) ---
+        entries = loaded.sources.sources
+        substack_mock.assert_awaited_once_with([entries[0], entries[1]], _USER_ID)
         arxiv_mock.assert_awaited_once_with(
             user_id=_USER_ID, max_samples=2, fetch_content=False, offset=None
         )
-        # Both web URLs (explicit + untyped→web) batched into ONE call as a single
-        # list, in configured order — web is the last batched variant (#075).
-        web_batch_mock.assert_awaited_once_with(
-            [
-                "https://www.anthropic.com/engineering/some-page",
-                "https://www.reddit.com/r/AI_Agents/comments/example",
-            ],
-            _USER_ID,
-        )
+        # Both web URLs in ONE ingest_web_batch call, in configured order.
+        web_mock.assert_awaited_once_with([entries[3], entries[4]], _USER_ID)
 
         # --- Aggregated result holds one doc per dispatched call ---
         assert len(result) == 5

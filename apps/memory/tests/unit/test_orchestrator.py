@@ -104,17 +104,9 @@ def test_serve_deployments_registers_all_deployments(mocker):
         "memory-extract-etl-orchestrator",
         "memory-extract-etl-worker",
         "memory-indexing-etl",
-        # --- [Prefect Cloud free-tier cap: 5 deployments] --------------
-        # The five names below are temporarily NOT served (free tier allows
-        # only 5 deployments). Re-enable them here together with the matching
-        # ``.to_deployment(...)`` blocks in ``orchestrator.serve_deployments``
-        # once the Cloud plan is upgraded.
-        # "ingest-file-etl",
-        # "ingest-conversation-etl",
-        # "ingest-youtube-video-batch-etl",
-        # "ingest-youtube-rss-feed-batch-etl",
-        # "dream-consolidation-etl",
-        # ---------------------------------------------------------------
+        # The optional dream deployment is gated by ``prefect.deploy_optional``
+        # (default false) — absent here, asserted present in
+        # ``test_deploy_optional_enabled_registers_optional``.
     }
     # The two retired single-flow deployments must not linger in the registration.
     assert "memory-extraction-etl" not in deployment_names
@@ -123,14 +115,39 @@ def test_serve_deployments_registers_all_deployments(mocker):
     assert "memory-extraction-fanout-etl" not in deployment_names
 
 
-def test_serve_deployments_registers_dream_with_its_cron(mocker):
-    """The dream deployment carries its cron schedule, and ONLY it is scheduled.
+def test_deploy_optional_disabled_by_default(mocker):
+    """With ``prefect.deploy_optional`` false (default), only the core 5 register."""
 
-    Preserves the #065 dream-cron guard and makes it robust: asserts the
-    ``dream-consolidation-etl`` deployment is registered with the configured cron
-    (``app_config.dream.cron``) and that no OTHER deployment is given a schedule —
-    so a cron accidentally dropped from dream or attached to a worker/orchestrator
-    deployment is caught.
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    orchestrator.serve_deployments(limit=4)
+
+    names = {dep.name for dep in spy.call_args.args}
+    assert len(names) == 5
+    assert "dream-consolidation-all-users" not in names
+
+
+def test_deploy_optional_enabled_registers_optional(mocker):
+    """``prefect.deploy_optional`` true adds the scheduled dream deployment."""
+
+    mocker.patch.object(orchestrator.app_config.prefect, "deploy_optional", True)
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    orchestrator.serve_deployments(limit=4)
+
+    names = {dep.name for dep in spy.call_args.args}
+    assert len(names) == 6
+    assert "dream-consolidation-all-users" in names
+
+
+def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):
+    """``data-etl-orchestrator`` is the ONLY scheduled deployment.
+
+    Its deployment carries ONE nightly cron whose runs override
+    ``scheduled_only=True`` (so the schedule ingests only flagged sources, while
+    manual runs ingest everything). No worker/indexing deployment may be given a
+    schedule — guards against a cron dropped from the orchestrator or attached to
+    the wrong deployment.
     """
 
     # Arrange
@@ -141,23 +158,20 @@ def test_serve_deployments_registers_dream_with_its_cron(mocker):
 
     # Assert
     call = spy.call_args
-    crons_by_name = {
+    schedules_by_name = {
         dep.name: [
-            schedule.schedule.cron
-            for schedule in (dep.schedules or [])
-            if getattr(schedule.schedule, "cron", None) is not None
+            (sched.schedule.cron, sched.parameters)
+            for sched in (dep.schedules or [])
+            if getattr(sched.schedule, "cron", None) is not None
         ]
         for dep in call.args
     }
-    scheduled = {name: crons for name, crons in crons_by_name.items() if crons}
-    # --- [Prefect Cloud free-tier cap: 5 deployments] ----------------------
-    # ``dream-consolidation-etl`` (the only scheduled deployment) is temporarily
-    # not served under the free tier, so NO deployment carries a cron. Restore
-    # the original assertion below when the dream deployment is re-enabled in
-    # ``orchestrator.serve_deployments``.
-    # assert scheduled == {"dream-consolidation-etl": [app_config.dream.cron]}
-    assert scheduled == {}
-    # -----------------------------------------------------------------------
+    scheduled = {name: scheds for name, scheds in schedules_by_name.items() if scheds}
+    assert scheduled == {
+        "data-etl-orchestrator": [
+            (orchestrator._SCHEDULED_INGEST_CRON, {"scheduled_only": True})
+        ]
+    }
 
 
 def test_serve_deployments_serves_the_built_topology(mocker):

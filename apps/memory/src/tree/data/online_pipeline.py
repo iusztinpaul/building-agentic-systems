@@ -1,11 +1,16 @@
 """
-URL dispatcher for data ingestion.
+Realtime (online) ingestion dispatcher.
 
-Routes a URL to the appropriate data pipeline based on domain matching.
-New pipelines register their URL pattern here to be automatically
-available via the MCP ``ingest_url`` tool.
+The online counterpart to ``offline_pipeline.offline_ingest_batch``: it ingests a
+SINGLE realtime input — a URL, a local file, or a conversation — and returns the
+persisted :class:`Document`. The MCP ingest tools funnel through
+:func:`online_ingest`, which routes a typed :data:`OnlineSource` to the matching
+leaf pipeline (``ingest_url`` / ``ingest_file`` / ``ingest_conversation``).
 
-Match order:
+Like the offline batch, this layer returns Documents and does NOT trigger memory
+extraction — the MCP layer submits that out-of-band (``mcp.ingest.submit_ingestion``).
+
+``ingest_url`` itself routes a URL to the appropriate leaf pipeline by domain:
 1. Static registry ``_URL_HANDLERS`` (e.g. ``substack.com``).
 2. Custom Substack domains derived from ``app_config.sources``.
 3. Fallback: the generic web pipeline backed by Bright Data Web Unlocker.
@@ -14,9 +19,13 @@ Match order:
 import functools
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import Annotated, Literal, Union
 from urllib.parse import urlparse
 
 from beanie import PydanticObjectId
+from prefect import tags
+from pydantic import BaseModel, Field
 
 from tree.config.app_config import (
     SubstackArticleSource,
@@ -24,8 +33,19 @@ from tree.config.app_config import (
     app_config,
 )
 from tree.entities.documents import Document
+from tree.observability import (
+    TAGS_DATA_ONLINE,
+    configure_opik,
+    pipeline_metadata,
+    span,
+)
 
 logger = logging.getLogger(__name__)
+
+# Opik tags + metadata for the online data pipeline's trace, mirroring the offline
+# pipeline (``_DATA_TAGS`` / ``_DATA_METADATA`` there). Same ``pipeline="data"``
+# metadata as offline; the offline/online split lives in the tags.
+_ONLINE_METADATA = pipeline_metadata("data")
 
 
 _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -36,7 +56,7 @@ async def _ingest_substack_article(
 ) -> Document | None:
     """Ingest a Substack article via the Substack article pipeline."""
 
-    from tree.data.substack.substack_article_pipeline import (
+    from tree.data.substack.substack_pipeline import (
         ingest_substack_article,
     )
 
@@ -51,7 +71,7 @@ async def _ingest_youtube_video(url: str, user_id: PydanticObjectId) -> Document
     rejected up-front in :func:`ingest_url` with a clear ``ValueError``.
     """
 
-    from tree.data.youtube.youtube_video_pipeline import ingest_youtube_video
+    from tree.data.youtube.youtube_pipeline import ingest_youtube_video
 
     return await ingest_youtube_video(url, user_id)
 
@@ -101,7 +121,7 @@ def _get_configured_substack_domains() -> set[str]:
     return domains
 
 
-async def ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
+async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Route a URL to the appropriate data pipeline and ingest it for ``user_id``.
 
     Matches against:
@@ -156,3 +176,103 @@ async def ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
     # Fallback: generic web pipeline (Bright Data Web Unlocker).
     logger.info("Routing URL to 'web (Bright Data fallback)' pipeline: %s", url)
     return await _ingest_web_url(url, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Online ingestion orchestrator
+# ---------------------------------------------------------------------------
+# The realtime counterpart to ``offline_pipeline.offline_ingest_batch``. Each
+# variant carries ONLY its own fields; ``online_ingest`` dispatches on ``type``
+# (mirrors the offline ``SourceEntry`` discriminated union).
+
+
+class UrlSource(BaseModel):
+    """A realtime URL, routed by domain through :func:`ingest_url`."""
+
+    type: Literal["url"] = "url"
+    uri: str = Field(min_length=1)
+
+
+class FileSource(BaseModel):
+    """A local file (.txt/.md/.html) read into a Document."""
+
+    type: Literal["file"] = "file"
+    path: str = Field(min_length=1)
+    title: str | None = None
+
+
+class ConversationSource(BaseModel):
+    """Conversation text captured from an agent session."""
+
+    type: Literal["conversation"] = "conversation"
+    text: str = Field(min_length=1)
+    title: str | None = None
+    session_uri: str | None = None
+    session_started_at: datetime | None = None
+
+
+OnlineSource = Annotated[
+    Union[UrlSource, FileSource, ConversationSource],
+    Field(discriminator="type"),
+]
+
+
+async def _ingest_file(
+    source: FileSource, user_id: PydanticObjectId
+) -> Document | None:
+    """Ingest a local file via the file pipeline."""
+
+    from tree.data.file.file_pipeline import ingest_file
+
+    return await ingest_file(source.path, user_id, source.title)
+
+
+async def _ingest_conversation(
+    source: ConversationSource, user_id: PydanticObjectId
+) -> Document | None:
+    """Ingest conversation text via the conversation pipeline."""
+
+    from tree.data.conversation.conversation_pipeline import ingest_conversation
+
+    return await ingest_conversation(
+        source.text,
+        user_id,
+        title=source.title,
+        session_uri=source.session_uri,
+        session_started_at=source.session_started_at,
+    )
+
+
+async def online_ingest(
+    source: OnlineSource, user_id: PydanticObjectId
+) -> Document | None:
+    """Route a realtime ``source`` to its leaf pipeline and ingest it for ``user_id``.
+
+    The online counterpart to ``offline_ingest_batch``: distributes a single typed
+    input (URL / file / conversation) to its leaf pipeline and returns the
+    persisted Document, or ``None`` if it was a duplicate. Like the offline batch,
+    it does NOT trigger extraction — the MCP layer submits that out-of-band.
+    """
+
+    # Opik: own a span for the online data pipeline, mirroring the offline trace.
+    # ``configure_opik`` is idempotent so the CLI path (run_online_ingest) traces
+    # too; under the MCP ``@track`` ingest tools this span nests via contextvars
+    # (same process — no distributed headers needed). The leaf url/file/conversation
+    # spans nest under it the same way.
+    # Prefect: ``tags`` is dynamically scoped so it reaches the leaf flow run created
+    # in the handler (the thin @flows don't inherit a deployment's tags).
+    configure_opik()
+    with (
+        tags(*TAGS_DATA_ONLINE),
+        span("online_ingest", tags=TAGS_DATA_ONLINE, metadata=_ONLINE_METADATA),
+    ):
+        match source:
+            case UrlSource():
+                return await _ingest_url(source.uri, user_id)
+            case FileSource():
+                return await _ingest_file(source, user_id)
+            case ConversationSource():
+                return await _ingest_conversation(source, user_id)
+            # ponytail: unreachable (discriminated union); guard a silent None.
+            case _:
+                raise TypeError(f"Unsupported online source: {type(source).__name__}")

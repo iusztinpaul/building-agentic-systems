@@ -14,6 +14,8 @@ on the ``User`` document; this collection just records the selection.
 
 from __future__ import annotations
 
+import logging
+import os
 from datetime import UTC, datetime
 
 from beanie import Document as BeanieDocument
@@ -21,6 +23,8 @@ from beanie import PydanticObjectId
 from pydantic import Field
 
 from tree.entities.users import User
+
+logger = logging.getLogger(__name__)
 
 # Fixed primary key of the singleton session document. There is only ever one.
 CURRENT_SESSION_ID = "current"
@@ -125,3 +129,23 @@ async def resolve_user(
             "Run `make memory-signup` or `make memory-set-current-user` first."
         )
     return user
+
+
+async def resolve_user_id(
+    user_id: str | None = None, user_identifier: str | None = None
+) -> PydanticObjectId:
+    """Resolve the target user's ``_id`` for a CLI / ops entrypoint.
+
+    The CLI-facing wrapper over :func:`resolve_user`: applies the ``USER_ID`` /
+    ``USER_IDENTIFIER`` env-var fallback the ``run-*`` / ``query-*`` Make targets
+    rely on (an explicit arg wins over the env var), then returns the resolved
+    user's id. Raises :class:`ValueError` (NOT ``SystemExit`` — library code must
+    not exit the process); the calling entrypoint owns how a CLI surfaces that.
+    """
+
+    user = await resolve_user(
+        user_id=user_id or os.environ.get("USER_ID"),
+        user_identifier=user_identifier or os.environ.get("USER_IDENTIFIER"),
+    )
+    logger.info("Resolved target user: id=%s identifier=%s", user.id, user.identifier)
+    return user.id

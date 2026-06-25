@@ -80,13 +80,7 @@ integration-tests-slow: # Run only the slow integration tests (vector-index conv
 	uv run pytest tests/integration -m "slow"
 
 # --- Integration tests run SPLIT BY AREA, one pytest PROCESS per area
-# (data / memory / mcp / rest). The suite shares one session-scoped DB, and a
-# fire-and-forget async write from one area (the MCP `search_web` background
-# ingest) was landing during a LATER area's test and polluting it — a write that
-# arrives after the per-test wipe can't be cleaned. Separate processes give each
-# area its own DB lifecycle so a stray async write can't cross the boundary. Each
-# area passes on its own; only the mixed single-process run failed. Still
-# sequential (no `-n auto`) — the shared-DB cleanup fixture collides in parallel.
+# (data / memory / mcp / rest).
 
 INTEGRATION_AREAS = tests/integration/data tests/integration/memory tests/integration/mcp
 INTEGRATION_REST = tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
@@ -188,19 +182,43 @@ whoami: # Print the current user (id, identifier, name).
 	uv run python scripts/signup.py whoami
 
 
-# --- Data Pipelines ---
+# --- Data Pipelines (ingest sources -> documents; NO extraction/indexing) ---
 
-run-data-pipeline: # Trigger the data-etl-orchestrator pipeline via Prefect (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers; no trailing index; no NUM_SHARDS flag — parallelism is per-source via platform bucketing + the HF source's num_workers in default.yaml). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+run-data-pipeline-offline: # OFFLINE data pipeline: trigger data-etl-orchestrator (groups configs/default.yaml sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers). Produces `documents` only. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass SCHEDULED=1 to ingest ONLY `scheduled: true` sources (the nightly cron's behaviour).
+	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(SCHEDULED),--scheduled-only,)
+
+run-data-pipeline-online: # ONLINE data pipeline: ingest ONE source (URL or local file) into `documents` ONLY — does NOT extract or index (run run-memory-pipeline-extraction-online with the printed document id next). Pass SOURCE="<http(s) URL | local file path>" [TITLE="..."]. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-data-pipeline-online SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
+	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
-# --- Memory Pipelines ---
+# --- Memory Pipelines (documents -> knowledge graph) ---
 
-run-memory-pipeline-extraction: # Trigger the memory-extract-etl-orchestrator pipeline via Prefect (dispatches memory-extract-etl-worker shards + one index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1 = 1 worker + 1 index).
+run-memory-pipeline-extraction-offline: # OFFLINE batch extraction: trigger memory-extract-etl-orchestrator over ALL pending documents (dispatches memory-extract-etl-worker shards + one trailing index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1).
 	uv run python scripts/run_memory_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-memory-pipeline-indexing: # Trigger memory indexing pipeline via Prefect (reverse edges, embeddings, indexes). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+run-memory-pipeline-extraction-online: # ONLINE extraction: extract ONE document (e.g. the one just produced by run-data-pipeline-online) via memory-extract-etl-orchestrator (+ trailing index). Requires DOC_IDS="<id>[,<id2>]". Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	@if [ -z "$(DOC_IDS)" ]; then echo 'USAGE: make memory-run-memory-pipeline-extraction-online DOC_IDS="<document id>" (the id printed by run-data-pipeline-online)'; exit 1; fi
+	uv run python scripts/run_memory_pipeline.py --doc-ids "$(DOC_IDS)" $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+
+run-memory-pipeline-indexing: # Trigger the memory indexing pipeline via Prefect (reverse edges, embeddings, indexes) — the single indexing step that works after either offline or online extraction. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
 	uv run python scripts/run_indexing_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+
+
+# --- Full pipeline (data -> memory), chaining the existing deployments ---
+
+run-offline: # FULL OFFLINE run end-to-end: chains run-data-pipeline-offline -> run-memory-pipeline-extraction-offline (the extraction orchestrator also fires the trailing index, so the graph is queryable after this). Each step blocks until its Prefect run completes. Forwards USER_ID/USER_IDENTIFIER; pass SCHEDULED=1 for scheduled-only data, NUM_SHARDS=<n> for extraction fan-out.
+	$(MAKE) run-data-pipeline-offline $(if $(USER_ID),USER_ID="$(USER_ID)",) $(if $(USER_IDENTIFIER),USER_IDENTIFIER="$(USER_IDENTIFIER)",) $(if $(SCHEDULED),SCHEDULED=1,)
+	$(MAKE) run-memory-pipeline-extraction-offline $(if $(USER_ID),USER_ID="$(USER_ID)",) $(if $(USER_IDENTIFIER),USER_IDENTIFIER="$(USER_IDENTIFIER)",) $(if $(NUM_SHARDS),NUM_SHARDS="$(NUM_SHARDS)",)
+
+run-online: # FULL ONLINE run end-to-end for ONE source: chains run-data-pipeline-online -> run-memory-pipeline-extraction-online for the just-ingested document (extraction also fires the trailing index). Pass SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER. A duplicate source skips extraction.
+	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-online SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
+	@doc_id=$$(uv run python scripts/run_online_ingest.py --source "$(SOURCE)" $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)); \
+	if [ -n "$$doc_id" ]; then \
+		$(MAKE) run-memory-pipeline-extraction-online DOC_IDS="$$doc_id" $(if $(USER_ID),USER_ID="$(USER_ID)",) $(if $(USER_IDENTIFIER),USER_IDENTIFIER="$(USER_IDENTIFIER)",); \
+	else \
+		echo "Already ingested (duplicate) — nothing new to extract."; \
+	fi
 
 
 # --- Dream Consolidation ---

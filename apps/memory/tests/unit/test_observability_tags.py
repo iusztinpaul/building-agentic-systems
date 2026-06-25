@@ -1,24 +1,23 @@
-"""Unit tests for the centralized four-tag family (design change 2026-06-10).
+"""Unit tests for the centralized Opik tag families.
 
-The whole Opik telemetry surface is tagged from EXACTLY four tags, used as
-combinations:
+Two families, both centralized in :mod:`tree.observability`:
 
-* ``ingestion`` — writes into memory
-* ``retrieval`` — reads memory
-* ``batch``     — offline via Prefect (flows / tasks)
-* ``mcp``       — online via the MCP server tools
+* PIPELINE-IDENTITY — the data / memory-extraction / memory-indexing pipelines,
+  tagged 1:1 with their Prefect deployment / flow-run tags (the SAME constant
+  feeds both), so a Prefect run and its Opik trace read identically.
+* MCP-SURFACE — the four-tag family (``ingestion`` / ``retrieval`` / ``batch`` /
+  ``mcp``) used as combinations by the MCP tools + dream consolidation.
 
-These tests pin (a) the family is exactly those four constants, (b) the
-combination constants only ever draw from the family, and (c) the MCP tools wear
-the right combination. Centralizing the constants in
-:mod:`tree.observability` means a stray tag anywhere fails one of these.
+These tests pin the constant values, the Prefect↔Opik 1:1 mapping, and that the
+MCP tools stay on the four-tag family (no pipeline-name tag leaks into
+``tools.py``).
 """
 
 from __future__ import annotations
 
 import tree.observability as obs
 
-# The closed set — nothing outside this is a valid Opik tag.
+# The MCP-surface family — the closed set the MCP tools + dream draw from.
 _FAMILY = {"ingestion", "retrieval", "batch", "mcp"}
 
 
@@ -46,13 +45,50 @@ class TestTagFamily:
         assert set(obs.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}
         assert set(obs.TAGS_MCP) == {"mcp"}
 
-    def test_pipeline_metadata_replaces_pipeline_name_tag(self) -> None:
-        # Pipeline identity moved from a tag to metadata.
+    def test_pipeline_metadata_carries_pipeline_name(self) -> None:
+        # The finer pipeline name rides as metadata, complementing the tag.
         assert obs.pipeline_metadata("extraction") == {"pipeline": "extraction"}
         assert obs.pipeline_metadata("data", shard=2) == {
             "pipeline": "data",
             "shard": 2,
         }
+
+
+class TestPipelineIdentityTags:
+    """Pipeline-identity tags + the Prefect↔Opik 1:1 invariant the user asked for:
+    data = [data-pipeline, offline|online]; extraction = [memory-pipeline,
+    extraction]; indexing = [memory-pipeline, indexing]."""
+
+    def test_constant_values(self) -> None:
+        assert obs.TAGS_DATA_OFFLINE == ["data-pipeline", "offline"]
+        assert obs.TAGS_DATA_ONLINE == ["data-pipeline", "online"]
+        assert obs.TAGS_EXTRACTION == ["memory-pipeline", "extraction"]
+        assert obs.TAGS_INDEXING == ["memory-pipeline", "indexing"]
+
+    def test_opik_span_tags_use_the_shared_constants(self) -> None:
+        # Each pipeline's Opik ``_*_TAGS`` IS the shared constant (so Opik == Prefect).
+        from tree.data.conversation.conversation_pipeline import _CONVERSATION_TAGS
+        from tree.data.file.file_pipeline import _FILE_TAGS
+        from tree.data.offline_pipeline import _DATA_TAGS
+        from tree.memory.extraction.pipeline import _EXTRACTION_TAGS
+        from tree.memory.indexing.pipeline import _INDEXING_TAGS
+
+        assert _DATA_TAGS == obs.TAGS_DATA_OFFLINE
+        assert _FILE_TAGS == obs.TAGS_DATA_ONLINE
+        assert _CONVERSATION_TAGS == obs.TAGS_DATA_ONLINE
+        assert _EXTRACTION_TAGS == obs.TAGS_EXTRACTION
+        assert _INDEXING_TAGS == obs.TAGS_INDEXING
+
+    def test_prefect_deployment_tags_match_opik_1to1(self) -> None:
+        # The Prefect deployment specs carry the SAME pipeline-identity tags.
+        from tree.orchestrator import _DEPLOYMENT_SPECS
+
+        tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
+        assert tags_by_name["data-etl-orchestrator"] == obs.TAGS_DATA_OFFLINE
+        assert tags_by_name["data-etl-worker"] == obs.TAGS_DATA_OFFLINE
+        assert tags_by_name["memory-extract-etl-orchestrator"] == obs.TAGS_EXTRACTION
+        assert tags_by_name["memory-extract-etl-worker"] == obs.TAGS_EXTRACTION
+        assert tags_by_name["memory-indexing-etl"] == obs.TAGS_INDEXING
 
 
 class TestMcpToolTags:

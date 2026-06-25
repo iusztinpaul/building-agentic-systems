@@ -1,5 +1,6 @@
-"""Unit tests for tree.data.ingest — URL dispatcher."""
+"""Unit tests for tree.data.online_pipeline — URL dispatcher + online_ingest router."""
 
+import contextlib
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,9 +14,13 @@ from tree.config.app_config import (
     SubstackRssSource,
     WebSource,
 )
-from tree.data.ingest import (
+from tree.data.online_pipeline import (
+    ConversationSource,
+    FileSource,
+    UrlSource,
     _get_configured_substack_domains,
-    ingest_url,
+    _ingest_url,
+    online_ingest,
 )
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -35,7 +40,7 @@ def _patch_sources(mocker, entries: list) -> None:
 
     mock_config = MagicMock()
     mock_config.sources = SourcesConfig(sources=entries)
-    mocker.patch("tree.data.ingest.app_config", mock_config)
+    mocker.patch("tree.data.online_pipeline.app_config", mock_config)
 
 
 class TestGetConfiguredSubstackDomains:
@@ -138,11 +143,11 @@ class TestIngestUrl:
     async def test_routes_substack_url(self, mocker) -> None:
         mock_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "tree.data.ingest._URL_HANDLERS",
+            "tree.data.online_pipeline._URL_HANDLERS",
             [("substack.com", mock_handler)],
         )
 
-        await ingest_url("https://newsletter.substack.com/p/article", _USER_ID)
+        await _ingest_url("https://newsletter.substack.com/p/article", _USER_ID)
 
         mock_handler.assert_awaited_once_with(
             "https://newsletter.substack.com/p/article", _USER_ID
@@ -151,21 +156,21 @@ class TestIngestUrl:
     async def test_routes_custom_substack_domain(self, mocker) -> None:
         mock_substack = AsyncMock(return_value=MagicMock())
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.online_pipeline._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.ingest._get_configured_substack_domains",
+            "tree.data.online_pipeline._get_configured_substack_domains",
             return_value={"decodingai.com"},
         )
         mocker.patch(
-            "tree.data.ingest._ingest_substack_article",
+            "tree.data.online_pipeline._ingest_substack_article",
             mock_substack,
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
-        await ingest_url("https://decodingai.com/p/my-article", _USER_ID)
+        await _ingest_url("https://decodingai.com/p/my-article", _USER_ID)
 
         mock_substack.assert_awaited_once_with(
             "https://decodingai.com/p/my-article", _USER_ID
@@ -175,31 +180,31 @@ class TestIngestUrl:
     async def test_static_registry_takes_precedence(self, mocker) -> None:
         static_handler = AsyncMock(return_value=MagicMock())
         mocker.patch(
-            "tree.data.ingest._URL_HANDLERS",
+            "tree.data.online_pipeline._URL_HANDLERS",
             [("example.com", static_handler)],
         )
         mocker.patch(
-            "tree.data.ingest._get_configured_substack_domains",
+            "tree.data.online_pipeline._get_configured_substack_domains",
             return_value={"example.com"},
         )
 
-        await ingest_url("https://example.com/p/article", _USER_ID)
+        await _ingest_url("https://example.com/p/article", _USER_ID)
 
         static_handler.assert_awaited_once()
 
     async def test_falls_through_to_web_for_unmatched_http_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.online_pipeline._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.ingest._get_configured_substack_domains",
+            "tree.data.online_pipeline._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
-        await ingest_url(
+        await _ingest_url(
             "https://martinfowler.com/articles/microservices.html", _USER_ID
         )
 
@@ -209,17 +214,17 @@ class TestIngestUrl:
 
     async def test_falls_through_to_web_for_github_url(self, mocker) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.online_pipeline._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.ingest._get_configured_substack_domains",
+            "tree.data.online_pipeline._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
-        await ingest_url("https://github.com/anthropics/claude-code", _USER_ID)
+        await _ingest_url("https://github.com/anthropics/claude-code", _USER_ID)
 
         mock_fallback.assert_awaited_once_with(
             "https://github.com/anthropics/claude-code", _USER_ID
@@ -227,19 +232,19 @@ class TestIngestUrl:
 
     async def test_fallback_emits_info_log(self, mocker, caplog) -> None:
         mock_fallback = AsyncMock(return_value=MagicMock())
-        mocker.patch("tree.data.ingest._URL_HANDLERS", [])
+        mocker.patch("tree.data.online_pipeline._URL_HANDLERS", [])
         mocker.patch(
-            "tree.data.ingest._get_configured_substack_domains",
+            "tree.data.online_pipeline._get_configured_substack_domains",
             return_value=set(),
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
         url = "https://martinfowler.com/articles/microservices.html"
-        with caplog.at_level(logging.INFO, logger="tree.data.ingest"):
-            await ingest_url(url, _USER_ID)
+        with caplog.at_level(logging.INFO, logger="tree.data.online_pipeline"):
+            await _ingest_url(url, _USER_ID)
 
         expected = f"Routing URL to 'web (Bright Data fallback)' pipeline: {url}"
         assert any(expected in record.getMessage() for record in caplog.records)
@@ -257,16 +262,16 @@ class TestIngestUrl:
         mock_fallback = AsyncMock()
         mock_substack = AsyncMock()
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
         mocker.patch(
-            "tree.data.ingest._ingest_substack_article",
+            "tree.data.online_pipeline._ingest_substack_article",
             mock_substack,
         )
 
         with pytest.raises(ValueError, match="scheme"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()
@@ -287,7 +292,7 @@ class TestIngestUrl:
         # The static registry captures handler references at module load,
         # so we replace it wholesale to inject the mocked YouTube handler.
         mocker.patch(
-            "tree.data.ingest._URL_HANDLERS",
+            "tree.data.online_pipeline._URL_HANDLERS",
             [
                 ("youtube.com", mock_youtube),
                 ("youtu.be", mock_youtube),
@@ -295,11 +300,11 @@ class TestIngestUrl:
             ],
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
-        await ingest_url(url, _USER_ID)
+        await _ingest_url(url, _USER_ID)
 
         mock_youtube.assert_awaited_once_with(url, _USER_ID)
         mock_substack.assert_not_awaited()
@@ -317,16 +322,16 @@ class TestIngestUrl:
         mock_youtube = AsyncMock()
         mock_fallback = AsyncMock()
         mocker.patch(
-            "tree.data.ingest._ingest_youtube_video",
+            "tree.data.online_pipeline._ingest_youtube_video",
             mock_youtube,
         )
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
 
         with pytest.raises(ValueError, match="youtube_rss"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_youtube.assert_not_awaited()
         mock_fallback.assert_not_awaited()
@@ -343,16 +348,88 @@ class TestIngestUrl:
         mock_fallback = AsyncMock()
         mock_substack = AsyncMock()
         mocker.patch(
-            "tree.data.ingest._ingest_web_url",
+            "tree.data.online_pipeline._ingest_web_url",
             mock_fallback,
         )
         mocker.patch(
-            "tree.data.ingest._ingest_substack_article",
+            "tree.data.online_pipeline._ingest_substack_article",
             mock_substack,
         )
 
         with pytest.raises(ValueError, match="missing a host"):
-            await ingest_url(url, _USER_ID)
+            await _ingest_url(url, _USER_ID)
 
         mock_fallback.assert_not_awaited()
         mock_substack.assert_not_awaited()
+
+
+class TestOnlineIngestRouting:
+    """``online_ingest`` distributes each variant to its leaf pipeline + forwards user_id."""
+
+    async def test_url_routes_to_ingest_url(self, mocker) -> None:
+        doc = MagicMock()
+        mock_url = mocker.patch(
+            "tree.data.online_pipeline._ingest_url",
+            new_callable=AsyncMock,
+            return_value=doc,
+        )
+
+        result = await online_ingest(UrlSource(uri="https://example.com"), _USER_ID)
+
+        assert result is doc
+        mock_url.assert_awaited_once_with("https://example.com", _USER_ID)
+
+    async def test_file_routes_to_file_pipeline(self, mocker) -> None:
+        doc = MagicMock()
+        mock_file = mocker.patch(
+            "tree.data.online_pipeline._ingest_file",
+            new_callable=AsyncMock,
+            return_value=doc,
+        )
+
+        source = FileSource(path="/tmp/x.md", title="T")
+        result = await online_ingest(source, _USER_ID)
+
+        assert result is doc
+        mock_file.assert_awaited_once_with(source, _USER_ID)
+
+    async def test_conversation_routes_to_conversation_pipeline(self, mocker) -> None:
+        doc = MagicMock()
+        mock_conv = mocker.patch(
+            "tree.data.online_pipeline._ingest_conversation",
+            new_callable=AsyncMock,
+            return_value=doc,
+        )
+
+        source = ConversationSource(text="hi")
+        result = await online_ingest(source, _USER_ID)
+
+        assert result is doc
+        mock_conv.assert_awaited_once_with(source, _USER_ID)
+
+    async def test_owns_opik_span_mirroring_offline(self, mocker) -> None:
+        # The online data pipeline configures Opik + opens its own span, tagged
+        # 1:1 with its Prefect flow-run tags (mirrors the offline trace).
+        mock_configure = mocker.patch("tree.data.online_pipeline.configure_opik")
+        captured: dict = {}
+
+        @contextlib.contextmanager
+        def fake_span(name, **kwargs):
+            captured.update(
+                name=name, tags=kwargs.get("tags"), meta=kwargs.get("metadata")
+            )
+            yield
+
+        mocker.patch("tree.data.online_pipeline.span", fake_span)
+        mocker.patch(
+            "tree.data.online_pipeline._ingest_url",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        )
+
+        await online_ingest(UrlSource(uri="https://example.com"), _USER_ID)
+
+        mock_configure.assert_called_once()
+        assert captured["name"] == "online_ingest"
+        assert captured["tags"] == ["data-pipeline", "online"]
+        assert captured["meta"] == {"pipeline": "data"}

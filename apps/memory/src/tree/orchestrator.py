@@ -24,29 +24,28 @@ when triggering a deployment, e.g.::
         -p user_id=507f1f77bcf86cd799439011
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from prefect import Flow, serve
 from prefect.blocks.system import Secret
 from prefect.runner.storage import GitRepository
+from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
-from tree.data.pipeline import data_etl_orchestrator, data_etl_worker
+from tree.data.offline_pipeline import data_etl_orchestrator, data_etl_worker
+from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_orchestrator,
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
-from tree.observability import configure_opik
-
-# --- [Prefect Cloud free-tier cap: 5 deployments] --------------------------
-# The free tier allows only 5 deployments per workspace, so the five flows below
-# are temporarily not served/deployed. Re-enable (uncomment these imports AND add
-# the matching ``_DeploymentSpec`` entries) once the Cloud plan is upgraded.
-# from tree.data.conversation.conversation_pipeline import ingest_conversation
-# from tree.data.file.file_pipeline import ingest_file
-# from tree.memory.consolidation.dream import dream_consolidation_all_users
-# ---------------------------------------------------------------------------
+from tree.observability import (
+    TAGS_DATA_OFFLINE,
+    TAGS_EXTRACTION,
+    TAGS_INDEXING,
+    configure_opik,
+)
 
 # Prefect Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
 GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"
@@ -101,6 +100,12 @@ class _GitRepoWithPipInstall(GitRepository):
         ]
 
 
+# Nightly schedule for the data pipeline's scheduled run (UTC). The cron fires
+# ``data-etl-orchestrator`` with ``scheduled_only=True`` and no ``user_id`` — so it
+# ingests ONLY ``scheduled: true`` sources, fanned out across all active users.
+_SCHEDULED_INGEST_CRON = "0 3 * * *"
+
+
 @dataclass(frozen=True)
 class _DeploymentSpec:
     """One deployment's topology — shared by the local-serve and cloud paths.
@@ -108,6 +113,11 @@ class _DeploymentSpec:
     ``flow`` is the imported flow object (used for local ``to_deployment`` and as
     the ``from_source`` accessor). ``entrypoint`` is the repo-relative
     ``path:function`` Prefect's managed worker loads after cloning the repo.
+    ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
+    deployment whose runs override the flow's default parameters — e.g. the data
+    orchestrator's nightly cron passes ``scheduled_only=True``. ``optional`` marks a
+    deployment as beyond the free-tier 5 — registered only when
+    ``app_config.prefect.deploy_optional`` is true.
     """
 
     flow: Flow
@@ -115,46 +125,79 @@ class _DeploymentSpec:
     entrypoint: str
     tags: list[str]
     cron: str | None = None
+    schedule_parameters: dict[str, Any] = field(default_factory=dict)
+    optional: bool = False
+
+    def schedules(self) -> list[Cron] | None:
+        """The deployment's schedule list, or ``None`` when it has no cron.
+
+        Each schedule carries ``schedule_parameters`` so scheduled runs differ
+        from manual ones (Prefect overrides only the listed params; the rest fall
+        back to the flow defaults).
+        """
+
+        if self.cron is None:
+            return None
+        return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
-# The deployment topology. Operators trigger the ORCHESTRATORs:
-# - data-etl-orchestrator: partitions the configured ``sources:`` into shards and
-#   dispatches one ``data-etl-worker`` per shard (no trailing index).
-# - memory-extract-etl-orchestrator: shards the user's pending docs across
-#   ``memory-extract-etl-worker`` runs, then fires one ``memory-indexing-etl``.
-# The workers / indexing flows are also triggerable directly.
+# The first 5 are the always-on CORE set (free-tier safe). The trailing dream
+# deployment is OPTIONAL (``optional=True``): registered only when
+# ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         data_etl_orchestrator,
         "data-etl-orchestrator",
-        "apps/memory/src/tree/data/pipeline.py:data_etl_orchestrator",
-        ["data-pipeline", "orchestrator"],
+        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
+        TAGS_DATA_OFFLINE,
+        cron=_SCHEDULED_INGEST_CRON,
+        schedule_parameters={"scheduled_only": True},
     ),
     _DeploymentSpec(
         data_etl_worker,
         "data-etl-worker",
-        "apps/memory/src/tree/data/pipeline.py:data_etl_worker",
-        ["data-pipeline", "worker"],
+        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
+        TAGS_DATA_OFFLINE,
     ),
     _DeploymentSpec(
         memory_extract_etl_orchestrator,
         "memory-extract-etl-orchestrator",
         "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_orchestrator",
-        ["memory-pipeline", "extraction", "orchestrator"],
+        TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
         memory_extract_etl_worker,
         "memory-extract-etl-worker",
         "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_worker",
-        ["memory-pipeline", "extraction", "worker"],
+        TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
         memory_indexing,
         "memory-indexing-etl",
         "apps/memory/src/tree/memory/indexing/pipeline.py:memory_indexing",
-        ["memory-pipeline", "indexing"],
+        TAGS_INDEXING,
+    ),
+    # --- Optional (beyond the Prefect Cloud free-tier 5; gated by prefect.deploy_optional) ---
+    _DeploymentSpec(
+        dream_consolidation_all_users,
+        "dream-consolidation-all-users",
+        "apps/memory/src/tree/memory/consolidation/dream.py:dream_consolidation_all_users",
+        ["memory-pipeline", "dream", "consolidation"],
+        cron=app_config.dream.cron,
+        optional=True,
     ),
 ]
+
+
+def _active_deployment_specs() -> list[_DeploymentSpec]:
+    """The deployments to register: the core 5 plus the optional dream when enabled.
+
+    Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
+    YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.
+    """
+
+    deploy_optional = app_config.prefect.deploy_optional
+    return [s for s in _DEPLOYMENT_SPECS if deploy_optional or not s.optional]
 
 
 def build_deployments() -> list:
@@ -166,8 +209,10 @@ def build_deployments() -> list:
     """
 
     return [
-        spec.flow.to_deployment(name=spec.name, tags=spec.tags, cron=spec.cron)
-        for spec in _DEPLOYMENT_SPECS
+        spec.flow.to_deployment(
+            name=spec.name, tags=spec.tags, schedules=spec.schedules()
+        )
+        for spec in _active_deployment_specs()
     ]
 
 
@@ -210,13 +255,13 @@ def deploy_cloud_pipelines(
     job_variables = {"env": job_env, "image": MANAGED_IMAGE}
 
     deployment_ids: list[str] = []
-    for spec in _DEPLOYMENT_SPECS:
+    for spec in _active_deployment_specs():
         flow = spec.flow.from_source(source=source, entrypoint=spec.entrypoint)
         deployment_id = flow.deploy(
             name=spec.name,
             work_pool_name=work_pool_name,
             tags=spec.tags,
-            cron=spec.cron,
+            schedules=spec.schedules(),
             job_variables=job_variables,
             build=False,
             push=False,
@@ -277,7 +322,7 @@ def deployment_full_names() -> list[str]:
     ``down`` without re-listing the topology.
     """
 
-    return [f"{spec.flow.name}/{spec.name}" for spec in _DEPLOYMENT_SPECS]
+    return [f"{spec.flow.name}/{spec.name}" for spec in _active_deployment_specs()]
 
 
 def _git_ref_kwarg(git_ref: str) -> dict[str, str]:

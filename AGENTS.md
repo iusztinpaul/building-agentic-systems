@@ -160,7 +160,7 @@ Test selection is gated by two orthogonal markers — `slow` and `requires_mongo
 By default, use the "Paul Iusztin" user when testing.
 
 1. **Serve the workflows** in the background to pick up the latest code: `make memory-serve-workflows &`. This process is the in-process Prefect worker — without it, deployments register but nothing executes. If a serve process is already running, kill it first and re-serve.
-2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here): `make memory-run-data-pipeline` → `make memory-run-memory-pipeline-extraction` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results.
+2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here): `make memory-run-data-pipeline-offline` → `make memory-run-memory-pipeline-extraction-offline` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results.
 
 # Developing New Features & Bug Fixes
 
