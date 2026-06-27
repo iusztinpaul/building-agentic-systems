@@ -1,6 +1,6 @@
 # ADR-003: Source Definitions as Operator Data
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-27
 - **Deciders:** Paul (project owner)
 - **Context references:**
