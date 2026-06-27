@@ -1,55 +1,9 @@
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
-
-sources:
-  # `scheduled: true` opts a source into the nightly run (data-etl-orchestrator
-  # cron, all active users). A manual `make run-data-pipeline` ingests everything
-  # regardless. Default false — set it on feeds (RSS), not one-shot articles.
-  # Substack
-  - uri: https://www.decodingai.com/feed
-    type: substack_rss
-    scheduled: true
-  - uri: https://maximelabonne.substack.com/feed
-    type: substack_rss
-    scheduled: true
-  - uri: https://www.latent.space/feed
-    type: substack_rss
-    scheduled: true
-  - uri: https://www.decodingai.com/p/ai-agents-foundations-course
-    type: substack_article
-  - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
-    type: substack_article
-  - uri: https://www.decodingai.com/p/context-engineering-2025s-1-skill
-    type: substack_article
-  - uri: https://www.decodingai.com/p/llm-structured-outputs-the-only-way
-    type: substack_article
-  - uri: https://www.decodingai.com/p/stop-building-ai-agents-use-these
-    type: substack_article
-  - uri: https://www.decodingai.com/p/tool-calling-from-scratch-to-production
-    type: substack_article
-  - uri: https://www.decodingai.com/p/ai-agents-planning
-    type: substack_article
-  - uri: https://www.decodingai.com/p/building-production-react-agents
-    type: substack_article
-  - uri: https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
-    type: substack_article
-  - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
-    type: substack_article
-  # HuggingFace datasets
-  - uri: librarian-bots/arxiv-metadata-snapshot
-    type: huggingface_dataset
-    max_samples: 1000
-    fetch_content: false
-    num_workers: 2
-    batch_size: 50
-    concurrency: 25
-  # YouTube
-  # - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA
-  #   type: youtube_rss
-  - uri: https://www.youtube.com/watch?v=Sntj4HmuykI
-    type: youtube_video
-  # Arbitrary URLs (blogs, reddit threads, news, profiles)
-  - uri: https://www.reddit.com/r/LLMDevs/comments/1ts3qc3/a_year_building_agent_memory_on_knowledge_graphs/
-  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
+#
+# This file holds ONLY static memory config (models, extraction, query, dream,
+# concurrency, prefect, mcp, observability). Data-ingestion sources are operator
+# DATA and live under the repo-root `sources/` directory (`sources/backfill.yaml`
+# + `sources/listen.yaml`), loaded by `tree.config.sources` — see ADR-003.
 
 models:
   llm:

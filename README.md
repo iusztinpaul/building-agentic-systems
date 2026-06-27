@@ -163,7 +163,7 @@ make memory-serve-workflows &   # in-process worker; (re)serve to load local cod
 **6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the knowledge graph.
 
 ```bash
-make memory-run-data-pipeline-offline              # walks sources.sources in configs/default.yaml (Substack RSS + articles + arXiv + web) → documents
+make memory-run-data-pipeline-offline              # ingests the default sources (sources/backfill.yaml + sources/listen.yaml) → documents
 make memory-run-memory-pipeline-extraction-offline # documents → LLM → nodes + edges → knowledge_graph collection
 make memory-run-memory-pipeline-indexing   # reverse edges, embeddings, search indexes
 make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
@@ -171,13 +171,13 @@ make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the res
 make memory-run-data-pipeline-offline USER_IDENTIFIER=another@example.com  # one-off run as a different user
 
 # Or chain data → extract → index in one shot:
-make memory-run-offline                                          # all configured sources
+make memory-run-offline                                          # default sources (backfill + listen)
 make memory-run-online SOURCE="https://example.com/some-post"    # one source on demand
 ```
 
-`run-memory-pipeline-extraction-offline` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline-offline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `default.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
+`run-memory-pipeline-extraction-offline` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline-offline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `sources/backfill.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
-The data pipeline runs in three modes — `make memory-run-data-pipeline-offline` (all configured sources), `... SCHEDULED=1` (only `scheduled: true` sources, the same set the nightly cron ingests across all active users), and `make memory-run-data-pipeline-online SOURCE="<url|path>"` (one source on demand, realtime). See [Data pipelines](apps/memory/README.md#data-pipelines) for all three.
+The data pipeline runs **offline** (config-driven, fanned out over Prefect workers) and **online** (realtime, one source). Offline source selection is freely combinable: bare `make memory-run-data-pipeline-offline` ingests the default set (`sources/backfill.yaml` + `sources/listen.yaml`); `... SOURCE_FILE="sources/listen.yaml"` ingests chosen source file(s); `... URI="https://blog.com/feed=substack_rss"` ingests ad-hoc URLs (type inferred when the `=TYPE` suffix is omitted). The nightly cron ingests `sources/listen.yaml` across all active users. Online is `make memory-run-data-pipeline-online SOURCE="<url|path>"`. See [Data pipelines](apps/memory/README.md#data-pipelines).
 
 **7. Drive memory with the agent.**
 
@@ -204,7 +204,7 @@ make memory-search-web QUERY="anthropic claude api" NUM_RESULTS=5 INGEST=true IN
 
 ## App guides
 
-- **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`configs/default.yaml`), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
+- **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`configs/default.yaml` + the `sources/` files), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
 - **Harness app** → [`apps/harness/README.md`](apps/harness/README.md). Modes (CLI vs Ink), native tools, permissions, sub-agents, shell hooks, JSONL sessions.
 
 ## Monitoring

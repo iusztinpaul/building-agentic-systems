@@ -314,36 +314,21 @@ class ObservabilityConfig(BaseModel):
 # --- Source variants (discriminated union) ---
 
 
-class _ConfiguredSource(BaseModel):
-    """Fields shared by every configured offline source.
-
-    ``scheduled`` opts a source into the nightly scheduled run
-    (``data-etl-orchestrator``'s cron sets ``scheduled_only=True``, which ingests
-    ONLY flagged sources, for every active user). A manual ``make
-    run-data-pipeline-offline`` ignores the flag and ingests everything. Default
-    ``false`` — set it ``true`` on feeds that gain new items over time (e.g.
-    ``substack_rss`` / ``youtube_rss``); leave it off for one-shot
-    articles/videos/datasets that never change after first ingest.
-    """
-
-    scheduled: bool = False
-
-
-class SubstackRssSource(_ConfiguredSource):
+class SubstackRssSource(BaseModel):
     """A Substack RSS feed URL."""
 
     type: Literal["substack_rss"] = "substack_rss"
     uri: str = Field(min_length=1)
 
 
-class SubstackArticleSource(_ConfiguredSource):
+class SubstackArticleSource(BaseModel):
     """A Substack article URL (may live on a custom domain)."""
 
     type: Literal["substack_article"] = "substack_article"
     uri: str = Field(min_length=1)
 
 
-class HuggingFaceDatasetSource(_ConfiguredSource):
+class HuggingFaceDatasetSource(BaseModel):
     """A HuggingFace dataset id (NOT a URL).
 
     The ``uri`` is the dataset id (``namespace/name``) and is used to
@@ -383,21 +368,21 @@ class HuggingFaceDatasetSource(_ConfiguredSource):
     offset: int | None = None
 
 
-class YouTubeVideoSource(_ConfiguredSource):
+class YouTubeVideoSource(BaseModel):
     """A YouTube video URL (or 11-char video id)."""
 
     type: Literal["youtube_video"] = "youtube_video"
     uri: str = Field(min_length=1)
 
 
-class YouTubeRssSource(_ConfiguredSource):
+class YouTubeRssSource(BaseModel):
     """A YouTube channel feed: ``youtube.com/feeds/videos.xml?channel_id=…``."""
 
     type: Literal["youtube_rss"] = "youtube_rss"
     uri: str = Field(min_length=1)
 
 
-class WebSource(_ConfiguredSource):
+class WebSource(BaseModel):
     """A generic web URL ingested via the URL dispatcher."""
 
     type: Literal["web"] = "web"
@@ -526,13 +511,13 @@ class SourcesConfig(BaseModel):
 
         Runs before discriminated-union validation so untyped raw dicts can
         be coerced into a typed variant. Also coerces a bare list of source
-        entries into ``{"sources": <list>}`` so the YAML can write the flat
-        shape directly under ``AppConfig.sources``. See module-level helpers
-        for the inference rules.
+        entries into ``{"sources": <list>}`` so a source file can write the
+        flat top-level-list shape directly. See module-level helpers for the
+        inference rules.
         """
 
-        # Accept the flat YAML shape (``sources: [...]`` at the AppConfig
-        # level) by wrapping a bare list as ``{"sources": <list>}``.
+        # Accept the flat YAML shape (a bare top-level list, as the
+        # ``sources/*.yaml`` files use) by wrapping it as ``{"sources": <list>}``.
         if isinstance(data, list):
             data = {"sources": data}
 
@@ -560,7 +545,6 @@ class MCPConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    sources: SourcesConfig = SourcesConfig()
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()

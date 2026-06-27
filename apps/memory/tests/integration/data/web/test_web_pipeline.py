@@ -12,7 +12,6 @@ Each test cleans up the document(s) it creates by ``source_uri`` in a
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock
 
 import pytest
 from beanie import PydanticObjectId
@@ -54,8 +53,7 @@ _EXAMPLE_ORG_URL = "https://example.org"
 _EXAMPLE_NET_URL = "https://example.net"
 _FALLBACK_URL = "https://martinfowler.com/bliki/CQRS.html"
 # A long-stable Substack article that is also present in
-# ``configs/default.yaml`` as a ``type: substack_article`` entry under the
-# top-level ``sources`` list.
+# ``sources/backfill.yaml`` as a ``type: substack_article`` entry.
 _SUBSTACK_URL = "https://www.decodingai.com/p/ai-agents-foundations-course"
 
 
@@ -170,8 +168,7 @@ class TestDataPipelinePicksUpWebEntries:
     async def test_data_pipeline_picks_up_web_entries_config(
         self, mongo_client, mocker
     ) -> None:
-        mock_config = MagicMock()
-        mock_config.sources.sources = [
+        sources = [
             WebSource(uri=_EXAMPLE_URL),
             HuggingFaceDatasetSource(
                 uri="librarian-bots/arxiv-metadata-snapshot",
@@ -181,10 +178,10 @@ class TestDataPipelinePicksUpWebEntries:
                 concurrency=10,
             ),
         ]
-        mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
+        # The arxiv leaf reads the shared source loader for its defaults.
         mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.app_config",
-            mock_config,
+            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+            return_value=sources,
         )
         mocker.patch(
             "tree.data.offline_pipeline.init_mongodb",
@@ -210,7 +207,7 @@ class TestDataPipelinePicksUpWebEntries:
             with prefect_tags("tests"):
                 # #068: the worker now owns per-variant dispatch and takes its
                 # sources as an argument rather than reading ``app_config``.
-                result = await data_etl_worker(_USER_ID, mock_config.sources.sources)
+                result = await data_etl_worker(_USER_ID, sources)
 
             web_docs = [d for d in result if d.source_type == SourceType.WEB]
             assert len(web_docs) == 1

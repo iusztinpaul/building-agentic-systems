@@ -10,8 +10,9 @@ from tree.config.app_config import (
     SourceEntry,
     SubstackArticleSource,
     SubstackRssSource,
-    load_app_config,
+    WebSource,
 )
+from tree.config.sources import load_sources
 from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
 from tree.entities.documents import Document, SourceType
 
@@ -104,19 +105,20 @@ def _make_mock_article_client(mocker) -> AsyncMock:
     return mock_client
 
 
-def _make_full_config(
+def _make_sources(
     mocker,
     *,
     substack_feeds: list[str] | None = None,
     substack_articles: list[str] | None = None,
     arxiv_max_samples: int = 2,
-) -> MagicMock:
-    """Patch ``app_config`` with a flat list of typed source entries.
+) -> list[SourceEntry]:
+    """Build a flat list of typed source entries to hand the worker directly.
 
-    The ``data-etl-worker`` is handed ``mock_config.sources.sources`` directly
-    (#068 moved the per-variant dispatch into the worker, which takes its sources
-    as an argument rather than reading ``app_config``). The arxiv connector still
-    reads its defaults from ``app_config``, so that module is patched too.
+    The ``data-etl-worker`` takes its sources as an argument (#068 moved the
+    per-variant dispatch into the worker; ADR-003 removed ``AppConfig.sources``),
+    so the test passes this list straight in. The arxiv connector reads its
+    defaults from the shared source loader (``default_configured_sources``), so
+    that is patched to the same list too.
     """
 
     sources: list[SourceEntry] = []
@@ -134,11 +136,12 @@ def _make_full_config(
         )
     )
 
-    mock_config = MagicMock()
-    mock_config.sources.sources = sources
-    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
-    mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
-    return mock_config
+    # The arxiv leaf reads the shared source loader for its defaults.
+    mocker.patch(
+        "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+        return_value=sources,
+    )
+    return sources
 
 
 def _mock_init_mongodb(mocker, mongo_client) -> None:
@@ -187,7 +190,7 @@ class TestDataPipeline:
         _mock_rss_source(mocker)
         _mock_article_source(mocker)
         _mock_arxiv_source(mocker)
-        config = _make_full_config(
+        sources = _make_sources(
             mocker,
             substack_feeds=["https://blog.example.com/feed"],
             substack_articles=[
@@ -197,7 +200,7 @@ class TestDataPipeline:
         )
 
         with prefect_tags("tests"):
-            result = await data_etl_worker(_USER_ID, config.sources.sources)
+            result = await data_etl_worker(_USER_ID, sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -215,14 +218,14 @@ class TestDataPipeline:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_rss_source(mocker)
         _mock_arxiv_source(mocker)
-        config = _make_full_config(
+        sources = _make_sources(
             mocker,
             substack_feeds=["https://blog.example.com/feed"],
             substack_articles=[],
         )
 
         with prefect_tags("tests"):
-            result = await data_etl_worker(_USER_ID, config.sources.sources)
+            result = await data_etl_worker(_USER_ID, sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -236,14 +239,14 @@ class TestDataPipeline:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_article_source(mocker)
         _mock_arxiv_source(mocker)
-        config = _make_full_config(
+        sources = _make_sources(
             mocker,
             substack_feeds=[],
             substack_articles=["https://blog.example.com/p/article-1"],
         )
 
         with prefect_tags("tests"):
-            result = await data_etl_worker(_USER_ID, config.sources.sources)
+            result = await data_etl_worker(_USER_ID, sources)
 
         substack_docs = [d for d in result if d.source_type == SourceType.SUBSTACK]
         hf_docs = [d for d in result if d.source_type == SourceType.HUGGINGFACE]
@@ -253,14 +256,14 @@ class TestDataPipeline:
     async def test_runs_only_arxiv_when_no_substack(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
         _mock_arxiv_source(mocker)
-        config = _make_full_config(
+        sources = _make_sources(
             mocker,
             substack_feeds=[],
             substack_articles=[],
         )
 
         with prefect_tags("tests"):
-            result = await data_etl_worker(_USER_ID, config.sources.sources)
+            result = await data_etl_worker(_USER_ID, sources)
 
         assert all(d.source_type == SourceType.HUGGINGFACE for d in result)
         assert len(result) == 2
@@ -283,40 +286,40 @@ class TestDataPipeline:
               last platform.
         """
 
-        # --- YAML fixture with all 5 variants ---
+        # --- Source-file fixture (flat top-level list) with all 5 variants ---
         config_yaml = tmp_path / "all_variants.yaml"
         config_yaml.write_text(
             """
-sources:
-  - uri: https://blog.example.com/feed
-    type: substack_rss
-  - uri: https://blog.example.com/p/test-post
-    type: substack_article
-  - uri: librarian-bots/arxiv-metadata-snapshot
-    type: huggingface_dataset
-    max_samples: 2
-    fetch_content: false
-  - uri: https://www.anthropic.com/engineering/some-page
-    type: web
-  - uri: https://www.reddit.com/r/AI_Agents/comments/example
+- uri: https://blog.example.com/feed
+  type: substack_rss
+- uri: https://blog.example.com/p/test-post
+  type: substack_article
+- uri: librarian-bots/arxiv-metadata-snapshot
+  type: huggingface_dataset
+  max_samples: 2
+  fetch_content: false
+- uri: https://www.anthropic.com/engineering/some-page
+  type: web
+- uri: https://www.reddit.com/r/AI_Agents/comments/example
 """
         )
 
-        loaded = load_app_config(config_yaml)
+        # Load through the shared source loader (ADR-003) — the production path
+        # for source files; it applies the same load-time type inference.
+        entries = load_sources([str(config_yaml)])
         # Sanity: the load-time validator normalized the untyped Reddit
         # entry into a WebSource, leaving us with exactly 5 entries.
-        from tree.config.app_config import (
-            HuggingFaceDatasetSource as _Hf,
-            SubstackArticleSource as _SubArt,
-            SubstackRssSource as _SubRss,
-            WebSource as _Web,
-        )
-
-        types = [type(s) for s in loaded.sources.sources]
-        assert types == [_SubRss, _SubArt, _Hf, _Web, _Web], types
+        types = [type(s) for s in entries]
+        assert types == [
+            SubstackRssSource,
+            SubstackArticleSource,
+            HuggingFaceDatasetSource,
+            WebSource,
+            WebSource,
+        ], types
         # The reddit entry must be a WebSource (untyped → web fallback).
-        reddit_entry = loaded.sources.sources[4]
-        assert isinstance(reddit_entry, _Web)
+        reddit_entry = entries[4]
+        assert isinstance(reddit_entry, WebSource)
         assert "reddit.com" in reddit_entry.uri
 
         # --- Mock the platform pipelines the worker dispatches to ---
@@ -383,10 +386,9 @@ sources:
 
         # --- Run the worker against the loaded fixture's sources ---
         with prefect_tags("tests"):
-            result = await data_etl_worker(_USER_ID, loaded.sources.sources)
+            result = await data_etl_worker(_USER_ID, entries)
 
         # --- Each platform pipeline got its TYPED entries (RSS + single together) ---
-        entries = loaded.sources.sources
         substack_mock.assert_awaited_once_with([entries[0], entries[1]], _USER_ID)
         arxiv_mock.assert_awaited_once_with(
             user_id=_USER_ID, max_samples=2, fetch_content=False, offset=None

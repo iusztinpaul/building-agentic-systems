@@ -9,7 +9,6 @@ from beanie import PydanticObjectId
 
 from tree.config.app_config import (
     HuggingFaceDatasetSource,
-    SourcesConfig,
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,
@@ -36,11 +35,16 @@ def _clear_substack_domain_cache() -> None:
 
 
 def _patch_sources(mocker, entries: list) -> None:
-    """Replace ``app_config.sources`` with a real ``SourcesConfig``."""
+    """Point the dispatcher's ``default_configured_sources`` at ``entries``.
 
-    mock_config = MagicMock()
-    mock_config.sources = SourcesConfig(sources=entries)
-    mocker.patch("tree.data.online_pipeline.app_config", mock_config)
+    Mirrors the loader's real contract: it hands back a single cached list, so the
+    mock returns the SAME list object on every call.
+    """
+
+    mocker.patch(
+        "tree.data.online_pipeline.default_configured_sources",
+        return_value=entries,
+    )
 
 
 class TestGetConfiguredSubstackDomains:
@@ -137,6 +141,24 @@ class TestGetConfiguredSubstackDomains:
         domains = _get_configured_substack_domains()
 
         assert domains == set()
+
+    def test_does_not_mutate_loader_cached_list(self, mocker) -> None:
+        """The helper iterates the loader's cached list read-only.
+
+        ``default_configured_sources()`` returns the process-global cached list
+        object; mutating it here would poison every other consumer.
+        """
+
+        entries = [
+            SubstackRssSource(uri="https://decodingai.com/feed"),
+            WebSource(uri="https://anthropic.com/post"),
+        ]
+        snapshot = list(entries)
+        _patch_sources(mocker, entries)
+
+        _get_configured_substack_domains()
+
+        assert entries == snapshot
 
 
 class TestIngestUrl:

@@ -3,6 +3,7 @@
 import textwrap
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from tree.config.app_config import (
@@ -13,7 +14,6 @@ from tree.config.app_config import (
     WebSource,
     YouTubeRssSource,
     YouTubeVideoSource,
-    load_app_config,
 )
 
 
@@ -273,28 +273,31 @@ class TestUntypedEntryNormalization:
 
 class TestYamlRoundTrip:
     def test_yaml_round_trip_typed_and_untyped_mix(self, tmp_path):
+        # Arrange — a source file is a flat top-level YAML list (the shape the
+        # ``sources/*.yaml`` files + the loader use), mixing typed and untyped
+        # entries.
         config_file = tmp_path / "sources.yaml"
         config_file.write_text(
             textwrap.dedent("""\
-                sources:
-                  sources:
-                    - type: substack_rss
-                      uri: https://www.decodingai.com/feed
-                    - type: substack_article
-                      uri: https://www.decodingai.com/p/some-article
-                    - type: huggingface_dataset
-                      uri: librarian-bots/arxiv-metadata-snapshot
-                      max_samples: 25
-                    - type: web
-                      uri: https://www.anthropic.com/engineering/harness-design
-                    - uri: https://www.reddit.com/r/AI_Agents
-                    - uri: https://maximelabonne.substack.com/p/article
+                - type: substack_rss
+                  uri: https://www.decodingai.com/feed
+                - type: substack_article
+                  uri: https://www.decodingai.com/p/some-article
+                - type: huggingface_dataset
+                  uri: librarian-bots/arxiv-metadata-snapshot
+                  max_samples: 25
+                - type: web
+                  uri: https://www.anthropic.com/engineering/harness-design
+                - uri: https://www.reddit.com/r/AI_Agents
+                - uri: https://maximelabonne.substack.com/p/article
             """)
         )
 
-        config = load_app_config(config_file)
+        # Act
+        config = SourcesConfig.model_validate(yaml.safe_load(config_file.read_text()))
 
-        sources = config.sources.sources
+        # Assert
+        sources = config.sources
         assert len(sources) == 6
         # No raw dicts — every entry is a typed Pydantic instance.
         assert all(
@@ -330,21 +333,29 @@ class TestSourcesConfigDefault:
         assert config.sources == []
 
 
-class TestScheduledFlag:
-    """The shared ``scheduled`` flag (opt-in to the nightly scheduled run)."""
+class TestScheduledFieldRetired:
+    """The per-source ``scheduled`` flag is retired (ADR-003): cadence lives in
+    the source filename, not a boolean. No variant carries the field, and a YAML
+    that still sets it is ignored rather than honored."""
 
-    def test_defaults_to_false(self):
-        config = SourcesConfig.model_validate(
-            {
-                "sources": [
-                    {"type": "substack_rss", "uri": "https://x.substack.com/feed"}
-                ]
-            }
-        )
+    @pytest.mark.parametrize(
+        "variant",
+        [
+            SubstackRssSource,
+            SubstackArticleSource,
+            HuggingFaceDatasetSource,
+            YouTubeVideoSource,
+            YouTubeRssSource,
+            WebSource,
+        ],
+    )
+    def test_no_variant_has_a_scheduled_field(self, variant):
+        assert "scheduled" not in variant.model_fields
 
-        assert config.sources[0].scheduled is False
-
-    def test_parses_true_through_the_union(self):
+    def test_legacy_scheduled_key_is_dropped_not_persisted(self):
+        # A source file authored before the retirement may still carry
+        # ``scheduled: true``; the union drops the unknown key (extra=ignore)
+        # rather than failing or round-tripping it.
         config = SourcesConfig.model_validate(
             {
                 "sources": [
@@ -357,27 +368,6 @@ class TestScheduledFlag:
             }
         )
 
-        assert config.sources[0].scheduled is True
-
-    def test_available_on_every_variant(self):
-        # The orchestrator's ``scheduled_only`` filter reads ``.scheduled`` on
-        # every source, so the field must exist on all variants (via the base).
-        for source in (
-            SubstackRssSource(uri="u"),
-            SubstackArticleSource(uri="u"),
-            HuggingFaceDatasetSource(uri="ns/name"),
-            YouTubeVideoSource(uri="u"),
-            YouTubeRssSource(uri="u"),
-            WebSource(uri="u"),
-        ):
-            assert source.scheduled is False
-
-    def test_survives_model_dump_round_trip(self):
-        # The orchestrator serializes shards via model_dump() before dispatch, so
-        # ``scheduled`` must round-trip through the discriminated union.
-        original = SubstackRssSource(uri="https://x.substack.com/feed", scheduled=True)
-        reparsed = SourcesConfig.model_validate(
-            {"sources": [original.model_dump()]}
-        ).sources[0]
-
-        assert reparsed.scheduled is True
+        entry = config.sources[0]
+        assert isinstance(entry, SubstackRssSource)
+        assert "scheduled" not in entry.model_dump()

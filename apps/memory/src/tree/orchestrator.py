@@ -101,8 +101,9 @@ class _GitRepoWithPipInstall(GitRepository):
 
 
 # Nightly schedule for the data pipeline's scheduled run (UTC). The cron fires
-# ``data-etl-orchestrator`` with ``scheduled_only=True`` and no ``user_id`` — so it
-# ingests ONLY ``scheduled: true`` sources, fanned out across all active users.
+# ``data-etl-orchestrator`` with ``source_files=["sources/listen.yaml"]`` and no
+# ``user_id`` — so it ingests the polled listen feeds, fanned out across all active
+# users.
 _SCHEDULED_INGEST_CRON = "0 3 * * *"
 
 
@@ -115,8 +116,8 @@ class _DeploymentSpec:
     ``path:function`` Prefect's managed worker loads after cloning the repo.
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
     deployment whose runs override the flow's default parameters — e.g. the data
-    orchestrator's nightly cron passes ``scheduled_only=True``. ``optional`` marks a
-    deployment as beyond the free-tier 5 — registered only when
+    orchestrator's nightly cron passes ``source_files=["sources/listen.yaml"]``.
+    ``optional`` marks a deployment as beyond the free-tier 5 — registered only when
     ``app_config.prefect.deploy_optional`` is true.
     """
 
@@ -151,7 +152,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
         TAGS_DATA_OFFLINE,
         cron=_SCHEDULED_INGEST_CRON,
-        schedule_parameters={"scheduled_only": True},
+        schedule_parameters={"source_files": ["sources/listen.yaml"]},
     ),
     _DeploymentSpec(
         data_etl_worker,

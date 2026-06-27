@@ -24,8 +24,9 @@ index — the data pipeline only produces ``documents``; there is NO index step:
   the orchestrator's internal dispatch target (but may be triggered directly for a
   bare shard ingestion). Registered as deployment ``data-etl-worker``.
 
-* ``data_etl_orchestrator`` (deployment ``data-etl-orchestrator``) — reads the
-  configured ``sources:`` list and partitions it by PLATFORM (#072, ADR-002 §3
+* ``data_etl_orchestrator`` (deployment ``data-etl-orchestrator``) — resolves its
+  source set (``source_files`` ++ inline ``sources``, else the backfill+listen
+  default) and partitions it by PLATFORM (#072, ADR-002 §3
   amendment #070–#074): one homogeneous ``data-etl-worker`` run per non-HuggingFace
   platform bucket present (``substack`` / ``youtube`` / ``custom``), plus
   ``num_workers`` runs per ``HuggingFaceDatasetSource`` (one per disjoint offset-window
@@ -64,9 +65,9 @@ from tree.config.app_config import (
     WebSource,
     YouTubeRssSource,
     YouTubeVideoSource,
-    app_config,
 )
 from tree.config.settings import settings
+from tree.config.sources import default_configured_sources, load_sources
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     arxiv_window_entries,
     ingest_arxiv_dataset,
@@ -511,29 +512,61 @@ async def _resolve_target_user_ids(
     return await select_active_user_ids(database=database)
 
 
+def _resolve_source_set(
+    source_files: list[str] | None,
+    sources: list[dict[str, Any]] | None,
+) -> list[SourceEntry]:
+    """Resolve the orchestrator's source set: file(s) ++ inline, else the default.
+
+    CONCATENATES (NOT either/or): :func:`load_sources` over ``source_files`` (when
+    given) is followed by the coerced inline ``sources`` (when given), in that
+    order. When BOTH are absent, the set is :func:`default_configured_sources`
+    (backfill + listen). Inline dicts are coerced through the discriminated-union
+    ``_SOURCES_ADAPTER`` — the same ``TypeAdapter`` the worker re-parses shards with.
+
+    ``default_configured_sources`` returns a CACHED list; this never mutates it (it
+    is partitioned into fresh per-platform shards downstream).
+    """
+
+    if source_files is None and sources is None:
+        return default_configured_sources()
+
+    resolved: list[SourceEntry] = []
+    if source_files is not None:
+        resolved.extend(load_sources(list(source_files)))
+    if sources is not None:
+        resolved.extend(_SOURCES_ADAPTER.validate_python(sources))
+    return resolved
+
+
 @flow(name="data-etl-orchestrator", log_prints=True)
 async def data_etl_orchestrator(
     user_id: PydanticObjectId | None = None,
-    scheduled_only: bool = False,
+    source_files: list[str] | None = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> DataFanOutStats:
-    """Read configured sources → group by Platform → dispatch ``data-etl-worker`` runs.
+    """Resolve sources → group by Platform → dispatch ``data-etl-worker`` runs.
 
-    The operator entrypoint for data ingestion (ADR-002 §3, amended #070–#074). Reads
-    the configured ``app_config.sources.sources`` list and partitions it via
-    :func:`_partition_sources_by_platform` into:
+    The operator entrypoint for data ingestion (ADR-002 §3, amended #070–#074;
+    source selection per ADR-003). Resolves its source set via
+    :func:`_resolve_source_set` — ``load_sources(source_files)`` ++ the coerced
+    inline ``sources``, or :func:`default_configured_sources` (backfill+listen) when
+    BOTH are absent — then partitions it via :func:`_partition_sources_by_platform`
+    into:
 
     * ONE homogeneous ``data-etl-worker`` run per non-HuggingFace **Platform** bucket
       present (``substack`` / ``youtube`` / ``custom``), AND
     * ``num_workers`` worker runs per ``HuggingFaceDatasetSource``, one per disjoint
       offset-**Window** of the dataset.
 
-    Two run modes share this one deployment:
+    Run modes share this one deployment:
 
-    * **Manual** (``user_id`` set, ``scheduled_only=False``) — ``make
-      run-data-pipeline``: ingest EVERY configured source for that one tenant.
-    * **Scheduled** (``user_id=None``, ``scheduled_only=True``) — the deployment's
-      nightly cron: ingest ONLY sources flagged ``scheduled: true`` (see
-      ``_ConfiguredSource``), fanned out across ALL active users.
+    * **Manual** (``user_id`` set) — ``make run-data-pipeline-offline``: ingest the
+      resolved source set for that one tenant (default = backfill+listen, or the
+      operator's ``--source-file`` / ``--uri`` selection).
+    * **Scheduled** (``user_id=None``, ``source_files=["sources/listen.yaml"]``) —
+      the deployment's nightly cron: ingest the polled listen feeds, fanned out
+      across ALL active users.
 
     Each shard is dispatched via ``run_deployment`` under
     ``asyncio.gather(return_exceptions=True)`` carrying ``{user_id, sources}`` (the
@@ -541,10 +574,10 @@ async def data_etl_orchestrator(
     deployment; the worker never calls ``run_deployment``) and NO trailing step — the
     data pipeline only produces ``documents``; there is no index.
 
-    Empty source set (none configured, or none flagged when ``scheduled_only``) ⇒
-    clean no-op: zero worker dispatch, ``DataFanOutStats(shards_total=0)``. One
-    shard's failure is isolated and recorded in :class:`DataFanOutStats.failures`
-    (keyed ``user_id:shard_index``) while the others proceed.
+    An empty resolved set ⇒ clean no-op: zero worker dispatch,
+    ``DataFanOutStats(shards_total=0)``. One shard's failure is isolated and recorded
+    in :class:`DataFanOutStats.failures` (keyed ``user_id:shard_index``) while the
+    others proceed.
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
@@ -553,18 +586,18 @@ async def data_etl_orchestrator(
     configure_opik()
     try:
         with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
-            sources = app_config.sources.sources
-            if scheduled_only:
-                sources = [s for s in sources if s.scheduled]
-            if not sources:
+            resolved_sources = _resolve_source_set(source_files, sources)
+            if not resolved_sources:
                 logger.info(
-                    "data fan-out: no sources to ingest (scheduled_only=%s) — "
-                    "nothing to do (no child runs, no index run)",
-                    scheduled_only,
+                    "data fan-out: empty resolved source set "
+                    "(source_files=%s, inline sources=%s) — nothing to do "
+                    "(no child runs, no index run)",
+                    source_files,
+                    "set" if sources else "unset",
                 )
                 return DataFanOutStats(shards_total=0)
 
-            typed_shards = _partition_sources_by_platform(sources)
+            typed_shards = _partition_sources_by_platform(resolved_sources)
             shards = [[e.model_dump() for e in shard] for shard in typed_shards]
 
             user_ids = await _resolve_target_user_ids(user_id)
@@ -577,11 +610,10 @@ async def data_etl_orchestrator(
 
             logger.info(
                 "data fan-out: grouped %d source(s) into %d Platform/Window shard(s) "
-                "for %d tenant(s) (scheduled_only=%s)",
-                len(sources),
+                "for %d tenant(s)",
+                len(resolved_sources),
                 len(shards),
                 len(user_ids),
-                scheduled_only,
             )
 
             headers = get_distributed_trace_headers()

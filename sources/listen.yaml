@@ -1,0 +1,14 @@
+# Listen sources — repeatedly-polled feeds (RSS). The nightly data-etl
+# orchestrator cron loads ONLY this file, fanned across all active users.
+# Cadence lives in the filename: there is no per-source `scheduled` flag.
+
+# Substack RSS feeds
+- uri: https://www.decodingai.com/feed
+  type: substack_rss
+- uri: https://maximelabonne.substack.com/feed
+  type: substack_rss
+- uri: https://www.latent.space/feed
+  type: substack_rss
+# YouTube channel feed (example — uncomment to ingest a channel)
+# - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCsBjURrPoezykLs9EqgamOA
+#   type: youtube_rss

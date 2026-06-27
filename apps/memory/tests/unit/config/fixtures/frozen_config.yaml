@@ -1,54 +1,8 @@
 # Frozen config fixture — STRICTLY for tests. Decoupled from the human-tuned
 # configs/default.yaml (which operators edit freely). Tests assert on the
 # values here, so changes are intentional and local to the test suite.
-# Keep the source counts in sync with test_app_config.py if you edit them:
-#   5 substack_rss, 10 substack_article, 1 huggingface_dataset, 2 web,
-#   1 youtube_rss, 1 youtube_video (20 total).
-
-sources:
-  - uri: https://www.decodingai.com/feed
-    type: substack_rss
-  - uri: https://maximelabonne.substack.com/feed
-    type: substack_rss
-  - uri: https://modelcraft.substack.com/feed
-    type: substack_rss
-  - uri: https://www.latent.space/feed
-    type: substack_rss
-  - uri: https://alexeyondata.substack.com/feed
-    type: substack_rss
-  - uri: https://www.decodingai.com/p/ai-agents-foundations-course
-    type: substack_article
-  - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
-    type: substack_article
-  - uri: https://www.decodingai.com/p/context-engineering-2025s-1-skill
-    type: substack_article
-  - uri: https://www.decodingai.com/p/llm-structured-outputs-the-only-way
-    type: substack_article
-  - uri: https://www.decodingai.com/p/stop-building-ai-agents-use-these
-    type: substack_article
-  - uri: https://www.decodingai.com/p/tool-calling-from-scratch-to-production
-    type: substack_article
-  - uri: https://www.decodingai.com/p/ai-agents-planning
-    type: substack_article
-  - uri: https://www.decodingai.com/p/building-production-react-agents
-    type: substack_article
-  - uri: https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
-    type: substack_article
-  - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
-    type: substack_article
-  - uri: librarian-bots/arxiv-metadata-snapshot
-    type: huggingface_dataset
-    max_samples: 10
-    fetch_content: false
-    batch_size: 50
-    concurrency: 10
-  # Bare (untyped) entries — exercise the untyped → WebSource normalization.
-  - uri: https://www.reddit.com/r/AI_Agents/comments/1su8zwi/i_almost_built_rag_for_my_notes_then_realized_i/
-  - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
-  - uri: https://www.youtube.com/feeds/videos.xml?channel_id=UCkyHDwRWMEluOEYmOGJ_2nw
-    type: youtube_rss
-  - uri: https://www.youtube.com/watch?v=eYaWxljC4sA
-    type: youtube_video
+# Holds ONLY static memory config — sources moved out to repo-root `sources/`
+# (ADR-003); the source files are covered by test_sources_files.py.
 
 models:
   llm:
