@@ -137,8 +137,7 @@ def _make_full_config(
 
     mock_config = MagicMock()
     mock_config.sources.sources = sources
-    mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
-    # The arxiv leaf now reads the shared source loader, not ``app_config``.
+    # The arxiv leaf reads the shared source loader for its defaults.
     mocker.patch(
         "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
         return_value=sources,

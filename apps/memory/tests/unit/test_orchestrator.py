@@ -144,10 +144,10 @@ def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):
     """``data-etl-orchestrator`` is the ONLY scheduled deployment.
 
     Its deployment carries ONE nightly cron whose runs override
-    ``scheduled_only=True`` (so the schedule ingests only flagged sources, while
-    manual runs ingest everything). No worker/indexing deployment may be given a
-    schedule — guards against a cron dropped from the orchestrator or attached to
-    the wrong deployment.
+    ``source_files=["sources/listen.yaml"]`` (so the schedule ingests the polled
+    listen feeds, while manual runs ingest the default/operator-selected set). No
+    worker/indexing deployment may be given a schedule — guards against a cron
+    dropped from the orchestrator or attached to the wrong deployment.
     """
 
     # Arrange
@@ -169,7 +169,10 @@ def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):
     scheduled = {name: scheds for name, scheds in schedules_by_name.items() if scheds}
     assert scheduled == {
         "data-etl-orchestrator": [
-            (orchestrator._SCHEDULED_INGEST_CRON, {"scheduled_only": True})
+            (
+                orchestrator._SCHEDULED_INGEST_CRON,
+                {"source_files": ["sources/listen.yaml"]},
+            )
         ]
     }
 
