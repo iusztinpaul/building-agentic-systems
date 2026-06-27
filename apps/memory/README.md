@@ -36,16 +36,25 @@ The virtual environment lives at `apps/memory/.venv`. `uv` manages dependencies 
 
 ## Configuration
 
-Two sources of configuration, split by concern:
+Three sources of configuration, split by concern:
 
 | Where | What | Override |
 |---|---|---|
-| [`configs/default.yaml`](configs/default.yaml) | Sources, model names, chunking, query tuning, MCP defaults | Set `APP_CONFIG_PATH=<path>` to point at a different YAML |
+| [`configs/default.yaml`](configs/default.yaml) | Static memory config: model names, chunking, query tuning, dream/concurrency/prefect/MCP defaults | Set `APP_CONFIG_PATH=<path>` to point at a different YAML |
+| Repo-root [`sources/`](../../sources) | Data-ingestion sources (operator data), split by cadence: `backfill.yaml` (one-shot) + `listen.yaml` (polled RSS) | Edit the files; select per-run with `--source-file` / `--uri` |
 | Repo-root `.env` | Secrets + infra (Mongo, Prefect, LLM/embedding keys) | Edit the file |
+
+### Source files (`sources/`)
+
+Data-ingestion sources are operator **data**, kept out of `default.yaml` and committed under the repo-root [`sources/`](../../sources) directory, split by **cadence** (ADR-003):
+
+- [`sources/backfill.yaml`](../../sources/backfill.yaml) — one-shot ingests (`substack_article`, `huggingface_dataset`, `youtube_video`, plain `web`); sources that do not gain new items after first ingest.
+- [`sources/listen.yaml`](../../sources/listen.yaml) — repeatedly-polled feeds (`substack_rss`, `youtube_rss`). The nightly cron loads **only** this file, across all active users — the filename _is_ the schedule selector, so there is no per-source `scheduled` flag.
+
+Each file is a flat top-level YAML list of entries; an entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `youtube_rss`, `youtube_video`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (YouTube watch/feed URLs → `youtube_video` / `youtube_rss`; substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.offline_pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, `num_workers`, and `concurrency` for tuning the dataset ingestor. A run selects sources with `--source-file` / `--uri` (see [Data pipelines](#data-pipelines)); `huggingface_dataset` can only be defined in a file, never via `--uri`.
 
 ### `default.yaml` sections
 
-- `sources` — flat list of typed source entries. Each entry is a dict with a `uri` and an optional `type` (one of `substack_rss`, `substack_article`, `youtube_rss`, `youtube_video`, `huggingface_dataset`, `web`). Untyped entries have `type` inferred from the URL shape (substack subdomain or a configured Substack custom domain → `substack_article`; otherwise → `web`, ingested via Bright Data Web Unlocker). Every entry also accepts `scheduled: true` (default `false`) to opt it into the nightly scheduled run (`make memory-run-data-pipeline-offline SCHEDULED=1` / the cron) — see [Data pipelines](#data-pipelines). For `huggingface_dataset` entries the `uri` is the HF dataset id (e.g. `librarian-bots/arxiv-metadata-snapshot`); the dispatcher routes by dataset id to a registered ETL in `tree.data.offline_pipeline._HUGGINGFACE_DATASET_HANDLERS`, and unknown ids raise. These entries also accept `max_samples`, `fetch_content`, `batch_size`, and `concurrency` for tuning the dataset ingestor.
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
 - `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
@@ -126,8 +135,8 @@ Two stages — **data** (sources → `documents`) then **memory** (extraction �
 
 ```bash
 # Offline: every configured source -> documents -> graph (+ index)
-make memory-run-offline
-make memory-run-offline USER_IDENTIFIER=paul SCHEDULED=1     # scheduled-only sources, another user
+make memory-run-offline                                                  # default sources (backfill + listen)
+make memory-run-offline USER_IDENTIFIER=paul SOURCE_FILE="sources/listen.yaml"   # chosen file, another user
 
 # Online: one source -> document -> graph (+ index), end to end
 make memory-run-online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
@@ -138,31 +147,28 @@ make memory-run-online SOURCE="/path/to/notes.md" TITLE="My notes"
 
 ### Data pipelines
 
-The data pipeline produces `documents` **only** — it does NOT extract or index (that's the [memory pipeline](#memory-extraction), a separate step). It runs in two **offline** modes (config-driven, fanned out over Prefect workers) and one **online** mode (realtime, one source at a time). Each target streams logs from the local `make memory-serve-workflows` (or the Dockerized worker) back to the terminal.
+The data pipeline produces `documents` **only** — it does NOT extract or index (that's the [memory pipeline](#memory-extraction), a separate step). It runs **offline** (source-file / URI-driven, fanned out over Prefect workers) and **online** (realtime, one source at a time). Each target streams logs from the local `make memory-serve-workflows` (or the Dockerized worker) back to the terminal.
 
-#### Offline — all sources
-
-```bash
-make memory-run-data-pipeline-offline                        # all sources, current user
-make memory-run-data-pipeline-offline USER_IDENTIFIER=paul   # all sources, another user
-```
-
-Triggers `data-etl-orchestrator`: groups `sources.sources` by platform and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `default.yaml`, not a global flag. Ingests **every** configured source for one user (the current user; override with `USER_ID` / `USER_IDENTIFIER`).
-
-#### Offline — scheduled only
+#### Offline — selecting sources
 
 ```bash
-make memory-run-data-pipeline-offline SCHEDULED=1            # only `scheduled: true` sources, current user
+make memory-run-data-pipeline-offline                                       # default set (backfill + listen), current user
+make memory-run-data-pipeline-offline USER_IDENTIFIER=paul                  # default set, another user
+make memory-run-data-pipeline-offline SOURCE_FILE="sources/listen.yaml"     # only the listen feeds
+make memory-run-data-pipeline-offline URI="https://blog.com/feed=substack_rss https://news.site/post"  # ad-hoc URLs
+make memory-run-data-pipeline-offline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
-Same orchestrator, but ingests **only** sources flagged `scheduled: true` in `default.yaml`. This is what the deployment's **nightly cron** (`0 3 * * *` UTC) runs on its own — fanned out across **all active users**, no `user_id` to pass. The `SCHEDULED=1` flag manually exercises that scheduled behaviour for the current user. Flag a source for the nightly run:
+Triggers `data-etl-orchestrator`: resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
 
-```yaml
-sources:
-  - uri: https://www.decodingai.com/feed
-    type: substack_rss
-    scheduled: true        # default false; set on feeds (RSS), not one-shot articles
-```
+Source selection is freely combinable (ADR-003):
+
+- **Neither flag** → the default set: `sources/backfill.yaml` + `sources/listen.yaml`.
+- **`SOURCE_FILE="..."`** (space-separated, repeatable) → load the named source file(s).
+- **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
+- Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
+
+The **nightly cron** (`0 3 * * *` UTC) runs the same orchestrator with `source_files=["sources/listen.yaml"]` and no `user_id` — ingesting the polled listen feeds fanned out across **all active users**. The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 

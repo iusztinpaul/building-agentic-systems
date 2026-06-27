@@ -102,9 +102,7 @@ class TestRunDataPipelineForwarding:
         assert result.exit_code == 0, result.output
         kwargs = mock_run.await_args.kwargs
         assert kwargs["source_files"] == []
-        assert kwargs["inline_sources"] == [
-            {"uri": "https://x.com/a", "type": "web", "scheduled": False}
-        ]
+        assert kwargs["inline_sources"] == [{"uri": "https://x.com/a", "type": "web"}]
 
     def test_source_file_and_uri_combined_forwards_both(
         self, mock_run, cli_main

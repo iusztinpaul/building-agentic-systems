@@ -1,6 +1,5 @@
 import json
 import textwrap
-from collections import Counter
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -12,11 +11,6 @@ from tree.config.app_config import (
     DreamConfig,
     HuggingFaceDatasetSource,
     SourceEntry,
-    SubstackArticleSource,
-    SubstackRssSource,
-    WebSource,
-    YouTubeRssSource,
-    YouTubeVideoSource,
     load_app_config,
 )
 
@@ -89,27 +83,6 @@ class TestLoadAppConfig:
         assert config.models.embedding_batch.max_inputs == 128
         assert config.models.embedding_batch.max_total_tokens == 50_000
         assert config.models.embedding_batch.max_input_tokens == 8000
-
-    def test_loads_default_yaml_sources_flat_shape(self, frozen_config_path):
-        """The config uses the flat ``sources:`` list shape (post-#007).
-
-        Counts each variant; deeper per-variant assertions live in
-        ``test_sources_config.py``.
-        """
-
-        config = load_app_config(frozen_config_path)
-
-        counts = Counter(type(e).__name__ for e in config.sources.sources)
-
-        assert counts == {
-            "SubstackRssSource": 5,
-            "SubstackArticleSource": 10,
-            "HuggingFaceDatasetSource": 1,
-            "WebSource": 2,
-            "YouTubeRssSource": 1,
-            "YouTubeVideoSource": 1,
-        }
-        assert sum(counts.values()) == 20
 
     def test_dream_block_loaded_from_default_yaml(self, frozen_config_path):
         """The #051 ``dream:`` block is read into the typed :class:`DreamConfig`.
@@ -190,52 +163,32 @@ class TestLoadAppConfig:
         assert config.dream.max_pairs == 42
         assert config.dream.enable_supersession_judge is True
 
-    def test_loads_default_yaml_huggingface_dataset_entry(self, frozen_config_path):
-        """The HF arxiv entry preserves the parameters from the legacy YAML."""
+    def test_app_config_has_no_sources_field(self):
+        """``AppConfig`` is static memory config only — sources moved out to the
+        repo-root ``sources/`` files (ADR-003), so the field is gone."""
 
-        config = load_app_config(frozen_config_path)
+        assert "sources" not in AppConfig.model_fields
 
-        hf_entries = [
-            e for e in config.sources.sources if isinstance(e, HuggingFaceDatasetSource)
-        ]
-        assert len(hf_entries) == 1
-        entry = hf_entries[0]
-        assert entry.uri == "librarian-bots/arxiv-metadata-snapshot"
-        assert entry.max_samples == 10
-        assert entry.fetch_content is False
-        assert entry.batch_size == 50
-        assert entry.concurrency == 10
+    def test_load_app_config_ignores_a_legacy_sources_block(self, tmp_path):
+        """A YAML that still carries a top-level ``sources:`` block loads green —
+        the loader no longer eagerly validates it, and no ``sources`` attribute
+        is materialised on the config."""
 
-    def test_loads_default_yaml_normalizes_untyped_to_web(self, frozen_config_path):
-        """The two bare ``- uri:`` entries (Reddit, Anthropic) load as WebSource."""
-
-        config = load_app_config(frozen_config_path)
-
-        web_entries = [e for e in config.sources.sources if isinstance(e, WebSource)]
-        assert len(web_entries) == 2
-        web_uris = {e.uri for e in web_entries}
-        assert any("reddit.com" in u for u in web_uris)
-        assert any("anthropic.com" in u for u in web_uris)
-
-    def test_default_yaml_round_trip_preserves_typed_variants(self, frozen_config_path):
-        """Round-trip the config YAML: every entry is a typed Pydantic variant."""
-
-        config = load_app_config(frozen_config_path)
-
-        assert all(
-            isinstance(
-                s,
-                (
-                    SubstackRssSource,
-                    SubstackArticleSource,
-                    HuggingFaceDatasetSource,
-                    WebSource,
-                    YouTubeRssSource,
-                    YouTubeVideoSource,
-                ),
-            )
-            for s in config.sources.sources
+        custom = tmp_path / "with_sources.yaml"
+        custom.write_text(
+            textwrap.dedent("""\
+                sources:
+                  - uri: https://example.substack.com/feed
+                    type: substack_rss
+                query:
+                  top_k: 5
+            """)
         )
+
+        config = load_app_config(custom)
+
+        assert config.query.top_k == 5
+        assert not hasattr(config, "sources")
 
     def test_loads_custom_yaml(self, tmp_path):
         custom = tmp_path / "custom.yaml"
