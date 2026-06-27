@@ -216,4 +216,88 @@ $ git status --porcelain --untracked-files=all
 - `SourcesConfig` silently yields `[]` for a YAML that is a single mapping rather than a top-level list (BP7). An operator fat-fingering a source file would get a no-op ingest with no error. Pre-existing (#083–#087), not 088. Consider a "non-empty / shape" guard.
 - (Already noted by SWE) orchestrator grouping `logger.info` line does not reach Prefect API run logs.
 
+### [PR Reviewer] 2026-06-27 17:41 — Review
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed the full feature diff (35 files) for PR #30 (branch `feat/sources-config-split`) across all six dimensions (A performance, B clean code, C tests, D standards, E doc discipline, F simplicity). Ran the new/updated unit suites locally: 210 passed.
+
+- Blockers: 0
+- Nits: 3 (appended to PR #30 description)
+
+Findings on the requested focus points:
+- Dual cwd+module-root path resolution in `load_sources` — necessary per ADR-003 §5 (local serve cwd=`apps/memory/` vs Prefect Cloud cwd=git-clone-root); two `is_file()` probes, the absolute-path alternative was considered and rejected in the ADR. NOT over-built.
+- `parse_uri_token` rightmost-`=`-only-if-type-literal — correct for ordinary query-string URLs (tested); a query value coincidentally equal to a type literal mis-splits (Nit 1, documented tradeoff).
+- `build_uri_sources` HF-rejection + inline discriminated-union round-trip (`model_dump` → JSON → `TypeAdapter`) — correct and tested end-to-end through the CLI; bare HF id infers to `web` rather than rejecting (Nit 2).
+- `default_configured_sources()` cached mutable list — NOT a real hazard: `_partition_sources_by_platform` and both read-only consumers build fresh lists / iterate without mutation; covered by a dedicated `test_does_not_mutate_loader_cached_list`.
+- Retired `scheduled`/`scheduled_only`/`--scheduled-only` surface — fully removed from production code; residual references are negative-assertion tests, the `_SCHEDULED_INGEST_CRON` constant name, and ADR-003 only.
+
+Nits (non-blocking, in PR description):
+1. [Simplicity/correctness] `parse_uri_token` mis-splits a `--uri` whose query string ends in a type-literal value.
+2. [Standards/UX] bare HF dataset id via `--uri` infers to `web` instead of the helpful HF-rejection error.
+3. [Clean code/robustness] `load_sources` silently yields `[]` for a malformed (mapping, not list) source file — corroborates the BP7 rollup candidate above.
+
+Pipeline may advance to hand-off. (Per role: On-Call's `/review-ci` gate runs separately; not assessed here.)
+
 **VERDICT: PASS**
+
+### [PA] 2026-06-27 — Acceptance Review (feature: sources-config-split, PR #30)
+
+**VERDICT: ACCEPT**
+
+Walked the whole feature from the operator's POV against the Tasks Plan ACs (083–088). All
+five loading modes + the default + the cron path do exactly what the user asked, the HF
+rejection is sensible and actionable, both READMEs tell the correct new story, and no trace
+of the retired `scheduled` model leaks into any user-facing surface.
+
+Evidence per intent:
+- **Sources separated from static config** — `apps/memory/configs/default.yaml` `sources:`
+  block fully removed; the file now carries only static memory config + a header note
+  pointing at `sources/` + ADR-003. `sources/backfill.yaml` = the one-shot set
+  (10 substack_article + 1 huggingface_dataset w/ tuning verbatim + 1 youtube_video + 2
+  untyped web), `sources/listen.yaml` = the RSS set (3 substack_rss + a commented youtube_rss
+  example). No `scheduled:` keys in either.
+- **Default (no flags)** — `_resolve_source_set(None, None) → default_configured_sources()`
+  (`offline_pipeline.py:531`); 088 log resolution = 17 (14 backfill + 3 listen). Root +
+  app READMEs both say "default sources (backfill + listen)".
+- **Single / multiple `--source-file`** — `multiple=True` CLI opt + Makefile `$(foreach ...)`
+  over `SOURCE_FILE`; 088 Mode 2 (backfill only, no substack_rss) and Mode 3 (two files ==
+  default, idempotent) ingested as expected.
+- **`--uri URL` / `--uri URL=TYPE`, type optional+inferred, combinable** — `parse_uri_token`
+  + `build_uri_sources` (`sources.py:115/132`); no `--type` flag, no mutual exclusivity;
+  088 Mode 4 honored `=substack_rss` (maximelabonne feed → 20 docs) and inferred the
+  untyped anthropic URL → `web`.
+- **HF rejection** — `build_uri_sources` raises a clear, actionable `ValueError` naming
+  `sources/backfill.yaml`, fired up front in `main()` BEFORE any flow/Mongo (088 Mode 5:
+  exit 1, no flow run). Sensible: HF needs tuning fields a bare URL can't carry.
+- **`scheduled` retired; cron loads listen.yaml** — `scheduled` field, `scheduled_only`
+  param/filter, and `--scheduled-only` flag all gone; cron `schedule_parameters =
+  {"source_files": ["sources/listen.yaml"]}` with no `user_id` (all active users)
+  (`orchestrator.py:154-155`). 088 Mode 6: only the RSS feeds ingested (latent.space +20,
+  HF/youtube/web unchanged); relative-path resolution under the served worker confirmed,
+  cloud cwd=git-clone-root documented per ADR-003 §5.
+- **Downstream intact** — 088: extraction → 54 nodes/17 edges, indexing, query returned 13
+  nodes/12 edges.
+- **Docs discipline** — ADR-003 present in the diff, Status Accepted, five-section Nygard +
+  coloured Mermaid; glossary carries canonical "Backfill sources" / "Listen sources" /
+  "Source file" / "Source variant" terms, used verbatim across code, READMEs, and the ADR.
+- **No leak** — `git grep` for `scheduled_only` / `--scheduled-only` / `SCHEDULED=1` /
+  `app_config.sources` / `^sources:` in default.yaml is clean outside tasks/tracker/adr/tests;
+  the only README "scheduled" mention is the intentional "there is no per-source `scheduled`
+  flag" statement.
+
+Non-blocking polish observations (NOT grounds for rejection — happy paths and every
+documented mode behave correctly; candidates for a future cleanup task):
+1. CLI build-time failures (`--uri …=huggingface_dataset`, empty `--uri ''`) surface as raw
+   Python tracebacks rather than a clean `click.UsageError`; the actionable message is still
+   present at the tail, so the operator is correctly told what to do.
+2. A malformed source file that is a single YAML mapping (not a top-level list) loads as a
+   silent `[]` no-op. Pre-existing `SourcesConfig` behavior (#083–#087), not introduced by
+   this feature; only reachable via a hand-authored custom file (the committed files + default
+   + cron paths are unaffected).
+3. Empty-resolved-set log uses `"set"/"unset"` and mislabels an explicit `sources=[]`
+   (unreachable via the CLI; cosmetic).
+4. Orchestrator grouping `logger.info` line does not reach the Prefect API run logs
+   (observability gap, already noted by SWE/Tester).
+
+User satisfaction guaranteed for the documented operator surface. Hand off to the PR Reviewer.
