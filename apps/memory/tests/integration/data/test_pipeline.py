@@ -111,12 +111,13 @@ def _make_full_config(
     substack_articles: list[str] | None = None,
     arxiv_max_samples: int = 2,
 ) -> MagicMock:
-    """Patch ``app_config`` with a flat list of typed source entries.
+    """Patch the source config with a flat list of typed source entries.
 
     The ``data-etl-worker`` is handed ``mock_config.sources.sources`` directly
     (#068 moved the per-variant dispatch into the worker, which takes its sources
-    as an argument rather than reading ``app_config``). The arxiv connector still
-    reads its defaults from ``app_config``, so that module is patched too.
+    as an argument rather than reading ``app_config``). The arxiv connector reads
+    its defaults from the shared source loader (``default_configured_sources``),
+    so that is patched too.
     """
 
     sources: list[SourceEntry] = []
@@ -137,7 +138,11 @@ def _make_full_config(
     mock_config = MagicMock()
     mock_config.sources.sources = sources
     mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
-    mocker.patch("tree.data.huggingface.arxiv_dataset_pipeline.app_config", mock_config)
+    # The arxiv leaf now reads the shared source loader, not ``app_config``.
+    mocker.patch(
+        "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+        return_value=sources,
+    )
     return mock_config
 
 

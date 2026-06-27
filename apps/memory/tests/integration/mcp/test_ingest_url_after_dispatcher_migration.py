@@ -1,14 +1,15 @@
-"""Regression: the URL dispatcher works after the flat-sources migration.
+"""Regression: the URL dispatcher works after the shared-loader migration.
 
-#008 changed how the dispatcher derives its custom-Substack-domain registry:
-it now walks the flat ``app_config.sources.sources`` list and picks up the
-host of every entry typed ``substack_rss`` / ``substack_article``.
+The dispatcher derives its custom-Substack-domain registry from the shared
+source loader: it now walks ``default_configured_sources()`` (the committed
+``sources/backfill.yaml`` + ``sources/listen.yaml`` set) and picks up the host
+of every entry typed ``substack_rss`` / ``substack_article``.
 
-This module exercises the *real* migrated ``configs/default.yaml`` against
-the dispatcher to guard against two regressions:
+This module exercises the *real* committed source files against the dispatcher
+to guard against two regressions:
 
 1. A URL on a custom Substack domain (e.g. ``decodingai.com``) — known to
-   the registry through both RSS and article entries in ``default.yaml`` —
+   the registry through both RSS (listen) and article (backfill) entries —
    must still route to the Substack article handler.
 2. A URL on a non-Substack domain (e.g. ``news.ycombinator.com``) must
    still fall back to the generic web (Bright Data) pipeline.
@@ -21,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.config.app_config import app_config
+from tree.config.sources import default_configured_sources
 from tree.data import online_pipeline as ingest_module
 from tree.data.online_pipeline import _get_configured_substack_domains, _ingest_url
 from tree.entities.documents import Document, SourceType
@@ -42,24 +43,24 @@ class TestDispatcherAgainstMigratedDefaultConfig:
     async def test_decodingai_post_routes_to_substack_article_handler(
         self, mocker
     ) -> None:
-        """A fresh decodingai.com article URL (not present in default.yaml)
+        """A fresh decodingai.com article URL (not present in the source files)
         must still route to the Substack article handler thanks to the
-        custom-Substack-domain registry derived from the flat sources list.
+        custom-Substack-domain registry derived from the shared source loader.
         """
 
-        # Sanity-check: the migrated default config still surfaces
+        # Sanity-check: the shared source loader still surfaces
         # ``decodingai.com`` as a custom Substack domain.
         domains = _get_configured_substack_domains()
         assert "decodingai.com" in domains, (
-            "Expected decodingai.com to be derived from default.yaml's flat "
-            f"sources list; got: {sorted(domains)}"
+            "Expected decodingai.com to be derived from the shared source "
+            f"loader; got: {sorted(domains)}"
         )
-        # Spot check: the configured sources list is non-empty and contains
+        # Spot check: the loaded sources list is non-empty and contains
         # at least one Substack-typed entry on decodingai.com.
         assert any(
             getattr(s, "uri", "").startswith("https://www.decodingai.com")
-            for s in app_config.sources.sources
-        ), "default.yaml lost its decodingai.com entries"
+            for s in default_configured_sources()
+        ), "source files lost their decodingai.com entries"
 
         substack_doc = Document(
             source_type=SourceType.SUBSTACK,

@@ -54,8 +54,7 @@ _EXAMPLE_ORG_URL = "https://example.org"
 _EXAMPLE_NET_URL = "https://example.net"
 _FALLBACK_URL = "https://martinfowler.com/bliki/CQRS.html"
 # A long-stable Substack article that is also present in
-# ``configs/default.yaml`` as a ``type: substack_article`` entry under the
-# top-level ``sources`` list.
+# ``sources/backfill.yaml`` as a ``type: substack_article`` entry.
 _SUBSTACK_URL = "https://www.decodingai.com/p/ai-agents-foundations-course"
 
 
@@ -182,9 +181,10 @@ class TestDataPipelinePicksUpWebEntries:
             ),
         ]
         mocker.patch("tree.data.offline_pipeline.app_config", mock_config)
+        # The arxiv leaf now reads the shared source loader, not ``app_config``.
         mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.app_config",
-            mock_config,
+            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+            return_value=mock_config.sources.sources,
         )
         mocker.patch(
             "tree.data.offline_pipeline.init_mongodb",

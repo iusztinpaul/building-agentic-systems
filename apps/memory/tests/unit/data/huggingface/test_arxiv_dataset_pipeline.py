@@ -16,7 +16,6 @@ from beanie import PydanticObjectId
 
 from tree.config.app_config import (
     HuggingFaceDatasetSource,
-    SourcesConfig,
     SubstackRssSource,
 )
 from tree.data.huggingface.arxiv_dataset_pipeline import (
@@ -73,11 +72,12 @@ class TestTaskMetadata:
 
 
 class TestGetHuggingfaceArxivDefaults:
-    """The helper walks the flat ``app_config.sources.sources`` list (unchanged)."""
+    """The helper walks the shared loader's ``default_configured_sources()``."""
 
     def test_picks_first_huggingface_arxiv_source(self, mocker) -> None:
-        sources = SourcesConfig(
-            sources=[
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+            return_value=[
                 SubstackRssSource(uri="https://example.substack.com/feed"),
                 HuggingFaceDatasetSource(
                     uri="librarian-bots/arxiv-metadata-snapshot",
@@ -86,11 +86,7 @@ class TestGetHuggingfaceArxivDefaults:
                     batch_size=25,
                     concurrency=4,
                 ),
-            ]
-        )
-        mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.app_config.sources",
-            sources,
+            ],
         )
 
         max_samples, fetch_content, batch_size, concurrency = (
@@ -103,12 +99,9 @@ class TestGetHuggingfaceArxivDefaults:
         assert concurrency == 4
 
     def test_falls_back_to_huggingface_arxiv_source_defaults(self, mocker) -> None:
-        sources = SourcesConfig(
-            sources=[SubstackRssSource(uri="https://example.substack.com/feed")]
-        )
         mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.app_config.sources",
-            sources,
+            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+            return_value=[SubstackRssSource(uri="https://example.substack.com/feed")],
         )
 
         max_samples, fetch_content, batch_size, concurrency = (
@@ -120,6 +113,29 @@ class TestGetHuggingfaceArxivDefaults:
         assert fetch_content is False
         assert batch_size == 50
         assert concurrency == 10
+
+    def test_does_not_mutate_loader_cached_list(self, mocker) -> None:
+        """The helper iterates the loader's cached list read-only.
+
+        ``default_configured_sources()`` returns the process-global cached list
+        object; mutating it here would poison every other consumer.
+        """
+
+        entries = [
+            SubstackRssSource(uri="https://example.substack.com/feed"),
+            HuggingFaceDatasetSource(
+                uri="librarian-bots/arxiv-metadata-snapshot",
+            ),
+        ]
+        snapshot = list(entries)
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
+            return_value=entries,
+        )
+
+        _get_huggingface_arxiv_defaults()
+
+        assert entries == snapshot
 
 
 class TestTransformBatch:

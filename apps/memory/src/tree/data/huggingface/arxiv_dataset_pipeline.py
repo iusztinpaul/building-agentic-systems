@@ -4,8 +4,9 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.app_config import HuggingFaceDatasetSource, app_config
+from tree.config.app_config import HuggingFaceDatasetSource
 from tree.config.settings import settings
+from tree.config.sources import default_configured_sources
 from tree.data.batch import gather_isolated
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -169,13 +170,14 @@ async def load_batch(docs: list[Document]) -> list[Document]:
 def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
     """Return (max_samples, fetch_content, batch_size, concurrency) for HF arxiv.
 
-    Walks the flat ``app_config.sources.sources`` list and picks the first
-    ``HuggingFaceDatasetSource`` entry whose ``uri`` matches the arxiv dataset
-    id. Falls back to ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)``
-    defaults if no such entry exists.
+    Walks the shared source loader's ``default_configured_sources()`` list
+    (backfill + listen, read-only) and picks the first ``HuggingFaceDatasetSource``
+    entry whose ``uri`` matches the arxiv dataset id. Falls back to
+    ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)`` defaults if no such entry
+    exists.
     """
 
-    for entry in app_config.sources.sources:
+    for entry in default_configured_sources():
         if (
             isinstance(entry, HuggingFaceDatasetSource)
             and entry.uri == ARXIV_DATASET_ID

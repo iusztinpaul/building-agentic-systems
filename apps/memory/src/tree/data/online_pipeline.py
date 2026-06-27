@@ -12,7 +12,8 @@ extraction — the MCP layer submits that out-of-band (``mcp.ingest.submit_inges
 
 ``ingest_url`` itself routes a URL to the appropriate leaf pipeline by domain:
 1. Static registry ``_URL_HANDLERS`` (e.g. ``substack.com``).
-2. Custom Substack domains derived from ``app_config.sources``.
+2. Custom Substack domains derived from the shared source loader
+   (``default_configured_sources``).
 3. Fallback: the generic web pipeline backed by Bright Data Web Unlocker.
 """
 
@@ -30,8 +31,8 @@ from pydantic import BaseModel, Field
 from tree.config.app_config import (
     SubstackArticleSource,
     SubstackRssSource,
-    app_config,
 )
+from tree.config.sources import default_configured_sources
 from tree.entities.documents import Document
 from tree.observability import (
     TAGS_DATA_ONLINE,
@@ -101,18 +102,21 @@ _URL_HANDLERS: list[
 def _get_configured_substack_domains() -> set[str]:
     """Extract unique bare domains from configured Substack sources.
 
-    Walks the flat ``app_config.sources.sources`` list and collects the host
-    (lower-cased, ``www.`` stripped) of every entry typed as
-    ``substack_rss`` or ``substack_article``. Entries of any other type
-    (``web``, ``huggingface_dataset``, ...) are ignored — even if their
-    ``uri`` happens to look like a Substack custom domain.
+    Walks the shared source loader's ``default_configured_sources()`` list
+    (backfill + listen) and collects the host (lower-cased, ``www.`` stripped)
+    of every entry typed as ``substack_rss`` or ``substack_article``. Entries of
+    any other type (``web``, ``huggingface_dataset``, ...) are ignored — even if
+    their ``uri`` happens to look like a Substack custom domain.
 
     Entries whose ``uri`` does not parse to a host (e.g. a HuggingFace
     dataset id) contribute nothing to the set.
+
+    Iterates the loader's cached list read-only — never mutates it in place
+    (the loader hands back its process-global cached object).
     """
 
     domains: set[str] = set()
-    for entry in app_config.sources.sources:
+    for entry in default_configured_sources():
         if not isinstance(entry, (SubstackRssSource, SubstackArticleSource)):
             continue
         parsed = urlparse(entry.uri)
@@ -126,7 +130,7 @@ async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
 
     Matches against:
     1. Static registry patterns (e.g. ``substack.com``).
-    2. Custom Substack domains derived from ``app_config.sources``.
+    2. Custom Substack domains derived from the shared source loader.
     3. Fallback: the generic web pipeline (Bright Data Web Unlocker).
 
     Returns the persisted Document, or None if the URL was a duplicate.
