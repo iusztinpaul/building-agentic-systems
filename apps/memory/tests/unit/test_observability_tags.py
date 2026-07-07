@@ -84,9 +84,9 @@ class TestPipelineIdentityTags:
         from tree.orchestrator import _DEPLOYMENT_SPECS
 
         tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
-        assert tags_by_name["data-etl-orchestrator"] == obs.TAGS_DATA_OFFLINE
+        assert tags_by_name["data-etl-coordinator"] == obs.TAGS_DATA_OFFLINE
         assert tags_by_name["data-etl-worker"] == obs.TAGS_DATA_OFFLINE
-        assert tags_by_name["memory-extract-etl-orchestrator"] == obs.TAGS_EXTRACTION
+        assert tags_by_name["memory-extract-etl-coordinator"] == obs.TAGS_EXTRACTION
         assert tags_by_name["memory-extract-etl-worker"] == obs.TAGS_EXTRACTION
         assert tags_by_name["memory-indexing-etl"] == obs.TAGS_INDEXING
 

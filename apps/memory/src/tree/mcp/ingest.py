@@ -4,7 +4,7 @@ MCP ingestion orchestration.
 Two ways to turn an ingested :class:`Document` into knowledge-graph content:
 
 * :func:`submit_ingestion` (DEFAULT for the MCP tools) — fire the
-  ``memory-extract-etl-orchestrator`` Prefect deployment for the document and
+  ``memory-extract-etl-coordinator`` Prefect deployment for the document and
   return immediately. The MCP server runs on a serverless host with a tight
   request budget, so it must not block on the multi-minute
   extraction/embedding/indexing pipeline; a served worker executes the run
@@ -27,11 +27,11 @@ from tree.models.base import BaseEmbeddingModel, BaseLLM
 
 logger = logging.getLogger(__name__)
 
-# Operators always trigger the ORCHESTRATOR (extraction fan-out + trailing
+# Operators always trigger the COORDINATOR (extraction fan-out + trailing
 # index); for a single just-ingested document we scope it via ``document_ids``.
 # Mirrors ``scripts/run_memory_pipeline.py``.
-_EXTRACT_ORCHESTRATOR_DEPLOYMENT = (
-    "memory-extract-etl-orchestrator/memory-extract-etl-orchestrator"
+_EXTRACT_COORDINATOR_DEPLOYMENT = (
+    "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
 )
 
 
@@ -40,7 +40,7 @@ async def submit_ingestion(
 ) -> dict[str, Any]:
     """Submit extraction + indexing for ``document`` to Prefect; return at once.
 
-    Creates a flow run for the ``memory-extract-etl-orchestrator`` deployment
+    Creates a flow run for the ``memory-extract-etl-coordinator`` deployment
     scoped to this single document and returns WITHOUT waiting for it to finish
     (async ingestion). The return dict reports whether the submission was
     accepted:
@@ -66,7 +66,7 @@ async def submit_ingestion(
     try:
         async with get_client() as client:
             deployment = await client.read_deployment_by_name(
-                _EXTRACT_ORCHESTRATOR_DEPLOYMENT
+                _EXTRACT_COORDINATOR_DEPLOYMENT
             )
             flow_run = await client.create_flow_run_from_deployment(
                 deployment_id=deployment.id,

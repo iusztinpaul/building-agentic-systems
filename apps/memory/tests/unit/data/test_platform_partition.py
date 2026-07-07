@@ -1,10 +1,10 @@
-"""Unit tests for ``_partition_sources_by_platform`` — the data Orchestrator's shard map.
+"""Unit tests for ``_partition_sources_by_platform`` — the data Coordinator's shard map.
 
 Pure decision logic (no DB, no Prefect): given the typed configured ``SourceEntry``
-list, it returns the FULL list of shards the orchestrator dispatches — one HOMOGENEOUS
+list, it returns the FULL list of shards the coordinator dispatches — one HOMOGENEOUS
 shard per non-HuggingFace **Platform** bucket present (substack / youtube / custom), plus
 one single-entry shard per HuggingFace offset-**Window** (``num_workers`` windows per HF
-entry). The orchestrator then ``model_dump()``s each shard and hands it to the unchanged
+entry). The coordinator then ``model_dump()``s each shard and hands it to the unchanged
 ``_fan_out_data``. These assert platform bucketing, HF window expansion, order-stability,
 and the homogeneous-shard invariant.
 """

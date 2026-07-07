@@ -1,4 +1,4 @@
-"""Data pipeline: orchestrator + worker deployments (#068, ADR-002 §3 amended #066).
+"""Data pipeline: coordinator + worker deployments (#068, ADR-002 §3 amended #066).
 
 Two Prefect flows live here, mirroring the memory split (#067) minus the trailing
 index — the data pipeline only produces ``documents``; there is NO index step:
@@ -20,11 +20,11 @@ index — the data pipeline only produces ``documents``; there is NO index step:
     dataset ids raise ``ValueError``.
 
   A platform absent from the shard is skipped (with a scoped "skipped: no entries"
-  log line). NO partitioning, NO ``run_deployment``, NO orchestration — the worker is
-  the orchestrator's internal dispatch target (but may be triggered directly for a
+  log line). NO partitioning, NO ``run_deployment``, NO coordination — the worker is
+  the coordinator's internal dispatch target (but may be triggered directly for a
   bare shard ingestion). Registered as deployment ``data-etl-worker``.
 
-* ``data_etl_orchestrator`` (deployment ``data-etl-orchestrator``) — resolves its
+* ``data_etl_coordinator`` (deployment ``data-etl-coordinator``) — resolves its
   source set (``source_files`` ++ inline ``sources``, else the backfill+listen
   default) and partitions it by PLATFORM (#072, ADR-002 §3
   amendment #070–#074): one homogeneous ``data-etl-worker`` run per non-HuggingFace
@@ -34,16 +34,16 @@ index — the data pipeline only produces ``documents``; there is NO index step:
   ``run_deployment`` under ``asyncio.gather(return_exceptions=True)``. NO trailing step.
   Parallelism is declared per-source (platform bucketing + HF ``num_workers``), NOT via
   a global ``num_shards``. Empty sources ⇒ clean no-op (``shards_total=0``). Registered
-  as deployment ``data-etl-orchestrator``.
+  as deployment ``data-etl-coordinator``.
 
 Source-shard serialization: ``SourceEntry`` is a Pydantic discriminated union.
-Prefect serializes flow-run parameters as JSON, so the orchestrator dumps each shard's
+Prefect serializes flow-run parameters as JSON, so the coordinator dumps each shard's
 entries to dicts (``model_dump()``) and the worker re-parses them to ``SourceEntry``
 via a ``TypeAdapter`` (the ``type`` discriminator round-trips through JSON cleanly).
 
 Usage:
-    Served as Prefect deployments via the orchestrator. Operators trigger the
-    ORCHESTRATOR via the unified ``run-data-pipeline`` Make target.
+    Served as Prefect deployments via the coordinator. Operators trigger the
+    COORDINATOR via the unified ``run-data-pipeline`` Make target.
 """
 
 import asyncio
@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 # Round-trips a serialized shard (``list[dict]``) back to the typed discriminated
 # union. The ``type`` discriminator survives the JSON round-trip Prefect performs on
 # flow-run parameters, so the worker reconstructs the exact ``SourceEntry`` objects
-# the orchestrator partitioned.
+# the coordinator partitioned.
 _SOURCES_ADAPTER: TypeAdapter[list[SourceEntry]] = TypeAdapter(list[SourceEntry])
 
 
@@ -168,7 +168,7 @@ _PLATFORM_PIPELINES: list[PlatformPipeline] = [
 def _coerce_sources(sources: list[Any]) -> list[SourceEntry]:
     """Coerce a worker ``sources`` argument to typed ``SourceEntry`` objects.
 
-    The worker is dispatched by the orchestrator with the shard serialized as a
+    The worker is dispatched by the coordinator with the shard serialized as a
     ``list[dict]`` (Prefect JSON-serializes flow-run parameters). Already-typed
     ``SourceEntry`` instances (e.g. a direct in-process call in a test) pass through
     unchanged; dicts are re-parsed via the discriminated-union ``TypeAdapter``.
@@ -263,16 +263,16 @@ async def data_etl_worker(
     with unknown-id ``ValueError``, web via ``ingest_web_url_batch`` (last)). A variant
     absent from the shard is skipped. This is PURE ingestion: NO partitioning, NO
     ``run_deployment``,
-    NO orchestration, NO trailing index.
+    NO coordination, NO trailing index.
 
     ``sources`` arrives serialized (``list[dict]``) when dispatched by the
-    orchestrator (Prefect JSON-serializes flow-run parameters); already-typed
+    coordinator (Prefect JSON-serializes flow-run parameters); already-typed
     ``SourceEntry`` objects pass through unchanged. The shard is re-parsed to the
     typed discriminated union before grouping.
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE trace.
-    ``opik_trace_headers`` is forwarded by the data orchestrator so the worker
-    nests under the orchestrator's trace; ``None`` (standalone trigger) starts a
+    ``opik_trace_headers`` is forwarded by the data coordinator so the worker
+    nests under the coordinator's trace; ``None`` (standalone trigger) starts a
     fresh trace.
     """
 
@@ -317,11 +317,11 @@ async def data_etl_worker(
 
 
 # ---------------------------------------------------------------------------
-# Source-shard fan-out (orchestrator path)
+# Source-shard fan-out (coordinator path)
 # ---------------------------------------------------------------------------
 
 
-# Platform buckets for the data orchestrator's GROUP-BY-PLATFORM partition
+# Platform buckets for the data coordinator's GROUP-BY-PLATFORM partition
 _NON_HF_PLATFORMS: list[tuple[str, tuple[type[SourceEntry], ...]]] = [
     ("substack", (SubstackRssSource, SubstackArticleSource)),
     ("youtube", (YouTubeRssSource, YouTubeVideoSource)),
@@ -332,12 +332,12 @@ _NON_HF_PLATFORMS: list[tuple[str, tuple[type[SourceEntry], ...]]] = [
 def _partition_sources_by_platform(
     sources: list[SourceEntry],
 ) -> list[list[SourceEntry]]:
-    """Partition the configured sources into the shards the orchestrator dispatches.
+    """Partition the configured sources into the shards the coordinator dispatches.
 
-    The data orchestrator's shard map (#072, ADR-002 §3 amendment #070–#074), replacing
+    The data coordinator's shard map (#072, ADR-002 §3 amendment #070–#074), replacing
     the old count-based ``_partition_into_shards``. Pure decision logic (no DB, no
     Prefect, order-stable) so it is unit-testable directly. Returns the FULL list of
-    shards — each a ``list[SourceEntry]`` — that the orchestrator ``model_dump()``s and
+    shards — each a ``list[SourceEntry]`` — that the coordinator ``model_dump()``s and
     hands to the unchanged :func:`_fan_out_data` (one ``data-etl-worker`` run per shard):
 
     * **Non-HuggingFace → one HOMOGENEOUS shard per Platform bucket present.** Variants
@@ -388,12 +388,12 @@ def _get_run_logger() -> logging.Logger:
 
 @dataclass
 class DataFanOutStats:
-    """Per-run accounting for the source-shard fan-out (orchestrator path).
+    """Per-run accounting for the source-shard fan-out (coordinator path).
 
     Mirrors the memory ``FanOutStats`` shape (``shards_total`` / ``succeeded`` /
     ``failed`` / ``failures``) so the two splits report identically. The data
-    orchestrator does NOT collect per-shard ``Document`` lists back — the worker
-    persists documents directly, so the orchestrator only needs the fan-out
+    coordinator does NOT collect per-shard ``Document`` lists back — the worker
+    persists documents directly, so the coordinator only needs the fan-out
     accounting. ``failures`` maps the failing shard index (string) to the
     exception message so one shard's blow-up is logged and isolated, never
     aborting the others.
@@ -414,13 +414,13 @@ async def _fan_out_data(
 ) -> DataFanOutStats:
     """Fan one worker dispatch out per shard, isolate failures, NO trailing step.
 
-    Pure orchestration core (no DB, no partitioning) so the gather /
+    Pure coordination core (no DB, no partitioning) so the gather /
     failure-isolation contract is unit-testable directly. ``run_deployment`` is
     injected (the Prefect entrypoint in the flow; a fake in tests).
 
     * One ``data-etl-worker`` run per shard under
       ``asyncio.gather(return_exceptions=True)``, each carrying
-      ``{user_id, sources}`` — the orchestrator dispatches a DISTINCT worker
+      ``{user_id, sources}`` — the coordinator dispatches a DISTINCT worker
       deployment, so there is NO recursion and NO ``num_shards`` child key (the
       worker has no such param). A single shard's exception is caught, logged,
       recorded in ``stats.failures``, and the gather still completes for the
@@ -429,8 +429,8 @@ async def _fan_out_data(
       there is no index. This function fires EXACTLY ``len(shards)`` worker runs
       and nothing else.
 
-    ``opik_trace_headers`` (the orchestrator's distributed-trace headers) is
-    forwarded to every worker as a flow parameter so the orchestrated data run
+    ``opik_trace_headers`` (the coordinator's distributed-trace headers) is
+    forwarded to every worker as a flow parameter so the coordinated data run
     renders as ONE Opik trace across ``run_deployment``'s process hop. ``None``
     is simply not forwarded — each worker then starts its own trace.
     """
@@ -485,7 +485,7 @@ async def _fan_out_data(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator flow — data-etl-orchestrator (#068)
+# Coordinator flow — data-etl-coordinator (#068)
 # ---------------------------------------------------------------------------
 
 
@@ -516,7 +516,7 @@ def _resolve_source_set(
     source_files: list[str] | None,
     sources: list[dict[str, Any]] | None,
 ) -> list[SourceEntry]:
-    """Resolve the orchestrator's source set: file(s) ++ inline, else the default.
+    """Resolve the coordinator's source set: file(s) ++ inline, else the default.
 
     CONCATENATES (NOT either/or): :func:`load_sources` over ``source_files`` (when
     given) is followed by the coerced inline ``sources`` (when given), in that
@@ -539,8 +539,8 @@ def _resolve_source_set(
     return resolved
 
 
-@flow(name="data-etl-orchestrator", log_prints=True)
-async def data_etl_orchestrator(
+@flow(name="data-etl-coordinator", log_prints=True)
+async def data_etl_coordinator(
     user_id: PydanticObjectId | None = None,
     source_files: list[str] | None = None,
     sources: list[dict[str, Any]] | None = None,
@@ -581,11 +581,11 @@ async def data_etl_orchestrator(
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
-    # distributed headers are forwarded to every worker run, so the orchestrated
+    # distributed headers are forwarded to every worker run, so the coordinated
     # data run renders as a single trace across ``run_deployment``'s process hop.
     configure_opik()
     try:
-        with span("data-etl-orchestrator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
+        with span("data-etl-coordinator", tags=_DATA_TAGS, metadata=_DATA_METADATA):
             resolved_sources = _resolve_source_set(source_files, sources)
             if not resolved_sources:
                 logger.info(

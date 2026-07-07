@@ -9,10 +9,10 @@ when the resolver and dedup type-strictness disagree.
 Two Prefect flows live here (#067, ADR-002 §3 amended #066):
 
 * ``memory_extract_etl_worker`` (deployment ``memory-extract-etl-worker``) — the
-  pure six-task extraction body. NO ``num_shards``, NO orchestrator branch, NO
+  pure six-task extraction body. NO ``num_shards``, NO coordinator branch, NO
   ``run_deployment``, NO indexing trigger. Returns a :class:`WriteSummary`.
-* ``memory_extract_etl_orchestrator`` (deployment
-  ``memory-extract-etl-orchestrator``) — resolve pending docs → partition into
+* ``memory_extract_etl_coordinator`` (deployment
+  ``memory-extract-etl-coordinator``) — resolve pending docs → partition into
   ``min(num_shards, N)`` balanced shards → dispatch ONE
   ``memory-extract-etl-worker`` run per shard under
   ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory-indexing-etl``
@@ -1549,20 +1549,20 @@ apply_writes_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator path — document-shard fan-out dispatching the worker (#067)
+# Coordinator path — document-shard fan-out dispatching the worker (#067)
 # ---------------------------------------------------------------------------
 
 
-async def _orchestrate_sharded_extraction(
+async def _coordinate_sharded_extraction(
     *,
     user_id: PydanticObjectId,
     document_ids: list[str] | None,
     num_shards: int,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
-    """Run the orchestrator path: resolve pending docs, partition, fan out, index.
+    """Run the coordinator path: resolve pending docs, partition, fan out, index.
 
-    The body of the ``memory-extract-etl-orchestrator`` flow. Resolves the user's
+    The body of the ``memory-extract-etl-coordinator`` flow. Resolves the user's
     pending documents when ``document_ids is None`` (an explicit list is used
     verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
     dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
@@ -1625,12 +1625,12 @@ async def _orchestrate_sharded_extraction(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator flow — memory-extract-etl-orchestrator (#067)
+# Coordinator flow — memory-extract-etl-coordinator (#067)
 # ---------------------------------------------------------------------------
 
 
-@flow(name="memory-extract-etl-orchestrator", log_prints=True)
-async def memory_extract_etl_orchestrator(
+@flow(name="memory-extract-etl-coordinator", log_prints=True)
+async def memory_extract_etl_coordinator(
     user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
     num_shards: int = 1,
@@ -1655,18 +1655,18 @@ async def memory_extract_etl_orchestrator(
     """
 
     # Configure Opik in this flow-run process (idempotent; no-op without a key)
-    # and own ONE trace for the whole orchestrated run. The trace's distributed
+    # and own ONE trace for the whole coordinated run. The trace's distributed
     # headers are forwarded to each worker + the trailing indexing run so the
-    # orchestrator → workers → indexing chain renders as a SINGLE trace.
+    # coordinator → workers → indexing chain renders as a SINGLE trace.
     configure_opik()
     try:
         with span(
-            "memory-extract-etl-orchestrator",
+            "memory-extract-etl-coordinator",
             tags=_EXTRACTION_TAGS,
             metadata=_EXTRACTION_METADATA,
         ):
             headers = get_distributed_trace_headers()
-            return await _orchestrate_sharded_extraction(
+            return await _coordinate_sharded_extraction(
                 user_id=user_id,
                 document_ids=document_ids,
                 num_shards=num_shards,
@@ -1698,16 +1698,16 @@ async def memory_extract_etl_worker(
     ``document_ids is None`` → fetch all ``content != None`` docs for the user; zero
     docs → ``WriteSummary(documents_processed=0)``.
 
-    This is PURE extraction: NO ``num_shards``, NO orchestrator branch, NO
+    This is PURE extraction: NO ``num_shards``, NO coordinator branch, NO
     ``run_deployment`` (no self-dispatch), NO ``memory-indexing-etl`` trigger. It is the
-    orchestrator's internal dispatch target, but may also be triggered directly for a
+    coordinator's internal dispatch target, but may also be triggered directly for a
     bare extraction with no trailing index (e.g. debugging).
 
     Observability (#monitoring-fix): configures Opik at entry (Prefect runs flow
     runs in subprocesses where serve-time config never happened — without this
     the Gemini client is wrapped unwrapped, so no LLM spans / usage / cost), then
     owns ONE trace for the whole worker run. ``opik_trace_headers`` is forwarded
-    by the orchestrator so the orchestrator → worker → indexing chain is ONE
+    by the coordinator so the coordinator → worker → indexing chain is ONE
     trace; when triggered standalone it is ``None`` and the worker starts its own
     trace. Every task receives the run's distributed-trace headers so its span
     nests under this trace instead of minting a fresh root.

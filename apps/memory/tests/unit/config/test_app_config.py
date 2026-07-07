@@ -382,7 +382,7 @@ class TestHuggingFaceWindowFields:
 
     def test_discriminated_union_round_trip_preserves_window_fields(self):
         """``model_dump()`` → JSON → ``TypeAdapter(list[SourceEntry])`` preserves
-        the new window fields — the round-trip the orchestrator dispatches
+        the new window fields — the round-trip the coordinator dispatches
         through ``run_deployment`` flow-run params. Covers both the ``None``
         and a set-int offset case."""
 

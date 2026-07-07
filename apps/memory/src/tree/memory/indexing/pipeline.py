@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Ingestion telemetry tags for the indexing tasks. Each task opens its span via
 # :func:`tree.observability.span` attached to the flow's trace through the
-# ``opik_trace_headers`` parameter (the orchestrator forwards its trace headers
+# ``opik_trace_headers`` parameter (the coordinator forwards its trace headers
 # so indexing nests under the same trace as the extraction it follows). Nested
 # embedding spans (Voyage/Modal) attach to the task span via contextvars.
 #
@@ -103,7 +103,7 @@ async def memory_indexing(
     ``user_id``.
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
-    trace. ``opik_trace_headers`` is forwarded by the extraction orchestrator so
+    trace. ``opik_trace_headers`` is forwarded by the extraction coordinator so
     the trailing indexing run nests under the SAME trace as the extraction; when
     triggered standalone it is ``None`` and indexing starts its own trace. Both
     tasks receive the run's distributed-trace headers so their spans nest under

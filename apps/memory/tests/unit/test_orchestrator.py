@@ -9,8 +9,8 @@ installed Prefect 3.6.19. We do NOT unit-test Prefect internals here; this is a
 focused contract check on OUR call to ``serve``.
 
 #069 finalizes the registered-deployment-name set after BOTH the memory (#067)
-and data (#068) orchestrator/worker splits have landed: the registration
-assertion now reflects the FINAL topology — the four new orchestrator/worker
+and data (#068) coordinator/worker splits have landed: the registration
+assertion now reflects the FINAL topology — the four new coordinator/worker
 deployments plus the unchanged indexing, ingest, and dream-cron deployments —
 and the two retired single-flow deployments (``memory-extraction-etl``,
 ``data-pipeline-etl``) are asserted ABSENT. The #065 admission-control guards
@@ -80,7 +80,7 @@ def test_serve_deployments_registers_all_deployments(mocker):
     Compares the FULL set of registered deployment names (not a subset / membership
     check) so any future drift — a dropped, renamed, or accidentally added
     deployment — fails this test. After the memory (#067) and data (#068)
-    orchestrator/worker splits, the set is the four new orchestrator/worker
+    coordinator/worker splits, the set is the four new coordinator/worker
     deployments plus the unchanged indexing, ingest, and dream deployments. The two
     retired single-flow deployments are explicitly asserted ABSENT.
     """
@@ -96,12 +96,12 @@ def test_serve_deployments_registers_all_deployments(mocker):
     deployment_names = {dep.name for dep in call.args}
     assert deployment_names == {
         # #068: the single ``data-pipeline-etl`` deployment is split into the
-        # orchestrator + worker. The old name is GONE.
-        "data-etl-orchestrator",
+        # coordinator + worker. The old name is GONE.
+        "data-etl-coordinator",
         "data-etl-worker",
         # #067: the single ``memory-extraction-etl`` deployment is split into the
-        # orchestrator + worker. The old name is GONE.
-        "memory-extract-etl-orchestrator",
+        # coordinator + worker. The old name is GONE.
+        "memory-extract-etl-coordinator",
         "memory-extract-etl-worker",
         "memory-indexing-etl",
         # The optional dream deployment is gated by ``prefect.deploy_optional``
@@ -140,14 +140,14 @@ def test_deploy_optional_enabled_registers_optional(mocker):
     assert "dream-consolidation-all-users" in names
 
 
-def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):
-    """``data-etl-orchestrator`` is the ONLY scheduled deployment.
+def test_serve_deployments_schedules_only_the_data_coordinator(mocker):
+    """``data-etl-coordinator`` is the ONLY scheduled deployment.
 
     Its deployment carries ONE nightly cron whose runs override
     ``source_files=["sources/listen.yaml"]`` (so the schedule ingests the polled
     listen feeds, while manual runs ingest the default/operator-selected set). No
     worker/indexing deployment may be given a schedule — guards against a cron
-    dropped from the orchestrator or attached to the wrong deployment.
+    dropped from the coordinator or attached to the wrong deployment.
     """
 
     # Arrange
@@ -168,7 +168,7 @@ def test_serve_deployments_schedules_only_the_data_orchestrator(mocker):
     }
     scheduled = {name: scheds for name, scheds in schedules_by_name.items() if scheds}
     assert scheduled == {
-        "data-etl-orchestrator": [
+        "data-etl-coordinator": [
             (
                 orchestrator._SCHEDULED_INGEST_CRON,
                 {"source_files": ["sources/listen.yaml"]},

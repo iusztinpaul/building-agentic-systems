@@ -73,7 +73,7 @@ async def ingest_conversation(
 
     Returns ``None`` if the conversation was already ingested
     (idempotent). Assumes MongoDB/Beanie is already initialised by the
-    caller (MCP lifespan, orchestrator, or batch flow).
+    caller (MCP lifespan, coordinator, or batch flow).
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
     trace; the task span nests under it via the forwarded distributed headers.

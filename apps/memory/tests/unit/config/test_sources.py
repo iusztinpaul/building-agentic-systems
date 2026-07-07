@@ -1,6 +1,6 @@
 """Unit tests for the shared source loader ``tree.config.sources``.
 
-Covers the four public entry points the offline orchestrator / online router /
+Covers the four public entry points the offline coordinator / online router /
 CLI build on (ADR-003): ``load_sources`` (read + validate + concatenate, with
 two-strategy path resolution), the cached ``default_configured_sources``,
 ``parse_uri_token`` (the ``URL`` / ``URL=TYPE`` CLI syntax), and

@@ -1,7 +1,7 @@
 """Unit tests for the document-shard fan-out (#067, ADR-002 §3 amended #066).
 
-#067 split extraction into an orchestrator flow
-(``memory-extract-etl-orchestrator``) that dispatches a DISTINCT worker deployment
+#067 split extraction into an coordinator flow
+(``memory-extract-etl-coordinator``) that dispatches a DISTINCT worker deployment
 (``memory-extract-etl-worker``) per shard — there is NO recursion. These exercise
 the PURE logic with no Prefect server and ``run_deployment`` mocked:
 
@@ -13,7 +13,7 @@ the PURE logic with no Prefect server and ``run_deployment`` mocked:
   param), driven through a fake ``run_deployment`` so we never touch a real
   deployment.
 
-The orchestrator flow ``memory_extract_etl_orchestrator(...)`` and pending-doc
+The coordinator flow ``memory_extract_etl_coordinator(...)`` and pending-doc
 resolution against Mongo are covered by the integration test
 (``tests/integration/memory/test_extraction_fanout.py``).
 """
@@ -192,7 +192,7 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(mocker) -> Non
 async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
     """Every shard dispatch targets the WORKER deployment (no recursion/self).
 
-    The dispatched name contains ``worker`` and NOT ``orchestrator`` — the #067
+    The dispatched name contains ``worker`` and NOT ``coordinator`` — the #067
     split replaced #061's recursive self-dispatch with a distinct worker deployment.
     """
 
@@ -208,11 +208,11 @@ async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
 
     await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
 
-    # Every non-index dispatch targets the worker; none target an orchestrator.
+    # Every non-index dispatch targets the worker; none target an coordinator.
     dispatch_names = [name for name, _p in calls if "indexing" not in name]
     assert len(dispatch_names) == len(shards)
     assert all("worker" in name for name in dispatch_names)
-    assert all("orchestrator" not in name for name in dispatch_names)
+    assert all("coordinator" not in name for name in dispatch_names)
 
 
 async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
@@ -368,7 +368,7 @@ async def test_fan_out_all_worker_runs_precede_the_index_run(mocker) -> None:
 
 
 async def test_fan_out_forwards_trace_headers_to_workers_and_index(mocker) -> None:
-    """When the orchestrator owns a trace, its headers are forwarded to every
+    """When the coordinator owns a trace, its headers are forwarded to every
     worker AND the trailing indexing run, so the whole run is ONE Opik trace."""
 
     user_id = PydanticObjectId()

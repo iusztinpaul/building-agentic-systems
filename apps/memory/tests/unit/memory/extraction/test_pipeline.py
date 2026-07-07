@@ -1177,10 +1177,10 @@ class TestPipelineExports:
         assert hasattr(pipeline, "memory_extract_etl_worker")
         # The worker flow name (referenced by the worker deployment, #067).
         assert memory_extract_etl_worker.name == "memory-extract-etl-worker"
-        assert hasattr(pipeline, "memory_extract_etl_orchestrator")
+        assert hasattr(pipeline, "memory_extract_etl_coordinator")
         assert (
-            pipeline.memory_extract_etl_orchestrator.name
-            == "memory-extract-etl-orchestrator"
+            pipeline.memory_extract_etl_coordinator.name
+            == "memory-extract-etl-coordinator"
         )
 
 

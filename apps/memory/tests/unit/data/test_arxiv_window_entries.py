@@ -2,7 +2,7 @@
 
 Pure decision logic (no DB, no Prefect): given one ``HuggingFaceDatasetSource``, it
 returns ``num_workers`` disjoint windows that tile ``[0, max_samples)`` exactly (the
-last window takes the remainder). The data orchestrator (#072) dispatches one
+last window takes the remainder). The data coordinator (#072) dispatches one
 ``data-etl-worker`` run per returned window-entry. These assert the arithmetic, the
 edge-case clamps, and that the configured entry is never mutated (``offset`` is a
 dispatch-time coordinate, #070).

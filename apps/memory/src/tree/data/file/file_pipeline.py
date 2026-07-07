@@ -56,7 +56,7 @@ async def ingest_file(
     """Read a local file and ingest it as a Document for ``user_id``.
 
     Assumes MongoDB/Beanie is already initialised by the caller
-    (MCP lifespan, orchestrator, or batch flow).
+    (MCP lifespan, coordinator, or batch flow).
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
     trace; the task span nests under it via the forwarded distributed headers.

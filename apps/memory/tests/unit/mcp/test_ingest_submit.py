@@ -1,7 +1,7 @@
 """Unit tests for ``submit_ingestion`` — the async-ingestion submit contract.
 
 ``submit_ingestion`` is the boundary helper the MCP ingest tools call instead of
-running extraction in-process: it fires the extraction-orchestrator deployment
+running extraction in-process: it fires the extraction-coordinator deployment
 and returns a status the caller surfaces. These tests cover the three return
 contracts (submitted / empty-content / Prefect-unreachable), mocking only the
 Prefect client boundary (``get_client``).

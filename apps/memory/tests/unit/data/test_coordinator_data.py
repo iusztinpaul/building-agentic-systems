@@ -1,10 +1,10 @@
-"""Unit tests for the ``data-etl-orchestrator`` flow (#072, ADR-002 §3 amend #070–#074;
+"""Unit tests for the ``data-etl-coordinator`` flow (#072, ADR-002 §3 amend #070–#074;
 source selection per ADR-003 / #086).
 
-These drive ``data_etl_orchestrator`` directly with the orchestrator's source
+These drive ``data_etl_coordinator`` directly with the coordinator's source
 resolution patched (``default_configured_sources`` / ``load_sources`` in
 ``tree.data.offline_pipeline``) and ``tree.data.offline_pipeline.run_deployment``
-mocked, so nothing touches a real Prefect server. They assert the orchestrator
+mocked, so nothing touches a real Prefect server. They assert the coordinator
 partitions by PLATFORM (not by count) and resolves its source set by CONCATENATION
 (``source_files`` ++ inline ``sources``, else the backfill+listen default — there is
 NO ``scheduled_only`` filter):
@@ -41,13 +41,13 @@ from tree.config.app_config import (
     YouTubeVideoSource,
 )
 from tree.data.huggingface.arxiv_dataset_pipeline import ARXIV_DATASET_ID
-from tree.data.offline_pipeline import _resolve_source_set, data_etl_orchestrator
+from tree.data.offline_pipeline import _resolve_source_set, data_etl_coordinator
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 def _patch_default_sources(mocker, sources: list[SourceEntry]) -> None:
-    """Patch the orchestrator's DEFAULT source set (the no-flags resolution path)."""
+    """Patch the coordinator's DEFAULT source set (the no-flags resolution path)."""
 
     mocker.patch(
         "tree.data.offline_pipeline.default_configured_sources",
@@ -91,10 +91,10 @@ def _non_hf_sources() -> list[SourceEntry]:
 # --- num_shards is gone -----------------------------------------------------
 
 
-def test_orchestrator_signature_is_user_id_source_files_sources() -> None:
+def test_coordinator_signature_is_user_id_source_files_sources() -> None:
     """The signature is ``(user_id, source_files, sources)`` — no ``num_shards``/``scheduled_only``."""
 
-    params = inspect.signature(data_etl_orchestrator).parameters
+    params = inspect.signature(data_etl_coordinator).parameters
     assert "num_shards" not in params
     assert "scheduled_only" not in params
     assert list(params) == ["user_id", "source_files", "sources"]
@@ -107,7 +107,7 @@ async def test_passing_num_shards_raises_type_error(mocker) -> None:
     _capture_run_deployment(mocker)
 
     with pytest.raises(TypeError):
-        await data_etl_orchestrator(_USER_ID, num_shards=2)  # type: ignore[call-arg]
+        await data_etl_coordinator(_USER_ID, num_shards=2)  # type: ignore[call-arg]
 
 
 # --- group-by-platform (non-HF) ---------------------------------------------
@@ -119,7 +119,7 @@ async def test_one_homogeneous_worker_per_non_hf_platform(mocker) -> None:
     _patch_default_sources(mocker, _non_hf_sources())
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     assert len(calls) == 3
     assert all("data-etl-worker" in name for name, _p in calls)
@@ -146,7 +146,7 @@ async def test_substack_and_youtube_variants_share_one_shard(mocker) -> None:
     _patch_default_sources(mocker, _non_hf_sources())
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     shards_by_type = [_types_of(p) for _name, p in calls]
     assert {"substack_rss", "substack_article"} in shards_by_type
@@ -161,7 +161,7 @@ async def test_non_hf_shard_union_reconstructs_configured_sources(mocker) -> Non
     _patch_default_sources(mocker, sources)
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     flat_uris = sorted(s["uri"] for _name, p in calls for s in p["sources"])
     assert flat_uris == sorted(s.uri for s in sources)
@@ -183,7 +183,7 @@ async def test_hf_fans_out_into_disjoint_offset_windows(mocker) -> None:
     )
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     assert len(calls) == 4
     assert stats.shards_total == 4
@@ -210,7 +210,7 @@ async def test_hf_remainder_goes_to_the_last_window(mocker) -> None:
     )
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     windows = [
         (p["sources"][0]["offset"], p["sources"][0]["max_samples"])
@@ -237,7 +237,7 @@ async def test_hf_single_worker_is_byte_identical_to_today(mocker) -> None:
     )
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     assert len(calls) == 1
     _name, params = calls[0]
@@ -260,7 +260,7 @@ async def test_hf_window_shard_roundtrips_offset_through_run_deployment(mocker) 
     )
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     # Second window carries offset=250, max_samples=250 as JSON-safe dict fields.
     second = calls[1][1]["sources"][0]
@@ -284,7 +284,7 @@ async def test_multiple_hf_entries_fan_out_independently(mocker) -> None:
     )
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     # 2 windows + 3 windows = 5 dispatches.
     assert len(calls) == 5
@@ -307,7 +307,7 @@ async def test_mixed_config_dispatches_platform_buckets_plus_hf_windows(mocker) 
     _patch_default_sources(mocker, sources)
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     assert len(calls) == 7
     assert stats.shards_total == 7
@@ -319,7 +319,7 @@ async def test_each_worker_carries_user_id_and_serialized_sources(mocker) -> Non
     _patch_default_sources(mocker, _non_hf_sources())
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     for _name, params in calls:
         assert params["user_id"] == str(_USER_ID)
@@ -343,20 +343,20 @@ async def test_fires_no_trailing_index_run(mocker) -> None:
     _patch_default_sources(mocker, sources)
     calls = _capture_run_deployment(mocker)
 
-    await data_etl_orchestrator(_USER_ID)
+    await data_etl_coordinator(_USER_ID)
 
     dispatched = [name for name, _p in calls]
     assert dispatched, "expected at least one dispatch"
     assert all("data-etl-worker" in name for name in dispatched)
     assert all("indexing" not in name for name in dispatched)
-    assert all("orchestrator" not in name for name in dispatched)
+    assert all("coordinator" not in name for name in dispatched)
 
 
 async def test_empty_sources_is_a_clean_noop(mocker) -> None:
     _patch_default_sources(mocker, [])
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     assert calls == []
     assert stats.shards_total == 0
@@ -384,7 +384,7 @@ async def test_one_shard_failure_is_isolated(mocker) -> None:
         new=mocker.AsyncMock(side_effect=_fake_run_deployment),
     )
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     # Every shard was attempted; one failed and is recorded; the rest succeeded.
     assert len(calls) == stats.shards_total
@@ -463,13 +463,13 @@ def test_resolve_source_set_concatenates_files_then_inline(mocker) -> None:
 
 
 async def test_default_run_dispatches_the_default_source_set(mocker) -> None:
-    """The no-flags orchestrator path fans out the backfill+listen default."""
+    """The no-flags coordinator path fans out the backfill+listen default."""
 
     load = mocker.patch("tree.data.offline_pipeline.load_sources")
     _patch_default_sources(mocker, [SubstackRssSource(uri="https://a.example/feed")])
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     load.assert_not_called()
     assert stats.shards_total == 1
@@ -477,7 +477,7 @@ async def test_default_run_dispatches_the_default_source_set(mocker) -> None:
 
 
 async def test_source_files_run_dispatches_the_loaded_files(mocker) -> None:
-    """``source_files`` ⇒ the orchestrator fans out exactly what ``load_sources`` returns."""
+    """``source_files`` ⇒ the coordinator fans out exactly what ``load_sources`` returns."""
 
     mocker.patch(
         "tree.data.offline_pipeline.load_sources",
@@ -486,7 +486,7 @@ async def test_source_files_run_dispatches_the_loaded_files(mocker) -> None:
     default = mocker.patch("tree.data.offline_pipeline.default_configured_sources")
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID, source_files=["sources/listen.yaml"])
+    stats = await data_etl_coordinator(_USER_ID, source_files=["sources/listen.yaml"])
 
     default.assert_not_called()
     assert stats.shards_total == 1
@@ -495,13 +495,13 @@ async def test_source_files_run_dispatches_the_loaded_files(mocker) -> None:
 
 
 async def test_inline_sources_run_dispatches_the_coerced_entries(mocker) -> None:
-    """Inline ``sources`` dicts ⇒ the orchestrator fans out the coerced typed entries."""
+    """Inline ``sources`` dicts ⇒ the coordinator fans out the coerced typed entries."""
 
     mocker.patch("tree.data.offline_pipeline.load_sources")
     default = mocker.patch("tree.data.offline_pipeline.default_configured_sources")
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(
+    stats = await data_etl_coordinator(
         _USER_ID, sources=[{"uri": "https://inline.example/page", "type": "web"}]
     )
 
@@ -519,7 +519,7 @@ async def test_both_files_and_inline_are_concatenated_for_dispatch(mocker) -> No
     )
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(
+    stats = await data_etl_coordinator(
         _USER_ID,
         source_files=["sources/backfill.yaml"],
         sources=[{"uri": "https://inline.example/page", "type": "web"}],
@@ -537,7 +537,7 @@ async def test_empty_resolved_set_from_explicit_flags_is_a_noop(mocker) -> None:
     mocker.patch("tree.data.offline_pipeline.load_sources", return_value=[])
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID, source_files=[], sources=[])
+    stats = await data_etl_coordinator(_USER_ID, source_files=[], sources=[])
 
     assert calls == []
     assert stats.shards_total == 0
@@ -558,7 +558,7 @@ async def test_user_id_none_fans_out_per_active_user(mocker) -> None:
     _patch_default_sources(mocker, [SubstackRssSource(uri="https://a.example/feed")])
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(user_id=None)
+    stats = await data_etl_coordinator(user_id=None)
 
     # One shard (substack) dispatched for EACH of the two tenants.
     dispatched_users = {p["user_id"] for _n, p in calls}
@@ -577,7 +577,7 @@ async def test_explicit_user_id_does_not_enumerate_active_users(mocker) -> None:
     _patch_default_sources(mocker, [SubstackRssSource(uri="https://a.example/feed")])
     calls = _capture_run_deployment(mocker)
 
-    stats = await data_etl_orchestrator(_USER_ID)
+    stats = await data_etl_coordinator(_USER_ID)
 
     boom.assert_not_awaited()
     assert {p["user_id"] for _n, p in calls} == {str(_USER_ID)}
