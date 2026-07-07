@@ -40,7 +40,7 @@ Two seam features fix this:
    ``opik.start_as_current_span(opik_distributed_trace_headers=...)``), so every
    task span attaches to the flow's trace instead of starting its own root.
    ``run_deployment`` calls forward the same headers as a flow parameter, so the
-   orchestrator → worker → indexing chain is one trace.
+   coordinator → worker → indexing chain is one trace.
 """
 
 import contextlib

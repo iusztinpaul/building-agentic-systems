@@ -6,10 +6,10 @@ per-platform pipeline — ``ingest_substack_batch`` / ``ingest_youtube_batch`` /
 ``ingest_web_batch`` — plus a per-entry HuggingFace dispatch. This suite exercises
 ``data_etl_worker`` directly with typed ``SourceEntry`` objects (which pass through
 ``_coerce_sources`` unchanged); a separate test covers the serialized-dict round-trip
-the orchestrator actually dispatches.
+the coordinator actually dispatches.
 
-The orchestrator fan-out (partition → dispatch → no-index) is covered in
-``test_orchestrator_data.py``; the pure fan-out core in ``test_fanout_data.py``; each
+The coordinator fan-out (partition → dispatch → no-index) is covered in
+``test_coordinator_data.py``; the pure fan-out core in ``test_fanout_data.py``; each
 unified platform pipeline's flatten+load in ``test_youtube_pipeline_batch.py`` /
 ``test_substack_pipeline_batch.py``.
 """
@@ -240,7 +240,7 @@ class TestDataWorker:
 
     async def test_reconstructs_sources_from_serialized_dicts(self, _platforms) -> None:
         """A shard arrives serialized (``list[dict]``) and is re-parsed to typed
-        ``SourceEntry`` objects before grouping — the round-trip the orchestrator
+        ``SourceEntry`` objects before grouping — the round-trip the coordinator
         actually dispatches.
         """
 

@@ -27,8 +27,8 @@ def arxiv_window_entries(
 ) -> list[HuggingFaceDatasetSource]:
     """Fan ONE HuggingFace dataset entry into its disjoint offset-**Window**s.
 
-    Pure decision logic (no DB, no Prefect) shared by the data orchestrator (#072,
-    ADR-002 §3 amendment #070–#074): the orchestrator calls this per configured
+    Pure decision logic (no DB, no Prefect) shared by the data coordinator (#072,
+    ADR-002 §3 amendment #070–#074): the coordinator calls this per configured
     ``HuggingFaceDatasetSource`` and dispatches one ``data-etl-worker`` run per
     returned window-entry. Each returned entry is a COPY of ``entry`` (the configured
     entry is NEVER mutated — ``offset`` is a dispatch-time runtime coordinate, #070)

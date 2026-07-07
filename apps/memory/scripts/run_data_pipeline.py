@@ -1,8 +1,8 @@
 """
 Trigger the data pipeline via Prefect.
 
-Triggers the ``data-etl-orchestrator`` deployment (#072, ADR-002 §3 amended #066;
-source selection per ADR-003). Operators always run the ORCHESTRATOR: it resolves
+Triggers the ``data-etl-coordinator`` deployment (#072, ADR-002 §3 amended #066;
+source selection per ADR-003). Operators always run the COORDINATOR: it resolves
 its source set, groups it by PLATFORM, and dispatches one ``data-etl-worker`` run
 per non-HuggingFace platform bucket present (``substack`` / ``youtube`` /
 ``custom``) plus ``num_workers`` offset-window runs per ``HuggingFaceDatasetSource``
@@ -18,7 +18,7 @@ Source selection (freely combinable; pass neither for the default):
   force a type (e.g. ``…/feed=substack_rss``); the type is inferred otherwise.
   ``huggingface_dataset`` is rejected — those need tuning fields a bare URL can't
   carry, so define them in a YAML file and use ``--source-file``.
-* Neither flag → the orchestrator's default backfill+listen set.
+* Neither flag → the coordinator's default backfill+listen set.
 
 ``--uri`` tokens are parsed + built into typed sources up front, so a bad token
 (e.g. an explicit ``huggingface_dataset``) fails fast BEFORE any flow is triggered.
@@ -57,7 +57,7 @@ from tree.logging import init_logger
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = "data-etl-orchestrator/data-etl-orchestrator"
+DEPLOYMENT_NAME = "data-etl-coordinator/data-etl-coordinator"
 POLL_INTERVAL_SECONDS = 2
 
 
@@ -77,7 +77,7 @@ async def _run(
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
         # Forward only the selectors the operator passed; with neither present the
-        # orchestrator falls back to its default backfill+listen set.
+        # coordinator falls back to its default backfill+listen set.
         parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
         if source_files:
             parameters["source_files"] = source_files
@@ -163,7 +163,7 @@ def main(
     source_files: tuple[str, ...],
     uris: tuple[str, ...],
 ) -> None:
-    """Trigger the data-etl-orchestrator deployment for the resolved user."""
+    """Trigger the data-etl-coordinator deployment for the resolved user."""
 
     # Parse + build inline sources from --uri tokens up front so a bad token
     # (e.g. an explicit huggingface_dataset) fails fast BEFORE any flow runs.

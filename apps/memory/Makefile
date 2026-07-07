@@ -184,7 +184,7 @@ whoami: # Print the current user (id, identifier, name).
 
 # --- Data Pipelines (ingest sources -> documents; NO extraction/indexing) ---
 
-run-data-pipeline-offline: # OFFLINE data pipeline: trigger data-etl-orchestrator (groups the resolved sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers). Produces `documents` only. Default (no SOURCE_FILE/URI): the backfill+listen set. Pass SOURCE_FILE="sources/backfill.yaml sources/listen.yaml" (space-separated, repeatable) and/or URI="https://a.com https://b.com/feed=substack_rss" (space-separated, repeatable; both combinable). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+run-data-pipeline-offline: # OFFLINE data pipeline: trigger data-etl-coordinator (groups the resolved sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers). Produces `documents` only. Default (no SOURCE_FILE/URI): the backfill+listen set. Pass SOURCE_FILE="sources/backfill.yaml sources/listen.yaml" (space-separated, repeatable) and/or URI="https://a.com https://b.com/feed=substack_rss" (space-separated, repeatable; both combinable). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
 	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)")
 
 run-data-pipeline-online: # ONLINE data pipeline: ingest ONE source (URL or local file) into `documents` ONLY — does NOT extract or index (run run-memory-pipeline-extraction-online with the printed document id next). Pass SOURCE="<http(s) URL | local file path>" [TITLE="..."]. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
@@ -194,10 +194,10 @@ run-data-pipeline-online: # ONLINE data pipeline: ingest ONE source (URL or loca
 
 # --- Memory Pipelines (documents -> knowledge graph) ---
 
-run-memory-pipeline-extraction-offline: # OFFLINE batch extraction: trigger memory-extract-etl-orchestrator over ALL pending documents (dispatches memory-extract-etl-worker shards + one trailing index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1).
+run-memory-pipeline-extraction-offline: # OFFLINE batch extraction: trigger memory-extract-etl-coordinator over ALL pending documents (dispatches memory-extract-etl-worker shards + one trailing index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1).
 	uv run python scripts/run_memory_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-memory-pipeline-extraction-online: # ONLINE extraction: extract ONE document (e.g. the one just produced by run-data-pipeline-online) via memory-extract-etl-orchestrator (+ trailing index). Requires DOC_IDS="<id>[,<id2>]". Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+run-memory-pipeline-extraction-online: # ONLINE extraction: extract ONE document (e.g. the one just produced by run-data-pipeline-online) via memory-extract-etl-coordinator (+ trailing index). Requires DOC_IDS="<id>[,<id2>]". Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
 	@if [ -z "$(DOC_IDS)" ]; then echo 'USAGE: make memory-run-memory-pipeline-extraction-online DOC_IDS="<document id>" (the id printed by run-data-pipeline-online)'; exit 1; fi
 	uv run python scripts/run_memory_pipeline.py --doc-ids "$(DOC_IDS)" $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
@@ -207,7 +207,7 @@ run-memory-pipeline-indexing: # Trigger the memory indexing pipeline via Prefect
 
 # --- Full pipeline (data -> memory), chaining the existing deployments ---
 
-run-offline: # FULL OFFLINE run end-to-end: chains run-data-pipeline-offline -> run-memory-pipeline-extraction-offline (the extraction orchestrator also fires the trailing index, so the graph is queryable after this). Each step blocks until its Prefect run completes. Forwards USER_ID/USER_IDENTIFIER; pass SOURCE_FILE="..." and/or URI="..." to select the data sources (default: backfill+listen), NUM_SHARDS=<n> for extraction fan-out.
+run-offline: # FULL OFFLINE run end-to-end: chains run-data-pipeline-offline -> run-memory-pipeline-extraction-offline (the extraction coordinator also fires the trailing index, so the graph is queryable after this). Each step blocks until its Prefect run completes. Forwards USER_ID/USER_IDENTIFIER; pass SOURCE_FILE="..." and/or URI="..." to select the data sources (default: backfill+listen), NUM_SHARDS=<n> for extraction fan-out.
 	$(MAKE) run-data-pipeline-offline $(if $(USER_ID),USER_ID="$(USER_ID)",) $(if $(USER_IDENTIFIER),USER_IDENTIFIER="$(USER_IDENTIFIER)",) $(if $(SOURCE_FILE),SOURCE_FILE="$(SOURCE_FILE)",) $(if $(URI),URI="$(URI)",)
 	$(MAKE) run-memory-pipeline-extraction-offline $(if $(USER_ID),USER_ID="$(USER_ID)",) $(if $(USER_IDENTIFIER),USER_IDENTIFIER="$(USER_IDENTIFIER)",) $(if $(NUM_SHARDS),NUM_SHARDS="$(NUM_SHARDS)",)
 

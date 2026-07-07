@@ -112,11 +112,11 @@ make memory-serve-workflows
 
 The deployments registered by `src/tree/orchestrator.py` (the always-on core 5; the data worker dispatches each platform to one unified pipeline in-process — those are NOT separate deployments):
 
-- `data-etl-orchestrator`, `data-etl-worker` (data ingestion is split into an
-  operator-facing orchestrator that groups the configured `sources:` list by platform
+- `data-etl-coordinator`, `data-etl-worker` (data ingestion is split into an
+  operator-facing coordinator that groups the configured `sources:` list by platform
   and windows HuggingFace, and a worker that ingests one shard — #072)
-- `memory-extract-etl-orchestrator`, `memory-extract-etl-worker` (memory extraction
-  is split into an orchestrator that shards pending docs + indexes once and a worker
+- `memory-extract-etl-coordinator`, `memory-extract-etl-worker` (memory extraction
+  is split into a coordinator that shards pending docs + indexes once and a worker
   that runs the six-task extraction body — #067), `memory-indexing-etl`
 
 Plus the optional `dream-consolidation-all-users` (nightly cron) when `prefect.deploy_optional: true` — see [Configuration](#configuration).
@@ -159,7 +159,7 @@ make memory-run-data-pipeline-offline URI="https://blog.com/feed=substack_rss ht
 make memory-run-data-pipeline-offline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
-Triggers `data-etl-orchestrator`: resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
+Triggers `data-etl-coordinator`: resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
 
 Source selection is freely combinable (ADR-003):
 
@@ -168,7 +168,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) runs the same orchestrator with `source_files=["sources/listen.yaml"]` and no `user_id` — ingesting the polled listen feeds fanned out across **all active users**. The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`0 3 * * *` UTC) runs the same coordinator with `source_files=["sources/listen.yaml"]` and no `user_id` — ingesting the polled listen feeds fanned out across **all active users**. The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 
@@ -181,7 +181,7 @@ Ingests a single URL or local file in realtime through `online_ingest` into `doc
 
 ### Memory extraction
 
-Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both via `memory-extract-etl-orchestrator` (which also fires one trailing index run):
+Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both via `memory-extract-etl-coordinator` (which also fires one trailing index run):
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)

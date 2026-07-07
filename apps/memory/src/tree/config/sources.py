@@ -8,7 +8,7 @@ one-way (no cycle); it does NOT relocate them.
 Per ADR-003, source definitions are operator DATA living under the repo-root
 ``sources/`` directory, split by cadence (backfill = one-shot, listen = polled
 RSS). This loader is the single place that reads them so the offline
-orchestrator, the online URL router, and the arxiv defaults cannot drift.
+coordinator, the online URL router, and the arxiv defaults cannot drift.
 """
 
 import functools
@@ -104,7 +104,7 @@ def load_sources(paths: list[str | Path]) -> list[SourceEntry]:
 def default_configured_sources() -> list[SourceEntry]:
     """The default ingest set: backfill + listen, concatenated and cached.
 
-    Cached because the offline orchestrator, the online URL router, and the
+    Cached because the offline coordinator, the online URL router, and the
     arxiv defaults all read the same set. The cache is clearable for tests via
     ``default_configured_sources.cache_clear()``.
     """

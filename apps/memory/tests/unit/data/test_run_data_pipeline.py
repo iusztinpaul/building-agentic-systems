@@ -2,7 +2,7 @@
 
 Exercise the operator surface only — Click flag parsing and the glue that turns
 ``--uri`` tokens into inline ``sources`` and forwards ``source_files`` / ``sources``
-to the orchestrator deployment. The Prefect/Mongo work in ``_run`` is mocked (an
+to the coordinator deployment. The Prefect/Mongo work in ``_run`` is mocked (an
 external boundary), so nothing touches a real server. The source-building business
 logic itself lives in ``tree.config.sources`` and is covered by
 ``test_sources.py`` — here it is deliberately NOT mocked so the combined run and

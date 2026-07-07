@@ -1,8 +1,8 @@
 """
 Trigger the memory extraction pipeline via Prefect.
 
-Triggers the ``memory-extract-etl-orchestrator`` deployment (#067, ADR-002 §3
-amended #066). Operators always run the ORCHESTRATOR: it resolves the user's pending
+Triggers the ``memory-extract-etl-coordinator`` deployment (#067, ADR-002 §3
+amended #066). Operators always run the COORDINATOR: it resolves the user's pending
 docs, partitions them into ``min(num_shards, N)`` balanced shards, dispatches one
 ``memory-extract-etl-worker`` run per shard (a DISTINCT worker deployment — NO
 recursion), then fires a single trailing ``memory-indexing-etl`` run. ``num_shards=1``
@@ -45,7 +45,7 @@ from tree.logging import init_logger
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = "memory-extract-etl-orchestrator/memory-extract-etl-orchestrator"
+DEPLOYMENT_NAME = "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
 POLL_INTERVAL_SECONDS = 2
 
 
@@ -135,7 +135,7 @@ async def _run(
     default=None,
     type=int,
     help=(
-        "Optional document-shard fan-out width (#067). The orchestrator partitions "
+        "Optional document-shard fan-out width (#067). The coordinator partitions "
         "pending docs into ``min(num_shards, N)`` shards and dispatches one "
         "``memory-extract-etl-worker`` run per shard, then indexes once. Omit or 1 "
         "→ 1 worker run + 1 index run. Must be ``>= 1``."
@@ -147,7 +147,7 @@ def main(
     doc_ids: str | None,
     num_shards: int | None,
 ) -> None:
-    """Trigger the memory-extract-etl-orchestrator deployment for the resolved user."""
+    """Trigger the memory-extract-etl-coordinator deployment for the resolved user."""
 
     if num_shards is not None and num_shards < 1:
         logger.error("--num-shards must be >= 1 (got %d)", num_shards)

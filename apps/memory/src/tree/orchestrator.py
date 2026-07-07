@@ -20,7 +20,7 @@ Every flow exposes ``user_id`` as a required parameter — operators MUST pass i
 when triggering a deployment, e.g.::
 
     prefect deployment run \\
-        memory-extract-etl-orchestrator/memory-extract-etl-orchestrator \\
+        memory-extract-etl-coordinator/memory-extract-etl-coordinator \\
         -p user_id=507f1f77bcf86cd799439011
 """
 
@@ -33,10 +33,10 @@ from prefect.runner.storage import GitRepository
 from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
-from tree.data.offline_pipeline import data_etl_orchestrator, data_etl_worker
+from tree.data.offline_pipeline import data_etl_coordinator, data_etl_worker
 from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
-    memory_extract_etl_orchestrator,
+    memory_extract_etl_coordinator,
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
@@ -101,7 +101,7 @@ class _GitRepoWithPipInstall(GitRepository):
 
 
 # Nightly schedule for the data pipeline's scheduled run (UTC). The cron fires
-# ``data-etl-orchestrator`` with ``source_files=["sources/listen.yaml"]`` and no
+# ``data-etl-coordinator`` with ``source_files=["sources/listen.yaml"]`` and no
 # ``user_id`` — so it ingests the polled listen feeds, fanned out across all active
 # users.
 _SCHEDULED_INGEST_CRON = "0 3 * * *"
@@ -116,7 +116,7 @@ class _DeploymentSpec:
     ``path:function`` Prefect's managed worker loads after cloning the repo.
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
     deployment whose runs override the flow's default parameters — e.g. the data
-    orchestrator's nightly cron passes ``source_files=["sources/listen.yaml"]``.
+    coordinator's nightly cron passes ``source_files=["sources/listen.yaml"]``.
     ``optional`` marks a deployment as beyond the free-tier 5 — registered only when
     ``app_config.prefect.deploy_optional`` is true.
     """
@@ -147,9 +147,9 @@ class _DeploymentSpec:
 # ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
-        data_etl_orchestrator,
-        "data-etl-orchestrator",
-        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_orchestrator",
+        data_etl_coordinator,
+        "data-etl-coordinator",
+        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_coordinator",
         TAGS_DATA_OFFLINE,
         cron=_SCHEDULED_INGEST_CRON,
         schedule_parameters={"source_files": ["sources/listen.yaml"]},
@@ -161,9 +161,9 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         TAGS_DATA_OFFLINE,
     ),
     _DeploymentSpec(
-        memory_extract_etl_orchestrator,
-        "memory-extract-etl-orchestrator",
-        "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_orchestrator",
+        memory_extract_etl_coordinator,
+        "memory-extract-etl-coordinator",
+        "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_coordinator",
         TAGS_EXTRACTION,
     ),
     _DeploymentSpec(

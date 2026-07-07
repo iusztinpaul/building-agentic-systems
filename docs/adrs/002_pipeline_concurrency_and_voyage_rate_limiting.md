@@ -88,7 +88,7 @@ shared Voyage budget.
    `memory-extraction-fanout-etl`. On review (open PR #24, before merge) the project
    owner rejected the two-entrypoint shape: it forces operators to know which of two
    extraction commands to run, and the worker deployment (`memory-extraction-etl`)
-   and the orchestrator deployment (`memory-extraction-fanout-etl`) are otherwise the
+   and the coordinator deployment (`memory-extraction-fanout-etl`) are otherwise the
    same logical pipeline. The fan-out axis, the document-shard partitioning, the
    `asyncio.gather(return_exceptions=True)` failure-isolation, and the
    single-trailing-index rule are all **unchanged** — only the deployment topology is
@@ -101,7 +101,7 @@ shared Voyage budget.
      directly, unchanged — the "worker" path. It does NOT self-dispatch and does NOT
      trigger indexing (exactly the prior `memory_extraction` behaviour). `num_shards=1`
      is therefore byte-for-byte equivalent to extraction before this feature.
-   - `num_shards > 1` → the flow takes the "orchestrator" path: resolve the user's
+   - `num_shards > 1` → the flow takes the "coordinator" path: resolve the user's
      pending documents (when `document_ids is None`), partition into
      `min(num_shards, N)` contiguous balanced shards, then `run_deployment(
      "memory-extraction-etl/memory-extraction-etl", parameters={"user_id": …,
@@ -112,7 +112,7 @@ shared Voyage budget.
    - Children are ALWAYS dispatched with `num_shards=1`, so each child takes the
      worker path — recursion terminates after exactly one level (no infinite
      self-dispatch).
-   - The trailing single index runs ONLY on the orchestrator path (`num_shards > 1`).
+   - The trailing single index runs ONLY on the coordinator path (`num_shards > 1`).
      The worker path (`num_shards <= 1`) is pure extraction with no indexing trigger,
      matching the prior `memory_extraction` contract.
 
@@ -127,50 +127,50 @@ shared Voyage budget.
    superseded; #056's separate-entrypoint design is superseded by this in-flow
    `num_shards` design.
 
-   **Amendment (#066 — orchestrator/worker two-deployment topology for both
+   **Amendment (#066 — coordinator/worker two-deployment topology for both
    pipelines).** The fan-out is now realized as TWO SEPARATE NAMED deployments per
-   pipeline — an `…-orchestrator` (the operator entrypoint) and an `…-worker` (the
-   orchestrator's internal `run_deployment` dispatch target) — REPLACING #061's
+   pipeline — an `…-coordinator` (the operator entrypoint) and an `…-worker` (the
+   coordinator's internal `run_deployment` dispatch target) — REPLACING #061's
    single-deployment + recursive-self-dispatch design. #061's in-flow `num_shards`
    recursive self-dispatch (one `memory-extraction-etl` deployment that re-dispatches
    to itself with `num_shards=1`) is hereby **SUPERSEDED** by this two-deployment
    topology.
 
-   - **Why.** The owner wants the orchestrator-vs-worker boundary to be explicit and
-     visible in the Prefect UI: the parent run shows as `…-orchestrator` and its
+   - **Why.** The owner wants the coordinator-vs-worker boundary to be explicit and
+     visible in the Prefect UI: the parent run shows as `…-coordinator` and its
      children as `…-worker`, instead of every node being the same recursively
      self-dispatched `memory-extraction-etl` run. This is **NOT** the #061 "two
      operator entrypoints" problem that was rejected in the #061 amendment —
-     operators still run exactly ONE entrypoint per pipeline (the orchestrator). The
-     worker is purely the orchestrator's internal dispatch target, never a second
+     operators still run exactly ONE entrypoint per pipeline (the coordinator). The
+     worker is purely the coordinator's internal dispatch target, never a second
      operator command.
 
    - **Memory topology (target).**
      - Worker flow `memory-extract-etl-worker` `(user_id, document_ids=None)` — the
-       actual six-task extraction body. NO `num_shards`, NO orchestrator branch, NO
+       actual six-task extraction body. NO `num_shards`, NO coordinator branch, NO
        indexing trigger. Registered as deployment `memory-extract-etl-worker`.
-     - Orchestrator flow `memory-extract-etl-orchestrator`
+     - Coordinator flow `memory-extract-etl-coordinator`
        `(user_id, document_ids=None, num_shards=1)` — resolve pending docs (when
        `document_ids is None`), partition into `min(num_shards, N)` balanced shards,
        dispatch ONE `memory-extract-etl-worker` run per shard via `run_deployment`
        under `asyncio.gather(return_exceptions=True)`, then ONE trailing
        `memory-indexing-etl` run. Dispatches to the WORKER deployment — NO recursion.
-       Registered as deployment `memory-extract-etl-orchestrator`.
-     - `memory-indexing-etl` is UNCHANGED (name + behavior); the orchestrator still
+       Registered as deployment `memory-extract-etl-coordinator`.
+     - `memory-indexing-etl` is UNCHANGED (name + behavior); the coordinator still
        triggers it exactly once after the gather settles.
 
    - **Data topology (target).**
      - Worker flow `data-etl-worker` `(user_id, sources: list[...])` — ingest a SUBSET
        (shard) of the configured sources, reusing the existing per-source-type batch
        logic. Registered as deployment `data-etl-worker`.
-     - Orchestrator flow `data-etl-orchestrator` `(user_id, num_shards=1)` — read the
+     - Coordinator flow `data-etl-coordinator` `(user_id, num_shards=1)` — read the
        configured `sources:` list, partition into N balanced shards, dispatch one
        `data-etl-worker` per shard via `run_deployment` under
        `asyncio.gather(return_exceptions=True)`. NO trailing step (the data pipeline
        only produces `documents`; there is no index). Registered as deployment
-       `data-etl-orchestrator`.
+       `data-etl-coordinator`.
 
-   - **`num_shards=1` semantics CHANGE.** On the memory orchestrator, `num_shards=1`
+   - **`num_shards=1` semantics CHANGE.** On the memory coordinator, `num_shards=1`
      now dispatches 1 worker run + 1 index run — it is NO LONGER a byte-identical
      in-process "plain" extraction run as it was under #061. A bare extraction (no
      index) is available by triggering `memory-extract-etl-worker` directly. This is
@@ -189,7 +189,7 @@ shared Voyage budget.
    - **Shared partitioning helper.** The pure partitioning math
      (`_partition_into_shards`, generic over the element type, and
      `_resolve_num_shards` with its non-positive→1 clamp) is relocated to the neutral
-     `tree.sharding` module (#066) so BOTH orchestrators import the IDENTICAL helpers
+     `tree.sharding` module (#066) so BOTH coordinators import the IDENTICAL helpers
      with no copy-paste. The memory-specific helpers (`_resolve_pending_document_ids`,
      `_fan_out_extraction`, `FanOutStats`) stay in `tree.memory.extraction.sharding`.
 
@@ -202,13 +202,13 @@ shared Voyage budget.
        fan-out deployment).
 
    This amendment is DOC-ONLY: #066 changes zero deployment topology. The actual
-   orchestrator/worker split lands in #067 (memory) and #068 (data); the current
+   coordinator/worker split lands in #067 (memory) and #068 (data); the current
    `memory-extraction-etl` deployment and `memory_extraction(num_shards)` flow remain
    functional and behavior-identical until then.
 
    **Amendment (#070–#074 — platform-grouped data fan-out + HuggingFace
    offset-windowing).** The data fan-out axis (§3 / amendment #066's "Data
-   topology") is refined again: the `data-etl-orchestrator` STOPS partitioning the
+   topology") is refined again: the `data-etl-coordinator` STOPS partitioning the
    configured `sources:` list by COUNT (`_partition_into_shards(sources, num_shards)`
    → mixed-variant shards) and instead **groups sources by platform**, with a
    **HuggingFace offset-window sub-fan-out**. The dispatch core is unchanged
@@ -244,11 +244,11 @@ shared Voyage budget.
      CAPPED runs only; `split_dataset_by_node` is the documented (out-of-scope)
      successor for a future uncapped whole-dataset run.
 
-   - **`num_shards` dropped for DATA only.** The `data_etl_orchestrator` `num_shards`
+   - **`num_shards` dropped for DATA only.** The `data_etl_coordinator` `num_shards`
      parameter, the `--num-shards` script flag, and the Makefile `NUM_SHARDS` thread
-     are removed. The MEMORY orchestrator keeps `num_shards` unchanged. The shared
+     are removed. The MEMORY coordinator keeps `num_shards` unchanged. The shared
      `tree.sharding._partition_into_shards` / `_resolve_num_shards` helpers are NOT
-     deleted — the memory document-shard axis still uses them; the data orchestrator
+     deleted — the memory document-shard axis still uses them; the data coordinator
      simply stops importing them.
 
    - **`runner_global_limit` raised 4 → 6** in `apps/memory/configs/default.yaml`
@@ -272,7 +272,7 @@ shared Voyage budget.
      overlap — safe to re-run (upsert, never double-insert).
 
    **Amendment (#078–#082 — batch-grain ETL task topology for the leaf pipelines).**
-   The §3 fan-out so far governs the FLOW-level topology (orchestrator → worker →
+   The §3 fan-out so far governs the FLOW-level topology (coordinator → worker →
    per-source batch flow). This amendment refines the TASK grain *inside* a worker: each
    leaf batch ETL flow's Prefect `@task`s now run at **Batch** grain reflecting the ETL
    phases, NOT once per row. The flow-level topology, the fan-out axis, the deployment
@@ -347,7 +347,7 @@ shared Voyage budget.
      no results — and none was added (no cache policy is introduced).
 
    - **Unchanged invariants (so Status stays `Accepted`).** The flow-level topology
-     (orchestrator → worker → per-source batch flow), the two-deployments-per-pipeline +
+     (coordinator → worker → per-source batch flow), the two-deployments-per-pipeline +
      depth-1/no-recursion dispatch (§3 amendments #066/#070–#074), the group-by-platform
      data fan-out + HF offset-windowing (§3 amendment #070–#074), the
      `asyncio.gather(return_exceptions=True)` failure-isolation, NO trailing index for the

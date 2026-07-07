@@ -2,7 +2,7 @@
 
 #066 relocated the pure partitioning math (``_partition_into_shards`` /
 ``_resolve_num_shards``) into :mod:`tree.sharding` so BOTH the memory-extraction
-orchestrator and the data orchestrator (#068) import the IDENTICAL helpers without
+coordinator and the data coordinator (#068) import the IDENTICAL helpers without
 copy-paste (ADR-002 §3 Amendment #066).
 
 The memory document-shard partitioning (``list[str]``) is exhaustively covered by
@@ -10,7 +10,7 @@ The memory document-shard partitioning (``list[str]``) is exhaustively covered b
 through the ``tree.memory.extraction.sharding`` re-export). These tests pin the
 NEW reuse contract directly against ``tree.sharding``:
 
-* the partitioning math is GENERIC over the element type (the data orchestrator
+* the partitioning math is GENERIC over the element type (the data coordinator
   shards a list of arbitrary source items, not just ``str`` doc ids), and
 * the canonical import home is ``tree.sharding`` — the path #068 will import from.
 """
@@ -26,7 +26,7 @@ from tree.sharding import _partition_into_shards, _resolve_num_shards
 
 @dataclass(frozen=True)
 class _FakeSource:
-    """Stand-in for the data orchestrator's source items (#068).
+    """Stand-in for the data coordinator's source items (#068).
 
     Proves ``_partition_into_shards`` is generic over ``T`` and never touches the
     element's contents — it shards arbitrary objects, not just ``str`` doc ids.
@@ -36,7 +36,7 @@ class _FakeSource:
 
 
 # ---------------------------------------------------------------------------
-# Generic-element partitioning (the #068 data-orchestrator reuse path)
+# Generic-element partitioning (the #068 data-coordinator reuse path)
 # ---------------------------------------------------------------------------
 
 
@@ -69,7 +69,7 @@ def test_partition_empty_returns_no_shards() -> None:
 
 
 def test_partition_preserves_object_identity() -> None:
-    """Sharding never copies/mutates elements — the data orchestrator gets the
+    """Sharding never copies/mutates elements — the data coordinator gets the
     SAME source objects back, just regrouped."""
 
     sources = [_FakeSource(uri=f"s{i}") for i in range(5)]

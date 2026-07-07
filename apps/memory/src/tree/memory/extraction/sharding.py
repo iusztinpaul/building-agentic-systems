@@ -1,21 +1,21 @@
-"""Pure document-shard fan-out helpers for the memory extraction orchestrator
+"""Pure document-shard fan-out helpers for the memory extraction coordinator
 (#067, ADR-002 §3 as amended #066).
 
-The orchestrator flow ``memory-extract-etl-orchestrator`` consumes these helpers to
+The coordinator flow ``memory-extract-etl-coordinator`` consumes these helpers to
 resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once (see
-:func:`tree.memory.extraction.pipeline.memory_extract_etl_orchestrator`). This module
+:func:`tree.memory.extraction.pipeline.memory_extract_etl_coordinator`). This module
 holds the reusable PURE helpers — there is NO Prefect ``@flow`` and NO deployment
 here.
 
 The pure, pipeline-agnostic partitioning math (``_partition_into_shards`` /
 ``_resolve_num_shards``) now lives in the neutral :mod:`tree.sharding` module
-(ADR-002 §3 Amendment #066) so the data orchestrator (#068) reuses the IDENTICAL
+(ADR-002 §3 Amendment #066) so the data coordinator (#068) reuses the IDENTICAL
 helpers without copy-paste. They are re-exported here so memory call sites and
 tests keep their existing import paths; the MEMORY-specific helpers
 (``_resolve_pending_document_ids``, ``_fan_out_extraction``, ``FanOutStats``)
 remain in this module.
 
-The fan-out axis is document-shards of ONE user. Topology (orchestrator path):
+The fan-out axis is document-shards of ONE user. Topology (coordinator path):
 
 1. **Resolve pending docs.** If ``document_ids`` is ``None``, compute the user's
    not-yet-ingested documents: a :class:`~tree.entities.documents.Document` is
@@ -27,7 +27,7 @@ The fan-out axis is document-shards of ONE user. Topology (orchestrator path):
 3. **Fan out extraction.** One ``memory-extract-etl-worker`` run per shard via
    ``run_deployment`` under ``asyncio.gather(return_exceptions=True)`` so one
    shard's failure is isolated and recorded, never aborting the others. The
-   orchestrator dispatches a DISTINCT worker deployment — there is NO recursion and
+   coordinator dispatches a DISTINCT worker deployment — there is NO recursion and
    each child carries only ``{user_id, document_ids}`` (the worker has no
    ``num_shards`` param).
 4. **Index ONCE.** After the gather, trigger a SINGLE ``memory-indexing-etl`` run
@@ -53,7 +53,7 @@ from tree.entities.documents import Document
 
 # The balanced-contiguous partitioning math now lives in the neutral, pipeline-
 # agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
-# and data orchestrators import the IDENTICAL helpers without copy-paste. Memory
+# and data coordinators import the IDENTICAL helpers without copy-paste. Memory
 # extraction keeps importing them through this module (behaviour unchanged); the
 # functions are re-exported so existing call sites and tests are untouched.
 from tree.sharding import _partition_into_shards, _resolve_num_shards
@@ -69,7 +69,7 @@ __all__ = [
 ]
 
 _KG_COLLECTION = "knowledge_graph"
-# The orchestrator dispatches the WORKER deployment (#067) — NOT itself. There is
+# The coordinator dispatches the WORKER deployment (#067) — NOT itself. There is
 # no recursion; the worker has no ``num_shards`` param.
 _WORKER_DEPLOYMENT = "memory-extract-etl-worker/memory-extract-etl-worker"
 _INDEXING_DEPLOYMENT = "memory-indexing-etl/memory-indexing-etl"
@@ -95,7 +95,7 @@ def _get_run_logger() -> logging.Logger:
 
 @dataclass
 class FanOutStats:
-    """Per-run accounting for the document-shard fan-out (orchestrator path).
+    """Per-run accounting for the document-shard fan-out (coordinator path).
 
     ``shards_total`` is how many shards the pending docs were partitioned into;
     ``succeeded`` / ``failed`` partition them by extraction outcome. ``failures``
@@ -173,14 +173,14 @@ async def _fan_out_extraction(
 ) -> FanOutStats:
     """Fan one worker dispatch out per shard, isolate failures, index ONCE.
 
-    Pure orchestration core (no DB, no partitioning) so the gather /
+    Pure coordination core (no DB, no partitioning) so the gather /
     failure-isolation / single-index contract is unit-testable directly.
     ``run_deployment`` is injected (the Prefect entrypoint in the flow; a fake in
     tests).
 
     * One ``memory-extract-etl-worker`` run per shard under
       ``asyncio.gather(return_exceptions=True)``, each carrying only
-      ``{user_id, document_ids}`` — the orchestrator dispatches a DISTINCT worker
+      ``{user_id, document_ids}`` — the coordinator dispatches a DISTINCT worker
       deployment, so there is NO recursion and NO ``num_shards`` child key (the
       worker has no such param). A single shard's exception is caught, logged,
       recorded in ``stats.failures``, and the gather still completes for the others
@@ -190,9 +190,9 @@ async def _fan_out_extraction(
       writers). The index run fires regardless of how many shards failed, so a
       partial extraction is still indexed.
 
-    ``opik_trace_headers`` (the orchestrator's distributed-trace headers) is
+    ``opik_trace_headers`` (the coordinator's distributed-trace headers) is
     forwarded to every worker AND the indexing run as a flow parameter, so the
-    whole orchestrated run renders as ONE Opik trace across the process hops that
+    whole coordinated run renders as ONE Opik trace across the process hops that
     ``run_deployment`` introduces. ``None`` (Opik off / no active trace) is
     simply not forwarded — each child then starts its own trace.
     """

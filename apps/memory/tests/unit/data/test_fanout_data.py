@@ -1,6 +1,6 @@
 """Unit tests for the data source-shard fan-out core (#068, ADR-002 §3 amended #066).
 
-#068 split data ingestion into an orchestrator flow (``data-etl-orchestrator``) that
+#068 split data ingestion into an coordinator flow (``data-etl-coordinator``) that
 dispatches a DISTINCT worker deployment (``data-etl-worker``) per shard — there is NO
 recursion and NO trailing index. These exercise the PURE fan-out core with no Prefect
 server and ``run_deployment`` mocked:
@@ -11,8 +11,8 @@ server and ``run_deployment`` mocked:
   the WORKER deployment and carries ``{user_id, sources}``. Critically, the data path
   fires NO trailing/index run (the data pipeline only produces ``documents``).
 
-The orchestrator flow ``data_etl_orchestrator(...)`` is covered in
-``test_orchestrator_data.py`` (config reading + partition + no-op) and by integration
+The coordinator flow ``data_etl_coordinator(...)`` is covered in
+``test_coordinator_data.py`` (config reading + partition + no-op) and by integration
 tests.
 """
 
@@ -108,7 +108,7 @@ async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
     dispatch_names = [name for name, _p in calls]
     assert len(dispatch_names) == len(shards)
     assert all("worker" in name for name in dispatch_names)
-    assert all("orchestrator" not in name for name in dispatch_names)
+    assert all("coordinator" not in name for name in dispatch_names)
 
 
 async def test_fan_out_passes_user_and_shard_sources(mocker) -> None:
@@ -205,8 +205,8 @@ async def test_fan_out_no_shards_is_noop(mocker) -> None:
 
 
 async def test_fan_out_data_forwards_trace_headers(mocker) -> None:
-    """When the data orchestrator owns a trace, its headers are forwarded to
-    every worker so the orchestrated run renders as ONE Opik trace."""
+    """When the data coordinator owns a trace, its headers are forwarded to
+    every worker so the coordinated run renders as ONE Opik trace."""
 
     user_id = PydanticObjectId()
     shards = _partition_into_shards(

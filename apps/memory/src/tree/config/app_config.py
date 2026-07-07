@@ -156,7 +156,7 @@ class ExtractionConfig(BaseModel):
     # override hatch via :func:`_apply_env_overrides`.
     # ``doc_concurrency`` — how many documents one extraction run processes in
     # parallel (default 1 = serial; the cross-run fan-out is the
-    # ``memory-extract-etl-orchestrator`` dispatching worker shards, see ADR-002).
+    # ``memory-extract-etl-coordinator`` dispatching worker shards, see ADR-002).
     doc_concurrency: int = 1
     # ``dedup_concurrency`` — how many entities the dedup stage may resolve in
     # parallel within a run.
@@ -344,13 +344,13 @@ class HuggingFaceDatasetSource(BaseModel):
       dataset. Default ``1`` ⇒ a single window covering the whole
       ``max_samples`` ⇒ today's behavior. Must be ``>= 1``.
     * ``offset`` — a dispatch-time RUNTIME coordinate, NOT authored in YAML and
-      never present in ``default.yaml``. The orchestrator sets it ONLY at
+      never present in ``default.yaml``. The coordinator sets it ONLY at
       dispatch via ``entry.model_copy(update={"offset": ...})`` (#072), and #071
       makes the ingest skip the first ``offset`` rows. Default ``None`` ⇒ no
       skip ⇒ today's behavior.
 
     The discriminated-union round-trip MUST preserve both fields: the
-    orchestrator serializes shards through ``run_deployment`` flow-run params
+    coordinator serializes shards through ``run_deployment`` flow-run params
     (``model_dump()`` → JSON → ``TypeAdapter(list[SourceEntry])``), so a set
     ``offset`` round-trips as the int and ``offset=None`` round-trips as ``None``.
     """

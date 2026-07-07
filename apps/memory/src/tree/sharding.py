@@ -1,15 +1,15 @@
 """Neutral, pipeline-agnostic shard-partitioning helpers (ADR-002 §3).
 
 These two PURE functions are the single home for the balanced-contiguous
-partitioning math shared by BOTH orchestrators:
+partitioning math shared by BOTH coordinators:
 
-* the memory-extraction orchestrator, which shards a ``list[str]`` of pending
+* the memory-extraction coordinator, which shards a ``list[str]`` of pending
   document ids (``tree.memory.extraction``), and
-* the data orchestrator (#068), which shards the configured ``sources:`` list.
+* the data coordinator (#068), which shards the configured ``sources:`` list.
 
 They depend only on ``len()`` and slicing, so they are generic over the element
 type (``list[T] -> list[list[T]]``). Living at the ``tree`` top level — not under
-``memory/`` or ``data/`` — lets both orchestrators import the IDENTICAL math with
+``memory/`` or ``data/`` — lets both coordinators import the IDENTICAL math with
 zero copy-paste and no cross-module (memory↔data) dependency.
 
 There is NO Prefect ``@flow`` and NO deployment here — these are pure decision
@@ -43,7 +43,7 @@ def _partition_into_shards(items: list[T], num_shards: int) -> list[list[T]]:
 
     Generic over the element type ``T`` (relies only on ``len()`` and slicing),
     so it shards a ``list[str]`` of document ids (memory) or any other element
-    list (e.g. the data orchestrator's source list) with identical math.
+    list (e.g. the data coordinator's source list) with identical math.
 
     The shards are contiguous (preserve input order), disjoint, and balanced:
     sizes differ by at most one, with the larger (``ceil(N / shards)``-sized)

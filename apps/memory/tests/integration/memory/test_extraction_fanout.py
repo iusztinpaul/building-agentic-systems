@@ -1,14 +1,14 @@
 """Integration tests for the document-shard fan-out (#067, ADR-002 §3 amended #066).
 
-#067 split extraction into an orchestrator flow
-(``memory-extract-etl-orchestrator``) that dispatches a DISTINCT worker deployment
+#067 split extraction into an coordinator flow
+(``memory-extract-etl-coordinator``) that dispatches a DISTINCT worker deployment
 (``memory-extract-etl-worker``) per shard — there is NO recursion. These exercise
 the parts of the fan-out that DO NOT need ``$vectorSearch`` (so they run in CI
 without the mongot Search Index Management service):
 
 * pending-doc resolution against a real Mongo (a ``Document`` is *pending* iff its
   ``_id`` is absent from every ``knowledge_graph.sources`` array);
-* the ORCHESTRATOR flow ``memory_extract_etl_orchestrator(...)`` dispatching one
+* the COORDINATOR flow ``memory_extract_etl_coordinator(...)`` dispatching one
   ``memory-extract-etl-worker`` run per shard (each carrying only
   ``{user_id, document_ids}`` — NO ``num_shards`` key) and firing exactly ONE
   indexing run afterwards;
@@ -35,7 +35,7 @@ from beanie import PydanticObjectId
 from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.pipeline import (
-    memory_extract_etl_orchestrator,
+    memory_extract_etl_coordinator,
     memory_extract_etl_worker,
 )
 from tree.memory.extraction.sharding import (
@@ -185,7 +185,7 @@ async def test_resolution_empty_when_all_ingested(mongo_client, kg_collection) -
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator flow: memory_extract_etl_orchestrator(...)  (run_deployment spied)
+# Coordinator flow: memory_extract_etl_coordinator(...)  (run_deployment spied)
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +205,7 @@ def spy_run_deployment(mocker):
     return calls
 
 
-async def test_orchestrator_fans_out_per_shard_then_indexes_once(
+async def test_coordinator_fans_out_per_shard_then_indexes_once(
     mongo_client, kg_collection, spy_run_deployment
 ) -> None:
     """Explicit 6 ids + num_shards=4 ⇒ 4 disjoint worker runs + 1 index run."""
@@ -213,7 +213,7 @@ async def test_orchestrator_fans_out_per_shard_then_indexes_once(
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(6)]
 
-    stats = await memory_extract_etl_orchestrator(
+    stats = await memory_extract_etl_coordinator(
         user_id=user_id, document_ids=ids, num_shards=4
     )
 
@@ -239,7 +239,7 @@ async def test_orchestrator_fans_out_per_shard_then_indexes_once(
     assert stats == FanOutStats(shards_total=4, succeeded=4, failed=0)
 
 
-async def test_orchestrator_resolves_pending_docs_when_ids_omitted(
+async def test_coordinator_resolves_pending_docs_when_ids_omitted(
     mongo_client, kg_collection, spy_run_deployment
 ) -> None:
     """Omitting document_ids drives the fan-out off the resolved pending set."""
@@ -251,7 +251,7 @@ async def test_orchestrator_resolves_pending_docs_when_ids_omitted(
         _kg_node_with_sources(user_id=user_id, name="delta", sources=[ingested.id])
     )
 
-    stats = await memory_extract_etl_orchestrator(user_id=user_id, num_shards=4)
+    stats = await memory_extract_etl_coordinator(user_id=user_id, num_shards=4)
 
     worker = [c for c in spy_run_deployment if "worker" in c[0]]
     indexing = [c for c in spy_run_deployment if "indexing" in c[0]]
@@ -265,7 +265,7 @@ async def test_orchestrator_resolves_pending_docs_when_ids_omitted(
     assert stats.succeeded == 1
 
 
-async def test_orchestrator_no_pending_docs_is_noop(
+async def test_coordinator_no_pending_docs_is_noop(
     mongo_client, kg_collection, spy_run_deployment
 ) -> None:
     """A user whose docs are all ingested ⇒ no child runs, no indexing run."""
@@ -276,13 +276,13 @@ async def test_orchestrator_no_pending_docs_is_noop(
         _kg_node_with_sources(user_id=user_id, name="eps", sources=[d1.id])
     )
 
-    stats = await memory_extract_etl_orchestrator(user_id=user_id, num_shards=4)
+    stats = await memory_extract_etl_coordinator(user_id=user_id, num_shards=4)
 
     assert spy_run_deployment == []
     assert stats == FanOutStats(shards_total=0)
 
 
-async def test_orchestrator_default_num_shards_one_dispatches_one_worker_then_index(
+async def test_coordinator_default_num_shards_one_dispatches_one_worker_then_index(
     mongo_client, kg_collection, spy_run_deployment
 ) -> None:
     """Default (``num_shards`` omitted) ⇒ 1 worker run + 1 index run.
@@ -294,7 +294,7 @@ async def test_orchestrator_default_num_shards_one_dispatches_one_worker_then_in
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(3)]
 
-    stats = await memory_extract_etl_orchestrator(user_id=user_id, document_ids=ids)
+    stats = await memory_extract_etl_coordinator(user_id=user_id, document_ids=ids)
 
     worker = [c for c in spy_run_deployment if "worker" in c[0]]
     indexing = [c for c in spy_run_deployment if "indexing" in c[0]]
@@ -308,7 +308,7 @@ async def test_orchestrator_default_num_shards_one_dispatches_one_worker_then_in
     assert stats == FanOutStats(shards_total=1, succeeded=1, failed=0)
 
 
-async def test_orchestrator_isolates_one_shard_failure_and_still_indexes(
+async def test_coordinator_isolates_one_shard_failure_and_still_indexes(
     mongo_client, kg_collection, mocker
 ) -> None:
     """One shard's worker raises; others complete; the index run still fires."""
@@ -327,7 +327,7 @@ async def test_orchestrator_isolates_one_shard_failure_and_still_indexes(
 
     mocker.patch("tree.memory.extraction.pipeline.run_deployment", side_effect=_fake)
 
-    stats = await memory_extract_etl_orchestrator(
+    stats = await memory_extract_etl_coordinator(
         user_id=user_id, document_ids=ids, num_shards=4
     )
 
