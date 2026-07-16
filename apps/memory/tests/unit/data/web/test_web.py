@@ -130,7 +130,6 @@ class TestFetchAndExtractWeb:
         await fetch_and_extract_web("https://example.com/x", _USER_ID)
 
         mock_fetch.assert_awaited_once()
-        # Verify data_format is markdown
         kwargs = mock_fetch.call_args.kwargs
         assert kwargs.get("data_format") == "markdown"
 

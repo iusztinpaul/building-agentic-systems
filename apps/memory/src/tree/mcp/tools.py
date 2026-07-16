@@ -642,8 +642,6 @@ async def ingest_conversation(
 
 
 def _serialize_pending_duplicate(p: Any) -> dict[str, Any]:
-    """Convert a :class:`PendingDuplicate` to a JSON-friendly dict."""
-
     return {
         "source_node_id": p.source_node_id,
         "target_node_id": p.target_node_id,
@@ -658,8 +656,6 @@ def _serialize_pending_duplicate(p: Any) -> dict[str, Any]:
 
 
 def _serialize_review_result(r: Any) -> dict[str, Any]:
-    """Convert a :class:`ReviewResult` to a JSON-friendly dict."""
-
     return {
         "decision": r.decision.value,
         "winner_node_id": r.winner_node_id,

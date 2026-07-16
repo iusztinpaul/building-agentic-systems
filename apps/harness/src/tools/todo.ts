@@ -7,7 +7,6 @@ interface TodoItem {
   done: boolean;
 }
 
-// Process-lifetime list. Persistence + per-session isolation arrive at M4.
 const todos: TodoItem[] = [];
 let nextId = 1;
 

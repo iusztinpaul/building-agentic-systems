@@ -98,16 +98,12 @@ def _summarize(doc: dict[str, Any]) -> str:
 
 
 def _format_value(value: Any) -> str:
-    """Format a property value for markdown display."""
-
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
     return str(value)
 
 
 def _render_node_md(doc: dict[str, Any]) -> str:
-    """Render a node document as markdown."""
-
     ntype = doc.get("type", "?")
     name = doc.get("name", "?")
     lines = [
@@ -138,8 +134,6 @@ def _render_node_md(doc: dict[str, Any]) -> str:
 
 
 def _render_edge_md(doc: dict[str, Any]) -> str:
-    """Render an edge document as markdown."""
-
     src = doc.get("source_node_id", "?")
     tgt = doc.get("target_node_id", "?")
     etype = doc.get("type", "?")

@@ -42,7 +42,6 @@ export function mcpToolToHarnessTool(
   };
 }
 
-// Convert every tool on every connected server into a harness tool list.
 export function mcpServersToTools(servers: Iterable<McpServer>): Tool<Record<string, unknown>>[] {
   const out: Tool<Record<string, unknown>>[] = [];
   for (const server of servers) {
