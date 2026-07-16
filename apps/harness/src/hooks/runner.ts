@@ -51,7 +51,6 @@ export async function runHook(
     stderr: "inherit",
   });
 
-  // Pipe the JSON context in, then close stdin.
   const stdin = proc.stdin as unknown as { write: (s: string) => void; end: () => void };
   stdin.write(`${JSON.stringify(context)}\n`);
   stdin.end();

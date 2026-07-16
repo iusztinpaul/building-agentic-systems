@@ -57,8 +57,6 @@ _PYVIS_OPTIONS = """\
 
 
 def build_networkx_graph(result: QueryResult) -> nx.DiGraph:
-    """Convert a QueryResult into a networkx DiGraph."""
-
     G = nx.DiGraph()
 
     for node in result.nodes:
@@ -117,8 +115,6 @@ def render_html(
     *,
     open_browser: bool = True,
 ) -> Path:
-    """Render a networkx DiGraph as an interactive HTML file via pyvis."""
-
     net = Network(
         height="900px",
         width="100%",
@@ -151,8 +147,6 @@ def visualize_query_result(
     *,
     open_browser: bool = True,
 ) -> Path:
-    """One-shot: QueryResult → networkx → HTML file."""
-
     G = build_networkx_graph(result)
     return render_html(G, output, open_browser=open_browser)
 

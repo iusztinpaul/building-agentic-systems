@@ -8,7 +8,7 @@ For the wider system (harness, end-to-end flow, shared infra) see the repo-root 
 
 - **Data pipelines** (`src/tree/data/`) — one Prefect flow per source. Normalizes everything into the `documents` collection.
 - **Memory pipelines** (`src/tree/memory/`) — `extraction/` chunks + LLM-extracts nodes and edges; `indexing/` builds reverse edges, embeds nodes, ensures text/vector/search indexes.
-- **Query + MCP** (`src/tree/memory/query/`, `src/tree/mcp/`) — a CLI that renders interactive HTML graphs, and a FastMCP server exposing six tools to any MCP client.
+- **Query + MCP** (`src/tree/memory/query/`, `src/tree/mcp/`) — a CLI that renders interactive HTML graphs, and a FastMCP server exposing the memory tools to any MCP client.
 
 Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `knowledge_graph` collection.
 

@@ -175,9 +175,9 @@ make memory-run-offline                                          # default sourc
 make memory-run-online SOURCE="https://example.com/some-post"    # one source on demand
 ```
 
-`run-memory-pipeline-extraction-offline` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline-offline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `sources/backfill.yaml`). The Dockerized `prefect-worker` serves all deployments in-container, so these `make` triggers work without any extra setup. If you're iterating on pipeline code and want live reloads, run `make memory-serve-workflows` in a separate terminal instead — but don't do both (duplicate workers). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
+`run-memory-pipeline-extraction-offline` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline-offline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `sources/backfill.yaml`). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
 
-The data pipeline runs **offline** (config-driven, fanned out over Prefect workers) and **online** (realtime, one source). Offline source selection is freely combinable: bare `make memory-run-data-pipeline-offline` ingests the default set (`sources/backfill.yaml` + `sources/listen.yaml`); `... SOURCE_FILE="sources/listen.yaml"` ingests chosen source file(s); `... URI="https://blog.com/feed=substack_rss"` ingests ad-hoc URLs (type inferred when the `=TYPE` suffix is omitted). The nightly cron ingests `sources/listen.yaml` across all active users. Online is `make memory-run-data-pipeline-online SOURCE="<url|path>"`. See [Data pipelines](apps/memory/README.md#data-pipelines).
+The data pipeline runs **offline** (config-driven, fanned out over Prefect workers) and **online** (realtime, one source: `make memory-run-data-pipeline-online SOURCE="<url|path>"`). Source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron are covered in [Data pipelines](apps/memory/README.md#data-pipelines).
 
 **7. Drive memory with the agent.**
 
@@ -189,18 +189,9 @@ make harness-dev
 PROMPT="what do I have on AI agents in memory?" make harness-run
 ```
 
-The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its seven memory tools (`mcp__tree-memory__query_memory`, `search_memory`, `deep_search_memory`, `search_web`, `ingest_url`, `ingest_file`, `ingest_conversation`) are available from the first prompt.
+The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory` MCP server, so its memory tools (`mcp__tree-memory__*` — see the [tool catalogue](apps/memory/README.md#mcp-server)) are available from the first prompt.
 
-**On-demand web search via `search_web`** — search the live web (Google / Bing / Yandex via Bright Data's SERP API) without polluting memory. By default `search_web` returns SERP results only; pass `ingest=True` (or `INGEST=true` on the CLI) to opt into batching the URLs through the same `ingest-web-url-batch-etl` flow that backs `ingest_url`. Requires `BRIGHTDATA_API_KEY` and `BRIGHTDATA_SERP_ZONE` in `.env`.
-
-```bash
-# Search-only — no side effects on memory.
-make memory-search-web QUERY="anthropic claude api" NUM_RESULTS=5
-
-# Search + opt-in fire-and-forget ingest of the top 1 result.
-make memory-serve-workflows &   # workflows must be served for the ingest path
-make memory-search-web QUERY="anthropic claude api" NUM_RESULTS=5 INGEST=true INGEST_TOP_K=1
-```
+**On-demand web search** — the `search_web` tool searches the live web via Bright Data's SERP API without polluting memory (ingest is opt-in); see the [`search_web` example](apps/memory/README.md#search_web-example).
 
 ## App guides
 

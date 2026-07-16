@@ -55,8 +55,6 @@ _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 async def _ingest_substack_article(
     url: str, user_id: PydanticObjectId
 ) -> Document | None:
-    """Ingest a Substack article via the Substack article pipeline."""
-
     from tree.data.substack.substack_pipeline import (
         ingest_substack_article,
     )
@@ -78,8 +76,6 @@ async def _ingest_youtube_video(url: str, user_id: PydanticObjectId) -> Document
 
 
 async def _ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
-    """Ingest an arbitrary URL via the generic web (Bright Data) pipeline."""
-
     from tree.data.web.web_pipeline import ingest_web_url
 
     return await ingest_web_url(url, user_id)
@@ -224,8 +220,6 @@ OnlineSource = Annotated[
 async def _ingest_file(
     source: FileSource, user_id: PydanticObjectId
 ) -> Document | None:
-    """Ingest a local file via the file pipeline."""
-
     from tree.data.file.file_pipeline import ingest_file
 
     return await ingest_file(source.path, user_id, source.title)
@@ -234,8 +228,6 @@ async def _ingest_file(
 async def _ingest_conversation(
     source: ConversationSource, user_id: PydanticObjectId
 ) -> Document | None:
-    """Ingest conversation text via the conversation pipeline."""
-
     from tree.data.conversation.conversation_pipeline import ingest_conversation
 
     return await ingest_conversation(

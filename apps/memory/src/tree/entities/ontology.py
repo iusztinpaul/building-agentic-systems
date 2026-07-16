@@ -815,8 +815,6 @@ class EmployedByProperties(_EmploymentRoleDates):
 
 
 class OwnsProperties(BaseModel):
-    """Properties for ``related_to + semantic_type=owns``."""
-
     acquisition_date: str | None = Field(
         default=None,
         description=(
@@ -855,8 +853,6 @@ class ResidesAtProperties(_DateRangeProperties):
 
 
 class ParticipatedInProperties(BaseModel):
-    """Properties for ``related_to + semantic_type=participated_in``."""
-
     role: str | None = Field(
         default=None,
         description=(
@@ -867,8 +863,6 @@ class ParticipatedInProperties(BaseModel):
 
 
 class InvolvedProperties(BaseModel):
-    """Properties for ``related_to + semantic_type=involved`` (object → event)."""
-
     role: str | None = Field(
         default=None,
         description=(
@@ -934,8 +928,6 @@ class EdgeConstraint(BaseModel):
 # ---------------------------------------------------------------------------
 # Built-in registrations (POLE+O Phase 0 — pre-existing types only)
 # ---------------------------------------------------------------------------
-
-# --- Built-in registrations ---
 
 register_node_type(
     NodeTypeSpec(

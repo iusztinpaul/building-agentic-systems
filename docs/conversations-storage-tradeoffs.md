@@ -11,7 +11,7 @@ Two options for storing chat data in Tree:
 - **Option A** — add `CONVERSATION` and `MESSAGE` as new node types inside the existing `knowledge_graph` collection.
 - **Option B** — keep them in dedicated `conversations` and `messages` collections, mirroring how `documents` already sits alongside `knowledge_graph`.
 
-This doc lays out the tradeoffs. Decision lives in `plan.md`.
+This doc lays out the tradeoffs.
 
 ## Option A — Conversations + Messages inside `knowledge_graph`
 

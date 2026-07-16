@@ -127,7 +127,6 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
       return;
     }
 
-    // Execute each tool and collect results.
     const results: ToolResultBlock[] = [];
     for (const call of pending) {
       const tool = registry.get(call.name);
