@@ -2,7 +2,7 @@
 
 The agent half of **Tree: Your Rooted Personal Assistant**. A minimal TypeScript coding agent (`tree` CLI) that pairs with the `tree-memory` MCP server in `apps/memory/`.
 
-Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/harness-plan.md`](../../docs/harness-plan.md); per-milestone task files are under [`../../docs/tasks/`](../../docs/tasks/).
+Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/harness-plan.md`](../../docs/harness-plan.md).
 
 ## Prerequisites
 
@@ -26,16 +26,9 @@ PROMPT="what is 2+2?" make harness-run
 
 # interactive Ink REPL (requires a TTY)
 make harness-dev
-
-# end-to-end: memory + harness
-make local-start                                       # shared infra (from repo root)
-make memory-run-data-pipeline                          # ingest some data
-make memory-run-memory-pipeline-extraction             # extract the graph
-make memory-run-memory-pipeline-indexing               # index it
-PROMPT="search my memory for knowledge-graph notes" make harness-run
 ```
 
-In the last command the harness auto-spawns the `tree-memory` MCP server from `.mcp.json` and exposes its six tools (`query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`) to the model.
+For the full memory + harness flow, follow the [end-to-end quick start](../../README.md#end-to-end-quick-start) at the repo root — the harness auto-spawns the `tree-memory` MCP server from `.mcp.json`.
 
 ## Modes
 
@@ -62,8 +55,7 @@ In the last command the harness auto-spawns the `tree-memory` MCP server from `.
 
 Native tools (always available): `bash`, `read`, `write`, `edit`, `glob`, `grep`, `todo`, `task`.
 
-MCP tools (on startup) are discovered from the root `.mcp.json`. Each shows up as `mcp__<server>__<name>`; for the default config that means the six `tree-memory` tools:
-`query_memory`, `search_memory`, `deep_search_memory`, `ingest_url`, `ingest_file`, `ingest_conversation`.
+MCP tools (on startup) are discovered from the root `.mcp.json`. Each shows up as `mcp__<server>__<name>`; for the default config that means the `tree-memory` tools ([catalogue](../memory/README.md#mcp-server)).
 
 ### Destructive-tool gating
 

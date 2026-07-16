@@ -2,34 +2,13 @@
 
 ## Repo layout
 
-This is a monorepo. Each app is self-contained; only cross-app concerns live at the repo root.
-
-```
-building-agentic-systems/
-├── apps/
-│   ├── memory/          # Python app: ETL + knowledge-graph memory + FastMCP server
-│   └── harness/         # Planned TypeScript/Ink/Bun coding-agent harness (see docs/harness-plan.md)
-├── docker/              # Shared infra config (MongoDB + mongot)
-├── docs/                # Architecture & design docs
-├── docker-compose.yml   # Shared infra orchestration
-├── .mcp.json            # MCP servers the agents/harness spawn
-├── .env / .env.example  # Shared secrets across apps
-└── Makefile             # Thin root: delegates to apps/*/Makefile; shared infra targets
-```
-
-See [`README.md`](README.md) for prerequisites and installation.
+This is a monorepo — see [`README.md`](README.md#repo-layout) for the layout, prerequisites, and installation.
 
 ## Development workflow
 
 1. Branch off `main`: `git checkout -b feat/my-feature` (or `fix/...`, `refactor/...`).
-2. Work inside the app that owns the change — memory code goes in `apps/memory/src/`, harness code in `apps/harness/src/` (once the harness lands).
-3. Run targets via the root Makefile:
-   - `make memory-<target>` delegates to `apps/memory/Makefile` (e.g., `make memory-unit-tests`, `make memory-serve-mcp`).
-   - `make harness-<target>` is reserved for the future harness app.
-   - `make local-start` / `make local-stop` — shared MongoDB + mongot infra.
-   - `make tests` — aggregate across all apps.
-   - `make pre-commit` — lint / format across the repo.
-   - `make help` — list top-level targets.
+2. Work inside the app that owns the change — memory code goes in `apps/memory/src/`, harness code in `apps/harness/src/`.
+3. Run targets via the root Makefile — `make help` lists them (see [`README.md`](README.md#qa-and-tests)).
 4. Before committing: `make memory-format-fix && make memory-lint-fix && make pre-commit`.
 5. Open a PR against `main`. CI runs format, lint, and tests (`.github/workflows/ci.yml`).
 
@@ -53,7 +32,7 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 | App-level YAML config | `apps/memory/configs/default.yaml` |
 | Python deps | `apps/memory/pyproject.toml` |
 | Memory Dockerfile | `apps/memory/docker/Dockerfile` |
-| Harness (TS) code | `apps/harness/src/` *(planned — see [`docs/harness-plan.md`](docs/harness-plan.md))* |
+| Harness (TS) code | `apps/harness/src/` |
 | Shared env vars | `.env` / `.env.example` |
 | MCP server registration | `.mcp.json` |
 | Shared MongoDB/mongot config | `docker/` |
