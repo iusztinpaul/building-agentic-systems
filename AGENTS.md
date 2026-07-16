@@ -1,6 +1,6 @@
 # Tree — Your Rooted Personal Assistant
 
-A personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents. A Python (`apps/memory`) + TypeScript (`apps/harness`) monorepo.
+A personal assistant rooted in a knowledge-graph memory, powered by ontologies, LLMs, and agents.
 
 # Key Principles You Will Respect All Over Your Work
 
@@ -9,18 +9,17 @@ A personal assistant rooted in a knowledge-graph memory, powered by ontologies, 
 
 # Key Components
 
-Two apps:
+Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml`/`package.json`, `Makefile`); only cross-app concerns live at the repo root.
 
-- **`apps/harness`** — the user-facing component: a TUI CLI implementing a custom coding-agent harness (TypeScript/Bun). Internals are still being designed — see `docs/harness-plan.md`.
-- **`apps/memory`** — the context layer (Python): ingestion + retrieval pipelines for the knowledge graph, served to the harness via an MCP server.
+- **`apps/memory`** — the context layer (Python): ingestion + retrieval pipelines for the knowledge graph, served to the harness via an MCP server. Core module `src/tree/` holds `config/`, `entities/` (shared ODMs), `models/` (LLM/embedding interfaces), `data/` (one ETL subpackage per source), `mcp/` (FastMCP server), and `memory/` (extraction, indexing, query, resolution, review, consolidation); plus `deploy/`, `configs/`, `scripts/`, `tests/`.
+- **`apps/harness`** — the user-facing TUI CLI: a custom coding-agent harness (TypeScript/Bun). `src/`: `agent/`, `tools/`, `mcp/`, `hooks/`, `permissions/`, `session/`, `ui/`.
+- **Repo root (cross-app only):** `docker/` (shared MongoDB + mongot infra), `docs/` (incl. `adrs/`), `tracker/`, `.env`/`.env.example`, `.mcp.json`, `docker-compose.yml`, and the thin delegating `Makefile`.
 
 ## Memory
 
 - **Data Pipeline:** ETL pipelines gathering data from multiple sources and normalizing everything into the `documents` collection. One ETL pipeline per source, such as Substack, Substack RSS feeds, HuggingFace Datasets, YouTube, Custom sites, etc.
 - **Memory Pipeline:** Maps `documents` to `knowledge graph objects` within the `knowledge_graph` collection by cleaning, chunking, graph extracting, normalizing and upserting nodes and edges directly.
 - **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored in a single mutable `knowledge_graph` collection.
-- **Agentic Tools:** Tools used to query or write to the unified memory.
-- **MCP Server:** The memory is served as an MCP server to the harness, allowing the harness to query and write to the memory.
 - **Configuration:** done in two layers, plus an escape hatch:
   1. The root `.env` file injects environment variables (credentials + higher-level config needed to boot the harness and memory; see `.env.example`). Loaded at runtime via `apps/memory/src/tree/config/settings.py`.
   2. All memory-app config lives in YAML under `apps/memory/src/tree/config`, loaded at `apps/memory/src/tree/config/app_config.py`.
@@ -31,14 +30,6 @@ Two apps:
 - Memory-app entry-point scripts (`apps/memory/scripts/`) + deploy scripts (`apps/memory/deploy/`):
   - Don't implement business logic in the scripts. Only load it from `apps/memory/src/tree/` + write the glue code to call it.
   - Must call `init_logger()` from `tree.logging` at module level to configure logging.
-
-# Project Structure
-
-Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml`/`package.json`, `Makefile`). Only cross-app concerns live at the repo root.
-
-- **`apps/memory`** — Python: ETL + knowledge graph + MCP server. Core module `src/tree/` holds `config/`, `entities/` (shared ODMs), `models/` (LLM/embedding interfaces), `data/` (one ETL subpackage per source), `mcp/` (FastMCP server), and `memory/` (extraction, indexing, query, resolution, review, consolidation); plus `deploy/`, `configs/`, `scripts/`, `tests/`.
-- **`apps/harness`** — TS/Bun coding-agent TUI (see `docs/harness-plan.md`). `src/`: `agent/`, `tools/`, `mcp/`, `hooks/`, `permissions/`, `session/`, `ui/`.
-- **Repo root (cross-app only):** `docker/` (shared MongoDB + mongot infra), `docs/` (incl. `adrs/`), `tracker/`, `.env`/`.env.example`, `.mcp.json`, `docker-compose.yml`, and the thin delegating `Makefile`.
 
 # Key Software Design Choices
 
@@ -102,7 +93,7 @@ Use the `context7` MCP server (when connected) to look up authoritative usage fo
 We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run everything with `make ...`. `uv` manages the `apps/memory` Python project (`uv run <command>`); `bun` manages the `apps/harness` TypeScript project (`bun run <command>`).
 
 - `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-unit-tests`, `make memory-serve-mcp`).
-- `make harness-<target>` — reserved for the future TS harness at `apps/harness/`.
+- `make harness-<target>` — run `<target>` inside `apps/harness/` (e.g. `make harness-unit-tests`, `make harness-dev`).
 - `make local-start` / `make local-stop` / `make local-restart` — shared Docker infra.
 - `make tests` — aggregate: runs all apps' tests.
 - `make pre-commit` — pre-commit across the repo.
@@ -111,9 +102,9 @@ We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run e
 
 ## Environments
 
-We have two environments: `local` (Docker-based, loads `.env`) and `production` (Cloud, loads `.env.production`)
+We have two environments: `local` (Docker-based, loads `.env`) and `production` (Cloud, loads `.env.prod`)
 
-Run `make env-status` to see which environment is currently active. Switch between environments by running `make env-local` / `make env-production`.
+Run `make env-status` to see which environment is currently active. Switch between environments by running `make env-local` / `make env-prod`.
 
 ## Infrastructure & external-service CLIs
 
@@ -125,11 +116,11 @@ Trigger Prefect deployments via `uv run prefect deployment ...` from `apps/memor
 
 # Testing & QA
 
-Always call the `/testing-python` skill from the Squid plugin when writing tests.
+Always call the `/squid-testing-python` skill from the Squid plugin when writing tests.
 
 **Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
-**Run tests only with the LOCAL env target (`make env-status` → local).** With `.env.target=prod` the suite hits the Atlas cluster, where index-creating tests fail with "The maximum number of FTS indexes has been reached for this instance size" (M0 cap) — and tests must not write to prod anyway. direnv exports the prod vars into every shell, so switch with `make env-local` (and back with `make env-prod`) rather than `--env-file` overrides, which do NOT win over already-exported vars.
+**Run tests only with the LOCAL env target (`make env-status` → local).** With `.env.target=prod` the suite hits the Atlas cluster, where index-creating tests fail with "The maximum number of FTS indexes has been reached for this instance size" (M0 cap) — and tests must not write to prod anyway. direnv exports the prod vars into every shell, so switch with `make env-local` rather than `--env-file` overrides, which do NOT win over already-exported vars.
 
 For `apps/memory` we use `ruff` as formatter and linter.
 
@@ -146,10 +137,10 @@ After every commit to git:
 
 When a feature is done and ready for PR, ALWAYS run:
 
-5. Full integration tests: `make memory-integration-tests-all` (~5 min; includes `@pytest.mark.slow`). CI runs this same target.
+5. Full integration tests: `make memory-integration-tests-all` (~5 min; includes `@pytest.mark.slow`).
 6. Run and verify the code end-to-end (see "Running pipelines & E2E"), adapted to the changes you made.
 
-Mirror the CI integration command locally (skips mongot-dependent tests; runs sequentially because the shared-DB cleanup fixture makes parallel `-n auto` workers collide): `make memory-integration-tests-ci`. Run all apps' tests together: `make tests`.
+Mirror the CI integration command locally (skips mongot-dependent tests; runs sequentially because the shared-DB cleanup fixture makes parallel `-n auto` workers collide): `make memory-integration-tests-ci`.
 
 ## Test markers
 
@@ -164,4 +155,4 @@ By default, use the "Paul Iusztin" user when testing.
 
 # Developing New Features & Bug Fixes
 
-This project uses the **squid** agent-team plugin — follow its processes one-to-one. Direct chat for trivial edits; for one or a few groomed tasks use `/implement-task`; to plan a whole feature use `/plan` then `/implement-night`. Bugs go through `/triage-issue`, structural changes through `/refactor`; `/review` and `/review-ci` run as standalone gates.
+This project uses the **squid** agent-team plugin — follow its processes one-to-one. Direct chat for trivial edits; for one or a few groomed tasks use `/squid-implement-task`; to plan a whole feature use `/squid-plan` then `/squid-implement-night`. Bugs go through `/squid-triage-issue`, structural changes through `/squid-refactor`; `/squid-review` and `/squid-review-ci` run as standalone gates.
