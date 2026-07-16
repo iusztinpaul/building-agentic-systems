@@ -2,8 +2,6 @@
 
 The agent half of **Tree: Your Rooted Personal Assistant**. A minimal TypeScript coding agent (`tree` CLI) that pairs with the `tree-memory` MCP server in `apps/memory/`.
 
-Architecture, rationale, and the seven-milestone roadmap live in [`../../docs/harness-plan.md`](../../docs/harness-plan.md).
-
 ## Prerequisites
 
 - [Bun](https://bun.sh) ≥ 1.1 (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
