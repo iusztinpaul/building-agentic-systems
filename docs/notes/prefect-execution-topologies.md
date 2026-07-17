@@ -262,6 +262,58 @@ wins:
 Only the GCL protects the shared API regardless of how many workers/containers exist — pool and
 worker limits scale *with* hardware and can't, alone, keep us under a vendor rate ceiling.
 
+## Fan-out × concurrency — how a batch actually parallelizes
+
+The lever people reach for is wrong: **the number of deployments ("logical workers") is not a
+concurrency cap.** A deployment is a *template*; containers track **flow RUNS**, not deployments.
+6 worker deployments can run 0 or 50 containers; 1 worker deployment can run 50. Two numbers
+decide real parallelism:
+
+- **fan-out width** — how many worker *runs* the coordinator creates (`run_deployment` per shard:
+  one per non-HF platform + `num_workers` per HF dataset for data; `NUM_SHARDS` for extraction).
+- **the concurrency cap** — how many of those runs execute at once. In Managed that's the
+  **work-pool concurrency limit** — and since we set none and use the default queue with no
+  per-queue limit, it currently falls back to **Prefect's plan managed-execution cap**. (The local
+  `serve(limit=6)` does NOT apply to the cloud pool — don't read that 6 as a cloud ceiling.)
+
+**Walkthrough — a 6-shard batch on the data pipeline:**
+
+```
+1. trigger data-etl-coordinator      → 1 coordinator container [Running]
+2. shards into 6 → run_deployment ×6 → 6 data-etl-worker runs [Scheduled] on the queue
+3. coordinator BLOCKS on asyncio.gather → its container stays Running, holding 1 slot
+4. Prefect launches worker containers, bounded by the cap C:
+     C ≥ 7  → all 6 run at once             (fully parallel: 6 workers + 1 coordinator)
+     C < 7  → only C−1 workers run; each finish frees a slot → next Scheduled worker starts
+     unset  → plan cap decides (free tier: a few at a time, not all 6)
+5. each worker: platform ETL → dedupe-insert `documents` → exit → frees a slot
+6. all 6 done → gather returns → coordinator exits.  No trailing index (data pipeline).
+```
+
+So: **parallel up to `cap − 1`** (the coordinator holds one slot the whole time it waits on its
+children), and the rest sit `Scheduled`/`AwaitingConcurrencySlot`, draining as slots free.
+
+**Sizing rule (avoid starvation / deadlock).** Because the blocking coordinator occupies a slot,
+a too-small cap starves its own children; at the extreme, nested fan-outs where parents hold every
+slot **deadlock**. Set the pool limit ≥ (1 per coordinator level) + (workers you want running at
+once):
+
+```
+prefect work-pool set-concurrency-limit tree-managed <N>    # deterministic ceiling
+```
+
+**Two independent axes — don't conflate them.** The queue governs only the **flow-level** axis
+(how many worker *containers* coexist). Inside each worker container there's a **task-level** axis:
+the ETL is already `asyncio`-concurrent over its items (one shared `fetch_many`, `gather_isolated`
+batch loads). A single worker container is internally parallel regardless of the queue cap; the cap
+only controls how many such containers run side by side. Effective throughput = (containers in
+parallel) × (in-container task concurrency).
+
+> Data-pipeline scope: the `voyage-embeddings` GCL does **not** gate this — that throttles
+> embeddings in extraction/indexing. The data pipeline's real external throttle is the source
+> scrapers (Bright Data, transcript fetch), not a Prefect limit; flow-level parallelism here is
+> purely the pool/plan cap.
+
 ## Cross-links
 
 - `deployment-runbook.md` — ordered prod bring-up (Atlas → sign-up → Prefect Cloud → MCP).
