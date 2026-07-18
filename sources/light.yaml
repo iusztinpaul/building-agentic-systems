@@ -1,0 +1,22 @@
+# Light example that loads only Substack articles via GET requests
+
+- uri: https://www.decodingai.com/p/ai-agents-foundations-course
+  type: substack_article
+- uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
+  type: substack_article
+- uri: https://www.decodingai.com/p/context-engineering-2025s-1-skill
+  type: substack_article
+- uri: https://www.decodingai.com/p/llm-structured-outputs-the-only-way
+  type: substack_article
+- uri: https://www.decodingai.com/p/stop-building-ai-agents-use-these
+  type: substack_article
+- uri: https://www.decodingai.com/p/tool-calling-from-scratch-to-production
+  type: substack_article
+- uri: https://www.decodingai.com/p/ai-agents-planning
+  type: substack_article
+- uri: https://www.decodingai.com/p/building-production-react-agents
+  type: substack_article
+- uri: https://www.decodingai.com/p/how-does-memory-for-ai-agents-work
+  type: substack_article
+- uri: https://www.decodingai.com/p/stop-converting-documents-to-text
+  type: substack_article
