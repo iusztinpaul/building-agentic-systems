@@ -11,6 +11,10 @@ server and ``run_deployment`` mocked:
   the WORKER deployment and carries ``{user_id, sources}``. Critically, the data path
   fires NO trailing/index run (the data pipeline only produces ``documents``).
 
+Since #095 every fake returns a real ``FlowRun`` — the shape ``run_deployment``
+actually returns — because the fan-out now counts a shard as succeeded only when
+that run's terminal state is COMPLETED.
+
 The coordinator flow ``data_etl_coordinator(...)`` is covered in
 ``test_coordinator_data.py`` (config reading + partition + no-op) and by integration
 tests.
@@ -18,8 +22,11 @@ tests.
 
 from __future__ import annotations
 
+import pytest
 from beanie import PydanticObjectId
+from prefect.client.schemas.objects import StateType
 
+from tests.prefect_doubles import completed_flow_run, flow_run_in_state
 from tree.data.offline_pipeline import (
     DataFanOutStats,
     _fan_out_data,
@@ -46,6 +53,7 @@ async def test_fan_out_issues_one_run_per_shard(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -78,6 +86,7 @@ async def test_fan_out_fires_no_trailing_index_run(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append(name)
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -100,6 +109,7 @@ async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -122,6 +132,7 @@ async def test_fan_out_passes_user_and_shard_sources(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -146,6 +157,7 @@ async def test_fan_out_children_carry_only_user_and_sources(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -172,6 +184,7 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
         params = parameters or {}
         if [s["uri"] for s in params.get("sources", [])] == failing_shard:
             raise RuntimeError("shard blew up")
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -187,6 +200,72 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
 
     # No index/trailing run despite the partial failure.
     assert all("indexing" not in name for name, _p in calls)
+
+
+class TestNonCompletedWorkerRuns:
+    """A worker that hard-FAILS is counted as failed, never as succeeded (#095).
+
+    ``run_deployment`` RETURNS the finished flow run for a Failed / Crashed /
+    Cancelled worker instead of raising, so counting "it returned" as success
+    made the fan-out summary — the operator's main signal that an offline run
+    worked — read green while data was missing.
+    """
+
+    @pytest.mark.parametrize(
+        "state_type",
+        [StateType.FAILED, StateType.CRASHED, StateType.CANCELLED],
+        ids=["Failed", "Crashed", "Cancelled"],
+    )
+    async def test_terminal_non_completed_state_counts_as_failed(
+        self, mocker, state_type: StateType
+    ) -> None:
+        user_id = PydanticObjectId()
+        shards = _partition_into_shards([_shard("https://e.example")], 1)
+
+        async def _fake_run_deployment(name, parameters=None, **kwargs):
+            return flow_run_in_state(state_type, "worker exploded")
+
+        runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+        stats = await _fan_out_data(
+            user_id=user_id, shards=shards, run_deployment=runner
+        )
+
+        assert stats.shards_total == 1
+        assert stats.succeeded == 0
+        assert stats.failed == 1
+        assert "worker exploded" in stats.failures["0"]
+
+    async def test_summary_partitions_completed_from_failed_shards(
+        self, mocker
+    ) -> None:
+        """The one live #093 symptom: 2 failed + 1 completed ⇒ succeeded=1 failed=2."""
+
+        user_id = PydanticObjectId()
+        shards = _partition_into_shards(
+            [_shard(f"https://e{i}.example") for i in range(3)], 3
+        )
+        outcomes = [
+            completed_flow_run(),
+            flow_run_in_state(StateType.FAILED),
+            flow_run_in_state(StateType.CRASHED),
+        ]
+        uris = [shard[0]["uri"] for shard in shards]
+
+        async def _fake_run_deployment(name, parameters=None, **kwargs):
+            params = parameters or {}
+            return outcomes[uris.index(params["sources"][0]["uri"])]
+
+        runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+        stats = await _fan_out_data(
+            user_id=user_id, shards=shards, run_deployment=runner
+        )
+
+        assert stats.shards_total == 3
+        assert stats.succeeded == 1
+        assert stats.failed == 2
+        assert set(stats.failures) == {"1", "2"}
 
 
 async def test_fan_out_no_shards_is_noop(mocker) -> None:
@@ -218,6 +297,7 @@ async def test_fan_out_data_forwards_trace_headers(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -245,6 +325,7 @@ async def test_fan_out_data_omits_headers_when_none(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 

@@ -90,6 +90,7 @@ from tree.observability import (
     span,
     tracked_span,
 )
+from tree.sharding import _shard_failure_reason
 
 # Pipeline-identity tags, shared 1:1 with this pipeline's Prefect deployment /
 # flow-run tags (``prefect.tags(*_DATA_TAGS)`` below).
@@ -425,6 +426,12 @@ async def _fan_out_data(
       worker has no such param). A single shard's exception is caught, logged,
       recorded in ``stats.failures``, and the gather still completes for the
       others (ADR-002 §3).
+    * A shard counts as succeeded ONLY when its flow run comes back COMPLETED
+      (``_shard_failure_reason``, #095). ``run_deployment`` RETURNS a Failed /
+      Crashed / Cancelled run instead of raising, so counting "it returned" as
+      success let this summary — the operator's main signal that an offline run
+      worked — read ``succeeded=1 failed=0`` while two workers had hard-failed
+      and their documents were missing.
     * NO trailing/index run — the data pipeline only produces ``documents``;
       there is no index. This function fires EXACTLY ``len(shards)`` worker runs
       and nothing else.
@@ -462,14 +469,15 @@ async def _fan_out_data(
     )
 
     for idx, result in enumerate(results):
-        if isinstance(result, Exception):
+        failure = _shard_failure_reason(result)
+        if failure is not None:
             stats.failed += 1
-            stats.failures[str(idx)] = str(result)
+            stats.failures[str(idx)] = failure
             log.error(
                 "data fan-out: shard %d FAILED (isolated): %s",
                 idx,
-                result,
-                exc_info=result,
+                failure,
+                exc_info=result if isinstance(result, BaseException) else None,
             )
             continue
         stats.succeeded += 1

@@ -56,7 +56,11 @@ from tree.entities.documents import Document
 # and data coordinators import the IDENTICAL helpers without copy-paste. Memory
 # extraction keeps importing them through this module (behaviour unchanged); the
 # functions are re-exported so existing call sites and tests are untouched.
-from tree.sharding import _partition_into_shards, _resolve_num_shards
+from tree.sharding import (
+    _partition_into_shards,
+    _resolve_num_shards,
+    _shard_failure_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +188,10 @@ async def _fan_out_extraction(
       deployment, so there is NO recursion and NO ``num_shards`` child key (the
       worker has no such param). A single shard's exception is caught, logged,
       recorded in ``stats.failures``, and the gather still completes for the others
-      (ADR-002 §3).
+      (ADR-002 §3). A shard counts as succeeded ONLY when its flow run comes back
+      COMPLETED (``_shard_failure_reason``, #095) — ``run_deployment`` RETURNS a
+      Failed / Crashed / Cancelled run instead of raising, and counting that as a
+      success made the summary read green while extraction output was missing.
     * After the gather, a SINGLE ``memory-indexing-etl`` run for the user fires —
       never per-shard (indexing is a global backfill; per-shard would race
       writers). The index run fires regardless of how many shards failed, so a
@@ -224,14 +231,15 @@ async def _fan_out_extraction(
     )
 
     for idx, result in enumerate(results):
-        if isinstance(result, Exception):
+        failure = _shard_failure_reason(result)
+        if failure is not None:
             stats.failed += 1
-            stats.failures[str(idx)] = str(result)
+            stats.failures[str(idx)] = failure
             log.error(
                 "extraction fan-out: shard %d FAILED (isolated): %s",
                 idx,
-                result,
-                exc_info=result,
+                failure,
+                exc_info=result if isinstance(result, BaseException) else None,
             )
             continue
         stats.succeeded += 1

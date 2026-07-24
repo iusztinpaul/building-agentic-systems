@@ -13,15 +13,27 @@ NEW reuse contract directly against ``tree.sharding``:
 * the partitioning math is GENERIC over the element type (the data coordinator
   shards a list of arbitrary source items, not just ``str`` doc ids), and
 * the canonical import home is ``tree.sharding`` — the path #068 will import from.
+
+#095 added a third shared helper here, ``_shard_failure_reason`` — the single
+"did this shard's flow run genuinely COMPLETE?" rule both fan-outs apply to what
+``run_deployment`` returns.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from uuid import uuid4
 
 import pytest
+from prefect.client.schemas.objects import FlowRun, StateType
 
-from tree.sharding import _partition_into_shards, _resolve_num_shards
+from tests.prefect_doubles import completed_flow_run, flow_run_in_state
+from tree.sharding import (
+    _partition_into_shards,
+    _resolve_num_shards,
+    _shard_failure_reason,
+)
 
 
 @dataclass(frozen=True)
@@ -94,3 +106,56 @@ def test_resolve_num_shards_clamps_nonpositive_to_one(bad) -> None:
 @pytest.mark.parametrize("good", [1, 2, 4, 9])
 def test_resolve_num_shards_positive_is_unchanged(good) -> None:
     assert _resolve_num_shards(good) == good
+
+
+# ---------------------------------------------------------------------------
+# Shard-outcome classification (#095) — the shared "did this run COMPLETE?" rule
+# ---------------------------------------------------------------------------
+
+
+def test_completed_flow_run_is_not_a_failure() -> None:
+    assert _shard_failure_reason(completed_flow_run()) is None
+
+
+@pytest.mark.parametrize(
+    "state_type",
+    [StateType.FAILED, StateType.CRASHED, StateType.CANCELLED],
+    ids=["Failed", "Crashed", "Cancelled"],
+)
+def test_non_completed_terminal_state_is_a_failure(state_type: StateType) -> None:
+    """Every non-``COMPLETED`` terminal state is a failure, named by state.
+
+    ``run_deployment`` RETURNS (rather than raising) for all three, which is
+    exactly how a hard-failed worker used to be counted as a success.
+    """
+
+    reason = _shard_failure_reason(flow_run_in_state(state_type, "worker exploded"))
+
+    assert reason is not None
+    assert state_type.value.capitalize() in reason
+    assert "worker exploded" in reason
+
+
+def test_raised_exception_is_a_failure_carrying_its_message() -> None:
+    reason = _shard_failure_reason(RuntimeError("shard blew up"))
+
+    assert reason == "shard blew up"
+
+
+def test_bare_base_exception_falls_back_to_its_type_name() -> None:
+    """A cancelled child arrives as an empty-message ``BaseException``.
+
+    ``asyncio.gather(return_exceptions=True)`` hands back a ``CancelledError``
+    (a ``BaseException``, NOT an ``Exception``) for a cancelled child, so the
+    classifier must recognise it and still say something useful.
+    """
+
+    assert _shard_failure_reason(asyncio.CancelledError()) == "CancelledError"
+
+
+def test_result_without_a_state_is_a_failure_not_a_silent_success() -> None:
+    """We never report success for a run whose outcome we could not read."""
+
+    reason = _shard_failure_reason(FlowRun(flow_id=uuid4()))
+
+    assert reason == "flow run reported no terminal state"

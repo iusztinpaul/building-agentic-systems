@@ -1,16 +1,18 @@
-"""Neutral, pipeline-agnostic shard-partitioning helpers (ADR-002 §3).
+"""Neutral, pipeline-agnostic shard helpers (ADR-002 §3).
 
-These two PURE functions are the single home for the balanced-contiguous
-partitioning math shared by BOTH coordinators:
+These PURE functions are the single home for the balanced-contiguous
+partitioning math — and for the shard-OUTCOME rule (#095) — shared by BOTH
+coordinators:
 
 * the memory-extraction coordinator, which shards a ``list[str]`` of pending
   document ids (``tree.memory.extraction``), and
 * the data coordinator (#068), which shards the configured ``sources:`` list.
 
-They depend only on ``len()`` and slicing, so they are generic over the element
-type (``list[T] -> list[list[T]]``). Living at the ``tree`` top level — not under
-``memory/`` or ``data/`` — lets both coordinators import the IDENTICAL math with
-zero copy-paste and no cross-module (memory↔data) dependency.
+The partitioning pair depends only on ``len()`` and slicing, so it is generic
+over the element type (``list[T] -> list[list[T]]``). Living at the ``tree`` top
+level — not under ``memory/`` or ``data/`` — lets both coordinators import the
+IDENTICAL logic with zero copy-paste and no cross-module (memory↔data)
+dependency.
 
 There is NO Prefect ``@flow`` and NO deployment here — these are pure decision
 helpers, unit-tested directly.
@@ -18,7 +20,7 @@ helpers, unit-tested directly.
 
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -72,3 +74,36 @@ def _partition_into_shards(items: list[T], num_shards: int) -> list[list[T]]:
         shards.append(items[start : start + size])
         start += size
     return shards
+
+
+def _shard_failure_reason(result: Any) -> str | None:
+    """Why one settled shard dispatch is NOT a success — ``None`` if it completed.
+
+    ``asyncio.gather(return_exceptions=True)`` hands back either the exception a
+    dispatch raised or the ``FlowRun`` ``run_deployment`` returned, hence ``Any``.
+    Both are failure shapes:
+
+    * an exception (``BaseException``, so a gathered ``CancelledError`` counts
+      too) → its message, or its type name when the message is empty;
+    * a flow run whose terminal state is anything but ``COMPLETED`` — Failed,
+      Crashed, Cancelled. ``run_deployment`` RETURNS such a run instead of
+      raising, which is how a hard-failed worker used to be counted as a success
+      and the fan-out summary read ``succeeded=1 failed=0`` while data was
+      missing (#095). Decided by Prefect's own ``State.is_completed()``, never by
+      matching state-name strings.
+
+    A result carrying no state at all is a failure too: we never report success
+    for a run whose outcome we could not read.
+    """
+
+    if isinstance(result, BaseException):
+        return str(result) or type(result).__name__
+
+    state = getattr(result, "state", None)
+    if state is None:
+        return "flow run reported no terminal state"
+    if state.is_completed():
+        return None
+
+    detail = f" ({state.message})" if state.message else ""
+    return f"flow run finished in state {state.name}{detail}"
