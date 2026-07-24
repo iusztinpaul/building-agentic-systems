@@ -138,21 +138,43 @@ async def load_video_document(doc: Document) -> Document | None:
     - Substack's ``load_document`` requires a synthetic ``raw_entry`` dict;
       passing a fake one would obscure that we deliberately skip references.
 
-    Returns the persisted Document, or ``None`` when an existing non-LATENT
-    document already lives at the same canonical URL.
+    Returns the persisted Document, or ``None`` when an existing successfully
+    ingested non-LATENT document already lives at the same canonical URL.
+
+    Two kinds of existing row are REPLACEABLE rather than a skip:
+
+    - a `SourceType.LATENT` placeholder (a reference discovered before its
+      own ingestion), and
+    - a row carrying an `ingest_error` — a persisted ingest failure. Every
+      later run re-attempts it (no attempt cap, per ADR-004 §6) and logs a
+      WARNING naming the prior error, so a permanently failing video is
+      visible instead of silently retried forever.
     """
 
     existing = await Document.find_one(
         {"user_id": doc.user_id, "source_uri": doc.source_uri}
     )
-    if existing and existing.source_type != SourceType.LATENT:
+    if (
+        existing
+        and existing.source_type != SourceType.LATENT
+        and existing.ingest_error is None
+    ):
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None
 
     if existing:
+        if existing.ingest_error is not None:
+            logger.warning(
+                "Re-attempting previously failed ingest: %s (prior error: %s)",
+                doc.source_uri,
+                existing.ingest_error,
+            )
+            outcome = "Replaced errored document"
+        else:
+            outcome = "Upgraded latent document"
         doc.id = existing.id
         await doc.replace()
-        logger.info("Upgraded latent document: %s", doc.source_uri)
+        logger.info("%s: %s", outcome, doc.source_uri)
     else:
         try:
             await doc.insert()
