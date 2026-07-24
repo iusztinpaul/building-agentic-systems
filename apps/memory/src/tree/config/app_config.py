@@ -257,6 +257,31 @@ class PrefectConfig(BaseModel):
     deploy_optional: bool = False
 
 
+class YouTubeConfig(BaseModel):
+    """Static tuning for the YouTube ETL's Bright Data collection (ADR-004).
+
+    Two timing knobs only — credential PRESENCE is the backend switch, so
+    there is no ``enabled`` flag and no new env var. The dataset id and the
+    Web Scraper API URLs are API identity, not tuning, so they stay module
+    constants in ``tree.data.youtube.brightdata_transcript_fetcher`` /
+    ``tree.data.web.web_scraper_api``.
+
+    * ``brightdata_timeout_seconds`` — upper bound on the wait for ONE
+      collection. A live probe measured ~173 s for a single video; 600 is the
+      Bright Data CLI default. Hitting it is a fallback trigger (#092), not a
+      task failure.
+    * ``brightdata_poll_interval_seconds`` — delay between two ``/progress``
+      reads.
+
+    Lives here rather than on ``YouTubeVideoSource`` because ADR-003 made
+    source entries operator DATA under ``sources/``; these are static app
+    tuning, like ``concurrency:``.
+    """
+
+    brightdata_timeout_seconds: float = 600.0
+    brightdata_poll_interval_seconds: float = 10.0
+
+
 class QueryConfig(BaseModel):
     top_k: int = 10
     max_hops: int = 1
@@ -553,6 +578,7 @@ class AppConfig(BaseModel):
     concurrency: ConcurrencyConfig = ConcurrencyConfig()
     prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
+    youtube: YouTubeConfig = YouTubeConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}

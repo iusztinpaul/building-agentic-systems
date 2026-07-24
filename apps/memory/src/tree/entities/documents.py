@@ -38,6 +38,16 @@ class Document(BeanieDocument):
     # No index is created on this field — it is a bag, not a queryable
     # surface.
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Normalized ingest-failure marker: ``"<code>: <message>"`` — a short
+    # stable code, a colon, then a human message (e.g.
+    # ``"no_transcript: no captions on either backend"``,
+    # ``"invalid_url: no video id in input"``). NEVER a raw exception dump.
+    # Set when ingestion could not produce content, so a failure row carries
+    # ``content=None`` and is excluded from extraction by the existing
+    # ``{"content": {"$ne": None}}`` filters. ``None`` on every successfully
+    # ingested row. Nullable → no migration; not indexed (inspected ad hoc,
+    # not a query surface).
+    ingest_error: str | None = None
 
     class Settings:
         name = "documents"

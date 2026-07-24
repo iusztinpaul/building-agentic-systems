@@ -11,6 +11,7 @@ from tree.config.app_config import (
     DreamConfig,
     HuggingFaceDatasetSource,
     SourceEntry,
+    YouTubeConfig,
     load_app_config,
 )
 
@@ -127,6 +128,41 @@ class TestLoadAppConfig:
         config = load_app_config(custom)
 
         assert config.prefect.deploy_optional is True
+
+    def test_youtube_block_loaded_from_default_yaml(self, frozen_config_path):
+        """The #091 ``youtube:`` block drives the Bright Data collection wait."""
+
+        config = load_app_config(frozen_config_path)
+
+        assert config.youtube.brightdata_timeout_seconds == 600.0
+        assert config.youtube.brightdata_poll_interval_seconds == 10.0
+
+    def test_youtube_defaults_when_absent(self, tmp_path):
+        """A YAML with no ``youtube`` block falls back to the typed defaults."""
+
+        custom = tmp_path / "no_youtube.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.youtube == YouTubeConfig()
+        assert config.youtube.brightdata_timeout_seconds == 600.0
+        assert config.youtube.brightdata_poll_interval_seconds == 10.0
+
+    def test_youtube_timing_knobs_loaded_from_yaml(self, tmp_path):
+        """An operator can retune the collection wait without touching code."""
+
+        custom = tmp_path / "youtube.yaml"
+        custom.write_text(
+            "youtube:\n"
+            "  brightdata_timeout_seconds: 90\n"
+            "  brightdata_poll_interval_seconds: 3\n"
+        )
+
+        config = load_app_config(custom)
+
+        assert config.youtube.brightdata_timeout_seconds == 90.0
+        assert config.youtube.brightdata_poll_interval_seconds == 3.0
 
     def test_dream_defaults_when_absent(self, tmp_path):
         """A YAML with no ``dream`` block falls back to the typed defaults."""

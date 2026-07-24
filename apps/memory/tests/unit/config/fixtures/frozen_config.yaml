@@ -67,6 +67,10 @@ mcp:
   max_retries: 1
   max_results: 10
 
+youtube:
+  brightdata_timeout_seconds: 600
+  brightdata_poll_interval_seconds: 10
+
 observability:
   enabled: true
   embedding_price_per_1m_tokens:

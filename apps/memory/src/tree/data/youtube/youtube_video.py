@@ -37,6 +37,11 @@ _OEMBED_ENDPOINT = "https://www.youtube.com/oembed"
 _OEMBED_TIMEOUT_SECONDS = 30.0
 _SUMMARY_MAX_CHARS = 280
 
+# The normalized ``ingest_error`` for an input we could not resolve to a video
+# id at all (ADR-004 §6). Such a row is keyed on the RAW input string, since no
+# canonical URL exists for it.
+INVALID_URL_ERROR = "invalid_url: no video id in input"
+
 
 async def fetch_oembed_metadata(video_url: str) -> dict[str, Any]:
     """Fetch best-effort oEmbed metadata for a YouTube video URL.
@@ -126,6 +131,43 @@ def build_document(
     )
 
 
+def build_failure_document(
+    *,
+    source_uri: str,
+    metadata: VideoMetadata | None,
+    ingest_error: str,
+    user_id: PydanticObjectId,
+) -> Document:
+    """Assemble a persisted ingest-FAILURE row for a video we could not ingest.
+
+    Failures are data, not scrolled-away WARNINGs (ADR-004 §6): the row keeps
+    whatever base metadata exists (title, channel, publish date) and carries
+
+    - ``content=None`` — which the extraction pipelines already exclude via
+      ``{"content": {"$ne": None}}``, so no downstream change is needed, and
+    - a NORMALIZED ``ingest_error`` (``"<code>: <message>"``, never a raw
+      exception dump) naming what actually happened.
+
+    ``source_uri`` is the canonical ``watch?v=…`` URL when the video resolved
+    (so a later successful run replaces this row), or the RAW input string when
+    it did not — ``metadata`` is ``None`` in exactly that case.
+
+    The row goes through the normal `load_video_document` path, so #089's
+    replace-on-retry semantics apply: the next run re-attempts it.
+    """
+
+    return Document(
+        source_type=SourceType.YOUTUBE,
+        source_uri=source_uri,
+        user_id=user_id,
+        title=metadata.title if metadata else None,
+        content=None,
+        authors=[metadata.channel] if metadata and metadata.channel else [],
+        date=metadata.publish_date if metadata else None,
+        ingest_error=ingest_error,
+    )
+
+
 async def load_video_document(doc: Document) -> Document | None:
     """Dedup and persist a single YouTube `Document`.
 
@@ -138,21 +180,43 @@ async def load_video_document(doc: Document) -> Document | None:
     - Substack's ``load_document`` requires a synthetic ``raw_entry`` dict;
       passing a fake one would obscure that we deliberately skip references.
 
-    Returns the persisted Document, or ``None`` when an existing non-LATENT
-    document already lives at the same canonical URL.
+    Returns the persisted Document, or ``None`` when an existing successfully
+    ingested non-LATENT document already lives at the same canonical URL.
+
+    Two kinds of existing row are REPLACEABLE rather than a skip:
+
+    - a `SourceType.LATENT` placeholder (a reference discovered before its
+      own ingestion), and
+    - a row carrying an `ingest_error` — a persisted ingest failure. Every
+      later run re-attempts it (no attempt cap, per ADR-004 §6) and logs a
+      WARNING naming the prior error, so a permanently failing video is
+      visible instead of silently retried forever.
     """
 
     existing = await Document.find_one(
         {"user_id": doc.user_id, "source_uri": doc.source_uri}
     )
-    if existing and existing.source_type != SourceType.LATENT:
+    if (
+        existing
+        and existing.source_type != SourceType.LATENT
+        and existing.ingest_error is None
+    ):
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None
 
     if existing:
+        if existing.ingest_error is not None:
+            logger.warning(
+                "Re-attempting previously failed ingest: %s (prior error: %s)",
+                doc.source_uri,
+                existing.ingest_error,
+            )
+            outcome = "Replaced errored document"
+        else:
+            outcome = "Upgraded latent document"
         doc.id = existing.id
         await doc.replace()
-        logger.info("Upgraded latent document: %s", doc.source_uri)
+        logger.info("%s: %s", outcome, doc.source_uri)
     else:
         try:
             await doc.insert()
@@ -163,6 +227,13 @@ async def load_video_document(doc: Document) -> Document | None:
             # clean skip, not a failure.
             logger.debug("Skipping concurrent duplicate: %s", doc.source_uri)
             return None
-        logger.info("Ingested: %s", doc.source_uri)
+        if doc.ingest_error is not None:
+            # A failure row is NOT an ingest; saying "Ingested" here would read as
+            # a success in the logs for a document with no content at all.
+            logger.info(
+                "Recorded ingest failure: %s (%s)", doc.source_uri, doc.ingest_error
+            )
+        else:
+            logger.info("Ingested: %s", doc.source_uri)
 
     return doc

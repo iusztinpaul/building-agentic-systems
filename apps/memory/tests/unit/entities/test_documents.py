@@ -72,6 +72,45 @@ class TestDocumentModel:
         assert doc.references == []
 
 
+class TestDocumentIngestError:
+    """``ingest_error`` is the persisted-failure marker (ADR-004 §6): a
+    normalized ``"<code>: <message>"`` string on a row whose ``content`` is
+    ``None``. Nullable, unindexed, written only by the YouTube path.
+    """
+
+    async def test_ingest_error_defaults_to_none(self):
+        doc = Document(
+            source_type=SourceType.YOUTUBE,
+            source_uri="https://www.youtube.com/watch?v=eYaWxljC4sA",
+            user_id=_user_id(),
+        )
+
+        assert doc.ingest_error is None
+
+    async def test_ingest_error_round_trips_normalized_code_message_string(self):
+        error = "no_transcript: no transcript available from either backend"
+        doc = Document(
+            source_type=SourceType.YOUTUBE,
+            source_uri="https://www.youtube.com/watch?v=eYaWxljC4sA",
+            user_id=_user_id(),
+            content=None,
+            ingest_error=error,
+        )
+
+        restored = Document.model_validate(doc.model_dump())
+
+        assert restored.ingest_error == error
+        assert restored.content is None
+
+    def test_ingest_error_is_not_indexed(self) -> None:
+        index_models: list[IndexModel] = list(Document.Settings.indexes)
+
+        indexed_keys = {
+            key for im in index_models for key in im.document.get("key", {})
+        }
+        assert "ingest_error" not in indexed_keys
+
+
 class TestDocumentCompoundUniqueIndex:
     """The legacy single-field unique on ``source_uri`` becomes a compound
     unique on ``(user_id, source_type, source_uri)`` — same URI is allowed

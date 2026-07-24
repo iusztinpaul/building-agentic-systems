@@ -36,6 +36,29 @@ class VideoMetadata(BaseModel):
         return value
 
 
+def merge_video_metadata(base: VideoMetadata, override: VideoMetadata) -> VideoMetadata:
+    """Merge two metadata records — every non-``None`` `override` field wins.
+
+    The ONE merge both transcript branches run (ADR-004, Decision 5). `base` is
+    the caller's metadata (oEmbed for a single video, the Atom feed entry for
+    RSS); `override` is whatever the fetched transcript carries. A Bright Data
+    record fills title / channel / channel_id / publish_date / duration /
+    description, so those win; wherever the record is null the base survives.
+    The Gemini branch's transcript metadata carries only `video_id`, so the same
+    call leaves the base intact there — no branch-specific logic.
+
+    Pure: returns a NEW `VideoMetadata`, mutating neither argument.
+    """
+
+    return base.model_copy(
+        update={
+            field: value
+            for field, value in override.model_dump().items()
+            if value is not None
+        }
+    )
+
+
 class TranscriptSegment(BaseModel):
     """A single transcript segment as returned by the underlying backend."""
 

@@ -95,6 +95,15 @@ mcp:
   max_retries: 1
   max_results: 10
 
+# YouTube ETL: the bounded wait for ONE Bright Data transcript collection
+# (ADR-004). Credential presence is the backend switch — there is no `enabled`
+# flag and no new env var.
+youtube:
+  # Measured: ~173s to collect a single video; 600 matches the Bright Data CLI
+  # default. Hitting it falls the whole batch back to Gemini, it is not a failure.
+  brightdata_timeout_seconds: 600
+  brightdata_poll_interval_seconds: 10
+
 observability:
   enabled: true
   # Per-model USD price per 1,000,000 tokens. Used to compute the manual
