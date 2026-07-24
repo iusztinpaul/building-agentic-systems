@@ -1,12 +1,21 @@
 """YouTube transcript fetcher backed by Gemini 3.5 Flash.
 
-This is the SOLE transcript backend: `GeminiTranscriptFetcher` sends the
-canonical YouTube URL straight to Gemini via the multimodal
+This is the FALLBACK transcript backend (ADR-004,
+`docs/adrs/004_brightdata_primary_youtube_transcript_backend.md`):
+`brightdata_transcript_fetcher.BrightDataTranscriptFetcher` is primary, and
+this fetcher runs only over the slots Bright Data could not transcribe — or
+over the whole batch when Bright Data is unavailable or unconfigured. It
+sends the canonical YouTube URL straight to Gemini via the multimodal
 `Part.from_uri(...)` API and asks the model for a verbatim transcript.
 
-Costs money per call. Returns `None` only on Gemini-side errors (auth,
-quota, refusal, malformed response, empty body); a successful Gemini
-response always yields a `FetchedTranscript`.
+Costs Gemini video tokens per call — the dominant data-pipeline model spend,
+and the reason it is second in the chain. Every fallback into this fetcher is
+WARNING-logged by the caller (`fetch_transcripts_batch`) with the reason, the
+slot count, and the cost consequence, so the spend is never silent.
+
+Returns `None` only on Gemini-side errors (auth, quota, refusal, malformed
+response, empty body); a successful Gemini response always yields a
+`FetchedTranscript`.
 
 Design notes:
 - The model id is hard-coded at the constructor (`gemini-3.5-flash`).
@@ -17,8 +26,10 @@ Design notes:
   channel enrichment — Gemini may include that prose in the response body,
   but we deliberately don't parse it.
 - Per-slot failures return `None`; this layer NEVER emits a WARNING. The
-  `None`-slot WARNING lives in `fetch_transcripts_batch`
-  (`tree.data.youtube.youtube_ingest`), which names the skipped video.
+  `None`-slot WARNING still lives in `fetch_transcripts_batch`
+  (`tree.data.youtube.youtube_ingest`), which names the skipped video —
+  after #092 it fires for slots the WHOLE chain exhausted, carrying a
+  normalized `no_transcript: …` error naming both backends' states.
 """
 
 from __future__ import annotations
@@ -52,15 +63,20 @@ _TRANSCRIPT_PROMPT = (
 
 
 class GeminiTranscriptFetcher:
-    """The sole (default) YouTube transcript fetcher.
+    """The fallback YouTube transcript fetcher (ADR-004).
+
+    `BrightDataTranscriptFetcher` is the primary backend; this one runs only
+    over the slots it could not transcribe, or over the whole batch when
+    Bright Data is unavailable or unconfigured.
 
     Sends the YouTube video URL directly to Gemini 3.5 Flash via
     ``Part.from_uri(file_uri=<youtube_url>, mime_type="video/*")`` and asks
     the model to return a verbatim transcript.
 
-    Costs money per call. Returns ``None`` only on Gemini-side errors (auth,
-    quota, refusal, malformed response, empty body); a successful Gemini
-    response always yields a `FetchedTranscript`.
+    Costs Gemini video tokens per call, and every fallback into it is
+    WARNING-logged by `fetch_transcripts_batch`. Returns ``None`` only on
+    Gemini-side errors (auth, quota, refusal, malformed response, empty
+    body); a successful Gemini response always yields a `FetchedTranscript`.
 
     Metadata note: only ``VideoMetadata.video_id`` is populated here. Other
     fields (title, channel, ...) are filled by per-source pipelines: oEmbed
