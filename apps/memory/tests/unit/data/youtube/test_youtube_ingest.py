@@ -11,14 +11,19 @@ point (``youtube_ingest.BrightDataTranscriptFetcher`` /
 ``youtube_ingest.GeminiTranscriptFetcher``) — the thin seam per fetcher, required
 because both constructors raise without their API key. Credential PRESENCE is
 faked by patching ``settings`` so the suite behaves identically with or without
-keys in the operator's ``.env``.
+keys in the operator's ``.env``. ``TestBrightDataTransportFailure`` is the one
+exception: it patches a DEEPER seam (``httpx.AsyncClient`` inside
+``web_scraper_api``) because the behaviour it proves — a transport failure
+reaching the fallback chain as a typed error — lives below the fetcher.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
@@ -131,6 +136,22 @@ def _configure_backends(
     )
     mocker.patch.object(
         settings, "google_api_key", SecretStr("gemini-key" if gemini else "")
+    )
+
+
+def _patch_failing_httpx_client(mocker, error: Exception) -> None:
+    """Make every Web Scraper API request fail with ``error``, at the HTTP seam."""
+
+    client = AsyncMock()
+    client.post = AsyncMock(side_effect=error)
+    client.get = AsyncMock(side_effect=error)
+
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mocker.patch(
+        "tree.data.web.web_scraper_api.httpx.AsyncClient", return_value=client_cm
     )
 
 
@@ -311,6 +332,44 @@ class TestFallbackChain:
         assert (transcribed, failed) == ([], [])
         brightdata_ctor.assert_not_called()
         gemini_ctor.assert_not_called()
+
+
+class TestBrightDataTransportFailure:
+    """A Bright Data OUTAGE falls back like a poll timeout does (#094).
+
+    The only test in this module that runs the REAL
+    ``BrightDataTranscriptFetcher`` + ``collect``: the failure it proves is a
+    typing question at the client's HTTP seam, so injecting it at the fetcher
+    construction point (as every other test here does) would assume away the
+    very thing under test. Still fully mocked — the injection point is
+    ``httpx.AsyncClient`` inside ``web_scraper_api``, so no request leaves the
+    process.
+    """
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [httpx.ConnectError, httpx.TimeoutException],
+        ids=["ConnectError", "TimeoutException"],
+    )
+    async def test_transport_failure_sends_the_whole_batch_to_gemini(
+        self, mocker, caplog, error_type: type[httpx.TransportError]
+    ) -> None:
+        _configure_backends(mocker)
+        _patch_failing_httpx_client(mocker, error_type("bright data is unreachable"))
+        gemini = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        mocker.patch.object(
+            youtube_ingest, "GeminiTranscriptFetcher", return_value=gemini
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_INGEST_LOGGER):
+            transcribed, failed = await fetch_transcripts_batch.fn(_items())
+
+        # The task does NOT fail: the whole batch reaches the paid fallback.
+        assert gemini.calls == [[_canonical(vid) for vid in VIDEO_IDS]]
+        assert len(transcribed) == 3
+        assert failed == []
+        assert "reason=brightdata_request_error" in caplog.text
+        assert "consumes Gemini tokens and incurs API cost" in caplog.text
 
 
 class TestFallbackWarnings:

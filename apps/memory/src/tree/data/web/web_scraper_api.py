@@ -83,11 +83,11 @@ async def collect(
         BrightDataConfigurationError: If ``BRIGHTDATA_API_KEY`` is empty
             (raised before any HTTP request).
         BrightDataRequestError: On any non-2xx response, a trigger response
-            without a ``snapshot_id``, a ``failed`` collection, or a snapshot
-            body that is not a list of records.
+            without a ``snapshot_id``, a ``failed`` collection, a snapshot body
+            that is not a list of records, or a transport failure (connect/read
+            timeout, network, protocol or proxy error).
         BrightDataTimeoutError: If the snapshot is still not ready after
             ``timeout_seconds``.
-        httpx.TimeoutException: Propagated as-is on network timeout.
     """
 
     if not inputs:
@@ -229,13 +229,16 @@ async def _post_json(
 ) -> Any:
     """Single POST returning parsed JSON. Kept thin so tests patch one seam."""
 
-    async with httpx.AsyncClient(timeout=_HTTP_REQUEST_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            url,
-            params=params,
-            json=payload,
-            headers=_auth_headers(api_key),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                url,
+                params=params,
+                json=payload,
+                headers=_auth_headers(api_key),
+            )
+    except httpx.TransportError as exc:
+        raise _transport_error(url, exc) from exc
 
     return _parse_json(response)
 
@@ -248,14 +251,40 @@ async def _get_json(
 ) -> Any:
     """Single GET returning parsed JSON. Kept thin so tests patch one seam."""
 
-    async with httpx.AsyncClient(timeout=_HTTP_REQUEST_TIMEOUT_SECONDS) as client:
-        response = await client.get(
-            url,
-            params=params,
-            headers=_auth_headers(api_key),
-        )
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                url,
+                params=params,
+                headers=_auth_headers(api_key),
+            )
+    except httpx.TransportError as exc:
+        raise _transport_error(url, exc) from exc
 
     return _parse_json(response)
+
+
+def _transport_error(url: str, exc: httpx.TransportError) -> BrightDataRequestError:
+    """Type a transport failure as the error the fallback chain keys on.
+
+    "Bright Data is unreachable right now" — a connect/read timeout, a DNS or
+    TCP failure, a proxy refusal, a mid-response disconnect — is the SAME
+    operational condition as the poll timeout ADR-004 Decision 3 already routes
+    to the Gemini fallback. Letting a raw ``httpx`` error escape ``collect``
+    instead hard-fails the Prefect task and burns its retries, because the
+    fallback chain catches only the three Bright Data error types.
+
+    Scope is ``httpx.TransportError``, NOT the wider ``httpx.HTTPError``: it is
+    exactly the "request never completed" branch (timeouts, network, protocol,
+    proxy, unsupported scheme), while ``httpx.HTTPStatusError`` — a real HTTP
+    response, already handled by ``_parse_json`` — and every non-httpx error
+    stay unwrapped, so a genuine bug still surfaces as itself.
+    """
+
+    return BrightDataRequestError(
+        f"Bright Data Web Scraper API request to {url} failed at the transport "
+        f"layer: {type(exc).__name__}: {exc}"
+    )
 
 
 def _parse_json(response: httpx.Response) -> Any:
