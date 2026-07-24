@@ -90,11 +90,12 @@ class TestIngestOne:
         assert metadata.channel == "C"
         assert user_arg == user_id
 
-    async def test_unresolvable_url_returns_none_without_core_call(
-        self, mocker
-    ) -> None:
+    async def test_unresolvable_url_persists_an_invalid_url_row(self, mocker) -> None:
+        # ADR-004 §6: an unresolvable input is persisted as an ingest_error row
+        # keyed on the RAW input, so the failure is inspectable data — but the
+        # flow still reports "nothing ingested".
         core_mock = mocker.patch.object(
-            video_pipeline, "_bulk_build_and_load", mocker.AsyncMock()
+            video_pipeline, "_bulk_build_and_load", mocker.AsyncMock(return_value=[])
         )
 
         result = await _ingest_youtube_video_one(
@@ -102,7 +103,28 @@ class TestIngestOne:
         )
 
         assert result is None
-        core_mock.assert_not_awaited()
+        core_mock.assert_awaited_once()
+        items_arg, _ = core_mock.await_args.args
+        assert items_arg == []  # no transcript fetch: nothing resolvable
+        assert core_mock.await_args.kwargs["invalid_inputs"] == [
+            "https://example.com/not-youtube"
+        ]
+
+    async def test_unresolvable_url_never_triggers_a_transcript_fetch(
+        self, mocker
+    ) -> None:
+        oembed_mock = mocker.patch.object(
+            video_pipeline, "fetch_oembed_metadata", mocker.AsyncMock()
+        )
+        mocker.patch.object(
+            video_pipeline, "_bulk_build_and_load", mocker.AsyncMock(return_value=[])
+        )
+
+        await _ingest_youtube_video_one(
+            "https://example.com/not-youtube", PydanticObjectId()
+        )
+
+        oembed_mock.assert_not_awaited()
 
     async def test_returns_none_when_core_yields_nothing(self, mocker) -> None:
         mocker.patch.object(

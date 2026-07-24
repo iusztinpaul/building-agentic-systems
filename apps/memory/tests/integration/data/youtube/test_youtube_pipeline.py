@@ -3,17 +3,18 @@
 Persists real Documents against the local MongoDB fixture (`mongo_client`
 from `tests/integration/conftest.py`). Mocks:
 
-- The transcript fetcher (no `youtube-transcript-api`, no Gemini calls), injected
-  by patching `tree.data.youtube.youtube_ingest.GeminiTranscriptFetcher` (the
-  construction point inside the shared bulk core) — the flows no longer carry a
-  `fetcher` arg. Patching the class is REQUIRED because
-  `GeminiTranscriptFetcher.__init__` raises without `GOOGLE_API_KEY`.
+- BOTH transcript backends (no Bright Data collection, no Gemini call), injected
+  by patching `tree.data.youtube.youtube_ingest.BrightDataTranscriptFetcher` and
+  `...GeminiTranscriptFetcher` — the construction points inside the shared bulk
+  core; the flows carry no `fetcher` arg. Patching the classes is REQUIRED
+  because both constructors raise without their API key, and it is what keeps
+  this suite from ever billing a live backend (ADR-004, Decision 8).
 - The oEmbed HTTP call (no live network to youtube.com).
 
 Covers both the thin single-video MCP flow (`ingest_youtube_video`) and the unified
 batch (`youtube_pipeline_batch.ingest_youtube_batch`), which issues ONE bulk
 `fetch_many(all_urls)` over the whole shard — a call-count assertion on the fake
-fetcher guards that.
+PRIMARY fetcher guards that — plus the persisted `ingest_error` rows (#092).
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ import pytest
 import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
+from pydantic import SecretStr
 
+from tree.config.settings import settings
 from tree.data.youtube.types import (
     FetchedTranscript,
     TranscriptSegment,
@@ -56,10 +59,10 @@ def _make_transcript(
 
 
 class _FakeFetcher:
-    """Programmable stand-in for ``GeminiTranscriptFetcher`` recording every call.
+    """Programmable stand-in for either transcript backend, recording every call.
 
     Same ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
-    swapped in by patching ``youtube_ingest.GeminiTranscriptFetcher`` to return it.
+    swapped in by patching the backend's construction point in ``youtube_ingest``.
     Returns one element per input slot by substring-matching each URL against the
     supplied ``results_per_id`` map.
     """
@@ -83,14 +86,24 @@ class _FakeFetcher:
         return results
 
 
-def _patch_fetcher(mocker, fake: _FakeFetcher) -> None:
-    """Patch the construction point so ``GeminiTranscriptFetcher()`` yields ``fake``.
+def _patch_fetcher(mocker, fake: _FakeFetcher) -> _FakeFetcher:
+    """Patch BOTH construction points: ``fake`` is the PRIMARY (Bright Data) backend.
 
-    Patching the class (not an injected arg) sidesteps the ``GOOGLE_API_KEY`` guard in
-    ``GeminiTranscriptFetcher.__init__`` — no key/network needed.
+    Patching the classes (not injected args) sidesteps the API-key guards in both
+    constructors — no key, no network, no billed call. The Gemini fallback is
+    wired to an always-empty fake so a transcript-less primary slot exhausts the
+    chain deterministically; the returned fake is that fallback, so a test can
+    assert on what Gemini was asked for.
     """
 
-    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
+    gemini = _FakeFetcher({})
+    mocker.patch.object(
+        youtube_ingest, "BrightDataTranscriptFetcher", return_value=fake
+    )
+    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=gemini)
+    mocker.patch.object(settings, "brightdata_api_key", SecretStr("bd-key"))
+    mocker.patch.object(settings, "google_api_key", SecretStr("gemini-key"))
+    return gemini
 
 
 def _patch_oembed(mocker, payload: dict | None = None, *, status_code: int = 200):
@@ -210,33 +223,83 @@ class TestIngestYoutubeVideoFlow:
         assert len(rows) == 1
         assert rows[0].source_type == SourceType.YOUTUBE
 
-    async def test_missing_transcript_skips_quietly(
+    async def test_exhausted_transcript_persists_an_ingest_error_row(
         self, mongo_client, mocker, caplog
     ) -> None:
-        # oEmbed should not even be called when the bulk fetch returned None,
-        # but patch defensively so a regression doesn't hit the network.
         _patch_oembed(mocker)
         fake = _FakeFetcher({VIDEO_ID: None})
-        _patch_fetcher(mocker, fake)
+        gemini = _patch_fetcher(mocker, fake)  # the fallback is empty too
 
         caplog.set_level(logging.WARNING, logger=PIPELINE_LOGGER)
 
         with prefect_tags("tests"):
             result = await ingest_youtube_video(CANONICAL_URL, PydanticObjectId())
 
+        # Nothing was INGESTED …
         assert result is None
-
+        # … but the failure is persisted as inspectable data (ADR-004 §6).
         rows = await Document.find().to_list()
-        assert rows == []
+        assert len(rows) == 1
+        assert rows[0].source_uri == CANONICAL_URL
+        assert rows[0].source_type == SourceType.YOUTUBE
+        assert rows[0].content is None
+        assert rows[0].ingest_error == (
+            "no_transcript: brightdata + gemini both returned empty"
+        )
+        # The fallback ran over exactly the transcript-less slot.
+        assert gemini.calls == [[CANONICAL_URL]]
 
         # Spec: pipeline emits no redundant WARNING — the bulk core owns the
-        # "No transcript for <url>; skipping" warning in fetch_transcripts_batch.
+        # "No transcript for <url>" warning in fetch_transcripts_batch.
         pipeline_warnings = [
             r
             for r in caplog.records
             if r.name == PIPELINE_LOGGER and r.levelno >= logging.WARNING
         ]
         assert pipeline_warnings == []
+
+    async def test_later_success_replaces_a_persisted_failure_row(
+        self, mongo_client, mocker
+    ) -> None:
+        # #089 replace-on-retry, end-to-end: the failure row a first run leaves
+        # behind is REPLACED by the transcript a later run gets.
+        _patch_oembed(mocker)
+        user_id = PydanticObjectId()
+
+        _patch_fetcher(mocker, _FakeFetcher({VIDEO_ID: None}))
+        with prefect_tags("tests"):
+            first = await ingest_youtube_video(CANONICAL_URL, user_id)
+
+        _patch_fetcher(mocker, _FakeFetcher({VIDEO_ID: _make_transcript()}))
+        with prefect_tags("tests"):
+            second = await ingest_youtube_video(CANONICAL_URL, user_id)
+
+        assert first is None
+        assert second is not None
+
+        rows = await Document.find(Document.source_uri == CANONICAL_URL).to_list()
+        assert len(rows) == 1  # replaced in place, not duplicated
+        assert rows[0].ingest_error is None
+        assert rows[0].content == "Some spoken words here."
+
+    async def test_unresolvable_input_persists_an_invalid_url_row(
+        self, mongo_client, mocker
+    ) -> None:
+        _patch_oembed(mocker)
+        _patch_fetcher(mocker, _FakeFetcher({}))
+        raw_input = "https://example.com/not-a-youtube-video"
+
+        with prefect_tags("tests"):
+            result = await ingest_youtube_video(raw_input, PydanticObjectId())
+
+        assert result is None
+
+        rows = await Document.find().to_list()
+        assert len(rows) == 1
+        # Keyed on the RAW input: there is no canonical URL for it.
+        assert rows[0].source_uri == raw_input
+        assert rows[0].content is None
+        assert rows[0].ingest_error == "invalid_url: no video id in input"
 
     async def test_oembed_404_still_persists_document(
         self, mongo_client, mocker
@@ -322,6 +385,13 @@ class TestIngestYoutubeBatchFlow:
         # Still ONE bulk fetch over both URLs.
         assert len(fake.calls) == 1
         assert len(fake.calls[0]) == 2
+
+        # The exhausted slot lands as a failure row — the batch survives it.
+        rows = await Document.find(Document.source_uri == url_bad).to_list()
+        assert len(rows) == 1
+        assert rows[0].content is None
+        assert rows[0].ingest_error is not None
+        assert rows[0].ingest_error.startswith("no_transcript: ")
 
 
 @pytest.fixture(autouse=True)

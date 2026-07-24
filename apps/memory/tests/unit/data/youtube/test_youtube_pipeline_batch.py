@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from beanie import PydanticObjectId
+from pydantic import SecretStr
 
 import tree.data.youtube.youtube_ingest as youtube_ingest
 import tree.data.youtube.youtube_pipeline_batch as yt
 from tree.config.app_config import YouTubeRssSource, YouTubeVideoSource
+from tree.config.settings import settings
 from tree.data.youtube.types import (
     FetchedTranscript,
     TranscriptSegment,
@@ -52,10 +54,10 @@ async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
     # combined 5 items (the single-fetch_many win).
     feed_items = {
         "feed://A": [
-            ("https://yt/watch?v=a1", _meta("a1")),
-            ("https://yt/watch?v=a2", _meta("a2")),
+            (_canonical("aaaaaaaaaa1"), _meta("aaaaaaaaaa1")),
+            (_canonical("aaaaaaaaaa2"), _meta("aaaaaaaaaa2")),
         ],
-        "feed://B": [("https://yt/watch?v=b1", _meta("b1"))],
+        "feed://B": [(_canonical("bbbbbbbbbb1"), _meta("bbbbbbbbbb1"))],
     }
 
     async def fake_resolve_feed(feed_url):
@@ -78,8 +80,8 @@ async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
     entries = [
         YouTubeRssSource(uri="feed://A"),
         YouTubeRssSource(uri="feed://B"),
-        YouTubeVideoSource(uri="https://yt/watch?v=v1"),
-        YouTubeVideoSource(uri="https://yt/watch?v=v2"),
+        YouTubeVideoSource(uri=_canonical("vvvvvvvvvv1")),
+        YouTubeVideoSource(uri=_canonical("vvvvvvvvvv2")),
     ]
     result = await yt.ingest_youtube_batch.fn(entries, _USER_ID)
 
@@ -88,6 +90,27 @@ async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
     assert user_id == _USER_ID
     assert len(items) == 5  # 3 from feeds + 2 single videos, in ONE call
     assert result == ["doc"]
+
+
+async def test_unresolvable_loose_video_is_passed_as_an_invalid_input(mocker) -> None:
+    # ADR-004 §6: a loose video whose id cannot be resolved never reaches the
+    # oEmbed resolve — it flows to the core as a RAW input for an
+    # ``invalid_url`` ingest_error row.
+    resolve = mocker.patch.object(
+        yt, "_resolve_video_item", new_callable=AsyncMock, return_value=None
+    )
+    bulk = _patch_bulk(mocker)
+
+    await yt.ingest_youtube_batch.fn(
+        [YouTubeVideoSource(uri="https://example.com/not-youtube")], _USER_ID
+    )
+
+    resolve.assert_not_awaited()
+    items, _ = bulk.await_args.args
+    assert items == []
+    assert bulk.await_args.kwargs["invalid_inputs"] == [
+        "https://example.com/not-youtube"
+    ]
 
 
 async def test_isolates_a_failing_feed(mocker) -> None:
@@ -125,7 +148,7 @@ async def test_no_resolvable_items_skips_bulk(mocker) -> None:
 
 
 class _FakeFetcher:
-    """Programmable stand-in for ``GeminiTranscriptFetcher`` recording its calls."""
+    """Programmable stand-in for either transcript fetcher, recording its calls."""
 
     def __init__(self, transcripts: dict[str, FetchedTranscript | None]) -> None:
         self.transcripts = transcripts
@@ -156,7 +179,8 @@ def _transcript(video_id: str) -> FetchedTranscript:
 async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     # The whole point of the unification: a worker with channel feeds + loose videos
     # issues EXACTLY ONE fetch_many over the COMBINED url list (was one-per-feed + one
-    # for the loose videos). Uses the REAL _bulk_build_and_load with a fake fetcher.
+    # for the loose videos). Uses the REAL _bulk_build_and_load with a fake PRIMARY
+    # (Bright Data) fetcher — no live call, and Gemini is never needed.
     feed_vids = ["aaaaaaaaaaa", "bbbbbbbbbbb"]
     loose_vid = "ccccccccccc"
 
@@ -181,8 +205,13 @@ async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
         new_callable=AsyncMock,
         side_effect=lambda d: d,
     )
+    mocker.patch.object(settings, "brightdata_api_key", SecretStr("bd-key"))
+    mocker.patch.object(settings, "google_api_key", SecretStr("gemini-key"))
     fake = _FakeFetcher({v: _transcript(v) for v in [*feed_vids, loose_vid]})
-    mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher", return_value=fake)
+    mocker.patch.object(
+        youtube_ingest, "BrightDataTranscriptFetcher", return_value=fake
+    )
+    gemini_ctor = mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher")
 
     entries = [
         YouTubeRssSource(uri="feed://A"),
@@ -193,3 +222,4 @@ async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     assert len(fake.calls) == 1  # ONE fetch_many, not per-feed + per-loose-batch
     assert len(fake.calls[0]) == 3  # 2 feed videos + 1 loose video, combined
     assert len(result) == 3
+    gemini_ctor.assert_not_called()  # the primary covered every slot

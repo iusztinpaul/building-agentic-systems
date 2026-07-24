@@ -8,10 +8,11 @@ the resolve step — RSS metadata comes from the feed, single-video metadata fro
 oEmbed; once flattened to ``(url, VideoMetadata)`` the two are indistinguishable.
 
 Failure isolation is preserved at the flatten boundary: a feed that fails to fetch is
-logged + skipped (its items absent), an unresolvable/oEmbed-failing video is dropped,
-and ``fetch_many`` keeps its per-slot ``None``-transcript resilience. The thin
-single-video MCP flow (``youtube_pipeline.ingest_youtube_video``) and the pure
-helpers (``youtube_rss`` / ``youtube_video`` / ``youtube_ingest``) are unchanged.
+logged + skipped (its items absent), an oEmbed-failing video is dropped, and the
+shared core keeps its per-slot transcript resilience. A loose video whose id cannot
+be resolved at all is NOT dropped: it reaches the core as a raw ``invalid_url``
+ingest_error row (ADR-004 §6). Feed entries with no resolvable id stay WARNING-only —
+there is no stable key to persist them under.
 """
 
 from __future__ import annotations
@@ -32,7 +33,10 @@ from tree.data.youtube.youtube_rss import (
     feed_entry_to_metadata,
     fetch_feed,
 )
-from tree.data.youtube.youtube_pipeline import _resolve_video_item
+from tree.data.youtube.youtube_pipeline import (
+    _partition_video_inputs,
+    _resolve_video_item,
+)
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 
@@ -94,6 +98,7 @@ async def ingest_youtube_batch(
     video_urls = [e.uri for e in entries if isinstance(e, YouTubeVideoSource)]
 
     items: list[_ResolvedItem] = []
+    invalid_inputs: list[str] = []
 
     # RSS feeds → expand to per-video items, isolated per feed.
     if feed_urls:
@@ -109,20 +114,23 @@ async def ingest_youtube_batch(
                 continue
             items.extend(result)
 
-    # Single videos → oEmbed-resolve, isolated per URL (unresolvable ids drop).
+    # Single videos → oEmbed-resolve, isolated per URL. An input with no
+    # resolvable video id never reaches oEmbed: it goes to the core as a RAW
+    # ``invalid_url`` failure row (ADR-004 §6).
     if video_urls:
-        resolved, failures = await gather_isolated(video_urls, _resolve_video_item)
+        resolvable, invalid_inputs = _partition_video_inputs(video_urls)
+        resolved, failures = await gather_isolated(resolvable, _resolve_video_item)
         if failures:
             logger.warning(
-                "oEmbed resolution failed for %d/%d URLs", failures, len(video_urls)
+                "oEmbed resolution failed for %d/%d URLs", failures, len(resolvable)
             )
         items.extend(resolved)
 
-    if not items:
+    if not items and not invalid_inputs:
         logger.info("YouTube: no resolvable items in shard")
         return []
 
-    ingested = await _bulk_build_and_load(items, user_id)
+    ingested = await _bulk_build_and_load(items, user_id, invalid_inputs=invalid_inputs)
     logger.info(
         "YouTube: ingested %d items (%d feeds, %d single videos)",
         len(ingested),

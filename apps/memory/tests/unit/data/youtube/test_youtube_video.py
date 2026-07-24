@@ -24,7 +24,9 @@ from tree.data.youtube.types import (
     VideoMetadata,
 )
 from tree.data.youtube.youtube_video import (
+    INVALID_URL_ERROR,
     build_document,
+    build_failure_document,
     load_video_document,
     parse_oembed_metadata,
 )
@@ -218,6 +220,61 @@ class TestBuildDocument:
         assert doc.date == publish
 
 
+class TestBuildFailureDocument:
+    """Persisted ingest-failure rows (ADR-004 §6)."""
+
+    def test_no_transcript_row_keeps_base_metadata_and_drops_content(self) -> None:
+        metadata = VideoMetadata(
+            video_id=VIDEO_ID, title="An Interesting Video", channel="The Channel"
+        )
+
+        doc = build_failure_document(
+            source_uri=CANONICAL_URL,
+            metadata=metadata,
+            ingest_error="no_transcript: brightdata + gemini both returned empty",
+            user_id=_USER_ID,
+        )
+
+        assert doc.source_type == SourceType.YOUTUBE
+        assert doc.source_uri == CANONICAL_URL
+        assert doc.title == "An Interesting Video"
+        assert doc.authors == ["The Channel"]
+        # `content=None` is what keeps the row out of extraction (the existing
+        # `{"content": {"$ne": None}}` filter).
+        assert doc.content is None
+        assert doc.ingest_error == (
+            "no_transcript: brightdata + gemini both returned empty"
+        )
+
+    def test_no_transcript_row_carries_the_known_publish_date(self) -> None:
+        publish = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        metadata = VideoMetadata(video_id=VIDEO_ID, publish_date=publish)
+
+        doc = build_failure_document(
+            source_uri=CANONICAL_URL,
+            metadata=metadata,
+            ingest_error="no_transcript: brightdata returned empty; gemini not configured",
+            user_id=_USER_ID,
+        )
+
+        assert doc.date == publish
+
+    def test_invalid_url_row_is_keyed_on_the_raw_input(self) -> None:
+        doc = build_failure_document(
+            source_uri="pls transcribe this",
+            metadata=None,
+            ingest_error=INVALID_URL_ERROR,
+            user_id=_USER_ID,
+        )
+
+        assert doc.source_uri == "pls transcribe this"
+        assert doc.title is None
+        assert doc.authors == []
+        assert doc.date is None
+        assert doc.content is None
+        assert doc.ingest_error == "invalid_url: no video id in input"
+
+
 class TestLoadVideoDocument:
     async def test_replaces_existing_errored_row(self, mocker) -> None:
         """ADR-004 §6: a row carrying `ingest_error` is REPLACEABLE on a later
@@ -293,6 +350,24 @@ class TestLoadVideoDocument:
             await load_video_document(doc)
 
         assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    async def test_new_failure_row_is_not_logged_as_an_ingest(
+        self, mocker, caplog
+    ) -> None:
+        doc = Document(
+            source_type=SourceType.YOUTUBE,
+            source_uri=CANONICAL_URL,
+            user_id=_USER_ID,
+            ingest_error=INVALID_URL_ERROR,
+        )
+        _patch_find_one(mocker, None)
+        mocker.patch(f"{_LOADER_LOGGER}.Document.insert", new_callable=mocker.AsyncMock)
+
+        with caplog.at_level(logging.INFO, logger=_LOADER_LOGGER):
+            await load_video_document(doc)
+
+        assert "Recorded ingest failure" in caplog.text
+        assert "Ingested:" not in caplog.text
 
     async def test_returns_none_on_duplicate_key_race(self, mocker) -> None:
         """The in-batch collision path: a flattened unified batch can hold the
