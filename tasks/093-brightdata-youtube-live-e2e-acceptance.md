@@ -654,3 +654,68 @@ feature's diff (confirmed via `git log main..HEAD`), correctly routed to a rollu
 task rather than fixed here or hidden. All non-live gates (format, lint, pre-commit,
 unit, CI-mirror integration) reproduced green with 0 warnings. Hand off to PA for
 acceptance review.
+
+### [PA] 2026-07-24 17:05 — Acceptance Review (feature `brightdata-youtube-transcripts`, tasks #089–#093, PR #34)
+
+**VERDICT: ACCEPT**
+
+Reviewed the whole feature from the user's perspective against the user's own
+grilling-session asks, not only the task ACs. Every ask maps to shipped, live-verified
+behavior:
+
+1. **Fallback per credential combination** — both keys: Bright Data primary inside the
+   YouTube ETL (not the generic web ETL), Gemini rescues transcript-less slots AND any
+   batch-wide Bright Data failure (`youtube_ingest.py:113-140`, live runs 1/2/A).
+   BD key absent: whole batch → Gemini (run 2). Neither key: up-front
+   `RuntimeError: Neither BRIGHTDATA_API_KEY nor GOOGLE_API_KEY is configured; see
+   .env.example` before any billable call (run 3). BD-only: misses become error rows
+   instead of a crash — a sensible completion of the user's matrix.
+2. **Cost WARNING** — single warning site fires on EVERY Gemini invocation ("Falling
+   back to Gemini for N/M videos (reason=…) — consumes Gemini tokens and incurs API
+   cost"), at WARNING level, which is exactly the level that reaches the terminal /
+   Prefect store from workers (INFO does not) — genuinely visible, explicitly costed.
+3. **"What failed / what to rerun"** — `Document.ingest_error` is a normalized
+   `code: message` from a fixed vocabulary; `{ingest_error: {$ne: null}}` lists
+   failures, the code prefix tells the user the fix (`invalid_url` → fix input,
+   `…not configured` → set a key, `both returned empty` → no captions), and a plain
+   pipeline re-run auto-retries errored rows with a WARNING naming the prior error —
+   verified live (run A → run 1, same `_id` replaced; success rows never clobbered by
+   later failures).
+4. **"Completely separate"** as clarified — two independent fetchers, no base class,
+   `gemini_transcript_fetcher.py` byte-identical; ONE `merge_video_metadata` combines
+   feed/oEmbed base metadata with either backend's output in BOTH branches (BD non-None
+   wins → real 2009 publish date in run 1; Gemini carries only `video_id` → base intact
+   in run 2).
+5. **Testing posture** — committed suite is mocked/fixture-only, mapping proven against
+   the genuine captured vendor snapshot fixture; live proof was the one-off operator
+   run in #093, not a committed test. Exactly "recorded and mocked", "one-off, not in
+   the integration tests".
+6. **Scope** — nothing missing; nothing unasked-for. The `youtube:` YAML block (2
+   timing knobs, no `enabled` toggle, no new env vars) is the minimum the bounded
+   async wait needs. No speculative interface. ADR-004 (one ADR for the feature,
+   Accepted) + 3 glossary terms used consistently in code and copy.
+
+Adjacent follow-up candidates (out of feature scope, new tasks — not expansion):
+coordinator fan-out counting a FAILED worker as succeeded (`offline_pipeline.py:464`,
+pre-existing); serve-start draining the nightly cron backlog under the current user;
+Gemini-side unexpected exception mid-fallback re-billing Bright Data on Prefect retry.
+
+All acceptance criteria verified from user POV. Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-07-24 — Review (PR #34, branch `feat/brightdata-youtube-transcripts`)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed all 29 changed files (~6,000 added lines) against `docs/adrs/004_brightdata_primary_youtube_transcript_backend.md` (Accepted): full diff read file-by-file; walked performance, clean-code, untested-code, standards, documentation-discipline, and simplicity dimensions. Re-ran `make memory-unit-tests` on the local env: 1,824 passed.
+
+Verified specifically:
+- **No test can trigger a live paid call** — every Bright Data path is patched at the `collect` seam or the `_post_json`/`_get_json` seams; both fetcher construction points are patched in ingest/pipeline/integration tests; credential presence is faked via `settings` patches, so the suite behaves identically with or without keys in `.env`. The committed snapshot fixture carries no credentials (the `video_url` googlevideo link is an expired signed playback URL, not a secret).
+- Credential gate raises before either fetcher is constructed; an unconfigured backend is never built; fetchers stay inside the Prefect task body (never task inputs).
+- `merge_video_metadata` is pure, non-mutating, and cannot drop base metadata (only non-None override fields win; Gemini's video_id-only metadata leaves base intact — unit-proven).
+- `web_scraper_api` trigger/poll/download loop: bounded deadline, sleep clamped to remaining time, `failed` status → typed error, 2xx-with-non-JSON body (WAF/captcha/empty) → `BrightDataRequestError`, keeping the fallback chain intact.
+- Fetcher record→slot realignment by video id (arbitrary order, dedup billed once, `input.url` fallback) and ms→s conversion asserted against the real captured fixture.
+- Docs discipline: ADR-004 present + Accepted; glossary gains Transcript fetcher / Transcript fallback chain / Ingest error; no ADR contradicted.
+
+Blockers: 0; Nits: 4 (appended to the PR #34 description): stale "SOLE backend" docstrings in `gemini_transcript_fetcher.py`; untyped httpx transport errors bypassing the fallback chain in `web_scraper_api.py` (consistent with `web_unlocker`, non-blocking); missing return annotations on new test helpers; the two known follow-ups confirmed as recorded.
+
+Pipeline may advance to hand-off.
