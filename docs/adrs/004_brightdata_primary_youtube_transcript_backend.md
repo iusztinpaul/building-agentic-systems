@@ -1,6 +1,6 @@
 # ADR-004: Bright Data as Primary YouTube Transcript Backend, Gemini as Fallback
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-24
 - **Deciders:** Paul (project owner)
 - **Context references:**
