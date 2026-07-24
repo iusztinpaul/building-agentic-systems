@@ -31,6 +31,7 @@ import inspect
 import pytest
 from beanie import PydanticObjectId
 
+from tests.prefect_doubles import completed_flow_run
 from tree.config.app_config import (
     HuggingFaceDatasetSource,
     SourceEntry,
@@ -60,6 +61,9 @@ def _capture_run_deployment(mocker) -> list[tuple[str, dict]]:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        # #095: the fan-out counts a shard succeeded only on a COMPLETED run, so
+        # the double returns what ``run_deployment`` really returns.
+        return completed_flow_run()
 
     mocker.patch(
         "tree.data.offline_pipeline.run_deployment",
@@ -378,6 +382,7 @@ async def test_one_shard_failure_is_isolated(mocker) -> None:
         # Fail whichever shard contains the YouTube entries.
         if any(s.get("type") == "youtube_video" for s in params.get("sources", [])):
             raise RuntimeError("bright data fetch error")
+        return completed_flow_run()
 
     mocker.patch(
         "tree.data.offline_pipeline.run_deployment",

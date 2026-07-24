@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 import pytest
 from beanie import PydanticObjectId
 
+from tests.prefect_doubles import completed_flow_run
 from tree.entities.documents import Document, SourceType
 from tree.entities.knowledge_graph import NodeType
 from tree.memory.extraction.pipeline import (
@@ -197,6 +198,9 @@ def spy_run_deployment(mocker):
 
     async def _fake(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        # #095: the fan-out counts a shard succeeded only on a COMPLETED run, so
+        # the spy returns what ``run_deployment`` really returns.
+        return completed_flow_run()
 
     mocker.patch(
         "tree.memory.extraction.pipeline.run_deployment",
@@ -324,6 +328,7 @@ async def test_coordinator_isolates_one_shard_failure_and_still_indexes(
         # Fail the first worker shard only.
         if "worker" in name and params.get("document_ids") == ids[:2]:
             raise RuntimeError("transient shard error")
+        return completed_flow_run()
 
     mocker.patch("tree.memory.extraction.pipeline.run_deployment", side_effect=_fake)
 

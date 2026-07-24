@@ -13,6 +13,10 @@ the PURE logic with no Prefect server and ``run_deployment`` mocked:
   param), driven through a fake ``run_deployment`` so we never touch a real
   deployment.
 
+Since #095 every fake returns a real ``FlowRun`` — the shape ``run_deployment``
+actually returns — because the fan-out now counts a shard as succeeded only when
+that run's terminal state is COMPLETED.
+
 The coordinator flow ``memory_extract_etl_coordinator(...)`` and pending-doc
 resolution against Mongo are covered by the integration test
 (``tests/integration/memory/test_extraction_fanout.py``).
@@ -22,7 +26,9 @@ from __future__ import annotations
 
 import pytest
 from beanie import PydanticObjectId
+from prefect.client.schemas.objects import StateType
 
+from tests.prefect_doubles import completed_flow_run, flow_run_in_state
 from tree.memory.extraction.sharding import (
     FanOutStats,
     _fan_out_extraction,
@@ -165,6 +171,7 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(mocker) -> Non
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -203,6 +210,7 @@ async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -226,6 +234,7 @@ async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -254,6 +263,7 @@ async def test_fan_out_children_carry_no_num_shards_key(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -275,6 +285,7 @@ async def test_fan_out_indexing_carries_user_id_only(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -303,6 +314,7 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
             failing_shard_ids
         ):
             raise RuntimeError("shard blew up")
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -324,6 +336,71 @@ async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
     # The single indexing run still fires AFTER the gather.
     assert len(indexing_calls) == 1
     assert "indexing" in calls[-1][0]
+
+
+class TestNonCompletedWorkerRuns:
+    """A worker that hard-FAILS is counted as failed, never as succeeded (#095).
+
+    The data coordinator's twin defect: ``run_deployment`` RETURNS the finished
+    flow run for a Failed / Crashed / Cancelled worker instead of raising, so
+    counting "it returned" as success let the fan-out summary read green while
+    extraction output was missing.
+    """
+
+    @pytest.mark.parametrize(
+        "state_type",
+        [StateType.FAILED, StateType.CRASHED, StateType.CANCELLED],
+        ids=["Failed", "Crashed", "Cancelled"],
+    )
+    async def test_terminal_non_completed_state_counts_as_failed(
+        self, mocker, state_type: StateType
+    ) -> None:
+        user_id = PydanticObjectId()
+        shards = _partition_into_shards([str(PydanticObjectId())], 1)
+
+        async def _fake_run_deployment(name, parameters=None, **kwargs):
+            if "worker" in name:
+                return flow_run_in_state(state_type, "worker exploded")
+            return completed_flow_run()
+
+        runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+        stats = await _fan_out_extraction(
+            user_id=user_id, shards=shards, run_deployment=runner
+        )
+
+        assert stats.shards_total == 1
+        assert stats.succeeded == 0
+        assert stats.failed == 1
+        assert "worker exploded" in stats.failures["0"]
+
+    async def test_index_run_still_fires_after_a_failed_worker_state(
+        self, mocker
+    ) -> None:
+        """A state-failed shard is a PARTIAL extraction — still indexed, as before."""
+
+        user_id = PydanticObjectId()
+        ids = [str(PydanticObjectId()) for _ in range(2)]
+        shards = _partition_into_shards(ids, 2)
+        calls: list[str] = []
+
+        async def _fake_run_deployment(name, parameters=None, **kwargs):
+            calls.append(name)
+            params = parameters or {}
+            if params.get("document_ids") == [ids[0]]:
+                return flow_run_in_state(StateType.FAILED)
+            return completed_flow_run()
+
+        runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+        stats = await _fan_out_extraction(
+            user_id=user_id, shards=shards, run_deployment=runner
+        )
+
+        assert stats.succeeded == 1
+        assert stats.failed == 1
+        assert len([name for name in calls if "indexing" in name]) == 1
+        assert "indexing" in calls[-1]
 
 
 async def test_fan_out_no_shards_is_noop(mocker) -> None:
@@ -351,6 +428,7 @@ async def test_fan_out_all_worker_runs_precede_the_index_run(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         order.append("index" if "indexing" in name else "worker")
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -379,6 +457,7 @@ async def test_fan_out_forwards_trace_headers_to_workers_and_index(mocker) -> No
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 
@@ -414,6 +493,7 @@ async def test_fan_out_omits_headers_when_none(mocker) -> None:
 
     async def _fake_run_deployment(name, parameters=None, **kwargs):
         calls.append((name, parameters or {}))
+        return completed_flow_run()
 
     runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
 

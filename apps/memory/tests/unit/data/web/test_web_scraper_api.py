@@ -20,6 +20,20 @@ from tree.data.web.web_scraper_api import (
 DATASET_ID = "gd_test_dataset"
 INPUTS = [{"url": "https://www.youtube.com/watch?v=abc123"}]
 
+# Every branch of ``httpx.TransportError``: the request never completed, so
+# Bright Data is unreachable right now — the condition ADR-004 Decision 3 routes
+# to the Gemini fallback.
+_TRANSPORT_ERROR_TYPES = [
+    httpx.TimeoutException,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.ProxyError,
+]
+
 
 def _patch_settings(mocker, *, api_key: str = "test-api-key") -> None:
     """Patch the settings singleton in the web_scraper_api module."""
@@ -79,6 +93,22 @@ def _patch_async_client(mocker, response: httpx.Response) -> AsyncMock:
         "tree.data.web.web_scraper_api.httpx.AsyncClient", return_value=client_cm
     )
     return client
+
+
+def _patch_failing_async_client(mocker, error: Exception) -> None:
+    """Patch httpx.AsyncClient so every request fails with ``error``."""
+
+    client = AsyncMock()
+    client.post = AsyncMock(side_effect=error)
+    client.get = AsyncMock(side_effect=error)
+
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mocker.patch(
+        "tree.data.web.web_scraper_api.httpx.AsyncClient", return_value=client_cm
+    )
 
 
 class TestCollectConfiguration:
@@ -412,3 +442,83 @@ class TestHttpErrorPropagation:
         # Assert
         headers = client.post.await_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer secret-key"
+
+
+class TestTransportErrorTyping:
+    """A transport failure is a Bright Data request error, not a raw httpx one.
+
+    An untyped ``httpx`` error escaping ``collect`` is none of the three types
+    the fallback chain catches, so a Bright Data outage would hard-fail the
+    Prefect task instead of falling the batch back to Gemini (#094).
+    """
+
+    @pytest.mark.parametrize(
+        "error_type", _TRANSPORT_ERROR_TYPES, ids=lambda t: t.__name__
+    )
+    async def test_trigger_transport_failure_raises_request_error(
+        self, mocker, error_type: type[httpx.TransportError]
+    ) -> None:
+        # Arrange
+        _patch_settings(mocker)
+        error = error_type("bright data is unreachable")
+        _patch_failing_async_client(mocker, error)
+
+        # Act & Assert
+        with pytest.raises(BrightDataRequestError) as exc_info:
+            await collect(
+                DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
+            )
+
+        message = str(exc_info.value)
+        assert "api.brightdata.com/datasets/v3/trigger" in message
+        assert "bright data is unreachable" in message
+        assert exc_info.value.__cause__ is error
+
+    @pytest.mark.parametrize(
+        "error_type", _TRANSPORT_ERROR_TYPES, ids=lambda t: t.__name__
+    )
+    async def test_poll_transport_failure_raises_request_error(
+        self, mocker, error_type: type[httpx.TransportError]
+    ) -> None:
+        # Arrange — the GET seam: the collection triggered, then the network died.
+        _patch_settings(mocker)
+        mocker.patch(
+            "tree.data.web.web_scraper_api._post_json",
+            new_callable=AsyncMock,
+            return_value={"snapshot_id": "sd_1"},
+        )
+        error = error_type("bright data is unreachable")
+        _patch_failing_async_client(mocker, error)
+
+        # Act & Assert
+        with pytest.raises(BrightDataRequestError) as exc_info:
+            await collect(
+                DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
+            )
+
+        message = str(exc_info.value)
+        assert "api.brightdata.com/datasets/v3/progress/sd_1" in message
+        assert exc_info.value.__cause__ is error
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            TypeError("post() got an unexpected keyword argument"),
+            AttributeError("'NoneType' object has no attribute 'get'"),
+            httpx.InvalidURL("relative urls are not supported"),
+        ],
+        ids=["TypeError", "AttributeError", "InvalidURL"],
+    )
+    async def test_non_transport_failure_surfaces_as_itself(
+        self, mocker, error: Exception
+    ) -> None:
+        # Arrange — a genuine bug on our side (including httpx's own non-transport
+        # ``InvalidURL``) must NOT be mislabelled as a Bright Data request error.
+        _patch_settings(mocker)
+        _patch_failing_async_client(mocker, error)
+
+        # Act & Assert
+        with pytest.raises(type(error)):
+            await collect(
+                DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
+            )

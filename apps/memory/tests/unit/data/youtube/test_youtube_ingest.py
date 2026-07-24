@@ -11,14 +11,20 @@ point (``youtube_ingest.BrightDataTranscriptFetcher`` /
 ``youtube_ingest.GeminiTranscriptFetcher``) — the thin seam per fetcher, required
 because both constructors raise without their API key. Credential PRESENCE is
 faked by patching ``settings`` so the suite behaves identically with or without
-keys in the operator's ``.env``.
+keys in the operator's ``.env``. ``TestBrightDataTransportFailure`` is the one
+exception: it patches a DEEPER seam (``httpx.AsyncClient`` inside
+``web_scraper_api``) because the behaviour it proves — a transport failure
+reaching the fallback chain as a typed error — lives below the fetcher.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import tree.data.youtube.youtube_ingest as youtube_ingest
 from beanie import PydanticObjectId
@@ -98,7 +104,7 @@ class _FakeFetcher:
         self,
         results_per_id: dict[str, FetchedTranscript | None] | None = None,
         *,
-        error: Exception | None = None,
+        error: BaseException | None = None,
     ) -> None:
         self._results_per_id = results_per_id or {}
         self._error = error
@@ -131,6 +137,22 @@ def _configure_backends(
     )
     mocker.patch.object(
         settings, "google_api_key", SecretStr("gemini-key" if gemini else "")
+    )
+
+
+def _patch_failing_httpx_client(mocker, error: Exception) -> None:
+    """Make every Web Scraper API request fail with ``error``, at the HTTP seam."""
+
+    client = AsyncMock()
+    client.post = AsyncMock(side_effect=error)
+    client.get = AsyncMock(side_effect=error)
+
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mocker.patch(
+        "tree.data.web.web_scraper_api.httpx.AsyncClient", return_value=client_cm
     )
 
 
@@ -311,6 +333,162 @@ class TestFallbackChain:
         assert (transcribed, failed) == ([], [])
         brightdata_ctor.assert_not_called()
         gemini_ctor.assert_not_called()
+
+
+class TestBrightDataTransportFailure:
+    """A Bright Data OUTAGE falls back like a poll timeout does (#094).
+
+    The only test in this module that runs the REAL
+    ``BrightDataTranscriptFetcher`` + ``collect``: the failure it proves is a
+    typing question at the client's HTTP seam, so injecting it at the fetcher
+    construction point (as every other test here does) would assume away the
+    very thing under test. Still fully mocked — the injection point is
+    ``httpx.AsyncClient`` inside ``web_scraper_api``, so no request leaves the
+    process.
+    """
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [httpx.ConnectError, httpx.TimeoutException],
+        ids=["ConnectError", "TimeoutException"],
+    )
+    async def test_transport_failure_sends_the_whole_batch_to_gemini(
+        self, mocker, caplog, error_type: type[httpx.TransportError]
+    ) -> None:
+        _configure_backends(mocker)
+        _patch_failing_httpx_client(mocker, error_type("bright data is unreachable"))
+        gemini = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
+        mocker.patch.object(
+            youtube_ingest, "GeminiTranscriptFetcher", return_value=gemini
+        )
+
+        with caplog.at_level(logging.WARNING, logger=_INGEST_LOGGER):
+            transcribed, failed = await fetch_transcripts_batch.fn(_items())
+
+        # The task does NOT fail: the whole batch reaches the paid fallback.
+        assert gemini.calls == [[_canonical(vid) for vid in VIDEO_IDS]]
+        assert len(transcribed) == 3
+        assert failed == []
+        assert "reason=brightdata_request_error" in caplog.text
+        assert "consumes Gemini tokens and incurs API cost" in caplog.text
+
+
+class TestGeminiFallbackFailure:
+    """An UNEXPECTED Gemini exception must not discard paid Bright Data work (#095).
+
+    Before #095 anything escaping the fallback ``fetch_many`` failed the task, and
+    ``retries=2`` then re-ran — and RE-BILLED — the Bright Data collection whose
+    transcripts were already in hand. The chain now absorbs it exactly like a
+    batch-wide Bright Data failure: successes land, the un-rescued slots become
+    ``no_transcript:`` rows, and the failure is a WARNING.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [RuntimeError("gemini 500"), ValueError("unexpected response shape")],
+        ids=["RuntimeError", "ValueError"],
+    )
+    async def test_brightdata_transcripts_survive_a_gemini_exception(
+        self, mocker, error: Exception
+    ) -> None:
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher(
+            {
+                VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0]),
+                VIDEO_IDS[1]: None,
+                VIDEO_IDS[2]: None,
+            }
+        )
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=error))
+
+        transcribed, failed = await fetch_transcripts_batch.fn(_items())
+
+        # The task completes: the paid transcript is kept, only the misses fail.
+        assert [url for url, _, _ in transcribed] == [_canonical(VIDEO_IDS[0])]
+        assert [url for url, _, _ in failed] == [
+            _canonical(VIDEO_IDS[1]),
+            _canonical(VIDEO_IDS[2]),
+        ]
+
+    async def test_un_rescued_slots_name_the_failed_gemini_call(self, mocker) -> None:
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher({VIDEO_IDS[0]: None})
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=RuntimeError("boom")))
+
+        _, failed = await fetch_transcripts_batch.fn(_items([VIDEO_IDS[0]]))
+
+        error = failed[0][2]
+        assert error == (
+            "no_transcript: brightdata returned empty; gemini unavailable "
+            "(fetch failed)"
+        )
+        # Normalized: a code + a message, never a raw exception dump.
+        assert "RuntimeError" not in error
+        assert "Traceback" not in error
+
+    async def test_warns_naming_the_failure_and_the_slot_count(
+        self, mocker, caplog
+    ) -> None:
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher(
+            {
+                VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0]),
+                VIDEO_IDS[1]: None,
+                VIDEO_IDS[2]: None,
+            }
+        )
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=RuntimeError("boom")))
+
+        with caplog.at_level(logging.WARNING, logger=_INGEST_LOGGER):
+            await fetch_transcripts_batch.fn(_items())
+
+        failures = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "Gemini fallback failed" in record.getMessage()
+        ]
+        assert len(failures) == 1
+        assert "2/3 videos" in failures[0]
+        assert "RuntimeError" in failures[0]
+        assert "boom" in failures[0]
+        assert "ingest_error" in failures[0]
+
+    @pytest.mark.parametrize(
+        "error",
+        [asyncio.CancelledError(), KeyboardInterrupt()],
+        ids=["CancelledError", "KeyboardInterrupt"],
+    )
+    async def test_base_exceptions_still_propagate(
+        self, mocker, error: BaseException
+    ) -> None:
+        """Only ``Exception`` is absorbed: cancellation/interrupt must NOT be.
+
+        ``asyncio.CancelledError`` inherits from ``BaseException`` (3.8+), so a
+        cancelled batch still cancels instead of quietly writing failure rows.
+        """
+
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher({VIDEO_IDS[0]: None})
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=error))
+
+        with pytest.raises(type(error)):
+            await fetch_transcripts_batch.fn(_items([VIDEO_IDS[0]]))
+
+    async def test_batch_wide_brightdata_failure_plus_dead_gemini_names_both(
+        self, mocker
+    ) -> None:
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher(error=BrightDataTimeoutError("still running"))
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=RuntimeError("boom")))
+
+        transcribed, failed = await fetch_transcripts_batch.fn(_items([VIDEO_IDS[0]]))
+
+        assert transcribed == []
+        assert failed[0][2] == (
+            "no_transcript: brightdata unavailable (poll timeout); "
+            "gemini unavailable (fetch failed)"
+        )
 
 
 class TestFallbackWarnings:
@@ -743,6 +921,34 @@ class TestBulkBuildAndLoad:
         assert failure_rows[0].source_uri == _canonical(VIDEO_IDS[1])
         # …but only the real ingest is reported as ingested.
         assert [doc.source_uri for doc in result] == [_canonical(VIDEO_IDS[0])]
+
+    async def test_gemini_exception_still_persists_the_brightdata_documents(
+        self, mocker
+    ) -> None:
+        """#095 end-to-end: a dead Gemini costs the batch nothing already paid for."""
+
+        _configure_backends(mocker)
+        brightdata = _FakeFetcher(
+            {VIDEO_IDS[0]: _make_transcript(VIDEO_IDS[0]), VIDEO_IDS[1]: None}
+        )
+        _patch_fetchers(mocker, brightdata, _FakeFetcher(error=RuntimeError("boom")))
+        load_mock = mocker.patch.object(
+            youtube_ingest,
+            "load_video_document",
+            mocker.AsyncMock(side_effect=lambda doc: doc),
+        )
+
+        result = await _bulk_build_and_load(_items(VIDEO_IDS[:2]), PydanticObjectId())
+
+        loaded = [call.args[0] for call in load_mock.await_args_list]
+        # The Bright Data transcript is ingested; the un-rescued slot is a row.
+        assert [doc.source_uri for doc in result] == [_canonical(VIDEO_IDS[0])]
+        failure_rows = [doc for doc in loaded if doc.ingest_error is not None]
+        assert [doc.source_uri for doc in failure_rows] == [_canonical(VIDEO_IDS[1])]
+        assert failure_rows[0].ingest_error == (
+            "no_transcript: brightdata returned empty; gemini unavailable "
+            "(fetch failed)"
+        )
 
     async def test_invalid_inputs_become_rows_keyed_on_the_raw_input(
         self, mocker

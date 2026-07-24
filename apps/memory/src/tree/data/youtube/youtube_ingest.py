@@ -63,6 +63,7 @@ _REASON_BRIGHTDATA_TIMEOUT = "brightdata_timeout"
 # Backend states as they read inside a normalized ``no_transcript: …`` message.
 _STATE_EMPTY = "returned empty"
 _STATE_NOT_CONFIGURED = "not configured"
+_STATE_FETCH_FAILED = "unavailable (fetch failed)"
 
 _BRIGHTDATA_STATES = {
     _REASON_NO_BRIGHTDATA_TRANSCRIPT: _STATE_EMPTY,
@@ -91,7 +92,9 @@ async def fetch_transcripts_batch(
        A batch-WIDE Bright Data failure (missing credentials, trigger rejected,
        poll timeout) makes that subset the whole batch instead of failing the
        task. EVERY fallback is a WARNING naming the reason, the slot count, and
-       the Gemini token/cost consequence.
+       the Gemini token/cost consequence. A failing GEMINI call is absorbed the
+       same way (#095) — the already-fetched Bright Data transcripts must never
+       be thrown away and re-billed by a task retry.
 
     Returns the transcribed slots and the exhausted ones (with a normalized
     ``no_transcript: …`` error each) — one bad video never sinks the batch.
@@ -114,6 +117,7 @@ async def fetch_transcripts_batch(
         video_urls, configured=brightdata_configured
     )
 
+    gemini_state = _STATE_EMPTY if gemini_configured else _STATE_NOT_CONFIGURED
     missing = [index for index, slot in enumerate(transcripts) if slot is None]
     if missing:
         reason = brightdata_reason or _REASON_NO_BRIGHTDATA_TRANSCRIPT
@@ -125,11 +129,14 @@ async def fetch_transcripts_batch(
                 len(video_urls),
                 reason,
             )
-            fallback = await GeminiTranscriptFetcher().fetch_many(
-                [video_urls[index] for index in missing]
+            fallback, gemini_answered = await _fetch_fallback(
+                [video_urls[index] for index in missing],
+                batch_size=len(video_urls),
             )
             for index, transcript in zip(missing, fallback, strict=True):
                 transcripts[index] = transcript
+            if not gemini_answered:
+                gemini_state = _STATE_FETCH_FAILED
         else:
             logger.warning(
                 "No Gemini fallback for %d/%d videos (reason=%s): GOOGLE_API_KEY is "
@@ -143,7 +150,7 @@ async def fetch_transcripts_batch(
         brightdata_state=_BRIGHTDATA_STATES[
             brightdata_reason or _REASON_NO_BRIGHTDATA_TRANSCRIPT
         ],
-        gemini_state=_STATE_EMPTY if gemini_configured else _STATE_NOT_CONFIGURED,
+        gemini_state=gemini_state,
     )
 
     transcribed: list[_TranscribedItem] = []
@@ -191,6 +198,43 @@ async def _fetch_primary(
         )
 
     return list(transcripts), None
+
+
+async def _fetch_fallback(
+    video_urls: list[str], *, batch_size: int
+) -> tuple[list[FetchedTranscript | None], bool]:
+    """Run Gemini over the transcript-less slots; report whether it ANSWERED.
+
+    Any ``Exception`` escaping the bulk ``fetch_many`` is absorbed into empty
+    slots plus ``False``, exactly like a batch-WIDE Bright Data failure. Letting
+    it escape instead would fail the task and make Prefect (``retries=2``) re-run
+    — and RE-BILL — the Bright Data collection whose transcripts are already in
+    hand; the slots Gemini did not rescue become ``no_transcript:`` rows instead,
+    so nothing is silently lost.
+
+    ``BaseException`` deliberately still propagates: ``asyncio.CancelledError``
+    (a ``BaseException`` since 3.8) and ``KeyboardInterrupt`` mean the RUN is
+    going away, not that Gemini is down — swallowing them would write failure
+    rows for a batch nobody asked to finish. ``exc_info`` keeps the traceback of
+    a genuine programming bug in the Gemini path visible in the logs.
+    """
+
+    try:
+        transcripts = await GeminiTranscriptFetcher().fetch_many(video_urls)
+    except Exception as exc:  # noqa: BLE001 — a dead Gemini must not re-bill BD
+        logger.warning(
+            "Gemini fallback failed for %d/%d videos (%s: %s) — keeping the "
+            "Bright Data transcripts already fetched and recording ingest_error "
+            "rows for the rest",
+            len(video_urls),
+            batch_size,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        return [None] * len(video_urls), False
+
+    return list(transcripts), True
 
 
 def _brightdata_unavailable(
