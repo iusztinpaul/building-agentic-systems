@@ -1,9 +1,5 @@
 # System architecture of future AI apps: UI/TUI/IDE extension ↔ harness ↔ connectivity (MCP clients, CLIs, skills) MCP servers
 
-**Post 15:** System architecture of future AI apps: UI/TUI/IDE extension ↔ harness ↔ connectivity (MCP clients, CLIs, skills) MCP servers  (more details [here](https://read.readwise.io/archive/read/01kpmy78m7aq4tsm1dawdjnmh0))
-
----
-
 # System Architecture of Future AI Apps
 
 **Source anchor:** [[The Future of MCP — David Soria Parra, Anthropic]] (DSP, AI Engineer 2026)

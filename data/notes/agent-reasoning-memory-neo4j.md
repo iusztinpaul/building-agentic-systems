@@ -1,11 +1,5 @@
 # Agent Reasoning Memory - Why It Matters and How to Use It (based on Neo4J’s agent-memory repository)
 
-Repository: [https://github.com/neo4j-labs/agent-memory](https://github.com/neo4j-labs/agent-memory)
-
-Obsidian Project - Understanding Neo4j Agent Memory
-
----
-
 Most agents can remember:
 
 - **recent conversation context** (short-term), and

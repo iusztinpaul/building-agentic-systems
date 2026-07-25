@@ -1,13 +1,5 @@
 # RDF vs. Labeled Property Graphs
 
-**Comment:** RDF it’s actually easier to query as it’s composed of pure (entity, relationship, entity) triples with 0 metadata attached to them.
-
-The cons are indeed that the size explodes, but the biggest con is that you need to know the whole data model with the attributes in advance. Thus, the upfront effort is larger. That’s why many people go with the Labeled Property graph version, which is more flexible and practical in the sense that you can start right away.
-
----
-
-**Related to this post:**
-
 Every graph is structured as a collection of (entity, relationship, entity) triplets.
 
 But here’s the part most people overlook:

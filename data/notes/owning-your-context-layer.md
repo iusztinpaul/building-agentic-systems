@@ -1,17 +1,5 @@
 # Owning Your Context Layer
 
-### Summary
-
-**Post 17:** Owning the context layer. True freedom. Harnesses are commoditized. The true business value is in the system around it: memory, MCP servers, skills, etc. Using “free” hardware, you are not really free, as what you want to own is the memory. Keeping your memory detached from a harness is true independence. You can do that through MCP servers (e.g., the setup from the book). Like this, you can switch harness, models, etc., and they will instantly remember who you are, your context, and what you have to do.
-
-### Post
-
-[https://www.linkedin.com/posts/pauliusztin_models-are-becoming-commoditized-harnesses-share-7472592740183318528-qNoM/?utm_source=share&utm_medium=member_desktop&rcm=ACoAACQFQWgBqowPZBqBQgSC3ATmuatVfZkf6fE](https://www.linkedin.com/posts/pauliusztin_models-are-becoming-commoditized-harnesses-share-7472592740183318528-qNoM/?utm_source=share&utm_medium=member_desktop&rcm=ACoAACQFQWgBqowPZBqBQgSC3ATmuatVfZkf6fE)
-
-[https://x.com/pauliusztin_/status/2066860844420653299](https://x.com/pauliusztin_/status/2066860844420653299)
-
----
-
 Models are becoming commoditized.
 
 Harnesses are becoming commoditized.

@@ -1,11 +1,5 @@
 # "You don't need a browser anymore"
 
-**Post 16:** MCP App. Serve UIs via MCP apps (e.g., Prefect Prefab)
-
-[https://drive.google.com/file/d/1jqnQ77oThB48O5WYo75xHPHP2_VHocjG/view?usp=drive_link](https://drive.google.com/file/d/1jqnQ77oThB48O5WYo75xHPHP2_VHocjG/view?usp=drive_link)
-
----
-
 A narrative, code-free handoff for a LinkedIn post about building Tree's in-chat UIs with
 **FastMCP + Prefab**. The companion technical doc is [`MCP_APP.md`](https://app.notion.com/p/MCP_APP.md).
 
