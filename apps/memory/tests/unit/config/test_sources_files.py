@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourcesConfig,
     SubstackArticleSource,

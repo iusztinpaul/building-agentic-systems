@@ -6,7 +6,7 @@
 - **Context references:**
   - `tasks/083-sources-yaml-files.md` … `tasks/088-sources-split-live-e2e-acceptance.md` (this feature's task plan)
   - `ADR-002` §3 (data coordinator/worker topology — the consumer of the source set; unchanged here)
-  - `apps/memory/src/tree/config/app_config.py` (source schema + untyped-entry inference, retained)
+  - `apps/memory/src/tree/config/sources.py` (source schema + untyped-entry inference + loader)
 
 ## Context
 
@@ -48,8 +48,9 @@ serve and under a Prefect Cloud managed run that pulls the repo from git.
    ONLY when the suffix is a real type literal, so query-string URLs stay intact), and
    `build_uri_sources(specs)` (reuses the existing `_normalize_untyped_entry` inference for
    omitted types; **rejects `huggingface_dataset`**, which needs tuning fields only a YAML
-   file carries). The `SourceEntry` discriminated union + inference helpers stay in
-   `app_config.py`; the loader imports them (one-way, no cycle).
+   file carries). The `SourceEntry` discriminated union + inference helpers live in the same
+   module, so all source-shaped logic sits in one file and `app_config.py` holds only static
+   app tuning.
 
 3. **The offline data coordinator selects sources dynamically.** The resolved set is
    `load_sources(source_files)` (when given) followed by the coerced inline `sources` (when

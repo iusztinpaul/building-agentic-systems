@@ -33,7 +33,7 @@ from tree.data.youtube.types import (
     TranscriptSegment,
     VideoMetadata,
 )
-from tree.config.app_config import YouTubeVideoSource
+from tree.config.sources import YouTubeVideoSource
 from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
 from tree.data.youtube.youtube_pipeline import ingest_youtube_video
 from tree.entities.documents import Document, SourceType

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SubstackArticleSource,
     SubstackRssSource,

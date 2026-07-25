@@ -1,27 +1,252 @@
-"""Shared source loader — the one way to materialise ``SourceEntry``s.
+"""Data-source definitions + the one way to materialise ``SourceEntry``s.
 
-Turns committed source files (``sources/backfill.yaml`` / ``sources/listen.yaml``)
-and ad-hoc CLI ``--uri`` tokens into the typed ``SourceEntry`` discriminated union
-defined in :mod:`tree.config.app_config`. This module imports those models
-one-way (no cycle); it does NOT relocate them.
+Owns the ``SourceEntry`` discriminated union (the typed source variants and the
+untyped-entry ``type`` inference) and turns committed source files
+(``sources/backfill.yaml`` / ``sources/listen.yaml``) and ad-hoc CLI ``--uri``
+tokens into those entries.
 
 Per ADR-003, source definitions are operator DATA living under the repo-root
 ``sources/`` directory, split by cadence (backfill = one-shot, listen = polled
-RSS). This loader is the single place that reads them so the offline
+RSS). This module is the single place that defines and reads them so the offline
 coordinator, the online URL router, and the arxiv defaults cannot drift.
 """
 
 import functools
 import typing
 from pathlib import Path
+from typing import Annotated, Any, Literal, Union
+from urllib.parse import urlparse
 
 import yaml
+from pydantic import BaseModel, Field, model_validator
 
-from tree.config.app_config import (
-    HuggingFaceDatasetSource,
-    SourceEntry,
-    SourcesConfig,
-)
+# --- Source variants (discriminated union) ---
+
+
+class SubstackRssSource(BaseModel):
+    """A Substack RSS feed URL."""
+
+    type: Literal["substack_rss"] = "substack_rss"
+    uri: str = Field(min_length=1)
+
+
+class SubstackArticleSource(BaseModel):
+    """A Substack article URL (may live on a custom domain)."""
+
+    type: Literal["substack_article"] = "substack_article"
+    uri: str = Field(min_length=1)
+
+
+class HuggingFaceDatasetSource(BaseModel):
+    """A HuggingFace dataset id (NOT a URL).
+
+    The ``uri`` is the dataset id (``namespace/name``) and is used to
+    dispatch to a per-dataset ETL pipeline registered in
+    ``tree.data.offline_pipeline``. Unknown dataset ids raise at dispatch time.
+
+    Two of these fields draw an authored-vs-runtime split (#070, the config
+    foundation for HF offset-window fan-out):
+
+    * ``num_workers`` — operator-AUTHORED YAML (like ``batch_size``). The
+      offset-window fan-out width: #072 dispatches ``num_workers``
+      ``data-etl-worker`` runs, each ingesting one disjoint offset-window of the
+      dataset. Default ``1`` ⇒ a single window covering the whole
+      ``max_samples`` ⇒ today's behavior. Must be ``>= 1``.
+    * ``offset`` — a dispatch-time RUNTIME coordinate, NOT authored in YAML and
+      never present in ``default.yaml``. The coordinator sets it ONLY at
+      dispatch via ``entry.model_copy(update={"offset": ...})`` (#072), and #071
+      makes the ingest skip the first ``offset`` rows. Default ``None`` ⇒ no
+      skip ⇒ today's behavior.
+
+    The discriminated-union round-trip MUST preserve both fields: the
+    coordinator serializes shards through ``run_deployment`` flow-run params
+    (``model_dump()`` → JSON → ``TypeAdapter(list[SourceEntry])``), so a set
+    ``offset`` round-trips as the int and ``offset=None`` round-trips as ``None``.
+    """
+
+    type: Literal["huggingface_dataset"] = "huggingface_dataset"
+    uri: str = Field(min_length=1)
+    max_samples: int = 10
+    fetch_content: bool = False
+    batch_size: int = 50
+    concurrency: int = 10
+    # YAML-authored offset-window fan-out width (#070). See class docstring.
+    num_workers: int = Field(default=1, ge=1)
+    # Dispatch-time runtime coordinate (#070), never authored in YAML. See
+    # class docstring.
+    offset: int | None = None
+
+
+class YouTubeVideoSource(BaseModel):
+    """A YouTube video URL (or 11-char video id)."""
+
+    type: Literal["youtube_video"] = "youtube_video"
+    uri: str = Field(min_length=1)
+
+
+class YouTubeRssSource(BaseModel):
+    """A YouTube channel feed: ``youtube.com/feeds/videos.xml?channel_id=…``."""
+
+    type: Literal["youtube_rss"] = "youtube_rss"
+    uri: str = Field(min_length=1)
+
+
+class WebSource(BaseModel):
+    """A generic web URL ingested via the URL dispatcher."""
+
+    type: Literal["web"] = "web"
+    uri: str = Field(min_length=1)
+
+
+SourceEntry = Annotated[
+    Union[
+        SubstackRssSource,
+        SubstackArticleSource,
+        HuggingFaceDatasetSource,
+        YouTubeVideoSource,
+        YouTubeRssSource,
+        WebSource,
+    ],
+    Field(discriminator="type"),
+]
+
+
+_YOUTUBE_HOSTS: frozenset[str] = frozenset({"youtube.com", "m.youtube.com", "youtu.be"})
+
+
+def _is_youtube_host(host: str) -> bool:
+    """True iff ``host`` is a recognized YouTube host (``www.`` already stripped)."""
+
+    return host in _YOUTUBE_HOSTS
+
+
+def _is_substack_subdomain(host: str) -> bool:
+    """True iff ``host`` is ``substack.com`` or any ``*.substack.com`` subdomain.
+
+    Strips a leading ``www.`` for tolerance.
+    """
+
+    if not host:
+        return False
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "substack.com" or host.endswith(".substack.com")
+
+
+def _host_of(uri: str) -> str:
+    """Lower-cased ``netloc`` of ``uri`` with any ``www.`` prefix stripped.
+
+    Returns an empty string if ``uri`` has no parseable host (e.g. a
+    HuggingFace dataset id).
+    """
+
+    host = (urlparse(uri).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _collect_typed_substack_hosts(raw_entries: list[Any]) -> set[str]:
+    """Hosts of entries explicitly typed as a Substack variant.
+
+    Used to coerce later untyped entries on the same custom domain.
+    """
+
+    hosts: set[str] = set()
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_type = entry.get("type")
+        if entry_type not in ("substack_rss", "substack_article"):
+            continue
+        uri = entry.get("uri")
+        if not isinstance(uri, str):
+            continue
+        host = _host_of(uri)
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _normalize_untyped_entry(
+    entry: dict[str, Any], substack_hosts: set[str]
+) -> dict[str, Any]:
+    """Add a ``type`` to an entry that has none, based on its ``uri``.
+
+    Rules:
+        - URL on a YouTube host AND path is ``/feeds/videos.xml`` AND query has
+          ``channel_id`` → ``youtube_rss``.
+        - URL on a YouTube host that looks like a video URL (``/watch``,
+          ``/shorts/...``, or ``youtu.be/<id>``) → ``youtube_video``.
+        - URL on ``*.substack.com`` (or ``substack.com``) → ``substack_article``.
+        - URL whose host matches another typed Substack source's host → ``substack_article``.
+        - Anything else (HTTP/HTTPS URL or otherwise) → ``web``.
+    """
+
+    uri = entry.get("uri")
+    if not isinstance(uri, str):
+        # Let Pydantic raise the proper validation error downstream.
+        return entry
+
+    parsed = urlparse(uri)
+    host = _host_of(uri)
+    path = parsed.path or ""
+    query = parsed.query or ""
+
+    if _is_youtube_host(host):
+        if path == "/feeds/videos.xml" and "channel_id=" in query:
+            return {**entry, "type": "youtube_rss"}
+        if host == "youtu.be" or path == "/watch" or path.startswith("/shorts/"):
+            return {**entry, "type": "youtube_video"}
+
+    if _is_substack_subdomain(host) or (host and host in substack_hosts):
+        inferred_type = "substack_article"
+    else:
+        inferred_type = "web"
+
+    return {**entry, "type": inferred_type}
+
+
+class SourcesConfig(BaseModel):
+    """Flat list of typed data sources for the ingestion pipelines."""
+
+    sources: list[SourceEntry] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_untyped_sources(cls, data: Any) -> Any:
+        """Pre-validation hook: infer ``type`` for entries that lack one.
+
+        Runs before discriminated-union validation so untyped raw dicts can
+        be coerced into a typed variant. Also coerces a bare list of source
+        entries into ``{"sources": <list>}`` so a source file can write the
+        flat top-level-list shape directly. See module-level helpers for the
+        inference rules.
+        """
+
+        # Accept the flat YAML shape (a bare top-level list, as the
+        # ``sources/*.yaml`` files use) by wrapping it as ``{"sources": <list>}``.
+        if isinstance(data, list):
+            data = {"sources": data}
+
+        if not isinstance(data, dict):
+            return data
+        raw_sources = data.get("sources")
+        if not isinstance(raw_sources, list):
+            return data
+
+        substack_hosts = _collect_typed_substack_hosts(raw_sources)
+
+        normalized: list[Any] = []
+        for entry in raw_sources:
+            if isinstance(entry, dict) and "type" not in entry:
+                normalized.append(_normalize_untyped_entry(entry, substack_hosts))
+            else:
+                normalized.append(entry)
+
+        return {**data, "sources": normalized}
+
 
 # The repo root is six path components up from this module
 # (config -> tree -> src -> memory -> apps -> repo root); the committed
@@ -37,7 +262,7 @@ def _source_type_literals() -> frozenset[str]:
     """The full set of ``SourceEntry`` ``type`` discriminator literals.
 
     Derived from the discriminated union itself so a new variant added to
-    ``app_config.SourceEntry`` is picked up here automatically — including
+    :data:`SourceEntry` is picked up here automatically — including
     ``huggingface_dataset``. Used by :func:`parse_uri_token` to decide whether a
     ``…=TYPE`` suffix is a real type or just part of a query-string URL.
     """

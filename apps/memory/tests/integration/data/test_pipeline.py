@@ -5,7 +5,7 @@ import pytest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,

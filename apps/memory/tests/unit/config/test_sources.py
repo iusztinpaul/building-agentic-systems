@@ -10,7 +10,7 @@ two-strategy path resolution), the cached ``default_configured_sources``,
 import pytest
 
 from tree.config import sources as sources_module
-from tree.config.app_config import (
+from tree.config.sources import (
     SubstackArticleSource,
     SubstackRssSource,
     WebSource,

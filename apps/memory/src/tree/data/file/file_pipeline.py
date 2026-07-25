@@ -42,7 +42,7 @@ async def _load_file_document(
 load_file_document_task = task(
     _load_file_document,
     name="load-file-document",
-    retries=1,
+    retries=2,
     retry_delay_seconds=2,
 )
 

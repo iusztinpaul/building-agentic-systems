@@ -24,7 +24,10 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.app_config import SubstackArticleSource, SubstackRssSource
+from tree.config.sources import (
+    SubstackArticleSource,
+    SubstackRssSource,
+)
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.substack.substack_article import fetch_and_extract

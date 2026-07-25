@@ -17,7 +17,10 @@ import pytest
 from beanie import PydanticObjectId
 from prefect import tags as prefect_tags
 
-from tree.config.app_config import HuggingFaceDatasetSource, WebSource
+from tree.config.sources import (
+    HuggingFaceDatasetSource,
+    WebSource,
+)
 from tree.data.offline_pipeline import data_etl_worker
 from tree.data.online_pipeline import _ingest_url
 from tree.data.web.web_pipeline import ingest_web_url, ingest_web_url_batch

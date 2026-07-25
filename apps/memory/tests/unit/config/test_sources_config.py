@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourcesConfig,
     SubstackArticleSource,

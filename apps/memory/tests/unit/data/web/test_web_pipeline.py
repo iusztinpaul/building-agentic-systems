@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 import tree.data.web.web_pipeline as web_pipeline
 from beanie import PydanticObjectId
 
-from tree.config.app_config import WebSource
+from tree.config.sources import WebSource
 from tree.data.web.web_pipeline import (
     _ingest_web_url_one,
     extract_batch,

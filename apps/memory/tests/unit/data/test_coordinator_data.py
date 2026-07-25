@@ -32,7 +32,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tests.prefect_doubles import completed_flow_run
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,

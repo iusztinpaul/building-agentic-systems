@@ -23,7 +23,10 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.app_config import YouTubeRssSource, YouTubeVideoSource
+from tree.config.sources import (
+    YouTubeRssSource,
+    YouTubeVideoSource,
+)
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.youtube.types import VideoMetadata

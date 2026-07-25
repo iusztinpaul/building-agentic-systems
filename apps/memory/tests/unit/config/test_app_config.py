@@ -5,14 +5,16 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from tree.config.app_config import (
-    _DEFAULT_CONFIG_PATH,
     AppConfig,
     ConcurrencyConfig,
     DreamConfig,
+    YouTubeConfig,
+    _DEFAULT_CONFIG_PATH,
+    load_app_config,
+)
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
-    YouTubeConfig,
-    load_app_config,
 )
 
 

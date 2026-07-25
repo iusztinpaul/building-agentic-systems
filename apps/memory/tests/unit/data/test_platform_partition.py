@@ -11,7 +11,7 @@ and the homogeneous-shard invariant.
 
 from __future__ import annotations
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,

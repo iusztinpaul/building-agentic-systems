@@ -17,7 +17,10 @@ from pydantic import SecretStr
 
 import tree.data.youtube.youtube_ingest as youtube_ingest
 import tree.data.youtube.youtube_pipeline_batch as yt
-from tree.config.app_config import YouTubeRssSource, YouTubeVideoSource
+from tree.config.sources import (
+    YouTubeRssSource,
+    YouTubeVideoSource,
+)
 from tree.config.settings import settings
 from tree.data.youtube.types import (
     FetchedTranscript,

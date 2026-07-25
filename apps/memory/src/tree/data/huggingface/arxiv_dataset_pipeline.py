@@ -4,7 +4,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.app_config import HuggingFaceDatasetSource
+from tree.config.sources import HuggingFaceDatasetSource
 from tree.config.settings import settings
 from tree.config.sources import default_configured_sources
 from tree.data.batch import gather_isolated

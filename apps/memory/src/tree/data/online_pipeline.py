@@ -28,7 +28,7 @@ from beanie import PydanticObjectId
 from prefect import tags
 from pydantic import BaseModel, Field
 
-from tree.config.app_config import (
+from tree.config.sources import (
     SubstackArticleSource,
     SubstackRssSource,
 )

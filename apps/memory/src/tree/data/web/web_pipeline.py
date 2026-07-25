@@ -24,7 +24,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.app_config import WebSource
+from tree.config.sources import WebSource
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.web.web import fetch_and_extract_web, load_web_document

@@ -10,7 +10,7 @@ dispatch-time coordinate, #070).
 
 from __future__ import annotations
 
-from tree.config.app_config import HuggingFaceDatasetSource
+from tree.config.sources import HuggingFaceDatasetSource
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     ARXIV_DATASET_ID,
     arxiv_window_entries,

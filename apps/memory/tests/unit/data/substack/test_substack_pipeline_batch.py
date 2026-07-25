@@ -16,7 +16,10 @@ import pytest
 from beanie import PydanticObjectId
 
 import tree.data.substack.substack_pipeline_batch as sub
-from tree.config.app_config import SubstackArticleSource, SubstackRssSource
+from tree.config.sources import (
+    SubstackArticleSource,
+    SubstackRssSource,
+)
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 

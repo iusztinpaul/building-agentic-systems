@@ -57,7 +57,7 @@ from prefect import flow, get_run_logger, tags
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
-from tree.config.app_config import (
+from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
     SubstackArticleSource,
