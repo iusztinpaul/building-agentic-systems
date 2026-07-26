@@ -43,35 +43,40 @@ def _extract_meta(soup: BeautifulSoup, property_name: str) -> str:
     return ""
 
 
+def _parse_iso_utc(value: str) -> datetime | None:
+    """Parse an ISO-8601 string to a tz-aware UTC datetime, or ``None`` if it isn't one.
+
+    A naive timestamp is assumed UTC — the project accepts no naive datetimes.
+    """
+
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _parse_article_date(soup: BeautifulSoup) -> datetime:
     """Extract the publication date from meta tags or time elements."""
 
-    for attr in ("article:published_time", "og:article:published_time"):
-        value = _extract_meta(soup, attr)
-        if value:
-            try:
-                dt = datetime.fromisoformat(value)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                pass
+    candidates = [
+        _extract_meta(soup, "article:published_time"),
+        _extract_meta(soup, "og:article:published_time"),
+    ]
 
     time_tag = soup.find("time")
     if time_tag:
-        dt_attr = time_tag.get("datetime", "")
-        if dt_attr:
-            try:
-                dt = datetime.fromisoformat(dt_attr)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                pass
-
+        candidates.append(time_tag.get("datetime", ""))
         text = time_tag.get_text(strip=True)
         if _ISO_DATE_RE.match(text):
-            try:
-                dt = datetime.fromisoformat(text)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                pass
+            candidates.append(text)
+
+    for candidate in candidates:
+        parsed = _parse_iso_utc(candidate)
+        if parsed:
+            return parsed
 
     return datetime.now(tz=timezone.utc)
 
@@ -92,8 +97,13 @@ def _extract_article_body(soup: BeautifulSoup) -> str:
 
 def extract_document_from_html(
     html: str, article_url: str, user_id: PydanticObjectId
-) -> Document:
-    """Parse a Substack article HTML page into a Document."""
+) -> tuple[Document, str]:
+    """Parse a Substack article HTML page into a Document plus its raw body HTML.
+
+    Returns the body HTML alongside the Document because every caller needs both
+    and this is the only place the page is parsed — the body is what
+    :func:`load_article_document` feeds to reference extraction.
+    """
 
     soup = BeautifulSoup(html, "html.parser")
 
@@ -108,30 +118,39 @@ def extract_document_from_html(
         or _extract_meta(soup, "description")
     )
 
-    author = _extract_meta(soup, "author") or _extract_meta(soup, "article:author")
-    if not author:
-        author_tag = soup.find("meta", attrs={"name": "author"})
-        author = (
-            author_tag["content"]
-            if author_tag and author_tag.get("content")
-            else "Unknown"
-        )
+    # ``_extract_meta`` already falls back from property= to name=, so a bare
+    # name="author" tag is covered by the first term.
+    author = (
+        _extract_meta(soup, "author")
+        or _extract_meta(soup, "article:author")
+        or "Unknown"
+    )
 
     body_html = _extract_article_body(soup)
-    content = html_to_plain_text(body_html)
 
-    date = _parse_article_date(soup)
-
-    return Document(
+    doc = Document(
         source_type=SourceType.SUBSTACK,
         source_uri=article_url,
         user_id=user_id,
         title=title,
         summary=summary or title,
-        content=content,
+        content=html_to_plain_text(body_html),
         authors=[author],
-        date=date,
+        date=_parse_article_date(soup),
     )
+
+    return doc, body_html
+
+
+def as_feed_entry(body_html: str) -> dict:
+    """Wrap scraped body HTML in the synthetic feed-entry shape ``load_document`` reads.
+
+    The article path has no feed entry, so it fakes the one field
+    ``substack_rss.load_document`` consumes. Lives here so the batch path and
+    :func:`load_article_document` can't drift on the shape.
+    """
+
+    return {"content": [{"value": body_html}]}
 
 
 async def load_article_document(doc: Document, body_html: str) -> Document | None:
@@ -141,8 +160,7 @@ async def load_article_document(doc: Document, body_html: str) -> Document | Non
     raw_entry so reference extraction works identically to the RSS path.
     """
 
-    synthetic_entry = {"content": [{"value": body_html}]}
-    return await load_document(doc, synthetic_entry)
+    return await load_document(doc, as_feed_entry(body_html))
 
 
 async def fetch_and_extract(
@@ -151,8 +169,5 @@ async def fetch_and_extract(
     """Fetch an article and extract a Document plus the raw body HTML."""
 
     html = await fetch_article(article_url)
-    soup = BeautifulSoup(html, "html.parser")
-    body_html = _extract_article_body(soup)
-    doc = extract_document_from_html(html, article_url, user_id)
 
-    return doc, body_html
+    return extract_document_from_html(html, article_url, user_id)

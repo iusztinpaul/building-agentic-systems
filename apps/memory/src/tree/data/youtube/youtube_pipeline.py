@@ -109,6 +109,12 @@ async def ingest_youtube_video(
     The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_youtube_video``) calls
     this so single-URL ingest still gets its own Prefect flow run + Opik trace. The
     BATCH path does NOT call this — it runs the shared bulk core directly.
+
+    NO ``retries`` here, deliberately (ADR-002 amendment #096, rules 3c + 5): the core
+    delegates to ``_bulk_build_and_load``, whose tasks already retry
+    (``fetch-youtube-transcripts-batch`` 2, ``load-youtube-batch`` 3). Adding a flow
+    retry would STACK on those AND replay the billable Bright Data collection
+    (~173 s + per-record billing) that #095 works to never pay twice.
     """
 
     return await _ingest_youtube_video_one(video_url, user_id)

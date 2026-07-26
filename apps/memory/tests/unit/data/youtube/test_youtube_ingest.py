@@ -176,17 +176,21 @@ class TestTaskMetadata:
     """Retry grain lives on the batch ETL-phase tasks (mirrors test_web_pipeline)."""
 
     def test_fetch_transcripts_batch_retries(self) -> None:
+        # Tier B — CAPPED at 2: ~173 s per Bright Data collection plus per-record
+        # billing, so 5 retries would be ~15 min and 5 paid collections.
         assert fetch_transcripts_batch.retries == 2
         assert fetch_transcripts_batch.retry_delay_seconds == 5
         assert fetch_transcripts_batch.name == "fetch-youtube-transcripts-batch"
 
     def test_build_batch_retries(self) -> None:
+        # Tier D — pure build, no I/O: a retry reproduces the failure exactly.
         assert build_batch.retries == 0
         assert build_batch.name == "build-youtube-batch"
 
     def test_load_batch_retries(self) -> None:
-        assert load_batch.retries == 1
-        assert load_batch.retry_delay_seconds == 2
+        # Tier F (idempotent Mongo write) → 3 x 5 s = 15 s (ADR-002 #096).
+        assert load_batch.retries == 3
+        assert load_batch.retry_delay_seconds == 5
         assert load_batch.name == "load-youtube-batch"
 
 

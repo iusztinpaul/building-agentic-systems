@@ -50,17 +50,28 @@ class TestTaskAndFlowMetadata:
     """Retry grain lives on the batch tasks (mirrors substack_pipeline)."""
 
     def test_extract_batch_retries(self) -> None:
+        # Tier B — CAPPED at 2: scrapes via billable Bright Data Web Unlocker, so one
+        # batch replay re-bills all N urls. Raising this costs money (ADR-002 #096).
         assert extract_batch.retries == 2
         assert extract_batch.retry_delay_seconds == 5
         assert extract_batch.name == "extract-web-batch"
 
     def test_load_batch_retries(self) -> None:
-        assert load_batch.retries == 1
-        assert load_batch.retry_delay_seconds == 2
+        # Tier F (idempotent Mongo write) → 3 x 5 s = 15 s (ADR-002 #096).
+        assert load_batch.retries == 3
+        assert load_batch.retry_delay_seconds == 5
         assert load_batch.name == "load-web-batch"
 
     def test_thin_flow_name(self) -> None:
         assert ingest_web_url.name == "ingest-web-url-etl"
+
+    def test_thin_flow_retries_at_flow_grain(self) -> None:
+        # The single-URL path has no per-row tasks, so the FLOW carries the retry —
+        # matching extract_batch's network grain. Safe: load dedups on
+        # (user_id, source_uri).
+        # Tier B — CAPPED at 2: each attempt is one billable Web Unlocker request.
+        assert ingest_web_url.retries == 2
+        assert ingest_web_url.retry_delay_seconds == 5
 
     def test_batch_flow_name(self) -> None:
         assert ingest_web_url_batch.name == "ingest-web-url-batch-etl"

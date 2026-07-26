@@ -54,17 +54,21 @@ class TestTaskMetadata:
     """Retry grain lives on the batch tasks (mirrors test_web_pipeline)."""
 
     def test_transform_batch_is_pure_map(self) -> None:
+        # Tier D — pure map, no I/O: a retry reproduces the failure exactly.
         assert transform_batch.retries == 0
         assert transform_batch.name == "transform-arxiv-batch"
 
     def test_enrich_batch_retries(self) -> None:
-        assert enrich_batch.retries == 2
+        # Tier F (free arxiv.org HTML) → 3 x 5 s = 15 s (ADR-002 #096).
+        assert enrich_batch.retries == 3
         assert enrich_batch.retry_delay_seconds == 5
         assert enrich_batch.name == "enrich-arxiv-batch"
 
     def test_load_batch_retries(self) -> None:
-        assert load_batch.retries == 1
-        assert load_batch.retry_delay_seconds == 2
+        # Tier F (idempotent Mongo write) → 3 x 5 s = 15 s, sized to outlast a
+        # primary election (~10-30 s).
+        assert load_batch.retries == 3
+        assert load_batch.retry_delay_seconds == 5
         assert load_batch.name == "load-arxiv-batch"
 
     def test_flow_name(self) -> None:
@@ -89,14 +93,12 @@ class TestGetHuggingfaceArxivDefaults:
             ],
         )
 
-        max_samples, fetch_content, batch_size, concurrency = (
-            _get_huggingface_arxiv_defaults()
-        )
+        defaults = _get_huggingface_arxiv_defaults()
 
-        assert max_samples == 42
-        assert fetch_content is True
-        assert batch_size == 25
-        assert concurrency == 4
+        assert defaults.max_samples == 42
+        assert defaults.fetch_content is True
+        assert defaults.batch_size == 25
+        assert defaults.concurrency == 4
 
     def test_falls_back_to_huggingface_arxiv_source_defaults(self, mocker) -> None:
         mocker.patch(
@@ -104,15 +106,13 @@ class TestGetHuggingfaceArxivDefaults:
             return_value=[SubstackRssSource(uri="https://example.substack.com/feed")],
         )
 
-        max_samples, fetch_content, batch_size, concurrency = (
-            _get_huggingface_arxiv_defaults()
-        )
+        defaults = _get_huggingface_arxiv_defaults()
 
         # Mirror HuggingFaceDatasetSource() field defaults.
-        assert max_samples == 10
-        assert fetch_content is False
-        assert batch_size == 50
-        assert concurrency == 10
+        assert defaults.max_samples == 10
+        assert defaults.fetch_content is False
+        assert defaults.batch_size == 50
+        assert defaults.concurrency == 10
 
     def test_does_not_mutate_loader_cached_list(self, mocker) -> None:
         """The helper iterates the loader's cached list read-only.

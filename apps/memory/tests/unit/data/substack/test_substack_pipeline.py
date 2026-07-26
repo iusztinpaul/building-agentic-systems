@@ -32,6 +32,13 @@ class TestFlowMetadata:
     def test_thin_flow_name(self) -> None:
         assert ingest_substack_article.name == "ingest-substack-article-etl"
 
+    def test_thin_flow_retries_at_flow_grain(self) -> None:
+        # The single-article path has no per-row tasks, so the FLOW carries the retry.
+        # Safe: load_document dedups on (user_id, source_uri), so a re-run upserts.
+        # Tier F: the article fetch is plain httpx, so replay is free → 3 x 5 s.
+        assert ingest_substack_article.retries == 3
+        assert ingest_substack_article.retry_delay_seconds == 5
+
     def test_per_row_tasks_are_gone(self) -> None:
         assert not hasattr(article_pipeline, "fetch_and_extract_task")
         assert not hasattr(article_pipeline, "load_article_document_task")

@@ -57,8 +57,20 @@ def parse_date(entry: dict) -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def entry_content_html(raw_entry: dict) -> str:
+    """Body HTML of a feed entry (a real feedparser one or a synthetic article one).
+
+    Returns ``""`` when the entry carries no content — including when ``content``
+    is present but EMPTY, which a bare ``entry["content"][0]`` would IndexError on.
+    """
+
+    content = raw_entry.get("content") or [{}]
+
+    return content[0].get("value", "")
+
+
 def extract_document(raw_entry: dict, user_id: PydanticObjectId) -> Document:
-    content_html = raw_entry.get("content", [{}])[0].get("value", "")
+    content_html = entry_content_html(raw_entry)
     if not content_html:
         content_html = raw_entry.get("summary", "")
 
@@ -119,7 +131,7 @@ async def load_document(doc: Document, raw_entry: dict) -> Document | None:
         logger.debug("Skipping duplicate: %s", doc.source_uri)
         return None
 
-    content_html = raw_entry.get("content", [{}])[0].get("value", "")
+    content_html = entry_content_html(raw_entry)
     ref_uris = [
         uri for uri in extract_references(content_html) if uri != doc.source_uri
     ]

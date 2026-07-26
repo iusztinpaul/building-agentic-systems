@@ -48,7 +48,12 @@ async def _ingest_substack_article_one(
     return result
 
 
-@flow(name="ingest-substack-article-etl", log_prints=True)
+@flow(
+    name="ingest-substack-article-etl",
+    log_prints=True,
+    retries=3,
+    retry_delay_seconds=5,
+)
 async def ingest_substack_article(
     article_url: str, user_id: PydanticObjectId
 ) -> Document | None:
@@ -57,6 +62,14 @@ async def ingest_substack_article(
     The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_substack_article``) calls
     this so single-URL ingest still gets its own Prefect flow run + Opik trace. The
     BATCH path does NOT call this — it runs the batch tasks directly.
+
+    Retries live on the FLOW, not on per-row ``@task``s (ADR-002 #078–#082 keeps task
+    grain at Batch): the core is one scrape + one load, so the flow IS the unit of work.
+    Tier F — ``retries=3`` / 5 s = a 15 s budget (ADR-002 amendment #096): the article
+    fetch is plain ``httpx``, so a replay is free. Safe because ``load_document`` dedups
+    on ``(user_id, source_uri)`` — a re-run upserts, never double-inserts. A retry that follows an insert which landed server-side before the
+    failure returns ``None`` (seen as a duplicate) rather than the Document; the article
+    is still ingested.
     """
 
     return await _ingest_substack_article_one(article_url, user_id)

@@ -4,9 +4,8 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow, task
 
-from tree.config.sources import HuggingFaceDatasetSource
 from tree.config.settings import settings
-from tree.config.sources import default_configured_sources
+from tree.config.sources import HuggingFaceDatasetSource, default_configured_sources
 from tree.data.batch import gather_isolated
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -89,10 +88,13 @@ def arxiv_window_entries(
 # add no ``persist_result`` flag (it would only matter alongside a ``cache_policy``,
 # which we do not introduce).
 #
-# Per-element isolation (uniform across enrich + load): per-element / bad-data
-# failures are caught by ``asyncio.gather(return_exceptions=True)``, logged at
-# WARNING, and the element is skipped — the task returns the successful subset and
-# a per-batch failure count. A task hard-fails (so Prefect retries the WHOLE batch)
+# Per-element isolation: per-element / bad-data failures are caught by an
+# ``asyncio.gather(return_exceptions=True)``, logged at WARNING, and the element is
+# skipped. NOT uniform across the two phases, deliberately: ``load_batch`` uses the
+# shared ``gather_isolated`` (a failed element is DROPPED), while ``enrich_batch``
+# keeps its own gather because a failed enrich must PASS THE DOC THROUGH with empty
+# content rather than lose it — enrichment is optional, the document is not.
+# A task hard-fails (so Prefect retries the WHOLE batch)
 # only on a batch-WIDE failure, which is SAFE because ``load_document`` dedups on
 # ``(user_id, source_uri)`` so a retried batch never double-inserts.
 
@@ -112,7 +114,7 @@ async def transform_batch(
     return [doc for doc in documents if doc is not None]
 
 
-@task(name="enrich-arxiv-batch", retries=2, retry_delay_seconds=5)
+@task(name="enrich-arxiv-batch", retries=3, retry_delay_seconds=5)
 async def enrich_batch(docs: list[Document], concurrency: int) -> list[Document]:
     """Fetch paper HTML per element under ``asyncio.Semaphore(concurrency)``.
 
@@ -149,7 +151,7 @@ async def enrich_batch(docs: list[Document], concurrency: int) -> list[Document]
     return enriched
 
 
-@task(name="load-arxiv-batch", retries=1, retry_delay_seconds=2)
+@task(name="load-arxiv-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(docs: list[Document]) -> list[Document]:
     """Dedup + persist one chunk via a SINGLE ``gather(return_exceptions=True)``.
 
@@ -157,8 +159,8 @@ async def load_batch(docs: list[Document]) -> list[Document]:
     ``gather_isolated`` helper and returns the successful, non-``None`` subset
     (duplicates drop out as ``None``). A per-element load failure is logged at WARNING +
     skipped, NOT propagated — so one bad row never sinks the chunk. Retried whole-batch
-    on a batch-WIDE infra failure (``retries=1``), safe via the
-    ``(user_id, source_uri)`` dedup.
+    on a batch-WIDE infra failure, safe via the ``(user_id, source_uri)`` dedup. Tier F
+    (idempotent Mongo write) → ``retries=3`` / 5 s = a 15 s budget (ADR-002 #096).
     """
 
     ingested, failures = await gather_isolated(docs, _load_document)
@@ -167,14 +169,17 @@ async def load_batch(docs: list[Document]) -> list[Document]:
     return ingested
 
 
-def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
-    """Return (max_samples, fetch_content, batch_size, concurrency) for HF arxiv.
+def _get_huggingface_arxiv_defaults() -> HuggingFaceDatasetSource:
+    """The configured arxiv HF source entry, or a defaults-only one.
 
     Walks the shared source loader's ``default_configured_sources()`` list
     (backfill + listen, read-only) and picks the first ``HuggingFaceDatasetSource``
     entry whose ``uri`` matches the arxiv dataset id. Falls back to
     ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)`` defaults if no such entry
     exists.
+
+    Returns the ENTRY rather than a positional tuple of its fields, so adding a
+    knob to the source model doesn't mean editing a tuple shape in four places.
     """
 
     for entry in default_configured_sources():
@@ -182,20 +187,9 @@ def _get_huggingface_arxiv_defaults() -> tuple[int, bool, int, int]:
             isinstance(entry, HuggingFaceDatasetSource)
             and entry.uri == ARXIV_DATASET_ID
         ):
-            return (
-                entry.max_samples,
-                entry.fetch_content,
-                entry.batch_size,
-                entry.concurrency,
-            )
+            return entry
 
-    fallback = HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)
-    return (
-        fallback.max_samples,
-        fallback.fetch_content,
-        fallback.batch_size,
-        fallback.concurrency,
-    )
+    return HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)
 
 
 @flow(name="ingest-arxiv-dataset-etl", log_prints=True)
@@ -212,18 +206,21 @@ async def ingest_arxiv_dataset(
     persists rows ``[offset, offset + max_samples)``. ``offset=None`` (the default,
     and what a non-windowed entry forwards) applies NO skip and reproduces today's
     single-run ingest exactly.
+
+    ACCEPTED RETRY EXCEPTION (ADR-002 amendment #096): ``_fetch_dataset_batches`` is a
+    streamed generator this flow iterates, so it CANNOT be a task — it is the one
+    unretried network read in the data layer. A retry would mean re-streaming from row 0,
+    so the flow carries no ``retries`` either; the per-chunk tasks below cover everything
+    after the read.
     """
 
-    (
-        default_max_samples,
-        default_fetch_content,
-        batch_size,
-        concurrency,
-    ) = _get_huggingface_arxiv_defaults()
+    defaults = _get_huggingface_arxiv_defaults()
+    batch_size = defaults.batch_size
+    concurrency = defaults.concurrency
     if max_samples is None:
-        max_samples = default_max_samples
+        max_samples = defaults.max_samples
     if fetch_content is None:
-        fetch_content = default_fetch_content
+        fetch_content = defaults.fetch_content
 
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),

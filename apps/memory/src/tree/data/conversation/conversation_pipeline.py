@@ -51,8 +51,8 @@ async def _load_conversation_document(
 load_conversation_document_task = task(
     _load_conversation_document,
     name="load-conversation-document",
-    retries=1,
-    retry_delay_seconds=2,
+    retries=3,
+    retry_delay_seconds=5,
 )
 
 
@@ -77,6 +77,11 @@ async def ingest_conversation(
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
     trace; the task span nests under it via the forwarded distributed headers.
+
+    NO flow-level ``retries`` (ADR-002 amendment #096, rules 3b + 5): the retry lives on
+    ``load_conversation_document_task``. A flow retry would re-run this body and emit ONE
+    TRACE PER ATTEMPT, breaking the "owns ONE trace" contract above — and would stack on
+    the task's own retries.
     """
 
     configure_opik()

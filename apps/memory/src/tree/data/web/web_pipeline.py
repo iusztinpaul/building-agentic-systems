@@ -54,18 +54,28 @@ async def _ingest_web_url_one(url: str, user_id: PydanticObjectId) -> Document |
     return result
 
 
-@flow(name="ingest-web-url-etl", log_prints=True)
+# Tier B — billable: each attempt is one Bright Data Web Unlocker request.
+# Capped at 2 (ADR-002 amendment #096).
+@flow(name="ingest-web-url-etl", log_prints=True, retries=2, retry_delay_seconds=5)
 async def ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | None:
     """Thin MCP-only @flow: ingest ONE URL via the core.
 
     The MCP ``ingest_url`` router (``tree.data.online_pipeline._ingest_web_url``, the generic-web
     fallback) calls this so single-URL ingest still gets its own Prefect flow run + Opik
     trace. The BATCH path does NOT call this — it runs the batch tasks directly.
+
+    Retries live on the FLOW, not on per-row ``@task``s (ADR-002 #078–#082 keeps task
+    grain at Batch): the core is one scrape + one load, so the flow IS the unit of work.
+    Tier B — capped at ``retries=2`` because each attempt is a billable Bright Data Web
+    Unlocker request. Safe because ``load_web_document`` dedups on
+    ``(user_id, source_uri)`` — a re-run upserts, never double-inserts.
     """
 
     return await _ingest_web_url_one(url, user_id)
 
 
+# Tier B — billable: scrapes via Bright Data Web Unlocker, so ONE batch replay
+# re-bills ALL N urls. Capped at 2 (ADR-002 amendment #096); do NOT raise to 3.
 @task(name="extract-web-batch", retries=2, retry_delay_seconds=5)
 async def extract_batch(urls: list[str], user_id: PydanticObjectId) -> list[Document]:
     """Scrape each URL into a Document via a SINGLE isolated gather.
@@ -86,15 +96,15 @@ async def extract_batch(urls: list[str], user_id: PydanticObjectId) -> list[Docu
     return extracted
 
 
-@task(name="load-web-batch", retries=1, retry_delay_seconds=2)
+@task(name="load-web-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(docs: list[Document]) -> list[Document]:
     """Dedup + persist each scraped Document via a SINGLE isolated gather.
 
     Awaits the pure ``web.load_web_document`` per element. Returns the successful,
     non-``None`` subset (duplicates drop as ``None``); a per-element failure is logged +
-    skipped, NOT propagated. Retried whole-batch on a batch-WIDE infra failure
-    (``retries=1``), safe via the ``(user_id, source_uri)`` dedup (LATENT upgrade +
-    ``DuplicateKeyError`` race handling).
+    skipped, NOT propagated. Retried whole-batch on a batch-WIDE infra failure, safe via
+    the ``(user_id, source_uri)`` dedup (LATENT upgrade + ``DuplicateKeyError`` race
+    handling). Tier F (idempotent Mongo write) → ``retries=3`` / 5 s = 15 s (ADR-002 #096).
     """
 
     ingested, failures = await gather_isolated(docs, load_web_document)

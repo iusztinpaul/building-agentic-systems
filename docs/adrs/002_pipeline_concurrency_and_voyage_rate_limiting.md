@@ -329,6 +329,10 @@ shared Voyage budget.
      retries live in the FETCH LAYER (existing httpx retry behavior / the transcript
      chain's per-slot fallback), not the batch task — so collapsing per-row tasks does NOT
      regress network-fetch retry behavior.
+     **Counts superseded by amendment #096** (F/B/D tiers): free-replay units are `3 / 5 s`,
+     billable ones stay capped at `2 / 5 s`, pure transforms stay `0`. The RELOCATION
+     principle here — retries gate batch-WIDE infra, per-element transients belong to the
+     fetch layer — is unchanged.
 
    - **RSS keeps feed-obtain + shares only the build/load tail (no re-fetch).**
      - **substack-RSS** builds from feed-EMBEDDED content (`fetch_feed_task` →
@@ -356,6 +360,85 @@ shared Voyage budget.
      via the existing `span(...)`, NOT per-doc; trace-header forwarding preserved) are ALL
      unchanged. The observability "win" is in Prefect TASK runs only — the batch flows
      already owned ONE Opik trace with no per-doc spans, so Opik structure does not change.
+
+   **Amendment (#096 — retry placement + retry budget).** The #078–#082 amendment fixed
+   the task GRAIN (Batch, not Document) and set retry counts per phase. It did not say
+   WHERE a retry belongs when a flow has no tasks at all, nor HOW a count is chosen — so
+   the leaf pipelines drifted: the thin single-item MCP flows carried no retry anywhere,
+   and the substack batch lost the `extract-substack-article-batch` / `load-substack-batch`
+   tasks this amendment's §"Pragmatic E/T/L" names, leaving its article scrape + load with
+   ZERO retries while byte-identical web operations had two. This amendment makes the
+   placement rule and the count rule explicit and normalizes every leaf pipeline onto them.
+   Flow-level topology, deployment count, fan-out axis, GCL, and admission control are all
+   unchanged — so Status stays `Accepted`; this is a finer-grained expression of the same
+   topology decision, not a new decision and not a supersession.
+
+   - **The placement rule.** Put the retry on the SMALLEST unit that (a) contains the
+     failure, (b) is idempotent, and (c) is cheap to replay — then NEVER stack two levels.
+     Applied as an ordered decision procedure:
+
+     1. **Dispatcher flow** (body is a `run_deployment` fan-out) → NO retries at any level.
+        A replay re-dispatches every shard; isolation is the per-shard gather.
+        (`data-etl-coordinator`, `data-etl-worker`.)
+     2. **Batch flow** (processes N items) → retries on batch-grain `@task`s, one per ETL
+        phase; the FLOW carries none.
+     3. **Single-item flow** → three sub-cases:
+        - **3a. Body is a 1-line call to a plain async core**, steps cheap and symmetric →
+          `@flow(retries=…)`, NO tasks. Two cheap steps (one HTTP GET ≈ 200 ms, one Mongo
+          write ≈ 10 ms) do not justify two task objects and two Prefect state round-trips
+          on an interactive MCP path. (`ingest-substack-article-etl`, `ingest-web-url-etl`.)
+        - **3b. Body owns an Opik trace** (`configure_opik()` / `span(…)` / `flush_opik()`)
+          → retries on the TASK. A flow retry re-runs the body, emitting ONE TRACE PER
+          ATTEMPT and breaking the documented "owns ONE trace" contract.
+          (`ingest-file-etl`, `ingest-conversation-etl`.)
+        - **3c. Core delegates to shared batch tasks** → add NOTHING; those tasks already
+          retry. (`ingest-youtube-video-etl` → `_bulk_build_and_load`.)
+     4. **Override — billable or asymmetric steps.** A step that is billable, or ≥10× the
+        next step's cost, gets its OWN task so a later cheap failure never replays it. If
+        even ONE replay is unacceptable, ABSORB the failure inside the task and return a
+        partial result rather than raising (`fetch-youtube-transcripts-batch`, #095).
+     5. **Never stack.** A flow whose tasks retry must not set `retries` itself — attempts
+        MULTIPLY (flow 2 × task 3 = up to 12 executions).
+
+   - **The count rule: `retries × retry_delay_seconds` = the transient window the unit must
+     outlast.** Three tiers, chosen from what actually fails here:
+
+     | Tier | Criterion | Budget |
+     | --- | --- | --- |
+     | **F — free replay** | plain HTTP read, or an idempotent Mongo write | **3 × 5 s = 15 s** |
+     | **B — billable replay** | every attempt costs money | **2 × 5 s = 10 s, HARD CAP** |
+     | **D — deterministic** | pure function, no I/O | **0** |
+
+     15 s is sized to outlast a MongoDB primary election (~10–30 s typical) and a transient
+     429/5xx — the two failures the data layer actually sees. Tier B is capped because past
+     that point the budget stops being time and starts being invoice. Tier D is `0` because
+     a pure map that raises on a bad row raises identically on attempt 2: retrying it buys
+     nothing and delays the real error by 10 s. Every Tier-B unit carries an inline
+     `# billable — capped at 2` comment so the cap is not raised without seeing the reason.
+
+   - **Tier assignment (authoritative; the code is normalized onto this).**
+     - **F, 3 / 5 s:** `fetch-substack-rss-feed`, `fetch-youtube-rss-feed`,
+       `enrich-arxiv-batch`, `extract-substack-article-batch`, `load-substack-batch`,
+       `load-web-batch`, `load-youtube-batch`, `load-arxiv-batch`, `load-file-document`,
+       `load-conversation-document`, and the `ingest-substack-article-etl` FLOW (substack
+       articles are fetched with plain `httpx` — replay is free).
+     - **B, 2 / 5 s capped:** `extract-web-batch` and the `ingest-web-url-etl` FLOW (both
+       scrape via **Bright Data Web Unlocker**, billable per request — one batch replay
+       re-bills ALL N urls), and `fetch-youtube-transcripts-batch` (~173 s per collection
+       plus per-record billing; 5 retries ≈ 15 min and 5 paid collections).
+     - **D, 0:** `transform-arxiv-batch`, `build-youtube-batch`.
+
+   - **Substack batch regains its ETL tasks.** `ingest-substack-batch-etl` wraps its
+     existing `gather_isolated` calls in `extract-substack-article-batch` (`retries=3`) and
+     `load-substack-batch` (`retries=3`), restoring the "Load is ALWAYS its own task" rule
+     above and parity with web. The FLATTEN logic is unchanged — the tasks wrap the gathers,
+     they do not re-introduce per-row tasks, and the flow stays at a small constant number
+     of task runs regardless of shard size.
+
+   - **Accepted exception (documented in code).** `arxiv`'s Extract
+     (`_fetch_dataset_batches`) is a streamed generator the flow iterates, so it CANNOT be a
+     task; it is the one unretried network read in the data layer. Retrying it would mean
+     re-streaming from row 0. `ingest_arxiv_dataset`'s docstring names this.
 
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed

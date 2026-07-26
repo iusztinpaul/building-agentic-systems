@@ -17,7 +17,6 @@ there is no stable key to persist them under.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from beanie import PydanticObjectId
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 _ResolvedItem = tuple[str, VideoMetadata]
 
 
-@task(name="fetch-youtube-rss-feed", retries=2, retry_delay_seconds=5)
+@task(name="fetch-youtube-rss-feed", retries=3, retry_delay_seconds=5)
 async def fetch_feed_task(feed_url: str) -> list[dict]:
     return await fetch_feed(feed_url)
 
@@ -105,17 +104,12 @@ async def ingest_youtube_batch(
 
     # RSS feeds → expand to per-video items, isolated per feed.
     if feed_urls:
-        results = await asyncio.gather(
-            *[_resolve_feed(feed_url) for feed_url in feed_urls],
-            return_exceptions=True,
-        )
-        for feed_url, result in zip(feed_urls, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.warning(
-                    "Failed to resolve feed %s; skipping", feed_url, exc_info=result
-                )
-                continue
-            items.extend(result)
+        per_feed, failures = await gather_isolated(feed_urls, _resolve_feed)
+        if failures:
+            logger.warning(
+                "Feed resolve failed for %d/%d feeds", failures, len(feed_urls)
+            )
+        items.extend(item for feed_items in per_feed for item in feed_items)
 
     # Single videos → oEmbed-resolve, isolated per URL. An input with no
     # resolvable video id never reaches oEmbed: it goes to the core as a RAW

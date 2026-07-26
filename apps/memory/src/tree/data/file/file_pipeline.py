@@ -42,8 +42,8 @@ async def _load_file_document(
 load_file_document_task = task(
     _load_file_document,
     name="load-file-document",
-    retries=2,
-    retry_delay_seconds=2,
+    retries=3,
+    retry_delay_seconds=5,
 )
 
 
@@ -60,6 +60,11 @@ async def ingest_file(
 
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
     trace; the task span nests under it via the forwarded distributed headers.
+
+    NO flow-level ``retries`` (ADR-002 amendment #096, rules 3b + 5): the retry lives on
+    ``load_file_document_task``. A flow retry would re-run this body and emit ONE TRACE
+    PER ATTEMPT, breaking the "owns ONE trace" contract above — and would stack on the
+    task's own retries.
     """
 
     configure_opik()

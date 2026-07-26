@@ -73,6 +73,8 @@ _BRIGHTDATA_STATES = {
 }
 
 
+# Tier B — billable: ~173 s per Bright Data collection plus per-record billing, so
+# 5 retries would be ~15 min and 5 paid collections. Capped at 2 (ADR-002 #096).
 @task(
     name="fetch-youtube-transcripts-batch",
     retries=2,
@@ -301,7 +303,7 @@ async def build_batch(
     return documents
 
 
-@task(name="load-youtube-batch", retries=1, retry_delay_seconds=2)
+@task(name="load-youtube-batch", retries=3, retry_delay_seconds=5)
 async def load_batch(docs: list[Document]) -> list[Document]:
     """Dedup + persist one batch via a SINGLE isolated gather.
 

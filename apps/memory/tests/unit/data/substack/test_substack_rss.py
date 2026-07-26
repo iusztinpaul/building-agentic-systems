@@ -4,6 +4,7 @@ from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
 from tree.data.substack.substack_rss import (
+    entry_content_html,
     extract_document,
     extract_references,
     fetch_feed,
@@ -31,6 +32,17 @@ SAMPLE_ENTRY = {
         }
     ],
 }
+
+
+class TestEntryContentHtml:
+    def test_reads_first_content_value(self):
+        assert "Hello" in entry_content_html(SAMPLE_ENTRY)
+
+    def test_missing_content_key_is_empty(self):
+        assert entry_content_html({"title": "No content"}) == ""
+
+    def test_empty_content_list_is_empty_not_indexerror(self):
+        assert entry_content_html({"content": []}) == ""
 
 
 class TestHtmlToPlainText:

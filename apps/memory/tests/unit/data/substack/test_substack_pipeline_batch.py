@@ -6,6 +6,10 @@ single articles (scraped during flatten, wrapped in a synthetic feed-entry) into
 ``load_document`` — so both kinds take the identical load/dedup path. Resolve and load
 are mocked here; their internals are covered by ``test_substack_rss.py`` /
 ``test_substack_article.py``.
+
+The article gather and the load gather are wrapped in the batch-grain tasks
+``extract-substack-article-batch`` / ``load-substack-batch`` (ADR-002 amendment #096), so
+both carry retries like web's. The tasks wrap the gathers — they do NOT add per-row tasks.
 """
 
 from __future__ import annotations
@@ -22,6 +26,30 @@ from tree.config.sources import (
 )
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+class TestBatchTaskMetadata:
+    """Retry grain per ADR-002 amendment #096: both batch tasks are Tier F (3 x 5 s)."""
+
+    def test_extract_article_batch_is_a_task_with_tier_f_retries(self) -> None:
+        assert sub.extract_article_batch.name == "extract-substack-article-batch"
+        # Tier F: substack articles are fetched with plain httpx — replay is free.
+        assert sub.extract_article_batch.retries == 3
+        assert sub.extract_article_batch.retry_delay_seconds == 5
+
+    def test_load_batch_is_a_task_with_tier_f_retries(self) -> None:
+        assert sub.load_batch.name == "load-substack-batch"
+        # Tier F: idempotent Mongo write, 15 s outlasts a primary election.
+        assert sub.load_batch.retries == 3
+        assert sub.load_batch.retry_delay_seconds == 5
+
+    def test_feed_fetch_task_retries(self) -> None:
+        assert sub.fetch_feed_task.retries == 3
+        assert sub.fetch_feed_task.retry_delay_seconds == 5
+
+    def test_flow_does_not_stack_retries_on_its_tasks(self) -> None:
+        # Rule 5: a flow whose tasks retry must not itself retry — attempts multiply.
+        assert not sub.ingest_substack_batch.retries
 
 
 @pytest.fixture(autouse=True)
