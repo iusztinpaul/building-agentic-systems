@@ -20,6 +20,18 @@ from tree.models.fake_model import FakeEmbeddingModel
 _TEST_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
+@pytest.fixture(autouse=True)
+def _no_mongot_sync_sleeps(mocker):
+    """Zero out the real ``asyncio.sleep`` waits in ``_ensure_vector_index``.
+
+    The production code sleeps 2-3s per call to let mongot process index
+    drops/creates — pointless against the mocked collections used here, yet it
+    made each test in this file take 3-5 wall-clock seconds (~28s of the suite).
+    """
+
+    mocker.patch("tree.memory.indexing.core.asyncio.sleep", new=AsyncMock())
+
+
 # ---------------------------------------------------------------------------
 # Cursor helpers
 # ---------------------------------------------------------------------------

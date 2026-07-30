@@ -3,9 +3,6 @@
 These tests cover behavior that does not require MongoDB: config
 validation, the ``enabled=False`` short-circuit, and the read-only
 invariant on ``dedupe_entity``.
-
-The vector-search behavior itself is exercised end-to-end in the
-integration suite (see ``tests/integration/memory/test_dedup.py``).
 """
 
 from __future__ import annotations

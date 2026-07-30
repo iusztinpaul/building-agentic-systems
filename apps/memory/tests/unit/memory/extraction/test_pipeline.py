@@ -1,10 +1,7 @@
 """Unit tests for the six-task extraction pipeline.
 
 Each test exercises a single task body (``task.fn``) with mocked Mongo /
-embedding / LLM dependencies. Behavior that requires Prefect's task runtime
-(caching, retries, mapping) is verified in
-``tests/integration/memory/test_extraction_pipeline.py`` against the live
-flow.
+embedding / LLM dependencies.
 """
 
 from __future__ import annotations

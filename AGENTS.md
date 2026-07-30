@@ -92,8 +92,8 @@ Use the `context7` MCP server (when connected) to look up authoritative usage fo
 
 We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run everything with `make ...`. `uv` manages the `apps/memory` Python project (`uv run <command>`); `bun` manages the `apps/harness` TypeScript project (`bun run <command>`).
 
-- `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-unit-tests`, `make memory-serve-mcp`).
-- `make harness-<target>` — run `<target>` inside `apps/harness/` (e.g. `make harness-unit-tests`, `make harness-dev`).
+- `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-tests`, `make memory-serve-mcp`).
+- `make harness-<target>` — run `<target>` inside `apps/harness/` (e.g. `make harness-tests`, `make harness-dev`).
 - `make local-start` / `make local-stop` / `make local-restart` — shared Docker infra.
 - `make tests` — aggregate: runs all apps' tests.
 - `make pre-commit` — pre-commit across the repo.
@@ -130,21 +130,13 @@ After every commit to git:
 
 1. Format and lint: `make memory-format-fix && make memory-lint-fix && make memory-format-check && make memory-lint-check`
 2. Pre-commit: `make pre-commit`
-3. Unit tests: `make memory-unit-tests`
-4. Case by case:
-   - Fast integration tail (skips `@pytest.mark.slow`) when touching the infra layer: `make memory-integration-tests`
-   - Slow integration tail when iterating on a vector-index or full-Prefect-e2e change: `make memory-integration-tests-slow`
+3. Tests: `make memory-tests`
 
 When a feature is done and ready for PR, ALWAYS run:
 
-5. Full integration tests: `make memory-integration-tests-all` (~5 min; includes `@pytest.mark.slow`).
-6. Run and verify the code end-to-end (see "Running pipelines & E2E"), adapted to the changes you made.
+4. Run and verify the code end-to-end (see "Running pipelines & E2E"), adapted to the changes you made.
 
-Mirror the CI integration command locally (skips mongot-dependent tests; runs sequentially because the shared-DB cleanup fixture makes parallel `-n auto` workers collide): `make memory-integration-tests-ci`.
-
-## Test markers
-
-Test selection is gated by two orthogonal markers — `slow` and `requires_mongot`. Authoritative definitions live in `apps/memory/pyproject.toml` (`[tool.pytest.ini_options] markers`); which target includes/excludes each is in the Makefile target comments.
+NEITHER app has an integration test suite (deleted deliberately — too slow for feedback loops); each `make <app>-tests` target runs the unit suite, and e2e verification happens by running the real pipelines instead.
 
 ## Running pipelines & E2E
 

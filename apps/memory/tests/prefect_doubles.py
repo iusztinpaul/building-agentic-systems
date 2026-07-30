@@ -4,8 +4,7 @@ Both coordinators now classify a shard by the TERMINAL STATE of the flow run
 ``run_deployment`` returns, so a fake that returns ``None`` is no longer a
 faithful stand-in: the real entrypoint always returns a
 :class:`~prefect.client.schemas.objects.FlowRun`. These two factories build that
-return value once for the unit AND integration fakes (imported directly, like
-``tests/integration/conftest.py``'s helpers already are).
+return value once for every fake (imported directly).
 
 They live in a plain module rather than a ``conftest.py`` because the root
 conftest must set ``OPIK_TRACK_DISABLE`` before ANY import that could pull in

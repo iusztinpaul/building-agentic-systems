@@ -1,6 +1,6 @@
 """Regression: the test suite must NEVER emit live Opik telemetry.
 
-The headline bug (2026-06-10): the unit suite is run via ``make memory-unit-tests``,
+The headline bug (2026-06-10): the unit suite is run via ``make memory-tests``,
 whose Makefile does ``include .env`` / ``export`` — so a real ``OPIK_API_KEY`` is
 present in the test process. The production functions (the MCP tools,
 ``execute_nl_query`` / ``nl_to_pipeline``, the pipeline flows) carry live

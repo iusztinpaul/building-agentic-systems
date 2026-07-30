@@ -8,8 +8,6 @@ tests/
     tmp-fs.ts              # mkdtemp + scoped cleanup
   unit/                    # fast, no external infra (no Gemini, no MongoDB, no MCP spawn)
     <area>/<file>.test.ts  # mirrors src/ structure
-  integration/             # slower; require make local-start etc.
-    *.test.ts
 ```
 
 ## Conventions
@@ -46,18 +44,16 @@ Two fakes under `tests/helpers/`:
 
 Prefer dependency injection (`SlashActions.listSessions`, `McpConnectDeps`) over `mock.module`. Bun's module mocks are global and leak across test files — we hit it once already with slash + session-resume tests and had to refactor.
 
-## Unit vs integration
+## Scope
 
-Unit tests must pass without any external setup (no `make local-start`, no `GOOGLE_API_KEY`, no `ripgrep`). If a function needs a real subprocess (e.g. `runHook` shells out to `bash`), use `/bin/echo`, `/bin/true`, or similar POSIX-guaranteed commands so tests stay portable.
+Tests must pass without any external setup (no `make local-start`, no `GOOGLE_API_KEY`, no `ripgrep`). If a function needs a real subprocess (e.g. `runHook` shells out to `bash`), use `/bin/echo`, `/bin/true`, or similar POSIX-guaranteed commands so tests stay portable.
 
-Integration tests live under `tests/integration/` and run via `make harness-integration-tests`. They may spawn subprocesses, but should **not** depend on external services (MongoDB, real Gemini, the real `tree-memory` server). For MCP coverage, the repo ships a tiny stub server at `tests/integration/fixtures/stub-mcp-server.ts` — a three-tool in-repo MCP server the test spawns via `bun run`. That lets us exercise the full `StdioClientTransport` / `Client` round-trip without booting Python or MongoDB. Follow the same pattern if you need to cover other real-subprocess paths.
+There is no integration suite (deleted deliberately — too slow for feedback loops); e2e verification happens by running the real harness.
 
 ## Running
 
 ```bash
-make harness-unit-tests          # fast — default during development
-make harness-integration-tests   # spawns a bun subprocess for the stub MCP server; no external infra
-make harness-tests               # everything
+make harness-tests               # everything — fast, no external infra
 
 bun test --watch tests/unit/                         # TDD loop
 bun test tests/unit/permissions/policy.test.ts       # single file

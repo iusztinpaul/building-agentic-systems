@@ -314,15 +314,10 @@ Then flip `models.search_embedding` (and, if desired, `models.resolution_embeddi
 ## Testing
 
 ```bash
-make memory-unit-tests         # fast, no external infra
-make memory-integration-tests  # needs make local-start; up to 15 min
-make memory-tests              # unit + integration
+make memory-tests              # unit suite (needs the local MongoDB from make local-start)
 ```
 
-Layout mirrors the source tree:
-
-- `tests/unit/` — pure unit tests with mocks (`pytest-mock`). No Mongo, no Prefect, no Modal.
-- `tests/integration/` — hit real MongoDB, real Gemini, real Modal when applicable. MCP tool tests live here (end-to-end, not unit).
+Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). There is no integration suite (deleted deliberately — too slow for feedback loops); e2e verification happens by running the real pipelines (see "Running pipelines").
 
 Auto-format + lint before committing:
 
@@ -341,7 +336,7 @@ apps/memory/
     entities/           # Beanie ODMs shared across the app
     data/               # one module per ingestion source
       core/             # base flow, URL dispatch, ingest framework
-      substack/         # substack_rss.py, substack_article.py
+      substack/         # substack.py + batch/single-article pipelines
       huggingface/      # arxiv_dataset_pipeline.py
       conversation.py   # conversation ingestion
       file.py           # local file ingestion
@@ -356,7 +351,7 @@ apps/memory/
   configs/default.yaml  # app tuning
   deploy/               # Modal deployments (vLLM embedding)
   scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph, signup, check_db)
-  tests/unit + tests/integration
+  tests/unit
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)
   pyproject.toml, uv.lock

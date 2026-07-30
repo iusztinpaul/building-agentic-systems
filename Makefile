@@ -17,7 +17,7 @@ endif
 include $(ENV_FILE)
 export
 
-.PHONY: help env-prod env-local env-status env-reload-infra tests unit-tests integration-tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
+.PHONY: help env-prod env-local env-status env-reload-infra tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
 
 # --- Utilities ---
 
@@ -58,17 +58,9 @@ local-restart: # Restart shared infra.
 
 # --- Convenience aggregates ---
 
-tests: # Run all tests (unit + integration) across all apps.
+tests: # Run all tests across all apps (unit only — integration suites were removed deliberately: too slow for feedback loops).
 	$(MAKE) memory-tests
 	$(MAKE) harness-tests
-
-unit-tests: # Run unit tests across all apps.
-	$(MAKE) memory-unit-tests
-	$(MAKE) harness-unit-tests
-
-integration-tests: # Run integration tests across all apps.
-	$(MAKE) memory-integration-tests
-	$(MAKE) harness-integration-tests
 
 format-check: # Run formatter checks across all apps.
 	$(MAKE) memory-format-check

@@ -221,12 +221,10 @@ make format-check    # ruff (memory) + biome (harness)
 make lint-check      # ruff (memory) + biome (harness)
 make typecheck       # TypeScript (harness only — memory is dynamically typed)
 make pre-commit      # repo-wide pre-commit
-make unit-tests      # memory + harness unit suites
-make integration-tests  # memory + harness integration suites (up to 15 min for memory)
-make tests           # unit + integration across all apps
+make tests           # memory + harness test suites (unit only — fast, no external infra)
 ```
 
-Per-app variants are available under `make memory-*` and `make harness-*` (e.g. `make memory-unit-tests`). Run `make help` to list all root targets.
+Per-app variants are available under `make memory-*` and `make harness-*` (e.g. `make memory-tests`). Run `make help` to list all root targets.
 
 ## CI
 

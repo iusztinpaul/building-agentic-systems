@@ -6,10 +6,6 @@ Mongo without standing up an integration database. The
 ``user_id``-scoping invariant is the centerpiece: every fact read must
 filter on the bound ``self.user_id`` AND on ``type == "fact"`` AND on
 ``kind == "node"``.
-
-Integration coverage of the helpers against real Mongo (with mongot
-for the vector path) lives at
-``tests/integration/memory/test_find_facts.py``.
 """
 
 from __future__ import annotations

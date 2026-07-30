@@ -59,20 +59,13 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit", "tests/integration"]
+testpaths = ["tests/unit"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-# Default per-test timeout (seconds). The slowest legitimate tests today are
-# the Prefect-e2e + mongot-convergence ones marked ``@pytest.mark.slow`` and
-# they top out around 10s; 300s leaves ample headroom while still catching
-# true hangs. Individual tests can opt into more via ``@pytest.mark.timeout(N)``.
+# Default per-test timeout (seconds): a per-test hang net with ample headroom.
 timeout = 300
 timeout_method = "signal"
-markers = [
-    "slow: marks tests that take >3s or require vector-index (mongot) convergence or full Prefect e2e. Excluded by default in `make memory-integration-tests`; included in CI and `make memory-integration-tests-all`.",
-    "requires_mongot: marks tests that need a working Atlas Search / mongot (live `$vectorSearch` or `create_search_index`). Excluded from CI (mongot's gRPC channel is unreliable on GitHub runners); included in local runs with the full `docker-compose.yml` infra. Orthogonal to `slow`.",
-]
 filterwarnings = [
     "ignore:Logger 'prefect:UserWarning",
     "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",

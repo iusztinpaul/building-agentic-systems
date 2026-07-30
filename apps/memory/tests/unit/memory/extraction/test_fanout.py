@@ -16,10 +16,6 @@ the PURE logic with no Prefect server and ``run_deployment`` mocked:
 Since #095 every fake returns a real ``FlowRun`` — the shape ``run_deployment``
 actually returns — because the fan-out now counts a shard as succeeded only when
 that run's terminal state is COMPLETED.
-
-The coordinator flow ``memory_extract_etl_coordinator(...)`` and pending-doc
-resolution against Mongo are covered by the integration test
-(``tests/integration/memory/test_extraction_fanout.py``).
 """
 
 from __future__ import annotations

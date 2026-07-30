@@ -2,8 +2,7 @@
 
 These tests cover model shape, default values, the ``canonical_name``
 fallback rule, and the payload produced by ``after_insert`` (with the
-underlying Mongo collection mocked via ``pytest-mock``). End-to-end
-behavior against a real MongoDB lives in ``tests/integration/entities/``.
+underlying Mongo collection mocked via ``pytest-mock``).
 """
 
 from __future__ import annotations

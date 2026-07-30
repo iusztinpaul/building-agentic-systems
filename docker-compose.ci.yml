@@ -7,14 +7,12 @@
 #   step) that connect with credentialed URIs from ``settings.mongo.mongo_uri``.
 # * Skips creation of the dedicated ``mongot`` user — mongot is not started in
 #   CI because its Search Index Management gRPC channel is unreliable on
-#   GitHub runners (CI run 25989844295). Tests that need it are tagged
-#   ``@pytest.mark.requires_mongot`` and skipped via
-#   ``pytest -m "not requires_mongot"``.
+#   GitHub runners (CI run 25989844295).
 # * Uses ``mongod.ci.conf`` (no security/keyFile, ``skipAuthentication...`` on)
 #   so the mongod boots even though we're not bringing mongot up.
 #
-# To bring up the full mongot stack locally for the integration suite, just
-# use the base ``docker-compose.yml``.
+# To bring up the full mongot stack locally, just use the base
+# ``docker-compose.yml``.
 #
 # Note: the merged compose config (``docker compose -f docker-compose.yml -f
 # docker-compose.ci.yml config``) still LISTS the ``mongot`` service because

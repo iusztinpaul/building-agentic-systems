@@ -20,8 +20,7 @@ env:
   MONGO_INITDB_ROOT_PASSWORD: tree
   MONGO_INITDB_DATABASE: tree
   # MONGOT_PORT intentionally unset — mongot is not started on CI (see the
-  # "Start infrastructure" step). Tests that need mongot are skipped via
-  # ``-m "not requires_mongot"``.
+  # "Start infrastructure" step); no test needs it.
   # Prefect
   PREFECT_PORT: "4200"
   PREFECT_API_URL: http://127.0.0.1:4200/api
@@ -75,11 +74,9 @@ jobs:
         # mongot is intentionally NOT started on CI. Its Search Index Management
         # gRPC channel is unreliable on GitHub runners (see CI run 25989844295:
         # 16 ``Failed to establish connectivity of gRPC channel before deadline``
-        # errors + 7 five-minute hangs on live ``$vectorSearch``). Tests that
-        # need mongot are tagged ``@pytest.mark.requires_mongot`` and skipped
-        # below; they're exercised locally with the full ``docker-compose.yml``
-        # stack instead. ``mongodb-init`` still runs to bring up the replica
-        # set; the keyfile / mongot-user override lives in ``docker-compose.ci.yml``.
+        # errors + 7 five-minute hangs on live ``$vectorSearch``); no test needs
+        # it. ``mongodb-init`` still runs to bring up the replica set; the
+        # keyfile / mongot-user override lives in ``docker-compose.ci.yml``.
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d mongodb mongodb-init prefect-server
 
       - name: Wait for MongoDB to be ready
@@ -124,28 +121,8 @@ jobs:
             sleep 5
           done
 
-      - name: Unit tests
-        run: uv run pytest tests/unit
-        working-directory: apps/memory
-        env:
-          PYTHONPATH: ./src/
-
-      - name: Integration tests (excludes @pytest.mark.requires_mongot)
-        # ``-m "not requires_mongot"`` skips the mongot/Atlas-Search subset
-        # (see the "Start infrastructure" comment above). Run SPLIT BY AREA, one
-        # pytest process per area (data / memory / mcp / rest): the suite shares
-        # one session-scoped DB and a fire-and-forget async write from one area
-        # (the MCP ``search_web`` background ingest) was landing during a LATER
-        # area's test and polluting it — a write that arrives after the per-test
-        # wipe can't be cleaned. Separate processes give each area its own DB
-        # lifecycle. Each area passes on its own; only the mixed single-process
-        # run failed. Still sequential (no ``-n auto``) — the shared-DB cleanup
-        # fixture collides in parallel. ``--timeout=300`` is a per-test hang net.
-        run: |
-          uv run pytest tests/integration/data -m "not requires_mongot" --timeout=300
-          uv run pytest tests/integration/memory -m "not requires_mongot" --timeout=300
-          uv run pytest tests/integration/mcp -m "not requires_mongot" --timeout=300
-          uv run pytest tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp -m "not requires_mongot" --timeout=300
+      - name: Tests
+        run: uv run pytest
         working-directory: apps/memory
         env:
           PYTHONPATH: ./src/
@@ -178,10 +155,6 @@ jobs:
         run: bun tsc --noEmit
         working-directory: apps/harness
 
-      - name: Unit tests
-        run: bun test tests/unit
-        working-directory: apps/harness
-
-      - name: Integration tests
-        run: bun test tests/integration
+      - name: Tests
+        run: bun test
         working-directory: apps/harness

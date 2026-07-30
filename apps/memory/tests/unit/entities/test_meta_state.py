@@ -2,8 +2,7 @@
 
 Pure schema checks — no live Mongo. Round-trip the Beanie document,
 pin the deterministic ``_id`` builder, the tz-aware validator, and the
-index declaration. The live write path is covered by the integration
-test (``tests/integration/memory/test_meta_state.py``).
+index declaration.
 """
 
 from __future__ import annotations

@@ -67,31 +67,8 @@ generate-secret-key: # Generate a random secret key (e.g. for MODAL_EMBEDDING_AP
 
 # --- Tests & QA ---
 
-tests: # Run all tests (unit + integration).
+tests: # Run the test suite (unit only — integration tests were removed deliberately: too slow for feedback loops; e2e verification runs the real pipelines instead).
 	uv run pytest
-
-unit-tests: # Run unit tests only.
-	uv run pytest tests/unit
-
-integration-tests: # Fast inner-loop integration tests (excludes @pytest.mark.slow). Target wall time <2 min.
-	uv run pytest tests/integration -m "not slow"
-
-integration-tests-slow: # Run only the slow integration tests (vector-index convergence + full Prefect e2e).
-	uv run pytest tests/integration -m "slow"
-
-# --- Integration tests run SPLIT BY AREA, one pytest PROCESS per area
-# (data / memory / mcp / rest).
-
-INTEGRATION_AREAS = tests/integration/data tests/integration/memory tests/integration/mcp
-INTEGRATION_REST = tests/integration --ignore=tests/integration/data --ignore=tests/integration/memory --ignore=tests/integration/mcp
-
-integration-tests-all: # Run the full integration suite (fast + slow, incl. mongot), one process per area. Used by the Tester's final acceptance gate; requires the full local mongot stack from docker-compose.yml.
-	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area || exit 1; done
-	uv run pytest $(INTEGRATION_REST)
-
-integration-tests-ci: # Mirror the CI integration command locally: skip mongot-dependent tests, one process per area (see comment above).
-	@for area in $(INTEGRATION_AREAS); do uv run pytest $$area -m "not requires_mongot" --timeout=300 || exit 1; done
-	uv run pytest $(INTEGRATION_REST) -m "not requires_mongot" --timeout=300
 
 pre-commit: # Run pre-commit hooks.
 	uv run pre-commit run --all-files

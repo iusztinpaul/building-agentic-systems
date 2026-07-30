@@ -391,8 +391,7 @@ class TestBuildStructuralEntries:
 
 # ---------------------------------------------------------------------------
 # normalize_nodes — DELETED in #012. Behavior is now covered by the six-task
-# pipeline (see ``tests/unit/memory/extraction/test_pipeline.py`` and the
-# integration suite under ``tests/integration/memory/test_extraction_pipeline.py``).
+# pipeline (see ``tests/unit/memory/extraction/test_pipeline.py``).
 # ---------------------------------------------------------------------------
 
 
