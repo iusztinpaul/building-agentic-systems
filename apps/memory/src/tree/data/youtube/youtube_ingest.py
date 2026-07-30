@@ -33,11 +33,11 @@ from tree.data.youtube.types import (
     VideoMetadata,
     merge_video_metadata,
 )
-from tree.data.youtube.urls import extract_video_id
-from tree.data.youtube.youtube_video import (
+from tree.data.youtube.youtube import (
     INVALID_URL_ERROR,
     build_document,
     build_failure_document,
+    extract_video_id,
     load_video_document,
 )
 from tree.entities.documents import Document

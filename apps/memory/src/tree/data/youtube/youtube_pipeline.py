@@ -20,12 +20,13 @@ from beanie import PydanticObjectId
 from prefect import flow
 
 from tree.data.youtube.types import VideoMetadata
-from tree.data.youtube.urls import canonical_video_url, extract_video_id
-from tree.data.youtube.youtube_ingest import _bulk_build_and_load
-from tree.data.youtube.youtube_video import (
+from tree.data.youtube.youtube import (
+    canonical_video_url,
+    extract_video_id,
     fetch_oembed_metadata,
     parse_oembed_metadata,
 )
+from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.entities.documents import Document
 
 logger = logging.getLogger(__name__)

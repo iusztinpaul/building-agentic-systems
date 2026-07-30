@@ -23,7 +23,7 @@ import logging
 import click
 from beanie import PydanticObjectId
 
-from tree.data.web.web_search_ingest import trigger_url_batch_ingest
+from tree.data.web.web_pipeline import trigger_url_batch_ingest
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,

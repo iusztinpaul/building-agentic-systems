@@ -40,7 +40,7 @@ from tree.data.youtube.types import (
     TranscriptSegment,
     VideoMetadata,
 )
-from tree.data.youtube.urls import canonical_video_url, extract_video_id
+from tree.data.youtube.youtube import canonical_video_url, extract_video_id
 
 logger = logging.getLogger(__name__)
 

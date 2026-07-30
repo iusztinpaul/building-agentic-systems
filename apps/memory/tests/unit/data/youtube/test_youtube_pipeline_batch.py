@@ -4,7 +4,7 @@ The unified flow FLATTENS a shard's RSS feeds (expanded to per-video items) and 
 videos into one ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk
 core ONCE — so there is exactly ONE ``fetch_many`` over feeds + loose videos combined.
 Resolve (feed-expand vs oEmbed) and the bulk core are mocked here; their internals are
-covered by ``test_youtube_rss.py`` / ``test_youtube_video.py`` / ``test_youtube_ingest.py``.
+covered by ``test_youtube.py`` / ``test_youtube_ingest.py``.
 """
 
 from __future__ import annotations

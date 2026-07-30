@@ -29,12 +29,12 @@ from tree.config.sources import (
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
 from tree.data.youtube.types import VideoMetadata
-from tree.data.youtube.youtube_ingest import _bulk_build_and_load
-from tree.data.youtube.youtube_rss import (
+from tree.data.youtube.youtube import (
     extract_video_url,
     feed_entry_to_metadata,
     fetch_feed,
 )
+from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_pipeline import (
     _partition_video_inputs,
     _resolve_video_item,

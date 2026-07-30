@@ -23,15 +23,29 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from pydantic import BaseModel, Field
 
 from tree.config.settings import settings
-from tree.data.web.types import SearchResult
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SearchResult(BaseModel):
+    """A single organic SERP entry returned by Bright Data's SERP API."""
+
+    rank: int = Field(
+        ..., description="Position within the organic results, 1-indexed."
+    )
+    title: str
+    url: str
+    snippet: str = Field(
+        default="", description="Description / page summary; may be empty."
+    )
+
 
 _BRIGHTDATA_REQUEST_URL = "https://api.brightdata.com/request"
 _PAGE_SIZE = 10

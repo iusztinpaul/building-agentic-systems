@@ -848,18 +848,18 @@ class TestLoadBatch:
         )
         existing.id = PydanticObjectId()
         mocker.patch(
-            "tree.data.youtube.youtube_video.Document.find_one",
+            "tree.data.youtube.youtube.Document.find_one",
             new_callable=mocker.AsyncMock,
             return_value=existing,
         )
         replace = mocker.patch(
-            "tree.data.youtube.youtube_video.Document.replace",
+            "tree.data.youtube.youtube.Document.replace",
             new_callable=mocker.AsyncMock,
         )
         incoming = _make_doc(VIDEO_IDS[0])
         incoming.user_id = user_id
 
-        with caplog.at_level(logging.WARNING, logger="tree.data.youtube.youtube_video"):
+        with caplog.at_level(logging.WARNING, logger="tree.data.youtube.youtube"):
             result = await load_batch.fn([incoming])
 
         assert result == [incoming]

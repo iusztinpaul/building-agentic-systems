@@ -25,7 +25,7 @@ from tree.data.web.web_scrape import (
 from tree.data.web.web_scrape import (
     scrape_one as _scrape_one,
 )
-from tree.data.web.web_search_ingest import (
+from tree.data.web.web_pipeline import (
     trigger_url_batch_ingest as _trigger_url_batch_ingest,
 )
 from tree.data.web.web_serp import search as web_search
