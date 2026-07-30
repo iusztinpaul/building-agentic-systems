@@ -1,6 +1,6 @@
 """Pure logic for the YouTube channel RSS-feed ETL.
 
-Mirrors `tree.data.substack.substack_rss` in shape, specialised for YouTube:
+Mirrors `tree.data.substack.substack` in shape, specialised for YouTube:
 
 - `fetch_feed` — `httpx.AsyncClient.get(...)` + `feedparser.parse(...)`, returns
   the list of Atom entries. Same error semantics as the Substack helper:
@@ -41,7 +41,7 @@ _FEED_TIMEOUT_SECONDS = 30.0
 async def fetch_feed(feed_url: str) -> list[dict]:
     """Fetch and parse a YouTube channel Atom feed, returning raw entries.
 
-    Mirrors `tree.data.substack.substack_rss.fetch_feed`: same error contract
+    Mirrors `tree.data.substack.substack.fetch_feed`: same error contract
     (HTTP errors propagate, malformed-with-no-entries raises ``ValueError``,
     bozo-with-entries is tolerated).
     """

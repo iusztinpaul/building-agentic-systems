@@ -1,6 +1,6 @@
 """Web ingestion core: fetch a URL via Bright Data Web Unlocker, build a Document, persist it.
 
-Mirrors the layered structure of ``tree.data.substack.substack_article`` (extraction
+Mirrors the layered structure of ``tree.data.substack.substack`` (extraction
 helpers + ``fetch_and_extract_*`` + ``load_*_document``) and the LATENT-promotion
 pattern from ``tree.data.file.file.load_file_document``.
 

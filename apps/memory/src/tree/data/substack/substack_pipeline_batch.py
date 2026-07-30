@@ -2,7 +2,7 @@
 
 Flattens a Substack shard (mixed ``SubstackRssSource`` + ``SubstackArticleSource``)
 into a single ``[(Document, raw_entry)]`` list, then loads every item via ONE isolated
-gather over the SHARED ``substack_rss.load_document``. The two kinds acquire content
+gather over the SHARED ``substack.load_document``. The two kinds acquire content
 differently — RSS items carry feed-embedded content (NO scrape), single articles are
 scraped during flatten — but both normalize to ``(Document, raw_entry)``: the article
 path wraps its scraped HTML in a synthetic feed-entry (``{"content": [{"value": …}]}``)
@@ -13,7 +13,7 @@ Failure isolation is preserved at the flatten boundary: a feed that fails to fet
 logged + skipped (its items absent), an article that fails to scrape is dropped, and
 the load gather isolates per-item failures. The thin single-article MCP flow
 (``substack_pipeline.ingest_substack_article``) and the pure helpers
-(``substack_rss`` / ``substack_article``) are unchanged.
+(``substack``) are unchanged.
 """
 
 from __future__ import annotations
@@ -29,9 +29,10 @@ from tree.config.sources import (
 )
 from tree.config.settings import settings
 from tree.data.batch import gather_isolated
-from tree.data.substack.substack_article import as_feed_entry, fetch_and_extract
-from tree.data.substack.substack_rss import (
+from tree.data.substack.substack import (
+    as_feed_entry,
     extract_document,
+    fetch_and_extract,
     fetch_feed,
     load_document,
 )

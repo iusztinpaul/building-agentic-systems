@@ -2,9 +2,9 @@
 
 The article path SCRAPES each URL (Extract+Transform fuse — one scrape yields the
 Document). ``_ingest_substack_article_one`` is the plain async core: the pure
-``substack_article.fetch_and_extract`` (scrape) then the SHARED
-``substack_article.load_article_document`` (which delegates to
-``substack_rss.load_document``). ``ingest_substack_article`` is a THIN 1-line @flow
+``substack.fetch_and_extract`` (scrape) then the SHARED
+``substack.load_article_document`` (which delegates to
+``substack.load_document``). ``ingest_substack_article`` is a THIN 1-line @flow
 wrapper used ONLY by the MCP URL router (``tree.data.online_pipeline``).
 
 The unified batch (``substack_pipeline_batch.ingest_substack_batch``) reuses the same
@@ -17,7 +17,7 @@ import logging
 from beanie import PydanticObjectId
 from prefect import flow
 
-from tree.data.substack.substack_article import (
+from tree.data.substack.substack import (
     fetch_and_extract,
     load_article_document,
 )

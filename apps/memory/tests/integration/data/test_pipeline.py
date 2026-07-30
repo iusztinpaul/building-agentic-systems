@@ -68,18 +68,6 @@ FAKE_ARTICLE_HTML = """
 """
 
 
-def _make_mock_rss_client(mocker) -> MagicMock:
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.text = "<rss></rss>"
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.get = AsyncMock(return_value=mock_response)
-    return mock_client
-
-
 def _make_parsed_feed(entries: list[dict]) -> MagicMock:
     feed = MagicMock()
     feed.entries = [MagicMock(**entry) for entry in entries]
@@ -155,21 +143,20 @@ def _mock_init_mongodb(mocker, mongo_client) -> None:
         mocker.patch(f"{module}.init_mongodb", return_value=mongo_client)
 
 
-def _mock_rss_source(mocker) -> None:
-    mocker.patch(
-        "tree.data.substack.substack_rss.httpx.AsyncClient",
-        return_value=_make_mock_rss_client(mocker),
-    )
-    mocker.patch(
-        "tree.data.substack.substack_rss.feedparser.parse",
-        return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
-    )
+def _mock_substack_source(mocker) -> None:
+    """Mock both Substack acquisition paths (one merged module → one httpx patch).
 
+    The RSS path never reads the response text — ``feedparser.parse`` is patched
+    directly — so a single client returning the article HTML serves both paths.
+    """
 
-def _mock_article_source(mocker) -> None:
     mocker.patch(
-        "tree.data.substack.substack_article.httpx.AsyncClient",
+        "tree.data.substack.substack.httpx.AsyncClient",
         return_value=_make_mock_article_client(mocker),
+    )
+    mocker.patch(
+        "tree.data.substack.substack.feedparser.parse",
+        return_value=_make_parsed_feed(FAKE_RSS_ENTRIES),
     )
 
 
@@ -187,8 +174,7 @@ class TestDataPipeline:
     @pytest.mark.slow
     async def test_runs_all_three_pipelines(self, mongo_client, mocker) -> None:
         _mock_init_mongodb(mocker, mongo_client)
-        _mock_rss_source(mocker)
-        _mock_article_source(mocker)
+        _mock_substack_source(mocker)
         _mock_arxiv_source(mocker)
         sources = _make_sources(
             mocker,
@@ -216,7 +202,7 @@ class TestDataPipeline:
         self, mongo_client, mocker
     ) -> None:
         _mock_init_mongodb(mocker, mongo_client)
-        _mock_rss_source(mocker)
+        _mock_substack_source(mocker)
         _mock_arxiv_source(mocker)
         sources = _make_sources(
             mocker,
@@ -237,7 +223,7 @@ class TestDataPipeline:
         self, mongo_client, mocker
     ) -> None:
         _mock_init_mongodb(mocker, mongo_client)
-        _mock_article_source(mocker)
+        _mock_substack_source(mocker)
         _mock_arxiv_source(mocker)
         sources = _make_sources(
             mocker,

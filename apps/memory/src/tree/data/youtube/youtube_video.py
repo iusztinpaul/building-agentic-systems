@@ -1,6 +1,6 @@
 """Pure logic for the single-video YouTube ETL.
 
-Mirrors `tree.data.substack.substack_article` in shape:
+Mirrors `tree.data.substack.substack` in shape:
 
 - `fetch_oembed_metadata` — best-effort HTTP enrichment via the public oEmbed
   endpoint. Returns `{}` (not an exception) for the "video disables oEmbed" /
@@ -12,7 +12,7 @@ Mirrors `tree.data.substack.substack_article` in shape:
   have no `<a href>` anchors, so there is no reference extraction.
 - `load_video_document` — minimal dedup + insert/replace. Inlines the
   ten-line dedup-then-insert pattern from
-  `tree.data.substack.substack_rss.load_document` (the canonical version) —
+  `tree.data.substack.substack.load_document` (the canonical version) —
   intentionally NOT imported, because the transcript path has no references
   to resolve.
 """
@@ -172,7 +172,7 @@ async def load_video_document(doc: Document) -> Document | None:
     """Dedup and persist a single YouTube `Document`.
 
     Mirrors the dedup-then-insert/replace path from
-    `tree.data.substack.substack_rss.load_document` — that is the canonical
+    `tree.data.substack.substack.load_document` — that is the canonical
     version. Intentionally **not** imported, because:
 
     - Transcripts contain no anchor tags → no references to resolve, so the

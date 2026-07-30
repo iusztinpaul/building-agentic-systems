@@ -194,7 +194,7 @@ def _mock_substack_fetch(mocker, sample_html: str) -> None:
     mock_response.text = sample_html
     mock_response.raise_for_status = mocker.MagicMock()
     mocker.patch(
-        "tree.data.substack.substack_article.httpx.AsyncClient",
+        "tree.data.substack.substack.httpx.AsyncClient",
         return_value=mocker.AsyncMock(
             __aenter__=mocker.AsyncMock(
                 return_value=mocker.MagicMock(

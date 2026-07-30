@@ -1,6 +1,6 @@
 """Unit tests for the pure logic in `tree.data.youtube.youtube_rss`.
 
-Mirrors `tests/unit/data/substack/test_substack_rss.py`. Covers:
+Mirrors `tests/unit/data/substack/test_substack.py`. Covers:
 - `extract_video_url` resolution order (yt_videoid → link fallback → None).
 - `feed_entry_to_metadata` mapping and tz-awareness invariants.
 - `fetch_feed` HTTP / bozo / empty-feed behaviour (mocked httpx + feedparser).

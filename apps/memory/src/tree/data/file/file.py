@@ -11,7 +11,7 @@ from pathlib import Path
 from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
-from tree.data.substack.substack_rss import html_to_plain_text
+from tree.data.substack.substack import html_to_plain_text
 from tree.entities.documents import Document, SourceType
 
 logger = logging.getLogger(__name__)

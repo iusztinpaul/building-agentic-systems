@@ -4,8 +4,7 @@ The unified flow FLATTENS a shard's RSS feeds (expanded from feed-embedded conte
 single articles (scraped during flatten, wrapped in a synthetic feed-entry) into one
 ``[(Document, raw_entry)]`` list, then runs ONE isolated load gather over the SHARED
 ``load_document`` — so both kinds take the identical load/dedup path. Resolve and load
-are mocked here; their internals are covered by ``test_substack_rss.py`` /
-``test_substack_article.py``.
+are mocked here; their internals are covered by ``test_substack.py``.
 
 The article gather and the load gather are wrapped in the batch-grain tasks
 ``extract-substack-article-batch`` / ``load-substack-batch`` (ADR-002 amendment #096), so
