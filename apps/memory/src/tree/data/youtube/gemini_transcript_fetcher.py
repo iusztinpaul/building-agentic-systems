@@ -27,7 +27,7 @@ Design notes:
   but we deliberately don't parse it.
 - Per-slot failures return `None`; this layer NEVER emits a WARNING. The
   `None`-slot WARNING still lives in `fetch_transcripts_batch`
-  (`tree.data.youtube.youtube_ingest`), which names the skipped video —
+  (`tree.data.youtube.youtube_pipeline`), which names the skipped video —
   after #092 it fires for slots the WHOLE chain exhausted, carrying a
   normalized `no_transcript: …` error naming both backends' states.
 """

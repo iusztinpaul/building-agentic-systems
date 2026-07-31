@@ -340,7 +340,7 @@ shared Voyage budget.
        per-article re-scrape. It shares ONLY the LOAD with substack-article (which keeps
        its own scrape `extract_batch`); RSS is NOT unified onto the article scrape path.
      - **youtube-RSS + youtube-video** share the bulk-transcript-fetch + `build_batch` +
-       `load_batch` tail (the `_bulk_build_and_load` core in `youtube_ingest.py`): ONE bulk
+       `load_batch` tail (the `_bulk_build_and_load` core in `youtube_pipeline.py`): ONE bulk
        `fetcher.fetch_many(all_urls)` per feed/batch (the #080 fix — previously per-video
        `fetch_many([url])` inside per-URL sub-flows). The metadata SOURCE stays distinct:
        oEmbed per video (direct) vs `feed_entry_to_metadata` (RSS).

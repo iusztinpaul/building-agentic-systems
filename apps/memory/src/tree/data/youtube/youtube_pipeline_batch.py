@@ -2,7 +2,7 @@
 
 Flattens a YouTube shard (mixed ``YouTubeRssSource`` + ``YouTubeVideoSource``) into a
 single ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk core
-(``youtube_ingest._bulk_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
+(``youtube_pipeline._bulk_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
 over ALL items (feeds + loose videos), build, load. The only per-kind difference is
 the resolve step — RSS metadata comes from the feed, single-video metadata from
 oEmbed; once flattened to ``(url, VideoMetadata)`` the two are indistinguishable.
@@ -34,8 +34,8 @@ from tree.data.youtube.youtube import (
     feed_entry_to_metadata,
     fetch_feed,
 )
-from tree.data.youtube.youtube_ingest import _bulk_build_and_load
 from tree.data.youtube.youtube_pipeline import (
+    _bulk_build_and_load,
     _partition_video_inputs,
     _resolve_video_item,
 )

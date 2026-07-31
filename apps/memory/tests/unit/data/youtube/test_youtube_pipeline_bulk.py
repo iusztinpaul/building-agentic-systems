@@ -1,14 +1,14 @@
 """Unit tests for the shared bulk-transcript ingest core (#080, rewired by #092).
 
-``tree.data.youtube.youtube_ingest`` is the single tail BOTH YouTube pipelines run:
+``tree.data.youtube.youtube_pipeline`` is the single tail BOTH YouTube pipelines run:
 "(url, metadata) list → Bright Data bulk fetch → Gemini fallback over the missing
 slots → build → load". These tests prove the fallback chain order and grain, the
 batch-wide fallback triggers, the up-front credential gate, the cost WARNINGs, the
 metadata merge, and the persisted ``ingest_error`` rows.
 
 NO live call is ever made: both backends are patched at their in-task CONSTRUCTION
-point (``youtube_ingest.BrightDataTranscriptFetcher`` /
-``youtube_ingest.GeminiTranscriptFetcher``) — the thin seam per fetcher, required
+point (``youtube_pipeline.BrightDataTranscriptFetcher`` /
+``youtube_pipeline.GeminiTranscriptFetcher``) — the thin seam per fetcher, required
 because both constructors raise without their API key. Credential PRESENCE is
 faked by patching ``settings`` so the suite behaves identically with or without
 keys in the operator's ``.env``. ``TestBrightDataTransportFailure`` is the one
@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-import tree.data.youtube.youtube_ingest as youtube_ingest
+import tree.data.youtube.youtube_pipeline as youtube_pipeline
 from beanie import PydanticObjectId
 from pydantic import SecretStr
 
@@ -41,7 +41,7 @@ from tree.data.youtube.types import (
     TranscriptSegment,
     VideoMetadata,
 )
-from tree.data.youtube.youtube_ingest import (
+from tree.data.youtube.youtube_pipeline import (
     _bulk_build_and_load,
     build_batch,
     fetch_transcripts_batch,
@@ -52,7 +52,7 @@ from tree.entities.documents import Document, SourceType
 VIDEO_IDS = ["eYaWxljC4sA", "AAAaaaBBBcc", "ZZZzzzYYYxx"]
 PUBLISH_DATE = datetime(2024, 3, 1, 12, 0, tzinfo=UTC)
 
-_INGEST_LOGGER = youtube_ingest.logger.name
+_INGEST_LOGGER = youtube_pipeline.logger.name
 
 
 def _canonical(video_id: str) -> str:
@@ -95,7 +95,7 @@ class _FakeFetcher:
 
     Stands in for either backend: same
     ``async def fetch_many(urls) -> list[FetchedTranscript | None]`` contract,
-    swapped in by patching the construction point in ``youtube_ingest``. Raises
+    swapped in by patching the construction point in ``youtube_pipeline``. Raises
     ``error`` instead of answering when one is supplied (the batch-WIDE failure
     shape Bright Data propagates).
     """
@@ -164,10 +164,10 @@ def _patch_fetchers(
     """Patch BOTH in-task construction points; return the two ctor mocks."""
 
     brightdata_ctor = mocker.patch.object(
-        youtube_ingest, "BrightDataTranscriptFetcher", return_value=brightdata
+        youtube_pipeline, "BrightDataTranscriptFetcher", return_value=brightdata
     )
     gemini_ctor = mocker.patch.object(
-        youtube_ingest, "GeminiTranscriptFetcher", return_value=gemini
+        youtube_pipeline, "GeminiTranscriptFetcher", return_value=gemini
     )
     return brightdata_ctor, gemini_ctor
 
@@ -363,7 +363,7 @@ class TestBrightDataTransportFailure:
         _patch_failing_httpx_client(mocker, error_type("bright data is unreachable"))
         gemini = _FakeFetcher({vid: _make_transcript(vid) for vid in VIDEO_IDS})
         mocker.patch.object(
-            youtube_ingest, "GeminiTranscriptFetcher", return_value=gemini
+            youtube_pipeline, "GeminiTranscriptFetcher", return_value=gemini
         )
 
         with caplog.at_level(logging.WARNING, logger=_INGEST_LOGGER):
@@ -799,7 +799,7 @@ class TestLoadBatch:
         doc_a = _make_doc(VIDEO_IDS[0])
         doc_b = _make_doc(VIDEO_IDS[1])
         load_mock = mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(side_effect=[doc_a, None]),
         )
@@ -814,7 +814,7 @@ class TestLoadBatch:
         doc_a = _make_doc(VIDEO_IDS[0])
         doc_b = _make_doc(VIDEO_IDS[1])
         mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(side_effect=[doc_a, RuntimeError("bad load")]),
         )
@@ -826,7 +826,7 @@ class TestLoadBatch:
 
     async def test_empty_batch_returns_empty(self, mocker) -> None:
         load_mock = mocker.patch.object(
-            youtube_ingest, "load_video_document", mocker.AsyncMock()
+            youtube_pipeline, "load_video_document", mocker.AsyncMock()
         )
 
         result = await load_batch.fn([])
@@ -883,14 +883,14 @@ class TestBulkBuildAndLoad:
 
         built_docs = [_make_doc(vid) for vid in VIDEO_IDS]
         load_mock = mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(
                 side_effect=[built_docs[0], RuntimeError("dup"), built_docs[2]]
             ),
         )
         mocker.patch.object(
-            youtube_ingest, "build_document", mocker.Mock(side_effect=built_docs)
+            youtube_pipeline, "build_document", mocker.Mock(side_effect=built_docs)
         )
 
         result = await _bulk_build_and_load(_items(), user_id)
@@ -910,7 +910,7 @@ class TestBulkBuildAndLoad:
         )
         _patch_fetchers(mocker, brightdata=brightdata)
         load_mock = mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
@@ -937,7 +937,7 @@ class TestBulkBuildAndLoad:
         )
         _patch_fetchers(mocker, brightdata, _FakeFetcher(error=RuntimeError("boom")))
         load_mock = mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
@@ -960,7 +960,7 @@ class TestBulkBuildAndLoad:
         _configure_backends(mocker)
         brightdata_ctor, gemini_ctor = _patch_fetchers(mocker)
         load_mock = mocker.patch.object(
-            youtube_ingest,
+            youtube_pipeline,
             "load_video_document",
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )

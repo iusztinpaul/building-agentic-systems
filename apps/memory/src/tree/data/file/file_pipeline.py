@@ -29,8 +29,9 @@ _FILE_TAGS = TAGS_DATA_ONLINE
 _FILE_METADATA = pipeline_metadata("file")
 
 
+@task(name="load-file-document", retries=3, retry_delay_seconds=5)
 @tracked_span("load_file_document_task", tags=_FILE_TAGS)
-async def _load_file_document(
+async def load_file_document_task(
     file_path: str,
     content: str,
     user_id: PydanticObjectId,
@@ -38,14 +39,6 @@ async def _load_file_document(
     opik_trace_headers: dict[str, str] | None = None,
 ) -> Document | None:
     return await load_file_document(file_path, content, user_id, title)
-
-
-load_file_document_task = task(
-    _load_file_document,
-    name="load-file-document",
-    retries=3,
-    retry_delay_seconds=5,
-)
 
 
 @flow(name="ingest-file-etl", log_prints=True)

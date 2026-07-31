@@ -4,7 +4,7 @@ The unified flow FLATTENS a shard's RSS feeds (expanded to per-video items) and 
 videos into one ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk
 core ONCE — so there is exactly ONE ``fetch_many`` over feeds + loose videos combined.
 Resolve (feed-expand vs oEmbed) and the bulk core are mocked here; their internals are
-covered by ``test_youtube.py`` / ``test_youtube_ingest.py``.
+covered by ``test_youtube.py`` / ``test_youtube_pipeline_bulk.py``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from beanie import PydanticObjectId
 from pydantic import SecretStr
 
-import tree.data.youtube.youtube_ingest as youtube_ingest
+import tree.data.youtube.youtube_pipeline as youtube_pipeline
 import tree.data.youtube.youtube_pipeline_batch as yt
 from tree.config.sources import (
     YouTubeRssSource,
@@ -203,7 +203,7 @@ async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
         side_effect=fake_resolve_video,
     )
     mocker.patch.object(
-        youtube_ingest,
+        youtube_pipeline,
         "load_video_document",
         new_callable=AsyncMock,
         side_effect=lambda d: d,
@@ -212,9 +212,9 @@ async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     mocker.patch.object(settings, "google_api_key", SecretStr("gemini-key"))
     fake = _FakeFetcher({v: _transcript(v) for v in [*feed_vids, loose_vid]})
     mocker.patch.object(
-        youtube_ingest, "BrightDataTranscriptFetcher", return_value=fake
+        youtube_pipeline, "BrightDataTranscriptFetcher", return_value=fake
     )
-    gemini_ctor = mocker.patch.object(youtube_ingest, "GeminiTranscriptFetcher")
+    gemini_ctor = mocker.patch.object(youtube_pipeline, "GeminiTranscriptFetcher")
 
     entries = [
         YouTubeRssSource(uri="feed://A"),

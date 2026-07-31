@@ -30,8 +30,9 @@ _CONVERSATION_TAGS = TAGS_DATA_ONLINE
 _CONVERSATION_METADATA = pipeline_metadata("conversation")
 
 
+@task(name="load-conversation-document", retries=3, retry_delay_seconds=5)
 @tracked_span("load_conversation_document_task", tags=_CONVERSATION_TAGS)
-async def _load_conversation_document(
+async def load_conversation_document_task(
     conversation_text: str,
     user_id: PydanticObjectId,
     title: str | None = None,
@@ -46,14 +47,6 @@ async def _load_conversation_document(
         session_uri=session_uri,
         session_started_at=session_started_at,
     )
-
-
-load_conversation_document_task = task(
-    _load_conversation_document,
-    name="load-conversation-document",
-    retries=3,
-    retry_delay_seconds=5,
-)
 
 
 @flow(name="ingest-conversation-etl", log_prints=True)
