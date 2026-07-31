@@ -131,6 +131,33 @@ class TestLoadAppConfig:
 
         assert config.prefect.deploy_optional is True
 
+    def test_prefect_deploy_optional_env_override(self, tmp_path, monkeypatch):
+        """``TREE_PREFECT__DEPLOY_OPTIONAL`` overrides YAML — the documented
+        escape hatch reaches sections beyond ``extraction.*`` (it was silently
+        extraction-only before, contradicting its own docs)."""
+
+        custom = tmp_path / "prefect.yaml"
+        custom.write_text("prefect:\n  deploy_optional: false\n")
+        monkeypatch.setenv("TREE_PREFECT__DEPLOY_OPTIONAL", "true")
+
+        config = load_app_config(custom)
+
+        assert config.prefect.deploy_optional is True
+
+    def test_single_segment_tree_env_vars_are_not_overrides(
+        self, tmp_path, monkeypatch
+    ):
+        """``TREE_USER_IDENTIFIER``-style settings vars (no ``__``) must not
+        leak into the YAML dict as top-level keys."""
+
+        custom = tmp_path / "empty.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+        monkeypatch.setenv("TREE_USER_IDENTIFIER", "someone@example.com")
+
+        config = load_app_config(custom)
+
+        assert not hasattr(config, "user_identifier")
+
     def test_youtube_block_loaded_from_default_yaml(self, frozen_config_path):
         """The #091 ``youtube:`` block drives the Bright Data collection wait."""
 

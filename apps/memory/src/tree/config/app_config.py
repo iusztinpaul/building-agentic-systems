@@ -250,7 +250,10 @@ class PrefectConfig(BaseModel):
       it to ``true`` on a paid plan or a self-hosted Prefect server. Both the local
       serve (``make memory-serve-workflows``) and the Cloud deploy path honour it.
       Override per-environment without editing YAML via
-      ``TREE_PREFECT__DEPLOY_OPTIONAL=true``.
+      ``TREE_PREFECT__DEPLOY_OPTIONAL=true``. (No flag for the online ingest
+      path: ``dispatch_online_ingest`` submits the ``data-etl-online``
+      deployment when registered and runs the same flow in-process otherwise —
+      presence of the deployment IS the switch.)
     """
 
     deploy_optional: bool = False
@@ -375,12 +378,15 @@ def _coerce_env_value(raw: str) -> Any:
 def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """Layer ``TREE_<SECTION>__<KEY>...`` env vars on top of the YAML dict.
 
-    Only overrides paths under ``extraction.resolution.*`` and
-    ``extraction.dedup.*``. Other config sections stay YAML-driven.
+    The operator escape hatch documented in CLAUDE.md: ANY YAML key can be
+    overridden per-environment, e.g. ``TREE_PREFECT__DEPLOY_OPTIONAL=true`` or
+    ``TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99``.
 
-    Reads ``TREE_EXTRACTION__RESOLUTION__TYPE_STRICT`` style keys, splitting
-    on ``__`` and lower-casing each segment. Missing intermediate dicts are
-    created on demand.
+    Reads ``TREE_<SECTION>__<KEY>`` style keys, splitting on ``__`` and
+    lower-casing each segment. Missing intermediate dicts are created on
+    demand. Single-segment keys (no ``__``) are ignored — they are plain
+    settings-layer env vars (``TREE_USER_IDENTIFIER``, ``TREE_WORKING_DIR``),
+    not YAML overrides.
     """
 
     prefix = "TREE_"
@@ -388,10 +394,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         if not env_key.startswith(prefix):
             continue
         path = [seg.lower() for seg in env_key[len(prefix) :].split("__") if seg]
-        if not path:
-            continue
-        # Restrict to the extraction.* subtree we care about.
-        if path[0] != "extraction" or len(path) < 2:
+        if len(path) < 2:
             continue
         cursor: dict[str, Any] = raw
         for segment in path[:-1]:
@@ -411,11 +414,11 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
         path: Explicit path to a YAML file. Falls back to APP_CONFIG_PATH
               env var, then configs/default.yaml.
 
-    ``TREE_EXTRACTION__RESOLUTION__*`` and ``TREE_EXTRACTION__DEDUP__*`` env
-    vars override the corresponding YAML keys; this lets operators flip a
-    single dedup/resolution knob without editing the YAML and ensures the
-    cross-key validator on :class:`ExtractionConfig` sees the actual runtime
-    values.
+    ``TREE_<SECTION>__<KEY>`` env vars override the corresponding YAML keys;
+    this lets operators flip a single knob (e.g.
+    ``TREE_PREFECT__DEPLOY_OPTIONAL``) without editing the YAML and ensures
+    cross-key validators (e.g. on :class:`ExtractionConfig`) see the actual
+    runtime values.
     """
 
     config_path = Path(path or os.environ.get("APP_CONFIG_PATH", _DEFAULT_CONFIG_PATH))
