@@ -37,7 +37,18 @@
 # YouTube
 - uri: https://www.youtube.com/watch?v=Sntj4HmuykI
   type: youtube_video
+- uri: https://www.youtube.com/watch?v=OqM67QG_Ikk
+  type: youtube_video
+- uri: https://www.youtube.com/watch?v=UNzCG3lw6O0
+  type: youtube_video
 
-# Arbitrary URLs (blogs, reddit threads, news, profiles) — type inferred to `web`
-- uri: https://www.reddit.com/r/LLMDevs/comments/1ts3qc3/a_year_building_agent_memory_on_knowledge_graphs/
+# Web Arbitrary URLs (blogs, reddit, x, linkedin) — type inferred to `web`
 - uri: https://www.anthropic.com/engineering/harness-design-long-running-apps
+- uri: https://modal.com/llm-almanac/summary
+- uri: https://modal.com/blog/scaling-to-1-million-concurrent-sandboxes-in-seconds
+- uri: https://www.reddit.com/r/AI_Agents/comments/1ux30vq/i_reverseengineered_the_three_biggest_agentmemory/
+- uri: https://www.reddit.com/r/AI_Agents/comments/1v9q7q0/i_am_getting_sick_of_claude_codes_32ktoken_system/
+- uri: https://x.com/pauliusztin_/status/2078457256362877087
+- uri: https://x.com/pauliusztin_/status/2064686521811144842
+- uri: https://www.linkedin.com/feed/update/urn:li:share:7484581244215660544/
+- uri: https://www.linkedin.com/feed/update/urn:li:share:7477286521130315776/
