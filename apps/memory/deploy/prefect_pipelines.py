@@ -17,10 +17,15 @@ values), and the git clone authenticates via the ``tree-github-pat`` Secret bloc
 ``main`` (branch-tracking, so merges go live without a re-deploy). The CD workflow
 can pass the tested commit SHA for reproducible deploys.
 
+``GROUPS`` (optional, comma-separated) narrows the deploy to whole pipelines —
+``data`` (data ETL coordinator + worker) and/or ``memory`` (extraction, indexing,
+dream). Unset deploys all of them.
+
 Usage::
 
     make memory-deploy-prefect
-    uv run python deploy/prefect_pipelines.py
+    make memory-deploy-prefect GROUPS=data
+    GROUPS=data,memory uv run python deploy/prefect_pipelines.py
 """
 
 import logging
@@ -39,10 +44,14 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     git_ref = os.environ.get("GIT_REF") or "main"
+    groups = tuple(
+        g.strip() for g in os.environ.get("GROUPS", "").split(",") if g.strip()
+    )
     deployment_ids = deploy_cloud_pipelines(
         work_pool_name=MANAGED_WORK_POOL,
         git_ref=git_ref,
         job_env=managed_env_templates(),
+        groups=groups,
     )
     logger.info(
         "Applied %d Prefect deployment(s) on %s @ %s: %s",

@@ -41,6 +41,8 @@ from tree.memory.extraction.pipeline import (
 )
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.observability import (
+    TAG_DATA_PIPELINE,
+    TAG_MEMORY_PIPELINE,
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,
     TAGS_INDEXING,
@@ -145,6 +147,13 @@ class _DeploymentSpec:
 # The first 5 are the always-on CORE set (free-tier safe). The trailing dream
 # deployment is OPTIONAL (``optional=True``): registered only when
 # ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
+# Deployable subsets, keyed by the pipeline-identity tag every spec already
+# carries — so a group never drifts from the specs it selects.
+DEPLOYMENT_GROUPS: dict[str, str] = {
+    "data": TAG_DATA_PIPELINE,
+    "memory": TAG_MEMORY_PIPELINE,
+}
+
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         data_etl_coordinator,
@@ -190,15 +199,29 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
 ]
 
 
-def _active_deployment_specs() -> list[_DeploymentSpec]:
+def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSpec]:
     """The deployments to register: the core 5 plus the optional dream when enabled.
 
     Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
     YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.
+
+    ``groups`` narrows the set to whole pipelines by their identity tag —
+    ``("data",)`` keeps the two ``data-pipeline`` specs, ``("memory",)`` keeps
+    extraction + indexing (+ dream). Empty (the default) deploys everything.
     """
 
     deploy_optional = app_config.prefect.deploy_optional
-    return [s for s in _DEPLOYMENT_SPECS if deploy_optional or not s.optional]
+    specs = [s for s in _DEPLOYMENT_SPECS if deploy_optional or not s.optional]
+    if not groups:
+        return specs
+    unknown = set(groups) - set(DEPLOYMENT_GROUPS)
+    if unknown:
+        raise ValueError(
+            f"Unknown deployment group(s): {sorted(unknown)}. "
+            f"Valid: {sorted(DEPLOYMENT_GROUPS)}"
+        )
+    wanted = {DEPLOYMENT_GROUPS[g] for g in groups}
+    return [s for s in specs if wanted & set(s.tags)]
 
 
 def build_deployments() -> list:
@@ -231,7 +254,11 @@ def serve_deployments(limit: int) -> None:
 
 
 def deploy_cloud_pipelines(
-    *, work_pool_name: str, git_ref: str, job_env: dict[str, str]
+    *,
+    work_pool_name: str,
+    git_ref: str,
+    job_env: dict[str, str],
+    groups: tuple[str, ...] = (),
 ) -> list[str]:
     """Deploy every pipeline to Prefect Cloud, bound to a Managed work pool.
 
@@ -242,8 +269,9 @@ def deploy_cloud_pipelines(
     (``job_variables.env``) — typically :func:`managed_env_templates`, whose
     secret/config values are ``{{ prefect.blocks.secret.* }}`` /
     ``{{ prefect.variables.* }}`` references resolved at run time. So this carries
-    no raw secrets and the CD path needs only the Prefect API creds. Returns the
-    deployment ids.
+    no raw secrets and the CD path needs only the Prefect API creds. ``groups``
+    (see :data:`DEPLOYMENT_GROUPS`) narrows the deploy to one pipeline family;
+    empty deploys all. Returns the deployment ids.
 
     Synchronous: all the Prefect ``Flow``/``Secret`` helpers are sync in 3.6.
     """
@@ -256,7 +284,7 @@ def deploy_cloud_pipelines(
     job_variables = {"env": job_env, "image": MANAGED_IMAGE}
 
     deployment_ids: list[str] = []
-    for spec in _active_deployment_specs():
+    for spec in _active_deployment_specs(groups):
         flow = spec.flow.from_source(source=source, entrypoint=spec.entrypoint)
         deployment_id = flow.deploy(
             name=spec.name,

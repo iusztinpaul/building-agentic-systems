@@ -23,6 +23,7 @@ from __future__ import annotations
 import inspect
 
 import prefect
+import pytest
 
 from tree import orchestrator
 
@@ -232,3 +233,24 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
         assert call.kwargs["job_variables"]["image"] == orchestrator.MANAGED_IMAGE
         # No raw token anywhere: the install is a pull step, not a pip_packages URL.
         assert "pip_packages" not in call.kwargs["job_variables"]
+
+
+def test_deployment_groups_select_whole_pipelines():
+    """``groups`` narrows the deploy set by pipeline; empty keeps everything.
+
+    The selector matches on the identity tag each spec already carries, so a
+    group can never drift from its specs. An unknown group is a typo that would
+    otherwise silently deploy nothing — it must raise instead.
+    """
+
+    # Arrange / Act
+    def names(groups: tuple[str, ...]) -> set[str]:
+        return {s.name for s in orchestrator._active_deployment_specs(groups)}
+
+    # Assert — the two groups partition the full set, no overlap, no leftovers.
+    assert names(("data",)) == {"data-etl-coordinator", "data-etl-worker"}
+    assert names(("memory",)) == names(()) - names(("data",))
+    assert names(("data", "memory")) == names(())
+
+    with pytest.raises(ValueError, match="Unknown deployment group"):
+        orchestrator._active_deployment_specs(("dta",))
