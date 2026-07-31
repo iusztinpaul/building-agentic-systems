@@ -3,7 +3,8 @@ Trigger a one-off ONLINE (realtime) ingestion of a single source.
 
 Glue over the realtime dispatcher ``dispatch_online_ingest``: it submits the
 ``data-etl-online`` Prefect deployment (a worker runs the data step and — with
-``--submit-extraction`` — chains the memory-extraction deployment), then blocks
+``--run-extraction`` — runs the extraction worker inline and submits the
+trailing indexing run), then blocks
 streaming the run's logs until it reaches a final state, exiting non-zero on
 failure. Where the deployment is not registered (e.g. free-tier Prefect Cloud),
 the dispatcher runs the SAME flow in-process instead and the script simply
@@ -121,7 +122,7 @@ async def _run(
     title: str | None,
     user_id: str | None,
     user_identifier: str | None,
-    submit_extraction: bool,
+    run_extraction: bool,
 ) -> None:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
@@ -131,16 +132,16 @@ async def _run(
 
     online_source = _build_source(source, title)
     logger.info(
-        "Online ingest: %s source for user_id=%s (%s, submit_extraction=%s)",
+        "Online ingest: %s source for user_id=%s (%s, run_extraction=%s)",
         online_source.type,
         resolved_user_id,
         source,
-        submit_extraction,
+        run_extraction,
     )
 
     try:
         result = await dispatch_online_ingest(
-            online_source, resolved_user_id, submit_extraction=submit_extraction
+            online_source, resolved_user_id, run_extraction=run_extraction
         )
     except ValueError as exc:
         logger.error("Invalid source: %s", exc)
@@ -184,12 +185,12 @@ async def _run(
     ),
 )
 @click.option(
-    "--submit-extraction",
+    "--run-extraction",
     is_flag=True,
     default=False,
     help=(
-        "Also chain the memory-extraction deployment after the data step "
-        "(the full online pipeline). Off = data step only."
+        "Also run the memory-extraction step (+ submit the trailing indexing "
+        "run) in the same flow run — the full online pipeline. Off = data step only."
     ),
 )
 def main(
@@ -197,11 +198,11 @@ def main(
     title: str | None,
     user_id: str | None,
     user_identifier: str | None,
-    submit_extraction: bool,
+    run_extraction: bool,
 ) -> None:
     """Ingest one URL or file through the realtime online pipeline for the resolved user."""
 
-    asyncio.run(_run(source, title, user_id, user_identifier, submit_extraction))
+    asyncio.run(_run(source, title, user_id, user_identifier, run_extraction))
 
 
 if __name__ == "__main__":

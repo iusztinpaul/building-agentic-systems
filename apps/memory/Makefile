@@ -187,9 +187,9 @@ run-memory-pipeline-indexing: # Trigger the memory indexing pipeline via Prefect
 run-offline: # FULL OFFLINE run end-to-end: ONE etl-offline flow run (data ingest -> extraction -> trailing index, so the graph is queryable after this). Blocks until the run completes; runs the flow in-process when the optional etl-offline deployment isn't registered. Forwards USER_ID/USER_IDENTIFIER; pass SOURCE_FILE="..." and/or URI="..." to select the data sources (default: backfill+listen), NUM_SHARDS=<n> for extraction fan-out.
 	uv run python scripts/run_data_pipeline.py --end-to-end $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)") $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-online: # FULL ONLINE run end-to-end for ONE source: ONE submit of the data-etl-online deployment, which ingests AND chains the memory-extraction deployment itself (extraction also fires the trailing index). Pass SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER. A duplicate source skips extraction.
+run-online: # FULL ONLINE run end-to-end for ONE source: ONE data-etl-online flow run that ingests AND runs extraction inline (then submits the trailing index run). Pass SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER. A duplicate source skips extraction.
 	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-online SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
-	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" --submit-extraction $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" --run-extraction $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
 
 
 # --- Dream Consolidation ---
