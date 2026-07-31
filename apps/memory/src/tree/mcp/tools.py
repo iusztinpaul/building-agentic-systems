@@ -261,7 +261,7 @@ async def _ingest(
     """Shared MCP ingest tail: dispatch to the online pipeline, serialize to JSON.
 
     ``dispatch_online_ingest`` owns the whole contract — edge validation, the
-    fire-and-forget ``data-etl-online`` deployment submit (ONE worker-side run
+    fire-and-forget ``etl-online`` deployment submit (ONE worker-side run
     ingests AND extracts), and the inline-flow fallback when no deployment is
     registered. The result's ``mode`` field says which path ran.
     """
@@ -275,7 +275,7 @@ async def _ingest(
 async def ingest_url(url: str, ctx: Context) -> str:
     """Fetch a web page and ingest its content into the knowledge graph.
 
-    Async ingestion: SUBMITS ONE ``data-etl-online`` flow run (fetch +
+    Async ingestion: SUBMITS ONE ``etl-online`` flow run (fetch +
     extraction inline, indexing submitted after) and returns immediately —
     ``{"status": "submitted", "flow_run_id": ..., "mode": "deployment"}``. It
     does not wait for the graph to be built. Without a registered deployment the
@@ -319,7 +319,7 @@ async def ingest_file(
 
     The server never opens ``file_path`` — it may not share a filesystem with
     you. Read the file YOURSELF and pass its text as ``content``. Async
-    ingestion: SUBMITS ONE ``data-etl-online`` flow run (document + extraction
+    ingestion: SUBMITS ONE ``etl-online`` flow run (document + extraction
     inline, indexing submitted after) and returns immediately
     (``{"status": "submitted", "mode": "deployment"}``); without a registered
     deployment the same pipeline runs in-process (``"mode": "in_process"``).
@@ -575,7 +575,7 @@ async def ingest_conversation(
 ) -> str:
     """Extract knowledge from a conversation and add it to the knowledge graph.
 
-    Async ingestion: SUBMITS ONE ``data-etl-online`` flow run (document +
+    Async ingestion: SUBMITS ONE ``etl-online`` flow run (document +
     extraction inline, indexing submitted after) and returns immediately —
     people, tasks, preferences, and relationships are built out-of-band by a
     worker. Returns ``{"status": "submitted", "mode": "deployment"}``; without a

@@ -35,7 +35,7 @@ from prefect.schedules import Cron
 from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_coordinator, data_etl_worker
 from tree.offline import TAGS_ETL_OFFLINE, etl_offline
-from tree.online import data_etl_online
+from tree.online import TAGS_ETL_ONLINE, etl_online
 from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_coordinator,
@@ -46,7 +46,6 @@ from tree.observability import (
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAGS_DATA_OFFLINE,
-    TAGS_DATA_ONLINE,
     TAGS_EXTRACTION,
     TAGS_INDEXING,
     configure_opik,
@@ -196,10 +195,10 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     # ponytail: shares serve(limit) admission with backfill fan-outs; give it a
     # dedicated work queue if interactive ingest ever starves behind a backfill.
     _DeploymentSpec(
-        data_etl_online,
-        "data-etl-online",
-        "apps/memory/src/tree/online.py:data_etl_online",
-        TAGS_DATA_ONLINE,
+        etl_online,
+        "etl-online",
+        "apps/memory/src/tree/online.py:etl_online",
+        TAGS_ETL_ONLINE,
         optional=True,
     ),
     # Offline end-to-end (data ingest → extraction → index) in one flow run.

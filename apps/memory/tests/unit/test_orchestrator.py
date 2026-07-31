@@ -125,7 +125,7 @@ def test_deploy_optional_disabled_by_default(mocker):
 
     names = {dep.name for dep in spy.call_args.args}
     assert len(names) == 5
-    assert "data-etl-online" not in names
+    assert "etl-online" not in names
     assert "etl-offline" not in names
     assert "dream-consolidation-all-users" not in names
 
@@ -140,7 +140,7 @@ def test_deploy_optional_enabled_registers_optional(mocker):
 
     names = {dep.name for dep in spy.call_args.args}
     assert len(names) == 8
-    assert "data-etl-online" in names
+    assert "etl-online" in names
     assert "etl-offline" in names
     assert "dream-consolidation-all-users" in names
 

@@ -2,7 +2,7 @@
 Trigger a one-off ONLINE (realtime) ingestion of a single source.
 
 Glue over the realtime dispatcher ``dispatch_online_ingest``: it submits the
-``data-etl-online`` Prefect deployment (a worker runs the data step and — with
+``etl-online`` Prefect deployment (a worker runs the data step and — with
 ``--run-extraction`` — runs the extraction worker inline and submits the
 trailing indexing run), then blocks
 streaming the run's logs until it reaches a final state, exiting non-zero on

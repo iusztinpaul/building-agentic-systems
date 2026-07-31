@@ -8,7 +8,7 @@ import the other; this module imports both.
 
 Async-first: callers (MCP ingest tools + the CLI) funnel through
 :func:`dispatch_online_ingest`, which validates at the edge and fires the
-``data-etl-online`` deployment fire-and-forget — ONE flow run on a Prefect
+``etl-online`` deployment fire-and-forget — ONE flow run on a Prefect
 worker ingests the source into ``documents`` AND runs the extraction worker
 inline, then submits the trailing indexing run. When no deployment is
 registered (e.g. the free-tier deployment cap) the SAME flow runs inline in
@@ -33,7 +33,9 @@ from tree.data.online_pipeline import (
 from tree.db import init_mongodb
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.observability import (
-    TAGS_DATA_ONLINE,
+    TAG_DATA_PIPELINE,
+    TAG_MEMORY_PIPELINE,
+    TAG_ONLINE,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,
@@ -44,14 +46,17 @@ from tree.observability import (
 logger = logging.getLogger(__name__)
 
 _ONLINE_METADATA = pipeline_metadata("data")
+
+# Spans/deployment tags for the end-to-end run: it IS both pipelines, online.
+TAGS_ETL_ONLINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_ONLINE]
 _ONLINE_SOURCE_ADAPTER: TypeAdapter[OnlineSource] = TypeAdapter(OnlineSource)
 
 # Prefect caps flow-run parameter payloads (~512KB server-side)
 MAX_SOURCE_PAYLOAD_BYTES = 400_000
 
 
-@flow(name="data-etl-online", log_prints=True)
-async def data_etl_online(
+@flow(name="etl-online", log_prints=True)
+async def etl_online(
     source: Any,
     user_id: PydanticObjectId,
     run_extraction: bool = True,
@@ -92,8 +97,8 @@ async def data_etl_online(
     configure_opik()
     try:
         with span(
-            "data-etl-online",
-            tags=TAGS_DATA_ONLINE,
+            "etl-online",
+            tags=TAGS_ETL_ONLINE,
             trace_headers=opik_trace_headers,
             metadata=_ONLINE_METADATA,
         ):
@@ -186,7 +191,7 @@ async def dispatch_online_ingest(
 ) -> dict[str, Any]:
     """Submit ``source`` to the online pipeline; the ONE entry point for callers.
 
-    Async-first: validates at the edge, then fires the ``data-etl-online``
+    Async-first: validates at the edge, then fires the ``etl-online``
     deployment fire-and-forget (``timeout=0``) — ONE worker-side flow run does
     the data step AND the extraction, so the caller returns in the time it
     takes to create a flow run. When the deployment isn't registered (e.g.
@@ -208,7 +213,7 @@ async def dispatch_online_ingest(
     opik_trace_headers = get_distributed_trace_headers()
     try:
         flow_run = await run_deployment(
-            "data-etl-online/data-etl-online",
+            "etl-online/etl-online",
             parameters={
                 "source": source.model_dump(mode="json"),
                 "user_id": str(user_id),
@@ -224,14 +229,14 @@ async def dispatch_online_ingest(
         }
     except Exception as exc:  # noqa: BLE001 — absent deployment / unreachable API.
         logger.warning(
-            "data-etl-online deployment unavailable (%s: %s); running the flow "
+            "etl-online deployment unavailable (%s: %s); running the flow "
             "in-process instead",
             type(exc).__name__,
             exc,
         )
 
     # In case the deployment is unavailable, run the flow in-process instead.
-    document_id = await data_etl_online(
+    document_id = await etl_online(
         source,
         user_id,
         run_extraction=run_extraction,
