@@ -252,5 +252,11 @@ def test_deployment_groups_select_whole_pipelines():
     assert names(("memory",)) == names(()) - names(("data",))
     assert names(("data", "memory")) == names(())
 
+    # The same selector reaches the names `status`/`down` address deployments by,
+    # so a group-scoped teardown can't touch the other pipeline's deployments.
+    scoped = orchestrator.deployment_full_names(("data",))
+    assert {n.split("/")[-1] for n in scoped} == names(("data",))
+    assert len(scoped) < len(orchestrator.deployment_full_names())
+
     with pytest.raises(ValueError, match="Unknown deployment group"):
         orchestrator._active_deployment_specs(("dta",))

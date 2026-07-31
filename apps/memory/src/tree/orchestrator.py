@@ -343,15 +343,18 @@ def managed_env_templates() -> dict[str, str]:
     return env
 
 
-def deployment_full_names() -> list[str]:
+def deployment_full_names(groups: tuple[str, ...] = ()) -> list[str]:
     """``flow_name/deployment_name`` for each managed deployment.
 
     The id Prefect addresses a deployment by — used by
     ``deploy/prefect_pipelines_setup.py`` to read/delete them in ``status`` /
-    ``down`` without re-listing the topology.
+    ``down`` without re-listing the topology. ``groups`` narrows the set exactly
+    as in :func:`deploy_cloud_pipelines`, so all four verbs share one selector.
     """
 
-    return [f"{spec.flow.name}/{spec.name}" for spec in _active_deployment_specs()]
+    return [
+        f"{spec.flow.name}/{spec.name}" for spec in _active_deployment_specs(groups)
+    ]
 
 
 def _git_ref_kwarg(git_ref: str) -> dict[str, str]:

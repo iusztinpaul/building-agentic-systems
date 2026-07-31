@@ -127,6 +127,41 @@ class TestVerifyPatAccess:
             _setup._verify_pat_access("ghp_no_access")
 
 
+class TestGroupsSelector:
+    """``--groups`` must reach the deploy call — the IaC path used to drop it,
+    so ``up GROUPS=data`` silently registered the memory deployments too."""
+
+    def _run(self, mocker, args: list[str]):
+        from click.testing import CliRunner
+
+        mocker.patch.object(_setup, "_seed_config_stores")
+        mocker.patch.object(_setup, "_ensure_work_pool", new=mocker.AsyncMock())
+        deploy = mocker.patch.object(_setup, "deploy_cloud_pipelines", return_value=[])
+        # env: don't let a GROUPS in the dev shell leak into the unscoped case.
+        result = CliRunner().invoke(_setup.cli, args, env={"GROUPS": ""})
+        return result, deploy
+
+    def test_up_forwards_groups_to_the_deploy_call(self, mocker) -> None:
+        result, deploy = self._run(mocker, ["up", "--groups", "data"])
+
+        assert result.exit_code == 0, result.output
+        assert deploy.call_args.kwargs["groups"] == ("data",)
+
+    def test_up_without_groups_deploys_everything(self, mocker) -> None:
+        result, deploy = self._run(mocker, ["up"])
+
+        assert result.exit_code == 0, result.output
+        assert deploy.call_args.kwargs["groups"] == ()
+
+    def test_unknown_group_fails_before_any_side_effect(self, mocker) -> None:
+        result, deploy = self._run(mocker, ["up", "--groups", "dta"])
+
+        assert result.exit_code != 0
+        assert "Unknown deployment group" in result.output
+        deploy.assert_not_called()
+        _setup._seed_config_stores.assert_not_called()
+
+
 class TestSeedConfigStores:
     def test_requires_github_pat(self, mocker, monkeypatch) -> None:
         import click

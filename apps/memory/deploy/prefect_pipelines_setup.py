@@ -34,6 +34,9 @@ Commands::
     uv run python deploy/prefect_pipelines_setup.py update    # re-deploy code/spec only
     uv run python deploy/prefect_pipelines_setup.py status    # print pool + deployment bindings
     uv run python deploy/prefect_pipelines_setup.py down      # delete deployments + pool
+
+Every verb takes ``--groups data|memory`` (comma-separated, defaults to the
+``GROUPS`` env var) to scope it to whole pipelines; unset means all.
 """
 
 from __future__ import annotations
@@ -152,14 +155,14 @@ async def _ensure_work_pool(name: str) -> None:
             logger.info("Work pool %r already exists (created concurrently).", name)
 
 
-async def _status(work_pool: str) -> None:
+async def _status(work_pool: str, groups: tuple[str, ...]) -> None:
     async with get_client() as client:
         try:
             pool = await client.read_work_pool(work_pool)
             click.echo(f"work pool: {pool.name} type={pool.type} status={pool.status}")
         except ObjectNotFound:
             click.echo(f"work pool: {work_pool} <missing — run `up`>")
-        for full_name in deployment_full_names():
+        for full_name in deployment_full_names(groups):
             try:
                 dep = await client.read_deployment_by_name(full_name)
                 pool_name = dep.work_pool_name or "<none — clobbered, re-run up>"
@@ -168,20 +171,25 @@ async def _status(work_pool: str) -> None:
                 click.echo(f"  {full_name}: <missing>")
 
 
-async def _down(work_pool: str, purge_blocks: bool) -> None:
+async def _down(work_pool: str, purge_blocks: bool, groups: tuple[str, ...]) -> None:
     async with get_client() as client:
-        for full_name in deployment_full_names():
+        for full_name in deployment_full_names(groups):
             try:
                 dep = await client.read_deployment_by_name(full_name)
                 await client.delete_deployment(dep.id)
                 logger.info("Deleted deployment %s", full_name)
             except ObjectNotFound:
                 logger.info("Deployment %s already absent", full_name)
-        try:
-            await client.delete_work_pool(work_pool)
-            logger.info("Deleted work pool %s", work_pool)
-        except ObjectNotFound:
-            logger.info("Work pool %s already absent", work_pool)
+        # A group-scoped teardown leaves the pool alone — the other group's
+        # deployments may still be bound to it.
+        if groups:
+            logger.info("Kept work pool %s (group-scoped down).", work_pool)
+        else:
+            try:
+                await client.delete_work_pool(work_pool)
+                logger.info("Deleted work pool %s", work_pool)
+            except ObjectNotFound:
+                logger.info("Work pool %s already absent", work_pool)
     if purge_blocks:
         logger.warning(
             "Block/variable purge not automated — delete %s and the tree-* "
@@ -196,6 +204,31 @@ def _pool_option(func):
     )
 
 
+def _parse_groups(ctx, param, value: str) -> tuple[str, ...]:
+    """``--groups data,memory`` → ``("data", "memory")``; empty → all.
+
+    Validates here, before any verb's side effects, so a typo (``GROUPS=dta``)
+    fails on the parse instead of seeding blocks and then deploying nothing.
+    """
+
+    groups = tuple(g.strip() for g in value.split(",") if g.strip())
+    try:
+        deployment_full_names(groups)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+    return groups
+
+
+def _groups_option(func):
+    return click.option(
+        "--groups",
+        envvar="GROUPS",
+        default="",
+        callback=_parse_groups,
+        help="Comma-separated pipeline groups (data|memory). Empty = all.",
+    )(func)
+
+
 @click.group()
 def cli() -> None:
     """Prefect Cloud pipeline IaC (Managed work pool)."""
@@ -203,52 +236,63 @@ def cli() -> None:
 
 @cli.command()
 @_pool_option
+@_groups_option
 @click.option("--git-ref", default="main", show_default=True, help="Branch or commit.")
-def up(work_pool: str, git_ref: str) -> None:
+def up(work_pool: str, groups: tuple[str, ...], git_ref: str) -> None:
     """Provision blocks + Managed work pool + deployments (idempotent)."""
 
     _seed_config_stores()
     asyncio.run(_ensure_work_pool(work_pool))
     ids = deploy_cloud_pipelines(
-        work_pool_name=work_pool, git_ref=git_ref, job_env=managed_env_templates()
+        work_pool_name=work_pool,
+        git_ref=git_ref,
+        job_env=managed_env_templates(),
+        groups=groups,
     )
     click.echo(f"Deployed {len(ids)} pipeline(s) to {work_pool}: {', '.join(ids)}")
 
 
 @cli.command()
 @_pool_option
+@_groups_option
 @click.option("--git-ref", default="main", show_default=True, help="Branch or commit.")
-def update(work_pool: str, git_ref: str) -> None:
+def update(work_pool: str, groups: tuple[str, ...], git_ref: str) -> None:
     """Re-deploy code/spec only (assumes the pool + blocks already exist)."""
 
     ids = deploy_cloud_pipelines(
-        work_pool_name=work_pool, git_ref=git_ref, job_env=managed_env_templates()
+        work_pool_name=work_pool,
+        git_ref=git_ref,
+        job_env=managed_env_templates(),
+        groups=groups,
     )
     click.echo(f"Updated {len(ids)} pipeline(s) on {work_pool}.")
 
 
 @cli.command()
 @_pool_option
-def status(work_pool: str) -> None:
+@_groups_option
+def status(work_pool: str, groups: tuple[str, ...]) -> None:
     """Print the work pool + each deployment's work-pool binding."""
 
-    asyncio.run(_status(work_pool))
+    asyncio.run(_status(work_pool, groups))
 
 
 @cli.command()
 @_pool_option
+@_groups_option
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @click.option("--purge-blocks", is_flag=True, help="Also note block cleanup.")
-def down(work_pool: str, yes: bool, purge_blocks: bool) -> None:
-    """Delete the deployments + the Managed work pool."""
+def down(
+    work_pool: str, groups: tuple[str, ...], yes: bool, purge_blocks: bool
+) -> None:
+    """Delete the deployments (+ the Managed work pool when unscoped)."""
 
+    scope = f"the {', '.join(groups)} " if groups else "all tree "
+    pool_note = "" if groups else f" and the '{work_pool}' work pool"
     if not yes:
-        click.confirm(
-            f"Delete all tree deployments and the '{work_pool}' work pool?",
-            abort=True,
-        )
-    asyncio.run(_down(work_pool, purge_blocks))
-    click.echo(f"Tore down {work_pool}.")
+        click.confirm(f"Delete {scope}deployments{pool_note}?", abort=True)
+    asyncio.run(_down(work_pool, purge_blocks, groups))
+    click.echo(f"Tore down {scope}deployments{pool_note}.")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ NOT create app data or indexes.
 ## 2. User sign-up
 
 ```
-make memory-signup IDENTIFIER=<email> NAME="<display name>"
+make memory-signup USER_IDENTIFIER=<email> NAME="<display name>"
 ```
 
 Must run BEFORE anything that resolves a user:
@@ -42,9 +42,15 @@ Must run BEFORE anything that resolves a user:
 ## 3. Prefect Cloud (pipelines)
 
 ```
-make memory-deploy-prefect-setup-up      # Managed work pool + Secret blocks/Variables + 5 deployments
+make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 2 data deployments
+make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + indexing when you need them
 make memory-run-memory-pipeline-indexing USER_ID=<oid>   # first indexing run
 ```
+
+`GROUPS=data|memory` (comma-separated) scopes every verb — `up`, `update`,
+`status`, `down` — to whole pipelines; unset means all 5 deployments. Start with
+`data` so nothing but ingestion is registered while you verify the cluster, then
+re-run with `memory`. A group-scoped `down` keeps the work pool.
 
 `up` is idempotent IaC (`deploy/prefect_pipelines_setup.py`); afterwards the CD
 workflow (`.github/workflows/cd.yml`) keeps the deployment specs in sync on
