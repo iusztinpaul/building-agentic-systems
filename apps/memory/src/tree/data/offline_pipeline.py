@@ -513,7 +513,7 @@ async def data_etl_coordinator(
 
     Run modes share this one deployment:
 
-    * **Manual** (``user_id`` set) — ``make run-data-pipeline-offline``: ingest the
+    * **Manual** (``user_id`` set) — ``make run-data-pipeline``: ingest the
       resolved source set for that one tenant (default = backfill+listen, or the
       operator's ``--source-file`` / ``--uri`` selection).
     * **Scheduled** (``user_id=None``, ``source_files=["sources/listen.yaml"]``) —

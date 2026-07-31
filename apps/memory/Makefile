@@ -159,37 +159,26 @@ whoami: # Print the current user (id, identifier, name).
 	uv run python scripts/signup.py whoami
 
 
-# --- Data Pipelines (ingest sources -> documents; NO extraction/indexing) ---
+# --- Pipelines ---
+# Each target is a thin shim over its same-named script, which itself just
+# dispatches tree/online.py / tree/offline.py or a core deployment. All take
+# MODE=offline (default) | MODE=online; shared shorthands:
+PIPELINE_MODE = --mode "$(or $(MODE),offline)"
+USER_FLAGS = $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+OFFLINE_SOURCE_FLAGS = $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)")
+ONLINE_SOURCE_FLAGS = $(if $(SOURCE),--source "$(SOURCE)",) $(if $(TITLE),--title "$(TITLE)",)
 
-run-data-pipeline-offline: # OFFLINE data pipeline: trigger data-etl-coordinator (groups the resolved sources by platform + dispatches one data-etl-worker per non-HF platform plus num_workers HuggingFace offset-window workers). Produces `documents` only. Default (no SOURCE_FILE/URI): the backfill+listen set. Pass SOURCE_FILE="sources/backfill.yaml sources/listen.yaml" (space-separated, repeatable) and/or URI="https://a.com https://b.com/feed=substack_rss" (space-separated, repeatable; both combinable). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	uv run python scripts/run_data_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)")
+run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> index; graph queryable after). MODE=offline (default): ONE etl-offline run over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen), NUM_SHARDS=<n> extraction fan-out. MODE=online: ONE etl-online run for SOURCE="<url|path>" [TITLE="..."] with extraction inline + trailing index submit. Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-data-pipeline-online: # ONLINE data pipeline: ingest ONE source (URL or local file) into `documents` ONLY — does NOT extract or index (submits the etl-online deployment and waits; runs in-process where no deployment is registered). Pass SOURCE="<http(s) URL | local file path>" [TITLE="..."]. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-data-pipeline-online SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
-	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+run-data-pipeline: # DATA pipeline only (sources -> `documents`; NO extraction/indexing). MODE=offline (default): data-etl-coordinator over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen set). MODE=online: ingest ONE source realtime; SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_data_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS)
 
+run-memory-pipeline: # MEMORY pipeline (`documents` -> knowledge graph, + ONE trailing index run). MODE=offline (default): all PENDING docs (optionally narrowed with DOC_IDS="id1,id2"; NUM_SHARDS=<n> fan-out). MODE=online: exactly DOC_IDS="<id>[,<id2>]" (required; the id printed by run-data-pipeline MODE=online). Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_memory_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-# --- Memory Pipelines (documents -> knowledge graph) ---
-
-run-memory-pipeline-extraction-offline: # OFFLINE batch extraction: trigger memory-extract-etl-coordinator over ALL pending documents (dispatches memory-extract-etl-worker shards + one trailing index run). Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Optionally pass DOC_IDS="id1,id2" and/or NUM_SHARDS=<n> (fan-out width; default 1).
-	uv run python scripts/run_memory_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
-
-run-memory-pipeline-extraction-online: # ONLINE extraction: extract ONE document (e.g. the one just produced by run-data-pipeline-online) via memory-extract-etl-coordinator (+ trailing index). Requires DOC_IDS="<id>[,<id2>]". Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	@if [ -z "$(DOC_IDS)" ]; then echo 'USAGE: make memory-run-memory-pipeline-extraction-online DOC_IDS="<document id>" (the id printed by run-data-pipeline-online)'; exit 1; fi
-	uv run python scripts/run_memory_pipeline.py --doc-ids "$(DOC_IDS)" $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
-
-run-memory-pipeline-indexing: # Trigger the memory indexing pipeline via Prefect (reverse edges, embeddings, indexes) — the single indexing step that works after either offline or online extraction. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
-	uv run python scripts/run_indexing_pipeline.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
-
-
-# --- Full pipeline (data -> memory), chaining the existing deployments ---
-
-run-offline: # FULL OFFLINE run end-to-end: ONE etl-offline flow run (data ingest -> extraction -> trailing index, so the graph is queryable after this). Blocks until the run completes; runs the flow in-process when the optional etl-offline deployment isn't registered. Forwards USER_ID/USER_IDENTIFIER; pass SOURCE_FILE="..." and/or URI="..." to select the data sources (default: backfill+listen), NUM_SHARDS=<n> for extraction fan-out.
-	uv run python scripts/run_data_pipeline.py --end-to-end $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)") $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
-
-run-online: # FULL ONLINE run end-to-end for ONE source: ONE etl-online flow run that ingests AND runs extraction inline (then submits the trailing index run). Pass SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER. A duplicate source skips extraction.
-	@if [ -z "$(SOURCE)" ]; then echo 'USAGE: make memory-run-online SOURCE="<url or file path>" [TITLE="..."]'; exit 1; fi
-	uv run python scripts/run_online_ingest.py --source "$(SOURCE)" --run-extraction $(if $(TITLE),--title "$(TITLE)",) $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",)
+run-indexing-pipeline: # INDEXING pipeline (reverse edges, embeddings, search indexes) — the single standalone step that works after either offline or online extraction; no modes. Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_indexing_pipeline.py $(USER_FLAGS)
 
 
 # --- Dream Consolidation ---

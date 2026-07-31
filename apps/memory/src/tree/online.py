@@ -90,7 +90,7 @@ async def etl_online(
     Returns the ingested document id (a caller polling the run to completion can
     recover it from the flow-run result), or ``None`` for a duplicate. A
     failed extraction fails THIS run (visible, retryable via
-    ``make memory-run-memory-pipeline-extraction-online DOC_IDS=<id>`` — a
+    ``make memory-run-memory-pipeline MODE=online DOC_IDS=<id>`` — a
     plain re-run would dedupe on the data step and skip the memory step).
     """
 

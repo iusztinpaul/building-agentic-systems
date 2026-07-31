@@ -239,7 +239,7 @@ local-start`) and the serve runner.
 | Managed CD (code/spec only, on push to `main`) | `deploy/prefect_pipelines.py` ← `make memory-deploy-prefect` (`.github/workflows/cd.yml`) |
 | Managed image + pull steps | `MANAGED_IMAGE`, `_GitRepoWithPipInstall` in `orchestrator.py` |
 | Runtime secrets/config → blocks/variables | `RUNTIME_CONFIG` + `managed_env_templates()` |
-| Trigger data pipeline | `scripts/run_data_pipeline.py` ← `make memory-run-data-pipeline-offline` |
+| Trigger data pipeline | `scripts/run_data_pipeline.py` ← `make memory-run-data-pipeline` |
 
 Deployments (all bound to `tree-managed` in prod; `flow_name/deployment_name`):
 `data-etl-coordinator`, `data-etl-worker`, `memory-extract-etl-coordinator`,

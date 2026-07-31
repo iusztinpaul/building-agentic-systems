@@ -44,7 +44,7 @@ Must run BEFORE anything that resolves a user:
 ```
 make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 2 data deployments
 make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + indexing when you need them
-make memory-run-memory-pipeline-indexing USER_ID=<oid>   # first indexing run
+make memory-run-indexing-pipeline USER_ID=<oid>   # first indexing run
 ```
 
 `GROUPS=data|memory` (comma-separated) scopes every verb — `up`, `update`,

@@ -127,23 +127,23 @@ Two stages — **data** (sources → `documents`) then **memory** (extraction �
 
 | stage | offline | online |
 |---|---|---|
-| **data** → `documents` | `run-data-pipeline-offline` | `run-data-pipeline-online SOURCE=…` |
-| **memory** → graph (+ trailing index) | `run-memory-pipeline-extraction-offline` | `run-memory-pipeline-extraction-online DOC_IDS=…` |
-| **index** (shared, standalone) | `run-memory-pipeline-indexing` | `run-memory-pipeline-indexing` |
+| **data** → `documents` | `run-data-pipeline` | `run-data-pipeline MODE=online SOURCE=…` |
+| **memory** → graph (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **index** (shared, standalone) | `run-indexing-pipeline` | `run-indexing-pipeline` |
 
-**Run it all in one shot** — `run-offline` / `run-online` just chain the steps above (each blocks until its Prefect run finishes; extraction fires the trailing index, so the graph is queryable when it returns):
+**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`etl-offline` / `etl-online`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; extraction fires the trailing index, so the graph is queryable when it returns:
 
 ```bash
 # Offline: every configured source -> documents -> graph (+ index)
-make memory-run-offline                                                  # default sources (backfill + listen)
-make memory-run-offline USER_IDENTIFIER=paul SOURCE_FILE="sources/listen.yaml"   # chosen file, another user
+make memory-run-pipeline                                                  # default sources (backfill + listen)
+make memory-run-pipeline USER_IDENTIFIER=paul SOURCE_FILE="sources/listen.yaml"   # chosen file, another user
 
 # Online: one source -> document -> graph (+ index), end to end
-make memory-run-online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
-make memory-run-online SOURCE="/path/to/notes.md" TITLE="My notes"
+make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
+make memory-run-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-`run-online` ingests the source, captures the new document id, then extracts+indexes just that document (a duplicate source skips extraction). The sections below break each step out for running them individually.
+`run-pipeline MODE=online` ingests the source and runs extraction inline in the SAME flow run, then submits the trailing indexing run (a duplicate source skips extraction). The sections below break each step out for running them individually.
 
 ### Data pipelines
 
@@ -152,11 +152,11 @@ The data pipeline produces `documents` **only** — it does NOT extract or index
 #### Offline — selecting sources
 
 ```bash
-make memory-run-data-pipeline-offline                                       # default set (backfill + listen), current user
-make memory-run-data-pipeline-offline USER_IDENTIFIER=paul                  # default set, another user
-make memory-run-data-pipeline-offline SOURCE_FILE="sources/listen.yaml"     # only the listen feeds
-make memory-run-data-pipeline-offline URI="https://blog.com/feed=substack_rss https://news.site/post"  # ad-hoc URLs
-make memory-run-data-pipeline-offline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
+make memory-run-data-pipeline                                       # default set (backfill + listen), current user
+make memory-run-data-pipeline USER_IDENTIFIER=paul                  # default set, another user
+make memory-run-data-pipeline SOURCE_FILE="sources/listen.yaml"     # only the listen feeds
+make memory-run-data-pipeline URI="https://blog.com/feed=substack_rss https://news.site/post"  # ad-hoc URLs
+make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
 Triggers `data-etl-coordinator`: resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
@@ -173,11 +173,11 @@ The **nightly cron** (`0 3 * * *` UTC) runs the same coordinator with `source_fi
 #### Online — one source on demand
 
 ```bash
-make memory-run-data-pipeline-online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
-make memory-run-data-pipeline-online SOURCE="/path/to/notes.md" TITLE="My notes"
+make memory-run-data-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
+make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Ingests a single URL or local file in realtime through `online_ingest` into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline-extraction-online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
+Dispatches the `etl-online` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory extraction
 
@@ -185,11 +185,11 @@ Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. T
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
-make memory-run-memory-pipeline-extraction-offline
-make memory-run-memory-pipeline-extraction-offline DOC_IDS="507f1f77bcf86cd799439011 507f1f77bcf86cd799439012"
+make memory-run-memory-pipeline
+make memory-run-memory-pipeline DOC_IDS="507f1f77bcf86cd799439011,507f1f77bcf86cd799439012"
 
-# Online — ONE document (e.g. the one just produced by run-data-pipeline-online)
-make memory-run-memory-pipeline-extraction-online DOC_IDS="507f1f77bcf86cd799439011"
+# Online — ONE document (e.g. the one just produced by run-data-pipeline MODE=online)
+make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
 ```
 
 ### Memory indexing
@@ -197,7 +197,7 @@ make memory-run-memory-pipeline-extraction-online DOC_IDS="507f1f77bcf86cd799439
 The single indexing step — works after either extraction mode. Builds reverse edges for bidirectional traversal, computes node embeddings, and ensures text / vector / Atlas-search indexes on `knowledge_graph`:
 
 ```bash
-make memory-run-memory-pipeline-indexing
+make memory-run-indexing-pipeline
 ```
 
 ### Query CLI

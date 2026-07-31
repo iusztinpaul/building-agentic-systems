@@ -1,52 +1,54 @@
 """
-Trigger the memory extraction pipeline via Prefect.
+Run the MEMORY extraction pipeline (``documents`` → knowledge graph).
 
-Triggers the ``memory-extract-etl-coordinator`` deployment (#067, ADR-002 §3
-amended #066). Operators always run the COORDINATOR: it resolves the user's pending
-docs, partitions them into ``min(num_shards, N)`` balanced shards, dispatches one
-``memory-extract-etl-worker`` run per shard (a DISTINCT worker deployment — NO
-recursion), then fires a single trailing ``memory-indexing-etl`` run. ``num_shards=1``
-(the default) dispatches 1 worker run + 1 index run; ``> 1`` fans out across multiple
-workers. A bare extraction with no index is available by triggering
-``memory-extract-etl-worker`` directly (not via this script).
+A light CLI shim (glue lives in :mod:`tree.cli`) over the
+``memory-extract-etl-coordinator`` deployment (#067): the coordinator resolves
+the doc set, partitions it into ``min(num_shards, N)`` shards, dispatches one
+``memory-extract-etl-worker`` run per shard, then fires ONE trailing
+``memory-indexing-etl`` run. Two modes select the doc set:
 
-Every Prefect deployment registered by ``tree.orchestrator`` requires a
-``user_id`` parameter (#020). It defaults to the current-session user; override
-with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the Makefile wires
-these for you). See :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
+* ``--mode offline`` (default) — batch: every PENDING document for the
+  resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``
+  sets the fan-out width.
+* ``--mode online`` — realtime: exactly the ``--doc-ids`` you pass (required;
+  e.g. the id printed by ``run_data_pipeline.py --mode online``). No shard
+  fan-out — a handful of docs needs one worker.
+
+Every run is scoped to a ``user_id`` (#020): defaults to the current-session
+user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>``
+(the Makefile wires these).
 
 Requires:
-    - Prefect server running (make local-start)
+    - Prefect server + Mongo running (make local-start)
     - Workflows served (make memory-serve-workflows)
 
-``--num-shards`` (optional, ``>= 1``) sets the document-shard fan-out width.
-
 Usage:
-    make memory-run-memory-pipeline-extraction-offline                       # current user
-    make memory-run-memory-pipeline-extraction-offline USER_ID=507f...       # override by id
-    make memory-run-memory-pipeline-extraction-offline USER_IDENTIFIER=paul  # override by handle
-    make memory-run-memory-pipeline-extraction-offline NUM_SHARDS=4
-    uv run python scripts/run_memory_pipeline.py --user-identifier paul --doc-ids "id1,id2"
+    make memory-run-memory-pipeline                                # offline, all pending docs
+    make memory-run-memory-pipeline NUM_SHARDS=4
+    make memory-run-memory-pipeline MODE=online DOC_IDS="<id1>,<id2>"
+    uv run python scripts/run_memory_pipeline.py --mode online --doc-ids "id1,id2"
 """
 
 import asyncio
 import logging
-import sys
+from typing import Any
 
 import click
-from prefect.client.orchestration import get_client
-from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
-from tree.entities.sessions import resolve_user_id
-from tree.config.settings import settings
-from tree.db import init_mongodb
+from tree.cli import (
+    MODE_ONLINE,
+    connect_and_resolve_user,
+    mode_option,
+    trigger_deployment,
+    user_options,
+    wait_for_flow_run,
+)
 from tree.logging import init_logger
 
 init_logger()
 logger = logging.getLogger(__name__)
 
 DEPLOYMENT_NAME = "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
-POLL_INTERVAL_SECONDS = 2
 
 
 async def _run(
@@ -55,79 +57,26 @@ async def _run(
     document_ids: list[str] | None,
     num_shards: int | None,
 ) -> None:
-    await init_mongodb(
-        settings.mongo.mongo_uri.get_secret_value(),
-        settings.mongo.mongo_initdb_database,
-    )
-    resolved_user_id = await resolve_user_id(user_id, user_identifier)
-
-    async with get_client() as client:
-        deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
-
-        parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
-        if document_ids:
-            parameters["document_ids"] = document_ids
-        if num_shards is not None:
-            parameters["num_shards"] = num_shards
-
-        flow_run = await client.create_flow_run_from_deployment(
-            deployment_id=deployment.id,
-            parameters=parameters,
-        )
-        logger.info("Flow run created: %s (user_id=%s)", flow_run.id, resolved_user_id)
-        base_url = str(client.api_url).rstrip("/").removesuffix("/api")
-        logger.info("Track at: %s/runs/flow-run/%s", base_url, flow_run.id)
-
-        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run.id]))
-        log_offset = 0
-
-        while True:
-            logs = await client.read_logs(
-                log_filter=log_filter, offset=log_offset, limit=100
-            )
-            for log in logs:
-                logger.info(
-                    "%s | %s | %s",
-                    f"{log.timestamp:%Y-%m-%d %H:%M:%S}",
-                    f"{logging.getLevelName(log.level):7s}",
-                    log.message,
-                )
-            log_offset += len(logs)
-
-            run = await client.read_flow_run(flow_run.id)
-            if run.state and run.state.is_final():
-                if run.state.is_completed():
-                    logger.info("Done. Flow completed successfully.")
-                else:
-                    logger.error("Flow finished with state: %s", run.state.name)
-                    sys.exit(1)
-                break
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
+    parameters: dict[str, Any] = {"user_id": str(resolved_user_id)}
+    if document_ids:
+        parameters["document_ids"] = document_ids
+    if num_shards is not None:
+        parameters["num_shards"] = num_shards
+    flow_run_id = await trigger_deployment(DEPLOYMENT_NAME, parameters)
+    await wait_for_flow_run(flow_run_id)
 
 
 @click.command()
-@click.option(
-    "--user-id",
-    default=None,
-    help=(
-        "Override the target tenant by Mongo ObjectId. Defaults to the "
-        "current-session user; also reads the ``USER_ID`` env var."
-    ),
-)
-@click.option(
-    "--user-identifier",
-    default=None,
-    help=(
-        "Override the target tenant by stable handle (e.g. email). Defaults to "
-        "the current-session user; also reads the ``USER_IDENTIFIER`` env var."
-    ),
-)
+@mode_option
+@user_options
 @click.option(
     "--doc-ids",
     default=None,
     help=(
-        "Optional comma-separated list of document ObjectIds to extract. "
-        "Omit to extract every PENDING document for the resolved user."
+        "Comma-separated document ObjectIds to extract. REQUIRED for --mode "
+        "online; optional narrowing for --mode offline (omit → every PENDING "
+        "document for the resolved user)."
     ),
 )
 @click.option(
@@ -135,23 +84,30 @@ async def _run(
     default=None,
     type=int,
     help=(
-        "Optional document-shard fan-out width (#067). The coordinator partitions "
-        "pending docs into ``min(num_shards, N)`` shards and dispatches one "
-        "``memory-extract-etl-worker`` run per shard, then indexes once. Omit or 1 "
-        "→ 1 worker run + 1 index run. Must be ``>= 1``."
+        "[offline] Document-shard fan-out width (#067, ``>= 1``): the coordinator "
+        "dispatches one worker run per shard, then indexes once. Omit or 1 → "
+        "1 worker run + 1 index run."
     ),
 )
 def main(
+    mode: str,
     user_id: str | None,
     user_identifier: str | None,
     doc_ids: str | None,
     num_shards: int | None,
 ) -> None:
-    """Trigger the memory-extract-etl-coordinator deployment for the resolved user."""
+    """Run the memory extraction pipeline: offline batch or specific online docs."""
 
+    if mode == MODE_ONLINE:
+        if not doc_ids:
+            raise click.UsageError(
+                "--mode online requires --doc-ids '<id>[,<id2>]' (the id printed "
+                "by run_data_pipeline.py --mode online)."
+            )
+        if num_shards is not None:
+            raise click.UsageError("--num-shards is an offline-only fan-out knob.")
     if num_shards is not None and num_shards < 1:
-        logger.error("--num-shards must be >= 1 (got %d)", num_shards)
-        raise SystemExit(1)
+        raise click.UsageError(f"--num-shards must be >= 1 (got {num_shards}).")
 
     parsed_doc_ids: list[str] | None = None
     if doc_ids:

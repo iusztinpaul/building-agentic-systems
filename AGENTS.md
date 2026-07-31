@@ -143,7 +143,7 @@ NEITHER app has an integration test suite (deleted deliberately — too slow for
 By default, use the "Paul Iusztin" user when testing.
 
 1. **Serve the workflows** in the background to pick up the latest code: `make memory-serve-workflows &`. This process is the in-process Prefect worker — without it, deployments register but nothing executes. If a serve process is already running, kill it first and re-serve.
-2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here): `make memory-run-data-pipeline-offline` → `make memory-run-memory-pipeline-extraction-offline` → `make memory-run-memory-pipeline-indexing` → `make memory-query-graph QUERY="test query"` → verify results.
+2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here). Each pipeline target takes `MODE=offline` (default) or `MODE=online`: step-by-step is `make memory-run-data-pipeline` → `make memory-run-memory-pipeline` → `make memory-run-indexing-pipeline` → `make memory-query-graph QUERY="test query"` → verify results; or end-to-end in one run with `make memory-run-pipeline` (offline batch) / `make memory-run-pipeline MODE=online SOURCE="<url|path>"` (one realtime source).
 
 # Developing New Features & Bug Fixes
 
