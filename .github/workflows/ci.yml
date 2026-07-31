@@ -126,6 +126,10 @@ jobs:
         working-directory: apps/memory
         env:
           PYTHONPATH: ./src/
+          # Point flow-executing tests at the compose Prefect server booted
+          # above — without this they silently spin up per-session ephemeral
+          # servers instead (slow, and the server we waited for goes unused).
+          PREFECT_API_URL: http://127.0.0.1:4200/api
 
       - name: Stop infrastructure
         if: always()
