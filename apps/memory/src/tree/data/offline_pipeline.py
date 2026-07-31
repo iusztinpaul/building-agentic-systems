@@ -1,50 +1,4 @@
-"""Data pipeline: coordinator + worker deployments (#068, ADR-002 §3 amended #066).
-
-Two Prefect flows live here, mirroring the memory split (#067) minus the trailing
-index — the data pipeline only produces ``documents``; there is NO index step:
-
-* ``data_etl_worker`` (deployment ``data-etl-worker``) — ingests a SUBSET (shard) of
-  the configured ``sources:`` list. It groups the shard's sources by PLATFORM and
-  dispatches each group to one unified per-platform pipeline:
-
-  - Substack (``SubstackRssSource`` + ``SubstackArticleSource``) → one
-    ``ingest_substack_batch``: flatten feeds + single articles into one item list,
-    then one shared load.
-  - YouTube (``YouTubeRssSource`` + ``YouTubeVideoSource``) → one
-    ``ingest_youtube_batch``: flatten feeds + single videos, then ONE shared
-    ``fetch_many`` transcript fetch.
-  - Web (``WebSource``) → ``ingest_web_batch`` (adapter over ``ingest_web_url_batch``),
-    the last/catch-all platform.
-  - ``HuggingFaceDatasetSource`` entries are dispatched per-entry through
-    ``_HUGGINGFACE_DATASET_HANDLERS``, keyed on the dataset id (``uri``). Unknown
-    dataset ids raise ``ValueError``.
-
-  A platform absent from the shard is skipped (with a scoped "skipped: no entries"
-  log line). NO partitioning, NO ``run_deployment``, NO coordination — the worker is
-  the coordinator's internal dispatch target (but may be triggered directly for a
-  bare shard ingestion). Registered as deployment ``data-etl-worker``.
-
-* ``data_etl_coordinator`` (deployment ``data-etl-coordinator``) — resolves its
-  source set (``source_files`` ++ inline ``sources``, else the backfill+listen
-  default) and partitions it by PLATFORM (#072, ADR-002 §3
-  amendment #070–#074): one homogeneous ``data-etl-worker`` run per non-HuggingFace
-  platform bucket present (``substack`` / ``youtube`` / ``custom``), plus
-  ``num_workers`` runs per ``HuggingFaceDatasetSource`` (one per disjoint offset-window
-  of the dataset). It dispatches one ``data-etl-worker`` run per shard via
-  ``run_deployment`` under ``asyncio.gather(return_exceptions=True)``. NO trailing step.
-  Parallelism is declared per-source (platform bucketing + HF ``num_workers``), NOT via
-  a global ``num_shards``. Empty sources ⇒ clean no-op (``shards_total=0``). Registered
-  as deployment ``data-etl-coordinator``.
-
-Source-shard serialization: ``SourceEntry`` is a Pydantic discriminated union.
-Prefect serializes flow-run parameters as JSON, so the coordinator dumps each shard's
-entries to dicts (``model_dump()``) and the worker re-parses them to ``SourceEntry``
-via a ``TypeAdapter`` (the ``type`` discriminator round-trips through JSON cleanly).
-
-Usage:
-    Served as Prefect deployments via the coordinator. Operators trigger the
-    COORDINATOR via the unified ``run-data-pipeline`` Make target.
-"""
+"""Data pipeline: coordinator + worker deployments (#068, ADR-002 §3 amended #066)"""
 
 import asyncio
 import logging
@@ -487,7 +441,7 @@ async def _fan_out_data(
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_target_user_ids(
+async def resolve_target_user_ids(
     user_id: PydanticObjectId | None,
 ) -> list[PydanticObjectId]:
     """Resolve which tenants a data run targets.
@@ -598,7 +552,7 @@ async def data_etl_coordinator(
             typed_shards = _partition_sources_by_platform(resolved_sources)
             shards = [[e.model_dump() for e in shard] for shard in typed_shards]
 
-            user_ids = await _resolve_target_user_ids(user_id)
+            user_ids = await resolve_target_user_ids(user_id)
             if not user_ids:
                 logger.info(
                     "data fan-out: no target users (scheduled all-users run found "

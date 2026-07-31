@@ -1,20 +1,9 @@
-"""
-Realtime (online) ingestion dispatcher.
+"""Realtime (online) DATA-pipeline step.
 
-The online counterpart to ``offline_pipeline.offline_ingest_batch``: it ingests a
-SINGLE realtime input — a URL, a local file, or a conversation — and returns the
-persisted :class:`Document`. The MCP ingest tools funnel through
-:func:`online_ingest`, which routes a typed :data:`OnlineSource` to the matching
-leaf pipeline (``ingest_url`` / ``ingest_file`` / ``ingest_conversation``).
-
-Like the offline batch, this layer returns Documents and does NOT trigger memory
-extraction — the MCP layer submits that out-of-band (``mcp.ingest.submit_ingestion``).
-
-``ingest_url`` itself routes a URL to the appropriate leaf pipeline by domain:
-1. Static registry ``_URL_HANDLERS`` (e.g. ``substack.com``).
-2. Custom Substack domains derived from the shared source loader
-   (``default_configured_sources``).
-3. Fallback: the generic web pipeline backed by Bright Data Web Unlocker.
+:func:`online_ingest` routes a typed :data:`OnlineSource` to its leaf pipeline
+and returns the persisted :class:`Document` — it never triggers extraction.
+The cross-pipeline orchestration (the ``data-etl-online`` flow + caller
+dispatch) lives one level up in :mod:`tree.online`.
 """
 
 import functools
@@ -43,9 +32,7 @@ from tree.observability import (
 
 logger = logging.getLogger(__name__)
 
-# Opik tags + metadata for the online data pipeline's trace, mirroring the offline
-# pipeline (``_DATA_TAGS`` / ``_DATA_METADATA`` there). Same ``pipeline="data"``
-# metadata as offline; the offline/online split lives in the tags.
+# Opik tags + metadata for the online data pipeline's trace
 _ONLINE_METADATA = pipeline_metadata("data")
 
 
@@ -82,9 +69,7 @@ async def _ingest_web_url(url: str, user_id: PydanticObjectId) -> Document | Non
 
 
 # Registry: (domain_substring, handler).
-# Order matters — first match wins. YouTube hosts are listed before
-# ``substack.com`` (and therefore before the custom-Substack-domain
-# fallback below) so YouTube URLs always route to the YouTube handler.
+# Order matters — first match wins.
 _URL_HANDLERS: list[
     tuple[str, Callable[[str, PydanticObjectId], Awaitable[Document | None]]]
 ] = [
@@ -121,19 +106,18 @@ def _get_configured_substack_domains() -> set[str]:
     return domains
 
 
-async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
-    """Route a URL to the appropriate data pipeline and ingest it for ``user_id``.
+def validate_url(url: str) -> None:
+    """Validate that ``url`` is ingestable — pure, no I/O.
 
-    Matches against:
-    1. Static registry patterns (e.g. ``substack.com``).
-    2. Custom Substack domains derived from the shared source loader.
-    3. Fallback: the generic web pipeline (Bright Data Web Unlocker).
-
-    Returns the persisted Document, or None if the URL was a duplicate.
+    Shared by :func:`_ingest_url` (in the pipeline) and
+    :func:`validate_online_source` (at the caller's edge, BEFORE submitting a
+    deployment run) — so garbage fails synchronously with a clear message
+    instead of becoming a remote flow-run failure nobody sees.
 
     Raises:
-        ValueError: If ``url`` is empty, its scheme is not ``http``/``https``,
-            or it is missing a host component.
+        ValueError: If the scheme is not ``http``/``https``, the host is
+            missing, or the URL is a YouTube channel RSS feed (feed-shaped —
+            many documents — while online ingest is single-document).
     """
 
     parsed = urlparse(url)
@@ -147,19 +131,36 @@ async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
     if not parsed.netloc:
         raise ValueError(f"URL is missing a host: {url!r}")
 
-    domain = parsed.netloc.lower()
-    bare_domain_for_guard = domain.removeprefix("www.")
+    bare_domain = parsed.netloc.lower().removeprefix("www.")
 
     # Guard: a YouTube channel RSS feed is feed-shaped (many docs), but
     # ``ingest_url`` returns a single Document. Reject up-front with a
     # message that points the user at the right config knob.
-    if bare_domain_for_guard in {"youtube.com", "m.youtube.com"} and (
+    if bare_domain in {"youtube.com", "m.youtube.com"} and (
         parsed.path == "/feeds/videos.xml"
     ):
         raise ValueError(
             "RSS feed URLs are not supported by ingest_url; configure them as "
             "'youtube_rss' in app config."
         )
+
+
+async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
+    """Route a URL to the appropriate data pipeline and ingest it for ``user_id``.
+
+    Matches against:
+    1. Static registry patterns (e.g. ``substack.com``).
+    2. Custom Substack domains derived from the shared source loader.
+    3. Fallback: the generic web pipeline (Bright Data Web Unlocker).
+
+    Returns the persisted Document, or None if the URL was a duplicate.
+
+    Raises:
+        ValueError: If ``url`` fails :func:`validate_url`.
+    """
+
+    validate_url(url)
+    domain = urlparse(url).netloc.lower()
 
     # Static registry match.
     for pattern, handler in _URL_HANDLERS:
@@ -257,13 +258,6 @@ async def online_ingest(
     it does NOT trigger extraction — the MCP layer submits that out-of-band.
     """
 
-    # Opik: own a span for the online data pipeline, mirroring the offline trace.
-    # ``configure_opik`` is idempotent so the CLI path (run_online_ingest) traces
-    # too; under the MCP ``@track`` ingest tools this span nests via contextvars
-    # (same process — no distributed headers needed). The leaf url/file/conversation
-    # spans nest under it the same way.
-    # Prefect: ``tags`` is dynamically scoped so it reaches the leaf flow run created
-    # in the handler (the thin @flows don't inherit a deployment's tags).
     configure_opik()
     with (
         tags(*TAGS_DATA_ONLINE),

@@ -1,8 +1,9 @@
 """Unit tests for ``submit_ingestion`` — the async-ingestion submit contract.
 
-``submit_ingestion`` is the boundary helper the MCP ingest tools call instead of
-running extraction in-process: it fires the extraction-coordinator deployment
-and returns a status the caller surfaces. These tests cover the three return
+``submit_ingestion`` is the boundary helper the online ingest flow
+(``tree.online.data_etl_online``) calls instead of running extraction
+in-process: it fires the extraction-coordinator deployment and returns a
+status the caller surfaces. These tests cover the three return
 contracts (submitted / empty-content / Prefect-unreachable), mocking only the
 Prefect client boundary (``get_client``).
 """
@@ -14,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 from beanie import PydanticObjectId
 
 from tree.entities.documents import Document, SourceType
-from tree.mcp.ingest import submit_ingestion
+from tree.memory.extraction.submit import submit_ingestion
 
 
 def _make_document(*, content: str | None) -> Document:
@@ -28,7 +29,7 @@ def _make_document(*, content: str | None) -> Document:
 
 
 def _stub_get_client(mocker, *, deployment_id: str, flow_run_id: str) -> MagicMock:
-    """Patch ``tree.mcp.ingest.get_client`` with a fake successful Prefect client."""
+    """Patch ``tree.memory.extraction.submit.get_client`` with a fake successful Prefect client."""
 
     fake_client = MagicMock()
     fake_client.read_deployment_by_name = AsyncMock(
@@ -40,7 +41,7 @@ def _stub_get_client(mocker, *, deployment_id: str, flow_run_id: str) -> MagicMo
     ctx_manager = MagicMock()
     ctx_manager.__aenter__ = AsyncMock(return_value=fake_client)
     ctx_manager.__aexit__ = AsyncMock(return_value=False)
-    mocker.patch("tree.mcp.ingest.get_client", return_value=ctx_manager)
+    mocker.patch("tree.memory.extraction.submit.get_client", return_value=ctx_manager)
     return fake_client
 
 
@@ -64,7 +65,7 @@ async def test_submitted_returns_flow_run_id_and_scopes_to_document(mocker) -> N
 async def test_empty_content_is_not_submitted(mocker) -> None:
     # Arrange — a content-less document must never reach Prefect.
     document = _make_document(content=None)
-    spy = mocker.patch("tree.mcp.ingest.get_client")
+    spy = mocker.patch("tree.memory.extraction.submit.get_client")
 
     # Act
     result = await submit_ingestion(document, user_id=PydanticObjectId())
@@ -78,7 +79,10 @@ async def test_empty_content_is_not_submitted(mocker) -> None:
 async def test_prefect_unreachable_returns_not_submitted_with_error(mocker) -> None:
     # Arrange — the Prefect API raising must degrade to a clean status, not raise.
     document = _make_document(content="some content")
-    mocker.patch("tree.mcp.ingest.get_client", side_effect=RuntimeError("prefect down"))
+    mocker.patch(
+        "tree.memory.extraction.submit.get_client",
+        side_effect=RuntimeError("prefect down"),
+    )
 
     # Act
     result = await submit_ingestion(document, user_id=PydanticObjectId())

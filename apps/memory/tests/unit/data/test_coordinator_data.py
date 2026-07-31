@@ -557,7 +557,7 @@ async def test_user_id_none_fans_out_per_active_user(mocker) -> None:
     user_a = PydanticObjectId("507f1f77bcf86cd799439011")
     user_b = PydanticObjectId("507f1f77bcf86cd799439012")
     mocker.patch(
-        "tree.data.offline_pipeline._resolve_target_user_ids",
+        "tree.data.offline_pipeline.resolve_target_user_ids",
         new=mocker.AsyncMock(return_value=[user_a, user_b]),
     )
     _patch_default_sources(mocker, [SubstackRssSource(uri="https://a.example/feed")])

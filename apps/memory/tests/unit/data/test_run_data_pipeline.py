@@ -73,6 +73,32 @@ class TestRunDataPipelineForwarding:
         assert kwargs["source_files"] == []
         assert kwargs["inline_sources"] == []
 
+    def test_end_to_end_flag_forwards_end_to_end_and_num_shards(
+        self, mock_run, cli_main
+    ) -> None:
+        # Arrange
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(cli_main, ["--end-to-end", "--num-shards", "2"])
+
+        # Assert — the flag selects the etl-offline path in _run.
+        assert result.exit_code == 0, result.output
+        kwargs = mock_run.await_args.kwargs
+        assert kwargs["end_to_end"] is True
+        assert kwargs["num_shards"] == 2
+
+    def test_default_is_data_step_only(self, mock_run, cli_main) -> None:
+        # Arrange
+        runner = CliRunner()
+
+        # Act
+        result = runner.invoke(cli_main, [])
+
+        # Assert
+        assert result.exit_code == 0, result.output
+        assert mock_run.await_args.kwargs["end_to_end"] is False
+
     def test_source_file_only_forwards_source_files(self, mock_run, cli_main) -> None:
         # Arrange
         runner = CliRunner()

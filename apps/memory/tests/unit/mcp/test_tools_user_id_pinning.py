@@ -16,8 +16,9 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.data.online_pipeline import ConversationSource, FileSource, UrlSource
-from tree.entities.documents import Document, SourceType
 from tree.mcp import tools as mcp_tools
+
+_SUBMITTED = {"status": "submitted", "flow_run_id": "run-1", "mode": "deployment"}
 
 
 def _make_ctx(user_id: PydanticObjectId) -> MagicMock:
@@ -32,85 +33,38 @@ def _make_ctx(user_id: PydanticObjectId) -> MagicMock:
     return ctx
 
 
-def _make_document(user_id: PydanticObjectId) -> Document:
-    return Document(
-        user_id=user_id,
-        source_type=SourceType.CONVERSATION,
-        source_uri="conversation://abc",
-        title="t",
-        content="c",
-    )
-
-
 class TestIngestConversationPropagatesUserId:
     """The headline gap from plan.md: ingest_conversation must carry user_id."""
 
-    async def test_passes_user_id_to_pipeline(self, mocker) -> None:
+    async def test_passes_user_id_to_dispatcher(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
-        doc = _make_document(user_id)
 
-        mock_ingest = mocker.patch(
-            "tree.mcp.tools.online_ingest",
+        mock_dispatch = mocker.patch(
+            "tree.mcp.tools.dispatch_online_ingest",
             new_callable=AsyncMock,
-            return_value=doc,
-        )
-        mock_run = mocker.patch(
-            "tree.mcp.tools.submit_ingestion",
-            new_callable=AsyncMock,
-            return_value={"status": "submitted"},
+            return_value=_SUBMITTED,
         )
 
         await mcp_tools.ingest_conversation("Some text.", ctx)
 
-        # online_ingest receives a ConversationSource + the boot-pinned user_id.
-        mock_ingest.assert_awaited_once()
-        source, passed_user_id = mock_ingest.await_args.args
+        # The dispatcher receives a ConversationSource + the boot-pinned user_id
+        # (it carries that user_id into the flow run's parameters).
+        mock_dispatch.assert_awaited_once()
+        source, passed_user_id = mock_dispatch.await_args.args
         assert isinstance(source, ConversationSource)
         assert source.text == "Some text."
         assert passed_user_id == user_id
-        # The ingestion summary pipeline is also scoped to the same user_id.
-        assert mock_run.await_args.kwargs["user_id"] == user_id
-
-    async def test_persisted_document_carries_user_id(self, mocker) -> None:
-        user_id = PydanticObjectId()
-        ctx = _make_ctx(user_id)
-        doc = _make_document(user_id)
-
-        mocker.patch(
-            "tree.mcp.tools.online_ingest",
-            new_callable=AsyncMock,
-            return_value=doc,
-        )
-        mocker.patch(
-            "tree.mcp.tools.submit_ingestion",
-            new_callable=AsyncMock,
-            return_value={"status": "submitted"},
-        )
-
-        await mcp_tools.ingest_conversation("Some text.", ctx)
-
-        # The document built by the ingest_conversation flow carries the
-        # boot-pinned user_id — this is the assertion the two-user
-        # isolation test in #021 leans on.
-        assert doc.user_id == user_id
-        assert doc.source_type == SourceType.CONVERSATION
 
 
 class TestIngestUrlPropagatesUserId:
     async def test_passes_user_id_to_dispatcher(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
-        doc = MagicMock()
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools.online_ingest",
+            "tree.mcp.tools.dispatch_online_ingest",
             new_callable=AsyncMock,
-            return_value=doc,
-        )
-        mock_run = mocker.patch(
-            "tree.mcp.tools.submit_ingestion",
-            new_callable=AsyncMock,
-            return_value={"status": "submitted"},
+            return_value=_SUBMITTED,
         )
 
         await mcp_tools.ingest_url("https://example.com", ctx)
@@ -118,30 +72,23 @@ class TestIngestUrlPropagatesUserId:
         mock_dispatch.assert_awaited_once_with(
             UrlSource(uri="https://example.com"), user_id
         )
-        assert mock_run.await_args.kwargs["user_id"] == user_id
 
 
 class TestIngestFilePropagatesUserId:
-    async def test_passes_user_id_to_pipeline(self, mocker) -> None:
+    async def test_passes_user_id_to_dispatcher(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
-        doc = MagicMock()
-        mock_ingest = mocker.patch(
-            "tree.mcp.tools.online_ingest",
+        mock_dispatch = mocker.patch(
+            "tree.mcp.tools.dispatch_online_ingest",
             new_callable=AsyncMock,
-            return_value=doc,
-        )
-        mocker.patch(
-            "tree.mcp.tools.submit_ingestion",
-            new_callable=AsyncMock,
-            return_value={"status": "submitted"},
+            return_value=_SUBMITTED,
         )
 
         await mcp_tools.ingest_file("/tmp/x.md", "file text", ctx)
 
-        mock_ingest.assert_awaited_once()
+        mock_dispatch.assert_awaited_once()
         # Positional: (FileSource, user_id)
-        source, passed_user_id = mock_ingest.await_args.args
+        source, passed_user_id = mock_dispatch.await_args.args
         assert isinstance(source, FileSource)
         assert source.path == "/tmp/x.md"
         assert passed_user_id == user_id

@@ -1,17 +1,13 @@
 """
-MCP ingestion orchestration.
+Extraction-pipeline submission glue.
 
-Two ways to turn an ingested :class:`Document` into knowledge-graph content:
-
-* :func:`submit_ingestion` (DEFAULT for the MCP tools) — fire the
-  ``memory-extract-etl-coordinator`` Prefect deployment for the document and
-  return immediately. The MCP server runs on a serverless host with a tight
-  request budget, so it must not block on the multi-minute
-  extraction/embedding/indexing pipeline; a served worker executes the run
-  out-of-band.
-* :func:`run_ingestion_pipeline` — run the same extraction + indexing
-  in-process and block until done. Kept for non-serverless / scripted callers
-  that genuinely want the result synchronously.
+:func:`submit_ingestion` turns an ingested :class:`Document` into
+knowledge-graph content asynchronously: it fires the
+``memory-extract-etl-coordinator`` Prefect deployment for the document and
+returns immediately. Nothing in the caller's request path blocks on the
+multi-minute extraction/embedding/indexing pipeline; a served worker executes
+the run out-of-band. Called by ``tree.online.data_etl_online`` (the realtime
+ingest flow) after the data step lands the document.
 """
 
 import logging
@@ -21,18 +17,8 @@ from beanie import PydanticObjectId
 from prefect.client.orchestration import get_client
 
 from tree.entities.documents import Document
-from tree.memory.extraction.pipeline import run_extraction_for_documents
-from tree.memory.indexing.core import embed_nodes
-from tree.models.base import BaseEmbeddingModel, BaseLLM
 
 logger = logging.getLogger(__name__)
-
-# Operators always trigger the COORDINATOR (extraction fan-out + trailing
-# index); for a single just-ingested document we scope it via ``document_ids``.
-# Mirrors ``scripts/run_memory_pipeline.py``.
-_EXTRACT_COORDINATOR_DEPLOYMENT = (
-    "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
-)
 
 
 async def submit_ingestion(
@@ -66,7 +52,7 @@ async def submit_ingestion(
     try:
         async with get_client() as client:
             deployment = await client.read_deployment_by_name(
-                _EXTRACT_COORDINATOR_DEPLOYMENT
+                "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
             )
             flow_run = await client.create_flow_run_from_deployment(
                 deployment_id=deployment.id,
@@ -83,54 +69,3 @@ async def submit_ingestion(
         "Submitted ingestion for document %s as flow run %s", document.id, flow_run.id
     )
     return {"status": "submitted", "flow_run_id": str(flow_run.id), **base}
-
-
-async def run_ingestion_pipeline(
-    document: Document,
-    *,
-    client: Any,
-    database: str,
-    llm: BaseLLM,
-    embedding_model: BaseEmbeddingModel,
-    user_id: PydanticObjectId,
-) -> dict[str, Any]:
-    """Run memory extraction and indexing on a Document.
-
-    Calls the same six-task extraction pipeline (in-process) and then the
-    indexing core to fill any embedding gaps. ``llm`` and ``embedding_model``
-    are caller-owned (constructed once in the FastMCP lifespan) so we don't
-    re-instantiate per request.
-
-    Returns a summary dict with extraction counts.
-    """
-
-    if not document.content:
-        logger.warning("Document %s has no content, skipping extraction", document.id)
-        return {
-            "status": "ingested",
-            "document_id": str(document.id),
-            "source_uri": document.source_uri,
-            "title": document.title,
-            "nodes_extracted": 0,
-            "edges_extracted": 0,
-        }
-
-    summary = await run_extraction_for_documents(
-        [str(document.id)],
-        user_id=user_id,
-        client=client,
-        database_name=database,
-        llm=llm,
-        embedding_model=embedding_model,
-    )
-
-    await embed_nodes(client, database, embedding_model, user_id)
-
-    return {
-        "status": "ingested",
-        "document_id": str(document.id),
-        "source_uri": document.source_uri,
-        "title": document.title,
-        "nodes_extracted": summary.nodes_written,
-        "edges_extracted": summary.edges_written,
-    }

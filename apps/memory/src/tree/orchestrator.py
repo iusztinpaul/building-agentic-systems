@@ -34,6 +34,8 @@ from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_coordinator, data_etl_worker
+from tree.offline import TAGS_ETL_OFFLINE, etl_offline
+from tree.online import data_etl_online
 from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_coordinator,
@@ -44,6 +46,7 @@ from tree.observability import (
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAGS_DATA_OFFLINE,
+    TAGS_DATA_ONLINE,
     TAGS_EXTRACTION,
     TAGS_INDEXING,
     configure_opik,
@@ -144,8 +147,8 @@ class _DeploymentSpec:
         return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
-# The first 5 are the always-on CORE set (free-tier safe). The trailing dream
-# deployment is OPTIONAL (``optional=True``): registered only when
+# The first 5 are the always-on CORE set (free-tier safe). The trailing online
+# and dream deployments are OPTIONAL (``optional=True``): registered only when
 # ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
 # Deployable subsets, keyed by the pipeline-identity tag every spec already
 # carries — so a group never drifts from the specs it selects.
@@ -188,6 +191,28 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         TAGS_INDEXING,
     ),
     # --- Optional (beyond the Prefect Cloud free-tier 5; gated by prefect.deploy_optional) ---
+    # Realtime ingest. Where it is NOT registered, `dispatch_online_ingest` runs
+    # the same flow in-process — so free-tier prod keeps working, synchronously.
+    # ponytail: shares serve(limit) admission with backfill fan-outs; give it a
+    # dedicated work queue if interactive ingest ever starves behind a backfill.
+    _DeploymentSpec(
+        data_etl_online,
+        "data-etl-online",
+        "apps/memory/src/tree/online.py:data_etl_online",
+        TAGS_DATA_ONLINE,
+        optional=True,
+    ),
+    # Offline end-to-end (data ingest → extraction → index) in one flow run.
+    # ponytail: once off the free-tier cap, move _SCHEDULED_INGEST_CRON (+ its
+    # listen.yaml parameters) from data-etl-coordinator onto THIS spec so the
+    # nightly run extracts what it ingests instead of leaving documents pending.
+    _DeploymentSpec(
+        etl_offline,
+        "etl-offline",
+        "apps/memory/src/tree/offline.py:etl_offline",
+        TAGS_ETL_OFFLINE,
+        optional=True,
+    ),
     _DeploymentSpec(
         dream_consolidation_all_users,
         "dream-consolidation-all-users",
@@ -200,7 +225,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
 
 
 def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSpec]:
-    """The deployments to register: the core 5 plus the optional dream when enabled.
+    """The deployments to register: the core 5 plus the optional ones when enabled.
 
     Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
     YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.

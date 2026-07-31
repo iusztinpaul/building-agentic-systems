@@ -58,6 +58,7 @@ init_logger()
 logger = logging.getLogger(__name__)
 
 DEPLOYMENT_NAME = "data-etl-coordinator/data-etl-coordinator"
+END_TO_END_DEPLOYMENT_NAME = "etl-offline/etl-offline"
 POLL_INTERVAL_SECONDS = 2
 
 
@@ -66,6 +67,8 @@ async def _run(
     user_identifier: str | None,
     source_files: list[str],
     inline_sources: list[dict[str, object]],
+    end_to_end: bool,
+    num_shards: int,
 ) -> None:
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
@@ -73,16 +76,42 @@ async def _run(
     )
     resolved_user_id = await resolve_user_id(user_id, user_identifier)
 
-    async with get_client() as client:
-        deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
+    # Forward only the selectors the operator passed; with neither present the
+    # coordinator falls back to its default backfill+listen set.
+    parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
+    if source_files:
+        parameters["source_files"] = source_files
+    if inline_sources:
+        parameters["sources"] = inline_sources
+    if end_to_end:
+        parameters["num_shards"] = num_shards
 
-        # Forward only the selectors the operator passed; with neither present the
-        # coordinator falls back to its default backfill+listen set.
-        parameters: dict[str, object] = {"user_id": str(resolved_user_id)}
-        if source_files:
-            parameters["source_files"] = source_files
-        if inline_sources:
-            parameters["sources"] = inline_sources
+    async with get_client() as client:
+        try:
+            deployment = await client.read_deployment_by_name(
+                END_TO_END_DEPLOYMENT_NAME if end_to_end else DEPLOYMENT_NAME
+            )
+        except Exception as exc:  # noqa: BLE001 — absent optional deployment.
+            if not end_to_end:
+                raise
+            # etl-offline is an OPTIONAL deployment (free-tier cap); mirror the
+            # online dispatcher: run the SAME flow inline in this process.
+            logger.warning(
+                "etl-offline deployment unavailable (%s: %s); running the flow "
+                "in-process instead",
+                type(exc).__name__,
+                exc,
+            )
+            from tree.offline import etl_offline
+
+            await etl_offline(
+                user_id=resolved_user_id,
+                source_files=source_files or None,
+                sources=inline_sources or None,
+                num_shards=num_shards,
+            )
+            logger.info("Done. Flow completed successfully (in-process).")
+            return
 
         flow_run = await client.create_flow_run_from_deployment(
             deployment_id=deployment.id,
@@ -157,13 +186,30 @@ async def _run(
         "— define HF datasets in a YAML file and use ``--source-file``."
     ),
 )
+@click.option(
+    "--end-to-end",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run the FULL offline pipeline (etl-offline: data ingest → extraction → "
+        "index) instead of the data step only. Falls back to running the flow "
+        "in-process when the optional etl-offline deployment isn't registered."
+    ),
+)
+@click.option(
+    "--num-shards",
+    default=1,
+    help="Extraction fan-out width (end-to-end only; forwarded per user).",
+)
 def main(
     user_id: str | None,
     user_identifier: str | None,
     source_files: tuple[str, ...],
     uris: tuple[str, ...],
+    end_to_end: bool,
+    num_shards: int,
 ) -> None:
-    """Trigger the data-etl-coordinator deployment for the resolved user."""
+    """Trigger the data-etl-coordinator (or end-to-end etl-offline) deployment."""
 
     # Parse + build inline sources from --uri tokens up front so a bad token
     # (e.g. an explicit huggingface_dataset) fails fast BEFORE any flow runs.
@@ -176,6 +222,8 @@ def main(
             user_identifier=user_identifier,
             source_files=list(source_files),
             inline_sources=inline_sources,
+            end_to_end=end_to_end,
+            num_shards=num_shards,
         )
     )
 

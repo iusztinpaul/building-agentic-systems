@@ -14,7 +14,6 @@ from tree.data.online_pipeline import (
     ConversationSource,
     FileSource,
     UrlSource,
-    online_ingest,
 )
 from tree.data.web.web_scrape import (
     DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
@@ -33,7 +32,6 @@ from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
-from tree.entities.documents import Document
 from tree.entities.knowledge_graph import NodeType
 
 # graph_app / dashboard_app: side-effect imports — register the read-only
@@ -41,8 +39,8 @@ from tree.entities.knowledge_graph import NodeType
 # custom-HTML dashboard (memory_dashboard tool + ui:// resource).
 from tree.mcp import dashboard_app, graph_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
-from tree.mcp.ingest import submit_ingestion
 from tree.mcp.server import mcp
+from tree.online import dispatch_online_ingest
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
 from tree.memory.query.visualize import build_networkx_graph, render_html
@@ -254,21 +252,22 @@ async def deep_search_memory(
 # ---------------------------------------------------------------------------
 
 
-async def _submit(
-    document: Document | None,
+async def _ingest(
+    source: UrlSource | FileSource | ConversationSource,
     *,
     user_id: PydanticObjectId,
     dup_extra: dict[str, Any],
 ) -> str:
-    """Shared MCP ingest tail: dedupe-aware submit to the extraction pipeline.
+    """Shared MCP ingest tail: dispatch to the online pipeline, serialize to JSON.
 
-    ``online_ingest`` returns ``None`` for a duplicate; otherwise we fire the async
-    extraction submission. Both branches serialize to the tool's JSON string.
+    ``dispatch_online_ingest`` owns the whole contract — edge validation, the
+    fire-and-forget ``data-etl-online`` deployment submit (a worker ingests AND
+    chains extraction), and the inline-flow fallback when no deployment is
+    registered. The result's ``mode`` field says which path ran.
     """
 
-    if document is None:
-        return json.dumps({"status": "already_ingested", **dup_extra})
-    return json.dumps(await submit_ingestion(document, user_id=user_id))
+    result = await dispatch_online_ingest(source, user_id)
+    return json.dumps({**result, **dup_extra})
 
 
 @mcp.tool
@@ -276,10 +275,12 @@ async def _submit(
 async def ingest_url(url: str, ctx: Context) -> str:
     """Fetch a web page and ingest its content into the knowledge graph.
 
-    Routes the URL to the appropriate data pipeline (currently supports
-    Substack articles), then SUBMITS memory extraction + indexing to the Prefect
-    pipeline and returns immediately (async ingestion) — it does not wait for the
-    graph to be built. Returns ``{"status": "submitted", ...}`` on success.
+    Async ingestion: SUBMITS the whole chain (fetch + extraction + indexing) to
+    the ``data-etl-online`` Prefect deployment and returns immediately —
+    ``{"status": "submitted", "flow_run_id": ..., "mode": "deployment"}``. It
+    does not wait for the graph to be built. Without a registered deployment the
+    same pipeline runs in-process instead (``"mode": "in_process"``, returning
+    ``ingested``/``already_ingested`` synchronously).
 
     Args:
         url: The web URL to fetch and ingest.
@@ -287,7 +288,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
     lc = ctx.lifespan_context
     try:
-        document = await online_ingest(UrlSource(uri=url), lc["user_id"])
+        return await _ingest(
+            UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
+        )
     except ValueError as exc:
         return json.dumps({"error": "unsupported_url", "detail": str(exc)})
     except BrightDataConfigurationError as exc:
@@ -303,8 +306,6 @@ async def ingest_url(url: str, ctx: Context) -> str:
             {"error": "network_error", "detail": f"Could not reach {url}: {exc}"}
         )
 
-    return await _submit(document, user_id=lc["user_id"], dup_extra={"url": url})
-
 
 @mcp.tool
 @track(tags=TAGS_INGESTION_MCP, name="ingest_file", create_duplicate_root_span=False)
@@ -317,10 +318,11 @@ async def ingest_file(
     """Ingest a file's text content into the knowledge graph.
 
     The server never opens ``file_path`` — it may not share a filesystem with
-    you. Read the file YOURSELF and pass its text as ``content``. Creates a
-    Document, then SUBMITS memory extraction + indexing to the Prefect pipeline
-    and returns immediately (async ingestion). Returns
-    ``{"status": "submitted", ...}`` on success.
+    you. Read the file YOURSELF and pass its text as ``content``. Async
+    ingestion: SUBMITS the whole chain (document + extraction + indexing) to the
+    ``data-etl-online`` Prefect deployment and returns immediately
+    (``{"status": "submitted", "mode": "deployment"}``); without a registered
+    deployment the same pipeline runs in-process (``"mode": "in_process"``).
 
     Args:
         file_path: Absolute path of the file on YOUR machine. Identity only:
@@ -333,15 +335,13 @@ async def ingest_file(
 
     lc = ctx.lifespan_context
     try:
-        document = await online_ingest(
-            FileSource(path=file_path, content=content, title=title), lc["user_id"]
+        return await _ingest(
+            FileSource(path=file_path, content=content, title=title),
+            user_id=lc["user_id"],
+            dup_extra={"file_path": file_path},
         )
     except ValueError as exc:
         return json.dumps({"error": "file_error", "detail": str(exc)})
-
-    return await _submit(
-        document, user_id=lc["user_id"], dup_extra={"file_path": file_path}
-    )
 
 
 @mcp.tool
@@ -575,10 +575,12 @@ async def ingest_conversation(
 ) -> str:
     """Extract knowledge from a conversation and add it to the knowledge graph.
 
-    Creates a Document from the conversation, then SUBMITS the extraction +
-    indexing pipeline to Prefect and returns immediately (async ingestion) —
+    Async ingestion: SUBMITS the whole chain (document + extraction + indexing)
+    to the ``data-etl-online`` Prefect deployment and returns immediately —
     people, tasks, preferences, and relationships are built out-of-band by a
-    worker. Returns ``{"status": "submitted", ...}`` on success.
+    worker. Returns ``{"status": "submitted", "mode": "deployment"}``; without a
+    registered deployment the same pipeline runs in-process
+    (``"mode": "in_process"``).
 
     Args:
         conversation_text: The full conversation text to process.
@@ -622,19 +624,18 @@ async def ingest_conversation(
 
     lc = ctx.lifespan_context
     try:
-        document = await online_ingest(
+        return await _ingest(
             ConversationSource(
                 text=conversation_text,
                 title=title,
                 session_uri=session_uri,
                 session_started_at=parsed_session_started_at,
             ),
-            lc["user_id"],
+            user_id=lc["user_id"],
+            dup_extra={},
         )
     except ValueError as exc:
         return json.dumps({"error": "invalid_input", "detail": str(exc)})
-
-    return await _submit(document, user_id=lc["user_id"], dup_extra={})
 
 
 # ---------------------------------------------------------------------------

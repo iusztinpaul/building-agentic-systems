@@ -133,9 +133,9 @@ class TestSearchWebMcpTool:
         # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
-        # Spy on the ingestion submission — search_web must NEVER call it.
+        # Spy on the ingestion dispatch — search_web must NEVER call it.
         mock_ingestion = mocker.patch(
-            "tree.mcp.tools.submit_ingestion", new_callable=AsyncMock
+            "tree.mcp.tools.dispatch_online_ingest", new_callable=AsyncMock
         )
         ctx = _make_ctx()
 

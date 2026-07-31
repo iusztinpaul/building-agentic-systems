@@ -1,8 +1,14 @@
+import json
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
+from beanie import PydanticObjectId
 from bson import ObjectId
 
-from tree.mcp.tools import _serialize
+from tree.data.online_pipeline import UrlSource
+from tree.mcp.tools import _ingest, _serialize
+
+_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestSerialize:
@@ -41,3 +47,38 @@ class TestSerialize:
         _serialize(docs)
 
         assert "embedding" in docs[0]
+
+
+class TestIngestTail:
+    """``_ingest`` delegates to ``dispatch_online_ingest`` and serializes to JSON.
+
+    The deployment-vs-inline branching itself is the dispatcher's contract,
+    covered in ``tests/unit/data/test_online_pipeline.py``.
+    """
+
+    async def test_merges_dup_extra_into_the_dispatch_result(self, mocker):
+        mock_dispatch = mocker.patch(
+            "tree.mcp.tools.dispatch_online_ingest",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "submitted",
+                "flow_run_id": "run-1",
+                "mode": "deployment",
+            },
+        )
+
+        result = await _ingest(
+            UrlSource(uri="https://example.com"),
+            user_id=_USER_ID,
+            dup_extra={"url": "https://example.com"},
+        )
+
+        assert json.loads(result) == {
+            "status": "submitted",
+            "flow_run_id": "run-1",
+            "mode": "deployment",
+            "url": "https://example.com",
+        }
+        mock_dispatch.assert_awaited_once_with(
+            UrlSource(uri="https://example.com"), _USER_ID
+        )

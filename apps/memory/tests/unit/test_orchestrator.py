@@ -125,11 +125,13 @@ def test_deploy_optional_disabled_by_default(mocker):
 
     names = {dep.name for dep in spy.call_args.args}
     assert len(names) == 5
+    assert "data-etl-online" not in names
+    assert "etl-offline" not in names
     assert "dream-consolidation-all-users" not in names
 
 
 def test_deploy_optional_enabled_registers_optional(mocker):
-    """``prefect.deploy_optional`` true adds the scheduled dream deployment."""
+    """``prefect.deploy_optional`` true adds the online, offline-e2e + dream deployments."""
 
     mocker.patch.object(orchestrator.app_config.prefect, "deploy_optional", True)
     spy = mocker.patch("tree.orchestrator.serve")
@@ -137,7 +139,9 @@ def test_deploy_optional_enabled_registers_optional(mocker):
     orchestrator.serve_deployments(limit=4)
 
     names = {dep.name for dep in spy.call_args.args}
-    assert len(names) == 6
+    assert len(names) == 8
+    assert "data-etl-online" in names
+    assert "etl-offline" in names
     assert "dream-consolidation-all-users" in names
 
 
