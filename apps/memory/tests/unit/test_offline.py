@@ -8,11 +8,11 @@ themselves are covered in their own suites.
 """
 
 from dataclasses import dataclass, field
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.offline import etl_offline
+from tree.offline import dispatch_offline_ingest, etl_offline
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _OTHER_USER_ID = PydanticObjectId("507f1f77bcf86cd799439012")
@@ -90,3 +90,63 @@ class TestEtlOffline:
         assert extract.await_count == 2
         assert result["extraction"][str(_USER_ID)] == {"error": "llm down"}
         assert result["extraction"][str(_OTHER_USER_ID)]["succeeded"] == 1
+
+
+class TestDispatchOfflineIngest:
+    """The caller-edge dispatcher: deployment first, inline flow fallback."""
+
+    async def test_submits_the_deployment_fire_and_forget(self, mocker) -> None:
+        flow_run = MagicMock()
+        flow_run.id = "run-1"
+        mock_run = mocker.patch(
+            "tree.offline.run_deployment",
+            new_callable=AsyncMock,
+            return_value=flow_run,
+        )
+        mock_flow = mocker.patch("tree.offline.etl_offline", new_callable=AsyncMock)
+
+        result = await dispatch_offline_ingest(
+            user_id=_USER_ID, source_files=["sources/listen.yaml"], num_shards=2
+        )
+
+        assert result == {
+            "status": "submitted",
+            "flow_run_id": "run-1",
+            "mode": "deployment",
+        }
+        mock_run.assert_awaited_once()
+        assert mock_run.await_args.args == ("etl-offline/etl-offline",)
+        assert mock_run.await_args.kwargs["timeout"] == 0
+        assert mock_run.await_args.kwargs["parameters"] == {
+            "user_id": str(_USER_ID),
+            "source_files": ["sources/listen.yaml"],
+            "sources": None,
+            "num_shards": 2,
+        }
+        mock_flow.assert_not_awaited()
+
+    async def test_runs_the_same_flow_inline_when_deployment_unavailable(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.offline.run_deployment",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("deployment not found"),
+        )
+        mock_flow = mocker.patch(
+            "tree.offline.etl_offline",
+            new_callable=AsyncMock,
+            return_value={"data": {"shards_total": 0}, "extraction": {}},
+        )
+
+        result = await dispatch_offline_ingest(user_id=_USER_ID)
+
+        # The fallback runs the SAME flow inline and hands back its result.
+        assert result == {
+            "status": "completed",
+            "result": {"data": {"shards_total": 0}, "extraction": {}},
+            "mode": "in_process",
+        }
+        mock_flow.assert_awaited_once_with(
+            user_id=_USER_ID, source_files=None, sources=None, num_shards=1
+        )

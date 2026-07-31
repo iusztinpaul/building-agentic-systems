@@ -15,6 +15,11 @@ Worker fan-outs inside each coordinator still run as separate deployment runs;
 only the two coordinators execute inline here, so the end-to-end run costs the
 same single admission slot a lone coordinator already does.
 
+Callers funnel through :func:`dispatch_offline_ingest` — the offline twin of
+``tree.online.dispatch_online_ingest``: it fires the ``etl-offline``
+deployment fire-and-forget and falls back to running the SAME flow inline when
+the optional deployment isn't registered (free-tier cap).
+
 The standalone ``data-etl-coordinator`` / ``memory-extract-etl-coordinator``
 deployments remain the manual single-step entry points; this flow composes
 them, it does not replace them.
@@ -26,6 +31,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 from prefect import flow
+from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.memory.extraction.pipeline import memory_extract_etl_coordinator
@@ -92,3 +98,59 @@ async def etl_offline(
     finally:
         # Fail-open telemetry flush — the worker subprocess exits after the run.
         flush_opik()
+
+
+async def dispatch_offline_ingest(
+    user_id: PydanticObjectId | None = None,
+    source_files: list[str] | None = None,
+    sources: list[dict[str, Any]] | None = None,
+    num_shards: int = 1,
+) -> dict[str, Any]:
+    """Submit the end-to-end offline run; the ONE entry point for callers.
+
+    The offline twin of ``tree.online.dispatch_online_ingest``: fires the
+    ``etl-offline`` deployment fire-and-forget (``timeout=0``) — a Prefect
+    worker runs the whole data → extraction → index chain — and returns the
+    flow-run id at once. When the optional deployment isn't registered (the
+    free-tier cap) or the Prefect API is unreachable, the SAME flow runs
+    inline in this process and the completed result is returned instead.
+    ``mode`` in the result says which happened:
+
+    * ``{"status": "submitted", "flow_run_id": ..., "mode": "deployment"}``
+    * ``{"status": "completed", "result": ..., "mode": "in_process"}``
+
+    Callers that want to BLOCK on a deployment-mode run (the CLI) poll the
+    returned ``flow_run_id`` themselves — waiting is a caller concern, not the
+    dispatcher's.
+    """
+
+    parameters: dict[str, Any] = {
+        "user_id": str(user_id) if user_id is not None else None,
+        "source_files": source_files,
+        "sources": sources,
+        "num_shards": num_shards,
+    }
+    try:
+        flow_run = await run_deployment(
+            "etl-offline/etl-offline", parameters=parameters, timeout=0
+        )
+        return {
+            "status": "submitted",
+            "flow_run_id": str(flow_run.id),
+            "mode": "deployment",
+        }
+    except Exception as exc:  # noqa: BLE001 — absent deployment / unreachable API.
+        logger.warning(
+            "etl-offline deployment unavailable (%s: %s); running the flow "
+            "in-process instead",
+            type(exc).__name__,
+            exc,
+        )
+
+    result = await etl_offline(
+        user_id=user_id,
+        source_files=source_files,
+        sources=sources,
+        num_shards=num_shards,
+    )
+    return {"status": "completed", "result": result, "mode": "in_process"}
