@@ -2,7 +2,7 @@
 
 Flattens a YouTube shard (mixed ``YouTubeRssSource`` + ``YouTubeVideoSource``) into a
 single ``[(canonical_url, VideoMetadata)]`` list, then runs the SHARED bulk core
-(``youtube_pipeline._bulk_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
+(``youtube_pipeline._batch_build_and_load``) ONCE: one ``fetch_many`` transcript fetch
 over ALL items (feeds + loose videos), build, load. The only per-kind difference is
 the resolve step — RSS metadata comes from the feed, single-video metadata from
 oEmbed; once flattened to ``(url, VideoMetadata)`` the two are indistinguishable.
@@ -35,7 +35,7 @@ from tree.data.youtube.youtube import (
     fetch_feed,
 )
 from tree.data.youtube.youtube_pipeline import (
-    _bulk_build_and_load,
+    _batch_build_and_load,
     _partition_video_inputs,
     _resolve_video_item,
 )
@@ -50,7 +50,7 @@ _ResolvedItem = tuple[str, VideoMetadata]
 
 
 @task(name="fetch-youtube-rss-feed", retries=3, retry_delay_seconds=5)
-async def fetch_feed_task(feed_url: str) -> list[dict]:
+async def fetch_rss_feed(feed_url: str) -> list[dict]:
     return await fetch_feed(feed_url)
 
 
@@ -74,7 +74,7 @@ def _resolve_feed_items(entries: list[dict]) -> list[_ResolvedItem]:
 async def _resolve_feed(feed_url: str) -> list[_ResolvedItem]:
     """Fetch + resolve one feed to items — the unit isolated per feed."""
 
-    return _resolve_feed_items(await fetch_feed_task(feed_url))
+    return _resolve_feed_items(await fetch_rss_feed(feed_url))
 
 
 @flow(name="ingest-youtube-batch-etl", log_prints=True, validate_parameters=False)
@@ -87,7 +87,7 @@ async def ingest_youtube_batch(
     Flattens both source kinds into one ``[(canonical_url, VideoMetadata)]`` list —
     RSS feeds expand to per-video items (metadata from the feed, isolated per feed),
     single videos resolve via oEmbed (isolated per URL) — then runs the SHARED
-    ``_bulk_build_and_load`` ONCE, so there is exactly ONE ``fetch_many`` transcript
+    ``_batch_build_and_load`` ONCE, so there is exactly ONE ``fetch_many`` transcript
     fetch over feeds + loose videos combined.
     """
 
@@ -127,7 +127,9 @@ async def ingest_youtube_batch(
         logger.info("YouTube: no resolvable items in shard")
         return []
 
-    ingested = await _bulk_build_and_load(items, user_id, invalid_inputs=invalid_inputs)
+    ingested = await _batch_build_and_load(
+        items, user_id, invalid_inputs=invalid_inputs
+    )
     logger.info(
         "YouTube: ingested %d items (%d feeds, %d single videos)",
         len(ingested),

@@ -75,11 +75,12 @@ def arxiv_window_entries(
     return windows
 
 
-# --- ETL-phase BATCH tasks --------------------------------------------------
-# One task per ETL phase, each operating over ONE ``batch_size``-chunk (the list
+# --- ETL-phase BATCH steps --------------------------------------------------
+# One step per ETL phase, each operating over ONE ``batch_size``-chunk (the list
 # of raw dicts ``fetch_dataset_batches`` yields) instead of per row. This keeps a
 # window worker at a few TENS of Prefect task runs (a small constant per chunk)
-# rather than ~1000 (one per row).
+# rather than ~1000 (one per row). Only the I/O phases (enrich, load) are
+# ``@task``s; the pure transform is a plain function (ADR-002 amendment #097).
 #
 # Result persistence is OFF by default in Prefect 3.6 (the repo sets no
 # ``persist_result`` / ``result_storage`` / ``cache_policy`` and no
@@ -99,7 +100,6 @@ def arxiv_window_entries(
 # ``(user_id, source_uri)`` so a retried batch never double-inserts.
 
 
-@task(name="transform-arxiv-batch", retries=0)
 async def transform_batch(
     batch: list[dict], user_id: PydanticObjectId
 ) -> list[Document]:
@@ -107,7 +107,8 @@ async def transform_batch(
 
     Runs the pure ``arxiv_dataset.extract_document`` per raw entry and drops the
     ``None`` results (entries with no id, already warned by the core fn). No
-    network, no DB → ``retries=0``.
+    network, no DB → a PLAIN function, not a ``@task`` (ADR-002 amendment #097:
+    a pure map gains nothing from task-hood).
     """
 
     documents = [_extract_document(entry, user_id) for entry in batch]

@@ -48,12 +48,12 @@ def _stub_mongo(mocker) -> None:
 
 def _patch_bulk(mocker) -> AsyncMock:
     return mocker.patch.object(
-        yt, "_bulk_build_and_load", new_callable=AsyncMock, return_value=["doc"]
+        yt, "_batch_build_and_load", new_callable=AsyncMock, return_value=["doc"]
     )
 
 
 async def test_flattens_feeds_and_videos_into_one_bulk_call(mocker) -> None:
-    # Two feeds (2 + 1 items) + two single videos → ONE _bulk_build_and_load over the
+    # Two feeds (2 + 1 items) + two single videos → ONE _batch_build_and_load over the
     # combined 5 items (the single-fetch_many win).
     feed_items = {
         "feed://A": [
@@ -182,7 +182,7 @@ def _transcript(video_id: str) -> FetchedTranscript:
 async def test_one_fetch_many_over_feeds_and_loose_videos(mocker) -> None:
     # The whole point of the unification: a worker with channel feeds + loose videos
     # issues EXACTLY ONE fetch_many over the COMBINED url list (was one-per-feed + one
-    # for the loose videos). Uses the REAL _bulk_build_and_load with a fake PRIMARY
+    # for the loose videos). Uses the REAL _batch_build_and_load with a fake PRIMARY
     # (Bright Data) fetcher — no live call, and Gemini is never needed.
     feed_vids = ["aaaaaaaaaaa", "bbbbbbbbbbb"]
     loose_vid = "ccccccccccc"

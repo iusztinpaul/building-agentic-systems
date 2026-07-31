@@ -43,8 +43,8 @@ class TestBatchTaskMetadata:
         assert sub.load_batch.retry_delay_seconds == 5
 
     def test_feed_fetch_task_retries(self) -> None:
-        assert sub.fetch_feed_task.retries == 3
-        assert sub.fetch_feed_task.retry_delay_seconds == 5
+        assert sub.fetch_rss_feed.retries == 3
+        assert sub.fetch_rss_feed.retry_delay_seconds == 5
 
     def test_flow_does_not_stack_retries_on_its_tasks(self) -> None:
         # Rule 5: a flow whose tasks retry must not itself retry — attempts multiply.

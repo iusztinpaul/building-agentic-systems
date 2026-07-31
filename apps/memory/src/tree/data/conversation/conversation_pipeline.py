@@ -1,14 +1,14 @@
 """
-Prefect tasks and flow for conversation ingestion.
+Prefect flow for conversation ingestion.
 
-Thin wrappers around conversation.py that add retries and logging.
+A thin wrapper around conversation.py that adds retries and logging.
 """
 
 import logging
 from datetime import datetime
 
 from beanie import PydanticObjectId
-from prefect import flow, task
+from prefect import flow
 
 from tree.data.conversation.conversation import load_conversation_document
 from tree.entities.documents import Document
@@ -16,10 +16,8 @@ from tree.observability import (
     TAGS_DATA_ONLINE,
     configure_opik,
     flush_opik,
-    get_distributed_trace_headers,
     pipeline_metadata,
     span,
-    tracked_span,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,26 +28,16 @@ _CONVERSATION_TAGS = TAGS_DATA_ONLINE
 _CONVERSATION_METADATA = pipeline_metadata("conversation")
 
 
-@task(name="load-conversation-document", retries=3, retry_delay_seconds=5)
-@tracked_span("load_conversation_document_task", tags=_CONVERSATION_TAGS)
-async def load_conversation_document_task(
-    conversation_text: str,
-    user_id: PydanticObjectId,
-    title: str | None = None,
-    session_uri: str | None = None,
-    session_started_at: datetime | None = None,
-    opik_trace_headers: dict[str, str] | None = None,
-) -> Document | None:
-    return await load_conversation_document(
-        conversation_text,
-        user_id,
-        title=title,
-        session_uri=session_uri,
-        session_started_at=session_started_at,
-    )
-
-
-@flow(name="ingest-conversation-etl", log_prints=True)
+# Tier F — free replay: the body is ONE idempotent Mongo write (deduped on
+# ``(user_id, source_type, source_uri)``), so retries live on the FLOW and there
+# are NO tasks (ADR-002 amendment #097, superseding #096 rule 3b). Accepted cost:
+# a retried attempt emits its own Opik trace — a trace per real retry is signal.
+@flow(
+    name="ingest-conversation-etl",
+    log_prints=True,
+    retries=3,
+    retry_delay_seconds=5,
+)
 async def ingest_conversation(
     conversation_text: str,
     user_id: PydanticObjectId,
@@ -68,13 +56,8 @@ async def ingest_conversation(
     (idempotent). Assumes MongoDB/Beanie is already initialised by the
     caller (MCP lifespan, coordinator, or batch flow).
 
-    Observability: configures Opik at entry (subprocess-safe) and owns ONE
-    trace; the task span nests under it via the forwarded distributed headers.
-
-    NO flow-level ``retries`` (ADR-002 amendment #096, rules 3b + 5): the retry lives on
-    ``load_conversation_document_task``. A flow retry would re-run this body and emit ONE
-    TRACE PER ATTEMPT, breaking the "owns ONE trace" contract above — and would stack on
-    the task's own retries.
+    Observability: configures Opik at entry (subprocess-safe) and owns one
+    trace per attempt.
     """
 
     configure_opik()
@@ -84,14 +67,12 @@ async def ingest_conversation(
             tags=_CONVERSATION_TAGS,
             metadata=_CONVERSATION_METADATA,
         ):
-            headers = get_distributed_trace_headers()
-            result = await load_conversation_document_task(
+            result = await load_conversation_document(
                 conversation_text,
                 user_id,
                 title=title,
                 session_uri=session_uri,
                 session_started_at=session_started_at,
-                opik_trace_headers=headers,
             )
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).

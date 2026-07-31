@@ -340,7 +340,7 @@ shared Voyage budget.
        per-article re-scrape. It shares ONLY the LOAD with substack-article (which keeps
        its own scrape `extract_batch`); RSS is NOT unified onto the article scrape path.
      - **youtube-RSS + youtube-video** share the bulk-transcript-fetch + `build_batch` +
-       `load_batch` tail (the `_bulk_build_and_load` core in `youtube_pipeline.py`): ONE bulk
+       `load_batch` tail (the `_batch_build_and_load` core in `youtube_pipeline.py`): ONE bulk
        `fetcher.fetch_many(all_urls)` per feed/batch (the #080 fix — previously per-video
        `fetch_many([url])` inside per-URL sub-flows). The metadata SOURCE stays distinct:
        oEmbed per video (direct) vs `feed_entry_to_metadata` (RSS).
@@ -392,7 +392,7 @@ shared Voyage budget.
           ATTEMPT and breaking the documented "owns ONE trace" contract.
           (`ingest-file-etl`, `ingest-conversation-etl`.)
         - **3c. Core delegates to shared batch tasks** → add NOTHING; those tasks already
-          retry. (`ingest-youtube-video-etl` → `_bulk_build_and_load`.)
+          retry. (`ingest-youtube-video-etl` → `_batch_build_and_load`.)
      4. **Override — billable or asymmetric steps.** A step that is billable, or ≥10× the
         next step's cost, gets its OWN task so a later cheap failure never replays it. If
         even ONE replay is unacceptable, ABSORB the failure inside the task and return a
@@ -439,6 +439,54 @@ shared Voyage budget.
      (`_fetch_dataset_batches`) is a streamed generator the flow iterates, so it CANNOT be a
      task; it is the one unretried network read in the data layer. Retrying it would mean
      re-streaming from row 0. `ingest_arxiv_dataset`'s docstring names this.
+
+   **Amendment (#097 — task-worthiness + task naming).** #096 fixed WHERE a retry lives
+   and HOW its count is chosen, but left every step a task by default — even Tier D,
+   where a pure map carried `@task(retries=0)`. This amendment inverts the default: a
+   step is a PLAIN FUNCTION unless task-hood buys something concrete. A `@task` with no
+   retries, no cache, and no persisted result still costs a task-run record, parameter
+   serialization of its inputs through the Prefect engine, and one more box in the UI —
+   pure overhead. Good: `build_batch` as a plain map called between two tasks. Bad:
+   `@task(retries=0)` on a pure map — attempt 2 raises identically, and the task run
+   bought nothing.
+
+   - **The task-worthiness rule.** Annotate a step `@task` ONLY when at least one holds:
+     1. **Billable or rate-limited external call** — it needs its own retry domain so a
+        cheap downstream failure never replays it (`fetch-youtube-transcripts-batch`,
+        `extract-web-batch`).
+     2. **Long or expensive compute** worth isolating/caching (`enrich-arxiv-batch`).
+     3. **Guard boundary for 1/2** — a cheap step whose task boundary protects an
+        expensive sibling from replay: the `load-*-batch` tasks exist so a Mongo blip
+        retries the load ALONE instead of re-running (and re-billing) the scrape above.
+     4. **The flow cannot retry** (dispatcher, billable replay, streamed Extract) and
+        the step is a network hop that still needs durability (`resolve-youtube-video`).
+
+     Everything else is a plain function, and a pipeline with NO tasks at all is fine —
+     its durability lives on the flow (`@flow(retries=…)`).
+
+   - **Deltas applied.**
+     - **Demoted to plain functions** (were Tier D tasks): `transform-arxiv-batch`,
+       `build-youtube-batch`. Tier D now means "not a task at all", not "a task with
+       `retries=0`".
+     - **`ingest-file-etl` / `ingest-conversation-etl` move from rule 3b to the 3a
+       treatment**: `@flow(retries=3, retry_delay_seconds=5)`, no tasks. The body is ONE
+       idempotent Mongo write, so replay is free. Accepted cost, superseding 3b: a flow
+       retry emits one Opik trace per attempt — a trace per REAL retry is signal, and
+       the web/substack thin flows already behave this way. Rule 3b is retired.
+     - **Promoted:** `resolve-youtube-video` (Tier F, 3 / 5 s) wraps the single-video
+       oEmbed resolve — the one network hop before the billable core, inside a flow
+       that must not retry (rule 3c). The BATCH path keeps calling the plain
+       `_resolve_video_item` under `gather_isolated`, so its task-run count stays a
+       small constant per shard.
+
+   - **Task naming.** Task functions never carry a `_task` suffix — the decorator
+     already says it, and the suffix leaks Prefect plumbing into every call site.
+     Good: `fetch_rss_feed`, `load_batch`, `resolve_video`. Bad: `fetch_feed_task`,
+     `load_file_document_task`. When a task wraps a same-named core function imported
+     into the module, name the TASK for what it does at pipeline grain (core
+     `fetch_feed` → task `fetch_rss_feed`) instead of suffixing. Batch-processing
+     helpers say `batch`, not `bulk` (`_batch_build_and_load`) — one word for one
+     concept.
 
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed

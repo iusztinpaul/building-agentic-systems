@@ -71,7 +71,7 @@ class TestIngestOne:
         )
         core_mock = mocker.patch.object(
             video_pipeline,
-            "_bulk_build_and_load",
+            "_batch_build_and_load",
             mocker.AsyncMock(return_value=[doc]),
         )
 
@@ -95,7 +95,7 @@ class TestIngestOne:
         # keyed on the RAW input, so the failure is inspectable data — but the
         # flow still reports "nothing ingested".
         core_mock = mocker.patch.object(
-            video_pipeline, "_bulk_build_and_load", mocker.AsyncMock(return_value=[])
+            video_pipeline, "_batch_build_and_load", mocker.AsyncMock(return_value=[])
         )
 
         result = await _ingest_youtube_video_one(
@@ -117,7 +117,7 @@ class TestIngestOne:
             video_pipeline, "fetch_oembed_metadata", mocker.AsyncMock()
         )
         mocker.patch.object(
-            video_pipeline, "_bulk_build_and_load", mocker.AsyncMock(return_value=[])
+            video_pipeline, "_batch_build_and_load", mocker.AsyncMock(return_value=[])
         )
 
         await _ingest_youtube_video_one(
@@ -134,7 +134,7 @@ class TestIngestOne:
         )
         mocker.patch.object(
             video_pipeline,
-            "_bulk_build_and_load",
+            "_batch_build_and_load",
             mocker.AsyncMock(return_value=[]),
         )
 

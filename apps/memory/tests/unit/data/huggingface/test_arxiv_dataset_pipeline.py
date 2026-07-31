@@ -1,9 +1,9 @@
 """Unit tests for ``tree.data.huggingface.arxiv_dataset_pipeline`` (#078).
 
 The arXiv HF leaf pipeline is BATCH-grain: per streamed ``batch_size``-chunk the
-flow runs three ETL-phase tasks — ``transform_batch`` (pure map, ``retries=0``),
-``enrich_batch`` (network, ``retries=2``, only when ``fetch_content``), and
-``load_batch`` (DB Load, ``retries=1``). Per-element failures are isolated INSIDE
+flow runs three ETL-phase steps — ``transform_batch`` (pure map, PLAIN function
+per ADR-002 #097), ``enrich_batch`` (network task, only when ``fetch_content``),
+and ``load_batch`` (DB Load task). Per-element failures are isolated INSIDE
 each task via ``asyncio.gather(return_exceptions=True)`` — a bad element is logged
 + skipped and the task returns the successful subset; only a batch-WIDE infra
 failure hard-fails the task (Prefect then retries the whole batch, safe because
@@ -53,10 +53,9 @@ def _raw(arxiv_id: str = "2103.12345") -> dict:
 class TestTaskMetadata:
     """Retry grain lives on the batch tasks (mirrors test_web_pipeline)."""
 
-    def test_transform_batch_is_pure_map(self) -> None:
-        # Tier D — pure map, no I/O: a retry reproduces the failure exactly.
-        assert transform_batch.retries == 0
-        assert transform_batch.name == "transform-arxiv-batch"
+    def test_transform_batch_is_a_plain_function(self) -> None:
+        # #097: a pure map (no I/O) is NOT a task — task-hood buys it nothing.
+        assert not hasattr(transform_batch, "fn")
 
     def test_enrich_batch_retries(self) -> None:
         # Tier F (free arxiv.org HTML) → 3 x 5 s = 15 s (ADR-002 #096).
@@ -144,7 +143,7 @@ class TestTransformBatch:
     async def test_maps_valid_entries(self) -> None:
         user_id = PydanticObjectId()
 
-        result = await transform_batch.fn(
+        result = await transform_batch(
             [_raw("2103.00001"), _raw("2103.00002")], user_id
         )
 
@@ -158,13 +157,13 @@ class TestTransformBatch:
     async def test_drops_idless_entry(self) -> None:
         bad = {"title": "No id", "abstract": "x"}
 
-        result = await transform_batch.fn([_raw("2103.00001"), bad], PydanticObjectId())
+        result = await transform_batch([_raw("2103.00001"), bad], PydanticObjectId())
 
         assert len(result) == 1
         assert result[0].source_uri == "https://arxiv.org/abs/2103.00001"
 
     async def test_empty_batch_returns_empty(self) -> None:
-        result = await transform_batch.fn([], PydanticObjectId())
+        result = await transform_batch([], PydanticObjectId())
 
         assert result == []
 

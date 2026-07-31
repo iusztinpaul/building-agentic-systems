@@ -7,7 +7,7 @@ files hold logic):
   Bright Data bulk fetch → Gemini fallback over ONLY the transcript-less slots →
   build → load" (ADR-004, Decision 1: no per-path branching), run identically by
   the single-video MCP flow below and the RSS/offline batch flow
-  (``youtube_pipeline_batch``) via ``_bulk_build_and_load``. It lives HERE, not in
+  (``youtube_pipeline_batch``) via ``_batch_build_and_load``. It lives HERE, not in
   ``youtube.py``, because its ``@task``s belong in a pipeline file and both
   transcript fetchers import ``youtube.py`` (a move would be a circular import).
 
@@ -22,7 +22,7 @@ files hold logic):
   VideoMetadata)`` — the direct-video metadata source, reused by the unified
   batch (``youtube_pipeline_batch.ingest_youtube_batch``) for its single-video
   entries. ``_ingest_youtube_video_one`` is the plain async core (resolve →
-  ``_bulk_build_and_load``); ``ingest_youtube_video`` is a THIN @flow wrapper
+  ``_batch_build_and_load``); ``ingest_youtube_video`` is a THIN @flow wrapper
   used ONLY by the MCP URL router
   (``tree.data.online_pipeline._ingest_youtube_video``), so a single-URL ingest
   still gets its own Prefect flow run + Opik trace.
@@ -285,7 +285,6 @@ def _no_transcript_error(*, brightdata_state: str, gemini_state: str) -> str:
     return f"no_transcript: brightdata {brightdata_state}; gemini {gemini_state}"
 
 
-@task(name="build-youtube-batch", retries=0)
 async def build_batch(
     transcribed: list[_TranscribedItem],
     failed: list[_FailedItem],
@@ -296,9 +295,10 @@ async def build_batch(
     Transcribed slots run the shared ``build_document`` with the caller's base
     metadata MERGED under the transcript's own (Bright Data's record fields win
     where they are non-``None``, so ``date`` gets the real ``date_posted``); failed
-    slots become ``ingest_error`` rows. No network, no DB → ``retries=0``. A slot
-    whose URL cannot be re-resolved to an id is skipped defensively (it was already
-    canonical, so this is unreachable in practice).
+    slots become ``ingest_error`` rows. No network, no DB → a PLAIN function, not
+    a ``@task`` (ADR-002 amendment #097: a pure map gains nothing from task-hood).
+    A slot whose URL cannot be re-resolved to an id is skipped defensively (it was
+    already canonical, so this is unreachable in practice).
     """
 
     documents: list[Document] = []
@@ -345,7 +345,7 @@ async def load_batch(docs: list[Document]) -> list[Document]:
     return ingested
 
 
-async def _bulk_build_and_load(
+async def _batch_build_and_load(
     items: list[tuple[str, VideoMetadata]],
     user_id: PydanticObjectId,
     *,
@@ -411,6 +411,17 @@ async def _resolve_video_item(
     return canonical_url, metadata
 
 
+# Tier F — free replay (one oEmbed HTTP GET). Task-grain retry because the
+# single-video flow deliberately carries NO retries (a flow replay would re-bill
+# the Bright Data transcript collection, ADR-002 #096 rule 3c) — this is the one
+# network hop before the billable core, so it gets its own durability slot
+# (amendment #097). The BATCH path calls the plain ``_resolve_video_item`` under
+# ``gather_isolated`` instead, keeping its task-run count constant per shard.
+@task(name="resolve-youtube-video", retries=3, retry_delay_seconds=5)
+async def resolve_video(video_url: str) -> tuple[str, VideoMetadata] | None:
+    return await _resolve_video_item(video_url)
+
+
 def _partition_video_inputs(video_urls: list[str]) -> tuple[list[str], list[str]]:
     """Split loose video inputs into resolvable URLs and RAW unresolvable ones.
 
@@ -438,7 +449,7 @@ async def _ingest_youtube_video_one(
     """Ingest a SINGLE video via the shared bulk core (plain async core, NO decorators).
 
     Resolves the id → canonical URL → per-video oEmbed metadata, then runs the SHARED
-    ``_bulk_build_and_load`` over the one-item list (the transcript fallback chain +
+    ``_batch_build_and_load`` over the one-item list (the transcript fallback chain +
     build + load). Shared by the thin MCP flow; the batch path calls the shared core
     directly with the whole URL list instead. Returns the persisted Document, or
     ``None`` for an unresolvable id / missing transcript / duplicate.
@@ -448,12 +459,12 @@ async def _ingest_youtube_video_one(
     rather than a WARNING that scrolls away. No transcript backend is touched.
     """
 
-    resolved = await _resolve_video_item(video_url)
+    resolved = await resolve_video(video_url)
     if resolved is None:
-        await _bulk_build_and_load([], user_id, invalid_inputs=[video_url])
+        await _batch_build_and_load([], user_id, invalid_inputs=[video_url])
         return None
 
-    ingested = await _bulk_build_and_load([resolved], user_id)
+    ingested = await _batch_build_and_load([resolved], user_id)
     return ingested[0] if ingested else None
 
 
@@ -469,7 +480,7 @@ async def ingest_youtube_video(
     BATCH path does NOT call this — it runs the shared bulk core directly.
 
     NO ``retries`` here, deliberately (ADR-002 amendment #096, rules 3c + 5): the core
-    delegates to ``_bulk_build_and_load``, whose tasks already retry
+    delegates to ``_batch_build_and_load``, whose tasks already retry
     (``fetch-youtube-transcripts-batch`` 2, ``load-youtube-batch`` 3). Adding a flow
     retry would STACK on those AND replay the billable Bright Data collection
     (~173 s + per-record billing) that #095 works to never pay twice.

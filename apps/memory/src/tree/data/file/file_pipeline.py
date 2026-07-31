@@ -1,13 +1,13 @@
 """
-Prefect tasks and flow for file ingestion.
+Prefect flow for file ingestion.
 
-Thin wrappers around file.py that add retries and logging.
+A thin wrapper around file.py that adds retries and logging.
 """
 
 import logging
 
 from beanie import PydanticObjectId
-from prefect import flow, task
+from prefect import flow
 
 from tree.data.file.file import load_file_document
 from tree.entities.documents import Document
@@ -15,10 +15,8 @@ from tree.observability import (
     TAGS_DATA_ONLINE,
     configure_opik,
     flush_opik,
-    get_distributed_trace_headers,
     pipeline_metadata,
     span,
-    tracked_span,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,19 +27,11 @@ _FILE_TAGS = TAGS_DATA_ONLINE
 _FILE_METADATA = pipeline_metadata("file")
 
 
-@task(name="load-file-document", retries=3, retry_delay_seconds=5)
-@tracked_span("load_file_document_task", tags=_FILE_TAGS)
-async def load_file_document_task(
-    file_path: str,
-    content: str,
-    user_id: PydanticObjectId,
-    title: str | None = None,
-    opik_trace_headers: dict[str, str] | None = None,
-) -> Document | None:
-    return await load_file_document(file_path, content, user_id, title)
-
-
-@flow(name="ingest-file-etl", log_prints=True)
+# Tier F — free replay: the body is ONE idempotent Mongo write (deduped on
+# ``(user_id, source_type, source_uri)``), so retries live on the FLOW and there
+# are NO tasks (ADR-002 amendment #097, superseding #096 rule 3b). Accepted cost:
+# a retried attempt emits its own Opik trace — a trace per real retry is signal.
+@flow(name="ingest-file-etl", log_prints=True, retries=3, retry_delay_seconds=5)
 async def ingest_file(
     file_path: str,
     content: str,
@@ -57,22 +47,14 @@ async def ingest_file(
     Assumes MongoDB/Beanie is already initialised by the caller
     (MCP lifespan, coordinator, or batch flow).
 
-    Observability: configures Opik at entry (subprocess-safe) and owns ONE
-    trace; the task span nests under it via the forwarded distributed headers.
-
-    NO flow-level ``retries`` (ADR-002 amendment #096, rules 3b + 5): the retry lives on
-    ``load_file_document_task``. A flow retry would re-run this body and emit ONE TRACE
-    PER ATTEMPT, breaking the "owns ONE trace" contract above — and would stack on the
-    task's own retries.
+    Observability: configures Opik at entry (subprocess-safe) and owns one
+    trace per attempt.
     """
 
     configure_opik()
     try:
         with span("ingest-file-etl", tags=_FILE_TAGS, metadata=_FILE_METADATA):
-            headers = get_distributed_trace_headers()
-            result = await load_file_document_task(
-                file_path, content, user_id, title, opik_trace_headers=headers
-            )
+            result = await load_file_document(file_path, content, user_id, title)
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
         flush_opik()

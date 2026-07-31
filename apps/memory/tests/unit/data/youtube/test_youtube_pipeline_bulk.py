@@ -42,7 +42,7 @@ from tree.data.youtube.types import (
     VideoMetadata,
 )
 from tree.data.youtube.youtube_pipeline import (
-    _bulk_build_and_load,
+    _batch_build_and_load,
     build_batch,
     fetch_transcripts_batch,
     load_batch,
@@ -182,10 +182,9 @@ class TestTaskMetadata:
         assert fetch_transcripts_batch.retry_delay_seconds == 5
         assert fetch_transcripts_batch.name == "fetch-youtube-transcripts-batch"
 
-    def test_build_batch_retries(self) -> None:
-        # Tier D — pure build, no I/O: a retry reproduces the failure exactly.
-        assert build_batch.retries == 0
-        assert build_batch.name == "build-youtube-batch"
+    def test_build_batch_is_a_plain_function(self) -> None:
+        # #097: a pure build (no I/O) is NOT a task — task-hood buys it nothing.
+        assert not hasattr(build_batch, "fn")
 
     def test_load_batch_retries(self) -> None:
         # Tier F (idempotent Mongo write) → 3 x 5 s = 15 s (ADR-002 #096).
@@ -671,7 +670,7 @@ class TestBuildBatch:
             for vid in VIDEO_IDS
         ]
 
-        docs = await build_batch.fn(transcribed, [], user_id)
+        docs = await build_batch(transcribed, [], user_id)
 
         assert len(docs) == 3
         assert [d.source_uri for d in docs] == [_canonical(vid) for vid in VIDEO_IDS]
@@ -695,7 +694,7 @@ class TestBuildBatch:
             )
         ]
 
-        docs = await build_batch.fn(transcribed, [], PydanticObjectId())
+        docs = await build_batch(transcribed, [], PydanticObjectId())
 
         assert docs[0].title == "Bright Data title"
         assert docs[0].authors == ["Bright Data channel"]
@@ -713,7 +712,7 @@ class TestBuildBatch:
             )
         ]
 
-        docs = await build_batch.fn(transcribed, [], PydanticObjectId())
+        docs = await build_batch(transcribed, [], PydanticObjectId())
 
         assert docs[0].title == "oEmbed title"
         assert docs[0].authors == ["oE"]
@@ -733,7 +732,7 @@ class TestBuildBatch:
             )
         ]
 
-        docs = await build_batch.fn(transcribed, [], PydanticObjectId())
+        docs = await build_batch(transcribed, [], PydanticObjectId())
 
         assert docs[0].date == PUBLISH_DATE
         assert docs[0].date.tzinfo is not None
@@ -749,7 +748,7 @@ class TestBuildBatch:
         )
         transcribed = [(_canonical(VIDEO_IDS[0]), base, _make_transcript(VIDEO_IDS[0]))]
 
-        docs = await build_batch.fn(transcribed, [], PydanticObjectId())
+        docs = await build_batch(transcribed, [], PydanticObjectId())
 
         assert docs[0].title == "Feed title"
         assert docs[0].authors == ["Feed channel"]
@@ -765,7 +764,7 @@ class TestBuildBatch:
             )
         ]
 
-        docs = await build_batch.fn([], failed, user_id)
+        docs = await build_batch([], failed, user_id)
 
         assert len(docs) == 1
         row = docs[0]
@@ -782,14 +781,14 @@ class TestBuildBatch:
         raw_input = "https://example.com/not-a-video"
         failed = [(raw_input, None, "invalid_url: no video id in input")]
 
-        docs = await build_batch.fn([], failed, PydanticObjectId())
+        docs = await build_batch([], failed, PydanticObjectId())
 
         assert docs[0].source_uri == raw_input
         assert docs[0].content is None
         assert docs[0].ingest_error == "invalid_url: no video id in input"
 
     async def test_empty_batch_returns_empty(self) -> None:
-        assert await build_batch.fn([], [], PydanticObjectId()) == []
+        assert await build_batch([], [], PydanticObjectId()) == []
 
 
 class TestLoadBatch:
@@ -873,7 +872,7 @@ class TestBulkBuildAndLoad:
 
     async def test_is_a_plain_function_not_a_flow_or_task(self) -> None:
         # The core carries NO Prefect decorator (no ``.fn`` / ``.name`` attrs).
-        assert not hasattr(_bulk_build_and_load, "fn")
+        assert not hasattr(_batch_build_and_load, "fn")
 
     async def test_one_bulk_fetch_builds_per_slot_loads_isolated(self, mocker) -> None:
         _configure_backends(mocker)
@@ -893,7 +892,7 @@ class TestBulkBuildAndLoad:
             youtube_pipeline, "build_document", mocker.Mock(side_effect=built_docs)
         )
 
-        result = await _bulk_build_and_load(_items(), user_id)
+        result = await _batch_build_and_load(_items(), user_id)
 
         assert len(brightdata.calls) == 1
         assert brightdata.calls[0] == [_canonical(vid) for vid in VIDEO_IDS]
@@ -915,7 +914,7 @@ class TestBulkBuildAndLoad:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
 
-        result = await _bulk_build_and_load(_items(VIDEO_IDS[:2]), PydanticObjectId())
+        result = await _batch_build_and_load(_items(VIDEO_IDS[:2]), PydanticObjectId())
 
         # BOTH documents go through the normal load path…
         loaded = [call.args[0] for call in load_mock.await_args_list]
@@ -942,7 +941,7 @@ class TestBulkBuildAndLoad:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
 
-        result = await _bulk_build_and_load(_items(VIDEO_IDS[:2]), PydanticObjectId())
+        result = await _batch_build_and_load(_items(VIDEO_IDS[:2]), PydanticObjectId())
 
         loaded = [call.args[0] for call in load_mock.await_args_list]
         # The Bright Data transcript is ingested; the un-rescued slot is a row.
@@ -965,7 +964,7 @@ class TestBulkBuildAndLoad:
             mocker.AsyncMock(side_effect=lambda doc: doc),
         )
 
-        result = await _bulk_build_and_load(
+        result = await _batch_build_and_load(
             [], PydanticObjectId(), invalid_inputs=["not a youtube url"]
         )
 

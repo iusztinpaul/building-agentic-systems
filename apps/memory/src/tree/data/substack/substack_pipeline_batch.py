@@ -48,7 +48,7 @@ _NormalizedItem = tuple[Document, dict]
 
 
 @task(name="fetch-substack-rss-feed", retries=3, retry_delay_seconds=5)
-async def fetch_feed_task(feed_url: str) -> list[dict]:
+async def fetch_rss_feed(feed_url: str) -> list[dict]:
     return await fetch_feed(feed_url)
 
 
@@ -103,7 +103,7 @@ async def _resolve_feed(
     doubles as the ``raw_entry`` ``load_document`` reads. Isolated per feed.
     """
 
-    entries = await fetch_feed_task(feed_url)
+    entries = await fetch_rss_feed(feed_url)
     return [(extract_document(entry, user_id), entry) for entry in entries]
 
 
