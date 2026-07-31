@@ -30,7 +30,7 @@
   type: huggingface_dataset
   max_samples: 10000
   fetch_content: false
-  num_workers: 4
+  num_workers: 2
   batch_size: 50
   concurrency: 25
 
