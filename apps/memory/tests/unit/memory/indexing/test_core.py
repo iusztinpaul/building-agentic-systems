@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,9 +28,19 @@ def _no_mongot_sync_sleeps(mocker):
     The production code sleeps 2-3s per call to let mongot process index
     drops/creates — pointless against the mocked collections used here, yet it
     made each test in this file take 3-5 wall-clock seconds (~28s of the suite).
+
+    The stub MUST replace the ``asyncio`` binding ON the core module, not
+    ``asyncio.sleep`` itself: ``core.asyncio`` IS the shared asyncio module, so
+    patching its ``sleep`` attribute no-ops sleep PROCESS-WIDE for the test's
+    duration — any live pymongo periodic executor on the loop then hot-spins
+    its zero-interval heartbeat into an AsyncMock (unbounded call history +
+    GC churn), intermittently wedging the whole suite for minutes.
     """
 
-    mocker.patch("tree.memory.indexing.core.asyncio.sleep", new=AsyncMock())
+    mocker.patch(
+        "tree.memory.indexing.core.asyncio",
+        new=SimpleNamespace(sleep=AsyncMock()),
+    )
 
 
 # ---------------------------------------------------------------------------
