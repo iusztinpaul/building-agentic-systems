@@ -97,8 +97,6 @@ _BRIGHTDATA_STATES = {
 }
 
 
-# Tier B — billable: ~173 s per Bright Data collection plus per-record billing, so
-# 5 retries would be ~15 min and 5 paid collections. Capped at 2 (ADR-002 #096).
 @task(
     name="fetch-youtube-transcripts-batch",
     retries=2,

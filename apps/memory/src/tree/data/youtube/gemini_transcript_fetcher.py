@@ -1,36 +1,4 @@
-"""YouTube transcript fetcher backed by Gemini 3.5 Flash.
-
-This is the FALLBACK transcript backend (ADR-004,
-`docs/adrs/004_brightdata_primary_youtube_transcript_backend.md`):
-`brightdata_transcript_fetcher.BrightDataTranscriptFetcher` is primary, and
-this fetcher runs only over the slots Bright Data could not transcribe — or
-over the whole batch when Bright Data is unavailable or unconfigured. It
-sends the canonical YouTube URL straight to Gemini via the multimodal
-`Part.from_uri(...)` API and asks the model for a verbatim transcript.
-
-Costs Gemini video tokens per call — the dominant data-pipeline model spend,
-and the reason it is second in the chain. Every fallback into this fetcher is
-WARNING-logged by the caller (`fetch_transcripts_batch`) with the reason, the
-slot count, and the cost consequence, so the spend is never silent.
-
-Returns `None` only on Gemini-side errors (auth, quota, refusal, malformed
-response, empty body); a successful Gemini response always yields a
-`FetchedTranscript`.
-
-Design notes:
-- The model id is hard-coded at the constructor (`gemini-3.5-flash`).
-  Surface as a YAML knob in a follow-up task only if a user asks; the v1
-  shape is intentionally minimal.
-- This fetcher only fills `VideoMetadata.video_id`. Per-source pipelines
-  (oEmbed in #003, Atom feed entries in #004) are responsible for title /
-  channel enrichment — Gemini may include that prose in the response body,
-  but we deliberately don't parse it.
-- Per-slot failures return `None`; this layer NEVER emits a WARNING. The
-  `None`-slot WARNING still lives in `fetch_transcripts_batch`
-  (`tree.data.youtube.youtube_pipeline`), which names the skipped video —
-  after #092 it fires for slots the WHOLE chain exhausted, carrying a
-  normalized `no_transcript: …` error naming both backends' states.
-"""
+"""YouTube transcript fetcher backed by Gemini 3.5 Flash."""
 
 from __future__ import annotations
 
@@ -120,8 +88,6 @@ class GeminiTranscriptFetcher:
     async def _fetch_one(self, url_or_id: str) -> FetchedTranscript | None:
         video_id = extract_video_id(url_or_id)
         if video_id is None:
-            # Unresolvable input: silent at this layer; the user-facing
-            # `None`-slot WARNING lives in `fetch_transcripts_batch`.
             logger.debug("Could not resolve video id from input: %r", url_or_id)
             return None
 
