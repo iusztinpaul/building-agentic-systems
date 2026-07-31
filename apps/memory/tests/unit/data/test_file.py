@@ -67,10 +67,8 @@ class TestReadFile:
 
 
 class TestLoadFileDocument:
-    async def test_creates_document_for_new_file(self, tmp_path, mocker) -> None:
-        txt = tmp_path / "notes.txt"
-        txt.write_text("Some content", encoding="utf-8")
-
+    async def test_creates_document_from_caller_content(self, mocker) -> None:
+        # No tmp file: content is caller-read; the pipeline never opens the path.
         mock_find_one = mocker.patch(
             "tree.data.file.file.Document.find_one",
             new_callable=AsyncMock,
@@ -82,19 +80,33 @@ class TestLoadFileDocument:
 
         from tree.data.file.file import load_file_document
 
-        doc = await load_file_document(str(txt), _USER_ID)
+        doc = await load_file_document("/home/u/notes.txt", "Some content", _USER_ID)
 
         assert doc is not None
-        assert doc.source_uri == f"file://{txt.resolve()}"
+        assert doc.source_uri == "file:///home/u/notes.txt"
         assert doc.title == "notes.txt"
         assert doc.content == "Some content"
         mock_find_one.assert_awaited_once()
         mock_insert.assert_awaited_once()
 
-    async def test_returns_none_for_duplicate(self, tmp_path, mocker) -> None:
-        txt = tmp_path / "dup.txt"
-        txt.write_text("content", encoding="utf-8")
+    async def test_never_touches_filesystem(self, mocker) -> None:
+        # The path may not exist on this host at all — must not raise.
+        mocker.patch(
+            "tree.data.file.file.Document.find_one",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+        mocker.patch("tree.data.file.file.Document.insert", new_callable=AsyncMock)
 
+        from tree.data.file.file import load_file_document
+
+        doc = await load_file_document(
+            "/definitely/not/on/this/host.md", "payload", _USER_ID
+        )
+        assert doc is not None
+        assert doc.source_uri == "file:///definitely/not/on/this/host.md"
+
+    async def test_returns_none_for_duplicate(self, mocker) -> None:
         from tree.entities.documents import SourceType
 
         existing = MagicMock()
@@ -108,13 +120,10 @@ class TestLoadFileDocument:
 
         from tree.data.file.file import load_file_document
 
-        result = await load_file_document(str(txt), _USER_ID)
+        result = await load_file_document("/home/u/dup.txt", "content", _USER_ID)
         assert result is None
 
-    async def test_custom_title_used(self, tmp_path, mocker) -> None:
-        txt = tmp_path / "data.txt"
-        txt.write_text("text", encoding="utf-8")
-
+    async def test_custom_title_used(self, mocker) -> None:
         mocker.patch(
             "tree.data.file.file.Document.find_one",
             new_callable=AsyncMock,
@@ -124,5 +133,14 @@ class TestLoadFileDocument:
 
         from tree.data.file.file import load_file_document
 
-        doc = await load_file_document(str(txt), _USER_ID, title="My Custom Title")
+        doc = await load_file_document(
+            "/home/u/data.txt", "text", _USER_ID, title="My Custom Title"
+        )
         assert doc.title == "My Custom Title"
+
+    @pytest.mark.parametrize("content", ["", "   \n\t"], ids=["empty", "whitespace"])
+    async def test_rejects_empty_content(self, content: str) -> None:
+        from tree.data.file.file import load_file_document
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            await load_file_document("/home/u/empty.txt", content, _USER_ID)

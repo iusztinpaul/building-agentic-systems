@@ -310,32 +310,33 @@ async def ingest_url(url: str, ctx: Context) -> str:
 @track(tags=TAGS_INGESTION_MCP, name="ingest_file", create_duplicate_root_span=False)
 async def ingest_file(
     file_path: str,
+    content: str,
     ctx: Context,
     title: str | None = None,
 ) -> str:
-    """Read a local file and ingest its content into the knowledge graph.
+    """Ingest a file's text content into the knowledge graph.
 
-    Supports .txt, .md, and .html files. Creates a Document, then SUBMITS memory
-    extraction + indexing to the Prefect pipeline and returns immediately (async
-    ingestion). Returns ``{"status": "submitted", ...}`` on success.
+    The server never opens ``file_path`` — it may not share a filesystem with
+    you. Read the file YOURSELF and pass its text as ``content``. Creates a
+    Document, then SUBMITS memory extraction + indexing to the Prefect pipeline
+    and returns immediately (async ingestion). Returns
+    ``{"status": "submitted", ...}`` on success.
 
     Args:
-        file_path: Absolute path to the file to ingest.
+        file_path: Absolute path of the file on YOUR machine. Identity only:
+            it becomes the dedup key (source_uri) and default title, so always
+            pass the same absolute form for the same file.
+        content: The file's text, read by you (convert non-text formats to
+            plain text/markdown first).
         title: Optional title override. Defaults to the filename.
     """
 
     lc = ctx.lifespan_context
     try:
         document = await online_ingest(
-            FileSource(path=file_path, title=title), lc["user_id"]
+            FileSource(path=file_path, content=content, title=title), lc["user_id"]
         )
-    except (
-        FileNotFoundError,
-        IsADirectoryError,
-        PermissionError,
-        ValueError,
-        UnicodeDecodeError,
-    ) as exc:
+    except ValueError as exc:
         return json.dumps({"error": "file_error", "detail": str(exc)})
 
     return await _submit(

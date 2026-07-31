@@ -137,7 +137,7 @@ class TestIngestFilePropagatesUserId:
             return_value={"status": "submitted"},
         )
 
-        await mcp_tools.ingest_file("/tmp/x.md", ctx)
+        await mcp_tools.ingest_file("/tmp/x.md", "file text", ctx)
 
         mock_ingest.assert_awaited_once()
         # Positional: (FileSource, user_id)

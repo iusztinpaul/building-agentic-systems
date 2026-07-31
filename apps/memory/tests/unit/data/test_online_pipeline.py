@@ -409,7 +409,7 @@ class TestOnlineIngestRouting:
             return_value=doc,
         )
 
-        source = FileSource(path="/tmp/x.md", title="T")
+        source = FileSource(path="/tmp/x.md", content="file text", title="T")
         result = await online_ingest(source, _USER_ID)
 
         assert result is doc

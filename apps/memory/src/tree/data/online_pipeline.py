@@ -194,10 +194,17 @@ class UrlSource(BaseModel):
 
 
 class FileSource(BaseModel):
-    """A local file (.txt/.md/.html) read into a Document."""
+    """A file read at the CALLER's edge (CLI / MCP client) into a Document.
+
+    ``path`` is identity only (source_uri + default title) — the pipeline
+    never opens it; the file exists only on the caller's machine. ``content``
+    is the payload, read there. Mirrors :class:`ConversationSource`'s
+    identity/payload split (``session_uri`` / ``text``).
+    """
 
     type: Literal["file"] = "file"
     path: str = Field(min_length=1)
+    content: str = Field(min_length=1)
     title: str | None = None
 
 
@@ -222,7 +229,7 @@ async def _ingest_file(
 ) -> Document | None:
     from tree.data.file.file_pipeline import ingest_file
 
-    return await ingest_file(source.path, user_id, source.title)
+    return await ingest_file(source.path, source.content, user_id, source.title)
 
 
 async def _ingest_conversation(

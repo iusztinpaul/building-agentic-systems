@@ -29,11 +29,13 @@ Usage:
 
 import asyncio
 import logging
+from pathlib import Path
 from urllib.parse import urlparse
 
 import click
 
 from tree.config.settings import settings
+from tree.data.file.file import read_file
 from tree.data.online_pipeline import (
     FileSource,
     OnlineSource,
@@ -52,13 +54,19 @@ logger = logging.getLogger(__name__)
 def _build_source(source: str, title: str | None) -> OnlineSource:
     """URL → ``UrlSource``; anything else → ``FileSource`` (CLI-boundary detect).
 
+    Files are READ HERE, at the edge where they exist — the pipeline only
+    carries the text payload (``FileSource.content``); ``path`` is identity.
+    Resolved to an absolute path so the dedup key (source_uri) is stable
+    regardless of the CLI's working directory.
+
     ``title`` applies only to files (a URL's title comes from the fetched page).
     """
 
     scheme = urlparse(source).scheme.lower()
     if scheme in {"http", "https"}:
         return UrlSource(uri=source)
-    return FileSource(path=source, title=title)
+    path = str(Path(source).resolve())
+    return FileSource(path=path, content=read_file(path), title=title)
 
 
 async def _run(

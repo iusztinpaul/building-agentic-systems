@@ -32,11 +32,12 @@ _FILE_METADATA = pipeline_metadata("file")
 @tracked_span("load_file_document_task", tags=_FILE_TAGS)
 async def _load_file_document(
     file_path: str,
+    content: str,
     user_id: PydanticObjectId,
     title: str | None = None,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> Document | None:
-    return await load_file_document(file_path, user_id, title)
+    return await load_file_document(file_path, content, user_id, title)
 
 
 load_file_document_task = task(
@@ -50,10 +51,15 @@ load_file_document_task = task(
 @flow(name="ingest-file-etl", log_prints=True)
 async def ingest_file(
     file_path: str,
+    content: str,
     user_id: PydanticObjectId,
     title: str | None = None,
 ) -> Document | None:
-    """Read a local file and ingest it as a Document for ``user_id``.
+    """Ingest caller-read file ``content`` as a Document for ``user_id``.
+
+    ``file_path`` is identity only (source_uri + default title) — the file
+    is read at the caller's edge, never here (the flow may not share a
+    filesystem with the file's machine).
 
     Assumes MongoDB/Beanie is already initialised by the caller
     (MCP lifespan, coordinator, or batch flow).
@@ -72,7 +78,7 @@ async def ingest_file(
         with span("ingest-file-etl", tags=_FILE_TAGS, metadata=_FILE_METADATA):
             headers = get_distributed_trace_headers()
             result = await load_file_document_task(
-                file_path, user_id, title, opik_trace_headers=headers
+                file_path, content, user_id, title, opik_trace_headers=headers
             )
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
