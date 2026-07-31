@@ -14,18 +14,21 @@ from unittest.mock import AsyncMock
 
 from beanie import PydanticObjectId
 
-from tree.config.sources import (
-    HuggingFaceDatasetSource,
-    SubstackRssSource,
-)
+from tree.config.sources import HuggingFaceDatasetSource
 from tree.data.huggingface.arxiv_dataset_pipeline import (
-    _get_huggingface_arxiv_defaults,
+    ARXIV_DATASET_ID,
     enrich_batch,
     ingest_arxiv_dataset,
     load_batch,
     transform_batch,
 )
 from tree.entities.documents import Document, SourceType
+
+
+def _entry(**overrides) -> HuggingFaceDatasetSource:
+    """A dispatched arxiv window entry — the flow's only config input."""
+
+    return HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID, **overrides)
 
 
 def _make_doc(arxiv_id: str = "2103.00001") -> Document:
@@ -72,69 +75,6 @@ class TestTaskMetadata:
 
     def test_flow_name(self) -> None:
         assert ingest_arxiv_dataset.name == "ingest-arxiv-dataset-etl"
-
-
-class TestGetHuggingfaceArxivDefaults:
-    """The helper walks the shared loader's ``default_configured_sources()``."""
-
-    def test_picks_first_huggingface_arxiv_source(self, mocker) -> None:
-        mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
-            return_value=[
-                SubstackRssSource(uri="https://example.substack.com/feed"),
-                HuggingFaceDatasetSource(
-                    uri="librarian-bots/arxiv-metadata-snapshot",
-                    max_samples=42,
-                    fetch_content=True,
-                    batch_size=25,
-                    concurrency=4,
-                ),
-            ],
-        )
-
-        defaults = _get_huggingface_arxiv_defaults()
-
-        assert defaults.max_samples == 42
-        assert defaults.fetch_content is True
-        assert defaults.batch_size == 25
-        assert defaults.concurrency == 4
-
-    def test_falls_back_to_huggingface_arxiv_source_defaults(self, mocker) -> None:
-        mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
-            return_value=[SubstackRssSource(uri="https://example.substack.com/feed")],
-        )
-
-        defaults = _get_huggingface_arxiv_defaults()
-
-        # Mirror HuggingFaceDatasetSource() field defaults.
-        assert defaults.max_samples == 10
-        assert defaults.fetch_content is False
-        assert defaults.batch_size == 50
-        assert defaults.concurrency == 10
-
-    def test_does_not_mutate_loader_cached_list(self, mocker) -> None:
-        """The helper iterates the loader's cached list read-only.
-
-        ``default_configured_sources()`` returns the process-global cached list
-        object; mutating it here would poison every other consumer.
-        """
-
-        entries = [
-            SubstackRssSource(uri="https://example.substack.com/feed"),
-            HuggingFaceDatasetSource(
-                uri="librarian-bots/arxiv-metadata-snapshot",
-            ),
-        ]
-        snapshot = list(entries)
-        mocker.patch(
-            "tree.data.huggingface.arxiv_dataset_pipeline.default_configured_sources",
-            return_value=entries,
-        )
-
-        _get_huggingface_arxiv_defaults()
-
-        assert entries == snapshot
 
 
 class TestTransformBatch:
@@ -296,7 +236,7 @@ class TestIngestArxivDataset:
         )
 
         result = await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(), max_samples=4, fetch_content=False
+            entry=_entry(max_samples=4), user_id=PydanticObjectId()
         )
 
         assert len(result) == 4
@@ -320,7 +260,7 @@ class TestIngestArxivDataset:
         )
 
         await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(), max_samples=4, fetch_content=False
+            entry=_entry(max_samples=4), user_id=PydanticObjectId()
         )
 
         # Two streamed chunks ⇒ exactly two load_batch task runs.
@@ -349,7 +289,7 @@ class TestIngestArxivDataset:
         )
 
         await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(), max_samples=2, fetch_content=False
+            entry=_entry(max_samples=2), user_id=PydanticObjectId()
         )
 
         enrich_spy.assert_not_awaited()
@@ -378,7 +318,8 @@ class TestIngestArxivDataset:
         )
 
         await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(), max_samples=2, fetch_content=True
+            entry=_entry(max_samples=2, fetch_content=True),
+            user_id=PydanticObjectId(),
         )
 
         enrich_spy.assert_awaited_once()
@@ -394,10 +335,7 @@ class TestIngestArxivDataset:
         )
 
         await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(),
-            max_samples=250,
-            fetch_content=False,
-            offset=250,
+            entry=_entry(max_samples=250, offset=250), user_id=PydanticObjectId()
         )
 
         assert fetch_mock.call_args.kwargs["offset"] == 250
@@ -413,7 +351,36 @@ class TestIngestArxivDataset:
         )
 
         await ingest_arxiv_dataset.fn(
-            user_id=PydanticObjectId(), max_samples=4, fetch_content=False
+            entry=_entry(max_samples=4), user_id=PydanticObjectId()
         )
 
         assert fetch_mock.call_args.kwargs["offset"] is None
+
+    async def test_takes_every_knob_from_the_dispatched_entry(self, mocker) -> None:
+        """Regression: the flow must NOT re-read the source YAML for its config.
+
+        It used to look its ``batch_size``/``concurrency``/``max_samples`` up via
+        ``default_configured_sources()``, which reads ``sources/*.yaml`` at run
+        time. In a Prefect Managed run that file is unreachable, so every arxiv
+        worker died with ``FileNotFoundError`` — while holding a fully-populated
+        entry the coordinator had already resolved.
+        """
+
+        # Arrange — entry values deliberately differ from the model defaults.
+        fetch_mock = mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline._fetch_dataset_batches",
+            return_value=iter([]),
+        )
+        mocker.patch(
+            "tree.data.huggingface.arxiv_dataset_pipeline.init_mongodb",
+            new_callable=AsyncMock,
+        )
+
+        # Act
+        await ingest_arxiv_dataset.fn(
+            entry=_entry(max_samples=250, batch_size=7, concurrency=3, offset=250),
+            user_id=PydanticObjectId(),
+        )
+
+        # Assert — max_samples + batch_size come straight off the entry.
+        assert fetch_mock.call_args.args == (250, 7)

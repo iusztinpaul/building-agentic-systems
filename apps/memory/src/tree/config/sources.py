@@ -250,12 +250,18 @@ class SourcesConfig(BaseModel):
 
 # The repo root is six path components up from this module
 # (config -> tree -> src -> memory -> apps -> repo root); the committed
-# ``sources/`` data dir lives there, NOT under the memory app root.
+# ``sources/`` data dir lives there, NOT under the memory app root. This holds
+# in a source checkout ONLY: a pip-installed ``tree`` (every Prefect Managed
+# run) sits in site-packages, where parents[5] is the install prefix
+# (``/usr/local``) and no ``sources/`` exists — hence the paths below stay
+# RELATIVE so :func:`_resolve_source_path` can fall back to the cwd.
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
-SOURCES_DIR = _REPO_ROOT / "sources"
-BACKFILL_PATH = SOURCES_DIR / "backfill.yaml"
-LISTEN_PATH = SOURCES_DIR / "listen.yaml"
+# Relative on purpose — resolved per call (repo root, then cwd), NEVER frozen to
+# an absolute path at import time. An absolute path skips the cwd fallback, which
+# is the only branch that resolves under a managed run.
+BACKFILL_PATH = Path("sources/backfill.yaml")
+LISTEN_PATH = Path("sources/listen.yaml")
 
 
 def _source_type_literals() -> frozenset[str]:

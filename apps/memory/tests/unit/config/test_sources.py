@@ -7,6 +7,8 @@ two-strategy path resolution), the cached ``default_configured_sources``,
 ``build_uri_sources`` (type inference + ``huggingface_dataset`` rejection).
 """
 
+from pathlib import Path
+
 import pytest
 
 from tree.config import sources as sources_module
@@ -20,12 +22,15 @@ from tree.config.sources import (
 from tree.config.sources import (
     BACKFILL_PATH,
     LISTEN_PATH,
-    SOURCES_DIR,
+    _resolve_source_path,
     build_uri_sources,
     default_configured_sources,
     load_sources,
     parse_uri_token,
 )
+
+# The real checkout root — what a managed run's cwd (its git clone) stands in for.
+_REPO_ROOT = Path(__file__).resolve().parents[5]
 
 # Committed-file shapes, mirrored from test_sources_files.py so the loader's
 # read path is pinned to the same counts the source files themselves assert.
@@ -56,17 +61,39 @@ def _clear_default_cache():
 
 
 class TestPathConstants:
-    def test_sources_dir_is_repo_root_sources(self):
-        assert SOURCES_DIR.name == "sources"
-        assert SOURCES_DIR.is_dir()
+    def test_default_paths_stay_relative(self):
+        """Relative, so :func:`_resolve_source_path`'s cwd fallback can run.
 
-    def test_backfill_and_listen_paths_point_into_sources_dir(self):
-        assert BACKFILL_PATH == SOURCES_DIR / "backfill.yaml"
-        assert LISTEN_PATH == SOURCES_DIR / "listen.yaml"
+        An absolute path takes the is-file-or-raise branch and never reaches the
+        cwd fallback — see the managed-run regression below.
+        """
 
-    def test_both_committed_files_exist(self):
-        assert BACKFILL_PATH.is_file()
-        assert LISTEN_PATH.is_file()
+        assert not BACKFILL_PATH.is_absolute()
+        assert not LISTEN_PATH.is_absolute()
+
+    def test_both_committed_files_resolve(self):
+        assert _resolve_source_path(BACKFILL_PATH).is_file()
+        assert _resolve_source_path(LISTEN_PATH).is_file()
+
+    def test_resolves_via_cwd_when_the_module_derived_repo_root_is_wrong(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression: pip-installed layout + git-clone cwd (Prefect Managed).
+
+        ``_REPO_ROOT`` is derived by counting parents from the module file, which
+        only holds in a source checkout. Installed into site-packages it points at
+        the install prefix (``/usr/local``), which has no ``sources/`` — the cwd
+        (the run's git clone) is what resolves. When the defaults were absolute
+        this fallback was skipped and every managed HuggingFace worker died with
+        ``FileNotFoundError: /usr/local/sources/backfill.yaml``.
+        """
+
+        # Arrange — bogus repo root, cwd on the real checkout.
+        monkeypatch.setattr(sources_module, "_REPO_ROOT", tmp_path)
+        monkeypatch.chdir(_REPO_ROOT)
+
+        # Act / Assert
+        assert _resolve_source_path(BACKFILL_PATH).is_file()
 
 
 class TestLoadSources:

@@ -30,15 +30,12 @@ from tree.config.sources import (
     YouTubeRssSource,
     YouTubeVideoSource,
 )
+from tree.data.huggingface.arxiv_dataset_pipeline import (
+    ARXIV_DATASET_ID as _ARXIV_DATASET_ID,
+)
 from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
-
-
-def _mock(mocker, name: str) -> AsyncMock:
-    mock = mocker.patch(f"tree.data.offline_pipeline.{name}", new_callable=AsyncMock)
-    mock.return_value = []
-    return mock
 
 
 class TestDataWorker:
@@ -61,8 +58,8 @@ class TestDataWorker:
     def _platforms(self, mocker) -> dict[str, AsyncMock]:
         """Mock every platform flow + the HF connector; default each to []."""
 
-        # Platform flows are direct refs in _PLATFORM_PIPELINES, so swap each entry's
-        # batch_fn for a mock; the HF connector is still a patchable module global.
+        # Both registries hold direct flow refs, so swap the registry entries: each
+        # _PLATFORM_PIPELINES entry's batch_fn, and the arxiv HF handler.
         labels = {"Substack": "substack", "YouTube": "youtube", "Web": "web"}
         mocks = {key: AsyncMock(return_value=[]) for key in labels.values()}
         mocker.patch(
@@ -72,7 +69,12 @@ class TestDataWorker:
                 for p in _PLATFORM_PIPELINES
             ],
         )
-        return {**mocks, "arxiv": _mock(mocker, "ingest_arxiv_dataset")}
+        arxiv = AsyncMock(return_value=[])
+        mocker.patch.dict(
+            "tree.data.offline_pipeline._HUGGINGFACE_DATASET_HANDLERS",
+            {_ARXIV_DATASET_ID: arxiv},
+        )
+        return {**mocks, "arxiv": arxiv}
 
     async def test_dispatches_each_platform_with_its_typed_entries(
         self, _platforms
@@ -88,9 +90,7 @@ class TestDataWorker:
             YouTubeVideoSource(uri="https://youtu.be/eYaWxljC4sA"),
         ]
         web = [WebSource(uri="https://martinfowler.com/articles/microservices.html")]
-        hf = HuggingFaceDatasetSource(
-            uri="librarian-bots/arxiv-metadata-snapshot", max_samples=5
-        )
+        hf = HuggingFaceDatasetSource(uri=_ARXIV_DATASET_ID, max_samples=5)
 
         doc_s, doc_y, doc_w, doc_h = MagicMock(), MagicMock(), MagicMock(), MagicMock()
         _platforms["substack"].return_value = [doc_s]
@@ -108,7 +108,7 @@ class TestDataWorker:
         _platforms["youtube"].assert_awaited_once_with(youtube, _USER_ID)
         _platforms["web"].assert_awaited_once_with(web, _USER_ID)
         _platforms["arxiv"].assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=5, fetch_content=False, offset=None
+            HuggingFaceDatasetSource(uri=_ARXIV_DATASET_ID, max_samples=5), _USER_ID
         )
 
     async def test_groups_both_substack_kinds_into_one_call(self, _platforms) -> None:
@@ -141,9 +141,7 @@ class TestDataWorker:
             platform_key
         ]
         # A shard with only a HuggingFace source: every URL platform is skipped.
-        sources: list[SourceEntry] = [
-            HuggingFaceDatasetSource(uri="librarian-bots/arxiv-metadata-snapshot")
-        ]
+        sources: list[SourceEntry] = [HuggingFaceDatasetSource(uri=_ARXIV_DATASET_ID)]
 
         with caplog.at_level(logging.INFO, logger="tree.data.offline_pipeline"):
             await data_etl_worker(_USER_ID, sources)
@@ -205,7 +203,7 @@ class TestDataWorker:
             _USER_ID,
             [
                 HuggingFaceDatasetSource(
-                    uri="librarian-bots/arxiv-metadata-snapshot",
+                    uri=_ARXIV_DATASET_ID,
                     max_samples=42,
                     fetch_content=True,
                 )
@@ -213,7 +211,10 @@ class TestDataWorker:
         )
 
         _platforms["arxiv"].assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=42, fetch_content=True, offset=None
+            HuggingFaceDatasetSource(
+                uri=_ARXIV_DATASET_ID, max_samples=42, fetch_content=True
+            ),
+            _USER_ID,
         )
 
     async def test_forwards_huggingface_dataset_offset_window(self, _platforms) -> None:
@@ -221,7 +222,7 @@ class TestDataWorker:
             _USER_ID,
             [
                 HuggingFaceDatasetSource(
-                    uri="librarian-bots/arxiv-metadata-snapshot",
+                    uri=_ARXIV_DATASET_ID,
                     max_samples=250,
                     offset=250,
                 )
@@ -229,7 +230,10 @@ class TestDataWorker:
         )
 
         _platforms["arxiv"].assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=250, fetch_content=False, offset=250
+            HuggingFaceDatasetSource(
+                uri=_ARXIV_DATASET_ID, max_samples=250, offset=250
+            ),
+            _USER_ID,
         )
 
     async def test_raises_for_unknown_huggingface_dataset_id(self, _platforms) -> None:
@@ -247,7 +251,7 @@ class TestDataWorker:
         serialized = [
             SubstackRssSource(uri="https://example.com/feed").model_dump(),
             HuggingFaceDatasetSource(
-                uri="librarian-bots/arxiv-metadata-snapshot",
+                uri=_ARXIV_DATASET_ID,
                 max_samples=7,
                 fetch_content=True,
             ).model_dump(),
@@ -260,5 +264,8 @@ class TestDataWorker:
             [SubstackRssSource(uri="https://example.com/feed")], _USER_ID
         )
         _platforms["arxiv"].assert_awaited_once_with(
-            user_id=_USER_ID, max_samples=7, fetch_content=True, offset=None
+            HuggingFaceDatasetSource(
+                uri=_ARXIV_DATASET_ID, max_samples=7, fetch_content=True
+            ),
+            _USER_ID,
         )

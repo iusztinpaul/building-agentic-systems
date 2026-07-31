@@ -106,24 +106,14 @@ logger = logging.getLogger(__name__)
 _SOURCES_ADAPTER: TypeAdapter[list[SourceEntry]] = TypeAdapter(list[SourceEntry])
 
 
-async def _ingest_arxiv_dataset_entry(
-    entry: HuggingFaceDatasetSource,
-    user_id: PydanticObjectId,
-) -> list[Document]:
-    return await ingest_arxiv_dataset(
-        user_id=user_id,
-        max_samples=entry.max_samples,
-        fetch_content=entry.fetch_content,
-        offset=entry.offset,
-    )
-
-
-# Registry: HuggingFace dataset id → ETL handler.
+# Registry: HuggingFace dataset id → ETL handler. Handlers take the dispatched
+# entry itself, so a new knob on the source model reaches the flow without a
+# wrapper to unpack it.
 _HUGGINGFACE_DATASET_HANDLERS: dict[
     str,
     Callable[[HuggingFaceDatasetSource, PydanticObjectId], Awaitable[list[Document]]],
 ] = {
-    "librarian-bots/arxiv-metadata-snapshot": _ingest_arxiv_dataset_entry,
+    "librarian-bots/arxiv-metadata-snapshot": ingest_arxiv_dataset,
 }
 
 

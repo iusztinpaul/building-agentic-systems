@@ -5,7 +5,7 @@ from beanie import PydanticObjectId
 from prefect import flow, task
 
 from tree.config.settings import settings
-from tree.config.sources import HuggingFaceDatasetSource, default_configured_sources
+from tree.config.sources import HuggingFaceDatasetSource
 from tree.data.batch import gather_isolated
 from tree.data.huggingface.arxiv_dataset import (
     extract_document as _extract_document,
@@ -170,43 +170,23 @@ async def load_batch(docs: list[Document]) -> list[Document]:
     return ingested
 
 
-def _get_huggingface_arxiv_defaults() -> HuggingFaceDatasetSource:
-    """The configured arxiv HF source entry, or a defaults-only one.
-
-    Walks the shared source loader's ``default_configured_sources()`` list
-    (backfill + listen, read-only) and picks the first ``HuggingFaceDatasetSource``
-    entry whose ``uri`` matches the arxiv dataset id. Falls back to
-    ``HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)`` defaults if no such entry
-    exists.
-
-    Returns the ENTRY rather than a positional tuple of its fields, so adding a
-    knob to the source model doesn't mean editing a tuple shape in four places.
-    """
-
-    for entry in default_configured_sources():
-        if (
-            isinstance(entry, HuggingFaceDatasetSource)
-            and entry.uri == ARXIV_DATASET_ID
-        ):
-            return entry
-
-    return HuggingFaceDatasetSource(uri=ARXIV_DATASET_ID)
-
-
 @flow(name="ingest-arxiv-dataset-etl", log_prints=True)
 async def ingest_arxiv_dataset(
+    entry: HuggingFaceDatasetSource,
     user_id: PydanticObjectId,
-    max_samples: int | None = None,
-    fetch_content: bool | None = None,
-    offset: int | None = None,
 ) -> list[Document]:
-    """Ingest the arxiv HF dataset for ``user_id``.
+    """Ingest the arxiv HF dataset for ``user_id``, configured by ``entry``.
 
-    ``offset`` (#071) selects a disjoint window of the stream: the ingest skips the
-    first ``offset`` rows and then streams ``max_samples`` rows — i.e. this run
-    persists rows ``[offset, offset + max_samples)``. ``offset=None`` (the default,
-    and what a non-windowed entry forwards) applies NO skip and reproduces today's
-    single-run ingest exactly.
+    Every knob (``max_samples``, ``fetch_content``, ``batch_size``, ``concurrency``,
+    ``offset``) comes from the dispatched ``entry`` — the window the coordinator
+    already resolved from the source YAML. The flow does NOT re-read that YAML:
+    it runs in a pip-installed managed container where the repo's ``sources/``
+    dir may not be reachable, and re-reading raced the dispatched window anyway.
+
+    ``entry.offset`` (#071) selects a disjoint window of the stream: the ingest
+    skips the first ``offset`` rows and then streams ``max_samples`` rows — i.e.
+    this run persists rows ``[offset, offset + max_samples)``. ``offset=None``
+    applies NO skip and reproduces the single-run ingest exactly.
 
     ACCEPTED RETRY EXCEPTION (ADR-002 amendment #096): ``_fetch_dataset_batches`` is a
     streamed generator this flow iterates, so it CANNOT be a task — it is the one
@@ -215,13 +195,11 @@ async def ingest_arxiv_dataset(
     after the read.
     """
 
-    defaults = _get_huggingface_arxiv_defaults()
-    batch_size = defaults.batch_size
-    concurrency = defaults.concurrency
-    if max_samples is None:
-        max_samples = defaults.max_samples
-    if fetch_content is None:
-        fetch_content = defaults.fetch_content
+    max_samples = entry.max_samples
+    fetch_content = entry.fetch_content
+    batch_size = entry.batch_size
+    concurrency = entry.concurrency
+    offset = entry.offset
 
     await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
