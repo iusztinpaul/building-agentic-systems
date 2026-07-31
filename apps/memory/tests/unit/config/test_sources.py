@@ -29,13 +29,21 @@ from tree.config.sources import (
     parse_uri_token,
 )
 
-# The real checkout root — what a managed run's cwd (its git clone) stands in for.
-_REPO_ROOT = Path(__file__).resolve().parents[5]
+# Loader inputs are FIXTURES, never the committed ``sources/*.yaml``: those files
+# are data that changes whenever a link is added, and asserting their contents
+# only produced tests that broke on every edit without guarding any behavior.
+_BACKFILL_YAML = """\
+- uri: https://www.decodingai.com/p/an-article
+  type: substack_article
+- uri: https://example.com/a-blog-post
+"""
+_BACKFILL_COUNT = 2
 
-# Committed-file shapes, mirrored from test_sources_files.py so the loader's
-# read path is pinned to the same counts the source files themselves assert.
-_BACKFILL_COUNT = 14
-_LISTEN_COUNT = 3
+_LISTEN_YAML = """\
+- uri: https://example.substack.com/feed
+  type: substack_rss
+"""
+_LISTEN_COUNT = 1
 
 _ALL_TYPE_LITERALS = (
     "substack_rss",
@@ -60,6 +68,22 @@ def _clear_default_cache():
     default_configured_sources.cache_clear()
 
 
+@pytest.fixture
+def checkout(monkeypatch, tmp_path) -> Path:
+    """A fake checkout: ``tmp_path/sources/{backfill,listen}.yaml``, repo root patched.
+
+    Stands in for the real repo so the loader's read + path-resolution behavior is
+    tested against fixture content the test itself declares.
+    """
+
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    (source_dir / "backfill.yaml").write_text(_BACKFILL_YAML)
+    (source_dir / "listen.yaml").write_text(_LISTEN_YAML)
+    monkeypatch.setattr(sources_module, "_REPO_ROOT", tmp_path)
+    return tmp_path
+
+
 class TestPathConstants:
     def test_default_paths_stay_relative(self):
         """Relative, so :func:`_resolve_source_path`'s cwd fallback can run.
@@ -71,12 +95,12 @@ class TestPathConstants:
         assert not BACKFILL_PATH.is_absolute()
         assert not LISTEN_PATH.is_absolute()
 
-    def test_both_committed_files_resolve(self):
+    def test_both_default_paths_resolve_under_the_repo_root(self, checkout: Path):
         assert _resolve_source_path(BACKFILL_PATH).is_file()
         assert _resolve_source_path(LISTEN_PATH).is_file()
 
     def test_resolves_via_cwd_when_the_module_derived_repo_root_is_wrong(
-        self, monkeypatch, tmp_path
+        self, checkout: Path, monkeypatch, tmp_path
     ):
         """Regression: pip-installed layout + git-clone cwd (Prefect Managed).
 
@@ -88,60 +112,50 @@ class TestPathConstants:
         ``FileNotFoundError: /usr/local/sources/backfill.yaml``.
         """
 
-        # Arrange — bogus repo root, cwd on the real checkout.
-        monkeypatch.setattr(sources_module, "_REPO_ROOT", tmp_path)
-        monkeypatch.chdir(_REPO_ROOT)
+        # Arrange — bogus repo root, cwd on the checkout.
+        bogus_root = tmp_path / "install-prefix"
+        bogus_root.mkdir()
+        monkeypatch.setattr(sources_module, "_REPO_ROOT", bogus_root)
+        monkeypatch.chdir(checkout)
 
         # Act / Assert
         assert _resolve_source_path(BACKFILL_PATH).is_file()
 
 
 class TestLoadSources:
-    def test_reads_backfill_file(self):
-        entries = load_sources([BACKFILL_PATH])
-
-        assert len(entries) == _BACKFILL_COUNT
-
-    def test_reads_listen_file_as_substack_rss_feeds(self):
+    def test_reads_a_file(self, checkout: Path):
         entries = load_sources([LISTEN_PATH])
 
         assert len(entries) == _LISTEN_COUNT
         assert all(isinstance(entry, SubstackRssSource) for entry in entries)
 
-    def test_concatenates_files_in_given_order(self):
+    def test_concatenates_files_in_the_paths_argument_order(self, checkout: Path):
         entries = load_sources([BACKFILL_PATH, LISTEN_PATH])
-
-        assert len(entries) == _BACKFILL_COUNT + _LISTEN_COUNT
-        # Backfill entries come first, listen entries last.
-        assert all(
-            not isinstance(entry, SubstackRssSource)
-            for entry in entries[:_BACKFILL_COUNT]
-        )
-        assert all(
-            isinstance(entry, SubstackRssSource) for entry in entries[_BACKFILL_COUNT:]
-        )
-
-    def test_order_follows_paths_argument(self):
         listen_first = load_sources([LISTEN_PATH, BACKFILL_PATH])
 
-        assert all(
-            isinstance(entry, SubstackRssSource)
-            for entry in listen_first[:_LISTEN_COUNT]
-        )
+        assert len(entries) == _BACKFILL_COUNT + _LISTEN_COUNT
+        # The rss feed lands last one way, first the other — order follows the
+        # argument, not the file names.
+        assert isinstance(entries[-1], SubstackRssSource)
+        assert isinstance(listen_first[0], SubstackRssSource)
 
-    def test_untyped_entries_infer_their_type(self):
-        # backfill.yaml carries untyped web URLs that must infer to WebSource,
-        # proving load_sources validates through SourcesConfig (not a raw parse).
+    def test_untyped_entries_infer_their_type(self, checkout: Path):
+        # The untyped fixture URL must infer to WebSource, proving load_sources
+        # validates through SourcesConfig (not a raw parse).
         entries = load_sources([BACKFILL_PATH])
 
         assert any(isinstance(entry, WebSource) for entry in entries)
 
 
 class TestLoadSourcesPathResolution:
-    def test_relative_path_resolves_under_repo_root(self, monkeypatch, tmp_path):
+    def test_relative_path_resolves_under_repo_root(
+        self, checkout: Path, monkeypatch, tmp_path
+    ):
         # cwd has no sources/ dir, so resolution must fall back to the
         # module-derived repo root — this is the local-serve cwd=apps/memory case.
-        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
 
         entries = load_sources(["sources/backfill.yaml"])
 
@@ -179,12 +193,12 @@ class TestLoadSourcesPathResolution:
 
 
 class TestDefaultConfiguredSources:
-    def test_equals_backfill_plus_listen_union(self):
+    def test_equals_backfill_plus_listen_union(self, checkout: Path):
         union = load_sources([BACKFILL_PATH, LISTEN_PATH])
 
         assert default_configured_sources() == union
 
-    def test_returns_cached_object_on_repeat_calls(self):
+    def test_returns_cached_object_on_repeat_calls(self, checkout: Path):
         first = default_configured_sources()
         second = default_configured_sources()
 
