@@ -80,8 +80,8 @@ from tree.memory.types import (
     RawExtraction,
 )
 from tree.models.get_model import get_llm, get_search_embedding_model
+from tree.config.constants import TAGS_INGESTION_BATCH
 from tree.observability import (
-    TAGS_INGESTION_BATCH,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,

@@ -11,8 +11,8 @@ from prefect import flow
 
 from tree.data.file.file import load_file_document
 from tree.entities.documents import Document
+from tree.config.constants import TAGS_DATA_ONLINE
 from tree.observability import (
-    TAGS_DATA_ONLINE,
     configure_opik,
     flush_opik,
     pipeline_metadata,

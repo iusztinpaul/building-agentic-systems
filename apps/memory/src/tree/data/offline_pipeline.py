@@ -35,8 +35,8 @@ from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.entities.users import select_active_user_ids
 from tree.memory.indexing.core import assert_settings_match_live_vector_index
+from tree.config.constants import TAGS_DATA_OFFLINE
 from tree.observability import (
-    TAGS_DATA_OFFLINE,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,

@@ -116,8 +116,8 @@ from tree.models.get_model import (
     get_resolution_embedding_model,
     get_search_embedding_model,
 )
+from tree.config.constants import TAGS_EXTRACTION
 from tree.observability import (
-    TAGS_EXTRACTION,
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,

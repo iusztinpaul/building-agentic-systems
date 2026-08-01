@@ -1,6 +1,6 @@
 """Unit tests for the centralized Opik tag families.
 
-Two families, both centralized in :mod:`tree.observability`:
+Two families, both centralized in :mod:`tree.config.constants`:
 
 * PIPELINE-IDENTITY — the data / memory-extraction / memory-indexing pipelines,
   tagged 1:1 with their Prefect deployment / flow-run tags (the SAME constant
@@ -15,7 +15,8 @@ MCP tools stay on the four-tag family (no pipeline-name tag leaks into
 
 from __future__ import annotations
 
-import tree.observability as obs
+import tree.config.constants as consts
+from tree.observability import pipeline_metadata
 
 # The MCP-surface family — the closed set the MCP tools + dream draw from.
 _FAMILY = {"ingestion", "retrieval", "batch", "mcp"}
@@ -24,31 +25,31 @@ _FAMILY = {"ingestion", "retrieval", "batch", "mcp"}
 class TestTagFamily:
     def test_family_is_exactly_four(self) -> None:
         assert {
-            obs.TAG_INGESTION,
-            obs.TAG_RETRIEVAL,
-            obs.TAG_BATCH,
-            obs.TAG_MCP,
+            consts.TAG_INGESTION,
+            consts.TAG_RETRIEVAL,
+            consts.TAG_BATCH,
+            consts.TAG_MCP,
         } == _FAMILY
 
     def test_combinations_only_use_family_tags(self) -> None:
         for combo in (
-            obs.TAGS_INGESTION_BATCH,
-            obs.TAGS_INGESTION_MCP,
-            obs.TAGS_RETRIEVAL_MCP,
-            obs.TAGS_MCP,
+            consts.TAGS_INGESTION_BATCH,
+            consts.TAGS_INGESTION_MCP,
+            consts.TAGS_RETRIEVAL_MCP,
+            consts.TAGS_MCP,
         ):
             assert set(combo) <= _FAMILY, combo
 
     def test_combination_values(self) -> None:
-        assert set(obs.TAGS_INGESTION_BATCH) == {"ingestion", "batch"}
-        assert set(obs.TAGS_INGESTION_MCP) == {"ingestion", "mcp"}
-        assert set(obs.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}
-        assert set(obs.TAGS_MCP) == {"mcp"}
+        assert set(consts.TAGS_INGESTION_BATCH) == {"ingestion", "batch"}
+        assert set(consts.TAGS_INGESTION_MCP) == {"ingestion", "mcp"}
+        assert set(consts.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}
+        assert set(consts.TAGS_MCP) == {"mcp"}
 
     def test_pipeline_metadata_carries_pipeline_name(self) -> None:
         # The finer pipeline name rides as metadata, complementing the tag.
-        assert obs.pipeline_metadata("extraction") == {"pipeline": "extraction"}
-        assert obs.pipeline_metadata("data", shard=2) == {
+        assert pipeline_metadata("extraction") == {"pipeline": "extraction"}
+        assert pipeline_metadata("data", shard=2) == {
             "pipeline": "data",
             "shard": 2,
         }
@@ -60,10 +61,10 @@ class TestPipelineIdentityTags:
     extraction]; indexing = [memory-pipeline, indexing]."""
 
     def test_constant_values(self) -> None:
-        assert obs.TAGS_DATA_OFFLINE == ["data-pipeline", "offline"]
-        assert obs.TAGS_DATA_ONLINE == ["data-pipeline", "online"]
-        assert obs.TAGS_EXTRACTION == ["memory-pipeline", "extraction"]
-        assert obs.TAGS_INDEXING == ["memory-pipeline", "indexing"]
+        assert consts.TAGS_DATA_OFFLINE == ["data-pipeline", "offline"]
+        assert consts.TAGS_DATA_ONLINE == ["data-pipeline", "online"]
+        assert consts.TAGS_EXTRACTION == ["memory-pipeline", "extraction"]
+        assert consts.TAGS_INDEXING == ["memory-pipeline", "indexing"]
 
     def test_opik_span_tags_use_the_shared_constants(self) -> None:
         # Each pipeline's Opik ``_*_TAGS`` IS the shared constant (so Opik == Prefect).
@@ -73,22 +74,22 @@ class TestPipelineIdentityTags:
         from tree.memory.extraction.pipeline import _EXTRACTION_TAGS
         from tree.memory.indexing.pipeline import _INDEXING_TAGS
 
-        assert _DATA_TAGS == obs.TAGS_DATA_OFFLINE
-        assert _FILE_TAGS == obs.TAGS_DATA_ONLINE
-        assert _CONVERSATION_TAGS == obs.TAGS_DATA_ONLINE
-        assert _EXTRACTION_TAGS == obs.TAGS_EXTRACTION
-        assert _INDEXING_TAGS == obs.TAGS_INDEXING
+        assert _DATA_TAGS == consts.TAGS_DATA_OFFLINE
+        assert _FILE_TAGS == consts.TAGS_DATA_ONLINE
+        assert _CONVERSATION_TAGS == consts.TAGS_DATA_ONLINE
+        assert _EXTRACTION_TAGS == consts.TAGS_EXTRACTION
+        assert _INDEXING_TAGS == consts.TAGS_INDEXING
 
     def test_prefect_deployment_tags_match_opik_1to1(self) -> None:
         # The Prefect deployment specs carry the SAME pipeline-identity tags.
         from tree.orchestrator import _DEPLOYMENT_SPECS
 
         tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
-        assert tags_by_name["data-etl-coordinator"] == obs.TAGS_DATA_OFFLINE
-        assert tags_by_name["data-etl-worker"] == obs.TAGS_DATA_OFFLINE
-        assert tags_by_name["memory-extract-etl-coordinator"] == obs.TAGS_EXTRACTION
-        assert tags_by_name["memory-extract-etl-worker"] == obs.TAGS_EXTRACTION
-        assert tags_by_name["memory-indexing-etl"] == obs.TAGS_INDEXING
+        assert tags_by_name["data-etl-coordinator"] == consts.TAGS_DATA_OFFLINE
+        assert tags_by_name["data-etl-worker"] == consts.TAGS_DATA_OFFLINE
+        assert tags_by_name["memory-extract-etl-coordinator"] == consts.TAGS_EXTRACTION
+        assert tags_by_name["memory-extract-etl-worker"] == consts.TAGS_EXTRACTION
+        assert tags_by_name["memory-indexing-etl"] == consts.TAGS_INDEXING
 
 
 class TestMcpToolTags:
@@ -112,10 +113,10 @@ class TestMcpToolTags:
             assert legacy not in src, f"legacy tag {legacy!r} still in tools.py"
 
     def test_retrieval_tools_carry_retrieval_mcp(self) -> None:
-        assert set(obs.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}
+        assert set(consts.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}
 
     def test_ingestion_tools_carry_ingestion_mcp(self) -> None:
-        assert set(obs.TAGS_INGESTION_MCP) == {"ingestion", "mcp"}
+        assert set(consts.TAGS_INGESTION_MCP) == {"ingestion", "mcp"}
 
 
 def _module_source(mod) -> str:

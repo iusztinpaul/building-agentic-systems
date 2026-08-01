@@ -32,10 +32,12 @@ from tree.data.online_pipeline import (
 )
 from tree.db import init_mongodb
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
-from tree.observability import (
+from tree.config.constants import (
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAG_ONLINE,
+)
+from tree.observability import (
     configure_opik,
     flush_opik,
     get_distributed_trace_headers,

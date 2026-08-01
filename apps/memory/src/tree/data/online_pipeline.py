@@ -23,8 +23,8 @@ from tree.config.sources import (
 )
 from tree.config.sources import default_configured_sources
 from tree.entities.documents import Document
+from tree.config.constants import TAGS_DATA_ONLINE
 from tree.observability import (
-    TAGS_DATA_ONLINE,
     configure_opik,
     pipeline_metadata,
     span,

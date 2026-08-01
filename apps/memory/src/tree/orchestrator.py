@@ -42,14 +42,14 @@ from tree.memory.extraction.pipeline import (
     memory_extract_etl_worker,
 )
 from tree.memory.indexing.pipeline import memory_indexing
-from tree.observability import (
-    TAG_DATA_PIPELINE,
-    TAG_MEMORY_PIPELINE,
+from tree.config.constants import (
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,
     TAGS_INDEXING,
-    configure_opik,
+    TAG_DATA_PIPELINE,
+    TAG_MEMORY_PIPELINE,
 )
+from tree.observability import configure_opik
 
 # Prefect Cloud managed-pool defaults (provisioned by deploy/prefect_pipelines_setup.py).
 GIT_URL = "https://github.com/iusztinpaul/building-agentic-systems.git"

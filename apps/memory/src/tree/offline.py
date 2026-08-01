@@ -35,10 +35,12 @@ from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.memory.extraction.pipeline import memory_extract_etl_coordinator
-from tree.observability import (
+from tree.config.constants import (
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAG_OFFLINE,
+)
+from tree.observability import (
     configure_opik,
     flush_opik,
     span,
@@ -147,6 +149,7 @@ async def dispatch_offline_ingest(
             exc,
         )
 
+    # If the deployment is unavailable, fall back to running the flow in-process.
     result = await etl_offline(
         user_id=user_id,
         source_files=source_files,

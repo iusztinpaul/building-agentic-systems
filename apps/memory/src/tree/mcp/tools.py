@@ -55,10 +55,12 @@ from tree.memory.review import (
     review_duplicate as _review_duplicate,
 )
 from tree.memory.types import QueryResult
-from tree.observability import (
+from tree.config.constants import (
     TAGS_INGESTION_MCP,
     TAGS_MCP,
     TAGS_RETRIEVAL_MCP,
+)
+from tree.observability import (
     track,
     update_current_trace,
 )
