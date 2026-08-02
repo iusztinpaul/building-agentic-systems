@@ -34,8 +34,8 @@ from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_coordinator, data_etl_worker
-from tree.offline import TAGS_ETL_OFFLINE, etl_offline
-from tree.online import TAGS_ETL_ONLINE, etl_online
+from tree.offline import TAGS_OFFLINE_PIPELINE, offline_pipeline
+from tree.online import TAGS_ONLINE_PIPELINE, online_pipeline
 from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import (
     memory_extract_etl_coordinator,
@@ -190,17 +190,17 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         TAGS_INDEXING,
     ),
     _DeploymentSpec(
-        etl_online,
-        "etl-online",
-        "apps/memory/src/tree/online.py:etl_online",
-        TAGS_ETL_ONLINE,
+        online_pipeline,
+        "online-pipeline",
+        "apps/memory/src/tree/online.py:online_pipeline",
+        TAGS_ONLINE_PIPELINE,
         optional=True,
     ),
     _DeploymentSpec(
-        etl_offline,
-        "etl-offline",
-        "apps/memory/src/tree/offline.py:etl_offline",
-        TAGS_ETL_OFFLINE,
+        offline_pipeline,
+        "offline-pipeline",
+        "apps/memory/src/tree/offline.py:offline_pipeline",
+        TAGS_OFFLINE_PIPELINE,
         optional=True,
     ),
     _DeploymentSpec(

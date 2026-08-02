@@ -1,7 +1,7 @@
 """Unit tests for ``tree.online`` — the cross-pipeline realtime ingest flow.
 
-Covers the ``etl-online`` flow (cold-start init, source coercion, inline
-extraction + indexing submit), the edge validator, and ``dispatch_online_ingest``'s
+Covers the ``online-pipeline`` flow (cold-start init, source coercion, inline
+extraction + indexing submit), the edge validator, and ``dispatch_online_pipeline``'s
 deployment-first / inline-fallback contract. The DATA-step router itself
 (``online_ingest``) is covered in ``tests/unit/data/test_online_pipeline.py``.
 """
@@ -14,8 +14,8 @@ from beanie import PydanticObjectId
 from tree.data.online_pipeline import FileSource, UrlSource
 from tree.online import (
     MAX_SOURCE_PAYLOAD_BYTES,
-    etl_online,
-    dispatch_online_ingest,
+    online_pipeline,
+    dispatch_online_pipeline,
     validate_online_source,
 )
 
@@ -23,7 +23,7 @@ _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
 class TestDataEtlOnlineFlow:
-    """``etl-online`` — ONE run: data step + inline extraction worker.
+    """``online-pipeline`` — ONE run: data step + inline extraction worker.
 
     A worker executes it cold, so it must init Mongo itself, coerce the
     JSON-serialized ``source`` dict back to the typed union, run the extraction
@@ -51,7 +51,7 @@ class TestDataEtlOnlineFlow:
         )
         mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
 
-        result = await etl_online(
+        result = await online_pipeline(
             {"type": "url", "uri": "https://example.com"}, _USER_ID
         )
 
@@ -76,7 +76,7 @@ class TestDataEtlOnlineFlow:
             "tree.online.memory_extract_etl_worker", new_callable=AsyncMock
         )
 
-        result = await etl_online({"type": "conversation", "text": "hi"}, _USER_ID)
+        result = await online_pipeline({"type": "conversation", "text": "hi"}, _USER_ID)
 
         assert result is None
         mock_extract.assert_not_awaited()
@@ -93,7 +93,7 @@ class TestDataEtlOnlineFlow:
         )
         mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
 
-        await etl_online(
+        await online_pipeline(
             FileSource(path="/tmp/x.md", content="text"),
             _USER_ID,
             run_extraction=False,
@@ -119,7 +119,7 @@ class TestDataEtlOnlineFlow:
 
         # Fail-open: the document + graph content are durable; the indexing
         # gap is WARNING-logged and covered by any later indexing run.
-        result = await etl_online(
+        result = await online_pipeline(
             {"type": "url", "uri": "https://example.com"}, _USER_ID
         )
 
@@ -158,9 +158,9 @@ class TestDispatchOnlineIngest:
             new_callable=AsyncMock,
             return_value=flow_run,
         )
-        mock_flow = mocker.patch("tree.online.etl_online", new_callable=AsyncMock)
+        mock_flow = mocker.patch("tree.online.online_pipeline", new_callable=AsyncMock)
 
-        result = await dispatch_online_ingest(
+        result = await dispatch_online_pipeline(
             UrlSource(uri="https://example.com"), _USER_ID
         )
 
@@ -172,7 +172,7 @@ class TestDispatchOnlineIngest:
             "mode": "deployment",
         }
         mock_run.assert_awaited_once()
-        assert mock_run.await_args.args == ("etl-online/etl-online",)
+        assert mock_run.await_args.args == ("online-pipeline/online-pipeline",)
         assert mock_run.await_args.kwargs["timeout"] == 0
         assert mock_run.await_args.kwargs["parameters"] == {
             "source": {"type": "url", "uri": "https://example.com"},
@@ -191,12 +191,12 @@ class TestDispatchOnlineIngest:
             side_effect=RuntimeError("deployment not found"),
         )
         mock_flow = mocker.patch(
-            "tree.online.etl_online",
+            "tree.online.online_pipeline",
             new_callable=AsyncMock,
             return_value="68a1",
         )
 
-        result = await dispatch_online_ingest(
+        result = await dispatch_online_pipeline(
             UrlSource(uri="https://example.com"), _USER_ID, run_extraction=False
         )
 
@@ -217,12 +217,12 @@ class TestDispatchOnlineIngest:
             side_effect=RuntimeError("prefect down"),
         )
         mocker.patch(
-            "tree.online.etl_online",
+            "tree.online.online_pipeline",
             new_callable=AsyncMock,
             return_value=None,
         )
 
-        result = await dispatch_online_ingest(
+        result = await dispatch_online_pipeline(
             UrlSource(uri="https://example.com"), _USER_ID
         )
 
@@ -232,6 +232,6 @@ class TestDispatchOnlineIngest:
         mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
 
         with pytest.raises(ValueError, match="Unsupported URL scheme"):
-            await dispatch_online_ingest(UrlSource(uri="notaurl"), _USER_ID)
+            await dispatch_online_pipeline(UrlSource(uri="notaurl"), _USER_ID)
 
         mock_run.assert_not_awaited()

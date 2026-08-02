@@ -7,8 +7,8 @@ memory step (``memory_extract_etl_worker``). Neither pipeline package may
 import the other; this module imports both.
 
 Async-first: callers (MCP ingest tools + the CLI) funnel through
-:func:`dispatch_online_ingest`, which validates at the edge and fires the
-``etl-online`` deployment fire-and-forget — ONE flow run on a Prefect
+:func:`dispatch_online_pipeline`, which validates at the edge and fires the
+``online-pipeline`` deployment fire-and-forget — ONE flow run on a Prefect
 worker ingests the source into ``documents`` AND runs the extraction worker
 inline, then submits the trailing indexing run. When no deployment is
 registered (e.g. the free-tier deployment cap) the SAME flow runs inline in
@@ -50,15 +50,15 @@ logger = logging.getLogger(__name__)
 _ONLINE_METADATA = pipeline_metadata("data")
 
 # Spans/deployment tags for the end-to-end run: it IS both pipelines, online.
-TAGS_ETL_ONLINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_ONLINE]
+TAGS_ONLINE_PIPELINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_ONLINE]
 _ONLINE_SOURCE_ADAPTER: TypeAdapter[OnlineSource] = TypeAdapter(OnlineSource)
 
 # Prefect caps flow-run parameter payloads (~512KB server-side)
 MAX_SOURCE_PAYLOAD_BYTES = 400_000
 
 
-@flow(name="etl-online", log_prints=True)
-async def etl_online(
+@flow(name="online-pipeline", log_prints=True)
+async def online_pipeline(
     source: Any,
     user_id: PydanticObjectId,
     run_extraction: bool = True,
@@ -66,9 +66,9 @@ async def etl_online(
 ) -> str | None:
     """The realtime ingest FLOW: data step + extraction, ONE run end-to-end.
 
-    The online counterpart of :func:`tree.offline.etl_offline`, collapsed for a
+    The online counterpart of :func:`tree.offline.offline_pipeline`, collapsed for a
     single source. Callers never invoke it directly — they go through
-    :func:`dispatch_online_ingest`, which fires it as a deployment when one is
+    :func:`dispatch_online_pipeline`, which fires it as a deployment when one is
     registered and runs it inline otherwise.
 
     ``run_extraction`` (default true) runs the memory step INSIDE this run:
@@ -99,8 +99,8 @@ async def etl_online(
     configure_opik()
     try:
         with span(
-            "etl-online",
-            tags=TAGS_ETL_ONLINE,
+            "online-pipeline",
+            tags=TAGS_ONLINE_PIPELINE,
             trace_headers=opik_trace_headers,
             metadata=_ONLINE_METADATA,
         ):
@@ -185,7 +185,7 @@ def validate_online_source(source: OnlineSource) -> None:
         )
 
 
-async def dispatch_online_ingest(
+async def dispatch_online_pipeline(
     source: OnlineSource,
     user_id: PydanticObjectId,
     *,
@@ -193,7 +193,7 @@ async def dispatch_online_ingest(
 ) -> dict[str, Any]:
     """Submit ``source`` to the online pipeline; the ONE entry point for callers.
 
-    Async-first: validates at the edge, then fires the ``etl-online``
+    Async-first: validates at the edge, then fires the ``online-pipeline``
     deployment fire-and-forget (``timeout=0``) — ONE worker-side flow run does
     the data step AND the extraction, so the caller returns in the time it
     takes to create a flow run. When the deployment isn't registered (e.g.
@@ -215,7 +215,7 @@ async def dispatch_online_ingest(
     opik_trace_headers = get_distributed_trace_headers()
     try:
         flow_run = await run_deployment(
-            "etl-online/etl-online",
+            "online-pipeline/online-pipeline",
             parameters={
                 "source": source.model_dump(mode="json"),
                 "user_id": str(user_id),
@@ -231,14 +231,14 @@ async def dispatch_online_ingest(
         }
     except Exception as exc:  # noqa: BLE001 — absent deployment / unreachable API.
         logger.warning(
-            "etl-online deployment unavailable (%s: %s); running the flow "
+            "online-pipeline deployment unavailable (%s: %s); running the flow "
             "in-process instead",
             type(exc).__name__,
             exc,
         )
 
     # In case the deployment is unavailable, run the flow in-process instead.
-    document_id = await etl_online(
+    document_id = await online_pipeline(
         source,
         user_id,
         run_extraction=run_extraction,

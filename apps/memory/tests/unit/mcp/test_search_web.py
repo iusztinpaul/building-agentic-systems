@@ -135,7 +135,7 @@ class TestSearchWebMcpTool:
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         # Spy on the ingestion dispatch — search_web must NEVER call it.
         mock_ingestion = mocker.patch(
-            "tree.mcp.tools.dispatch_online_ingest", new_callable=AsyncMock
+            "tree.mcp.tools.dispatch_online_pipeline", new_callable=AsyncMock
         )
         ctx = _make_ctx()
 

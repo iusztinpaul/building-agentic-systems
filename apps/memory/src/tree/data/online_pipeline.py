@@ -2,7 +2,7 @@
 
 :func:`online_ingest` routes a typed :data:`OnlineSource` to its leaf pipeline
 and returns the persisted :class:`Document` — it never triggers extraction.
-The cross-pipeline orchestration (the ``etl-online`` flow + caller
+The cross-pipeline orchestration (the ``online-pipeline`` flow + caller
 dispatch) lives one level up in :mod:`tree.online`.
 """
 

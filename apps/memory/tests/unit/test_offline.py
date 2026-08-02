@@ -1,6 +1,6 @@
 """Unit tests for ``tree.offline`` — the offline end-to-end glue flow.
 
-``etl_offline`` composes the two coordinators (data as inline subflow, then one
+``offline_pipeline`` composes the two coordinators (data as inline subflow, then one
 extraction coordinator per target user) without re-implementing either; these
 tests pin that composition contract: pass-through of source selectors, the
 per-user extraction fan-out, and per-user failure isolation. The coordinators
@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.offline import dispatch_offline_ingest, etl_offline
+from tree.offline import dispatch_offline_pipeline, offline_pipeline
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _OTHER_USER_ID = PydanticObjectId("507f1f77bcf86cd799439012")
@@ -49,7 +49,7 @@ class TestEtlOffline:
     async def test_passes_selectors_through_and_chains_extraction(self, mocker) -> None:
         data, extract, _ = _patch_coordinators(mocker)
 
-        result = await etl_offline(
+        result = await offline_pipeline(
             user_id=_USER_ID,
             source_files=["sources/listen.yaml"],
             num_shards=2,
@@ -70,7 +70,7 @@ class TestEtlOffline:
         _, extract, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
 
-        result = await etl_offline(user_id=None)
+        result = await offline_pipeline(user_id=None)
 
         # user_id=None (the nightly-cron semantics) fans extraction out across
         # every active user the data phase just ingested for.
@@ -83,7 +83,7 @@ class TestEtlOffline:
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         extract.side_effect = [RuntimeError("llm down"), _FakeStats()]
 
-        result = await etl_offline(user_id=None)
+        result = await offline_pipeline(user_id=None)
 
         # Mirror of the shard-isolation convention: the first user's blown
         # extraction is recorded, the second still runs.
@@ -103,9 +103,11 @@ class TestDispatchOfflineIngest:
             new_callable=AsyncMock,
             return_value=flow_run,
         )
-        mock_flow = mocker.patch("tree.offline.etl_offline", new_callable=AsyncMock)
+        mock_flow = mocker.patch(
+            "tree.offline.offline_pipeline", new_callable=AsyncMock
+        )
 
-        result = await dispatch_offline_ingest(
+        result = await dispatch_offline_pipeline(
             user_id=_USER_ID, source_files=["sources/listen.yaml"], num_shards=2
         )
 
@@ -115,7 +117,7 @@ class TestDispatchOfflineIngest:
             "mode": "deployment",
         }
         mock_run.assert_awaited_once()
-        assert mock_run.await_args.args == ("etl-offline/etl-offline",)
+        assert mock_run.await_args.args == ("offline-pipeline/offline-pipeline",)
         assert mock_run.await_args.kwargs["timeout"] == 0
         assert mock_run.await_args.kwargs["parameters"] == {
             "user_id": str(_USER_ID),
@@ -134,12 +136,12 @@ class TestDispatchOfflineIngest:
             side_effect=RuntimeError("deployment not found"),
         )
         mock_flow = mocker.patch(
-            "tree.offline.etl_offline",
+            "tree.offline.offline_pipeline",
             new_callable=AsyncMock,
             return_value={"data": {"shards_total": 0}, "extraction": {}},
         )
 
-        result = await dispatch_offline_ingest(user_id=_USER_ID)
+        result = await dispatch_offline_pipeline(user_id=_USER_ID)
 
         # The fallback runs the SAME flow inline and hands back its result.
         assert result == {

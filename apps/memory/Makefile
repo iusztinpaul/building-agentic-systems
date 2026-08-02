@@ -168,7 +168,7 @@ USER_FLAGS = $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--
 OFFLINE_SOURCE_FLAGS = $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)")
 ONLINE_SOURCE_FLAGS = $(if $(SOURCE),--source "$(SOURCE)",) $(if $(TITLE),--title "$(TITLE)",)
 
-run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> index; graph queryable after). MODE=offline (default): ONE etl-offline run over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen), NUM_SHARDS=<n> extraction fan-out. MODE=online: ONE etl-online run for SOURCE="<url|path>" [TITLE="..."] with extraction inline + trailing index submit. Forwards USER_ID/USER_IDENTIFIER.
+run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> index; graph queryable after). MODE=offline (default): ONE offline-pipeline run over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen), NUM_SHARDS=<n> extraction fan-out. MODE=online: ONE online-pipeline run for SOURCE="<url|path>" [TITLE="..."] with extraction inline + trailing index submit. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 run-data-pipeline: # DATA pipeline only (sources -> `documents`; NO extraction/indexing). MODE=offline (default): data-etl-coordinator over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen set). MODE=online: ingest ONE source realtime; SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER.

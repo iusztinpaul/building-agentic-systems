@@ -131,7 +131,7 @@ Two stages — **data** (sources → `documents`) then **memory** (extraction �
 | **memory** → graph (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
 | **index** (shared, standalone) | `run-indexing-pipeline` | `run-indexing-pipeline` |
 
-**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`etl-offline` / `etl-online`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; extraction fires the trailing index, so the graph is queryable when it returns:
+**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; extraction fires the trailing index, so the graph is queryable when it returns:
 
 ```bash
 # Offline: every configured source -> documents -> graph (+ index)
@@ -177,7 +177,7 @@ make memory-run-data-pipeline MODE=online SOURCE="https://www.decodingai.com/p/a
 make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Dispatches the `etl-online` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
+Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory extraction
 

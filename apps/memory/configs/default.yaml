@@ -89,7 +89,7 @@ prefect:
   # the 5 always-on core ones. Prefect Cloud's FREE TIER caps a workspace at 5
   # deployments, so keep this false there; set true on a paid plan or a
   # self-hosted Prefect server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
-  # No flag for the online ingest path: callers submit the etl-online
+  # No flag for the online ingest path: callers submit the online-pipeline
   # deployment when it is registered and run the same flow in-process otherwise.
   deploy_optional: false
 

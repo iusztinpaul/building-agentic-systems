@@ -41,7 +41,7 @@ class TestIngestConversationPropagatesUserId:
         ctx = _make_ctx(user_id)
 
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools.dispatch_online_ingest",
+            "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
             return_value=_SUBMITTED,
         )
@@ -62,7 +62,7 @@ class TestIngestUrlPropagatesUserId:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools.dispatch_online_ingest",
+            "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
             return_value=_SUBMITTED,
         )
@@ -79,7 +79,7 @@ class TestIngestFilePropagatesUserId:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools.dispatch_online_ingest",
+            "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
             return_value=_SUBMITTED,
         )

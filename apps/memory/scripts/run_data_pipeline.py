@@ -12,12 +12,12 @@ A light CLI shim (glue lives in :mod:`tree.cli`) with two modes:
   flow is triggered.
 * ``--mode online`` — ingest ONE realtime ``--source`` (URL or local
   ``.txt``/``.md``/``.html`` file, read here at the edge) by dispatching the
-  ``etl-online`` flow (:mod:`tree.online`) with extraction OFF — data step
+  ``online-pipeline`` flow (:mod:`tree.online`) with extraction OFF — data step
   only, symmetric with offline mode.
 
 Both modes block streaming the run's logs and exit non-zero on failure; the
 online dispatcher falls back to running the flow in-process when the optional
-``etl-online`` deployment isn't registered.
+``online-pipeline`` deployment isn't registered.
 
 Every write is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>``
@@ -54,7 +54,7 @@ from tree.cli import (
 from tree.config.sources import build_uri_sources, parse_uri_token
 from tree.logging import init_logger
 from tree.observability import flush_opik
-from tree.online import dispatch_online_ingest
+from tree.online import dispatch_online_pipeline
 
 init_logger()
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ async def _run_online(
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     online_source = build_online_source(source, title)
     try:
-        result = await dispatch_online_ingest(
+        result = await dispatch_online_pipeline(
             online_source, resolved_user_id, run_extraction=False
         )
     except ValueError as exc:

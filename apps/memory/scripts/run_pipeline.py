@@ -4,12 +4,12 @@ Run the FULL pipeline end-to-end (data ingest → extraction → index).
 A light CLI shim over the two cross-pipeline glue modules — everything is
 controlled there, this script only picks the dispatcher:
 
-* ``--mode offline`` (default) → :func:`tree.offline.dispatch_offline_ingest`:
-  ONE ``etl-offline`` flow run over the selected config sources
+* ``--mode offline`` (default) → :func:`tree.offline.dispatch_offline_pipeline`:
+  ONE ``offline-pipeline`` flow run over the selected config sources
   (``--source-file``/``--uri``; neither → the default backfill+listen set),
   with ``--num-shards`` extraction fan-out per user.
-* ``--mode online`` → :func:`tree.online.dispatch_online_ingest`: ONE
-  ``etl-online`` flow run for ONE ``--source`` (URL or local file, read here
+* ``--mode online`` → :func:`tree.online.dispatch_online_pipeline`: ONE
+  ``online-pipeline`` flow run for ONE ``--source`` (URL or local file, read here
   at the edge) that ingests AND runs extraction inline, then submits the
   trailing indexing run. A duplicate source skips extraction.
 
@@ -52,8 +52,8 @@ from tree.cli import (
 from tree.config.sources import build_uri_sources, parse_uri_token
 from tree.logging import init_logger
 from tree.observability import flush_opik
-from tree.offline import dispatch_offline_ingest
-from tree.online import dispatch_online_ingest
+from tree.offline import dispatch_offline_pipeline
+from tree.online import dispatch_online_pipeline
 
 init_logger()
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ async def _run_offline(
     num_shards: int,
 ) -> None:
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
-    result = await dispatch_offline_ingest(
+    result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,
         source_files=source_files or None,
         sources=inline_sources or None,
@@ -85,7 +85,7 @@ async def _run_online(
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     online_source = build_online_source(source, title)
     try:
-        result = await dispatch_online_ingest(
+        result = await dispatch_online_pipeline(
             online_source, resolved_user_id, run_extraction=True
         )
     except ValueError as exc:

@@ -251,7 +251,7 @@ class PrefectConfig(BaseModel):
       serve (``make memory-serve-workflows``) and the Cloud deploy path honour it.
       Override per-environment without editing YAML via
       ``TREE_PREFECT__DEPLOY_OPTIONAL=true``. (No flag for the online ingest
-      path: ``dispatch_online_ingest`` submits the ``etl-online``
+      path: ``dispatch_online_pipeline`` submits the ``online-pipeline``
       deployment when registered and runs the same flow in-process otherwise —
       presence of the deployment IS the switch.)
     """

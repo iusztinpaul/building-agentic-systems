@@ -6,7 +6,7 @@ Sits at the top level because it spans BOTH pipelines: the data step
 (``memory_extract_etl_coordinator``, which owns the trailing index run).
 Neither pipeline package may import the other; this module imports both.
 
-:func:`etl_offline` runs the whole chain in ONE flow run: the data coordinator
+:func:`offline_pipeline` runs the whole chain in ONE flow run: the data coordinator
 as an inline subflow (it owns source resolution — same ``source_files`` /
 inline ``sources`` / backfill+listen default as always — and the per-platform
 worker fan-out), then one extraction coordinator per target user (explicit
@@ -15,8 +15,8 @@ Worker fan-outs inside each coordinator still run as separate deployment runs;
 only the two coordinators execute inline here, so the end-to-end run costs the
 same single admission slot a lone coordinator already does.
 
-Callers funnel through :func:`dispatch_offline_ingest` — the offline twin of
-``tree.online.dispatch_online_ingest``: it fires the ``etl-offline``
+Callers funnel through :func:`dispatch_offline_pipeline` — the offline twin of
+``tree.online.dispatch_online_pipeline``: it fires the ``offline-pipeline``
 deployment fire-and-forget and falls back to running the SAME flow inline when
 the optional deployment isn't registered (free-tier cap).
 
@@ -49,11 +49,11 @@ from tree.observability import (
 logger = logging.getLogger(__name__)
 
 # Spans/deployment tags for the end-to-end run: it IS both pipelines, offline.
-TAGS_ETL_OFFLINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_OFFLINE]
+TAGS_OFFLINE_PIPELINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_OFFLINE]
 
 
-@flow(name="etl-offline", log_prints=True)
-async def etl_offline(
+@flow(name="offline-pipeline", log_prints=True)
+async def offline_pipeline(
     user_id: PydanticObjectId | None = None,
     source_files: list[str] | None = None,
     sources: list[dict[str, Any]] | None = None,
@@ -80,7 +80,7 @@ async def etl_offline(
 
     configure_opik()
     try:
-        with span("etl-offline", tags=TAGS_ETL_OFFLINE):
+        with span("offline-pipeline", tags=TAGS_OFFLINE_PIPELINE):
             data_stats = await data_etl_coordinator(
                 user_id=user_id, source_files=source_files, sources=sources
             )
@@ -93,7 +93,9 @@ async def etl_offline(
                     )
                     extraction[str(uid)] = asdict(stats)
                 except Exception as exc:  # noqa: BLE001 — isolate per-user failures.
-                    logger.exception("etl-offline: extraction failed for user %s", uid)
+                    logger.exception(
+                        "offline-pipeline: extraction failed for user %s", uid
+                    )
                     extraction[str(uid)] = {"error": str(exc)}
 
             return {"data": asdict(data_stats), "extraction": extraction}
@@ -102,7 +104,7 @@ async def etl_offline(
         flush_opik()
 
 
-async def dispatch_offline_ingest(
+async def dispatch_offline_pipeline(
     user_id: PydanticObjectId | None = None,
     source_files: list[str] | None = None,
     sources: list[dict[str, Any]] | None = None,
@@ -110,8 +112,8 @@ async def dispatch_offline_ingest(
 ) -> dict[str, Any]:
     """Submit the end-to-end offline run; the ONE entry point for callers.
 
-    The offline twin of ``tree.online.dispatch_online_ingest``: fires the
-    ``etl-offline`` deployment fire-and-forget (``timeout=0``) — a Prefect
+    The offline twin of ``tree.online.dispatch_online_pipeline``: fires the
+    ``offline-pipeline`` deployment fire-and-forget (``timeout=0``) — a Prefect
     worker runs the whole data → extraction → index chain — and returns the
     flow-run id at once. When the optional deployment isn't registered (the
     free-tier cap) or the Prefect API is unreachable, the SAME flow runs
@@ -134,7 +136,7 @@ async def dispatch_offline_ingest(
     }
     try:
         flow_run = await run_deployment(
-            "etl-offline/etl-offline", parameters=parameters, timeout=0
+            "offline-pipeline/offline-pipeline", parameters=parameters, timeout=0
         )
         return {
             "status": "submitted",
@@ -143,14 +145,14 @@ async def dispatch_offline_ingest(
         }
     except Exception as exc:  # noqa: BLE001 — absent deployment / unreachable API.
         logger.warning(
-            "etl-offline deployment unavailable (%s: %s); running the flow "
+            "offline-pipeline deployment unavailable (%s: %s); running the flow "
             "in-process instead",
             type(exc).__name__,
             exc,
         )
 
     # If the deployment is unavailable, fall back to running the flow in-process.
-    result = await etl_offline(
+    result = await offline_pipeline(
         user_id=user_id,
         source_files=source_files,
         sources=sources,

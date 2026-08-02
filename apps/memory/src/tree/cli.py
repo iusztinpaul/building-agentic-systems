@@ -156,7 +156,7 @@ async def wait_for_flow_run(flow_run_id: str) -> None:
 
 
 async def wait_for_dispatch(result: dict[str, Any]) -> None:
-    """Block on a ``dispatch_*_ingest`` result — waiting stays a CLI concern.
+    """Block on a ``dispatch_*_pipeline`` result — waiting stays a CLI concern.
 
     ``mode == "deployment"`` → stream the submitted run to completion;
     ``mode == "in_process"`` → the inline fallback already ran the flow to

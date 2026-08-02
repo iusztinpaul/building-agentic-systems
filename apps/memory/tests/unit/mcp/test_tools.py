@@ -50,7 +50,7 @@ class TestSerialize:
 
 
 class TestIngestTail:
-    """``_ingest`` delegates to ``dispatch_online_ingest`` and serializes to JSON.
+    """``_ingest`` delegates to ``dispatch_online_pipeline`` and serializes to JSON.
 
     The deployment-vs-inline branching itself is the dispatcher's contract,
     covered in ``tests/unit/data/test_online_pipeline.py``.
@@ -58,7 +58,7 @@ class TestIngestTail:
 
     async def test_merges_dup_extra_into_the_dispatch_result(self, mocker):
         mock_dispatch = mocker.patch(
-            "tree.mcp.tools.dispatch_online_ingest",
+            "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
             return_value={
                 "status": "submitted",
