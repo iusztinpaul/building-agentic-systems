@@ -189,11 +189,6 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "apps/memory/src/tree/memory/indexing/pipeline.py:memory_indexing",
         TAGS_INDEXING,
     ),
-    # --- Optional (beyond the Prefect Cloud free-tier 5; gated by prefect.deploy_optional) ---
-    # Realtime ingest. Where it is NOT registered, `dispatch_online_ingest` runs
-    # the same flow in-process — so free-tier prod keeps working, synchronously.
-    # ponytail: shares serve(limit) admission with backfill fan-outs; give it a
-    # dedicated work queue if interactive ingest ever starves behind a backfill.
     _DeploymentSpec(
         etl_online,
         "etl-online",
@@ -201,10 +196,6 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         TAGS_ETL_ONLINE,
         optional=True,
     ),
-    # Offline end-to-end (data ingest → extraction → index) in one flow run.
-    # ponytail: once off the free-tier cap, move _SCHEDULED_INGEST_CRON (+ its
-    # listen.yaml parameters) from data-etl-coordinator onto THIS spec so the
-    # nightly run extracts what it ingests instead of leaving documents pending.
     _DeploymentSpec(
         etl_offline,
         "etl-offline",
