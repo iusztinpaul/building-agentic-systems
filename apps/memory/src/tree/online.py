@@ -104,7 +104,6 @@ async def online_pipeline(
             trace_headers=opik_trace_headers,
             metadata=_ONLINE_METADATA,
         ):
-            # Worker processes start cold — no MCP lifespan/CLI bootstrap ran.
             await init_mongodb(
                 settings.mongo.mongo_uri.get_secret_value(),
                 settings.mongo.mongo_initdb_database,
@@ -212,6 +211,7 @@ async def dispatch_online_pipeline(
     """
 
     validate_online_source(source)
+
     opik_trace_headers = get_distributed_trace_headers()
     try:
         flow_run = await run_deployment(
@@ -229,7 +229,7 @@ async def dispatch_online_pipeline(
             "flow_run_id": str(flow_run.id),
             "mode": "deployment",
         }
-    except Exception as exc:  # noqa: BLE001 — absent deployment / unreachable API.
+    except Exception as exc:  # absent deployment / unreachable API.
         logger.warning(
             "online-pipeline deployment unavailable (%s: %s); running the flow "
             "in-process instead",

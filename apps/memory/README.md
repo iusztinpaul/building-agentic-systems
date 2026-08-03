@@ -303,7 +303,7 @@ Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_UNLOCKER_ZONE` (the
 The default embedding model is local sentence-transformers (`all-MiniLM-L6-v2`). For heavier workloads, swap in a Modal-hosted vLLM server running `voyageai/voyage-4-nano` on an A10G.
 
 ```bash
-make memory-generate-secret-key           # generate MODAL_EMBEDDING_API_KEY, put it in .env
+make generate-secret-key                  # generate MODAL_EMBEDDING_API_KEY, put it in .env
 make memory-deploy-embedding-model        # deploys to Modal (creates the vllm-embedding-api-key secret)
 make memory-deploy-embedding-model-test   # smoke-test the deployment
 make memory-deploy-embedding-model-stop   # tear it down

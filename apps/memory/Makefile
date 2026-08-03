@@ -61,9 +61,6 @@ smoke-torch-shared-memory: # Smoke-test that torch.tensor(0).share_memory_() run
 build: # Build the project (incl. the local-models extra: sentence-transformers + modal).
 	uv sync --extra local-models
 
-generate-secret-key: # Generate a random secret key (e.g. for MODAL_EMBEDDING_API_KEY).
-	@uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
-
 
 # --- Tests & QA ---
 

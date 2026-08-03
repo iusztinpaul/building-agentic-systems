@@ -17,7 +17,7 @@ endif
 include $(ENV_FILE)
 export
 
-.PHONY: help env-prod env-local env-status env-reload-infra tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
+.PHONY: help env-prod env-local env-status env-reload-infra generate-secret-key tests format-check lint-check typecheck pre-commit local-start local-stop local-restart
 
 # --- Utilities ---
 
@@ -36,6 +36,12 @@ env-prod: # Switch make + direnv + running infra to prod (.env.prod) via .env.ta
 
 env-status: # Show which env target is active.
 	@echo "Env target: $(if $(filter prod,$(ENV_TARGET)),prod (.env.prod),local (.env))"
+
+generate-secret-key: # Generate a random URL-safe secret (e.g. MODAL_EMBEDDING_API_KEY).
+	@python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+generate-password: # Generate a random URL-safe secret (e.g. MONGO_INITDB_ROOT_PASSWORD).
+	@python3 -c "import secrets; print(secrets.token_urlsafe(16))"
 
 # --- Delegation to per-app Makefiles ---
 
