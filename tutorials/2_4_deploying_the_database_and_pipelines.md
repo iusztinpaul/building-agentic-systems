@@ -125,7 +125,7 @@ As with the local setup, you can use MongoDB Compass GUI or mongosh CLI to look 
 ![Figure 2.23 The database visualized in MongoDB Compass](assets/figure_2_23_mongodb_compass.png)
 
 <details>
-<summary><strong>**MongoDB Atlas gotchas**</strong></summary>
+<summary><strong>MongoDB Atlas gotchas</strong></summary>
 
 **Missing seed-user variables are skipped silently.** The script only creates the database user when *both* `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` are set, with no warning otherwise. The cluster reaches IDLE and prints a connection string, and the missing user surfaces much later as an auth failure. Catch it with `make memory-check-db`.
 
@@ -207,7 +207,7 @@ make memory-deploy-prefect-setup-status  # work pool + each deployment's binding
 The status command must list the `tree-managed` work pool with each deployment bound to it. A missing deployment means `setup-up` didn't finish.
 
 <details>
-<summary><strong>**Prefect Cloud gotchas**</strong></summary>
+<summary><strong>Prefect Cloud gotchas</strong></summary>
 
 **The free tier allows one work pool per workspace.** The script reads before creating precisely because the create endpoint enforces that limit *before* the duplicate check, returning a 403 rather than a swallowable 409. If the workspace already has a pool from another project, `up` cannot add `tree-managed` — delete the other pool or use a fresh workspace.
 
