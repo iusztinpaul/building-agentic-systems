@@ -37,27 +37,41 @@ If it prints `local`, every command that follows in this section runs against yo
 To deploy a MongoDB cluster to MongoDB Atlas, we created a Python script at [apps/memory/deploy/atlas_cluster.py](../apps/memory/deploy/atlas_cluster.py), callable via a couple of Make commands that allow us to easily create, update, or destroy the cluster.
 
 ```bash
-make memory-atlas-up
-make memory-atlas-update
-make memory-atlas-down
-make memory-atlas-status # Print the cluster state and connection strings.
+make memory-atlas-up            # Creates a new MongoDB Atlas cluster.
+make memory-atlas-update        # Updates the cluster specifications.
+make memory-atlas-down          # Destroys the cluster.
+make memory-atlas-status        # Print the cluster state and connection strings.
 ```
 
 Within the [apps/memory/deploy/atlas_cluster.py](../apps/memory/deploy/atlas_cluster.py) script, to keep it simple, we avoided using infrastructure-as-code tools such as Terraform or Pulumi. Thus, we used Atlas's API via vanilla Python scripting to interface with the cluster.
 
 To make this work, you first have to create an account on Atlas via MongoDB's main page (https://www.mongodb.com/), where they provide their M0 free tier with 512 MB of storage.
 
-Next, the only manual steps you need to perform are to get the right credentials. To do so, you need to go to MongoDB's Atlas dashboard, create a project, then a service account, and ultimately add your IP to the allowed list.
+Next, the only manual steps you need to perform are to get the right credentials. To do so, you need to go to MongoDB's Atlas dashboard, create a project, then a service account, and ultimately add your IP to the allowed list. Each of these steps is documented officially by MongoDB:
+
+- [Manage projects](https://www.mongodb.com/docs/atlas/tutorial/manage-projects/) — create a project named `Tree` (or whatever you pass through `--project`). The script looks the project up by name and never creates one, so `make memory-atlas-up` fails without it.
+- [Service accounts overview](https://www.mongodb.com/docs/atlas/api/service-accounts-overview/) — Organization → **Identity & Access** → **Applications** → **Add new** → **Service Account**. Copy the client ID and secret; the secret is shown exactly once. Grant it Project Owner, or the three narrower roles the script actually uses: Cluster Manager, Database Access Admin, and Network Access Manager.
+- [Configure IP access list entries](https://www.mongodb.com/docs/atlas/security/ip-access-list/) — add your IP to the **service account's API access list**. This is not the same list as the project IP access list that `atlas-up` manages. Instead it's used by the Admin API to manipulate the resources.
 
 Next, you need to put the client ID and secret into `.env.prod` as the `MDB_MCP_API_CLIENT_ID` and `MDB_MCP_API_CLIENT_SECRET` env vars, which will be used by the script to create everything else. Note that even though we have `_MCP_` in the name, we don't use any MCP here. It's a constraint that comes from MongoDB, as they also provide an MCP server to interact with the cluster that requires these names, which we initially used as inspiration to create the script. So, even though you don't need their MCP server, if you install it, it will work.
 
-Before you run the script, you also need to set up, only in your `.env.prod` file, the `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` env vars, which the script will use to automatically create your admin user. To generate the password, you can run `make generate-password`.
+Before you run the script, you also need to set up, only in your `.env.prod` file, the `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` env vars, which the script will use to automatically create your admin user. To generate the password, you can run `make generate-password`, which emits only URL-safe characters.
+
+Altogether, this is what `.env.prod` needs before the first run (start from `cp .env.example .env.prod` on a fresh clone):
+
+| Variable | Purpose |
+| --- | --- |
+| `MDB_MCP_API_CLIENT_ID` | Service-account client ID |
+| `MDB_MCP_API_CLIENT_SECRET` | Service-account secret |
+| `MONGO_INITDB_ROOT_USERNAME` | Seed database user created on the cluster |
+| `MONGO_INITDB_ROOT_PASSWORD` | Its password — generate with `make generate-password` |
+| `MONGO_SCHEME=mongodb+srv` | Required to reach Atlas (TLS implied) |
+| `MONGO_HOST` | The cluster hostname — unknown until the cluster is up, so leave it empty for now |
+| `ATLAS_ACCESS_CIDRS` | *Optional*, comma-separated extra CIDRs for the project access list |
+
+If `.envrc` has never been approved, run `direnv allow` once.
 
 ![Figure 2.22 The cluster in the Atlas console](assets/figure_2_22_atlas_cluster.png)
-
-**Figure 2.22 The cluster in the Atlas console**
-
-For more details on the MongoDB Atlas setup, check [docs/setup/mongodb_atlas.md](../docs/setup/mongodb_atlas.md).
 
 Now, let's run the script that will create the M0 cluster, seed the database user (the same `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`), and open network access to Prefect Cloud:
 
@@ -74,7 +88,13 @@ Cluster tree state=IDLE
 mongodb+srv://tree.….mongodb.net
 ```
 
-Ultimately, after the cluster is up, you need to take the MongoDB host name from the up command and add it as the `MONGO_HOST` environment variable in `.env.prod`.
+You can also customize your cluster via `ATLAS_ARGS`:
+
+```bash
+make memory-atlas-up ATLAS_ARGS="--cluster tree-staging --tier M10 --provider AWS --region US_EAST_1"
+```
+
+Ultimately, after the cluster is up, you need to take the MongoDB host name from the up command and add it as the `MONGO_HOST` environment variable in `.env.prod`. Atlas assigns that hostname at creation time — `tree.w5kc0am.mongodb.net`, where `tree` is the cluster name and `w5kc0am` is a random identifier you don't choose — which is why it can't be filled in ahead of time. Nothing writes it back to `.env.prod`; this step is manual by design, so the script never mutates your secrets file.
 
 ```bash
 make env-prod
@@ -82,6 +102,13 @@ make memory-atlas-up  # prints mongodb+srv://tree.xxxxxxx.mongodb.net
 # → take the host part (no scheme) into MONGO_HOST in .env.prod
 # → ensure MONGO_SCHEME=mongodb+srv
 make memory-check-db  # verifies the connection actually works
+```
+
+Strip the scheme before pasting. The Atlas API returns the connection string with the `mongodb+srv://` prefix, but the app prepends the scheme itself, so `MONGO_HOST` takes the bare host:
+
+```bash
+MONGO_SCHEME=mongodb+srv
+MONGO_HOST=tree.w5kc0am.mongodb.net      # NOT mongodb+srv://tree.w5kc0am.mongodb.net
 ```
 
 **Check:** verify the cluster is up and reachable before moving on:
@@ -97,15 +124,56 @@ As with the local setup, you can use MongoDB Compass GUI or mongosh CLI to look 
 
 ![Figure 2.23 The database visualized in MongoDB Compass](assets/figure_2_23_mongodb_compass.png)
 
+<details>
+<summary><strong>**MongoDB Atlas gotchas**</strong></summary>
+
+**Missing seed-user variables are skipped silently.** The script only creates the database user when *both* `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD` are set, with no warning otherwise. The cluster reaches IDLE and prints a connection string, and the missing user surfaces much later as an auth failure. Catch it with `make memory-check-db`.
+
+**Rotating the database password is not idempotent.** The user-creation call treats HTTP 409 as success, so changing `MONGO_INITDB_ROOT_PASSWORD` and re-running `atlas-up` leaves the Atlas user on the old password, silently. Rotate in the Atlas UI, then update `.env.prod`. Locally, `MONGO_INITDB_ROOT_*` only apply on the first init of an empty data directory.
+
+**`0.0.0.0/0` is always on the project access list.** It's hardcoded because Prefect's managed runner has an unpinnable egress IP. Anything in `ATLAS_ACCESS_CIDRS` is added on top; it never narrows this. The database stays protected by SCRAM auth and TLS only.
+
+**Don't point the test suite at Atlas.** M0 caps the number of Atlas Search (FTS) indexes, so index-creating tests fail with *"The maximum number of FTS indexes has been reached for this instance size"*. Run tests on `make env-local`.
+
+</details>
+
 The final step is to deploy our code to Prefect Cloud.
 
 ## Prefect Cloud: The Pipelines, Hosted
 
 To create the Prefect deployments, you first need to create an account and workspace at Prefect Cloud (https://app.prefect.cloud). Similar to the MongoDB setup, we automated most of the process, while you only need to set up a few credentials.
 
-From Prefect, you need to take the `PREFECT_API_URL` and `PREFECT_API_KEY` environment variables and add them to `.env.prod`. In case Prefect needs to clone a private repository from GitHub, you also need to set up an optional `GITHUB_PAT` (a personal access token) env var.
+From Prefect, you need to take the `PREFECT_API_URL` and `PREFECT_API_KEY` environment variables and add them to `.env.prod`. In case Prefect needs to clone a private repository from GitHub, you also need to set up an optional `GITHUB_PAT` (a personal access token) env var. The official docs for each credential are:
 
-Now, by running the [apps/memory/deploy/prefect_pipelines_setup.py](../apps/memory/deploy/prefect_pipelines_setup.py) script, we can create, update, or tear down a Prefect work pool containing all our deployments registered within `_DEPLOYMENT_SPECS` (from [apps/memory/src/tree/orchestrator.py](../apps/memory/src/tree/orchestrator.py)).
+- [Manage workspaces](https://docs.prefect.io/v3/manage/cloud/workspaces) — creating the workspace and reading its `PREFECT_API_URL`.
+- [Manage API keys](https://docs.prefect.io/v3/how-to-guides/cloud/manage-api-keys) — generating the `PREFECT_API_KEY`.
+- [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) — creating the optional `GITHUB_PAT`.
+
+The Cloud API URL has a different shape from the local one. `.env.example` contains the local default (`http://127.0.0.1:4200/api`), which points at the Docker Prefect server, not Cloud:
+
+```bash
+PREFECT_API_URL=https://api.prefect.cloud/api/accounts/<account-id>/workspaces/<workspace-id>
+PREFECT_API_KEY=pnu_...
+```
+
+For the `GITHUB_PAT`, either a **classic** PAT with the `repo` scope or a **fine-grained** PAT whose resource owner is the repository owner, with this repository selected and **Contents: Read-only**, works. The setup script probes the token against the GitHub API before doing anything, because an unauthorized token otherwise surfaces as a cryptic `git clone ... exit code 128` deep inside the deployment build. The token is stored as a secret within the Prefect Cloud, so the CI/CD path never needs the PAT itself.
+
+Beyond the Prefect and GitHub credentials, the setup script copies the pipelines' runtime configuration out of your environment into Prefect Secret blocks (secrets) or Variables (non-secret config), so the managed workers get them at run time. All of these must hold their production values in `.env.prod` before you run it — the MongoDB group in particular must point at the Atlas cluster, not `localhost`.
+
+Altogether, this is what `.env.prod` needs before the first run:
+
+| Variable | Purpose |
+| --- | --- |
+| `PREFECT_API_URL` | Your Cloud workspace API URL (not the local `127.0.0.1` default) |
+| `PREFECT_API_KEY` | Cloud API key, `pnu_...` |
+| `GITHUB_PAT` | *Optional*, read access to clone this repo — required if it's private |
+| `MONGO_SCHEME`, `MONGO_HOST`, `MONGO_PORT` | The Atlas cluster from the previous section |
+| `MONGO_INITDB_ROOT_USERNAME`, `MONGO_INITDB_ROOT_PASSWORD`, `MONGO_INITDB_DATABASE` | Database credentials + database name |
+| `GOOGLE_API_KEY`, `VOYAGE_API_KEY` | LLM + embedding models |
+| `BRIGHTDATA_API_KEY`, `BRIGHTDATA_UNLOCKER_ZONE`, `BRIGHTDATA_SERP_ZONE` | Crawling and scraping |
+| `OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME` | Observability |
+
+Now, by running the [apps/memory/deploy/prefect_pipelines_setup.py](../apps/memory/deploy/prefect_pipelines_setup.py) script, we can create, update, or tear down a Prefect work pool containing all our deployments registered within `_DEPLOYMENT_SPECS` (from [apps/memory/src/tree/orchestrator.py](../apps/memory/src/tree/orchestrator.py)). The pool is a **managed** one, meaning Prefect hosts the workers, so flow runs execute without a self-hosted `serve` process of our own (the tradeoffs are in [docs/notes/prefect-execution-topologies.md](../docs/notes/prefect-execution-topologies.md)).
 
 Before running the script, we must ensure that we have a user within our database by running the `make memory-signup` command. Additionally, through the `GROUPS` argument, we control whether we spin up only the data deployments, only the memory deployments, or all of them. At the moment we aim to deploy just the data pipelines.
 
@@ -138,7 +206,22 @@ make memory-deploy-prefect-setup-status  # work pool + each deployment's binding
 
 The status command must list the `tree-managed` work pool with each deployment bound to it. A missing deployment means `setup-up` didn't finish.
 
-As for the MongoDB Atlas setup, we have the full setup available at [docs/setup/prefect_cloud.md](../docs/setup/prefect_cloud.md) within the repository.
+<details>
+<summary><strong>**Prefect Cloud gotchas**</strong></summary>
+
+**The free tier allows one work pool per workspace.** The script reads before creating precisely because the create endpoint enforces that limit *before* the duplicate check, returning a 403 rather than a swallowable 409. If the workspace already has a pool from another project, `up` cannot add `tree-managed` — delete the other pool or use a fresh workspace.
+
+**Empty env vars are seeded blank, with only a warning.** The script logs `Env <VAR> is empty; seeding <store> blank` and carries on, so `up` reports success and the gap surfaces much later as a managed run that can't authenticate. Scan the `up` output for `WARNING` lines before trusting it.
+
+**Never run `make memory-serve-workflows` against the Cloud workspace.** Local serve and `up` register the same deployment names and clobber each other. A clobbered deployment shows as `work_pool=<none — clobbered, re-run up>` in `status`; re-run `up` or `...-update` to restore it. Local serve belongs against the local Prefect server from `make local-start`.
+
+**Deployments track the `main` branch by default.** `--git-ref` (or `GIT_REF`) pins them to a branch or commit instead. Branch tracking means merges go live without a re-deploy, which is usually what you want, but it also means a bad merge reaches the managed workers immediately.
+
+**`down` does not remove blocks or variables.** It deletes the deployments and, when unscoped, the work pool, then logs a reminder to delete `tree-github-pat` and the `tree-*` blocks and variables in the Prefect UI by hand.
+
+**`up` is idempotent**, so re-running it after adding a missing key re-seeds the stores.
+
+</details>
 
 ## Running the Backfill in the Cloud
 
