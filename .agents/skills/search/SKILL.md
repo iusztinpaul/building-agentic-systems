@@ -1,6 +1,7 @@
 ---
 name: search
 description: Search the web via the Bright Data CLI — `bdata search` for Google/Bing/Yandex SERP, `bdata discover` for intent-ranked semantic results. Use when the user wants SERP results, needs URLs to feed into scraping, or wants semantic web discovery with optional page content. Hands off to `scrape` once target URLs are chosen, and to `data-feeds` when the user wants structured data from a known platform. Requires the Bright Data CLI; proactively guides install + login if missing.
+disable-model-invocation: true
 ---
 
 # Bright Data — Search

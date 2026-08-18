@@ -3,6 +3,7 @@ name: tree-memory
 description: "Query, explore, and write to Tree's knowledge graph memory. Use when the user asks to recall, search, visualize, or ingest information (people, tasks, episodes, preferences, documents, URLs, files, conversations). PROACTIVE USE: Also use this skill to extract the current conversation whenever something meaningful was discussed (technical decisions, debugging sessions, architecture changes, new learnings) or when the user switches to a different topic. When extracting conversations proactively, always run the ingestion in a background agent to avoid blocking the user."
 argument-hint: <natural language query or instruction>
 allowed-tools: mcp__tree-memory__query_memory, mcp__tree-memory__search_memory, mcp__tree-memory__deep_search_memory, mcp__tree-memory__ingest_url, mcp__tree-memory__ingest_file, mcp__tree-memory__ingest_conversation, Read
+disable-model-invocation: true
 ---
 
 # Tree Memory
