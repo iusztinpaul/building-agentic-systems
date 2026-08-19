@@ -19,7 +19,7 @@ import logging
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow
+from prefect import flow, tags
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
@@ -35,6 +35,7 @@ from tree.flow_runs import flow_run_status
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.config.constants import (
+    TAGS_INDEXING,
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAG_ONLINE,
@@ -122,9 +123,12 @@ async def online_pipeline(
                 )
                 return None
             if run_extraction:
-                summary = await memory_extract_etl_worker(
-                    user_id=user_id, document_ids=[str(document.id)]
-                )
+                # Inline subflow: tagged at the call site, since it inherits
+                # neither this run's deployment tags nor the worker deployment's.
+                with tags(TAG_MEMORY_PIPELINE, TAG_ONLINE):
+                    summary = await memory_extract_etl_worker(
+                        user_id=user_id, document_ids=[str(document.id)]
+                    )
                 logger.info(
                     "Extracted document %s: %d nodes, %d edges written",
                     document.id,
@@ -155,7 +159,8 @@ async def _run_indexing(user_id: PydanticObjectId) -> None:
     """
 
     try:
-        await memory_indexing(user_id=user_id)
+        with tags(*TAGS_INDEXING):
+            await memory_indexing(user_id=user_id)
         logger.info("Indexed inline for user %s", user_id)
     except Exception as exc:  # noqa: BLE001 — indexing gap, not an ingest failure.
         logger.warning(

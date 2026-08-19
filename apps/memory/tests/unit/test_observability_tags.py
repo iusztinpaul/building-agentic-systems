@@ -58,13 +58,13 @@ class TestTagFamily:
 class TestPipelineIdentityTags:
     """Pipeline-identity tags + the Prefect↔Opik 1:1 invariant the user asked for:
     data = [data-pipeline, offline|online]; extraction = [memory-pipeline,
-    extraction]; indexing = [memory-pipeline, indexing]."""
+    offline]; indexing = [memory-pipeline] (the mode tag comes from the caller)."""
 
     def test_constant_values(self) -> None:
         assert consts.TAGS_DATA_OFFLINE == ["data-pipeline", "offline"]
         assert consts.TAGS_DATA_ONLINE == ["data-pipeline", "online"]
-        assert consts.TAGS_EXTRACTION == ["memory-pipeline", "extraction"]
-        assert consts.TAGS_INDEXING == ["memory-pipeline", "indexing"]
+        assert consts.TAGS_EXTRACTION == ["memory-pipeline", "offline"]
+        assert consts.TAGS_INDEXING == ["memory-pipeline"]
 
     def test_opik_span_tags_use_the_shared_constants(self) -> None:
         # Each pipeline's Opik ``_*_TAGS`` IS the shared constant (so Opik == Prefect).

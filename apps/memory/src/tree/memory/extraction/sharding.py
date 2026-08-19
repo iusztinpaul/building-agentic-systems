@@ -51,9 +51,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import get_run_logger
+from prefect import get_run_logger, tags
 
 from tree.entities.documents import Document
+from tree.config.constants import TAGS_INDEXING
 from tree.memory.indexing.pipeline import memory_indexing
 
 # The balanced-contiguous partitioning math now lives in the neutral, pipeline-
@@ -261,6 +262,7 @@ async def _fan_out_extraction(
 
     # Index ONCE after every shard's extraction has settled — never per-shard.
     log.info("extraction fan-out: running single memory_indexing subflow inline")
-    await memory_indexing(user_id=user_id, opik_trace_headers=opik_trace_headers)
+    with tags(*TAGS_INDEXING):
+        await memory_indexing(user_id=user_id, opik_trace_headers=opik_trace_headers)
 
     return stats

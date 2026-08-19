@@ -37,13 +37,15 @@ from dataclasses import asdict
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow
+from prefect import flow, tags
 from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.flow_runs import flow_run_status
 from tree.memory.extraction.pipeline import memory_extract_etl_coordinator
 from tree.config.constants import (
+    TAGS_DATA_OFFLINE,
+    TAGS_EXTRACTION,
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAG_OFFLINE,
@@ -136,13 +138,16 @@ async def offline_pipeline(
     configure_opik()
     try:
         with span("offline-pipeline", tags=TAGS_OFFLINE_PIPELINE):
-            data_stats = (
-                await data_etl_coordinator(
-                    user_id=user_id, source_files=source_files, sources=sources
+            # Inline subflows don't inherit this run's deployment tags, so each
+            # coordinator's own flow run is tagged at the call site.
+            with tags(*TAGS_DATA_OFFLINE):
+                data_stats = (
+                    await data_etl_coordinator(
+                        user_id=user_id, source_files=source_files, sources=sources
+                    )
+                    if run_data
+                    else None
                 )
-                if run_data
-                else None
-            )
 
             extraction: dict[str, Any] = {}
             target_user_ids = (
@@ -150,9 +155,10 @@ async def offline_pipeline(
             )
             for uid in target_user_ids:
                 try:
-                    stats = await memory_extract_etl_coordinator(
-                        uid, document_ids=document_ids, num_shards=num_shards
-                    )
+                    with tags(*TAGS_EXTRACTION):
+                        stats = await memory_extract_etl_coordinator(
+                            uid, document_ids=document_ids, num_shards=num_shards
+                        )
                     extraction[str(uid)] = asdict(stats)
                 except Exception as exc:  # noqa: BLE001 — isolate per-user failures.
                     logger.exception(

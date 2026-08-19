@@ -22,11 +22,10 @@ TAG_MCP = "mcp"
 
 # --- Pipeline-identity tags: shared 1:1 by Prefect (deployment + flow-run tags)
 # and Opik (span/trace tags). Data ETL splits by mode (offline batch vs online
-# single-source); extraction/indexing have no mode (same deployment both ways). ---
+# single-source); extraction is the offline fan-out; indexing carries only the
+# pipeline tag and inherits the mode tag from whatever run calls it. ---
 TAG_DATA_PIPELINE = "data-pipeline"
 TAG_MEMORY_PIPELINE = "memory-pipeline"
-TAG_EXTRACTION = "extraction"
-TAG_INDEXING = "indexing"
 TAG_OFFLINE = "offline"
 TAG_ONLINE = "online"
 
@@ -37,9 +36,9 @@ TAGS_DATA_ONLINE = [
 ]  # online ingest (url/file/conversation)
 TAGS_EXTRACTION = [
     TAG_MEMORY_PIPELINE,
-    TAG_EXTRACTION,
-]  # memory extraction (both modes)
-TAGS_INDEXING = [TAG_MEMORY_PIPELINE, TAG_INDEXING]  # memory indexing
+    TAG_OFFLINE,
+]  # memory extraction — coordinator + worker, the offline fan-out
+TAGS_INDEXING = [TAG_MEMORY_PIPELINE]  # memory indexing (mode comes from the caller)
 
 # Dream consolidation — the remaining batch pipeline still on the MCP-surface family.
 TAGS_INGESTION_BATCH = [TAG_INGESTION, TAG_BATCH]
