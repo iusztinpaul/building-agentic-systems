@@ -18,7 +18,7 @@ from beanie import PydanticObjectId
 from tree.data.online_pipeline import ConversationSource, FileSource, UrlSource
 from tree.mcp import tools as mcp_tools
 
-_SUBMITTED = {"status": "submitted", "flow_run_id": "run-1", "mode": "deployment"}
+_SUBMITTED = {"status": "scheduled", "flow_run_id": "run-1"}
 
 
 def _make_ctx(user_id: PydanticObjectId) -> MagicMock:

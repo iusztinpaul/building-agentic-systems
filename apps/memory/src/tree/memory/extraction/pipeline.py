@@ -11,12 +11,12 @@ Two Prefect flows live here (#067, ADR-002 §3 amended #066):
 * ``memory_extract_etl_worker`` (deployment ``memory-extract-etl-worker``) — the
   pure six-task extraction body. NO ``num_shards``, NO coordinator branch, NO
   ``run_deployment``, NO indexing trigger. Returns a :class:`WriteSummary`.
-* ``memory_extract_etl_coordinator`` (deployment
-  ``memory-extract-etl-coordinator``) — resolve pending docs → partition into
-  ``min(num_shards, N)`` balanced shards → dispatch ONE
-  ``memory-extract-etl-worker`` run per shard under
-  ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory-indexing-etl``
-  run. Dispatches to the WORKER (no recursion). Returns a :class:`FanOutStats`.
+* ``memory_extract_etl_coordinator`` (an inline subflow of ``offline-pipeline``,
+  not a deployment) — resolve pending docs → partition into ``min(num_shards, N)``
+  balanced shards → dispatch ONE ``memory-extract-etl-worker`` run per shard under
+  ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory_indexing``
+  INLINE SUBFLOW. Dispatches to the WORKER (no recursion). Returns a
+  :class:`FanOutStats`.
 
 Internal task topology (per the §7 spec in
 ``tracker/012-extraction-pipeline-six-tasks.groomed.md``):
@@ -1567,9 +1567,9 @@ async def _coordinate_sharded_extraction(
     verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
     dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
     ``{user_id, document_ids}`` — NO ``num_shards`` key, the worker has no such
-    param) under ``asyncio.gather(return_exceptions=True)``, and finally fires
-    exactly ONE trailing ``memory-indexing-etl`` run after the gather settles.
-    Dispatches to the WORKER deployment — there is NO recursion.
+    param) under ``asyncio.gather(return_exceptions=True)``, and finally runs
+    exactly ONE trailing ``memory_indexing`` subflow inline after the gather
+    settles. Dispatches to the WORKER deployment — there is NO recursion.
 
     An empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
     zero indexing run, ``FanOutStats(shards_total=0)``.
@@ -1644,11 +1644,11 @@ async def memory_extract_etl_coordinator(
     ``asyncio.gather(return_exceptions=True)``. Each worker dispatch carries only
     ``{user_id, document_ids}`` — there is NO ``num_shards`` child key (the worker has no
     such param) and NO recursion (it dispatches a DISTINCT worker deployment). After the
-    gather settles, fires exactly ONE trailing ``memory-indexing-etl`` run, regardless of
-    how many shards failed (a partial extraction is still indexed). One shard's failure is
-    isolated and recorded in :class:`FanOutStats.failures`.
+    gather settles, runs exactly ONE trailing ``memory_indexing`` subflow inline,
+    regardless of how many shards failed (a partial extraction is still indexed). One
+    shard's failure is isolated and recorded in :class:`FanOutStats.failures`.
 
-    ``num_shards=1`` (the default) dispatches 1 worker run + 1 index run — it is NOT a
+    ``num_shards=1`` (the default) dispatches 1 worker run + 1 inline index — it is NOT a
     byte-identical in-process extraction (that is the worker, triggered directly). An
     empty resolved/explicit doc set is a clean no-op: zero worker dispatch, zero index
     run, ``FanOutStats(shards_total=0)``.
@@ -1656,7 +1656,7 @@ async def memory_extract_etl_coordinator(
 
     # Configure Opik in this flow-run process (idempotent; no-op without a key)
     # and own ONE trace for the whole coordinated run. The trace's distributed
-    # headers are forwarded to each worker + the trailing indexing run so the
+    # headers are forwarded to each worker + the trailing indexing subflow so the
     # coordinator → workers → indexing chain renders as a SINGLE trace.
     configure_opik()
     try:
@@ -1699,7 +1699,7 @@ async def memory_extract_etl_worker(
     docs → ``WriteSummary(documents_processed=0)``.
 
     This is PURE extraction: NO ``num_shards``, NO coordinator branch, NO
-    ``run_deployment`` (no self-dispatch), NO ``memory-indexing-etl`` trigger. It is the
+    ``run_deployment`` (no self-dispatch), NO ``memory_indexing`` call. It is the
     coordinator's internal dispatch target, but may also be triggered directly for a
     bare extraction with no trailing index (e.g. debugging).
 

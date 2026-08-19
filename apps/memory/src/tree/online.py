@@ -8,18 +8,18 @@ import the other; this module imports both.
 
 Async-first: callers (MCP ingest tools + the CLI) funnel through
 :func:`dispatch_online_pipeline`, which validates at the edge and fires the
-``online-pipeline`` deployment fire-and-forget — ONE flow run on a Prefect
-worker ingests the source into ``documents`` AND runs the extraction worker
-inline, then submits the trailing indexing run. When no deployment is
-registered (e.g. the free-tier deployment cap) the SAME flow runs inline in
-the caller's process.
+``online-pipeline`` core deployment fire-and-forget — ONE flow run on a Prefect
+worker ingests the source into ``documents``, runs the extraction worker inline
+AND runs the trailing indexing inline. Dispatch REQUIRES a reachable Prefect API
+with that deployment registered; there is no in-process fallback, so submission
+failures propagate to the caller.
 """
 
 import logging
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow
+from prefect import flow, tags
 from prefect.deployments import run_deployment
 from pydantic import TypeAdapter
 
@@ -31,8 +31,11 @@ from tree.data.online_pipeline import (
     validate_url,
 )
 from tree.db import init_mongodb
+from tree.flow_runs import flow_run_status
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
+from tree.memory.indexing.pipeline import memory_indexing
 from tree.config.constants import (
+    TAGS_INDEXING,
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
     TAG_ONLINE,
@@ -68,8 +71,7 @@ async def online_pipeline(
 
     The online counterpart of :func:`tree.offline.offline_pipeline`, collapsed for a
     single source. Callers never invoke it directly — they go through
-    :func:`dispatch_online_pipeline`, which fires it as a deployment when one is
-    registered and runs it inline otherwise.
+    :func:`dispatch_online_pipeline`, which fires it as a deployment run.
 
     ``run_extraction`` (default true) runs the memory step INSIDE this run:
     the extraction WORKER as an inline subflow — deliberately the worker, not
@@ -77,9 +79,10 @@ async def online_pipeline(
     waiting on child runs), so N concurrent online ingests can never become N
     waiting parents starving their own children out of the ``serve(limit)``
     pool. A single document needs no shard fan-out, which is all the
-    coordinator would add. The trailing ``memory-indexing-etl`` run is then
-    SUBMITTED fire-and-forget (indexing is a global backfill — never inline,
-    mirroring the coordinator's index-once-after-extraction contract).
+    coordinator would add. ``memory_indexing`` then runs ONCE as an inline
+    subflow (:func:`_run_indexing`), mirroring the coordinator's
+    index-once-after-extraction contract — since ``free-tier-deployments``
+    indexing is a flow, not a deployment.
 
     ``source`` arrives JSON-serialized (a ``dict``) when dispatched via a
     deployment; already-typed :data:`OnlineSource` objects pass through
@@ -120,40 +123,48 @@ async def online_pipeline(
                 )
                 return None
             if run_extraction:
-                summary = await memory_extract_etl_worker(
-                    user_id=user_id, document_ids=[str(document.id)]
-                )
+                # Inline subflow: tagged at the call site, since it inherits
+                # neither this run's deployment tags nor the worker deployment's.
+                with tags(TAG_MEMORY_PIPELINE, TAG_ONLINE):
+                    summary = await memory_extract_etl_worker(
+                        user_id=user_id, document_ids=[str(document.id)]
+                    )
                 logger.info(
                     "Extracted document %s: %d nodes, %d edges written",
                     document.id,
                     summary.nodes_written,
                     summary.edges_written,
                 )
-                await _submit_indexing(user_id)
+                await _run_indexing(user_id)
             return str(document.id)
     finally:
         # Fail-open telemetry flush — the worker subprocess exits after the run.
         flush_opik()
 
 
-async def _submit_indexing(user_id: PydanticObjectId) -> None:
-    """Fire the trailing ``memory-indexing-etl`` run, fire-and-forget.
+async def _run_indexing(user_id: PydanticObjectId) -> None:
+    """Run the trailing ``memory_indexing`` flow ONCE, inline, fail-open.
 
-    Fail-open: a failed submission is WARNING-logged, never fails the ingest —
+    Indexing stopped being a deployment with ``free-tier-deployments``, so this
+    is an inline subflow of the current ``online-pipeline`` run instead of a
+    submitted flow run. Opik nesting is preserved WITHOUT passing headers: the
+    subflow runs in THIS process, inside this flow's span, so its span nests via
+    the in-process context — the same reason the inline
+    ``memory_extract_etl_worker`` call above forwards none. (The deleted
+    deployment call passed no headers either.)
+
+    Fail-open, unchanged: a failure is WARNING-logged and NEVER fails the ingest —
     the document and its graph content are already durable, and any later
     indexing run (it is a global backfill over unembedded nodes) covers the gap.
     """
 
     try:
-        flow_run = await run_deployment(
-            "memory-indexing-etl/memory-indexing-etl",
-            parameters={"user_id": str(user_id)},
-            timeout=0,
-        )
-        logger.info("Submitted indexing as flow run %s", flow_run.id)
+        with tags(*TAGS_INDEXING):
+            await memory_indexing(user_id=user_id)
+        logger.info("Indexed inline for user %s", user_id)
     except Exception as exc:  # noqa: BLE001 — indexing gap, not an ingest failure.
         logger.warning(
-            "Failed to submit memory-indexing-etl (%s: %s); nodes stay "
+            "Inline memory_indexing failed (%s: %s); nodes stay "
             "unembedded until the next indexing run",
             type(exc).__name__,
             exc,
@@ -192,58 +203,39 @@ async def dispatch_online_pipeline(
 ) -> dict[str, Any]:
     """Submit ``source`` to the online pipeline; the ONE entry point for callers.
 
-    Async-first: validates at the edge, then fires the ``online-pipeline``
+    Async-first: validates at the edge, then fires the ``online-pipeline`` core
     deployment fire-and-forget (``timeout=0``) — ONE worker-side flow run does
     the data step AND the extraction, so the caller returns in the time it
-    takes to create a flow run. When the deployment isn't registered (e.g.
-    the free-tier deployment cap keeps it off prod) or the Prefect API is
-    unreachable, the SAME flow runs inline in this process instead — identical
-    behavior, synchronous execution. ``mode`` in the result says which happened:
+    takes to create a flow run, with::
 
-    * ``{"status": "submitted", "flow_run_id": ..., "mode": "deployment"}``
-    * ``{"status": "ingested", "document_id": ..., "mode": "in_process"}``
-    * ``{"status": "already_ingested", "mode": "in_process"}``
+        {"status": <flow-run state, lowercased>, "flow_run_id": ...}
+
+    ``status`` is Prefect's own state name for the freshly created run
+    (:func:`tree.flow_runs.flow_run_status` — ``scheduled`` normally), NOT an
+    ingest outcome: whether the source was new or a duplicate is decided later,
+    on the worker, and lives in the flow run's result.
+
+    There is exactly ONE path: dispatch requires a reachable Prefect API with
+    the deployment registered. Submission failures (unreachable API, missing
+    deployment, parameter validation, auth) PROPAGATE — a caller must see them
+    rather than have them silently swapped for a long blocking in-process run.
 
     Raises:
         ValueError: from :func:`validate_online_source` (bad URL / oversized
-            payload) — the only synchronous failures; ingest errors in
-            deployment mode live in the flow run.
+            payload) — the only failure raised before a run exists; ingest
+            errors live in the flow run.
     """
 
     validate_online_source(source)
 
-    opik_trace_headers = get_distributed_trace_headers()
-    try:
-        flow_run = await run_deployment(
-            "online-pipeline/online-pipeline",
-            parameters={
-                "source": source.model_dump(mode="json"),
-                "user_id": str(user_id),
-                "run_extraction": run_extraction,
-                "opik_trace_headers": opik_trace_headers,
-            },
-            timeout=0,
-        )
-        return {
-            "status": "submitted",
-            "flow_run_id": str(flow_run.id),
-            "mode": "deployment",
-        }
-    except Exception as exc:  # absent deployment / unreachable API.
-        logger.warning(
-            "online-pipeline deployment unavailable (%s: %s); running the flow "
-            "in-process instead",
-            type(exc).__name__,
-            exc,
-        )
-
-    # In case the deployment is unavailable, run the flow in-process instead.
-    document_id = await online_pipeline(
-        source,
-        user_id,
-        run_extraction=run_extraction,
-        opik_trace_headers=opik_trace_headers,
+    flow_run = await run_deployment(
+        "online-pipeline/online-pipeline",
+        parameters={
+            "source": source.model_dump(mode="json"),
+            "user_id": str(user_id),
+            "run_extraction": run_extraction,
+            "opik_trace_headers": get_distributed_trace_headers(),
+        },
+        timeout=0,
     )
-    if document_id is None:
-        return {"status": "already_ingested", "mode": "in_process"}
-    return {"status": "ingested", "document_id": document_id, "mode": "in_process"}
+    return {"status": flow_run_status(flow_run), "flow_run_id": str(flow_run.id)}

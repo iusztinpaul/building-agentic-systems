@@ -1,5 +1,6 @@
-# Listen sources — repeatedly-polled feeds (RSS). The nightly data-etl
-# coordinator cron loads ONLY this file, fanned across all active users.
+# Listen sources — repeatedly-polled feeds (RSS). The nightly `offline-pipeline`
+# cron loads ONLY this file, fanned across all active users, and continues
+# through extraction + indexing so nightly documents never sit PENDING.
 # Cadence lives in the filename: there is no per-source `scheduled` flag.
 
 # Substack RSS feeds

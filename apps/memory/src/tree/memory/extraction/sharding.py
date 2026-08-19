@@ -30,9 +30,13 @@ The fan-out axis is document-shards of ONE user. Topology (coordinator path):
    coordinator dispatches a DISTINCT worker deployment — there is NO recursion and
    each child carries only ``{user_id, document_ids}`` (the worker has no
    ``num_shards`` param).
-4. **Index ONCE.** After the gather, trigger a SINGLE ``memory-indexing-etl`` run
-   for the user — NEVER per-shard (indexing is a global backfill over unembedded
-   nodes; per-shard would race writers).
+4. **Index ONCE.** After the gather, run the ``memory_indexing`` flow ONCE for the
+   user as an INLINE SUBFLOW — NEVER per-shard (indexing is a global backfill over
+   unembedded nodes; per-shard would race writers). Since
+   ``free-tier-deployments`` indexing is no longer a deployment: the previous
+   ``run_deployment`` call carried no ``timeout=0`` and so already blocked until
+   indexing finished, so running it inline changes no wall-clock semantics — it
+   just stops spending a second admission slot (and a free-tier deployment slot).
 
 Per ``CLAUDE.md`` the Prefect ``@flow`` wiring is covered by integration tests;
 the pure decision logic here is unit-tested directly with ``run_deployment``
@@ -47,9 +51,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import get_run_logger
+from prefect import get_run_logger, tags
 
 from tree.entities.documents import Document
+from tree.config.constants import TAGS_INDEXING
+from tree.memory.indexing.pipeline import memory_indexing
 
 # The balanced-contiguous partitioning math now lives in the neutral, pipeline-
 # agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
@@ -76,7 +82,6 @@ _KG_COLLECTION = "knowledge_graph"
 # The coordinator dispatches the WORKER deployment (#067) — NOT itself. There is
 # no recursion; the worker has no ``num_shards`` param.
 _WORKER_DEPLOYMENT = "memory-extract-etl-worker/memory-extract-etl-worker"
-_INDEXING_DEPLOYMENT = "memory-indexing-etl/memory-indexing-etl"
 
 
 def _get_run_logger() -> logging.Logger:
@@ -192,16 +197,20 @@ async def _fan_out_extraction(
       COMPLETED (``_shard_failure_reason``, #095) — ``run_deployment`` RETURNS a
       Failed / Crashed / Cancelled run instead of raising, and counting that as a
       success made the summary read green while extraction output was missing.
-    * After the gather, a SINGLE ``memory-indexing-etl`` run for the user fires —
-      never per-shard (indexing is a global backfill; per-shard would race
-      writers). The index run fires regardless of how many shards failed, so a
-      partial extraction is still indexed.
+    * After the gather, :func:`~tree.memory.indexing.pipeline.memory_indexing` runs
+      ONCE for the user as an INLINE SUBFLOW — never per-shard (indexing is a
+      global backfill; per-shard would race writers). It runs regardless of how
+      many shards failed, so a partial extraction is still indexed. Indexing is
+      NOT injected like ``run_deployment``: it is a plain in-process call, so
+      tests patch ``tree.memory.extraction.sharding.memory_indexing``.
 
     ``opik_trace_headers`` (the coordinator's distributed-trace headers) is
-    forwarded to every worker AND the indexing run as a flow parameter, so the
-    whole coordinated run renders as ONE Opik trace across the process hops that
-    ``run_deployment`` introduces. ``None`` (Opik off / no active trace) is
-    simply not forwarded — each child then starts its own trace.
+    forwarded to every worker AND to the indexing subflow, so the whole
+    coordinated run renders as ONE Opik trace across the process hops that
+    ``run_deployment`` introduces. Workers get it as a flow PARAMETER and only
+    when set — ``None`` is omitted from the parameter dict so flow-run parameter
+    validation is untouched; the inline indexing call takes it as a plain keyword
+    (``None`` is its own default, meaning "start your own trace").
     """
 
     log = _get_run_logger()
@@ -252,10 +261,8 @@ async def _fan_out_extraction(
     )
 
     # Index ONCE after every shard's extraction has settled — never per-shard.
-    log.info("extraction fan-out: triggering single memory-indexing-etl run")
-    await run_deployment(
-        _INDEXING_DEPLOYMENT,
-        parameters={"user_id": str(user_id), **worker_params},
-    )
+    log.info("extraction fan-out: running single memory_indexing subflow inline")
+    with tags(*TAGS_INDEXING):
+        await memory_indexing(user_id=user_id, opik_trace_headers=opik_trace_headers)
 
     return stats

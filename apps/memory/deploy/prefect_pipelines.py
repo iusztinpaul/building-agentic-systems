@@ -18,8 +18,9 @@ values), and the git clone authenticates via the ``tree-github-pat`` Secret bloc
 can pass the tested commit SHA for reproducible deploys.
 
 ``GROUPS`` (optional, comma-separated) narrows the deploy to whole pipelines —
-``data`` (data ETL coordinator + worker) and/or ``memory`` (extraction, indexing,
-dream). Unset deploys all of them.
+``data`` (the data ETL worker) and/or ``memory`` (extraction, indexing, dream).
+The end-to-end ``online-pipeline`` / ``offline-pipeline`` carry BOTH identity tags,
+so EITHER group includes them. Unset deploys all of them.
 
 Usage::
 

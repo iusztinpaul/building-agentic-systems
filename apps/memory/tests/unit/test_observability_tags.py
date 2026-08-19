@@ -58,13 +58,13 @@ class TestTagFamily:
 class TestPipelineIdentityTags:
     """Pipeline-identity tags + the Prefect↔Opik 1:1 invariant the user asked for:
     data = [data-pipeline, offline|online]; extraction = [memory-pipeline,
-    extraction]; indexing = [memory-pipeline, indexing]."""
+    offline]; indexing = [memory-pipeline] (the mode tag comes from the caller)."""
 
     def test_constant_values(self) -> None:
         assert consts.TAGS_DATA_OFFLINE == ["data-pipeline", "offline"]
         assert consts.TAGS_DATA_ONLINE == ["data-pipeline", "online"]
-        assert consts.TAGS_EXTRACTION == ["memory-pipeline", "extraction"]
-        assert consts.TAGS_INDEXING == ["memory-pipeline", "indexing"]
+        assert consts.TAGS_EXTRACTION == ["memory-pipeline", "offline"]
+        assert consts.TAGS_INDEXING == ["memory-pipeline"]
 
     def test_opik_span_tags_use_the_shared_constants(self) -> None:
         # Each pipeline's Opik ``_*_TAGS`` IS the shared constant (so Opik == Prefect).
@@ -82,14 +82,19 @@ class TestPipelineIdentityTags:
 
     def test_prefect_deployment_tags_match_opik_1to1(self) -> None:
         # The Prefect deployment specs carry the SAME pipeline-identity tags.
+        from tree.offline import TAGS_OFFLINE_PIPELINE
+        from tree.online import TAGS_ONLINE_PIPELINE
         from tree.orchestrator import _DEPLOYMENT_SPECS
 
         tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
-        assert tags_by_name["data-etl-coordinator"] == consts.TAGS_DATA_OFFLINE
         assert tags_by_name["data-etl-worker"] == consts.TAGS_DATA_OFFLINE
-        assert tags_by_name["memory-extract-etl-coordinator"] == consts.TAGS_EXTRACTION
         assert tags_by_name["memory-extract-etl-worker"] == consts.TAGS_EXTRACTION
-        assert tags_by_name["memory-indexing-etl"] == consts.TAGS_INDEXING
+        # Indexing has no deployment of its own any more (it is an inline subflow),
+        # so the 1:1 mapping is asserted on its FLOW tags instead, above.
+        assert "memory-indexing-etl" not in tags_by_name
+        # The e2e pipelines span data + memory, so they carry both identity tags.
+        assert tags_by_name["online-pipeline"] == TAGS_ONLINE_PIPELINE
+        assert tags_by_name["offline-pipeline"] == TAGS_OFFLINE_PIPELINE
 
 
 class TestMcpToolTags:

@@ -13,11 +13,11 @@ controlled there, this script only picks the dispatcher:
   at the edge) that ingests AND runs extraction inline, then submits the
   trailing indexing run. A duplicate source skips extraction.
 
-Both dispatchers submit their deployment fire-and-forget; this CLI then blocks
-streaming the run's logs (exit non-zero on failure) — waiting is a caller
-concern. Where the optional deployment isn't registered (e.g. free-tier
-Prefect Cloud), the dispatcher runs the SAME flow in-process instead and the
-script reports the synchronous result.
+Both dispatchers submit their (always-registered) core deployment
+fire-and-forget; this CLI then blocks streaming the run's logs (exit non-zero
+on failure) — waiting is a caller concern. Dispatch needs a reachable Prefect
+API with the deployment registered: there is no in-process fallback, so a
+submission failure surfaces here as an error.
 
 Every write is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>``

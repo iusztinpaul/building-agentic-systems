@@ -262,10 +262,11 @@ async def _ingest(
 ) -> str:
     """Shared MCP ingest tail: dispatch to the online pipeline, serialize to JSON.
 
-    ``dispatch_online_pipeline`` owns the whole contract — edge validation, the
-    fire-and-forget ``online-pipeline`` deployment submit (ONE worker-side run
-    ingests AND extracts), and the inline-flow fallback when no deployment is
-    registered. The result's ``mode`` field says which path ran.
+    ``dispatch_online_pipeline`` owns the whole contract — edge validation and
+    the fire-and-forget ``online-pipeline`` deployment submit (ONE worker-side
+    run ingests AND extracts), returning ``{"status": <flow-run state>,
+    "flow_run_id": ...}``. There is no in-process path, so a Prefect failure
+    raises here and surfaces through each tool's error handling.
     """
 
     result = await dispatch_online_pipeline(source, user_id)
@@ -279,10 +280,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (fetch +
     extraction inline, indexing submitted after) and returns immediately —
-    ``{"status": "submitted", "flow_run_id": ..., "mode": "deployment"}``. It
-    does not wait for the graph to be built. Without a registered deployment the
-    same pipeline runs in-process instead (``"mode": "in_process"``, returning
-    ``ingested``/``already_ingested`` synchronously).
+    ``{"status": "scheduled", "flow_run_id": ...}``, where ``status`` is the
+    new run's Prefect state. It does not wait for the graph to be built, so
+    the page is NOT searchable yet when this returns.
 
     Args:
         url: The web URL to fetch and ingest.
@@ -322,9 +322,9 @@ async def ingest_file(
     The server never opens ``file_path`` — it may not share a filesystem with
     you. Read the file YOURSELF and pass its text as ``content``. Async
     ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + extraction
-    inline, indexing submitted after) and returns immediately
-    (``{"status": "submitted", "mode": "deployment"}``); without a registered
-    deployment the same pipeline runs in-process (``"mode": "in_process"``).
+    inline, indexing submitted after) and returns immediately —
+    ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
+    state — so the file is NOT searchable yet when this returns.
 
     Args:
         file_path: Absolute path of the file on YOUR machine. Identity only:
@@ -580,9 +580,8 @@ async def ingest_conversation(
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (document +
     extraction inline, indexing submitted after) and returns immediately —
     people, tasks, preferences, and relationships are built out-of-band by a
-    worker. Returns ``{"status": "submitted", "mode": "deployment"}``; without a
-    registered deployment the same pipeline runs in-process
-    (``"mode": "in_process"``).
+    worker. Returns ``{"status": "scheduled", "flow_run_id": ...}``, the new
+    run's Prefect state; the conversation is NOT searchable yet at that point.
 
     Args:
         conversation_text: The full conversation text to process.

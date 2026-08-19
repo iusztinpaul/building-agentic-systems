@@ -197,8 +197,9 @@ class DreamConfig(BaseModel):
     Fields:
 
     * ``enabled`` — master on/off switch.
-    * ``cron`` — schedule consumed by #052's deployment. Defined here so the
-      block is complete; this task does NOT register the deployment.
+    * ``cron`` — the schedule attached to the ``dream-consolidation-all-users``
+      deployment (a core spec in ``orchestrator.py`` since
+      ``free-tier-deployments``), so editing it here moves the nightly sweep.
     * ``dry_run`` — when ``True`` the sweep reports the duplicate pairs it
       WOULD merge/flag but performs NO writes (no merges, no SAME_AS edges,
       no watermark advance). Safe first-rollout default.
@@ -244,16 +245,20 @@ class ConcurrencyConfig(BaseModel):
 class PrefectConfig(BaseModel):
     """Prefect deployment-topology knobs.
 
-    * ``deploy_optional`` — register the OPTIONAL deployment (the scheduled dream
-      consolidation) on top of the 5 always-on core ones. Prefect Cloud's **free
-      tier caps a workspace at 5 deployments**, so this defaults to ``false`` — flip
-      it to ``true`` on a paid plan or a self-hosted Prefect server. Both the local
-      serve (``make memory-serve-workflows``) and the Cloud deploy path honour it.
+    * ``deploy_optional`` — register the deployments marked ``optional=True`` in
+      ``orchestrator.py`` on top of the always-on core ones. Prefect Cloud's **free
+      tier caps a workspace at 5 deployments** and the core set now spends ALL 5
+      (the two workers, both end-to-end pipelines, and the scheduled dream
+      consolidation), so NO spec is optional today and this flag registers nothing
+      extra — it is kept as the extension point for the next deployment that must
+      sit outside the budget. Defaults to ``false``; flip it to ``true`` on a paid
+      plan or a self-hosted Prefect server. Both the local serve
+      (``make memory-serve-workflows``) and the Cloud deploy path honour it.
       Override per-environment without editing YAML via
       ``TREE_PREFECT__DEPLOY_OPTIONAL=true``. (No flag for the online ingest
-      path: ``dispatch_online_pipeline`` submits the ``online-pipeline``
-      deployment when registered and runs the same flow in-process otherwise —
-      presence of the deployment IS the switch.)
+      path: ``online-pipeline`` is one of the core deployments, so
+      ``dispatch_online_pipeline`` always submits it — there is no in-process
+      fallback, and a missing deployment is an error, not a mode.)
     """
 
     deploy_optional: bool = False

@@ -3,21 +3,23 @@ Run the DATA pipeline (sources → ``documents``; NO extraction/indexing).
 
 A light CLI shim (glue lives in :mod:`tree.cli`) with two modes:
 
-* ``--mode offline`` (default) — trigger the ``data-etl-coordinator``
-  deployment over the selected config sources (ADR-003): ``--source-file``
-  (repeatable, e.g. ``sources/listen.yaml``) and/or ``--uri`` (repeatable,
-  optionally suffixed ``=TYPE``, e.g. ``…/feed=substack_rss``); neither →
-  the default backfill+listen set. ``--uri`` tokens are parsed up front so a
-  bad token (e.g. ``huggingface_dataset`` — YAML-only) fails fast BEFORE any
-  flow is triggered.
+* ``--mode offline`` (default) — dispatch the ``offline-pipeline`` flow
+  (:mod:`tree.offline`) with extraction OFF over the selected config sources
+  (ADR-003): ``--source-file`` (repeatable, e.g. ``sources/listen.yaml``)
+  and/or ``--uri`` (repeatable, optionally suffixed ``=TYPE``, e.g.
+  ``…/feed=substack_rss``); neither → the default backfill+listen set (the
+  data coordinator owns source resolution). ``--uri`` tokens are parsed up
+  front so a bad token (e.g. ``huggingface_dataset`` — YAML-only) fails fast
+  BEFORE any flow is dispatched.
 * ``--mode online`` — ingest ONE realtime ``--source`` (URL or local
   ``.txt``/``.md``/``.html`` file, read here at the edge) by dispatching the
   ``online-pipeline`` flow (:mod:`tree.online`) with extraction OFF — data step
   only, symmetric with offline mode.
 
-Both modes block streaming the run's logs and exit non-zero on failure; the
-online dispatcher falls back to running the flow in-process when the optional
-``online-pipeline`` deployment isn't registered.
+Both modes block streaming the run's logs and exit non-zero on failure. The
+``offline-pipeline`` / ``online-pipeline`` deployments are core (always
+registered), and dispatch needs a reachable Prefect API — there is no
+in-process fallback, so a submission failure surfaces here as an error.
 
 Every write is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>``
@@ -46,14 +48,13 @@ from tree.cli import (
     build_online_source,
     connect_and_resolve_user,
     mode_option,
-    trigger_deployment,
     user_options,
     wait_for_dispatch,
-    wait_for_flow_run,
 )
 from tree.config.sources import build_uri_sources, parse_uri_token
 from tree.logging import init_logger
 from tree.observability import flush_opik
+from tree.offline import dispatch_offline_pipeline
 from tree.online import dispatch_online_pipeline
 
 init_logger()
@@ -68,16 +69,16 @@ async def _run_offline(
 ) -> None:
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     # Forward only the selectors the operator passed; with neither present the
-    # coordinator falls back to its default backfill+listen set.
-    parameters: dict[str, Any] = {"user_id": str(resolved_user_id)}
-    if source_files:
-        parameters["source_files"] = source_files
-    if inline_sources:
-        parameters["sources"] = inline_sources
-    flow_run_id = await trigger_deployment(
-        "data-etl-coordinator/data-etl-coordinator", parameters
+    # data coordinator falls back to its default backfill+listen set.
+    result = await dispatch_offline_pipeline(
+        user_id=resolved_user_id,
+        source_files=source_files or None,
+        sources=inline_sources or None,
+        run_extraction=False,
     )
-    await wait_for_flow_run(flow_run_id)
+    await wait_for_dispatch(result)
+    # The dispatcher's spans belong to this short-lived process — flush before exit.
+    flush_opik()
 
 
 async def _run_online(

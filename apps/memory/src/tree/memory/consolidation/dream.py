@@ -6,8 +6,10 @@ parallel ingestion's inline write-time dedup missed. The default path is
 the NORMAL semantic + fuzzy dedup across ALL node types (NO LLM). The LLM
 contradiction / supersession judge is OUT of this task — it lands behind
 ``app_config.dream.enable_supersession_judge`` in #052, which plugs into the
-seam left at :func:`_supersession_sweep`. Scheduling / per-user fan-out is
-also #052 (this flow registers no deployment).
+seam left at :func:`_supersession_sweep`. Per-user fan-out landed with
+:func:`dream_consolidation_all_users`, which IS a registered deployment since
+``free-tier-deployments``: it is one of the core 5 and runs on
+``app_config.dream.cron`` (``0 4 * * *`` UTC).
 
 THE TWO-SET RULE (the correctness crux)
 ---------------------------------------

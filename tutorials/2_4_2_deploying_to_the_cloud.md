@@ -1,4 +1,4 @@
-# Deploying the Database & Pipelines
+# Deploying to the Cloud
 
 This is the tutorial used to deploy the MongoDB database and Prefect pipelines from Chapter 2, section `2.4 Deploying the Database & Pipelines` of the book.
 
@@ -71,7 +71,7 @@ Altogether, this is what `.env.prod` needs before the first run (start from `cp 
 
 If `.envrc` has never been approved, run `direnv allow` once.
 
-![Figure 2.22 The cluster in the Atlas console](assets/figure_2_22_atlas_cluster.png)
+![Figure 2.22 The cluster in the Atlas console](assets/2_4_2_atlas_cluster.png)
 
 Now, let's run the script that will create the M0 cluster, seed the database user (the same `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`), and open network access to Prefect Cloud:
 
@@ -122,7 +122,7 @@ make memory-check-db      # connects with your .env.prod credentials; exits non-
 
 As with the local setup, you can use MongoDB Compass GUI or mongosh CLI to look around the database by using the connection string from the `make memory-atlas-status` command.
 
-![Figure 2.23 The database visualized in MongoDB Compass](assets/figure_2_23_mongodb_compass.png)
+![Figure 2.23 The database visualized in MongoDB Compass](assets/2_4_2_mongodb_compass.png)
 
 <details>
 <summary><strong>MongoDB Atlas gotchas</strong></summary>
@@ -190,12 +190,16 @@ Outputs:
 ```
 Seeded 14 runtime config store(s).
 Created prefect:managed work pool 'tree-managed'.
-Deployed 2 pipeline(s) to tree-managed: data-etl-coordinator, …
+Deployed 3 pipeline(s) to tree-managed: data-etl-worker, online-pipeline, offline-pipeline
 ```
+
+`GROUPS=data` selects `data-etl-worker` plus the two end-to-end pipelines — `online-pipeline` and `offline-pipeline` carry BOTH the data and the memory identity tag, so they belong to BOTH groups (a `...-down GROUPS=data` deletes them too, and the next `...-up` puts them back). Unset `GROUPS` deploys all 4 core deployments: `data-etl-worker`, `memory-extract-etl-worker`, `online-pipeline`, `offline-pipeline`.
 
 After running the setup-up command, you should see within your Prefect Cloud dashboard a setup similar to this:
 
-![Figure 2.24 The pipelines in Prefect Cloud](assets/figure_2_24_prefect_cloud.png)
+![Figure 2.24 The pipelines in Prefect Cloud](assets/2_4_2_prefect_cloud.png)
+
+> **Note — the screenshots predate the current topology.** Figure 2.24 and Figure 2.17 (plus the quoted `Deployed N pipeline(s)` transcript they were captured with) come from the pre-`free-tier-deployments` layout, where `data-etl-coordinator` and `memory-extract-etl-coordinator` were registered deployments of their own. They now show a **superseded** layout. The deployment names you will actually see are the ones written above: the coordinators are still flows, but they run as inline subflows of an `offline-pipeline` run instead of as separate deployments.
 
 **Check:** verify the user and the deployments exist:
 
@@ -233,7 +237,7 @@ make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml"
 
 After the flow successfully completes, within Prefect Cloud's flow tab, you should see something similar to the image below:
 
-![Figure 2.17 The backfill in the Prefect UI. One data-etl-coordinator run dispatches five data-etl-worker runs](assets/figure_2_17_prefect_backfill.png)
+![Figure 2.17 The backfill in the Prefect UI (superseded layout). One offline-pipeline run hosts the data coordinator subflow, which dispatches five data-etl-worker runs](assets/2_4_2_prefect_backfill.png)
 
 **Check:** confirm the backfill actually landed in the cloud database:
 

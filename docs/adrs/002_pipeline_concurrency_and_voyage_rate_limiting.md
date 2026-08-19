@@ -271,6 +271,139 @@ shared Voyage budget.
      `arxiv_id → source_uri`), which makes disjoint windows — and any accidental
      overlap — safe to re-run (upsert, never double-insert).
 
+   **Amendment (`free-tier-deployments` #098–#102 — end-to-end pipelines replace the
+   coordinator DEPLOYMENTS).** Prefect Cloud's free tier caps a workspace at 5
+   deployments. The previous core 5 spent two slots on the coordinators while gating
+   `online-pipeline`/`offline-pipeline` behind `deploy_optional` (default false) — so on
+   prod the async dispatchers ALWAYS fell through to the in-process fallbacks that this
+   amendment goes on to delete. The
+   deployment budget is re-spent:
+
+   - **Coordinators remain FLOWS, cease to be DEPLOYMENTS.** `data_etl_coordinator` and
+     `memory_extract_etl_coordinator` are no longer registered; they execute exclusively
+     as inline subflows of `offline_pipeline` (which `tree/offline.py` already did).
+     Their internal `run_deployment` fan-out to `data-etl-worker` /
+     `memory-extract-etl-worker` and the single trailing `memory-indexing-etl` run are
+     unchanged — all three targets stay registered.
+   - **New core 5:** `data-etl-worker`, `memory-extract-etl-worker`,
+     `memory-indexing-etl`, `online-pipeline`, `offline-pipeline`.
+     `dream-consolidation-all-users` stays the ONLY `optional=True` spec, still gated by
+     `prefect.deploy_optional`. (Superseded by the follow-up below, which drops
+     `memory-indexing-etl` from the set: the core is now **4**.)
+   - **The nightly cron moves** from `data-etl-coordinator` to `offline-pipeline`,
+     keeping `0 3 * * *` UTC and `schedule_parameters={"source_files":
+     ["sources/listen.yaml"]}`. Widened semantics, deliberate: the scheduled run now
+     ingests the listen feeds AND extracts AND indexes across all active users — closing
+     the gap where nightly documents sat PENDING until a manual memory run.
+   - **`offline_pipeline` gains phase flags** `run_data: bool = True` /
+     `run_extraction: bool = True` (mirroring `online_pipeline`'s `run_extraction`) and
+     `document_ids: list[str] | None = None` (forwarded to each user's extraction
+     coordinator; guarded single-tenant — `document_ids` without `user_id` raises). Both
+     flags false is a logged no-op. The step CLIs (`run_data_pipeline` →
+     `run_extraction=False`, `run_memory_pipeline` → `run_data=False`) funnel through
+     `dispatch_offline_pipeline` like `run_pipeline` already did. (`tree.cli.trigger_deployment`
+     was kept at this point for the standalone indexing script, its one remaining
+     caller; the follow-up below deletes both that caller and the helper.)
+   - **Accepted consequence — MCP ingest goes async on prod.** With `online-pipeline`
+     registered, `ingest_url`/`ingest_file`/`ingest_conversation` return
+     `{"status": <the new run's Prefect state, normally `scheduled`>, "flow_run_id": …}`
+     instead of blocking in-process for a `document_id`. Intended, not a bug.
+   - **The in-process fallbacks are DELETED, not merely bypassed.** Both dispatchers
+     previously wrapped `run_deployment` in a bare `except Exception` and re-ran the
+     SAME flow inline. That branch existed only because the pipelines were optional, and
+     its "unreachable API" half never worked — the inline call is itself a `@flow`, so it
+     died with `RuntimeError: Failed to reach API` after swallowing the original error,
+     while the broad catch masked parameter-validation and auth failures by silently
+     turning a fast submit into a long blocking run. Dispatch now REQUIRES a reachable
+     Prefect API with the deployment registered; failures propagate. The vestigial
+     `mode` key is gone from both return dicts (there is only one path), and `status` is
+     derived from the created run's Prefect state via `tree.flow_runs.flow_run_status`
+     rather than hardcoded — Prefect has no `submitted` state.
+   - **Group overlap accepted.** `online-pipeline`/`offline-pipeline` carry both
+     pipeline-identity tags, so they belong to BOTH `DEPLOYMENT_GROUPS` — a
+     `down --groups <either>` deletes them; the next `up` restores them. The groups
+     mechanism is unchanged.
+   - **Ops note — stale deployments.** Per environment, delete the orphaned server-side
+     definitions:
+     - `prefect deployment delete data-etl-coordinator/data-etl-coordinator`
+     - `prefect deployment delete memory-extract-etl-coordinator/memory-extract-etl-coordinator`
+
+   **Follow-up (same feature — indexing ceases to be a DEPLOYMENT).** The amendment above
+   left `memory-indexing-etl` registered purely so its two callers could reach it via
+   `run_deployment`. Neither needed a deployment:
+
+   - **`memory_indexing` stays a FLOW, stops being a DEPLOYMENT**, and runs as an INLINE
+     SUBFLOW at both call sites: `_fan_out_extraction` (after the gather) and
+     `online_pipeline` (after the inline extraction worker).
+   - **This FREES an admission slot rather than costing one.** The coordinator's call was
+     `run_deployment(_INDEXING_DEPLOYMENT, …)` with **no `timeout=0`** — it ALREADY blocked
+     until the indexing run completed, so a coordinator run held its own slot *plus* the
+     indexing run's. Inline, the same wall-clock work happens under ONE slot. The
+     `voyage-embeddings` throttle is unaffected: it is a SERVER-SIDE global concurrency
+     limit acquired inside the embedding call (§1), so it applies identically inline — no
+     local semaphore was added.
+   - **The `online_pipeline` call was fire-and-forget (`timeout=0`) and is now inline and
+     blocking**, inside the run that just ingested. Its FAIL-OPEN contract is unchanged: a
+     failure is WARNING-logged and never fails the ingest (the document + graph writes are
+     already durable, and indexing is a global backfill that any later run covers).
+   - **The standalone CLI runs it IN-PROCESS.** `scripts/run_indexing_pipeline.py` calls the
+     flow directly for the resolved user — an operator maintenance command, so blocking is
+     fine and it no longer needs a `serve` worker at all.
+   - **`tree.cli.trigger_deployment` is DELETED** (it had zero callers left) — correcting the
+     "RETAINED for the standalone indexing script" line above. `wait_for_flow_run` stays:
+     `wait_for_dispatch` still uses it.
+   - **New core 4:** `data-etl-worker`, `memory-extract-etl-worker`, `online-pipeline`,
+     `offline-pipeline` — leaving ONE free-tier slot unspent. (Superseded by the second
+     follow-up below, which spends that slot on `dream-consolidation-all-users`: the core
+     is now **5** and NO slot is spare. The headroom this bullet earmarked for
+     `ingest-web-url-batch-etl` — dispatched by `mcp/tools.py:480` but never registered —
+     no longer exists; that dispatch keeps failing closed into its `triggered: false`
+     degrade path until a slot is freed or the plan is raised.)
+   - **Ops note — stale deployment.** Per environment:
+     `prefect deployment delete memory-indexing-etl/memory-indexing-etl`.
+   - **Unchanged invariants.** Index ONCE after the gather, NEVER per-shard (indexing is a
+     global backfill; per-shard would race writers); the index still runs regardless of how
+     many shards failed; the Opik trace still nests (headers are forwarded to the inline
+     call in the coordinator, and in-process context carries it in `online_pipeline`);
+     depth-1 dispatch with NO recursion — indexing is not a `run_deployment` target for
+     anyone any more.
+
+   **Unchanged invariants (so Status stays `Accepted`).** Depth-1 dispatch with NO
+   recursion (a worker never calls `run_deployment`); per-shard/per-user
+   `asyncio.gather`/try-isolated failure handling; the single-trailing-index rule (memory
+   only; the e2e run still costs ONE admission slot, now held by the `offline-pipeline`
+   run hosting the coordinator subflows); the cross-flow `voyage-embeddings` GCL (§1);
+   `serve(limit=runner_global_limit)` admission control (§4); and the 5-deployment
+   free-tier envelope itself — this amendment changes WHICH deployments fill it (the
+   follow-ups free indexing's slot and then spend it on dream, so all 5 are used), never
+   raising the cap.
+
+
+   **Follow-up 2 (same feature — dream takes the freed slot).** A cron on an UNREGISTERED
+   deployment never fires, so gating `dream-consolidation-all-users` behind
+   `deploy_optional` (default false) meant the nightly consolidation sweep did not run on
+   any environment. The slot indexing gave back is spent on it:
+
+   - **`dream-consolidation-all-users` is promoted out of `optional=True` into the CORE
+     set.** Final core 5: `data-etl-worker`, `memory-extract-etl-worker`, `online-pipeline`,
+     `offline-pipeline`, `dream-consolidation-all-users` — EXACTLY the free-tier cap, with
+     **no slot spare**.
+   - **Two scheduled deployments now, not one:** `offline-pipeline` (`0 3 * * *` UTC with
+     `schedule_parameters={"source_files": ["sources/listen.yaml"]}`) and
+     `dream-consolidation-all-users` (`app_config.dream.cron`, `0 4 * * *` UTC, no parameter
+     overrides — it sweeps every active user). The three remaining specs carry no schedule.
+   - **`dream` joins the `memory` deployment group** (it carries the `memory-pipeline`
+     identity tag), so `--groups memory` now covers the extraction worker + dream + the two
+     e2e pipelines. The `data`/`memory` groups still do NOT partition.
+   - **The `optional` mechanism is RETAINED but gates nothing.** `_DeploymentSpec.optional`,
+     `app_config.prefect.deploy_optional` and the filter in `_active_deployment_specs()` stay
+     as the extension point for the next deployment that must sit outside the budget; no
+     shipped spec sets `optional=True`. Unit tests pin the gate with a synthetic optional
+     spec so the unused mechanism cannot rot.
+   - **Consequence — the budget is full.** A sixth deployment (e.g. the still-unregistered
+     `ingest-web-url-batch-etl`) must displace a core one, be marked `optional=True`, or wait
+     for a paid/self-hosted Prefect.
+
    **Amendment (#078–#082 — batch-grain ETL task topology for the leaf pipelines).**
    The §3 fan-out so far governs the FLOW-level topology (coordinator → worker →
    per-source batch flow). This amendment refines the TASK grain *inside* a worker: each
