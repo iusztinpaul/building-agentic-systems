@@ -24,6 +24,7 @@ def build_deployments() -> list:
 
 
 def serve_deployments(limit: int) -> None:
+    configure_opik()
     serve(*build_deployments(), limit=limit)
 
 
@@ -31,11 +32,9 @@ if __name__ == "__main__":
     serve_deployments(app_config.concurrency.runner_global_limit)
 ```
 
-Within the `_active_deployment_specs` function we load all our Prefect deployment specs and filter out optional deployments in case `app_config.prefect.deploy_optional = False`. We added this because Prefect's Cloud free tier gives you a maximum of 5 deployments. Thus, we reduced the code to 4 core deployments (leaving one slot spare), and made the others optional. Also, it picks only the pipelines from the data or memory groups if explicitly specified. Within this chapter we will scope it down just to the data pipelines.
+Within the `_active_deployment_specs` function we load all our Prefect deployment specs and filter out optional deployments in case `app_config.prefect.deploy_optional = False`. We added this because Prefect's Cloud free tier gives you a maximum of 5 deployments. The always-on core set now spends all 5 slots, so no spec is optional today and the flag registers nothing extra — it is kept as the extension point for the next deployment that has to be gated. The function also takes an optional `groups` argument that narrows the set to whole pipelines (`data` or `memory`) by the identity tag every spec already carries; it is used by the cloud deploy path, while the local `serve()` registers everything.
 
-Within `_DEPLOYMENT_SPECS` we define all your deployment specs, where a `_DeploymentSpec` is a wrapper over a Prefect flow, packaging important metadata such as the flow's name, tags and optional scheduling parameters. We scheduled the data coordinator deployment to run every night at 03:00 UTC via the `"0 3 * * *"` cron job. Via the `TAGS_DATA_OFFLINE`/`TAGS_DATA_ONLINE` constants we flag the deployments as data-pipeline + offline/online, to easily filter the runs within Prefect.
-
-Along with the `data-etl-coordinator` and `data-etl-worker` deployments supporting the foundations of the data layer, we also have two optional deployments: `offline-pipeline` and `online-pipeline`, marked as optional due to Prefect's Cloud free tier limitations. Still, the two `offline-pipeline` and `online-pipeline` deployments are key at understanding the difference between the two execution models in practice.
+Within `_DEPLOYMENT_SPECS` we define all your deployment specs, where a `_DeploymentSpec` is a wrapper over a Prefect flow, packaging important metadata such as the flow's name, tags and optional scheduling parameters. We scheduled the end-to-end `offline-pipeline` deployment to run every night at 03:00 UTC via the `"0 3 * * *"` cron job, and the `dream-consolidation-all-users` deployment an hour later at 04:00 UTC. Via the `TAGS_DATA_OFFLINE`/`TAGS_ONLINE_PIPELINE`/`TAGS_OFFLINE_PIPELINE` constants we flag the deployments as data-pipeline / memory-pipeline + offline/online, to easily filter the runs within Prefect.
 
 **The topology registry, from [apps/memory/src/tree/orchestrator.py](../apps/memory/src/tree/orchestrator.py):**
 
@@ -57,39 +56,46 @@ class _DeploymentSpec:
 
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
-        data_etl_coordinator,
-        "data-etl-coordinator",
-        "apps/memory/src/tree/data/"
-        "offline_pipeline.py:data_etl_coordinator",
-        TAGS_DATA_OFFLINE,
-        cron="0 3 * * *",
-        schedule_parameters={"source_files": ["sources/listen.yaml"]},
-    ),
-    _DeploymentSpec(
         data_etl_worker,
         "data-etl-worker",
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
         TAGS_DATA_OFFLINE,
     ),
     _DeploymentSpec(
+        memory_extract_etl_worker,
+        "memory-extract-etl-worker",
+        "apps/memory/src/tree/memory/extraction/"
+        "pipeline.py:memory_extract_etl_worker",
+        TAGS_EXTRACTION,
+    ),
+    _DeploymentSpec(
         online_pipeline,
         "online-pipeline",
         "apps/memory/src/tree/online.py:online_pipeline",
-        TAGS_ETL_ONLINE,
-        optional=True,
+        TAGS_ONLINE_PIPELINE,
     ),
     _DeploymentSpec(
         offline_pipeline,
         "offline-pipeline",
         "apps/memory/src/tree/offline.py:offline_pipeline",
         TAGS_OFFLINE_PIPELINE,
-        cron="0 3 * * *",
+        cron=_SCHEDULED_INGEST_CRON,
         schedule_parameters={"source_files": ["sources/listen.yaml"]},
+    ),
+    _DeploymentSpec(
+        dream_consolidation_all_users,
+        "dream-consolidation-all-users",
+        "apps/memory/src/tree/memory/consolidation/"
+        "dream.py:dream_consolidation_all_users",
+        ["memory-pipeline", "dream", "consolidation"],
+        cron=app_config.dream.cron,
     ),
 ]
 ```
 
-Via the [apps/memory/configs/default.yaml](../apps/memory/configs/default.yaml) config, we can control `runner_global_limit: 6` which defines how many flow runs we can run concurrently at a time. A flow run is an invocation of all the deployments we defined above, the coordinator, worker, and so on. Note how we haven't defined the ETL pipelines as independent deployments. That's by design. They are invoked by the worker within the same process. Doing so, we could avoid a useless serialization/deserialization step. Meanwhile the `deploy_optional: false` is used to turn off or on the optional deployments. Note that this limitation exists only when deploying to Prefect Cloud. As the Prefect engine is open-source, when deploying locally or on a self-managed solution, you don't have it.
+The `data-etl-worker` and `memory-extract-etl-worker` deployments are the per-user workers fanned out by the coordinators, while `online-pipeline` and `offline-pipeline` are the end-to-end entrypoints that run data + memory in one go — they are also key at understanding the difference between the two execution models in practice. Note that `data_etl_coordinator` is *not* a deployment of its own: `offline_pipeline` calls it as an inline subflow, and memory indexing does the same within extraction. That's by design — it avoids a useless serialization/deserialization step plus a deployment slot. In this chapter we only exercise the data half (`data-etl-worker`, driven by the coordinator inside `offline-pipeline`); the memory deployments arrive in the next chapter.
+
+Via the [apps/memory/configs/default.yaml](../apps/memory/configs/default.yaml) config, we can control `runner_global_limit: 6` which defines how many flow runs we can run concurrently at a time. A flow run is an invocation of any of the deployments we defined above. Meanwhile `deploy_optional: false` is used to turn off or on the optional deployments. Note that this limitation exists only when deploying to Prefect Cloud. As the Prefect engine is open-source, when deploying locally or on a self-managed solution, you don't have it.
 
 ## The Local Stack Behind `make local-start`
 
@@ -99,9 +105,9 @@ The whole local stack is baked into a single [docker-compose.yml](../docker-comp
 2. **mongodb-init** is a one-shot container that after the replica set is online it creates the admin user, and exits.
 3. **mongot** is MongoDB's search engine that provides the vector index, running along with the database. We will use it within the memory layer to index our data.
 4. **prefect-server** is the Prefect control plane. It exposes the dashboard on port 4200 (accessible at http://127.0.0.1:4200/dashboard). It only orchestrates, it never executes the actual pipeline code.
-5. **prefect-worker** is the executor, built by us as a new Docker image within [apps/memory/docker/Dockerfile](../apps/memory/docker/Dockerfile) that inherits from `python:3.14-slim`, installs our memory app within it via `uv`, and then kicks off with `python -m tree.orchestrator` which serves all the Prefect deployments via the `serve()` Prefect function, we explained in listing 2.46.
+5. **prefect-worker** is the executor, built by us as a new Docker image within [apps/memory/docker/Dockerfile](../apps/memory/docker/Dockerfile) that inherits from `python:3.14-slim`, installs our memory app within it via `uv`, and then kicks off with `uv run python -m tree.orchestrator` which serves all the Prefect deployments via the `serve()` Prefect function, we explained in listing 2.46.
 
-![Figure 2.18 The data-etl-coordinator and data-etl-worker deployments in Prefect's dashboard. Note the data-etl-coordinator scheduled every day at 03:00 AM UTC](assets/2_4_1_prefect_deployments.png)
+![Figure 2.18 The deployments in Prefect's dashboard. Note the offline-pipeline scheduled every day at 03:00 AM UTC](assets/2_4_1_prefect_deployments.png)
 
 You can kick off the entire local infrastructure by running `make local-start`, which will call Docker Compose to do the heavy lifting. Running this will kick off the Prefect deployments within the `prefect-worker` Docker container. In case you want to run it directly locally, to avoid rebuilding the Docker image, you can also start the Prefect worker by running `make memory-serve-workflows`, which will run `uv run python -m tree.orchestrator` directly on the host. When doing so, just make sure to turn off the `prefect-worker` Docker container by commenting it out within the `docker-compose.yml` file or manually shutting it down.
 
