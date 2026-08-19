@@ -185,9 +185,10 @@ opaque). We never draw or run it.
 **Cons**
 - Least control: Prefect's image/runtime, resource ceilings, and **plan limits** bound you.
   Free tier caps a workspace at **1 work pool** (hence read-first pool creation) and **5
-  deployments** (hence `deploy_optional: false` → exactly the 5 core: the two end-to-end pipelines
-  + the two workers + indexing, with the Coordinators demoted to inline subflows; dream is the only
-  gated deployment). Raising concurrency = paid plan.
+  deployments** — spent EXACTLY by the 5 core ones: the two end-to-end pipelines + the two workers
+  + `dream-consolidation-all-users`, with the Coordinators AND indexing demoted to inline subflows.
+  No spec is `optional=True` any more (`deploy_optional: false` therefore withholds nothing) and
+  **no slot is spare**. Raising concurrency = paid plan.
 - Per-run **cold start = clone + `pip install` every container** — real latency; keep the
   install slim (heavy `sentence-transformers`/`modal` backends live in the opt-in `local-models`
   extra, *not* pulled).
@@ -237,7 +238,7 @@ local-start`) and the serve runner.
 
 | Concern | Where |
 |---|---|
-| Deployment topology (single source of truth) | `orchestrator.py` → `_DEPLOYMENT_SPECS` (5 core + 1 optional) |
+| Deployment topology (single source of truth) | `orchestrator.py` → `_DEPLOYMENT_SPECS` (4 core + 1 optional) |
 | Local serve | `serve_deployments()` ← `make memory-serve-workflows` |
 | Managed deploy (IaC: pool + blocks + deployments) | `deploy/prefect_pipelines_setup.py up` ← `make memory-deploy-prefect-setup-up` |
 | Managed CD (code/spec only, on push to `main`) | `deploy/prefect_pipelines.py` ← `make memory-deploy-prefect` (`.github/workflows/cd.yml`) |
@@ -245,11 +246,15 @@ local-start`) and the serve runner.
 | Runtime secrets/config → blocks/variables | `RUNTIME_CONFIG` + `managed_env_templates()` |
 | Trigger data pipeline | `scripts/run_data_pipeline.py` ← `make memory-run-data-pipeline` |
 
-Deployments (all bound to `tree-managed` in prod; `flow_name/deployment_name`):
-`data-etl-worker`, `memory-extract-etl-worker`, `memory-indexing-etl`, `online-pipeline`,
-`offline-pipeline` (+ optional `dream-consolidation-all-users`). The `data_etl_coordinator` /
+Deployments (all 5 bound to `tree-managed` in prod; `flow_name/deployment_name`):
+`data-etl-worker`, `memory-extract-etl-worker`, `online-pipeline`, `offline-pipeline`,
+`dream-consolidation-all-users` (core, no longer optional — it carries its own `0 4 * * *`
+consolidation cron). The `data_etl_coordinator` /
 `memory_extract_etl_coordinator` flows are NOT deployments — they run as inline subflows of an
-`offline-pipeline` run, which also carries the nightly `0 3 * * *` listen-sources cron.
+`offline-pipeline` run, which also carries the nightly `0 3 * * *` listen-sources cron. Neither is
+`memory_indexing` (flow `memory-indexing-etl`): it runs as an inline subflow of whichever flow just
+extracted, and standalone via `make memory-run-indexing-pipeline`, which executes it in the
+operator's own process.
 
 ## Concurrency — the layered governor (orthogonal to topology)
 

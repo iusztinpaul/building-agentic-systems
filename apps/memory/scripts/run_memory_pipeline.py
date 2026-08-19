@@ -5,8 +5,8 @@ A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
 ``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA phase OFF, so the
 run is the extraction step alone. Inside it, the extraction coordinator (#067)
 resolves the doc set, partitions it into ``min(num_shards, N)`` shards,
-dispatches one ``memory-extract-etl-worker`` run per shard, then fires ONE
-trailing ``memory-indexing-etl`` run. Two modes select the doc set:
+dispatches one ``memory-extract-etl-worker`` run per shard, then runs ONE
+trailing ``memory_indexing`` subflow inline. Two modes select the doc set:
 
 * ``--mode offline`` (default) — batch: every PENDING document for the
   resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``

@@ -38,11 +38,9 @@ from tree.offline import TAGS_OFFLINE_PIPELINE, offline_pipeline
 from tree.online import TAGS_ONLINE_PIPELINE, online_pipeline
 from tree.memory.consolidation.dream import dream_consolidation_all_users
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
-from tree.memory.indexing.pipeline import memory_indexing
 from tree.config.constants import (
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,
-    TAGS_INDEXING,
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
 )
@@ -119,8 +117,8 @@ class _DeploymentSpec:
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
     deployment whose runs override the flow's default parameters — e.g.
     ``offline-pipeline``'s nightly cron passes ``source_files=["sources/listen.yaml"]``.
-    ``optional`` marks a deployment as beyond the free-tier 5 — registered only when
-    ``app_config.prefect.deploy_optional`` is true.
+    ``optional`` marks a deployment as beyond the free-tier budget — registered only
+    when ``app_config.prefect.deploy_optional`` is true.
     """
 
     flow: Flow
@@ -144,9 +142,14 @@ class _DeploymentSpec:
         return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
-# The first 5 specs below are the always-on CORE set (free-tier safe); only the
-# trailing dream deployment is OPTIONAL (``optional=True``): registered when
-# ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
+# All 5 specs below are the always-on CORE set, exactly filling Prefect's
+# free-tier cap of 5 deployments per workspace. Indexing gave its slot back when
+# it became an inline subflow, and ``dream-consolidation-all-users`` took it —
+# promoted out of ``optional=True`` so its cron actually fires (a cron on an
+# unregistered deployment does nothing). NO spec is optional today; the
+# ``optional`` flag and ``app_config.prefect.deploy_optional`` are retained as
+# the extension point for the next deployment that must be gated — see
+# ``_active_deployment_specs``.
 # Deployable subsets, keyed by the pipeline-identity tag every spec already
 # carries — so a group never drifts from the specs it selects. NOTE the groups do
 # NOT partition: ``online-pipeline`` / ``offline-pipeline`` carry BOTH identity
@@ -172,12 +175,6 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
-        memory_indexing,
-        "memory-indexing-etl",
-        "apps/memory/src/tree/memory/indexing/pipeline.py:memory_indexing",
-        TAGS_INDEXING,
-    ),
-    _DeploymentSpec(
         online_pipeline,
         "online-pipeline",
         "apps/memory/src/tree/online.py:online_pipeline",
@@ -197,20 +194,23 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "apps/memory/src/tree/memory/consolidation/dream.py:dream_consolidation_all_users",
         ["memory-pipeline", "dream", "consolidation"],
         cron=app_config.dream.cron,
-        optional=True,
     ),
 ]
 
 
 def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSpec]:
-    """The deployments to register: the core 5 plus the optional dream when enabled.
+    """The deployments to register: the core 5 (no spec is optional today).
 
     Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
     YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.
+    The gate currently selects nothing — every spec is core — but is kept as the
+    extension point for the next spec that needs gating.
 
     ``groups`` narrows the set to whole pipelines by their identity tag —
     ``("data",)`` keeps the ``data-pipeline``-tagged specs, ``("memory",)`` keeps
-    extraction + indexing (+ dream). The groups do NOT partition: the e2e
+    the extraction worker + dream. Indexing left the groups with its deployment:
+    it is now an inline subflow of extraction / ``online-pipeline``, so it needs no
+    registration to run. The groups do NOT partition: the e2e
     ``online-pipeline`` / ``offline-pipeline`` carry BOTH tags and so are selected
     by EITHER group. Empty (the default) deploys everything.
     """

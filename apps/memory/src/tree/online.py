@@ -9,10 +9,10 @@ import the other; this module imports both.
 Async-first: callers (MCP ingest tools + the CLI) funnel through
 :func:`dispatch_online_pipeline`, which validates at the edge and fires the
 ``online-pipeline`` core deployment fire-and-forget — ONE flow run on a Prefect
-worker ingests the source into ``documents`` AND runs the extraction worker
-inline, then submits the trailing indexing run. Dispatch REQUIRES a reachable
-Prefect API with that deployment registered; there is no in-process fallback,
-so submission failures propagate to the caller.
+worker ingests the source into ``documents``, runs the extraction worker inline
+AND runs the trailing indexing inline. Dispatch REQUIRES a reachable Prefect API
+with that deployment registered; there is no in-process fallback, so submission
+failures propagate to the caller.
 """
 
 import logging
@@ -33,6 +33,7 @@ from tree.data.online_pipeline import (
 from tree.db import init_mongodb
 from tree.flow_runs import flow_run_status
 from tree.memory.extraction.pipeline import memory_extract_etl_worker
+from tree.memory.indexing.pipeline import memory_indexing
 from tree.config.constants import (
     TAG_DATA_PIPELINE,
     TAG_MEMORY_PIPELINE,
@@ -77,9 +78,10 @@ async def online_pipeline(
     waiting on child runs), so N concurrent online ingests can never become N
     waiting parents starving their own children out of the ``serve(limit)``
     pool. A single document needs no shard fan-out, which is all the
-    coordinator would add. The trailing ``memory-indexing-etl`` run is then
-    SUBMITTED fire-and-forget (indexing is a global backfill — never inline,
-    mirroring the coordinator's index-once-after-extraction contract).
+    coordinator would add. ``memory_indexing`` then runs ONCE as an inline
+    subflow (:func:`_run_indexing`), mirroring the coordinator's
+    index-once-after-extraction contract — since ``free-tier-deployments``
+    indexing is a flow, not a deployment.
 
     ``source`` arrives JSON-serialized (a ``dict``) when dispatched via a
     deployment; already-typed :data:`OnlineSource` objects pass through
@@ -129,31 +131,35 @@ async def online_pipeline(
                     summary.nodes_written,
                     summary.edges_written,
                 )
-                await _submit_indexing(user_id)
+                await _run_indexing(user_id)
             return str(document.id)
     finally:
         # Fail-open telemetry flush — the worker subprocess exits after the run.
         flush_opik()
 
 
-async def _submit_indexing(user_id: PydanticObjectId) -> None:
-    """Fire the trailing ``memory-indexing-etl`` run, fire-and-forget.
+async def _run_indexing(user_id: PydanticObjectId) -> None:
+    """Run the trailing ``memory_indexing`` flow ONCE, inline, fail-open.
 
-    Fail-open: a failed submission is WARNING-logged, never fails the ingest —
+    Indexing stopped being a deployment with ``free-tier-deployments``, so this
+    is an inline subflow of the current ``online-pipeline`` run instead of a
+    submitted flow run. Opik nesting is preserved WITHOUT passing headers: the
+    subflow runs in THIS process, inside this flow's span, so its span nests via
+    the in-process context — the same reason the inline
+    ``memory_extract_etl_worker`` call above forwards none. (The deleted
+    deployment call passed no headers either.)
+
+    Fail-open, unchanged: a failure is WARNING-logged and NEVER fails the ingest —
     the document and its graph content are already durable, and any later
     indexing run (it is a global backfill over unembedded nodes) covers the gap.
     """
 
     try:
-        flow_run = await run_deployment(
-            "memory-indexing-etl/memory-indexing-etl",
-            parameters={"user_id": str(user_id)},
-            timeout=0,
-        )
-        logger.info("Submitted indexing as flow run %s", flow_run.id)
+        await memory_indexing(user_id=user_id)
+        logger.info("Indexed inline for user %s", user_id)
     except Exception as exc:  # noqa: BLE001 — indexing gap, not an ingest failure.
         logger.warning(
-            "Failed to submit memory-indexing-etl (%s: %s); nodes stay "
+            "Inline memory_indexing failed (%s: %s); nodes stay "
             "unembedded until the next indexing run",
             type(exc).__name__,
             exc,

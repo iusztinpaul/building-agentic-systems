@@ -4,7 +4,7 @@ Two surfaces:
 
 * Pure logic in :mod:`tree.orchestrator` (importable directly): the
   ``_GitRepoWithPipInstall`` pull steps, the static ``managed_env_templates``
-  mapping, the ``RUNTIME_CONFIG`` coverage, the 5 deployment specs, and
+  mapping, the ``RUNTIME_CONFIG`` coverage, the 5 core deployment specs, and
   ``_git_ref_kwarg``.
 * The ``up``-only ``_seed_config_stores`` in ``deploy/prefect_pipelines_setup.py``
   (loaded by file path like ``test_atlas_cluster.py``) — the Prefect ``Secret`` /
@@ -82,8 +82,23 @@ class TestManagedEnvTemplates:
 
 
 class TestDeploymentSpecs:
-    def test_exactly_five_deployments(self) -> None:
-        assert len(orchestrator.deployment_full_names()) == 5
+    def test_exactly_five_core_deployments(self) -> None:
+        # Prefect Cloud's free tier caps a workspace at 5 deployments and the core
+        # set now spends EXACTLY 5 — the slot indexing gave back when it became an
+        # inline subflow went to ``dream-consolidation-all-users``. There is no
+        # spare slot: a 6th spec must displace one of these or be gated behind
+        # ``optional=True`` (see ``_active_deployment_specs``), so registering one
+        # more must fail here rather than at ``deploy`` time against Cloud.
+        full_names = orchestrator.deployment_full_names()
+
+        assert len(full_names) == 5
+        assert {name.split("/")[-1] for name in full_names} == {
+            "data-etl-worker",
+            "memory-extract-etl-worker",
+            "online-pipeline",
+            "offline-pipeline",
+            "dream-consolidation-all-users",
+        }
 
     def test_entrypoints_point_at_src_layout_flow_functions(self) -> None:
         for spec in orchestrator._DEPLOYMENT_SPECS:

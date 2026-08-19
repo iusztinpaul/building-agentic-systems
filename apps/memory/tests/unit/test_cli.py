@@ -1,10 +1,9 @@
 """Unit tests for :mod:`tree.cli` — the shared script glue.
 
 Only the logic-bearing helpers: ``build_online_source`` (URL vs file detect)
-and ``wait_for_dispatch`` (deployment vs in-process branching). The Prefect
-client plumbing (``trigger_deployment`` / ``wait_for_flow_run``) is
-infrastructure and is exercised by running the real pipelines (see AGENTS.md
-"Running pipelines & E2E"), not unit-tested.
+and ``wait_for_dispatch`` (blocking on a submitted run). The Prefect client
+plumbing (``wait_for_flow_run``) is infrastructure and is exercised by running
+the real pipelines (see AGENTS.md "Running pipelines & E2E"), not unit-tested.
 """
 
 from __future__ import annotations

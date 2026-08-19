@@ -3,9 +3,9 @@
 Provision the **persistent worker** side of the pipelines — entirely through code,
 mirroring ``deploy/atlas_cluster.py``. Where ``atlas_cluster.py`` owns the MongoDB
 cluster, this owns the Prefect Cloud **Managed work pool**, the config blocks the
-flows read at run time, and the 5 core deployments bound to that pool
-(``data-etl-worker``, ``memory-extract-etl-worker``, ``memory-indexing-etl``,
-``online-pipeline``, ``offline-pipeline``). Once ``up`` runs,
+flows read at run time, and the 4 core deployments bound to that pool
+(``data-etl-worker``, ``memory-extract-etl-worker``, ``online-pipeline``,
+``offline-pipeline``). Once ``up`` runs,
 Prefect hosts the workers, so flow runs the MCP submits (async ingestion) execute
 without any self-hosted ``serve`` process.
 

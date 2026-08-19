@@ -89,7 +89,9 @@ class TestPipelineIdentityTags:
         tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
         assert tags_by_name["data-etl-worker"] == consts.TAGS_DATA_OFFLINE
         assert tags_by_name["memory-extract-etl-worker"] == consts.TAGS_EXTRACTION
-        assert tags_by_name["memory-indexing-etl"] == consts.TAGS_INDEXING
+        # Indexing has no deployment of its own any more (it is an inline subflow),
+        # so the 1:1 mapping is asserted on its FLOW tags instead, above.
+        assert "memory-indexing-etl" not in tags_by_name
         # The e2e pipelines span data + memory, so they carry both identity tags.
         assert tags_by_name["online-pipeline"] == TAGS_ONLINE_PIPELINE
         assert tags_by_name["offline-pipeline"] == TAGS_OFFLINE_PIPELINE

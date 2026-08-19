@@ -110,27 +110,36 @@ make memory-serve-workflows
 
 **Pick one — don't run both.** Running both serves duplicate workers that race for the same deployments.
 
-The deployments registered by `src/tree/orchestrator.py` (the always-on core 5; the data worker dispatches each platform to one unified pipeline in-process — those are NOT separate deployments):
+The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, exactly filling the Prefect free-tier cap; the data worker dispatches each platform to one unified pipeline in-process — those are NOT separate deployments):
 
 - `data-etl-worker` (ingests ONE data shard — a platform bucket or a HuggingFace
   offset window — #072)
 - `memory-extract-etl-worker` (runs the six-task extraction body over one shard of
   pending documents — #067)
-- `memory-indexing-etl` (the shared indexing step: reverse edges, embeddings, search indexes)
 - `online-pipeline`, `offline-pipeline` (the two end-to-end flows in `tree/online.py` /
   `tree/offline.py`; `offline-pipeline` also carries the [nightly cron](#offline--selecting-sources))
+- `dream-consolidation-all-users` (the nightly incremental dedup sweep across every active
+  user, on its own cron — `dream.cron`, `0 4 * * *` UTC)
 
-The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) are still
-FLOWS, but since `free-tier-deployments` they are no longer Deployments: each runs as an **inline
-subflow** of an `offline-pipeline` run, which holds the single admission slot while the Coordinator
-fans out its Workers. Manual single-step runs go through `make memory-run-data-pipeline` /
-`make memory-run-memory-pipeline`, which dispatch `offline-pipeline` with the other phase off.
+The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) and the
+indexing step (`memory_indexing` — reverse edges, embeddings, search indexes) are still FLOWS, but
+they are no longer Deployments: each runs as an **inline subflow**. The Coordinators run inside an
+`offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
+`memory_indexing` runs inside whichever flow just extracted (the extraction Coordinator, or
+`online-pipeline`) — that call already blocked on the indexing run, so inlining it FREED a
+deployment slot instead of costing one. Standalone indexing
+(`make memory-run-indexing-pipeline`) now executes in the operator's own process. Manual
+single-step runs go through `make memory-run-data-pipeline` / `make memory-run-memory-pipeline`,
+which dispatch `offline-pipeline` with the other phase off.
 
 Both end-to-end pipelines carry BOTH identity tags, so they belong to BOTH the `data` and `memory`
 deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-down GROUPS=data`)
 deletes them too, and the next `...-up` restores them.
 
-Plus the optional `dream-consolidation-all-users` (nightly cron) when `prefect.deploy_optional: true` — see [Configuration](#configuration).
+That is 5 of the 5 deployments the Prefect free tier allows, with **no slot spare**: a sixth
+deployment must either displace one of these or be marked `optional=True` and registered only
+when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — see
+[Configuration](#configuration).
 
 ### Pipelines at a glance
 
@@ -239,7 +248,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 | `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
 | `search_memory` | Semantic + text search with graph expansion. Best for open-ended queries. |
 | `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
-| `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget. |
+| `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
 | `scrape_web` | On-demand scrape of one or more URLs via Bright Data Web Unlocker. **Does NOT touch memory.** Returns markdown (or HTML) inline for exploration; pair with `search_web` to read SERP results, then call `ingest_url` on whichever URLs are worth keeping. Max 5 URLs per call. |
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |

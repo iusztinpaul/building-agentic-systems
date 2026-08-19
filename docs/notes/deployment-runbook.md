@@ -42,13 +42,15 @@ Must run BEFORE anything that resolves a user:
 ## 3. Prefect Cloud (pipelines)
 
 ```
-make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 2 data deployments
-make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + indexing when you need them
+make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 3 data deployments
+make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + dream when you need them
 make memory-run-indexing-pipeline USER_ID=<oid>   # first indexing run
 ```
 
 `GROUPS=data|memory` (comma-separated) scopes every verb — `up`, `update`,
-`status`, `down` — to whole pipelines; unset means all 5 deployments. Start with
+`status`, `down` — to whole pipelines; unset means all 5 core deployments (`data` selects 3:
+the data worker + both end-to-end pipelines; `memory` selects 4: the extraction worker + dream +
+both end-to-end pipelines, which carry BOTH identity tags). Start with
 `data` so nothing but ingestion is registered while you verify the cluster, then
 re-run with `memory`. A group-scoped `down` keeps the work pool.
 

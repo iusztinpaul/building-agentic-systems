@@ -1,7 +1,7 @@
 """Unit tests for ``tree.online`` — the cross-pipeline realtime ingest flow.
 
 Covers the ``online-pipeline`` flow (cold-start init, source coercion, inline
-extraction + indexing submit), the edge validator, and
+extraction + inline indexing), the edge validator, and
 ``dispatch_online_pipeline``'s single-path contract: submit the core deployment
 fire-and-forget, report the new run's own state, let failures propagate. The
 DATA-step router itself (``online_ingest``) is covered in
@@ -39,8 +39,9 @@ class TestDataEtlOnlineFlow:
 
     A worker executes it cold, so it must init Mongo itself, coerce the
     JSON-serialized ``source`` dict back to the typed union, run the extraction
-    WORKER inline (the fire-and-forget caller never sees the Document), and
-    submit the trailing indexing run fire-and-forget.
+    WORKER inline (the fire-and-forget caller never sees the Document), and run
+    the trailing ``memory_indexing`` flow inline too — since
+    ``free-tier-deployments`` indexing is a subflow, not a submitted deployment run.
     """
 
     @pytest.fixture(autouse=True)
@@ -48,8 +49,14 @@ class TestDataEtlOnlineFlow:
         mocker.patch("tree.online.init_mongodb", new_callable=AsyncMock)
         mocker.patch("tree.online.flush_opik")
 
-    async def test_coerces_dict_source_extracts_and_submits_indexing(
-        self, mocker
+    @pytest.fixture
+    def mock_indexing(self, mocker) -> AsyncMock:
+        """Stub the INLINE ``memory_indexing`` subflow (no Mongo, no Prefect run)."""
+
+        return mocker.patch("tree.online.memory_indexing", new_callable=AsyncMock)
+
+    async def test_coerces_dict_source_extracts_and_indexes_inline(
+        self, mocker, mock_indexing
     ) -> None:
         doc = MagicMock()
         doc.id = "68a1"
@@ -68,17 +75,18 @@ class TestDataEtlOnlineFlow:
         )
 
         # The dict round-trips to the typed union before hitting the router;
-        # extraction runs INLINE (same run), indexing is submitted (timeout=0).
+        # extraction AND indexing both run INLINE in this same run — no dispatch.
         assert result == "68a1"
         mock_ingest.assert_awaited_once_with(
             UrlSource(uri="https://example.com"), _USER_ID
         )
         mock_extract.assert_awaited_once_with(user_id=_USER_ID, document_ids=["68a1"])
-        mock_run.assert_awaited_once()
-        assert mock_run.await_args.args == ("memory-indexing-etl/memory-indexing-etl",)
-        assert mock_run.await_args.kwargs["timeout"] == 0
+        mock_indexing.assert_awaited_once_with(user_id=_USER_ID)
+        mock_run.assert_not_awaited()
 
-    async def test_duplicate_returns_none_without_extracting(self, mocker) -> None:
+    async def test_duplicate_returns_none_without_extracting(
+        self, mocker, mock_indexing
+    ) -> None:
         mocker.patch(
             "tree.online.online_ingest",
             new_callable=AsyncMock,
@@ -92,8 +100,11 @@ class TestDataEtlOnlineFlow:
 
         assert result is None
         mock_extract.assert_not_awaited()
+        mock_indexing.assert_not_awaited()
 
-    async def test_run_extraction_false_skips_the_memory_step(self, mocker) -> None:
+    async def test_run_extraction_false_skips_the_memory_step(
+        self, mocker, mock_indexing
+    ) -> None:
         doc = MagicMock()
         mocker.patch(
             "tree.online.online_ingest",
@@ -103,8 +114,6 @@ class TestDataEtlOnlineFlow:
         mock_extract = mocker.patch(
             "tree.online.memory_extract_etl_worker", new_callable=AsyncMock
         )
-        mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
-
         await online_pipeline(
             FileSource(path="/tmp/x.md", content="text"),
             _USER_ID,
@@ -112,10 +121,10 @@ class TestDataEtlOnlineFlow:
         )
 
         mock_extract.assert_not_awaited()
-        mock_run.assert_not_awaited()
+        mock_indexing.assert_not_awaited()
 
-    async def test_failed_indexing_submit_does_not_fail_the_ingest(
-        self, mocker
+    async def test_failed_inline_indexing_does_not_fail_the_ingest(
+        self, mocker, mock_indexing
     ) -> None:
         doc = MagicMock()
         doc.id = "68a1"
@@ -123,19 +132,17 @@ class TestDataEtlOnlineFlow:
             "tree.online.online_ingest", new_callable=AsyncMock, return_value=doc
         )
         mocker.patch("tree.online.memory_extract_etl_worker", new_callable=AsyncMock)
-        mocker.patch(
-            "tree.online.run_deployment",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("prefect down"),
-        )
+        mock_indexing.side_effect = RuntimeError("mongot down")
 
-        # Fail-open: the document + graph content are durable; the indexing
-        # gap is WARNING-logged and covered by any later indexing run.
+        # Fail-open (unchanged by going inline): the document + graph content are
+        # durable; the indexing gap is WARNING-logged and covered by any later
+        # indexing run.
         result = await online_pipeline(
             {"type": "url", "uri": "https://example.com"}, _USER_ID
         )
 
         assert result == "68a1"
+        mock_indexing.assert_awaited_once()
 
 
 class TestValidateOnlineSource:

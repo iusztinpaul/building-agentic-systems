@@ -8,7 +8,6 @@ options + one dispatch call:
 
 * the common ``--mode`` / ``--user-id`` / ``--user-identifier`` Click options,
 * tenant resolution (Mongo init + :func:`tree.entities.sessions.resolve_user_id`),
-* triggering a core deployment by name,
 * streaming a flow run's logs while blocking until it is final (runs execute
   on a worker, so their logs live in Prefect — mirroring them here surfaces
   errors in the operator's terminal instead of only the Prefect UI),
@@ -106,19 +105,6 @@ def build_online_source(source: str, title: str | None) -> OnlineSource:
         return UrlSource(uri=source)
     path = str(Path(source).resolve())
     return FileSource(path=path, content=read_file(path), title=title)
-
-
-async def trigger_deployment(name: str, parameters: dict[str, Any]) -> str:
-    """Create a flow run from an always-registered deployment; return its id."""
-
-    async with get_client() as client:
-        deployment = await client.read_deployment_by_name(name)
-        flow_run = await client.create_flow_run_from_deployment(
-            deployment_id=deployment.id,
-            parameters=parameters,
-        )
-    logger.info("Flow run created: %s (%s)", flow_run.id, name)
-    return str(flow_run.id)
 
 
 async def wait_for_flow_run(flow_run_id: str) -> None:
