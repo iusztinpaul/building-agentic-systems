@@ -46,24 +46,12 @@ class TestBuildOnlineSource:
 
 
 class TestWaitForDispatch:
-    async def test_deployment_mode_waits_on_the_flow_run(self, mocker) -> None:
+    async def test_waits_on_the_submitted_flow_run(self, mocker) -> None:
         # Arrange
         mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
 
-        # Act
-        await wait_for_dispatch(
-            {"status": "submitted", "flow_run_id": "abc", "mode": "deployment"}
-        )
+        # Act — dispatch always creates a worker-side run; nothing to branch on.
+        await wait_for_dispatch({"status": "scheduled", "flow_run_id": "abc"})
 
         # Assert
         mock_wait.assert_awaited_once_with("abc")
-
-    async def test_in_process_mode_does_not_wait(self, mocker) -> None:
-        # Arrange
-        mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
-
-        # Act — the inline fallback already ran to completion in-process.
-        await wait_for_dispatch({"status": "ingested", "mode": "in_process"})
-
-        # Assert
-        mock_wait.assert_not_awaited()

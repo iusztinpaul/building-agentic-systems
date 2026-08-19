@@ -16,11 +16,11 @@ consumed by two execution models that must never drift apart:
   ``deploy/prefect_pipelines_setup.py`` (``up``); kept in sync by the CD path
   (``deploy/prefect_pipelines.py``), which only pushes code/spec updates.
 
-Every flow exposes ``user_id`` as a required parameter — operators MUST pass it
-when triggering a deployment, e.g.::
+Every flow exposes ``user_id``: the worker deployments REQUIRE it, the end-to-end
+``online-pipeline`` / ``offline-pipeline`` default it to ``None`` (= every active
+user). Trigger a deployment with, e.g.::
 
-    prefect deployment run \\
-        memory-extract-etl-coordinator/memory-extract-etl-coordinator \\
+    prefect deployment run offline-pipeline/offline-pipeline \\
         -p user_id=507f1f77bcf86cd799439011
 """
 
@@ -33,14 +33,11 @@ from prefect.runner.storage import GitRepository
 from prefect.schedules import Cron
 
 from tree.config.app_config import app_config
-from tree.data.offline_pipeline import data_etl_coordinator, data_etl_worker
+from tree.data.offline_pipeline import data_etl_worker
 from tree.offline import TAGS_OFFLINE_PIPELINE, offline_pipeline
 from tree.online import TAGS_ONLINE_PIPELINE, online_pipeline
 from tree.memory.consolidation.dream import dream_consolidation_all_users
-from tree.memory.extraction.pipeline import (
-    memory_extract_etl_coordinator,
-    memory_extract_etl_worker,
-)
+from tree.memory.extraction.pipeline import memory_extract_etl_worker
 from tree.memory.indexing.pipeline import memory_indexing
 from tree.config.constants import (
     TAGS_DATA_OFFLINE,
@@ -104,10 +101,11 @@ class _GitRepoWithPipInstall(GitRepository):
         ]
 
 
-# Nightly schedule for the data pipeline's scheduled run (UTC). The cron fires
-# ``data-etl-coordinator`` with ``source_files=["sources/listen.yaml"]`` and no
-# ``user_id`` — so it ingests the polled listen feeds, fanned out across all active
-# users.
+# Nightly schedule for the end-to-end offline run (UTC). The cron fires
+# ``offline-pipeline`` with ``source_files=["sources/listen.yaml"]`` and no
+# ``user_id`` — so it ingests the polled listen feeds fanned out across all active
+# users AND extracts + indexes them, instead of leaving the nightly documents
+# PENDING as the old data-only schedule did.
 _SCHEDULED_INGEST_CRON = "0 3 * * *"
 
 
@@ -119,8 +117,8 @@ class _DeploymentSpec:
     the ``from_source`` accessor). ``entrypoint`` is the repo-relative
     ``path:function`` Prefect's managed worker loads after cloning the repo.
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
-    deployment whose runs override the flow's default parameters — e.g. the data
-    coordinator's nightly cron passes ``source_files=["sources/listen.yaml"]``.
+    deployment whose runs override the flow's default parameters — e.g.
+    ``offline-pipeline``'s nightly cron passes ``source_files=["sources/listen.yaml"]``.
     ``optional`` marks a deployment as beyond the free-tier 5 — registered only when
     ``app_config.prefect.deploy_optional`` is true.
     """
@@ -146,11 +144,15 @@ class _DeploymentSpec:
         return [Cron(self.cron, parameters=self.schedule_parameters)]
 
 
-# The first 5 are the always-on CORE set (free-tier safe). The trailing online
-# and dream deployments are OPTIONAL (``optional=True``): registered only when
+# The first 5 specs below are the always-on CORE set (free-tier safe); only the
+# trailing dream deployment is OPTIONAL (``optional=True``): registered when
 # ``app_config.prefect.deploy_optional`` is true — see ``_active_deployment_specs``.
 # Deployable subsets, keyed by the pipeline-identity tag every spec already
-# carries — so a group never drifts from the specs it selects.
+# carries — so a group never drifts from the specs it selects. NOTE the groups do
+# NOT partition: ``online-pipeline`` / ``offline-pipeline`` carry BOTH identity
+# tags (they span data + memory), so they belong to BOTH groups — a
+# ``down --groups data`` OR ``--groups memory`` deletes them, and the next ``up``
+# restores them.
 DEPLOYMENT_GROUPS: dict[str, str] = {
     "data": TAG_DATA_PIPELINE,
     "memory": TAG_MEMORY_PIPELINE,
@@ -158,24 +160,10 @@ DEPLOYMENT_GROUPS: dict[str, str] = {
 
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
-        data_etl_coordinator,
-        "data-etl-coordinator",
-        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_coordinator",
-        TAGS_DATA_OFFLINE,
-        cron=_SCHEDULED_INGEST_CRON,
-        schedule_parameters={"source_files": ["sources/listen.yaml"]},
-    ),
-    _DeploymentSpec(
         data_etl_worker,
         "data-etl-worker",
         "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
         TAGS_DATA_OFFLINE,
-    ),
-    _DeploymentSpec(
-        memory_extract_etl_coordinator,
-        "memory-extract-etl-coordinator",
-        "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_coordinator",
-        TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
         memory_extract_etl_worker,
@@ -194,14 +182,14 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "online-pipeline",
         "apps/memory/src/tree/online.py:online_pipeline",
         TAGS_ONLINE_PIPELINE,
-        optional=True,
     ),
     _DeploymentSpec(
         offline_pipeline,
         "offline-pipeline",
         "apps/memory/src/tree/offline.py:offline_pipeline",
         TAGS_OFFLINE_PIPELINE,
-        optional=True,
+        cron=_SCHEDULED_INGEST_CRON,
+        schedule_parameters={"source_files": ["sources/listen.yaml"]},
     ),
     _DeploymentSpec(
         dream_consolidation_all_users,
@@ -215,14 +203,16 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
 
 
 def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSpec]:
-    """The deployments to register: the core 5 plus the optional ones when enabled.
+    """The deployments to register: the core 5 plus the optional dream when enabled.
 
     Reads ``app_config.prefect.deploy_optional`` at call time so the gate honours
     YAML, the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches.
 
     ``groups`` narrows the set to whole pipelines by their identity tag —
-    ``("data",)`` keeps the two ``data-pipeline`` specs, ``("memory",)`` keeps
-    extraction + indexing (+ dream). Empty (the default) deploys everything.
+    ``("data",)`` keeps the ``data-pipeline``-tagged specs, ``("memory",)`` keeps
+    extraction + indexing (+ dream). The groups do NOT partition: the e2e
+    ``online-pipeline`` / ``offline-pipeline`` carry BOTH tags and so are selected
+    by EITHER group. Empty (the default) deploys everything.
     """
 
     deploy_optional = app_config.prefect.deploy_optional

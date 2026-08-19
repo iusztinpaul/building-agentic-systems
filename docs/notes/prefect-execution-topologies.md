@@ -71,8 +71,8 @@ scheduler ─mints─▶ flow run [Scheduled]  (stamped: pool + deployment_id)
 ```
 
 Routing key is **`deployment_id`** stamped on each run, *not* the queue: one poller drains the
-whole pool and, per run, loads that deployment's entrypoint (`data_etl_coordinator` vs
-`data_etl_worker`). That's why coordinator-runs and worker-runs coexist in one queue with zero
+whole pool and, per run, loads that deployment's entrypoint (`offline_pipeline` vs
+`data_etl_worker`). That's why parent-runs and worker-runs coexist in one queue with zero
 routing logic.
 
 ---
@@ -162,7 +162,10 @@ Per-run, each container:
 The coordinator→worker fan-out is unchanged: `data_etl_coordinator` shards by platform and
 `run_deployment`s one `data-etl-worker` per shard back through the queue → Prefect launches a
 container for each → each writes `documents`. (Data pipeline has **no** trailing index; that's the
-extraction pipeline.)
+extraction pipeline.) Since `free-tier-deployments` the Coordinator is no longer a deployment of
+its own: it executes as an **inline subflow inside the `offline-pipeline` run**, so it's that
+parent container — not a dedicated coordinator container — that holds the slot while the workers
+run.
 
 **Who owns what.** Prefect owns *everything* in the execution path — control plane **and** the
 invisible poller **and** the container infra. We own only the flow code, the deployment specs, the
@@ -176,14 +179,15 @@ opaque). We never draw or run it.
   code in sync; runs "just execute."
 - True scale-to-zero; nothing idle.
 - Fits the async MCP ingest path: the MCP server fires
-  `create_flow_run_from_deployment(memory-extract-etl-coordinator)` and returns — Prefect executes
+  `create_flow_run_from_deployment(online-pipeline)` and returns — Prefect executes
   it out-of-band with no `serve` process alive.
 
 **Cons**
 - Least control: Prefect's image/runtime, resource ceilings, and **plan limits** bound you.
   Free tier caps a workspace at **1 work pool** (hence read-first pool creation) and **5
-  deployments** (hence `deploy_optional: false` → exactly the 5 core; the dream deployment is
-  gated off). Raising concurrency = paid plan.
+  deployments** (hence `deploy_optional: false` → exactly the 5 core: the two end-to-end pipelines
+  + the two workers + indexing, with the Coordinators demoted to inline subflows; dream is the only
+  gated deployment). Raising concurrency = paid plan.
 - Per-run **cold start = clone + `pip install` every container** — real latency; keep the
   install slim (heavy `sentence-transformers`/`modal` backends live in the opt-in `local-models`
   extra, *not* pulled).
@@ -204,9 +208,9 @@ Client/cron ─▶ local Prefect server (queue) ◀─poll─ serve() runner (on
 `serve(*build_deployments(), limit=runner_global_limit)`. Deployments are registered **poolless**
 (`spec.flow.to_deployment(...)`). The `serve()` **runner** is one long-lived process that polls
 the API for **its own deployments** (bypassing pools/queues entirely) and submits each due run to
-a **host subprocess** — not a container. Fan-out still works: the coordinator subprocess
-`run_deployment`s worker runs, the *same* runner picks them up as more subprocesses (both count
-against `limit`).
+a **host subprocess** — not a container. Fan-out still works: the `offline-pipeline` subprocess
+hosting the coordinator subflow `run_deployment`s worker runs, the *same* runner picks them up as
+more subprocesses (both count against `limit`).
 
 > Naming gotcha: the `prefect-worker` service in `docker-compose.yml` also runs
 > `uv run python -m tree.orchestrator` — i.e. it's the **serve() runner containerized**, NOT
@@ -242,8 +246,10 @@ local-start`) and the serve runner.
 | Trigger data pipeline | `scripts/run_data_pipeline.py` ← `make memory-run-data-pipeline` |
 
 Deployments (all bound to `tree-managed` in prod; `flow_name/deployment_name`):
-`data-etl-coordinator`, `data-etl-worker`, `memory-extract-etl-coordinator`,
-`memory-extract-etl-worker`, `memory-indexing-etl` (+ optional `dream-consolidation-all-users`).
+`data-etl-worker`, `memory-extract-etl-worker`, `memory-indexing-etl`, `online-pipeline`,
+`offline-pipeline` (+ optional `dream-consolidation-all-users`). The `data_etl_coordinator` /
+`memory_extract_etl_coordinator` flows are NOT deployments — they run as inline subflows of an
+`offline-pipeline` run, which also carries the nightly `0 3 * * *` listen-sources cron.
 
 ## Concurrency — the layered governor (orthogonal to topology)
 
@@ -279,19 +285,23 @@ decide real parallelism:
 **Walkthrough — a 6-shard batch on the data pipeline:**
 
 ```
-1. trigger data-etl-coordinator      → 1 coordinator container [Running]
+1. trigger offline-pipeline          → 1 parent container [Running] (data phase only:
+   run_extraction=False; it hosts data_etl_coordinator as an inline subflow)
 2. shards into 6 → run_deployment ×6 → 6 data-etl-worker runs [Scheduled] on the queue
-3. coordinator BLOCKS on asyncio.gather → its container stays Running, holding 1 slot
+3. coordinator BLOCKS on asyncio.gather → the parent container stays Running, holding 1 slot
 4. Prefect launches worker containers, bounded by the cap C:
-     C ≥ 7  → all 6 run at once             (fully parallel: 6 workers + 1 coordinator)
+     C ≥ 7  → all 6 run at once             (fully parallel: 6 workers + 1 parent)
      C < 7  → only C−1 workers run; each finish frees a slot → next Scheduled worker starts
      unset  → plan cap decides (free tier: a few at a time, not all 6)
 5. each worker: platform ETL → dedupe-insert `documents` → exit → frees a slot
-6. all 6 done → gather returns → coordinator exits.  No trailing index (data pipeline).
+6. all 6 done → gather returns → coordinator subflow (and its parent run) exits.
+   No trailing index (data pipeline).
 ```
 
-So: **parallel up to `cap − 1`** (the coordinator holds one slot the whole time it waits on its
-children), and the rest sit `Scheduled`/`AwaitingConcurrencySlot`, draining as slots free.
+Slot math is unchanged by the inline-subflow move: the `offline-pipeline` run costs the same single
+slot a standalone coordinator run used to. So: **parallel up to `cap − 1`** (the parent holds one
+slot the whole time its coordinator waits on the children), and the rest sit
+`Scheduled`/`AwaitingConcurrencySlot`, draining as slots free.
 
 **Sizing rule (avoid starvation / deadlock).** Because the blocking coordinator occupies a slot,
 a too-small cap starves its own children; at the extreme, nested fan-outs where parents hold every

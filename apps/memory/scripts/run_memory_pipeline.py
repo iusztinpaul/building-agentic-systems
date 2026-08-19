@@ -1,11 +1,12 @@
 """
 Run the MEMORY extraction pipeline (``documents`` → knowledge graph).
 
-A light CLI shim (glue lives in :mod:`tree.cli`) over the
-``memory-extract-etl-coordinator`` deployment (#067): the coordinator resolves
-the doc set, partitions it into ``min(num_shards, N)`` shards, dispatches one
-``memory-extract-etl-worker`` run per shard, then fires ONE trailing
-``memory-indexing-etl`` run. Two modes select the doc set:
+A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
+``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA phase OFF, so the
+run is the extraction step alone. Inside it, the extraction coordinator (#067)
+resolves the doc set, partitions it into ``min(num_shards, N)`` shards,
+dispatches one ``memory-extract-etl-worker`` run per shard, then fires ONE
+trailing ``memory-indexing-etl`` run. Two modes select the doc set:
 
 * ``--mode offline`` (default) — batch: every PENDING document for the
   resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``
@@ -13,6 +14,11 @@ the doc set, partitions it into ``min(num_shards, N)`` shards, dispatches one
 * ``--mode online`` — realtime: exactly the ``--doc-ids`` you pass (required;
   e.g. the id printed by ``run_data_pipeline.py --mode online``). No shard
   fan-out — a handful of docs needs one worker.
+
+The command blocks streaming the run's logs and exits non-zero on failure. The
+``offline-pipeline`` deployment is core (always registered), and dispatch needs
+a reachable Prefect API — there is no in-process fallback, so a submission
+failure surfaces here as an error.
 
 Every run is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>``
@@ -31,7 +37,6 @@ Usage:
 
 import asyncio
 import logging
-from typing import Any
 
 import click
 
@@ -39,16 +44,15 @@ from tree.cli import (
     MODE_ONLINE,
     connect_and_resolve_user,
     mode_option,
-    trigger_deployment,
     user_options,
-    wait_for_flow_run,
+    wait_for_dispatch,
 )
 from tree.logging import init_logger
+from tree.observability import flush_opik
+from tree.offline import dispatch_offline_pipeline
 
 init_logger()
 logger = logging.getLogger(__name__)
-
-DEPLOYMENT_NAME = "memory-extract-etl-coordinator/memory-extract-etl-coordinator"
 
 
 async def _run(
@@ -58,13 +62,15 @@ async def _run(
     num_shards: int | None,
 ) -> None:
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
-    parameters: dict[str, Any] = {"user_id": str(resolved_user_id)}
-    if document_ids:
-        parameters["document_ids"] = document_ids
-    if num_shards is not None:
-        parameters["num_shards"] = num_shards
-    flow_run_id = await trigger_deployment(DEPLOYMENT_NAME, parameters)
-    await wait_for_flow_run(flow_run_id)
+    result = await dispatch_offline_pipeline(
+        user_id=resolved_user_id,
+        document_ids=document_ids,
+        num_shards=num_shards if num_shards is not None else 1,
+        run_data=False,
+    )
+    await wait_for_dispatch(result)
+    # The dispatcher's spans belong to this short-lived process — flush before exit.
+    flush_opik()
 
 
 @click.command()

@@ -52,19 +52,15 @@ class TestSerialize:
 class TestIngestTail:
     """``_ingest`` delegates to ``dispatch_online_pipeline`` and serializes to JSON.
 
-    The deployment-vs-inline branching itself is the dispatcher's contract,
-    covered in ``tests/unit/data/test_online_pipeline.py``.
+    The submit contract itself (status derived from the new flow run, failures
+    propagating) is the dispatcher's, covered in ``tests/unit/test_online.py``.
     """
 
     async def test_merges_dup_extra_into_the_dispatch_result(self, mocker):
         mock_dispatch = mocker.patch(
             "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
-            return_value={
-                "status": "submitted",
-                "flow_run_id": "run-1",
-                "mode": "deployment",
-            },
+            return_value={"status": "scheduled", "flow_run_id": "run-1"},
         )
 
         result = await _ingest(
@@ -74,9 +70,8 @@ class TestIngestTail:
         )
 
         assert json.loads(result) == {
-            "status": "submitted",
+            "status": "scheduled",
             "flow_run_id": "run-1",
-            "mode": "deployment",
             "url": "https://example.com",
         }
         mock_dispatch.assert_awaited_once_with(

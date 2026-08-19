@@ -112,12 +112,23 @@ make memory-serve-workflows
 
 The deployments registered by `src/tree/orchestrator.py` (the always-on core 5; the data worker dispatches each platform to one unified pipeline in-process — those are NOT separate deployments):
 
-- `data-etl-coordinator`, `data-etl-worker` (data ingestion is split into an
-  operator-facing coordinator that groups the configured `sources:` list by platform
-  and windows HuggingFace, and a worker that ingests one shard — #072)
-- `memory-extract-etl-coordinator`, `memory-extract-etl-worker` (memory extraction
-  is split into a coordinator that shards pending docs + indexes once and a worker
-  that runs the six-task extraction body — #067), `memory-indexing-etl`
+- `data-etl-worker` (ingests ONE data shard — a platform bucket or a HuggingFace
+  offset window — #072)
+- `memory-extract-etl-worker` (runs the six-task extraction body over one shard of
+  pending documents — #067)
+- `memory-indexing-etl` (the shared indexing step: reverse edges, embeddings, search indexes)
+- `online-pipeline`, `offline-pipeline` (the two end-to-end flows in `tree/online.py` /
+  `tree/offline.py`; `offline-pipeline` also carries the [nightly cron](#offline--selecting-sources))
+
+The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) are still
+FLOWS, but since `free-tier-deployments` they are no longer Deployments: each runs as an **inline
+subflow** of an `offline-pipeline` run, which holds the single admission slot while the Coordinator
+fans out its Workers. Manual single-step runs go through `make memory-run-data-pipeline` /
+`make memory-run-memory-pipeline`, which dispatch `offline-pipeline` with the other phase off.
+
+Both end-to-end pipelines carry BOTH identity tags, so they belong to BOTH the `data` and `memory`
+deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-down GROUPS=data`)
+deletes them too, and the next `...-up` restores them.
 
 Plus the optional `dream-consolidation-all-users` (nightly cron) when `prefect.deploy_optional: true` — see [Configuration](#configuration).
 
@@ -159,7 +170,7 @@ make memory-run-data-pipeline URI="https://blog.com/feed=substack_rss https://ne
 make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
-Triggers `data-etl-coordinator`: resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
+Dispatches ONE `offline-pipeline` run with `run_extraction=False` (data phase only). Inside it, the data **Coordinator** runs as an inline subflow: it resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
 
 Source selection is freely combinable (ADR-003):
 
@@ -168,7 +179,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) runs the same coordinator with `source_files=["sources/listen.yaml"]` and no `user_id` — ingesting the polled listen feeds fanned out across **all active users**. The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND extracts them into the graph AND indexes, fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 
@@ -181,7 +192,7 @@ Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL 
 
 ### Memory extraction
 
-Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both via `memory-extract-etl-coordinator` (which also fires one trailing index run):
+Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both dispatched as ONE `offline-pipeline` run with `run_data=False` (extraction phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)

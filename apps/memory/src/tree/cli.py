@@ -158,13 +158,14 @@ async def wait_for_flow_run(flow_run_id: str) -> None:
 async def wait_for_dispatch(result: dict[str, Any]) -> None:
     """Block on a ``dispatch_*_pipeline`` result — waiting stays a CLI concern.
 
-    ``mode == "deployment"`` → stream the submitted run to completion;
-    ``mode == "in_process"`` → the inline fallback already ran the flow to
-    completion in this process, so just report its result.
+    Dispatch always creates a worker-side flow run (there is no in-process
+    path), so there is nothing to branch on: log the submitted run and stream
+    it to completion.
     """
 
-    if result["mode"] == "deployment":
-        logger.info("Submitted flow run %s; waiting for it...", result["flow_run_id"])
-        await wait_for_flow_run(result["flow_run_id"])
-    else:
-        logger.info("Ran in-process (no deployment registered): %s", result)
+    logger.info(
+        "Submitted flow run %s (%s); waiting for it...",
+        result["flow_run_id"],
+        result["status"],
+    )
+    await wait_for_flow_run(result["flow_run_id"])

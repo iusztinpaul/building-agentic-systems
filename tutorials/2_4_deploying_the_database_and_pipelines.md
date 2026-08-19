@@ -190,12 +190,16 @@ Outputs:
 ```
 Seeded 14 runtime config store(s).
 Created prefect:managed work pool 'tree-managed'.
-Deployed 2 pipeline(s) to tree-managed: data-etl-coordinator, …
+Deployed 3 pipeline(s) to tree-managed: data-etl-worker, online-pipeline, offline-pipeline
 ```
+
+`GROUPS=data` selects `data-etl-worker` plus the two end-to-end pipelines — `online-pipeline` and `offline-pipeline` carry BOTH the data and the memory identity tag, so they belong to BOTH groups (a `...-down GROUPS=data` deletes them too, and the next `...-up` puts them back). Unset `GROUPS` deploys all 5 core deployments: `data-etl-worker`, `memory-extract-etl-worker`, `memory-indexing-etl`, `online-pipeline`, `offline-pipeline`.
 
 After running the setup-up command, you should see within your Prefect Cloud dashboard a setup similar to this:
 
 ![Figure 2.24 The pipelines in Prefect Cloud](assets/figure_2_24_prefect_cloud.png)
+
+> **Note — the screenshots predate the current topology.** Figure 2.24 and Figure 2.17 (plus the quoted `Deployed N pipeline(s)` transcript they were captured with) come from the pre-`free-tier-deployments` layout, where `data-etl-coordinator` and `memory-extract-etl-coordinator` were registered deployments of their own. They now show a **superseded** layout. The deployment names you will actually see are the ones written above: the coordinators are still flows, but they run as inline subflows of an `offline-pipeline` run instead of as separate deployments.
 
 **Check:** verify the user and the deployments exist:
 
@@ -233,7 +237,7 @@ make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml"
 
 After the flow successfully completes, within Prefect Cloud's flow tab, you should see something similar to the image below:
 
-![Figure 2.17 The backfill in the Prefect UI. One data-etl-coordinator run dispatches five data-etl-worker runs](assets/figure_2_17_prefect_backfill.png)
+![Figure 2.17 The backfill in the Prefect UI (superseded layout). One offline-pipeline run hosts the data coordinator subflow, which dispatches five data-etl-worker runs](assets/figure_2_17_prefect_backfill.png)
 
 **Check:** confirm the backfill actually landed in the cloud database:
 

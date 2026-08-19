@@ -1,4 +1,4 @@
-"""Unit tests for ``tree.orchestrator`` (#065, finalized #069).
+"""Unit tests for ``tree.orchestrator`` (#065, retopologized #100).
 
 Guards the one thing CI never exercises and the fan-out tests never reach:
 the actual ``prefect.serve(...)`` invocation. ``make memory-serve-workflows``
@@ -8,14 +8,14 @@ which ``prefect.serve`` does not accept (it forwards through ``**kwargs`` into
 installed Prefect 3.6.19. We do NOT unit-test Prefect internals here; this is a
 focused contract check on OUR call to ``serve``.
 
-#069 finalizes the registered-deployment-name set after BOTH the memory (#067)
-and data (#068) coordinator/worker splits have landed: the registration
-assertion now reflects the FINAL topology — the four new coordinator/worker
-deployments plus the unchanged indexing, ingest, and dream-cron deployments —
-and the two retired single-flow deployments (``memory-extraction-etl``,
-``data-pipeline-etl``) are asserted ABSENT. The #065 admission-control guards
-(``limit`` not ``global_limit``; binding to the real ``prefect.serve``
-signature) and the dream-cron schedule guard are preserved.
+#100 pins the CURRENT core-5 topology: the two coordinator deployments
+(``data-etl-coordinator``, ``memory-extract-etl-coordinator``) are dropped — the
+flows now run as inline subflows of ``offline-pipeline`` — and the end-to-end
+``online-pipeline`` / ``offline-pipeline`` are promoted out of ``optional=True``,
+leaving ``dream-consolidation-all-users`` the only optional spec. The nightly cron
+moves onto ``offline-pipeline`` so scheduled ingests also extract + index. The
+#065 admission-control guards (``limit`` not ``global_limit``; binding to the real
+``prefect.serve`` signature) and the schedule guard are preserved.
 """
 
 from __future__ import annotations
@@ -76,14 +76,12 @@ def test_serve_deployments_kwargs_bind_to_real_serve_signature(mocker):
 
 
 def test_serve_deployments_registers_all_deployments(mocker):
-    """The registered deployment set is EXACTLY the final post-split topology (#069).
+    """The registered deployment set is EXACTLY the core 5 (#100).
 
     Compares the FULL set of registered deployment names (not a subset / membership
     check) so any future drift — a dropped, renamed, or accidentally added
-    deployment — fails this test. After the memory (#067) and data (#068)
-    coordinator/worker splits, the set is the four new coordinator/worker
-    deployments plus the unchanged indexing, ingest, and dream deployments. The two
-    retired single-flow deployments are explicitly asserted ABSENT.
+    deployment — fails this test. The set is the two workers + indexing plus the
+    promoted end-to-end pipelines; every retired deployment name is asserted ABSENT.
     """
 
     # Arrange
@@ -96,20 +94,21 @@ def test_serve_deployments_registers_all_deployments(mocker):
     call = spy.call_args
     deployment_names = {dep.name for dep in call.args}
     assert deployment_names == {
-        # #068: the single ``data-pipeline-etl`` deployment is split into the
-        # coordinator + worker. The old name is GONE.
-        "data-etl-coordinator",
         "data-etl-worker",
-        # #067: the single ``memory-extraction-etl`` deployment is split into the
-        # coordinator + worker. The old name is GONE.
-        "memory-extract-etl-coordinator",
         "memory-extract-etl-worker",
         "memory-indexing-etl",
+        # #100: promoted out of ``optional=True`` — the e2e entrypoints are core.
+        "online-pipeline",
+        "offline-pipeline",
         # The optional dream deployment is gated by ``prefect.deploy_optional``
         # (default false) — absent here, asserted present in
         # ``test_deploy_optional_enabled_registers_optional``.
     }
-    # The two retired single-flow deployments must not linger in the registration.
+    # #100: the coordinators run as inline subflows of ``offline-pipeline`` and are
+    # no longer deployments of their own.
+    assert "data-etl-coordinator" not in deployment_names
+    assert "memory-extract-etl-coordinator" not in deployment_names
+    # The retired single-flow deployments must not linger in the registration.
     assert "memory-extraction-etl" not in deployment_names
     assert "data-pipeline-etl" not in deployment_names
     # The pre-#066 fan-out deployment is also gone.
@@ -125,13 +124,14 @@ def test_deploy_optional_disabled_by_default(mocker):
 
     names = {dep.name for dep in spy.call_args.args}
     assert len(names) == 5
-    assert "online-pipeline" not in names
-    assert "offline-pipeline" not in names
+    # #100: the e2e pipelines are part of the core 5, not gated by the flag.
+    assert "online-pipeline" in names
+    assert "offline-pipeline" in names
     assert "dream-consolidation-all-users" not in names
 
 
 def test_deploy_optional_enabled_registers_optional(mocker):
-    """``prefect.deploy_optional`` true adds the online, offline-e2e + dream deployments."""
+    """``prefect.deploy_optional`` true adds dream — the only optional spec left."""
 
     mocker.patch.object(orchestrator.app_config.prefect, "deploy_optional", True)
     spy = mocker.patch("tree.orchestrator.serve")
@@ -139,20 +139,19 @@ def test_deploy_optional_enabled_registers_optional(mocker):
     orchestrator.serve_deployments(limit=4)
 
     names = {dep.name for dep in spy.call_args.args}
-    assert len(names) == 8
-    assert "online-pipeline" in names
-    assert "offline-pipeline" in names
+    assert len(names) == 6
     assert "dream-consolidation-all-users" in names
 
 
-def test_serve_deployments_schedules_only_the_data_coordinator(mocker):
-    """``data-etl-coordinator`` is the ONLY scheduled deployment.
+def test_serve_deployments_schedules_only_the_offline_pipeline(mocker):
+    """``offline-pipeline`` is the ONLY scheduled deployment (#100).
 
-    Its deployment carries ONE nightly cron whose runs override
+    It carries ONE nightly cron whose runs override
     ``source_files=["sources/listen.yaml"]`` (so the schedule ingests the polled
-    listen feeds, while manual runs ingest the default/operator-selected set). No
-    worker/indexing deployment may be given a schedule — guards against a cron
-    dropped from the coordinator or attached to the wrong deployment.
+    listen feeds AND extracts + indexes them, while manual runs ingest the
+    default/operator-selected set). No worker/indexing deployment may be given a
+    schedule — guards against a cron dropped from the e2e pipeline or attached to
+    the wrong deployment.
     """
 
     # Arrange
@@ -173,7 +172,7 @@ def test_serve_deployments_schedules_only_the_data_coordinator(mocker):
     }
     scheduled = {name: scheds for name, scheds in schedules_by_name.items() if scheds}
     assert scheduled == {
-        "data-etl-coordinator": [
+        "offline-pipeline": [
             (
                 orchestrator._SCHEDULED_INGEST_CRON,
                 {"source_files": ["sources/listen.yaml"]},
@@ -243,21 +242,40 @@ def test_deployment_groups_select_whole_pipelines():
     """``groups`` narrows the deploy set by pipeline; empty keeps everything.
 
     The selector matches on the identity tag each spec already carries, so a
-    group can never drift from its specs. An unknown group is a typo that would
-    otherwise silently deploy nothing — it must raise instead.
+    group can never drift from its specs. Since #100 the groups do NOT partition:
+    ``online-pipeline`` / ``offline-pipeline`` span data AND memory, so they carry
+    both identity tags and land in BOTH groups — pinned here as the documented
+    overlap. An unknown group is a typo that would otherwise silently deploy
+    nothing — it must raise instead.
     """
 
     # Arrange / Act
     def names(groups: tuple[str, ...]) -> set[str]:
         return {s.name for s in orchestrator._active_deployment_specs(groups)}
 
-    # Assert — the two groups partition the full set, no overlap, no leftovers.
-    assert names(("data",)) == {"data-etl-coordinator", "data-etl-worker"}
-    assert names(("memory",)) == names(()) - names(("data",))
+    # Assert — each group covers its pipeline plus the two e2e deployments.
+    assert names(("data",)) == {
+        "data-etl-worker",
+        "online-pipeline",
+        "offline-pipeline",
+    }
+    assert names(("memory",)) == {
+        "memory-extract-etl-worker",
+        "memory-indexing-etl",
+        "online-pipeline",
+        "offline-pipeline",
+    }
+    # The union is still the full set; the overlap is EXACTLY the e2e pipelines.
     assert names(("data", "memory")) == names(())
+    assert names(("data",)) | names(("memory",)) == names(())
+    assert names(("data",)) & names(("memory",)) == {
+        "online-pipeline",
+        "offline-pipeline",
+    }
 
     # The same selector reaches the names `status`/`down` address deployments by,
-    # so a group-scoped teardown can't touch the other pipeline's deployments.
+    # so a group-scoped teardown stays within that group's specs (the shared e2e
+    # pipelines included — the next `up` restores them).
     scoped = orchestrator.deployment_full_names(("data",))
     assert {n.split("/")[-1] for n in scoped} == names(("data",))
     assert len(scoped) < len(orchestrator.deployment_full_names())

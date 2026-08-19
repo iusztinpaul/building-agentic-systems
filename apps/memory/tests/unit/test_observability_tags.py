@@ -82,14 +82,17 @@ class TestPipelineIdentityTags:
 
     def test_prefect_deployment_tags_match_opik_1to1(self) -> None:
         # The Prefect deployment specs carry the SAME pipeline-identity tags.
+        from tree.offline import TAGS_OFFLINE_PIPELINE
+        from tree.online import TAGS_ONLINE_PIPELINE
         from tree.orchestrator import _DEPLOYMENT_SPECS
 
         tags_by_name = {s.name: s.tags for s in _DEPLOYMENT_SPECS}
-        assert tags_by_name["data-etl-coordinator"] == consts.TAGS_DATA_OFFLINE
         assert tags_by_name["data-etl-worker"] == consts.TAGS_DATA_OFFLINE
-        assert tags_by_name["memory-extract-etl-coordinator"] == consts.TAGS_EXTRACTION
         assert tags_by_name["memory-extract-etl-worker"] == consts.TAGS_EXTRACTION
         assert tags_by_name["memory-indexing-etl"] == consts.TAGS_INDEXING
+        # The e2e pipelines span data + memory, so they carry both identity tags.
+        assert tags_by_name["online-pipeline"] == TAGS_ONLINE_PIPELINE
+        assert tags_by_name["offline-pipeline"] == TAGS_OFFLINE_PIPELINE
 
 
 class TestMcpToolTags:

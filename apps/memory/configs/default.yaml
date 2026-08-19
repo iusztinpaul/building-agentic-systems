@@ -85,12 +85,14 @@ concurrency:
   runner_global_limit: 6
 
 prefect:
-  # Register the optional deployment (the scheduled dream consolidation) on top of
-  # the 5 always-on core ones. Prefect Cloud's FREE TIER caps a workspace at 5
-  # deployments, so keep this false there; set true on a paid plan or a
-  # self-hosted Prefect server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
-  # No flag for the online ingest path: callers submit the online-pipeline
-  # deployment when it is registered and run the same flow in-process otherwise.
+  # Register the ONLY optional deployment (the scheduled dream consolidation) on
+  # top of the 5 always-on core ones: data-etl-worker, memory-extract-etl-worker,
+  # memory-indexing-etl, online-pipeline, offline-pipeline. Prefect Cloud's FREE
+  # TIER caps a workspace at 5 deployments, so keep this false there; set true on a
+  # paid plan or a self-hosted Prefect server. (Env override:
+  # TREE_PREFECT__DEPLOY_OPTIONAL=true.) No flag for the online ingest path:
+  # callers submit the online-pipeline deployment when it is registered and run the
+  # same flow in-process otherwise.
   deploy_optional: false
 
 mcp:
