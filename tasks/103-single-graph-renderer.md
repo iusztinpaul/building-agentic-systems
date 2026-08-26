@@ -340,3 +340,18 @@ ls: apps/memory/knowledge_graph.html: No such file or directory
 **VERDICT: PASS**
 
 QA PASSED for #103. Hand off to PA for acceptance review. Note for the PA: the `QUERY="quantization"` literal E2E acceptance criterion could not be exercised against real ingested data in this environment (local `knowledge_graph` has 1 node) — the renderer's correctness for that scenario rests on independently-verified substitute evidence (rich synthetic payload + headless-Chrome screenshot + byte-identical template/payload hashes vs. the pre-move code), not a literal run of the exact acceptance command. Recommend ingesting real content before signing off on that specific line if a literal repro is required.
+
+### [PA] 2026-08-26 — Acceptance Review (feature-level, PR #38)
+
+**VERDICT: ACCEPT**
+
+Reviewed evidence from SWE + Tester log entries and the shipped code directly. All AC verified
+from the user POV; all three graph tools deliver the identical dual MCP App ∥ HTML-file behaviour
+through one helper; no surface renders graphs any other way; pyvis/networkx fully gone.
+Spec-defect admissions: #104 AC 1's repo-wide grep was mis-scoped (intent holds — one capability
+check on the graph path), and #103's literal E2E queries assumed unseeded data (intent closed by
+hash-proof + screenshot + #104's seeded-data run of the literal quantization query).
+Conditions: ADR-005 Consequences amended with the measured outputSchema/structuredContent corollary
+(text in the review); courtesy CLI run logged at merge; [HUMAN] iframe check stays on the merge
+checklist. Follow-up tasks to file: harness audience-block filtering; search_memory edge truncation.
+Hand off to the PR Reviewer.

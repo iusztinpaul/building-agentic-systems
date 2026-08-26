@@ -10,8 +10,8 @@
 *.pdf binary
 *.zip binary
 
-# Generated HTML (pyvis graph renders are self-contained; don't let GitHub
-# split their diffs line-by-line and call it reviewable).
+# Generated HTML (graphology/Sigma graph renders are self-contained; don't let
+# GitHub split their diffs line-by-line and call it reviewable).
 *.html binary
 
 # Generated lockfiles — collapse in GitHub PR diffs.

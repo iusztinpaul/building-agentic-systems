@@ -586,3 +586,18 @@ query_memory(query="How many documents were ingested?", visualize=True)
   truncation potentially dropping all edges from the graph view.
 
 **VERDICT: PASS**
+
+### [PA] 2026-08-26 — Acceptance Review (feature-level, PR #38)
+
+**VERDICT: ACCEPT**
+
+Reviewed evidence from SWE + Tester log entries and the shipped code directly. All AC verified
+from the user POV; all three graph tools deliver the identical dual MCP App ∥ HTML-file behaviour
+through one helper; no surface renders graphs any other way; pyvis/networkx fully gone.
+Spec-defect admissions: #104 AC 1's repo-wide grep was mis-scoped (intent holds — one capability
+check on the graph path), and #103's literal E2E queries assumed unseeded data (intent closed by
+hash-proof + screenshot + #104's seeded-data run of the literal quantization query).
+Conditions: ADR-005 Consequences amended with the measured outputSchema/structuredContent corollary
+(text in the review); courtesy CLI run logged at merge; [HUMAN] iframe check stays on the merge
+checklist. Follow-up tasks to file: harness audience-block filtering; search_memory edge truncation.
+Hand off to the PR Reviewer.

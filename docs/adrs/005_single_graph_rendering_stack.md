@@ -136,6 +136,10 @@ flowchart TD
   UX across CLI, file, and iframe. The pyvis dark theme is gone.
 - **Tool return types widen.** `query_memory` and `search_memory` return `str | ToolResult`
   (plain `str` unless `visualize=True` produces a graph); their model-visible text always retains
-  the serialized results.
+  the serialized results. Mechanical corollary (measured in #104): the union annotation drops
+  FastMCP's generated `outputSchema`, so plain-string returns no longer carry the auto-wrapped
+  `structuredContent={"result": …}`. Only a third-party client that ignores `content` text and
+  parses `structuredContent.result` for these two tools would notice; no client in this repo does,
+  and the graph path's `structured_content` (the **Graph payload**) is unaffected.
 - **Future graph tools are cheap.** They build a **Graph payload** and call `_graph_tool_result`;
   adding a surface never adds a renderer.
