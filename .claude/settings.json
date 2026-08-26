@@ -1,10 +1,4 @@
 {
-  "permissions": {
-    "allow": [
-      "mcp__plugin_context7_context7__resolve-library-id",
-      "mcp__plugin_context7_context7__query-docs"
-    ]
-  },
   "enabledMcpjsonServers": [
     "tree-memory",
     "tree-memory-local"
@@ -24,5 +18,11 @@
         "repo": "iusztinpaul/squid"
       }
     }
+  },
+  "skillOverrides": {
+    "bright-data-mcp": "off",
+    "bright-data-best-practices": "off",
+    "scrape": "off",
+    "search": "off"
   }
 }

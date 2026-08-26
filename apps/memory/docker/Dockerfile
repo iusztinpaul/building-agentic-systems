@@ -10,5 +10,6 @@ COPY apps/memory/pyproject.toml apps/memory/uv.lock apps/memory/README.md ./
 RUN uv sync --no-dev --frozen --extra local-models
 
 COPY apps/memory/src/ src/
+COPY sources/ sources/
 
 ENV PYTHONPATH=/app/src

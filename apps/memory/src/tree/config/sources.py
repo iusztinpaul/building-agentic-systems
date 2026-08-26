@@ -255,7 +255,10 @@ class SourcesConfig(BaseModel):
 # run) sits in site-packages, where parents[5] is the install prefix
 # (``/usr/local``) and no ``sources/`` exists — hence the paths below stay
 # RELATIVE so :func:`_resolve_source_path` can fall back to the cwd.
-_REPO_ROOT = Path(__file__).resolve().parents[5]
+# Shallow installs (the docker-compose worker at ``/app/src/tree/...``) have
+# fewer than six ancestors, so clamp to the filesystem root instead of raising.
+_PARENTS = Path(__file__).resolve().parents
+_REPO_ROOT = _PARENTS[min(5, len(_PARENTS) - 1)]
 
 # Relative on purpose — resolved per call (repo root, then cwd), NEVER frozen to
 # an absolute path at import time. An absolute path skips the cwd fallback, which
