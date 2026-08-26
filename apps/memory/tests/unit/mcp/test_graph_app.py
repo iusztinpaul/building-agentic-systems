@@ -1,12 +1,15 @@
 """Unit tests for the MCP layer of the read-only Sigma graph MCP App.
 
-Covers the rendering contract of the ``visualize_memory_graph`` tool (payload in
-a ``content`` JSON block — the App-UI host does not forward
-``structuredContent`` to a custom iframe), the file fallback's ``graphs://``
-resource link, and the resource handler itself. The Graph renderer it delegates
-to (``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives
-in ``tree.memory.query.visualize`` and is tested in
-``tests/unit/memory/query/test_visualize.py``.
+Covers ``_graph_tool_result`` — the ONE dual-path helper every graph-capable
+MCP tool delivers through (ADR-005, decision 4) — plus the rendering contract
+of the ``visualize_memory_graph`` tool that calls it (payload in a ``content``
+JSON block, because the App-UI host does not forward ``structuredContent`` to a
+custom iframe), the file fallback's ``graphs://`` resource link, and the
+resource handler itself. The Graph renderer it delegates to
+(``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives in
+``tree.memory.query.visualize`` and is tested in
+``tests/unit/memory/query/test_visualize.py``; the ``query_memory`` /
+``search_memory`` half of the shared helper is tested in ``test_tools.py``.
 """
 
 import json
@@ -17,7 +20,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastmcp.tools import ToolResult
 
-from tree.mcp.graph_app import _GRAPH_HTML, graph_file, visualize_memory_graph
+import tree.mcp.tools  # noqa: F401 — registers query_memory / search_memory
+from tree.mcp.graph_app import (
+    _GRAPH_HTML,
+    GRAPH_VIEW_URI,
+    _graph_tool_result,
+    graph_file,
+    visualize_memory_graph,
+)
+from tree.mcp.server import mcp
 from tree.memory.query.visualize import _render_graph_file, to_graph_payload
 from tree.memory.types import QueryResult
 
@@ -76,6 +87,86 @@ def _content_payload(result: ToolResult) -> dict[str, Any]:
             if isinstance(parsed, dict) and isinstance(parsed.get("nodes"), list):
                 return parsed
     raise AssertionError("No JSON payload content block found in tool result.")
+
+
+# ---------------------------------------------------------------------------
+# _graph_tool_result — the ONE dual-path seam behind every graph tool
+# ---------------------------------------------------------------------------
+
+
+def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only() -> None:
+    # Arrange
+    payload = to_graph_payload(_seed_result())
+    ctx = _make_ctx(ui_supported=True)
+
+    # Act
+    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
+
+    # Assert: the model reads the summary; the full node/edge dump is addressed
+    # to the iframe alone (audience=["user"]) and mirrored on structured_content.
+    summary_block, payload_block = result.content
+    assert "SUMMARY-SENTINEL" in summary_block.text
+    assert summary_block.annotations is None
+    assert payload_block.annotations.audience == ["user"]
+    assert json.loads(payload_block.text) == payload
+    assert result.structured_content == payload
+
+
+def test_graph_tool_result_writes_a_file_and_links_it_for_non_ui_clients(
+    mocker, tmp_path: Path
+) -> None:
+    # Arrange
+    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
+    payload = to_graph_payload(_seed_result())
+    ctx = _make_ctx(ui_supported=False)
+
+    # Act
+    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL", query="alice")
+
+    # Assert: the summary survives the fallback branch too, alongside the
+    # server-side path and the resource link a remote client downloads.
+    text_block, link_block = result.content
+    assert "SUMMARY-SENTINEL" in text_block.text
+    assert str(tmp_path) in text_block.text
+    assert link_block.type == "resource_link"
+    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://")
+    assert rendered.is_file()
+    # No payload block on this branch — the data is inside the file.
+    assert not any(b.type == "text" and b.text.startswith("{") for b in result.content)
+
+
+def test_graph_tool_result_survives_a_headless_browser_open(
+    mocker, tmp_path: Path
+) -> None:
+    # Arrange: a headless / remote server has no browser to open.
+    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch(
+        "tree.mcp.graph_app.webbrowser.open",
+        side_effect=RuntimeError("no browser"),
+    )
+    payload = to_graph_payload(_seed_result())
+    ctx = _make_ctx(ui_supported=False)
+
+    # Act
+    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
+
+    # Assert: swallowed — a missing browser never turns a good query into an error.
+    assert isinstance(result, ToolResult)
+    assert result.content[1].type == "resource_link"
+
+
+async def test_all_three_graph_tools_declare_the_shared_ui_resource() -> None:
+    # Arrange / Act: importing ``tree.mcp.tools`` (module level) registered all
+    # three graph tools on the server.
+    uris = {
+        name: ((await mcp.get_tool(name)).meta or {}).get("ui", {}).get("resourceUri")
+        for name in ("visualize_memory_graph", "query_memory", "search_memory")
+    }
+
+    # Assert: one ui:// resource serves all three (ADR-005, decision 4).
+    assert set(uris.values()) == {GRAPH_VIEW_URI}
+    assert (await mcp.get_resource(GRAPH_VIEW_URI)) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -3,13 +3,14 @@
 import asyncio
 import json
 import logging
-import webbrowser
 from typing import Any, Literal
 
 import httpx
 from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
+from fastmcp.apps import AppConfig
+from fastmcp.tools import ToolResult
 
 from tree.data.online_pipeline import (
     ConversationSource,
@@ -35,16 +36,21 @@ from tree.data.web.web_unlocker import (
 )
 from tree.entities.knowledge_graph import NodeType
 
-# graph_app / dashboard_app: side-effect imports — register the read-only
-# Sigma graph MCP App (visualize_memory_graph tool + ui:// resource) and the
-# custom-HTML dashboard (memory_dashboard tool + ui:// resource).
-from tree.mcp import dashboard_app, graph_app  # noqa: F401
+# dashboard_app: side-effect import — registers the custom-HTML dashboard
+# (memory_dashboard tool + ui:// resource).
+from tree.mcp import dashboard_app  # noqa: F401
+
+# graph_app: a REAL import (it also registers visualize_memory_graph + the
+# ui:// / graphs:// resources as a side effect). The dual-delivery helper and
+# the shared ui:// URI come from there; graph_app does NOT import this module,
+# so there is no cycle.
+from tree.mcp.graph_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.server import mcp
 from tree.online import dispatch_online_pipeline
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
-from tree.memory.query.visualize import _render_graph_file, to_graph_payload
+from tree.memory.query.visualize import to_graph_payload
 from tree.memory.review import (
     MergeStrategy,
     ReviewDecision,
@@ -95,14 +101,30 @@ def _serialize(docs: list[dict[str, Any]]) -> str:
     return json_util.dumps(cleaned, indent=2)
 
 
-def _visualize(docs: list[dict[str, Any]], *, query: str = "") -> str:
-    """Render docs with the Graph renderer and return a note with the file path.
+def _dual_graph_result(
+    ctx: Context,
+    docs: list[dict[str, Any]],
+    serialized: str,
+    query: str,
+) -> str | ToolResult:
+    """Answer with the serialized docs AND the graph, on whichever channel fits.
 
-    Builds the **Graph payload** from the returned rows and writes the
-    self-contained HTML to ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
-    Opening a browser is BEST EFFORT: the MCP server may run headless or
-    remotely (Prefect Horizon), where no browser exists — that must never turn
-    a successful query into a tool error.
+    The ONE visualization seam shared by ``query_memory`` and ``search_memory``
+    — both have the same shape (serialized docs + optional graph), so neither
+    builds a **Graph payload** nor branches on client capability itself. That
+    branching lives once, in :func:`~tree.mcp.graph_app._graph_tool_result`,
+    which also serves ``visualize_memory_graph`` (ADR-005, decision 4): inline
+    MCP App iframe when the client renders App UIs, else a self-contained file
+    under ``.tree/graphs/`` + a ``graphs://`` resource link.
+
+    ``serialized`` is carried VERBATIM into the model-visible text of whatever
+    comes back: these tools' contract is answering the user's question, so the
+    model must never lose the data to the visualization. The full node/edge
+    dump rides ONLY in the ``audience=["user"]`` block the iframe reads.
+
+    Returns the plain ``str`` — never a ``ToolResult`` — when the rows carry no
+    ``kind`` field, i.e. an aggregation or a projection dropped it and there is
+    nothing to draw.
     """
 
     nodes = [d for d in docs if d.get("kind") == "node"]
@@ -113,36 +135,39 @@ def _visualize(docs: list[dict[str, Any]], *, query: str = "") -> str:
             "Visualization skipped: no documents have a 'kind' field "
             "(query may have projected it away)."
         )
-        return "\n\nVisualization skipped: returned documents lack 'kind' field."
+        return (
+            f"{serialized}\n\nVisualization skipped: returned documents "
+            "lack 'kind' field."
+        )
 
-    result = QueryResult(nodes=nodes, edges=edges)
-    payload = to_graph_payload(result)
-    path = _render_graph_file(payload, query=query)
-
-    try:
-        webbrowser.open(path.resolve().as_uri())
-    except Exception:  # noqa: BLE001 — a missing browser must never fail the tool.
-        logger.debug("Could not open a browser for %s", path, exc_info=True)
-
-    return (
-        f"\n\nGraph visualized: {len(payload['nodes'])} nodes, "
-        f"{len(payload['edges'])} edges → {path}"
+    payload = to_graph_payload(QueryResult(nodes=nodes, edges=edges))
+    summary = (
+        f"{serialized}\n\nGraph of these results: "
+        f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
+    return _graph_tool_result(ctx, payload, summary, query=query)
 
 
-@mcp.tool
+@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
 @track(tags=TAGS_RETRIEVAL_MCP, name="query_memory", create_duplicate_root_span=False)
 async def query_memory(
     query: str,
     ctx: Context,
     visualize: bool = False,
     max_results: int = 10,
-) -> str:
+) -> str | ToolResult:
     """Query the knowledge graph using natural language.
 
     Dynamically translates the query into a MongoDB aggregation pipeline.
     Supports hybrid search (vector + text), graph traversals, filters,
     and aggregations.
+
+    The answer always carries the serialized results. With ``visualize`` the
+    same graph view as ``visualize_memory_graph`` comes along: inline when the
+    client renders MCP App UIs, otherwise a self-contained HTML file plus a
+    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
+    path exists locally just share it; if the server is remote (cloud), read
+    the linked resource and save its text as a local ``.html`` file.
 
     Args:
         query: Natural language question about the knowledge graph.
@@ -164,12 +189,12 @@ async def query_memory(
     output = _serialize(results)
 
     if visualize and results:
-        output += _visualize(results, query=query)
+        return _dual_graph_result(ctx, results, output, query)
 
     return output
 
 
-@mcp.tool
+@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
 @track(tags=TAGS_RETRIEVAL_MCP, name="search_memory", create_duplicate_root_span=False)
 async def search_memory(
     query: str,
@@ -178,11 +203,18 @@ async def search_memory(
     max_hops: int = 1,
     max_results: int = 10,
     visualize: bool = False,
-) -> str:
+) -> str | ToolResult:
     """Search the knowledge graph using semantic + text search with graph expansion.
 
     Uses vector similarity + text search with RRF fusion to find seed nodes,
     then expands the graph around them. Reliable fallback for semantic similarity.
+
+    The answer always carries the serialized results. With ``visualize`` the
+    same graph view as ``visualize_memory_graph`` comes along: inline when the
+    client renders MCP App UIs, otherwise a self-contained HTML file plus a
+    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
+    path exists locally just share it; if the server is remote (cloud), read
+    the linked resource and save its text as a local ``.html`` file.
 
     Args:
         query: Search query text.
@@ -209,7 +241,7 @@ async def search_memory(
     output = _serialize(docs)
 
     if visualize and docs:
-        output += _visualize(docs, query=query)
+        return _dual_graph_result(ctx, docs, output, query)
 
     return output
 
