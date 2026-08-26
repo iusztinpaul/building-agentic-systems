@@ -30,10 +30,10 @@ from fastmcp.apps import UI_EXTENSION_ID, AppConfig, ResourceCSP
 from fastmcp.tools import ToolResult
 from mcp import types
 
-from tree.mcp.graph_app import to_graph_payload
 from tree.mcp.server import mcp
 from tree.memory.query.core import fetch_full_graph
 from tree.memory.query.core import query_memory as structured_query_memory
+from tree.memory.query.visualize import to_graph_payload
 
 DASHBOARD_VIEW_URI = "ui://tree-memory/dashboard.html"
 

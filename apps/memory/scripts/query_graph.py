@@ -18,6 +18,9 @@ Usage:
 
     # Direct invocation
     uv run python scripts/query_graph.py --user-identifier paul --query "MLOps" --top-k 5
+
+    # Pin the output file (default: .tree/graphs/<query-slug>-<UTC-stamp>.html)
+    uv run python scripts/query_graph.py --query "MLOps" -o /tmp/mlops.html --no-open
 """
 
 import asyncio
@@ -43,7 +46,7 @@ async def _run(
     query: str | None,
     top_k: int,
     max_hops: int,
-    output: str,
+    output: str | None,
     no_open: bool,
 ) -> None:
     client = await init_mongodb(
@@ -84,7 +87,7 @@ async def _run(
         raise SystemExit(1)
 
     logger.info("Result: %d nodes, %d edges", len(result.nodes), len(result.edges))
-    visualize_query_result(result, output, open_browser=not no_open)
+    visualize_query_result(result, output, open_browser=not no_open, query=query or "")
 
 
 @click.command()
@@ -127,9 +130,11 @@ async def _run(
 @click.option(
     "--output",
     "-o",
-    default="knowledge_graph.html",
-    show_default=True,
-    help="Output HTML file.",
+    default=None,
+    help=(
+        "Output HTML file. Defaults to "
+        ".tree/graphs/<query-slug>-<UTC-stamp>.html under the repo root."
+    ),
 )
 @click.option(
     "--no-open",
@@ -143,7 +148,7 @@ def main(
     query: str | None,
     top_k: int,
     max_hops: int,
-    output: str,
+    output: str | None,
     no_open: bool,
 ) -> None:
     """Query and visualize the knowledge graph for the resolved user."""
