@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import webbrowser
 from typing import Any, Literal
 
 import httpx
@@ -43,7 +44,7 @@ from tree.mcp.server import mcp
 from tree.online import dispatch_online_pipeline
 from tree.memory.query.core import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
-from tree.memory.query.visualize import build_networkx_graph, render_html
+from tree.memory.query.visualize import _render_graph_file, to_graph_payload
 from tree.memory.review import (
     MergeStrategy,
     ReviewDecision,
@@ -94,8 +95,15 @@ def _serialize(docs: list[dict[str, Any]]) -> str:
     return json_util.dumps(cleaned, indent=2)
 
 
-def _visualize(docs: list[dict[str, Any]]) -> str:
-    """Render docs as an interactive HTML graph and return the file path."""
+def _visualize(docs: list[dict[str, Any]], *, query: str = "") -> str:
+    """Render docs with the Graph renderer and return a note with the file path.
+
+    Builds the **Graph payload** from the returned rows and writes the
+    self-contained HTML to ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
+    Opening a browser is BEST EFFORT: the MCP server may run headless or
+    remotely (Prefect Horizon), where no browser exists — that must never turn
+    a successful query into a tool error.
+    """
 
     nodes = [d for d in docs if d.get("kind") == "node"]
     edges = [d for d in docs if d.get("kind") == "edge"]
@@ -108,13 +116,17 @@ def _visualize(docs: list[dict[str, Any]]) -> str:
         return "\n\nVisualization skipped: returned documents lack 'kind' field."
 
     result = QueryResult(nodes=nodes, edges=edges)
+    payload = to_graph_payload(result)
+    path = _render_graph_file(payload, query=query)
 
-    graph = build_networkx_graph(result)
-    path = render_html(graph, open_browser=True)
+    try:
+        webbrowser.open(path.resolve().as_uri())
+    except Exception:  # noqa: BLE001 — a missing browser must never fail the tool.
+        logger.debug("Could not open a browser for %s", path, exc_info=True)
 
     return (
-        f"\n\nGraph visualized: {graph.number_of_nodes()} nodes, "
-        f"{graph.number_of_edges()} edges → {path}"
+        f"\n\nGraph visualized: {len(payload['nodes'])} nodes, "
+        f"{len(payload['edges'])} edges → {path}"
     )
 
 
@@ -152,7 +164,7 @@ async def query_memory(
     output = _serialize(results)
 
     if visualize and results:
-        output += _visualize(results)
+        output += _visualize(results, query=query)
 
     return output
 
@@ -197,7 +209,7 @@ async def search_memory(
     output = _serialize(docs)
 
     if visualize and docs:
-        output += _visualize(docs)
+        output += _visualize(docs, query=query)
 
     return output
 
