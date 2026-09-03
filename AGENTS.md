@@ -13,7 +13,7 @@ Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml
 
 - **`apps/memory`** — the context layer (Python): ingestion + retrieval pipelines for the knowledge graph, served to the harness via an MCP server. Core module `src/tree/` holds `config/`, `entities/` (shared ODMs), `models/` (LLM/embedding interfaces), `data/` (one ETL subpackage per source), `mcp/` (FastMCP server), and `memory/` (extraction, indexing, query, resolution, review, consolidation); plus `deploy/`, `configs/`, `scripts/`, `tests/`.
 - **`apps/harness`** — the user-facing TUI CLI: a custom coding-agent harness (TypeScript/Bun). `src/`: `agent/`, `tools/`, `mcp/`, `hooks/`, `permissions/`, `session/`, `ui/`.
-- **Repo root (cross-app only):** `docker/` (shared MongoDB + mongot infra), `docs/` (incl. `adrs/`), `tracker/`, `.env`/`.env.example`, `.mcp.json`, `docker-compose.yml`, and the thin delegating `Makefile`.
+- **Repo root (cross-app only):** `docker/` (shared MongoDB + mongot infra), `docs/` (incl. `adrs/`), `tasks/`, `.env`/`.env.example`, `.mcp.json`, `docker-compose.yml`, and the thin delegating `Makefile`.
 
 ## Memory
 

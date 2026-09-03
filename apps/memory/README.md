@@ -12,18 +12,6 @@ For the wider system (harness, end-to-end flow, shared infra) see the repo-root 
 
 Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `knowledge_graph` collection.
 
-## Prerequisites
-
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/)
-- Docker + Docker Compose (shared infra lives at the repo root)
-- GNU Make, [mongosh](https://www.mongodb.com/docs/mongodb-shell/install/)
-- A [Google AI API key](https://aistudio.google.com/apikey) in the repo-root `.env`
-
-Optional: [MongoDB Compass](https://www.mongodb.com/products/tools/compass), the [Modal](https://modal.com/) CLI (only if you deploy the vLLM embedding server).
-
-Secrets live in the repo-root `.env` (see [`../../.env.example`](../../.env.example)) — app-level tuning lives in [`configs/default.yaml`](configs/default.yaml).
-
 ## Setup
 
 All `make memory-*` targets are invoked from the repo root.
@@ -31,8 +19,6 @@ All `make memory-*` targets are invoked from the repo root.
 ```bash
 make memory-build    # runs uv sync into apps/memory/.venv
 ```
-
-The virtual environment lives at `apps/memory/.venv`. `uv` manages dependencies via `pyproject.toml`.
 
 ## Configuration
 
@@ -126,8 +112,7 @@ indexing step (`memory_indexing` — reverse edges, embeddings, search indexes) 
 they are no longer Deployments: each runs as an **inline subflow**. The Coordinators run inside an
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
 `memory_indexing` runs inside whichever flow just extracted (the extraction Coordinator, or
-`online-pipeline`) — that call already blocked on the indexing run, so inlining it FREED a
-deployment slot instead of costing one. Standalone indexing
+`online-pipeline`). Standalone indexing
 (`make memory-run-indexing-pipeline`) now executes in the operator's own process. Manual
 single-step runs go through `make memory-run-data-pipeline` / `make memory-run-memory-pipeline`,
 which dispatch `offline-pipeline` with the other phase off.
@@ -337,7 +322,7 @@ Then flip `models.search_embedding` (and, if desired, `models.resolution_embeddi
 make memory-tests              # unit suite (needs the local MongoDB from make local-start)
 ```
 
-Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). There is no integration suite (deleted deliberately — too slow for feedback loops); e2e verification happens by running the real pipelines (see "Running pipelines").
+Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). There is no integration suite (see `AGENTS.md`); e2e verification happens by running the real pipelines (see "Running pipelines").
 
 Auto-format + lint before committing:
 
@@ -376,19 +361,3 @@ apps/memory/
   Makefile              # app-local targets (see make memory-help)
   pyproject.toml, uv.lock
 ```
-
-## Monitoring
-
-**Prefect dashboard** — `http://127.0.0.1:4200/dashboard`. Or open directly:
-
-```bash
-uv run prefect dashboard open
-```
-
-**MongoDB** — connect Compass (or `mongosh`) to:
-
-```
-mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
-```
-
-Collections to inspect: `documents` (raw ingest) and `knowledge_graph` (nodes + edges).

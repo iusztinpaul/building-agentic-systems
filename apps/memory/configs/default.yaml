@@ -85,15 +85,10 @@ concurrency:
   runner_global_limit: 6
 
 prefect:
-  # Register the OPTIONAL deployments — those marked optional=True in
-  # orchestrator.py because they sit beyond the free-tier budget. Prefect Cloud's
-  # FREE TIER caps a workspace at 5 deployments and the always-on core set now
-  # spends ALL 5: data-etl-worker, memory-extract-etl-worker, online-pipeline,
-  # offline-pipeline, dream-consolidation-all-users. So NO spec is optional today
-  # and this flag currently registers nothing extra — there is NO spare slot. It is
-  # kept as the extension point for the next deployment that must be gated: mark
-  # its spec optional=True, then set this true on a paid plan or a self-hosted
-  # Prefect server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
+  # Register the OPTIONAL deployments (optional=True in orchestrator.py). Prefect
+  # Cloud's FREE TIER caps a workspace at 5 deployments and the core set spends all
+  # 5 — see README.md "Serving workflows". Set true on a paid plan or a self-hosted
+  # server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
   deploy_optional: false
 
 mcp:

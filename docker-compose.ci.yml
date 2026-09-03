@@ -11,9 +11,6 @@
 # * Uses ``mongod.ci.conf`` (no security/keyFile, ``skipAuthentication...`` on)
 #   so the mongod boots even though we're not bringing mongot up.
 #
-# To bring up the full mongot stack locally, just use the base
-# ``docker-compose.yml``.
-#
 # Note: the merged compose config (``docker compose -f docker-compose.yml -f
 # docker-compose.ci.yml config``) still LISTS the ``mongot`` service because
 # Docker Compose overrides cannot remove a service from the base file — only

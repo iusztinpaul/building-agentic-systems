@@ -111,7 +111,7 @@ The whole local stack is baked into a single [docker-compose.yml](../docker-comp
 
 You can kick off the entire local infrastructure by running `make local-start`, which will call Docker Compose to do the heavy lifting. Running this will kick off the Prefect deployments within the `prefect-worker` Docker container. In case you want to run it directly locally, to avoid rebuilding the Docker image, you can also start the Prefect worker by running `make memory-serve-workflows`, which will run `uv run python -m tree.orchestrator` directly on the host. When doing so, just make sure to turn off the `prefect-worker` Docker container by commenting it out within the `docker-compose.yml` file or manually shutting it down.
 
-You can access Prefect's server dashboard by typing within your browser http://127.0.0.1:4200/dashboard. For inspecting MongoDB we recommend using either their [mongosh CLI](https://www.mongodb.com/try/download/shell) or their [MongoDB Compass GUI](https://www.mongodb.com/try/download/compass) by using this connection string `mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin`. We personally use both. The CLI coupled with a coding agent like Claude Code or Codex and the GUI to manually inspect the data.
+You can access Prefect's server dashboard by typing within your browser http://127.0.0.1:4200/dashboard. For inspecting MongoDB, use mongosh or Compass as described in [Run it first](2_2_1_run_it_first.md).
 
 ![Figure 2.19 Inspecting the documents collection from MongoDB Compass](assets/2_4_1_mongodb_compass_documents.png)
 
