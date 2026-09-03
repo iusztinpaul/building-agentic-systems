@@ -7,19 +7,8 @@ A personal assistant rooted in a knowledge-graph memory, powered by ontologies, 
 - Always prioritize removing instructions over adding more.
 - Whenever you add a new rule within the memory (such as AGENTS.md), resources or skills, support it with a clear, concise explanation, plus a set of good and bad examples. Good examples: "a 200-token chunk size", "sub-100ms latency". Bad examples: "a powerful architecture", "a robust pipeline".
 
-# Key Components
+# Memory
 
-Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml`/`package.json`, `Makefile`); only cross-app concerns live at the repo root.
-
-- **`apps/memory`** — the context layer (Python): ingestion + retrieval pipelines for the knowledge graph, served to the harness via an MCP server. Core module `src/tree/` holds `config/`, `entities/` (shared ODMs), `models/` (LLM/embedding interfaces), `data/` (one ETL subpackage per source), `mcp/` (FastMCP server), and `memory/` (extraction, indexing, query, resolution, review, consolidation); plus `deploy/`, `configs/`, `scripts/`, `tests/`.
-- **`apps/harness`** — the user-facing TUI CLI: a custom coding-agent harness (TypeScript/Bun). `src/`: `agent/`, `tools/`, `mcp/`, `hooks/`, `permissions/`, `session/`, `ui/`.
-- **Repo root (cross-app only):** `docker/` (shared MongoDB + mongot infra), `docs/` (incl. `adrs/`), `tasks/`, `.env`/`.env.example`, `.mcp.json`, `docker-compose.yml`, and the thin delegating `Makefile`.
-
-## Memory
-
-- **Data Pipeline:** ETL pipelines gathering data from multiple sources and normalizing everything into the `documents` collection. One ETL pipeline per source.
-- **Memory Pipeline:** Maps `documents` to `knowledge graph objects` within the `knowledge_graph` collection by cleaning, chunking, graph extracting, normalizing and upserting nodes and edges directly.
-- **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search.
 - **Configuration:** done in two layers, plus an escape hatch:
   1. The root `.env` file injects environment variables (credentials + higher-level config needed to boot the harness and memory; see `.env.example`). Loaded at runtime via `apps/memory/src/tree/config/settings.py`.
   2. All memory-app config lives in YAML under `apps/memory/src/tree/config`, loaded at `apps/memory/src/tree/config/app_config.py`.
@@ -31,6 +20,7 @@ Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml
 - All dates are timezone aware (UTC by default). We don't accept naive datetime objects.
 - Always add types to function/method parameters and return types — even when they return `None`.
 - Pipelines must be idempotent, retried, and checkpointed.
+- Logging: the native Python logger — never `print`.
 - Always Pydantic over dataclasses or typed dicts when defining data structures.
 - Python with async patterns.
 - Loose clean architecture decoupling infrastructure, serving, app and domain logic:
@@ -38,55 +28,14 @@ Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml
   - Infrastructure we don't plan to change (MongoDB, Prefect, Opik) is imported directly — not made modular.
   - Flat structure and naming based on actionability rather than dogmatic clean architecture.
 
-# Tech Stack
+# Documentation
 
-## Core
-
-- **Data validation and structuring:** Pydantic
-- **ODM:** Beanie + PyMongo Async driver
-- **MCP Server Framework:** FastMCP
-- **Testing:** Pytest
-- **CLI:** Click
-- **Logging:** Native Python logger (never prints!)
-- **Embedding Models:** Sentence Transformers (local + open-source), Voyage AI (API + closed-source), Modal (remote + open-source)
-
-## Services
-
-- **Frontier Model API:** Gemini
-- **Embedding Models API:** Voyage AI — [text embeddings docs](https://docs.voyageai.com/docs/embeddings) · [text API](https://docs.voyageai.com/reference/embeddings-api) · [multimodal docs](https://docs.voyageai.com/docs/multimodal-embeddings) · [multimodal API](https://docs.voyageai.com/reference/multimodal-embeddings-api)
-- **Searching, crawling, scraping:** Bright Data
-
-## Infrastructure
-
-- **Unified memory and database:** MongoDB
-- **Serving AI Models & Remote Sandboxing:** Modal
-- **Observability and evals:** Opik
-- **Containerization:** Docker
-- **CI/CD:** GitHub Actions
-- **Pipeline orchestrator + agentic durable workflows:** Prefect
-
-## Access Documentation
-
-Use the `context7` MCP server (when connected) to look up authoritative usage for any tech-stack item or external service above; fall back to web search otherwise.
-
-**Reference docs (`llms.txt` — fetch on demand).** Each link below is an *index* of doc pages. Fetch the index first, then fetch only the specific page(s) you need. Do **not** pull whole `llms-full.txt` files into context unless a task truly requires the full reference, as it's large and consume tons of tokens.
-
-- **Gemini:** https://ai.google.dev/gemini-api/docs/llms.txt — scoped API reference index also at https://ai.google.dev/api/llms.txt (no Python-only variant; append .md.txt to any docs page (e.g. …/docs/libraries.md.txt) for a scoped, plain-markdown version.)
-- **MongoDB:** https://www.mongodb.com/llms.txt
-- **MongoDB Voyage AI:** https://docs.voyageai.com/llms.txt
-- **Modal:** https://modal.com/llms.txt — full reference at https://modal.com/llms-full.txt
-- **Opik:** https://www.comet.com/docs/opik/llms.txt — also append /llms.txt to any section URL for a scoped index.
-- **Prefect:** https://docs.prefect.io/llms.txt — full reference at https://docs.prefect.io/llms-full.txt
-- **FastMCP:** https://gofastmcp.com/llms.txt — full reference at https://gofastmcp.com/llms-full.txt
-- **Bright Data:** https://docs.brightdata.com/llms.txt — full reference at https://docs.brightdata.com/llms-full.txt
+Before writing code against any dependency or external service, use the `tech-docs` skill (`.agents/skills/tech-docs/SKILL.md`): context7 first, then the `llms.txt` indexes it lists.
 
 # Running Commands
 
 We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run everything with `make ...`. `uv` manages the `apps/memory` Python project (`uv run <command>`); `bun` manages the `apps/harness` TypeScript project (`bun run <command>`).
 
-- `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-tests`, `make memory-serve-mcp`).
-- `make harness-<target>` — run `<target>` inside `apps/harness/` (e.g. `make harness-tests`, `make harness-dev`).
-- `make local-start` / `make local-stop` / `make local-restart` — shared Docker infra.
 - `make help` — list all root targets.
 
 ## Environments
@@ -119,16 +68,9 @@ After every commit to git:
 
 When a feature is done and ready for PR, ALWAYS run:
 
-4. Run and verify the code end-to-end (see "Running pipelines & E2E"), adapted to the changes you made.
+4. Run and verify the code end-to-end with the `run-pipelines-e2e` skill (`.agents/skills/run-pipelines-e2e/SKILL.md`), adapted to the changes you made.
 
 NEITHER app has an integration test suite (deleted deliberately — too slow for feedback loops); each `make <app>-tests` target runs the unit suite, and e2e verification happens by running the real pipelines instead.
-
-## Running pipelines & E2E
-
-By default, use the "Paul Iusztin" user when testing.
-
-1. **Serve the workflows** in the background to pick up the latest code: `make memory-serve-workflows &`. This process is the in-process Prefect worker — without it, deployments register but nothing executes. If a serve process is already running, kill it first and re-serve.
-2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here). Each pipeline target takes `MODE=offline` (default) or `MODE=online`: step-by-step is `make memory-run-data-pipeline` → `make memory-run-memory-pipeline` → `make memory-run-indexing-pipeline` → `make memory-query-graph QUERY="test query"` → verify results; or end-to-end in one run with `make memory-run-pipeline` (offline batch) / `make memory-run-pipeline MODE=online SOURCE="<url|path>"` (one realtime source).
 
 # Developing New Features & Bug Fixes
 
