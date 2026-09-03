@@ -17,28 +17,20 @@ Monorepo: each app lives under `apps/` and owns its build files (`pyproject.toml
 
 ## Memory
 
-- **Data Pipeline:** ETL pipelines gathering data from multiple sources and normalizing everything into the `documents` collection. One ETL pipeline per source, such as Substack, Substack RSS feeds, HuggingFace Datasets, YouTube, Custom sites, etc.
+- **Data Pipeline:** ETL pipelines gathering data from multiple sources and normalizing everything into the `documents` collection. One ETL pipeline per source.
 - **Memory Pipeline:** Maps `documents` to `knowledge graph objects` within the `knowledge_graph` collection by cleaning, chunking, graph extracting, normalizing and upserting nodes and edges directly.
-- **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search. The data is stored in a single mutable `knowledge_graph` collection.
+- **The Unified Memory:** The agent's unified memory powered by MongoDB that leverages text, semantic and graph search.
 - **Configuration:** done in two layers, plus an escape hatch:
   1. The root `.env` file injects environment variables (credentials + higher-level config needed to boot the harness and memory; see `.env.example`). Loaded at runtime via `apps/memory/src/tree/config/settings.py`.
   2. All memory-app config lives in YAML under `apps/memory/src/tree/config`, loaded at `apps/memory/src/tree/config/app_config.py`.
   3. **Escape hatch.** Operators may override any YAML key via `TREE_<SECTION>__<KEY>` env vars — e.g. `TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99`. Mechanism: `_apply_env_overrides` in `app_config.py`. For emergency one-shot ops use; new knobs should not be documented in `.env.example`.
-
-### Memory App Specifics
-
-- Memory-app entry-point scripts (`apps/memory/scripts/`) + deploy scripts (`apps/memory/deploy/`):
-  - Don't implement business logic in the scripts. Only load it from `apps/memory/src/tree/` + write the glue code to call it.
-  - Must call `init_logger()` from `tree.logging` at module level to configure logging.
+- **Entry-point scripts** (`apps/memory/scripts/`, `apps/memory/deploy/`): no business logic — load it from `apps/memory/src/tree/` and write only the glue code to call it. Must call `init_logger()` from `tree.logging` at module level to configure logging.
 
 # Key Software Design Choices
 
 - All dates are timezone aware (UTC by default). We don't accept naive datetime objects.
 - Always add types to function/method parameters and return types — even when they return `None`.
 - Pipelines must be idempotent, retried, and checkpointed.
-
-## Python
-
 - Always Pydantic over dataclasses or typed dicts when defining data structures.
 - Python with async patterns.
 - Loose clean architecture decoupling infrastructure, serving, app and domain logic:
@@ -95,9 +87,6 @@ We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run e
 - `make memory-<target>` — run `<target>` inside `apps/memory/` (e.g. `make memory-tests`, `make memory-serve-mcp`).
 - `make harness-<target>` — run `<target>` inside `apps/harness/` (e.g. `make harness-tests`, `make harness-dev`).
 - `make local-start` / `make local-stop` / `make local-restart` — shared Docker infra.
-- `make tests` — aggregate: runs all apps' tests.
-- `make pre-commit` — pre-commit across the repo.
-- `make memory-build` — build the memory app.
 - `make help` — list all root targets.
 
 ## Environments
@@ -108,11 +97,9 @@ Run `make env-status` to see which environment is currently active. Switch betwe
 
 ## Infrastructure & external-service CLIs
 
-Use the CLIs installed directly on the system: `mongosh` (any MongoDB instance), `gh` (the remote GitHub repo — PRs, issues, Actions), `git` (Git operations).
+Use the CLIs installed directly on the system: `mongosh` (any MongoDB instance), `gh` (the remote GitHub repo — PRs, issues, Actions).
 
-Run `uv`-managed CLIs from the repo root with `uv --directory apps/memory run ...` (or `uv run ...` from `apps/memory/`): `python ...`, `prefect ...`, `modal ...`, `opik ...`. Deps available in `apps/memory/pyproject.toml`.
-
-Trigger Prefect deployments via `uv run prefect deployment ...` from `apps/memory/` — e.g. a deployment served in `apps/memory/src/tree/orchestrator.py` runs with `prefect deployment run [DEPLOYMENT_NAME]`.
+Run `uv`-managed CLIs from the repo root with `uv --directory apps/memory run ...` (or `uv run ...` from `apps/memory/`): `python ...`, `prefect ...` (deployments served in `apps/memory/src/tree/orchestrator.py` run with `prefect deployment run [DEPLOYMENT_NAME]`), `modal ...`, `opik ...`. Deps available in `apps/memory/pyproject.toml`.
 
 # Testing & QA
 
@@ -121,8 +108,6 @@ Always call the `/squid-testing-python` skill from the Squid plugin when writing
 **Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
 **Run tests only with the LOCAL env target (`make env-status` → local).** With `.env.target=prod` the suite hits the Atlas cluster, where index-creating tests fail with "The maximum number of FTS indexes has been reached for this instance size" (M0 cap) — and tests must not write to prod anyway. direnv exports the prod vars into every shell, so switch with `make env-local` rather than `--env-file` overrides, which do NOT win over already-exported vars.
-
-For `apps/memory` we use `ruff` as formatter and linter.
 
 ## Verification cadence
 
