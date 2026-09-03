@@ -4,9 +4,7 @@ The agent half of **Tree: Your Rooted Personal Assistant**. A minimal TypeScript
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) ≥ 1.1 (`brew install bun` or `curl -fsSL https://bun.sh/install | bash`)
-- `GOOGLE_API_KEY` set in the repo-root `.env` — shared with the memory app
-- Optional: `ripgrep` (`brew install ripgrep`) for the `grep` tool
+- Shared toolchain (Bun, `GOOGLE_API_KEY`, optional `ripgrep`): see the repo-root [`README.md`](../../README.md#prerequisites)
 - Optional (for memory tools): `make local-start` + `make memory-build` at the repo root. Without these, the `mcp__tree-memory__*` tools won't be available, but native tools (bash/read/write/edit/...) still work.
 
 ### Shared environment
@@ -16,7 +14,6 @@ The harness reads the repo-root `.env` (only `GOOGLE_API_KEY` is required) and l
 ## Quick start
 
 ```bash
-# install deps
 make harness-install
 
 # one-shot CLI (answer comes from the model alone)
@@ -137,15 +134,6 @@ apps/harness/
     client.ts         # Gemini SDK wrapper (streamText generator)
 ```
 
-## Make targets (from repo root)
+## Make targets
 
-| Target | Effect |
-|---|---|
-| `make harness-install` | `bun install` |
-| `make harness-dev` | `bun --watch` with optional `ARGS=` |
-| `make harness-run` | one-shot; set `PROMPT=` and/or `ARGS=` |
-| `make harness-typecheck` | `bun tsc --noEmit` |
-| `make harness-tests` / `unit-tests` / `integration-tests` | `bun test` across unit + integration suites (128 tests) |
-| `make harness-format-fix` / `format-check` | Biome format |
-| `make harness-lint-fix` / `lint-check` | Biome check (format + lint + organize-imports) |
-| `make harness-build` | single-binary compile to `dist/tree` |
+Run `make harness-help` from the repo root.

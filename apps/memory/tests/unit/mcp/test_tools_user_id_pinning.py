@@ -138,8 +138,6 @@ class TestQueryToolsPropagateUserId:
 
 
 class TestReviewListPendingPropagatesUserId:
-    """``review_list_pending`` must propagate the server-pinned user_id."""
-
     async def test_passes_user_id_to_find_pending_duplicates(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
@@ -157,8 +155,6 @@ class TestReviewListPendingPropagatesUserId:
 
 
 class TestReviewConfirmPropagatesUserId:
-    """``review_confirm`` must propagate the server-pinned user_id."""
-
     async def test_passes_user_id_to_review_duplicate(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
@@ -194,8 +190,6 @@ class TestReviewConfirmPropagatesUserId:
 
 
 class TestReviewRejectPropagatesUserId:
-    """``review_reject`` must propagate the server-pinned user_id."""
-
     async def test_passes_user_id_to_review_duplicate(self, mocker) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)

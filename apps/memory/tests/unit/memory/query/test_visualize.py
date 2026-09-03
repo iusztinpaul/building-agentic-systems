@@ -59,7 +59,6 @@ def _seed_result() -> QueryResult:
 
 
 def test_payload_maps_nodes_and_edges() -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     paper = f"{_UID}:document:paper"
     result = QueryResult(
@@ -67,10 +66,8 @@ def test_payload_maps_nodes_and_edges() -> None:
         edges=[_edge(alice, "mentions", paper)],
     )
 
-    # Act
     payload = to_graph_payload(result)
 
-    # Assert
     assert {n["id"] for n in payload["nodes"]} == {alice, paper}
     assert payload["edges"] == [
         {"source": alice, "target": paper, "type": "mentions", "meta": {}}
@@ -78,11 +75,9 @@ def test_payload_maps_nodes_and_edges() -> None:
 
 
 def test_label_strips_user_and_type_prefix() -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     result = QueryResult(nodes=[_node(alice, "person")], edges=[])
 
-    # Act
     payload = to_graph_payload(result)
 
     # Assert: the {user_id}:{type}: prefix is stripped to the bare name.
@@ -95,7 +90,6 @@ def test_full_name_kept_while_canvas_label_is_truncated() -> None:
     nid = f"{_UID}:preference:{long}"
     result = QueryResult(nodes=[_node(nid, "preference")], edges=[])
 
-    # Act
     node = to_graph_payload(result)["nodes"][0]
 
     # Assert: full name preserved for hover/detail; label clipped for the canvas.
@@ -105,16 +99,13 @@ def test_full_name_kept_while_canvas_label_is_truncated() -> None:
 
 
 def test_canonical_name_property_wins_over_id() -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     result = QueryResult(
         nodes=[_node(alice, "person", canonical_name="Alice Smith")], edges=[]
     )
 
-    # Act
     payload = to_graph_payload(result)
 
-    # Assert
     assert payload["nodes"][0]["label"] == "Alice Smith"
 
 
@@ -133,7 +124,6 @@ def test_node_carries_curated_metadata() -> None:
         "created_at": created,
     }
 
-    # Act
     meta = to_graph_payload(QueryResult(nodes=[node], edges=[]))["nodes"][0]["meta"]
 
     # Assert: floats rounded, lists joined, datetimes ISO-formatted.
@@ -145,7 +135,6 @@ def test_node_carries_curated_metadata() -> None:
 
 
 def test_edge_carries_curated_metadata() -> None:
-    # Arrange
     alice, bob = f"{_UID}:person:alice", f"{_UID}:person:bob"
     edge = {
         "_id": f"{alice}|knows|{bob}",
@@ -161,10 +150,8 @@ def test_edge_carries_curated_metadata() -> None:
         nodes=[_node(alice, "person"), _node(bob, "person")], edges=[edge]
     )
 
-    # Act
     meta = to_graph_payload(result)["edges"][0]["meta"]
 
-    # Assert
     assert meta == {
         "semantic_type": "social",
         "confidence": 0.5,
@@ -185,10 +172,8 @@ def test_curated_meta_drops_empty_and_null_fields() -> None:
         "confidence": 1.0,
     }
 
-    # Act
     meta = to_graph_payload(QueryResult(nodes=[node], edges=[]))["nodes"][0]["meta"]
 
-    # Assert
     assert meta == {"confidence": 1.0}
 
 
@@ -199,10 +184,8 @@ def test_dangling_endpoint_has_empty_meta() -> None:
         nodes=[_node(alice, "person")], edges=[_edge(alice, "mentions", ghost)]
     )
 
-    # Act
     payload = to_graph_payload(result)
 
-    # Assert
     ghost_node = next(n for n in payload["nodes"] if n["id"] == ghost)
     assert ghost_node["meta"] == {}
 
@@ -215,7 +198,6 @@ def test_dangling_edge_endpoints_are_materialised_as_nodes() -> None:
         nodes=[_node(alice, "person")], edges=[_edge(alice, "mentions", ghost)]
     )
 
-    # Act
     payload = to_graph_payload(result)
 
     # Assert: the renderer requires every endpoint to exist as a node.
@@ -227,7 +209,6 @@ def test_dangling_edge_endpoints_are_materialised_as_nodes() -> None:
 
 
 def test_edges_with_missing_endpoints_are_dropped() -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     result = QueryResult(
         nodes=[_node(alice, "person")],
@@ -236,7 +217,6 @@ def test_edges_with_missing_endpoints_are_dropped() -> None:
         ],
     )
 
-    # Act
     payload = to_graph_payload(result)
 
     # Assert: an edge with no target is skipped entirely.
@@ -244,11 +224,9 @@ def test_edges_with_missing_endpoints_are_dropped() -> None:
 
 
 def test_node_type_colour_is_assigned() -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     result = QueryResult(nodes=[_node(alice, "person")], edges=[])
 
-    # Act
     payload = to_graph_payload(result)
 
     # Assert: a known type gets a palette colour, not the fallback.
@@ -256,10 +234,8 @@ def test_node_type_colour_is_assigned() -> None:
 
 
 def test_empty_result_yields_empty_payload() -> None:
-    # Act
     payload = to_graph_payload(QueryResult())
 
-    # Assert
     assert payload == {"nodes": [], "edges": []}
 
 
@@ -269,7 +245,6 @@ def test_empty_result_yields_empty_payload() -> None:
 
 
 def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
-    # Arrange
     alice = f"{_UID}:person:alice"
     paper = f"{_UID}:document:paper"
     payload = to_graph_payload(
@@ -280,10 +255,8 @@ def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
     )
     out = tmp_path / "graph.html"
 
-    # Act
     path = _render_graph_file(payload, output=out)
 
-    # Assert
     assert path == out
     html = out.read_text(encoding="utf-8")
     # Self-contained: data embedded inline, Sigma + ForceAtlas2 present, NO ext-apps.
@@ -297,7 +270,6 @@ def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
 
 
 def test_render_graph_file_wires_metadata_and_edge_hover(tmp_path: Path) -> None:
-    # Arrange
     alice, bob = f"{_UID}:person:alice", f"{_UID}:person:bob"
     payload = to_graph_payload(
         QueryResult(
@@ -307,7 +279,6 @@ def test_render_graph_file_wires_metadata_and_edge_hover(tmp_path: Path) -> None
     )
     out = tmp_path / "graph.html"
 
-    # Act
     _render_graph_file(payload, output=out)
 
     # Assert: the metadata-card + edge-hover JS made it into the rendered file.
@@ -327,7 +298,6 @@ def test_render_graph_file_escapes_script_close_in_labels(tmp_path: Path) -> Non
     )
     out = tmp_path / "graph.html"
 
-    # Act
     _render_graph_file(payload, output=out)
 
     # Assert: the raw closing tag is escaped, the escaped form is present.
@@ -342,19 +312,16 @@ def test_render_graph_file_escapes_script_close_in_labels(tmp_path: Path) -> Non
 
 
 def test_slugify_makes_filesystem_safe_stem() -> None:
-    # Act / Assert
     assert _slugify("Overview of All Topics!") == "overview-of-all-topics"
     assert _slugify("  Tree/Memory: graph  ") == "tree-memory-graph"
 
 
 def test_slugify_falls_back_to_graph_for_empty_or_symbol_only() -> None:
-    # Act / Assert
     assert _slugify("") == "graph"
     assert _slugify("!!!") == "graph"
 
 
 def test_default_graph_path_is_unique_html_under_graphs_dir() -> None:
-    # Act
     path = _default_graph_path("overview of all topics")
 
     # Assert: discoverable .tree/graphs/ location, query-slug prefix, .html.
@@ -369,13 +336,11 @@ def test_default_graph_path_is_unique_html_under_graphs_dir() -> None:
 
 
 def test_visualize_query_result_writes_explicit_output(mocker, tmp_path: Path) -> None:
-    # Arrange
     open_mock = mocker.patch(
         "tree.memory.query.visualize.webbrowser.open", return_value=False
     )
     out = tmp_path / "pinned.html"
 
-    # Act
     path = visualize_query_result(
         _seed_result(), out, open_browser=False, query="alice"
     )
@@ -387,11 +352,9 @@ def test_visualize_query_result_writes_explicit_output(mocker, tmp_path: Path) -
 
 
 def test_visualize_query_result_defaults_to_graphs_dir(mocker, tmp_path: Path) -> None:
-    # Arrange
     mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.memory.query.visualize.webbrowser.open", return_value=False)
 
-    # Act
     path = visualize_query_result(_seed_result(), open_browser=True, query="MLOps talk")
 
     # Assert: <query-slug>-<UTC-stamp>.html under the graphs dir.
@@ -404,11 +367,9 @@ def test_visualize_query_result_defaults_to_graphs_dir(mocker, tmp_path: Path) -
 def test_visualize_query_result_empty_query_uses_graph_stem(
     mocker, tmp_path: Path
 ) -> None:
-    # Arrange
     mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.memory.query.visualize.webbrowser.open", return_value=False)
 
-    # Act
     path = visualize_query_result(_seed_result(), open_browser=False)
 
     # Assert: the empty-query slug falls back to "graph".
@@ -425,7 +386,6 @@ def test_visualize_query_result_survives_a_headless_browser_open(
         side_effect=RuntimeError("no browser"),
     )
 
-    # Act
     path = visualize_query_result(_seed_result(), open_browser=True, query="alice")
 
     # Assert: the render still succeeded — opening a browser is best-effort.
@@ -438,19 +398,15 @@ def test_visualize_query_result_survives_a_headless_browser_open(
 
 
 def test_truncate_leaves_short_text_unchanged() -> None:
-    # Act / Assert
     assert _truncate("hello", 10) == "hello"
 
 
 def test_truncate_clips_long_text_with_ellipsis() -> None:
-    # Act
     result = _truncate("a" * 100, 20)
 
-    # Assert
     assert len(result) == 20
     assert result.endswith("...")
 
 
 def test_truncate_leaves_exact_length_unchanged() -> None:
-    # Act / Assert
     assert _truncate("12345", 5) == "12345"

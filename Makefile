@@ -5,7 +5,6 @@ ENV_FILE := .env.prod
 COMPOSE_PROFILES :=
 else
 ENV_FILE := .env
-# Local brings up the full stack including the in-compose prefect-server.
 COMPOSE_PROFILES := local
 endif
 export COMPOSE_PROFILES
@@ -64,7 +63,7 @@ local-restart: # Restart shared infra.
 
 # --- Convenience aggregates ---
 
-tests: # Run all tests across all apps (unit only — integration suites were removed deliberately: too slow for feedback loops).
+tests: # Run all tests across all apps (unit only).
 	$(MAKE) memory-tests
 	$(MAKE) harness-tests
 

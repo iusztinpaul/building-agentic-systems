@@ -102,7 +102,6 @@ class TestFetchAndExtractWeb:
         assert doc.authors == ["Unknown"]
         assert doc.date is not None
         assert doc.date.tzinfo is not None
-        # tzinfo is UTC
         assert doc.date.utcoffset().total_seconds() == 0
 
     async def test_falls_back_to_url_path_tail(self, mocker) -> None:

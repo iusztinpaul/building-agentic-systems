@@ -90,17 +90,14 @@ class CompositeResolver:
 
         candidates = list(candidate_names)
 
-        # Alias.
         result = self._alias.resolve(name, entity_type, candidates, existing_aliases)
         if result.match_type != "none":
             return result
 
-        # Exact.
         result = self._exact.resolve(name, entity_type, candidates, existing_aliases)
         if result.match_type != "none":
             return result
 
-        # Fuzzy (may be disabled).
         if self._fuzzy is not None:
             result = self._fuzzy.resolve(
                 name, entity_type, candidates, existing_aliases
@@ -108,7 +105,6 @@ class CompositeResolver:
             if result.match_type != "none":
                 return result
 
-        # Semantic (may be disabled).
         if self._semantic is not None:
             result = await self._semantic.resolve(
                 name, entity_type, candidates, existing_aliases
@@ -130,8 +126,6 @@ class CompositeResolver:
         candidate_names: Iterable[str],
         existing_aliases: Mapping[str, list[str]] | None = None,
     ) -> list[ResolvedEntity]:
-        """Resolve each ``(name, type)`` against a shared candidate pool."""
-
         candidates = list(candidate_names)
         results: list[ResolvedEntity] = []
         for name, entity_type in entities:

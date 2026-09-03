@@ -269,8 +269,6 @@ class DreamReport:
 
 
 def _ordered(a: str, b: str) -> tuple[str, str]:
-    """Return ``(a, b)`` reordered so the first element is the smaller id."""
-
     return (a, b) if a < b else (b, a)
 
 

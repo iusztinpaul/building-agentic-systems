@@ -22,24 +22,6 @@ After cloning, tell git to ignore the monorepo-restructure commit in `blame` out
 git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
 
-## Where to edit what
-
-| Change | Location |
-|---|---|
-| Memory-app business logic | `apps/memory/src/tree/` |
-| Memory ETL / pipeline entry scripts | `apps/memory/scripts/` |
-| Memory tests | `apps/memory/tests/{unit,integration}/` |
-| App-level YAML config | `apps/memory/configs/default.yaml` |
-| Python deps | `apps/memory/pyproject.toml` |
-| Memory Dockerfile | `apps/memory/docker/Dockerfile` |
-| Harness (TS) code | `apps/harness/src/` |
-| Shared env vars | `.env` / `.env.example` |
-| MCP server registration | `.mcp.json` |
-| Shared MongoDB/mongot config | `docker/` |
-| Shared infra orchestration | `docker-compose.yml`, `docker-compose.ci.yml` |
-| Root-level delegating Makefile | `Makefile` |
-| CI workflow | `.github/workflows/ci.yml` |
-
 ## Editor settings
 
 `.editorconfig` defines indent / line-ending / trailing-whitespace rules per file type. VS Code, JetBrains IDEs, and Zed read it natively; Vim / Emacs need a plugin. No manual setup beyond opening the repo.

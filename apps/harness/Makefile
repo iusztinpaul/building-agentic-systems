@@ -30,7 +30,7 @@ run: # Run tree. Pass PROMPT="..." for one-shot; ARGS="..." for flags like --res
 typecheck: # Run the TypeScript compiler in type-check-only mode.
 	bun tsc --noEmit
 
-tests: # Run the test suite (unit only — fast, no external infra; integration tests were removed deliberately: too slow for feedback loops).
+tests: # Run the test suite (unit only — fast, no external infra).
 	bun test
 
 test-watch: # Watch tests — TDD loop.

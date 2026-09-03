@@ -25,10 +25,8 @@ _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 class TestDeduplicationConfigDefaults:
     def test_defaults_construct(self) -> None:
-        # Arrange / Act
         config = DeduplicationConfig()
 
-        # Assert
         assert config.enabled is True
         assert config.auto_merge_threshold == 0.95
         assert config.flag_threshold == 0.85
@@ -96,13 +94,10 @@ class TestDeduplicationConfigValidation:
 
 class TestDedupeEntityShortCircuit:
     async def test_enabled_false_skips_database(self, mocker) -> None:
-        """When ``enabled=False``, ``dedupe_entity`` must not touch Mongo."""
-
         # Arrange — a MagicMock database whose attribute access we will spy on.
         database = MagicMock(name="database")
         config = DeduplicationConfig(enabled=False)
 
-        # Act
         result = await dedupe_entity(
             database=database,
             user_id=_USER_ID,
@@ -112,7 +107,6 @@ class TestDedupeEntityShortCircuit:
             config=config,
         )
 
-        # Assert — short-circuited "none" result.
         assert isinstance(result, DeduplicationResult)
         assert result.action == "none"
         assert result.matched_node_id is None
@@ -160,7 +154,6 @@ class TestDedupeEntityReadOnlyInvariant:
         delete_many_spy = mocker.spy(collection, "delete_many")
         replace_one_spy = mocker.spy(collection, "replace_one")
 
-        # Act
         await dedupe_entity(
             database=database,
             user_id=_USER_ID,
@@ -170,7 +163,6 @@ class TestDedupeEntityReadOnlyInvariant:
             config=config,
         )
 
-        # Assert — no write methods called.
         assert insert_one_spy.call_count == 0
         assert insert_many_spy.call_count == 0
         assert update_one_spy.call_count == 0

@@ -65,8 +65,6 @@ def chunk_document(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
 ) -> list[str]:
-    """Split *text* into token-bounded chunks with overlap."""
-
     chunk_size = (
         chunk_size if chunk_size is not None else app_config.extraction.chunk_size
     )
@@ -209,14 +207,11 @@ Use this decision tree for any proposition of the form
 async def extract_entities(
     llm: BaseLLM, chunk: str, *, chunk_id: str = ""
 ) -> ExtractionResult:
-    """Ask the LLM to extract nodes and edges from a single chunk."""
-
     ontology = json.dumps(get_ontology_schema(), indent=2)
     system = _SYSTEM_PROMPT.format(ontology=ontology)
     raw = await llm.generate_json(chunk, system=system)
     result = _parse_extraction(raw)
 
-    # Stamp every extracted item with this chunk's id.
     for node in result.nodes:
         node.chunk_id = chunk_id
     for edge in result.edges:

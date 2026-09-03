@@ -88,10 +88,8 @@ def mock_flush_opik(mocker):
 
 class TestRunMemoryPipelineCliOptions:
     def test_online_without_doc_ids_is_a_usage_error(self, mock_run, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--mode", "online"])
 
         # Assert — hard CLI error BEFORE any flow is dispatched.
@@ -100,27 +98,21 @@ class TestRunMemoryPipelineCliOptions:
         mock_run.assert_not_awaited()
 
     def test_online_rejects_num_shards(self, mock_run, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main, ["--mode", "online", "--doc-ids", "68a1", "--num-shards", "2"]
         )
 
-        # Assert
         assert result.exit_code != 0
         assert "offline-only" in result.output
         mock_run.assert_not_awaited()
 
     def test_num_shards_below_one_is_a_usage_error(self, mock_run, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--num-shards", "0"])
 
-        # Assert
         assert result.exit_code != 0
         assert ">= 1" in result.output
         mock_run.assert_not_awaited()
@@ -128,10 +120,8 @@ class TestRunMemoryPipelineCliOptions:
 
 class TestRunMemoryPipelineForwarding:
     def test_offline_default_forwards_no_doc_ids(self, mock_run, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, [])
 
         # Assert — batch mode: the coordinator resolves every pending doc.
@@ -141,10 +131,8 @@ class TestRunMemoryPipelineForwarding:
         assert mock_run.await_args.args[3] is None  # num_shards
 
     def test_online_parses_comma_separated_doc_ids(self, mock_run, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main, ["--mode", "online", "--doc-ids", "68a1, 68b2,"]
         )
@@ -169,7 +157,6 @@ class TestRunMemoryPipelineDispatch:
         # Arrange — a narrowed doc set with an explicit fan-out width.
         document_ids = ["68a1", "68b2"]
 
-        # Act
         await cli_module._run(None, None, document_ids, 4)
 
         # Assert — the extraction step is the offline flow with data disabled.
@@ -193,7 +180,6 @@ class TestRunMemoryPipelineDispatch:
     ) -> None:
         # Arrange — the batch default: no doc narrowing, no fan-out knob.
 
-        # Act
         await cli_module._run(None, None, None, None)
 
         # Assert — one worker run, every PENDING document for the tenant.

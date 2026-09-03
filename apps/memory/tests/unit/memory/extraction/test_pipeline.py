@@ -632,7 +632,6 @@ class TestDedupeEntitiesParallelization:
             new=AsyncMock(side_effect=_slow_dedupe),
         )
 
-        # Act
         out = await _dedupe_entities(resolved, embeddings, MagicMock(), cfg, _USER_ID)
 
         # Assert: never more than the semaphore bound ran simultaneously, and
@@ -662,7 +661,6 @@ class TestDedupeEntitiesParallelization:
         assert ".embed(" not in src
 
     async def test_identical_output_to_sequential_reference(self, mocker) -> None:
-        # Arrange
         cfg = DeduplicationConfig()
         resolved = _multi_entity_resolved(15)
         embeddings = _embeddings_for(resolved)
@@ -786,7 +784,6 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(side_effect=_fake_task),
         )
 
-        # Act
         chunked_docs = await _chunk_documents(docs)
 
         # Assert: same order + contents as a straight sequential map.
@@ -824,7 +821,6 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(side_effect=_slow_task),
         )
 
-        # Act
         chunked_docs = await _chunk_documents(docs)
 
         # Assert: ran in parallel up to — but never beyond — the bound.
@@ -1328,7 +1324,6 @@ class TestDispatchEntityWriteReusesVector:
             side_effect=AssertionError("apply-writes must not re-embed")
         )
 
-        # Act
         await _dispatch_entity_write(
             database=MagicMock(),
             embedding_model=real_model,
@@ -1777,7 +1772,6 @@ class TestApplyWritesBulkBatching:
             ),
         ]
 
-        # Act
         summary = await _run_apply_writes(database, raws)
 
         # Assert — no per-item update_one anywhere in the two loops.
@@ -1795,7 +1789,6 @@ class TestApplyWritesBulkBatching:
         database = _make_bulk_write_database()
         raws = [_structural_only_raw()]
 
-        # Act
         summary = await _run_apply_writes(database, raws)
 
         # Assert — golden counts for this fixed input.
@@ -1807,7 +1800,6 @@ class TestApplyWritesBulkBatching:
         database = _make_bulk_write_database()
         collection = database[_KG_COLLECTION_SENTINEL]
 
-        # Act
         summary = await _run_apply_writes(database, [])
 
         # Assert — pymongo errors on an empty bulk_write, so we must skip it.
@@ -1871,7 +1863,6 @@ class TestApplyWritesBulkBatching:
             side_effect=_dispatch,
         )
 
-        # Act
         await _run_apply_writes(database, [raw], extractor=extractor)
 
         # Assert — locate the edge bulk_write (the second call) and inspect ops.
@@ -1927,7 +1918,6 @@ class TestApplyWritesBulkBatching:
             side_effect=_dispatch,
         )
 
-        # Act
         summary = await _run_apply_writes(database, [raw])
 
         # Assert — the MENTIONS edge (document -> person) was emitted, which

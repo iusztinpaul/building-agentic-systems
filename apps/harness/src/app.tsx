@@ -183,7 +183,6 @@ export function App({
     [session],
   );
 
-  // Sub-agent event sink — updates the UiMessage that carries live progress.
   const onSubagentEvent = useCallback((ev: SubagentProgressEvent) => {
     if (ev.kind === "start") {
       setMessages((prev) => [
@@ -520,5 +519,4 @@ export function App({
   );
 }
 
-// Re-export types used by callers that want to pass props through.
 export type { SpawnSubagentResult };

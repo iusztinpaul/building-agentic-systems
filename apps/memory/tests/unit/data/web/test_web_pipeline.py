@@ -423,47 +423,37 @@ def _patch_get_client(mocker, client: MagicMock) -> None:
 
 class TestTriggerUrlBatchIngest:
     async def test_empty_urls_raises_value_error(self) -> None:
-        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="urls must not be empty"):
             await trigger_url_batch_ingest([], _USER_ID)
 
     async def test_returns_flow_run_id_and_tracking_url(self, mocker) -> None:
-        # Arrange
         client = _make_mock_client(
             flow_run_id="abcd-1234",
             api_url="http://127.0.0.1:4200/api",
         )
         _patch_get_client(mocker, client)
 
-        # Act
         result = await trigger_url_batch_ingest(["https://a", "https://b"], _USER_ID)
 
-        # Assert
         assert result["flow_run_id"] == "abcd-1234"
         assert result["tracking_url"] == "http://127.0.0.1:4200/runs/flow-run/abcd-1234"
 
     async def test_looks_up_deployment_by_canonical_name(self, mocker) -> None:
-        # Arrange
         client = _make_mock_client()
         _patch_get_client(mocker, client)
 
-        # Act
         await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
-        # Assert
         client.read_deployment_by_name.assert_awaited_once_with(DEPLOYMENT_NAME)
         assert DEPLOYMENT_NAME == "ingest-web-url-batch-etl/ingest-web-url-batch-etl"
 
     async def test_passes_urls_in_parameters(self, mocker) -> None:
-        # Arrange
         client = _make_mock_client(deployment_id="dep-xyz")
         _patch_get_client(mocker, client)
         urls = ["https://a", "https://b", "https://c"]
 
-        # Act
         await trigger_url_batch_ingest(urls, _USER_ID)
 
-        # Assert
         client.create_flow_run_from_deployment.assert_awaited_once()
         kwargs = client.create_flow_run_from_deployment.await_args.kwargs
         assert kwargs["deployment_id"] == "dep-xyz"
@@ -472,27 +462,22 @@ class TestTriggerUrlBatchIngest:
     async def test_does_not_poll_run_state(self, mocker) -> None:
         """Fire-and-forget: helper must not call ``read_flow_run`` (no polling loop)."""
 
-        # Arrange
         client = _make_mock_client()
         _patch_get_client(mocker, client)
 
-        # Act
         await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
-        # Assert
         client.read_flow_run.assert_not_awaited()
 
     async def test_propagates_client_errors(self, mocker) -> None:
         """Deployment-not-found and connection errors propagate to caller."""
 
-        # Arrange
         client = _make_mock_client()
         client.read_deployment_by_name = AsyncMock(
             side_effect=RuntimeError("deployment not found")
         )
         _patch_get_client(mocker, client)
 
-        # Act / Assert
         with pytest.raises(RuntimeError, match="deployment not found"):
             await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
@@ -504,10 +489,8 @@ class TestTriggerUrlBatchIngest:
         )
         _patch_get_client(mocker, client)
 
-        # Act
         result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
-        # Assert
         assert result["tracking_url"] == "http://prefect.local:4200/runs/flow-run/run-1"
 
     async def test_prefect_ui_url_env_overrides_api_derivation(
@@ -515,7 +498,6 @@ class TestTriggerUrlBatchIngest:
     ) -> None:
         """``PREFECT_UI_URL`` is honored verbatim (Prefect Cloud convention)."""
 
-        # Arrange
         monkeypatch.setenv("PREFECT_UI_URL", "https://app.prefect.cloud/account/abc")
         client = _make_mock_client(
             flow_run_id="run-cloud-1",
@@ -523,10 +505,8 @@ class TestTriggerUrlBatchIngest:
         )
         _patch_get_client(mocker, client)
 
-        # Act
         result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
-        # Assert
         assert (
             result["tracking_url"]
             == "https://app.prefect.cloud/account/abc/runs/flow-run/run-cloud-1"
@@ -546,9 +526,7 @@ class TestTriggerUrlBatchIngest:
         )
         _patch_get_client(mocker, client)
 
-        # Act
         result = await trigger_url_batch_ingest(["https://a"], _USER_ID)
 
-        # Assert
         assert result["flow_run_id"] == "run-unk"
         assert result["tracking_url"] is None

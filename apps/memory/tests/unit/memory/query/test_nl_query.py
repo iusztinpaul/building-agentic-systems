@@ -469,10 +469,8 @@ class TestReplaceEmbeddingPlaceholder:
             {"$limit": 10},
         ]
 
-        # Act
         await _replace_embedding_placeholder(pipeline, mock_model)
 
-        # Assert
         assert "embed_query_vector" in spans
 
     async def test_no_embed_span_when_no_placeholder(self, mocker):
@@ -481,10 +479,8 @@ class TestReplaceEmbeddingPlaceholder:
         mock_model = mocker.AsyncMock()
         pipeline = [{"$match": {"kind": "node"}}, {"$limit": 10}]
 
-        # Act
         await _replace_embedding_placeholder(pipeline, mock_model)
 
-        # Assert
         assert "embed_query_vector" not in spans
         mock_model.embed.assert_not_called()
 
@@ -578,10 +574,8 @@ class TestNlToPipeline:
         mock_llm = mocker.AsyncMock()
         mock_llm.generate_json.return_value = {"pipeline": [{"$match": {}}]}
 
-        # Act
         await nl_to_pipeline(mock_llm, "find nodes")
 
-        # Assert
         assert "build_system_prompt" in spans
 
 
@@ -657,7 +651,6 @@ class TestExecuteNlQuery:
             "pipeline": [{"$match": {"kind": "node"}}, {"$limit": 10}]
         }
 
-        # Act
         await execute_nl_query(
             client=mock_deps["client"],
             database=mock_deps["database"],
@@ -667,7 +660,6 @@ class TestExecuteNlQuery:
             user_id=_USER_ID,
         )
 
-        # Assert
         assert "execute_aggregation" in spans
 
     async def test_retries_on_validation_error(self, mock_deps):

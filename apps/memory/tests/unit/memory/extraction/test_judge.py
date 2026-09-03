@@ -42,7 +42,6 @@ class _FailingLLM(BaseLLM):
 
 class TestJudgeContradictionBranches:
     async def test_contradiction_branch_returns_true_and_confidence(self) -> None:
-        # Arrange
         llm = _StubLLM(
             {
                 "is_contradiction": True,
@@ -51,14 +50,12 @@ class TestJudgeContradictionBranches:
             }
         )
 
-        # Act
         is_contradiction, confidence = await judge_contradiction(
             llm=llm,
             new_statement="prefers light mode",
             old_statement="prefers dark mode",
         )
 
-        # Assert
         assert is_contradiction is True
         assert confidence == pytest.approx(0.92)
         # The judge call carries both statements in the prompt

@@ -1,6 +1,3 @@
-// The registry holds tools with heterogeneous input types; a single type parameter
-// can't capture that polymorphism, so we use `Tool<any>` as the wide type.
-//
 // `AnyTool`, `GeminiFunctionDeclaration`, and `toGeminiTools` live in ./gemini —
 // a leaf module with no sibling-tool imports. Re-exported here for back-compat
 // so existing `from "./tools/registry"` consumers keep working. New code that

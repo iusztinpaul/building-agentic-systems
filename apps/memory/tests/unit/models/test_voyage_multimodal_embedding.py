@@ -435,7 +435,6 @@ class TestVoyageMultimodalRateLimitChokepoint:
 
         sessions = [_make_session_for_call(i) for i in range(3)]
 
-        # Act
         with patch("aiohttp.ClientSession") as mock_cls:
             mock_cls.side_effect = sessions
             result = await m.embed(["hello"])
@@ -455,9 +454,7 @@ class TestVoyageMultimodalRateLimitChokepoint:
             new_callable=AsyncMock,
         )
 
-        # Act
         result = await model.embed([])
 
-        # Assert
         assert result == []
         rate_limit.assert_not_awaited()

@@ -796,7 +796,6 @@ def _filter_self_match(
     if result.action == "none" or result.matched_node_id != prospective_id:
         return result
 
-    # Find the next non-self candidate.
     for cand in result.candidates:
         if str(cand.get("_id")) == prospective_id:
             continue

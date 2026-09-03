@@ -1,9 +1,5 @@
 # Backfill sources — one-shot ingests (articles, datasets, videos, web pages).
-# Loaded by a manual/default `run-data-pipeline-offline` run, never by the
-# nightly cron. Cadence lives in the filename: there is no per-source
-# `scheduled` flag.
 
-# Substack articles
 - uri: https://www.decodingai.com/p/ai-agents-foundations-course
   type: substack_article
 - uri: https://www.decodingai.com/p/ai-workflows-vs-agents-the-autonomy
@@ -25,7 +21,6 @@
 - uri: https://www.decodingai.com/p/stop-converting-documents-to-text
   type: substack_article
 
-# HuggingFace datasets
 - uri: librarian-bots/arxiv-metadata-snapshot
   type: huggingface_dataset
   max_samples: 10000
@@ -34,7 +29,6 @@
   batch_size: 50
   concurrency: 25
 
-# YouTube
 - uri: https://www.youtube.com/watch?v=Sntj4HmuykI
   type: youtube_video
 - uri: https://www.youtube.com/watch?v=ZRM_TfEZcIo

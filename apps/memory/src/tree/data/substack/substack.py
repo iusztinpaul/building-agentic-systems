@@ -334,8 +334,6 @@ async def load_article_document(doc: Document, body_html: str) -> Document | Non
 async def fetch_and_extract(
     article_url: str, user_id: PydanticObjectId
 ) -> tuple[Document, str]:
-    """Fetch an article and extract a Document plus the raw body HTML."""
-
     html = await fetch_article(article_url)
 
     return extract_document_from_html(html, article_url, user_id)

@@ -17,7 +17,7 @@ export UV_PROJECT_ENVIRONMENT=.venv
 export VIRTUAL_ENV=.venv
 export PYTHONPATH = ./src/
 
-# --- macOS short-TMPDIR shim (see CLAUDE.md "Configuration > macOS torch / TMPDIR") ---
+# --- macOS short-TMPDIR shim ---
 #
 # On macOS arm64 + Python 3.14, torch's bundled ``torch_shm_manager`` constructs
 # a Unix-domain socket path of the form ``<TMPDIR>/torch_<pid>_<rand>/manager.sock``
@@ -26,9 +26,8 @@ export PYTHONPATH = ./src/
 # ``/var/folders/.../com.apple.shortcuts.mac-helper/`` path some agent shells
 # inherit, ~81 chars), the full socket path overflows, ``__stack_chk_fail`` traps,
 # and the helper aborts with SIGABRT — surfacing as
-# ``RuntimeError: no response from torch_shm_manager``. See
-# ``tracker/done/035-pin-torch-version-py314-arm64.md`` for the full diagnostic
-# log. The canonical per-user short tmpdir on macOS is ``getconf
+# ``RuntimeError: no response from torch_shm_manager``.
+# The canonical per-user short tmpdir on macOS is ``getconf
 # DARWIN_USER_TEMP_DIR`` (~49 chars), which keeps the path safely under 104.
 # No-op on Linux (``sun_path`` is 108 bytes there and ``/tmp`` is 5 chars).
 UNAME_S := $(shell uname -s)
@@ -64,7 +63,7 @@ build: # Build the project (incl. the local-models extra: sentence-transformers 
 
 # --- Tests & QA ---
 
-tests: # Run the test suite (unit only — integration tests were removed deliberately: too slow for feedback loops; e2e verification runs the real pipelines instead).
+tests: # Run the unit test suite.
 	uv run pytest
 
 pre-commit: # Run pre-commit hooks.

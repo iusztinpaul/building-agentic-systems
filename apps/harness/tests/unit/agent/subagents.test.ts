@@ -169,7 +169,7 @@ describe("makeSpawnSubagent", () => {
     });
     const names = capturedToolNames(calls[0]?.config);
     expect(names).not.toContain("task");
-    expect(names).toContain("write"); // other tools still present
+    expect(names).toContain("write");
   });
 
   test("exceeding MAX_DEPTH refuses the spawn and doesn't call Gemini", async () => {
@@ -214,7 +214,6 @@ describe("makeSpawnSubagent", () => {
     expect(kinds[0]).toBe("start");
     expect(kinds.at(-1)).toBe("end");
     expect(kinds).toContain("assistant_text");
-    // start event carries the description + type + depth
     const start = events[0];
     if (start?.kind !== "start") throw new Error("first event not start");
     expect(start.description).toBe("greet");

@@ -67,10 +67,8 @@ def with_key(mocker) -> None:
 
 class TestConfigureOpikNoKey:
     def test_configure_is_noop_without_key(self, no_key, mocker) -> None:
-        # Arrange
         configure = mocker.patch("tree.observability.opik.configure")
 
-        # Act
         obs.configure_opik()
 
         # Assert — the SDK is never touched when no key is set.
@@ -82,13 +80,10 @@ class TestConfigureOpikNoKey:
 
 class TestConfigureOpikWithKey:
     def test_configure_calls_sdk_with_force_and_project(self, with_key, mocker) -> None:
-        # Arrange
         configure = mocker.patch("tree.observability.opik.configure")
 
-        # Act
         obs.configure_opik()
 
-        # Assert
         configure.assert_called_once()
         kwargs = configure.call_args.kwargs
         assert kwargs["api_key"] == "test-key"
@@ -117,7 +112,6 @@ class TestConfigureOpikWithKey:
         # no-op before the SDK and no test trace reaches the production project.
         mocker.patch.dict("os.environ", {"OPIK_TRACK_DISABLE": "true"})
 
-        # Act / Assert
         assert obs.is_opik_configured() is False
 
     def test_configure_is_noop_when_track_disabled(self, with_key, mocker) -> None:
@@ -125,36 +119,29 @@ class TestConfigureOpikWithKey:
         mocker.patch.dict("os.environ", {"OPIK_TRACK_DISABLE": "true"})
         configure = mocker.patch("tree.observability.opik.configure")
 
-        # Act
         obs.configure_opik()
 
-        # Assert
         configure.assert_not_called()
 
 
 class TestTrackGenaiClient:
     def test_returns_client_unchanged_without_key(self, no_key) -> None:
-        # Arrange
         sentinel = object()
 
-        # Act
         result = obs.track_genai_client(sentinel)
 
         # Assert — untouched passthrough on the no-key path.
         assert result is sentinel
 
     def test_wraps_client_with_key(self, with_key, mocker) -> None:
-        # Arrange
         wrapped = object()
         client = object()
         track_genai = mocker.patch(
             "opik.integrations.genai.track_genai", return_value=wrapped
         )
 
-        # Act
         result = obs.track_genai_client(client)
 
-        # Assert
         track_genai.assert_called_once_with(client)
         assert result is wrapped
 
@@ -166,10 +153,8 @@ class TestTrackGenaiClient:
             side_effect=RuntimeError("wrap failed"),
         )
 
-        # Act
         result = obs.track_genai_client(client)
 
-        # Assert
         assert result is client
 
 
@@ -181,53 +166,40 @@ class TestUpdateSpanTraceFailOpen:
             side_effect=RuntimeError("no active span"),
         )
 
-        # Act / Assert
         obs.update_current_span(provider="voyage", total_cost=0.1)
 
     def test_update_current_trace_is_fail_open(self, mocker) -> None:
-        # Arrange
         mocker.patch(
             "tree.observability.opik_context.update_current_trace",
             side_effect=RuntimeError("no active trace"),
         )
 
-        # Act / Assert
         obs.update_current_trace(thread_id="abc")
 
     def test_update_current_span_forwards_kwargs(self, mocker) -> None:
-        # Arrange
         spy = mocker.patch("tree.observability.opik_context.update_current_span")
 
-        # Act
         obs.update_current_span(provider="voyage", total_cost=0.5)
 
-        # Assert
         spy.assert_called_once_with(provider="voyage", total_cost=0.5)
 
 
 class TestFlushOpik:
     def test_flush_is_noop_without_key(self, no_key, mocker) -> None:
-        # Arrange
         flush = mocker.patch("tree.observability.opik.flush_tracker")
 
-        # Act
         obs.flush_opik()
 
-        # Assert
         flush.assert_not_called()
 
     def test_flush_calls_sdk_with_key(self, with_key, mocker) -> None:
-        # Arrange
         flush = mocker.patch("tree.observability.opik.flush_tracker")
 
-        # Act
         obs.flush_opik()
 
-        # Assert
         flush.assert_called_once()
 
     def test_flush_is_fail_open(self, with_key, mocker) -> None:
-        # Arrange
         mocker.patch(
             "tree.observability.opik.flush_tracker",
             side_effect=RuntimeError("flush boom"),
@@ -239,23 +211,19 @@ class TestFlushOpik:
 
 class TestEmbeddingCostMath:
     def test_voyage_3_5_cost_for_one_million_tokens(self) -> None:
-        # Arrange
         config = ObservabilityConfig()
 
         # Act — 1M tokens at $0.06/1M.
         cost = config.cost_for("voyage-3.5", 1_000_000)
 
-        # Assert
         assert cost == pytest.approx(0.06)
 
     def test_voyage_3_5_cost_is_linear(self) -> None:
-        # Arrange
         config = ObservabilityConfig()
 
         # Act — 500K tokens → half the per-1M price.
         cost = config.cost_for("voyage-3.5", 500_000)
 
-        # Assert
         assert cost == pytest.approx(0.03)
 
     @pytest.mark.parametrize(
@@ -271,33 +239,25 @@ class TestEmbeddingCostMath:
     def test_price_map_matches_voyage_docs(
         self, model: str, price_per_1m: float
     ) -> None:
-        # Arrange
         config = ObservabilityConfig()
 
-        # Act
         cost = config.cost_for(model, 1_000_000)
 
-        # Assert
         assert cost == pytest.approx(price_per_1m)
 
     def test_unknown_model_costs_zero(self) -> None:
-        # Arrange
         config = ObservabilityConfig()
 
         # Act — self-hosted / unknown model → no cost, but no error.
         cost = config.cost_for("voyageai/voyage-4-nano", 1_000_000)
 
-        # Assert
         assert cost == 0.0
 
     def test_zero_tokens_costs_zero(self) -> None:
-        # Arrange
         config = ObservabilityConfig()
 
-        # Act
         cost = config.cost_for("voyage-3.5", 0)
 
-        # Assert
         assert cost == 0.0
 
 
@@ -307,14 +267,12 @@ class TestLazyIdempotentConfiguration:
     process."""
 
     def test_configure_is_idempotent(self, with_key, mocker) -> None:
-        # Arrange
         configure = mocker.patch("tree.observability.opik.configure")
 
         # Act — two calls; the SDK is hit exactly once (memoized).
         obs.configure_opik()
         obs.configure_opik()
 
-        # Assert
         configure.assert_called_once()
 
     def test_track_genai_client_self_configures(self, with_key, mocker) -> None:
@@ -330,16 +288,13 @@ class TestLazyIdempotentConfiguration:
         configure.assert_called_once()
 
     def test_record_embedding_usage_self_configures(self, with_key, mocker) -> None:
-        # Arrange
         configure = mocker.patch("tree.observability.opik.configure")
         mocker.patch("tree.observability.opik_context.update_current_span")
 
-        # Act
         obs.record_embedding_usage(
             provider="voyage", model="voyage-3.5", total_tokens=10, total_cost=0.1
         )
 
-        # Assert
         configure.assert_called_once()
 
 
@@ -348,14 +303,12 @@ class TestDistributedTraceHeaders:
         assert obs.get_distributed_trace_headers() is None
 
     def test_returns_headers_with_key(self, with_key, mocker) -> None:
-        # Arrange
         mocker.patch("tree.observability.opik.configure")
         mocker.patch(
             "tree.observability.opik_context.get_distributed_trace_headers",
             return_value={"opik_trace_id": "t1", "opik_parent_span_id": "s1"},
         )
 
-        # Act
         headers = obs.get_distributed_trace_headers()
 
         # Assert — a plain JSON-serializable dict (safe as a Prefect parameter).
@@ -370,7 +323,6 @@ class TestDistributedTraceHeaders:
             side_effect=RuntimeError("no active trace"),
         )
 
-        # Act / Assert
         assert obs.get_distributed_trace_headers() is None
 
 
@@ -384,20 +336,17 @@ class TestSpanContextManager:
         with obs.span("x"):
             ran = True
 
-        # Assert
         assert ran is True
         start.assert_not_called()
 
     def test_span_forwards_distributed_headers_and_disables_dup_root(
         self, with_key, mocker
     ) -> None:
-        # Arrange
         mocker.patch("tree.observability.opik.configure")
         start = mocker.patch("tree.observability.opik.start_as_current_span")
 
         headers = {"opik_trace_id": "t1", "opik_parent_span_id": "s1"}
 
-        # Act
         with obs.span("task-span", tags=["ingestion"], trace_headers=headers):
             pass
 
@@ -415,11 +364,9 @@ class TestSpanContextManager:
         mocker.patch("tree.observability.opik.configure")
         start = mocker.patch("tree.observability.opik.start_as_current_span")
 
-        # Act
         with obs.span("task-span"):
             pass
 
-        # Assert
         _args, kwargs = start.call_args
         assert "opik_distributed_trace_headers" not in kwargs
 
@@ -431,16 +378,13 @@ class TestSpanContextManager:
             side_effect=RuntimeError("span boom"),
         )
 
-        # Act
         ran = False
         with obs.span("x"):
             ran = True
 
-        # Assert
         assert ran is True
 
     def test_span_propagates_body_exception(self, with_key, mocker) -> None:
-        # Arrange
         mocker.patch("tree.observability.opik.configure")
         mocker.patch("tree.observability.opik.start_as_current_span")
 
@@ -463,23 +407,19 @@ class TestTrackedSpanDecorator:
 
         headers = {"opik_trace_id": "t1", "opik_parent_span_id": "s1"}
 
-        # Act
         result = await task(1, opik_trace_headers=headers)
 
-        # Assert
         assert result == 2
         _args, kwargs = start.call_args
         assert kwargs["opik_distributed_trace_headers"] == headers
 
     async def test_runs_body_without_key(self, no_key, mocker) -> None:
-        # Arrange
         start = mocker.patch("tree.observability.opik.start_as_current_span")
 
         @obs.tracked_span("my-task")
         async def task(x: int, opik_trace_headers=None) -> int:
             return x * 2
 
-        # Act
         result = await task(3)
 
         # Assert — body ran, SDK untouched.

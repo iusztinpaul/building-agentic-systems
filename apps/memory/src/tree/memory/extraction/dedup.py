@@ -300,7 +300,6 @@ def decide_from_candidates(
     if best_match is None:
         return DeduplicationResult(action="none", candidates=candidates)
 
-    # Tier decision.
     if best_score >= config.auto_merge_threshold:
         action: Literal["none", "merged", "flagged"] = "merged"
     elif best_score >= config.flag_threshold:

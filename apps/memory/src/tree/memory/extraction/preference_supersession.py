@@ -110,17 +110,14 @@ def slugify(text: str, *, max_len: int = _SLUG_MAX_LEN) -> str:
 
     if not text:
         return ""
-    # Normalise unicode and drop combining marks (cafe -> cafe).
     normalised = unicodedata.normalize("NFKD", text)
     ascii_text = normalised.encode("ascii", "ignore").decode("ascii")
-    # Lowercase + collapse any non [a-z0-9] run to a single hyphen.
     lowered = ascii_text.lower()
     slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
     if not slug:
         return ""
     if len(slug) <= max_len:
         return slug
-    # Trim to max_len on a word boundary when possible.
     trimmed = slug[:max_len].rstrip("-")
     last_dash = trimmed.rfind("-")
     if last_dash >= max_len // 2:
@@ -539,12 +536,10 @@ async def _write_supersession(
         },
         upsert=True,
     )
-    # Stamp valid_until on the OLD row.
     await collection.update_one(
         {"_id": old_node_id},
         {"$set": {"valid_until": now, "updated_at": now}},
     )
-    # Upsert the superseded_by edge: new -> old.
     edge_id = build_edge_id(new_node_id, EdgeType.SUPERSEDED_BY, old_node_id)
     await collection.update_one(
         {"_id": edge_id},

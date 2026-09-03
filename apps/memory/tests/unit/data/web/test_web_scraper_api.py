@@ -113,13 +113,11 @@ def _patch_failing_async_client(mocker, error: Exception) -> None:
 
 class TestCollectConfiguration:
     async def test_raises_configuration_error_when_api_key_empty(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="")
         post_mock, get_mock = _patch_http(
             mocker, post_return={"snapshot_id": "sd_1"}, get_side_effect=[]
         )
 
-        # Act & Assert
         with pytest.raises(BrightDataConfigurationError, match="BRIGHTDATA_API_KEY"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -131,18 +129,15 @@ class TestCollectConfiguration:
 
 class TestCollectEmptyInputs:
     async def test_returns_empty_list_without_any_http_call(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         post_mock, get_mock = _patch_http(
             mocker, post_return={"snapshot_id": "sd_1"}, get_side_effect=[]
         )
 
-        # Act
         result = await collect(
             DATASET_ID, [], timeout_seconds=60.0, poll_interval_seconds=1.0
         )
 
-        # Assert
         assert result == []
         post_mock.assert_not_awaited()
         get_mock.assert_not_awaited()
@@ -150,7 +145,6 @@ class TestCollectEmptyInputs:
 
 class TestCollectHappyPath:
     async def test_returns_downloaded_records(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         records = [{"url": "https://www.youtube.com/watch?v=abc123", "title": "Demo"}]
         _patch_http(
@@ -160,18 +154,15 @@ class TestCollectHappyPath:
         )
         _patch_sleep(mocker)
 
-        # Act
         result = await collect(
             DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
         )
 
-        # Assert
         assert result == records
 
     async def test_stops_polling_immediately_when_first_status_is_ready(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(
             mocker,
@@ -180,18 +171,15 @@ class TestCollectHappyPath:
         )
         sleep_mock = _patch_sleep(mocker)
 
-        # Act
         await collect(
             DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=7.0
         )
 
-        # Assert
         sleep_mock.assert_not_awaited()
 
     async def test_sleeps_the_requested_poll_interval_between_polls(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(
             mocker,
@@ -200,16 +188,13 @@ class TestCollectHappyPath:
         )
         sleep_mock = _patch_sleep(mocker)
 
-        # Act
         await collect(
             DATASET_ID, INPUTS, timeout_seconds=600.0, poll_interval_seconds=3.5
         )
 
-        # Assert
         sleep_mock.assert_awaited_once_with(3.5)
 
     async def test_calls_trigger_progress_and_snapshot_endpoints(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="my-key")
         post_mock, get_mock = _patch_http(
             mocker,
@@ -218,12 +203,10 @@ class TestCollectHappyPath:
         )
         _patch_sleep(mocker)
 
-        # Act
         await collect(
             DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
         )
 
-        # Assert
         trigger_call = post_mock.await_args
         assert trigger_call.args[0] == "https://api.brightdata.com/datasets/v3/trigger"
         assert trigger_call.kwargs["params"] == {
@@ -248,7 +231,6 @@ class TestCollectHappyPath:
 
 class TestCollectFailures:
     async def test_raises_request_error_when_status_is_failed(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(
             mocker,
@@ -257,7 +239,6 @@ class TestCollectFailures:
         )
         _patch_sleep(mocker)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match="sd_boom"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -266,11 +247,9 @@ class TestCollectFailures:
     async def test_raises_request_error_when_trigger_omits_snapshot_id(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(mocker, post_return={"error": "bad dataset"}, get_side_effect=[])
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match="snapshot_id"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -279,7 +258,6 @@ class TestCollectFailures:
     async def test_raises_request_error_when_snapshot_is_not_a_list(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(
             mocker,
@@ -288,14 +266,12 @@ class TestCollectFailures:
         )
         _patch_sleep(mocker)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match="sd_1"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
             )
 
     async def test_raises_timeout_error_naming_snapshot_id(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         _patch_http(
             mocker,
@@ -308,7 +284,6 @@ class TestCollectFailures:
             side_effect=_stepping_clock(10.0),
         )
 
-        # Act & Assert
         with pytest.raises(BrightDataTimeoutError, match="sd_slow"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=30.0, poll_interval_seconds=10.0
@@ -324,7 +299,6 @@ class TestHttpErrorPropagation:
     async def test_trigger_non_2xx_raises_request_error_with_status_and_body(
         self, mocker, status_code: int
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         request = httpx.Request(
             "POST", "https://api.brightdata.com/datasets/v3/trigger"
@@ -334,7 +308,6 @@ class TestHttpErrorPropagation:
         )
         _patch_async_client(mocker, response)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match="upstream boom") as exc_info:
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -362,7 +335,6 @@ class TestHttpErrorPropagation:
         response = httpx.Response(status_code=200, text=body, request=request)
         _patch_async_client(mocker, response)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError) as exc_info:
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -375,7 +347,6 @@ class TestHttpErrorPropagation:
     async def test_non_json_body_is_truncated_in_the_error_message(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         request = httpx.Request(
             "POST", "https://api.brightdata.com/datasets/v3/trigger"
@@ -385,7 +356,6 @@ class TestHttpErrorPropagation:
         )
         _patch_async_client(mocker, response)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError) as exc_info:
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -412,14 +382,12 @@ class TestHttpErrorPropagation:
         )
         _patch_async_client(mocker, response)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match="200"):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
             )
 
     async def test_trigger_sends_bearer_auth_header(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="secret-key")
         request = httpx.Request(
             "POST", "https://api.brightdata.com/datasets/v3/trigger"
@@ -434,12 +402,10 @@ class TestHttpErrorPropagation:
             side_effect=[{"status": "ready"}, []],
         )
 
-        # Act
         await collect(
             DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
         )
 
-        # Assert
         headers = client.post.await_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer secret-key"
 
@@ -458,12 +424,10 @@ class TestTransportErrorTyping:
     async def test_trigger_transport_failure_raises_request_error(
         self, mocker, error_type: type[httpx.TransportError]
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         error = error_type("bright data is unreachable")
         _patch_failing_async_client(mocker, error)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError) as exc_info:
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -490,7 +454,6 @@ class TestTransportErrorTyping:
         error = error_type("bright data is unreachable")
         _patch_failing_async_client(mocker, error)
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError) as exc_info:
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0
@@ -517,7 +480,6 @@ class TestTransportErrorTyping:
         _patch_settings(mocker)
         _patch_failing_async_client(mocker, error)
 
-        # Act & Assert
         with pytest.raises(type(error)):
             await collect(
                 DATASET_ID, INPUTS, timeout_seconds=60.0, poll_interval_seconds=1.0

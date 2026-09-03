@@ -198,10 +198,6 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
             )
         return native
 
-    # ------------------------------------------------------------------
-    # Embedding
-    # ------------------------------------------------------------------
-
     @track(type="llm", name="voyage-text-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed text strings via the Voyage **text** embeddings API.

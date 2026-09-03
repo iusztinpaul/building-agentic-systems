@@ -95,11 +95,9 @@ def _content_payload(result: ToolResult) -> dict[str, Any]:
 
 
 def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only() -> None:
-    # Arrange
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
 
     # Assert: the model reads the summary; the full node/edge dump is addressed
@@ -115,13 +113,11 @@ def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only() -
 def test_graph_tool_result_writes_a_file_and_links_it_for_non_ui_clients(
     mocker, tmp_path: Path
 ) -> None:
-    # Arrange
     mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=False)
 
-    # Act
     result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL", query="alice")
 
     # Assert: the summary survives the fallback branch too, alongside the
@@ -148,7 +144,6 @@ def test_graph_tool_result_survives_a_headless_browser_open(
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=False)
 
-    # Act
     result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
 
     # Assert: swallowed — a missing browser never turns a good query into an error.
@@ -177,14 +172,12 @@ async def test_all_three_graph_tools_declare_the_shared_ui_resource() -> None:
 async def test_visualize_ships_payload_in_content_block_for_ui_clients(
     mocker,
 ) -> None:
-    # Arrange
     mocker.patch(
         "tree.mcp.graph_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await visualize_memory_graph(ctx, query="alice")
 
     # Assert: payload rides in a content JSON block (the channel the iframe
@@ -201,7 +194,6 @@ async def test_visualize_ships_payload_in_content_block_for_ui_clients(
 
 
 async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:
-    # Arrange
     query_mock = mocker.patch(
         "tree.mcp.graph_app.structured_query_memory", new=AsyncMock()
     )
@@ -211,10 +203,8 @@ async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await visualize_memory_graph(ctx)
 
-    # Assert
     full_graph_mock.assert_awaited_once()
     query_mock.assert_not_awaited()
     assert "your full memory" in result.content[0].text
@@ -232,7 +222,6 @@ async def test_visualize_fallback_returns_path_and_resource_link(
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     ctx = _make_ctx(ui_supported=False)
 
-    # Act
     result = await visualize_memory_graph(ctx, query="alice")
 
     # Assert: the text block carries the server-side path; the resource link
@@ -259,10 +248,8 @@ async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await visualize_memory_graph(ctx, query="alice", as_html_file=True)
 
-    # Assert
     assert result.content[0].text.count("you asked for an HTML file") == 1
     assert result.content[1].type == "resource_link"
 
@@ -273,15 +260,12 @@ async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
 
 
 def test_graph_file_resource_serves_rendered_html(mocker, tmp_path: Path) -> None:
-    # Arrange
     mocker.patch("tree.mcp.graph_app.GRAPHS_DIR", tmp_path)
     payload = to_graph_payload(_seed_result())
     rendered = _render_graph_file(payload, output=tmp_path / "alice-x.html")
 
-    # Act
     html = graph_file(rendered.name)
 
-    # Assert
     assert html == rendered.read_text(encoding="utf-8")
 
 
@@ -292,19 +276,15 @@ def test_graph_file_resource_serves_rendered_html(mocker, tmp_path: Path) -> Non
 def test_graph_file_resource_rejects_unsafe_names(
     mocker, tmp_path: Path, bad_name: str
 ) -> None:
-    # Arrange
     mocker.patch("tree.mcp.graph_app.GRAPHS_DIR", tmp_path)
 
-    # Act / Assert
     with pytest.raises(ValueError, match="Invalid graph file name"):
         graph_file(bad_name)
 
 
 def test_graph_file_resource_missing_file_raises(mocker, tmp_path: Path) -> None:
-    # Arrange
     mocker.patch("tree.mcp.graph_app.GRAPHS_DIR", tmp_path)
 
-    # Act / Assert
     with pytest.raises(FileNotFoundError, match="No rendered graph"):
         graph_file("missing.html")
 

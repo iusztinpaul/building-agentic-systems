@@ -43,7 +43,6 @@ class _FakeAsyncModels:
         self._lock = asyncio.Lock()
 
     async def generate_content(self, **kwargs: Any) -> Any:
-        # Track concurrency.
         async with self._lock:
             self.in_flight += 1
             if self.in_flight > self.max_in_flight:
@@ -127,14 +126,11 @@ class TestInit:
 
 class TestFetchMany:
     async def test_happy_path_single_video(self, mocker):
-        # Arrange
         client = _patch_genai(mocker, _stub_response("hello\nworld"))
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert len(results) == 1
         transcript = results[0]
         assert transcript is not None

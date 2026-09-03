@@ -21,8 +21,6 @@ from tree.memory.resolution import _normalize
     ],
 )
 def test_normalize_canonicalizes_whitespace_and_case(raw: str, expected: str) -> None:
-    # Arrange / Act
     result = _normalize(raw)
 
-    # Assert
     assert result == expected

@@ -175,9 +175,7 @@ make memory-run-pipeline                                          # default sour
 make memory-run-pipeline MODE=online SOURCE="https://example.com/some-post"    # one source on demand
 ```
 
-`run-memory-pipeline` accepts an optional `NUM_SHARDS=<n>` to fan out across more parallel workers (default 1); `run-data-pipeline` has no such flag — its parallelism is declared per-source (platform bucketing + the HuggingFace source's `num_workers` in `sources/backfill.yaml`). See [`apps/memory/README.md`](apps/memory/README.md#serving-workflows) for details.
-
-The data pipeline runs **offline** (config-driven, fanned out over Prefect workers) and **online** (realtime, one source: `make memory-run-data-pipeline MODE=online SOURCE="<url|path>"`). Source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron are covered in [Data pipelines](apps/memory/README.md#data-pipelines).
+Pipeline flags (`NUM_SHARDS=`, per-source parallelism) are covered in [`apps/memory/README.md`](apps/memory/README.md#serving-workflows); source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron in [Data pipelines](apps/memory/README.md#data-pipelines).
 
 **7. Drive memory with the agent.**
 
@@ -214,21 +212,4 @@ mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin
 
 ## QA and tests
 
-Aggregate targets at the root run across both apps:
-
-```bash
-make format-check    # ruff (memory) + biome (harness)
-make lint-check      # ruff (memory) + biome (harness)
-make typecheck       # TypeScript (harness only — memory is dynamically typed)
-make pre-commit      # repo-wide pre-commit
-make tests           # memory + harness test suites (unit only — fast, no external infra)
-```
-
-Per-app variants are available under `make memory-*` and `make harness-*` (e.g. `make memory-tests`). Run `make help` to list all root targets.
-
-## CI
-
-GitHub Actions runs two parallel jobs on push / PR to `main`:
-
-- **memory** — uv sync, ruff format/lint check, Docker infra up, pytest (unit + integration).
-- **harness** — bun install, biome check, TypeScript typecheck, bun test.
+Aggregate targets at the root run across both apps; per-app variants are available under `make memory-*` and `make harness-*` (e.g. `make memory-tests`). Run `make help` to list all root targets.

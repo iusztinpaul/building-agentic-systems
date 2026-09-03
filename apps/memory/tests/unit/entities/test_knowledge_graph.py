@@ -304,7 +304,6 @@ class TestResolutionDedupFields:
         assert alice.id != alice_smith.id
         assert alice.canonical_name == alice_smith.canonical_name == "Alice Smith"
 
-        # Each doc is retrievable independently by _id.
         assert collection[f"{user_id}:person:alice"] is alice
         assert collection[f"{user_id}:person:alice smith"] is alice_smith
         assert len(collection) == 2

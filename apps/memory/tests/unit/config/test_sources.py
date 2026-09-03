@@ -118,7 +118,6 @@ class TestPathConstants:
         monkeypatch.setattr(sources_module, "_REPO_ROOT", bogus_root)
         monkeypatch.chdir(checkout)
 
-        # Act / Assert
         assert _resolve_source_path(BACKFILL_PATH).is_file()
 
 

@@ -102,13 +102,10 @@ def mock_flush_opik(mocker):
 
 class TestRunDataPipelineCliOptions:
     def test_help_lists_mode_and_selectors(self, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--help"])
 
-        # Assert
         assert result.exit_code == 0
         for opt in ("--mode", "--user-id", "--source-file", "--uri", "--source"):
             assert opt in result.output
@@ -116,10 +113,8 @@ class TestRunDataPipelineCliOptions:
     def test_online_without_source_is_a_usage_error(
         self, mock_run_online, cli_main
     ) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--mode", "online"])
 
         # Assert — hard CLI error BEFORE any flow is dispatched.
@@ -128,16 +123,13 @@ class TestRunDataPipelineCliOptions:
         mock_run_online.assert_not_awaited()
 
     def test_online_rejects_offline_selectors(self, mock_run_online, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--mode", "online", "--source", "https://x.com/a", "--uri", "https://y"],
         )
 
-        # Assert
         assert result.exit_code != 0
         assert "offline-only" in result.output
         mock_run_online.assert_not_awaited()
@@ -146,10 +138,8 @@ class TestRunDataPipelineCliOptions:
         # Arrange — the default mode is offline; --source belongs to online.
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--source", "https://x.com/a"])
 
-        # Assert
         assert result.exit_code != 0
         assert "online-only" in result.output
         mock_run_offline.assert_not_awaited()
@@ -159,13 +149,10 @@ class TestRunDataPipelineOfflineForwarding:
     def test_no_flags_forwards_neither_selector(
         self, mock_run_offline, cli_main
     ) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, [])
 
-        # Assert
         assert result.exit_code == 0, result.output
         mock_run_offline.assert_awaited_once()
         args = mock_run_offline.await_args.args
@@ -175,7 +162,6 @@ class TestRunDataPipelineOfflineForwarding:
     def test_source_file_and_uri_combined_forwards_both(
         self, mock_run_offline, cli_main
     ) -> None:
-        # Arrange
         runner = CliRunner()
 
         # Act — combine a file with a typed and an untyped URL.
@@ -191,7 +177,6 @@ class TestRunDataPipelineOfflineForwarding:
             ],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         args = mock_run_offline.await_args.args
         assert args[2] == ["sources/backfill.yaml"]
@@ -205,7 +190,6 @@ class TestRunDataPipelineOfflineForwarding:
     def test_huggingface_uri_fails_fast_before_any_flow(
         self, mock_run_offline, cli_main
     ) -> None:
-        # Arrange
         runner = CliRunner()
 
         # Act — an explicit huggingface_dataset token must error out up front.
@@ -223,16 +207,13 @@ class TestRunDataPipelineOfflineForwarding:
 
 class TestRunDataPipelineOnlineForwarding:
     def test_online_forwards_source_and_title(self, mock_run_online, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--mode", "online", "--source", "/tmp/notes.md", "--title", "Notes"],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         mock_run_online.assert_awaited_once()
         args = mock_run_online.await_args.args
@@ -255,7 +236,6 @@ class TestRunDataPipelineOfflineDispatch:
         # Arrange — one source file, no inline sources.
         source_files = ["sources/listen.yaml"]
 
-        # Act
         await cli_module._run_offline(None, None, source_files, [])
 
         # Assert — the data step is the offline flow with extraction disabled.
@@ -279,10 +259,8 @@ class TestRunDataPipelineOfflineDispatch:
     ) -> None:
         # Arrange — neither selector: the data coordinator owns the default set.
 
-        # Act
         await cli_module._run_offline(None, None, [], [])
 
-        # Assert
         kwargs = mock_dispatch_offline.await_args.kwargs
         assert kwargs["source_files"] is None
         assert kwargs["sources"] is None
@@ -295,11 +273,8 @@ class TestRunDataPipelineOfflineDispatch:
         mock_wait_for_dispatch,
         mock_flush_opik,
     ) -> None:
-        # Arrange
         inline_sources = [{"uri": "https://x.com/a", "type": "web"}]
 
-        # Act
         await cli_module._run_offline(None, None, [], inline_sources)
 
-        # Assert
         assert mock_dispatch_offline.await_args.kwargs["sources"] == inline_sources

@@ -128,7 +128,6 @@ def validate_properties(
         alias = field_info.alias
         wire_key = alias if alias is not None else python_name
         python_name_to_wire_key[python_name] = wire_key
-        # The Python name is always accepted as a lookup key.
         key_to_python_name[python_name] = python_name
         # The alias is also accepted (most common LLM-facing form).
         if alias is not None:
@@ -313,7 +312,6 @@ def _validate_edge_envelope(
     if semantic_type is not None:
         return EnvelopeResult(ok=False, reason="semantic_on_non_related_to")
 
-    # Generic pair check.
     if (source_type, target_type) not in spec.allowed_pairs:
         return EnvelopeResult(ok=False, reason="disallowed_pair")
 

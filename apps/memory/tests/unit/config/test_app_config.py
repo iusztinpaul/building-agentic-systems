@@ -112,8 +112,6 @@ class TestLoadAppConfig:
         assert config.prefect.deploy_optional is False
 
     def test_prefect_deploy_optional_defaults_false_when_absent(self, tmp_path):
-        """A YAML with no ``prefect`` block defaults ``deploy_optional`` to false."""
-
         custom = tmp_path / "no_prefect.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
@@ -167,8 +165,6 @@ class TestLoadAppConfig:
         assert config.youtube.brightdata_poll_interval_seconds == 10.0
 
     def test_youtube_defaults_when_absent(self, tmp_path):
-        """A YAML with no ``youtube`` block falls back to the typed defaults."""
-
         custom = tmp_path / "no_youtube.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
@@ -194,8 +190,6 @@ class TestLoadAppConfig:
         assert config.youtube.brightdata_poll_interval_seconds == 3.0
 
     def test_dream_defaults_when_absent(self, tmp_path):
-        """A YAML with no ``dream`` block falls back to the typed defaults."""
-
         custom = tmp_path / "no_dream.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
@@ -208,8 +202,6 @@ class TestLoadAppConfig:
         assert config.dream.enable_supersession_judge is False
 
     def test_dream_block_loaded_from_custom_yaml(self, tmp_path):
-        """Operator-tuned dream knobs in YAML are read into the typed model."""
-
         custom = tmp_path / "dream.yaml"
         custom.write_text(
             "dream:\n"
@@ -275,7 +267,6 @@ class TestLoadAppConfig:
         assert config.models.llm.provider == "gemini"
         assert config.extraction.chunk_size == 256
         assert config.extraction.resolution.fuzzy_threshold == 0.9
-        # Unset values keep defaults.
         assert config.extraction.chunk_overlap == 64
         # Embedding dimensions fall back to the plain Pydantic default
         # (1024) when the custom YAML doesn't override them (#034/#039).
@@ -339,9 +330,6 @@ class TestConcurrencyConfig:
     """#054 / ADR-002: the top-level ``concurrency:`` block."""
 
     def test_concurrency_block_loaded_from_default_yaml(self, frozen_config_path):
-        """The concurrency knobs are read from YAML into the
-        typed :class:`ConcurrencyConfig`."""
-
         config = load_app_config(frozen_config_path)
 
         assert config.concurrency.voyage_rpm == 3
@@ -349,9 +337,6 @@ class TestConcurrencyConfig:
         assert config.concurrency.runner_global_limit == 4
 
     def test_concurrency_defaults_when_absent(self, tmp_path):
-        """A YAML with no ``concurrency`` block falls back to the typed
-        defaults."""
-
         custom = tmp_path / "no_concurrency.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
@@ -363,9 +348,6 @@ class TestConcurrencyConfig:
         assert config.concurrency.runner_global_limit == 4
 
     def test_concurrency_block_loaded_from_custom_yaml(self, tmp_path):
-        """Operator-tuned concurrency knobs in YAML are read into the typed
-        model."""
-
         custom = tmp_path / "concurrency.yaml"
         custom.write_text(
             "concurrency:\n"
@@ -537,8 +519,6 @@ class TestExtractionConcurrencyKnobs:
         assert config.extraction.dedup_concurrency == 4
 
     def test_doc_concurrency_env_override(self, tmp_path, monkeypatch):
-        """The override hatch also reaches ``doc_concurrency``."""
-
         custom = tmp_path / "extraction.yaml"
         custom.write_text("extraction:\n  doc_concurrency: 1\n")
         monkeypatch.setenv("TREE_EXTRACTION__DOC_CONCURRENCY", "3")

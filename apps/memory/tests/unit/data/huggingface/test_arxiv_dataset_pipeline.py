@@ -376,7 +376,6 @@ class TestIngestArxivDataset:
             new_callable=AsyncMock,
         )
 
-        # Act
         await ingest_arxiv_dataset.fn(
             entry=_entry(max_samples=250, batch_size=7, concurrency=3, offset=250),
             user_id=PydanticObjectId(),

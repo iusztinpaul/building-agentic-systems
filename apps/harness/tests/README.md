@@ -48,7 +48,7 @@ Prefer dependency injection (`SlashActions.listSessions`, `McpConnectDeps`) over
 
 Tests must pass without any external setup (no `make local-start`, no `GOOGLE_API_KEY`, no `ripgrep`). If a function needs a real subprocess (e.g. `runHook` shells out to `bash`), use `/bin/echo`, `/bin/true`, or similar POSIX-guaranteed commands so tests stay portable.
 
-There is no integration suite (deleted deliberately — too slow for feedback loops); e2e verification happens by running the real harness.
+There is no integration suite (see `AGENTS.md`); e2e verification happens by running the real harness.
 
 ## Running
 

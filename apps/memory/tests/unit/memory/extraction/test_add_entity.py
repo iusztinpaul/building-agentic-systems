@@ -157,8 +157,6 @@ class TestAddEntityInputValidation:
             )
 
     async def test_missing_user_id_raises_type_error(self, mocker) -> None:
-        """``add_entity`` refuses to run without ``user_id``."""
-
         database, _ = _make_database(mocker)
         with pytest.raises(TypeError, match="user_id"):
             await add_entity(  # type: ignore[call-arg]
@@ -180,13 +178,11 @@ class TestAddEntityInputValidation:
 
 class TestAddEntityShortCircuit:
     async def test_resolve_false_dedup_false_single_upsert(self, mocker) -> None:
-        # Arrange
         database, collection = _make_database(mocker)
         resolver = _make_resolver()
         embedding_model = _make_embedding_model()
         dedupe_spy = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
 
-        # Act
         target_id, resolved, dedup_result = await add_entity(
             database=database,
             embedding_model=embedding_model,
@@ -239,7 +235,6 @@ class TestAddEntityMergedAction:
     async def test_merged_emits_single_update_at_canonical(
         self, mocker, strategy: MergeStrategy
     ) -> None:
-        # Arrange
         database, collection = _make_database(mocker)
         dedup_result = DeduplicationResult(
             action="merged",
@@ -251,7 +246,6 @@ class TestAddEntityMergedAction:
         _patch_dedupe_entity(mocker, dedup_result)
         config = DeduplicationConfig(merge_strategy=strategy)
 
-        # Act
         target_id, _resolved, returned = await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
@@ -264,14 +258,12 @@ class TestAddEntityMergedAction:
             dedup_config=config,
         )
 
-        # Assert
         assert target_id == "person:alice_canonical"
         assert returned.applied_strategy is strategy
         # Exactly one update_one (the merge), and it targets the canonical.
         assert collection.update_one.call_count == 1
         merge_args = collection.update_one.call_args_list[0]
         assert merge_args.args[0] == {"_id": "person:alice_canonical"}
-        # No SAME_AS edge written.
         assert _count_same_as_calls(collection) == 0
 
 
@@ -282,7 +274,6 @@ class TestAddEntityFlaggedAction:
     async def test_flagged_emits_node_and_same_as_edge(
         self, mocker, strategy: MergeStrategy
     ) -> None:
-        # Arrange
         database, collection = _make_database(mocker)
         dedup_result = DeduplicationResult(
             action="flagged",
@@ -294,7 +285,6 @@ class TestAddEntityFlaggedAction:
         _patch_dedupe_entity(mocker, dedup_result)
         config = DeduplicationConfig(merge_strategy=strategy)
 
-        # Act
         target_id, _resolved, returned = await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
@@ -307,7 +297,6 @@ class TestAddEntityFlaggedAction:
             dedup_config=config,
         )
 
-        # Assert
         assert target_id == f"{_PH}:person:alyce smyth"
         assert returned.applied_strategy is None  # only set on merged
         # Two upserts: the new node + the SAME_AS edge.
@@ -328,7 +317,6 @@ class TestAddEntityFlaggedAction:
         assert edge_update["$set"]["properties.confidence"] == 0.88
         assert edge_update["$set"]["properties.match_type"] == "embedding"
         assert edge_args.kwargs.get("upsert") is True
-        # Exactly one SAME_AS edge.
         assert _count_same_as_calls(collection) == 1
 
 
@@ -337,12 +325,10 @@ class TestAddEntityNoneAction:
 
     @pytest.mark.parametrize("strategy", _ALL_STRATEGIES)
     async def test_none_emits_node_only(self, mocker, strategy: MergeStrategy) -> None:
-        # Arrange
         database, collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
         config = DeduplicationConfig(merge_strategy=strategy)
 
-        # Act
         target_id, _resolved, returned = await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
@@ -355,7 +341,6 @@ class TestAddEntityNoneAction:
             dedup_config=config,
         )
 
-        # Assert
         assert target_id == f"{_PH}:person:apple"
         assert returned.applied_strategy is None
         # Exactly one update_one (the new node), no SAME_AS edge.
@@ -374,11 +359,9 @@ class TestAddEntityCanonicalNameWritten:
     async def test_canonical_name_from_resolver_on_none(self, mocker) -> None:
         """On ``action="none"``, ``canonical_name`` comes from the resolver."""
 
-        # Arrange
         database, collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
 
-        # Act
         await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
@@ -396,7 +379,6 @@ class TestAddEntityCanonicalNameWritten:
         pipeline = node_call.args[1]
         set_stage = pipeline[0]["$set"]
         assert set_stage["canonical_name"] == "apple inc"
-        # user_id is stamped on the upsert.
         assert set_stage["user_id"] == _USER_ID
 
 
@@ -450,12 +432,10 @@ class TestAddEntitySelfMatchExclusion:
 
 class TestAddEntityDedupDisabled:
     async def test_dedup_config_disabled_skips_dedupe_entity(self, mocker) -> None:
-        # Arrange
         database, collection = _make_database(mocker)
         dedupe_spy = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
         config = DeduplicationConfig(enabled=False)
 
-        # Act
         target_id, _resolved, dedup_result = await add_entity(
             database=database,
             embedding_model=_make_embedding_model(),
@@ -565,7 +545,6 @@ class TestAddEntityNodeTextEmbedding:
         )
 
         properties = {"role": "researcher", "org": "OpenAI"}
-        # Act
         await add_entity(
             database=database,
             embedding_model=model,
@@ -600,7 +579,6 @@ class TestAddEntityNodeTextEmbedding:
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
 
         properties = {"role": "researcher"}
-        # Act
         await add_entity(
             database=database,
             embedding_model=model,
@@ -625,7 +603,6 @@ class TestAddEntityNodeTextEmbedding:
         assert persisted == expected_vec
 
     async def test_preference_embeds_statement_not_node_text(self, mocker) -> None:
-        # Arrange
         database, _collection = _make_database(mocker)
         model = _RecordingEmbeddingModel()
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
@@ -694,7 +671,6 @@ class TestAddEntityRoutesThroughChokepoint:
             new=AsyncMock(return_value=[[0.0] * 8]),
         )
 
-        # Act
         await add_entity(
             database=database,
             embedding_model=model,
@@ -729,7 +705,6 @@ class TestAddEntityRoutesThroughChokepoint:
             new=AsyncMock(return_value=[[]]),
         )
 
-        # Act
         await add_entity(
             database=database,
             embedding_model=model,
@@ -757,7 +732,6 @@ class TestAddEntityRoutesThroughChokepoint:
             new=AsyncMock(return_value=[]),
         )
 
-        # Act
         await add_entity(
             database=database,
             embedding_model=model,
@@ -770,7 +744,6 @@ class TestAddEntityRoutesThroughChokepoint:
             dedup_config=DeduplicationConfig(),
         )
 
-        # Assert
         assert dedupe.await_args.kwargs["embedding"] == []
 
 
@@ -862,7 +835,6 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         sess = _make_mock_voyage_session()
         mocker.patch("aiohttp.ClientSession", return_value=sess)
 
-        # Act
         await add_entity(
             database=database,
             embedding_model=real_model,

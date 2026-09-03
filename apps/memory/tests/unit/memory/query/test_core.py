@@ -33,7 +33,6 @@ class TestRRFFuse:
             assert item["score"] > 0
 
     def test_rrf_formula(self):
-        """Verify the exact RRF score for a simple case."""
         vector = [{"_id": "x"}]
         text = [{"_id": "x"}]
         fused = _rrf_fuse(vector, text, k=10)

@@ -95,7 +95,6 @@ class TestFindFactsFilters:
         find_mock = _patch_find(mocker)
         await KGQuery(_USER_A).find_facts()
         call_filter = find_mock.call_args.args[0]
-        # Only the three scoping keys.
         assert set(call_filter.keys()) == {"user_id", "kind", "type"}
 
 

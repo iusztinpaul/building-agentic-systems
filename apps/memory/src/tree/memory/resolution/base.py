@@ -44,8 +44,6 @@ class AbstractResolver(ABC):
 
     @staticmethod
     def _normalize(text: str) -> str:
-        """Delegate to :func:`tree.memory.resolution.types._normalize`."""
-
         return _normalize(text)
 
     @abstractmethod

@@ -283,7 +283,6 @@ class TestPreferenceSupersessionFires:
         embedding_model = _FakeEmbedding([0.95, 0.05, 0.0])
         now = datetime.now(tz=UTC)
 
-        # Act
         decisions = await resolve_supersessions(
             database=database,
             user_id=_USER_ID,
@@ -670,9 +669,7 @@ class TestFactSupersession:
         assert decision.superseded is True
         assert decision.old_node_id == existing_id
 
-        # Old fact superseded.
         assert collection.rows[existing_id]["valid_until"] == now
-        # superseded_by edge present.
         new_id = build_node_id(_USER_ID, NodeType.FACT, "earth-orbits-mars")
         edge_id = f"{new_id}|{EdgeType.SUPERSEDED_BY.value}|{existing_id}"
         assert edge_id in collection.rows
