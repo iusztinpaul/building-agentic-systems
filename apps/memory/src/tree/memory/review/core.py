@@ -461,7 +461,6 @@ async def _handle_confirm(
             tgt_id=tgt_id,
         )
 
-    # Load both endpoint nodes (tenant-scoped).
     src_node = await collection.find_one({"_id": src_id, "user_id": user_id})
     tgt_node = await collection.find_one({"_id": tgt_id, "user_id": user_id})
     if src_node is None or tgt_node is None:
@@ -474,7 +473,6 @@ async def _handle_confirm(
     winner_id = str(winner["_id"])
     loser_id = str(loser["_id"])
 
-    # Read entity_type off the winner (source_type/target_type fall back).
     winner_type_raw = (
         winner.get("type") or edge_doc.get("source_type") or edge_doc.get("target_type")
     )

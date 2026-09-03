@@ -36,8 +36,6 @@ class FakeEmbeddingModel(BaseEmbeddingModel):
 
     @property
     def dimensions(self) -> int:
-        """Configured output dimensionality."""
-
         return self._dimensions
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -53,8 +51,6 @@ class MockEmbeddingModel(BaseEmbeddingModel):
 
     @property
     def dimensions(self) -> int:
-        """Configured output dimensionality."""
-
         return self._dimensions
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

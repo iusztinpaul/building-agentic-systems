@@ -501,7 +501,6 @@ async def _build_ingest_block(
 ) -> dict[str, Any]:
     """Select URLs and trigger the batch ingest deployment. Always returns a dict."""
 
-    # URL selection. ingest_urls (explicit) wins; else top-k of SERP; else all SERP URLs.
     if ingest_urls is not None:
         selected: list[str] = list(ingest_urls)
     elif ingest_top_k is not None:

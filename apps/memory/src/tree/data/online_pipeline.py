@@ -32,7 +32,6 @@ from tree.observability import (
 
 logger = logging.getLogger(__name__)
 
-# Opik tags + metadata for the online data pipeline's trace
 _ONLINE_METADATA = pipeline_metadata("data")
 
 
@@ -162,19 +161,16 @@ async def _ingest_url(url: str, user_id: PydanticObjectId) -> Document | None:
     validate_url(url)
     domain = urlparse(url).netloc.lower()
 
-    # Static registry match.
     for pattern, handler in _URL_HANDLERS:
         if pattern in domain:
             logger.info("Routing URL to '%s' pipeline: %s", pattern, url)
             return await handler(url, user_id)
 
-    # Custom Substack domain match.
     bare_domain = domain.removeprefix("www.")
     if bare_domain in _get_configured_substack_domains():
         logger.info("Routing URL to 'substack (custom domain)' pipeline: %s", url)
         return await _ingest_substack_article(url, user_id)
 
-    # Fallback: generic web pipeline (Bright Data Web Unlocker).
     logger.info("Routing URL to 'web (Bright Data fallback)' pipeline: %s", url)
     return await _ingest_web_url(url, user_id)
 

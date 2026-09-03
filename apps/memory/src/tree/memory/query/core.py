@@ -56,18 +56,14 @@ async def search_nodes(
     db = client[database]
     collection = db[_KG_COLLECTION]
 
-    # --- Vector search ---
     vector_results = await _vector_search(
         collection, query, embedding_model, user_id=user_id, limit=top_k
     )
 
-    # --- Text search ---
     text_results = await _text_search(collection, query, user_id=user_id, limit=top_k)
 
-    # --- RRF fusion ---
     fused = _rrf_fuse(vector_results, text_results, k=rrf_k)
 
-    # Sort by fused score descending, take top_k.
     ranked = sorted(fused.items(), key=lambda x: x[1]["score"], reverse=True)[:top_k]
 
     return [item["doc"] for _, item in ranked]
@@ -82,8 +78,6 @@ async def _vector_search(
     user_id: PydanticObjectId,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Run $vectorSearch on the knowledge_graph collection."""
-
     query_vector = (await embedding_model.embed([query]))[0]
 
     pipeline = [
@@ -203,7 +197,6 @@ async def expand_graph(
     collection = db[_KG_COLLECTION]
 
     if not node_ids or max_hops == 0:
-        # No traversal — just hydrate seed nodes.
         all_nodes: list[dict[str, Any]] = []
         if node_ids:
             async for node in collection.find(

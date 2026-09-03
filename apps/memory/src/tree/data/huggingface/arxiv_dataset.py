@@ -37,8 +37,6 @@ def parse_update_date(date_value: str | datetime | None) -> datetime:
 
 
 def parse_authors(authors_str: str | None) -> list[str]:
-    """Parse the arxiv authors string into a list of individual author names."""
-
     if not authors_str:
         return ["Unknown"]
 

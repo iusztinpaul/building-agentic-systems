@@ -244,7 +244,6 @@ def validate_pipeline(
                 f"Allowed stages: {sorted(_ALLOWED_STAGES)}"
             )
 
-        # $vectorSearch must be the first stage.
         if stage_name == "$vectorSearch" and idx != 0:
             raise PipelineValidationError(
                 "$vectorSearch must be the first stage of the pipeline"
@@ -268,7 +267,6 @@ def validate_pipeline(
     if not has_limit:
         safe_pipeline.append({"$limit": max_results})
     else:
-        # Clamp any existing $limit that exceeds max_results.
         for stage in safe_pipeline:
             if "$limit" in stage and stage["$limit"] > max_results:
                 stage["$limit"] = max_results

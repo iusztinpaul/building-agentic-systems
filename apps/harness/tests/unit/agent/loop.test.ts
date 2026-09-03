@@ -6,7 +6,6 @@ import type { AnyTool } from "../../../src/tools/registry";
 import type { Tool, ToolContext, ToolResult } from "../../../src/tools/types";
 import { makeFakeGeminiClient } from "../../helpers/fake-gemini";
 
-// Drain an async generator and return the events it produced.
 async function collect(gen: AsyncGenerator<LoopEvent>): Promise<LoopEvent[]> {
   const out: LoopEvent[] = [];
   for await (const ev of gen) out.push(ev);
@@ -278,7 +277,6 @@ describe("loop", () => {
     const err = events.find((e) => e.type === "error");
     expect(err).toBeTruthy();
     if (err?.type === "error") expect(err.message).toContain("boom");
-    // No done event — loop returned early.
     expect(events.find((e) => e.type === "done")).toBeUndefined();
   });
 

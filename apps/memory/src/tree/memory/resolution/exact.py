@@ -13,8 +13,6 @@ from tree.memory.resolution.types import ResolvedEntity
 
 
 class ExactMatchResolver(AbstractResolver):
-    """Resolve via normalized equality with a candidate name."""
-
     def resolve(
         self,
         name: str,

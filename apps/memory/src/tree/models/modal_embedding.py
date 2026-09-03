@@ -109,10 +109,6 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             )
         return native
 
-    # ------------------------------------------------------------------
-    # Lazy initialisation (async)
-    # ------------------------------------------------------------------
-
     async def _ensure_initialised(self) -> None:
         """Resolve the Modal URL, build the client, and health-check.
 
@@ -133,10 +129,6 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         )
 
         await self._health_check(base_url)
-
-    # ------------------------------------------------------------------
-    # URL resolution
-    # ------------------------------------------------------------------
 
     async def _resolve_web_url(self) -> str:
         """Look up the deployed Modal function and return its web URL."""
@@ -163,10 +155,6 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             url = f"{url}/v1"
 
         return url
-
-    # ------------------------------------------------------------------
-    # Health check / warm-up
-    # ------------------------------------------------------------------
 
     async def _health_check(self, base_url: str) -> None:
         """Send a GET /health to wake up the Modal container."""
@@ -196,10 +184,6 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             ) from exc
 
         logger.info("Modal embedding endpoint is healthy")
-
-    # ------------------------------------------------------------------
-    # Embedding
-    # ------------------------------------------------------------------
 
     @track(type="llm", name="modal-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:

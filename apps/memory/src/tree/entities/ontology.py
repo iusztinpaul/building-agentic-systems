@@ -1527,9 +1527,6 @@ def get_ontology_schema() -> dict[str, Any]:
 
     node_types: dict[str, Any] = {}
     # Sort alphabetically by name for deterministic prompt output.
-    # Prior to #028 this iterated a Python ``set`` (non-deterministic
-    # ordering across hash-randomized runs); the Tester surfaced that
-    # while reviewing #027.
     extractable_node_names = sorted(
         name for name, spec in NODE_REGISTRY.items() if spec.llm_extractable
     )

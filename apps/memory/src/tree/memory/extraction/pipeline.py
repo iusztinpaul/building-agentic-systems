@@ -271,8 +271,6 @@ def _entity_embeddable_text(
 
 
 def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
-    """Construct the composite resolver from the YAML resolution config."""
-
     cfg = _live_app_config().extraction.resolution
     return CompositeResolver(
         embedding_model,
@@ -806,7 +804,6 @@ async def _resolve_entities(
     resolution_cfg = _live_app_config().extraction.resolution
     cap = resolution_cfg.max_candidates_per_type
 
-    # Collect all entities to resolve (LLM-extractable types only).
     entities: list[tuple[str, NodeType]] = []
     entities_by_doc: dict[str, list[tuple[NodeType, str]]] = {}
     # Keep the originating node (with its properties) per entity key so we
@@ -829,7 +826,6 @@ async def _resolve_entities(
         )
         return ResolutionOutput()
 
-    # Group entities by type for type-strict resolution.
     by_type: dict[NodeType, list[tuple[str, NodeType]]] = {}
     for name, etype in entities:
         by_type.setdefault(etype, []).append((name, etype))
@@ -898,7 +894,6 @@ async def _resolve_entities(
             elif doc_name:
                 alias_map.setdefault(doc_name, []).extend(aliases)
 
-        # Resolve every entity of this type against the per-type candidate set.
         existing_entities = {etype: sorted(candidate_names)}
         results = await resolver.resolve_with_types(
             entity_pairs,
@@ -906,7 +901,6 @@ async def _resolve_entities(
             existing_aliases=alias_map,
         )
         for (name, _t), resolved in zip(entity_pairs, results):
-            # Find the originating doc id for this (type, name).
             for doc_id, doc_entities in entities_by_doc.items():
                 if (etype, name) in doc_entities:
                     key = make_entity_key(doc_id, etype, name)
@@ -1229,7 +1223,6 @@ async def _apply_writes(
 
     seen_edge_ids: dict[str, ExtractedEdge] = {}
     for edge in all_edges:
-        # Source/target endpoints may need remapping.
         src_id = _remap_endpoint(
             edge.source_type, edge.source_node_id, name_to_target_id, user_id
         )

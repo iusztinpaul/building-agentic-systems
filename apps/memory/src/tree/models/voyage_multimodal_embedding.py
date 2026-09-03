@@ -167,10 +167,6 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
             )
         return native
 
-    # ------------------------------------------------------------------
-    # Embedding
-    # ------------------------------------------------------------------
-
     @track(type="llm", name="voyage-multimodal-embed")
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed text strings via the Voyage multimodal API.

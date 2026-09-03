@@ -102,7 +102,6 @@ describe("connectMcpServer", () => {
       createClient: () => handle.client,
     });
     expect(server.tools.map((t) => t.name)).toEqual(["a", "b", "c"]);
-    // Two listTools calls: first with no cursor, second with the cursor from page 1.
     expect(handle.listToolsCalls.length).toBe(2);
     expect(handle.listToolsCalls[0]).toEqual({});
     expect(handle.listToolsCalls[1]?.cursor).toBe("cursor-1");

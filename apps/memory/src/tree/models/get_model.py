@@ -20,8 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_llm(provider: str | None = None) -> BaseLLM:
-    """Factory for LLM instances."""
-
     provider = provider or app_config.models.llm.provider
 
     if provider == "gemini":

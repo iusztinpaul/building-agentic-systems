@@ -64,9 +64,6 @@ export function dispatchSlashCommand(name: string, actions: SlashActions): Slash
   return { info: `unknown slash command: /${name}  (try /help)` };
 }
 
-// Helper consumed by app.tsx — wraps the dispatcher call into a no-op Message[]
-// update if the caller wants to align the UI history panel. Returns the info
-// string for inline rendering.
 export function applySlashCommand(input: string, actions: SlashActions): SlashResult | null {
   const parsed = parseSlashCommand(input);
   if (!parsed) return null;

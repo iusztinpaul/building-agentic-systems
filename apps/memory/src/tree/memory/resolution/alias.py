@@ -15,8 +15,6 @@ from tree.memory.resolution.types import ResolvedEntity
 
 
 class AliasMatchResolver(AbstractResolver):
-    """Resolve via a pre-computed canonical → aliases mapping."""
-
     def resolve(
         self,
         name: str,

@@ -35,8 +35,6 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_urls(raw: str) -> list[str]:
-    """Parse the ``--urls`` comma-separated value into a clean list."""
-
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 

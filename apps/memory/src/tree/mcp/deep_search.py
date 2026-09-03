@@ -227,7 +227,6 @@ def write_deep_search_results(
         doc_id = str(doc.get("_id", uuid4().hex[:8]))
         kind = doc.get("kind", "node")
 
-        # Strip embedding before writing.
         cleaned = {k: v for k, v in doc.items() if k != "embedding"}
 
         slug = slugify(doc_id)
