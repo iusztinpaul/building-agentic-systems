@@ -458,10 +458,8 @@ class TestEmbedNodesIsBackfillOnly:
         client = _wire_client(collection)
         spy_model = _SpyEmbeddingModel(dimensions=4)
 
-        # Act
         embedded = await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
 
-        # Assert
         assert embedded == 1
         # The query the function issues must exclude non-empty embeddings
         # and be scoped to ``user_id``.
@@ -529,7 +527,6 @@ class TestEmbedNodesIsBackfillOnly:
             new=AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4], []]),
         )
 
-        # Act
         with caplog.at_level("INFO", logger="tree.memory.indexing.core"):
             embedded = await embed_nodes(
                 client, "test_db", _SpyEmbeddingModel(dimensions=4), _TEST_USER_ID

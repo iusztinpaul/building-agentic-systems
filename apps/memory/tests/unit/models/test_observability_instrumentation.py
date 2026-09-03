@@ -54,11 +54,9 @@ class TestVoyageTextCostRecording:
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
 
-        # Act
         with patch("aiohttp.ClientSession", return_value=mock_session):
             await model.embed(["hello"])
 
-        # Assert
         rec.assert_called_once()
         kwargs = rec.call_args.kwargs
         assert kwargs["provider"] == "voyage"
@@ -74,7 +72,6 @@ class TestVoyageTextCostRecording:
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
 
-        # Act
         with patch("aiohttp.ClientSession", return_value=mock_session):
             await model.embed(["hello"])
 
@@ -97,7 +94,6 @@ class TestVoyageTextCostRecording:
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
 
-        # Act
         with patch("aiohttp.ClientSession", return_value=mock_session):
             result = await model.embed(["hello"])
 
@@ -121,7 +117,6 @@ class TestVoyageMultimodalCostRecording:
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
 
-        # Act
         with patch("aiohttp.ClientSession", return_value=mock_session):
             await model.embed(["hello"])
 
@@ -151,10 +146,8 @@ class TestModalUsageRecording:
         response.data = [MagicMock(embedding=[0.1, 0.2])]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
-        # Act
         await model.embed(["hello"])
 
-        # Assert
         kwargs = rec.call_args.kwargs
         assert kwargs["provider"] == "modal"
         assert kwargs["model"] == "voyageai/voyage-4-nano"
@@ -170,7 +163,6 @@ class TestModalUsageRecording:
         response.data = [MagicMock(embedding=[0.1])]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
-        # Act
         await model.embed(["hello"])
 
         # Assert — recorded with total_tokens None (no usage), cost still 0.
@@ -179,7 +171,6 @@ class TestModalUsageRecording:
         assert kwargs["total_cost"] == 0.0
 
     async def test_recording_failure_does_not_break_embed(self, mocker) -> None:
-        # Arrange
         mocker.patch(
             "tree.models.modal_embedding.record_embedding_usage",
             side_effect=RuntimeError("opik down"),
@@ -190,8 +181,6 @@ class TestModalUsageRecording:
         response.data = [MagicMock(embedding=[0.9])]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
-        # Act
         result = await model.embed(["hello"])
 
-        # Assert
         assert result == [[0.9]]

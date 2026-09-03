@@ -81,7 +81,6 @@ def _content_payload(result: ToolResult) -> dict[str, Any]:
 
 
 def test_summary_includes_counts_breakdown() -> None:
-    # Arrange
     payload = {
         "nodes": [
             {"name": "a", "type": "person"},
@@ -91,10 +90,8 @@ def test_summary_includes_counts_breakdown() -> None:
         "edges": [{"source": "a", "target": "c", "type": "mentions"}],
     }
 
-    # Act
     summary = _summary(payload, "'test'")
 
-    # Assert
     assert "3 nodes" in summary
     assert "1 edges" in summary
     assert "person:2" in summary
@@ -109,14 +106,12 @@ def test_summary_includes_counts_breakdown() -> None:
 async def test_dashboard_ships_payload_in_content_block_for_ui_clients(
     mocker,
 ) -> None:
-    # Arrange
     mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await memory_dashboard(ctx, query="alice")
 
     # Assert: payload rides in a content JSON block (the channel the iframe
@@ -135,30 +130,25 @@ async def test_dashboard_ships_payload_in_content_block_for_ui_clients(
 async def test_dashboard_keeps_structured_content_for_forwarding_hosts(
     mocker,
 ) -> None:
-    # Arrange
     mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await memory_dashboard(ctx, query="alice")
 
-    # Assert
     assert result.structured_content is not None
     assert len(result.structured_content["nodes"]) == 2
 
 
 async def test_dashboard_model_facing_summary_is_short(mocker) -> None:
-    # Arrange
     mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await memory_dashboard(ctx, query="alice")
 
     # Assert: the first content block is the human/model summary, not data.
@@ -169,14 +159,12 @@ async def test_dashboard_model_facing_summary_is_short(mocker) -> None:
 
 
 async def test_dashboard_falls_back_to_text_without_ui_extension(mocker) -> None:
-    # Arrange
     mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     ctx = _make_ctx(ui_supported=False)
 
-    # Act
     result = await memory_dashboard(ctx, query="alice")
 
     # Assert: plain text summary, no app payload.
@@ -185,7 +173,6 @@ async def test_dashboard_falls_back_to_text_without_ui_extension(mocker) -> None
 
 
 async def test_dashboard_empty_query_covers_full_graph(mocker) -> None:
-    # Arrange
     query_mock = mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory", new=AsyncMock()
     )
@@ -195,7 +182,6 @@ async def test_dashboard_empty_query_covers_full_graph(mocker) -> None:
     )
     ctx = _make_ctx(ui_supported=True)
 
-    # Act
     result = await memory_dashboard(ctx)
 
     # Assert: no query → the full-graph fetch, labelled as such.
@@ -210,7 +196,6 @@ async def test_dashboard_empty_query_covers_full_graph(mocker) -> None:
 
 
 def test_dashboard_view_serves_resolved_html() -> None:
-    # Act
     html = dashboard_view()
 
     # Assert: a complete document with the CDN token spliced in.

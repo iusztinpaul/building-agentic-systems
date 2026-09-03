@@ -17,10 +17,8 @@ from tree.config.settings import MongoSettings, Settings
 
 class TestSettingsSmoke:
     def test_settings_singleton_imports(self) -> None:
-        # Arrange / Act
         from tree.config.settings import settings
 
-        # Assert
         assert settings is not None
         # Mongo URI computed field is the load-bearing helper for every
         # init_mongodb() caller in the project. The operator env may point
@@ -38,20 +36,15 @@ class TestOpikProjectName:
         # Variable that may be seeded blank — it must not override the default.
         monkeypatch.setenv("OPIK_PROJECT_NAME", "")
 
-        # Act
         settings = Settings()
 
-        # Assert
         assert settings.opik_project_name == "tree-memory"
 
     def test_explicit_env_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Arrange
         monkeypatch.setenv("OPIK_PROJECT_NAME", "my-project")
 
-        # Act
         settings = Settings()
 
-        # Assert
         assert settings.opik_project_name == "my-project"
 
 
@@ -73,10 +66,8 @@ class TestMongoUriScheme:
             mongo_initdb_root_password=SecretStr("tree"),
         )
 
-        # Act
         uri = mongo.mongo_uri.get_secret_value()
 
-        # Assert
         assert uri == (
             "mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin"
         )
@@ -84,7 +75,6 @@ class TestMongoUriScheme:
     def test_srv_scheme_builds_atlas_uri_without_port_or_direct_connection(
         self,
     ) -> None:
-        # Arrange
         mongo = MongoSettings(
             mongo_scheme="mongodb+srv",
             mongo_host="tree.example.mongodb.net",
@@ -93,15 +83,12 @@ class TestMongoUriScheme:
             mongo_initdb_root_password=SecretStr("atlas_pwd"),
         )
 
-        # Act
         uri = mongo.mongo_uri.get_secret_value()
 
-        # Assert
         assert uri == (
             "mongodb+srv://atlas_user:atlas_pwd@tree.example.mongodb.net/?retryWrites=true&w=majority"
         )
 
     def test_unknown_scheme_is_rejected(self) -> None:
-        # Arrange / Act / Assert
         with pytest.raises(ValidationError, match="mongo_scheme"):
             MongoSettings(mongo_scheme="postgres")

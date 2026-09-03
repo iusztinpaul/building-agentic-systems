@@ -159,11 +159,9 @@ class TestGraphToolsDualDelivery:
     async def test_visualize_false_returns_the_plain_serialized_string(
         self, mocker, tool_name, tool
     ) -> None:
-        # Arrange
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
         ctx = _make_graph_ctx(ui_supported=True)
 
-        # Act
         result = await tool(query="alice", ctx=ctx)
 
         # Assert: unchanged contract — no ToolResult, no graph, no iframe payload.
@@ -174,11 +172,9 @@ class TestGraphToolsDualDelivery:
     async def test_visualize_keeps_serialized_output_visible_to_the_model(
         self, mocker, tool_name, tool
     ) -> None:
-        # Arrange
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
         ctx = _make_graph_ctx(ui_supported=True)
 
-        # Act
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
         # Assert: the tool still answers the question — the serialized rows are
@@ -189,11 +185,9 @@ class TestGraphToolsDualDelivery:
     async def test_visualize_ships_the_graph_payload_to_the_iframe_only(
         self, mocker, tool_name, tool
     ) -> None:
-        # Arrange
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
         ctx = _make_graph_ctx(ui_supported=True)
 
-        # Act
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
         # Assert: node/edge dump rides in the audience=["user"] block.
@@ -213,7 +207,6 @@ class TestGraphToolsDualDelivery:
         mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
         ctx = _make_graph_ctx(ui_supported=False)
 
-        # Act
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
         # Assert: serialized rows + the server-side path + the download link.
@@ -232,10 +225,8 @@ class TestGraphToolsDualDelivery:
         _patch_query(mocker, tool_name, docs)
         ctx = _make_graph_ctx(ui_supported=True)
 
-        # Act
         result = await tool(query="how many", ctx=ctx, visualize=True)
 
-        # Assert
         assert isinstance(result, str)
         assert not isinstance(result, ToolResult)
         assert result.startswith(_serialize(docs))

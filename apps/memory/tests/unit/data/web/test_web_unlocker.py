@@ -41,18 +41,14 @@ def _build_response(
 
 class TestFetchUrlConfiguration:
     async def test_raises_configuration_error_when_api_key_empty(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="", zone="some-zone")
 
-        # Act & Assert
         with pytest.raises(BrightDataConfigurationError, match="BRIGHTDATA_API_KEY"):
             await fetch_url("https://example.com")
 
     async def test_raises_configuration_error_when_zone_empty(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="key", zone="")
 
-        # Act & Assert
         with pytest.raises(
             BrightDataConfigurationError, match="BRIGHTDATA_UNLOCKER_ZONE"
         ):
@@ -66,17 +62,14 @@ class TestFetchUrlValidation:
         ids=["empty", "ftp", "no-scheme", "whitespace", "javascript"],
     )
     async def test_raises_value_error_for_bad_url(self, mocker, bad_url: str) -> None:
-        # Arrange
         _patch_settings(mocker)
 
-        # Act & Assert
         with pytest.raises(ValueError, match="http"):
             await fetch_url(bad_url)
 
 
 class TestFetchUrlHttpBehavior:
     async def test_returns_response_body_verbatim_on_200(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         body_text = "# Heading\n\nSome **markdown** body."
         mock_response = _build_response(status_code=200, text=body_text)
@@ -93,10 +86,8 @@ class TestFetchUrlHttpBehavior:
             return_value=mock_client_cm,
         )
 
-        # Act
         result = await fetch_url("https://example.com/page")
 
-        # Assert
         assert result == body_text
 
     @pytest.mark.parametrize(
@@ -107,7 +98,6 @@ class TestFetchUrlHttpBehavior:
     async def test_raises_request_error_on_non_2xx(
         self, mocker, status_code: int
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         mock_response = _build_response(status_code=status_code, text="boom")
 
@@ -123,12 +113,10 @@ class TestFetchUrlHttpBehavior:
             return_value=mock_client_cm,
         )
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match=str(status_code)):
             await fetch_url("https://example.com")
 
     async def test_posts_expected_request_body_and_headers(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="my-key", zone="my-zone")
         mock_response = _build_response(status_code=200, text="ok")
 
@@ -146,10 +134,8 @@ class TestFetchUrlHttpBehavior:
 
         target_url = "https://example.com/article"
 
-        # Act
         await fetch_url(target_url)
 
-        # Assert
         mock_client.post.assert_awaited_once()
         call_args = mock_client.post.call_args
         assert call_args.args[0] == "https://api.brightdata.com/request"
@@ -162,7 +148,6 @@ class TestFetchUrlHttpBehavior:
         assert call_args.kwargs["headers"]["Authorization"] == "Bearer my-key"
 
     async def test_html_data_format_passed_through(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="k", zone="z")
         mock_response = _build_response(status_code=200, text="<html></html>")
 
@@ -178,10 +163,8 @@ class TestFetchUrlHttpBehavior:
             return_value=mock_client_cm,
         )
 
-        # Act
         result = await fetch_url("https://example.com", data_format="html")
 
-        # Assert
         assert result == "<html></html>"
         body = mock_client.post.call_args.kwargs["json"]
         assert body["data_format"] == "html"

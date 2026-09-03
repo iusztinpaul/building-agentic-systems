@@ -118,7 +118,6 @@ class TestEmptyAttributes:
 
         out = redirect_first_person(nodes, user)
 
-        # Nothing changes.
         assert out[0].name == "paul"
 
     def test_identifier_match_still_works(self) -> None:
@@ -136,13 +135,10 @@ class TestEmptyAttributes:
 
 class TestIdempotency:
     def test_second_pass_is_noop(self) -> None:
-        """Running the resolver on its own output is a no-op."""
-
         user = _make_user(name="Paul")
         nodes = [ExtractedNode(name="paul", type=NodeType.PERSON, properties={})]
 
         first = redirect_first_person(nodes, user)
-        # Snapshot the post-pass state.
         first_state = [(n.name, dict(n.properties)) for n in first]
 
         second = redirect_first_person(first, user)
@@ -152,8 +148,6 @@ class TestIdempotency:
         assert second[0].name == "self"
 
     def test_already_self_passes_through(self) -> None:
-        """A node already at ``name='self'`` is not re-aliased."""
-
         user = _make_user(name="Paul")
         nodes = [ExtractedNode(name="self", type=NodeType.PERSON, properties={})]
         before_aliases = list(nodes[0].properties.get("aliases", []))
@@ -161,7 +155,6 @@ class TestIdempotency:
         out = redirect_first_person(nodes, user)
 
         assert out[0].name == "self"
-        # Aliases not mutated.
         assert out[0].properties.get("aliases", []) == before_aliases
 
 

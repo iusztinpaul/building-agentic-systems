@@ -103,31 +103,25 @@ def fetcher() -> BrightDataTranscriptFetcher:
 
 class TestInit:
     def test_missing_api_key_raises_configuration_error(self, mocker) -> None:
-        # Arrange
         mocker.patch(
             f"{FETCHER_MODULE}.settings",
             SimpleNamespace(brightdata_api_key=SecretStr("")),
         )
 
-        # Act & Assert
         with pytest.raises(BrightDataConfigurationError, match="BRIGHTDATA_API_KEY"):
             BrightDataTranscriptFetcher()
 
     def test_api_key_resolves_from_settings(self, mocker) -> None:
-        # Arrange
         mocker.patch(
             f"{FETCHER_MODULE}.settings",
             SimpleNamespace(brightdata_api_key=SecretStr("from-settings")),
         )
 
-        # Act
         fetcher = BrightDataTranscriptFetcher()
 
-        # Assert
         assert fetcher.timeout_seconds > 0
 
     def test_timing_knobs_default_from_app_config(self, mocker) -> None:
-        # Arrange
         mocker.patch(
             f"{FETCHER_MODULE}.app_config",
             SimpleNamespace(
@@ -138,22 +132,18 @@ class TestInit:
             ),
         )
 
-        # Act
         fetcher = BrightDataTranscriptFetcher(api_key=SecretStr("test-key"))
 
-        # Assert
         assert fetcher.timeout_seconds == 123.0
         assert fetcher.poll_interval_seconds == 7.0
 
     def test_explicit_timing_knobs_win_over_app_config(self) -> None:
-        # Arrange & Act
         fetcher = BrightDataTranscriptFetcher(
             api_key=SecretStr("test-key"),
             timeout_seconds=42.0,
             poll_interval_seconds=1.5,
         )
 
-        # Assert
         assert fetcher.timeout_seconds == 42.0
         assert fetcher.poll_interval_seconds == 1.5
 
@@ -165,31 +155,25 @@ class TestCollectionShape:
     async def test_empty_input_returns_empty_without_collecting(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         collect_mock = _patch_collect(mocker)
 
-        # Act
         results = await fetcher.fetch_many([])
 
-        # Assert
         assert results == []
         collect_mock.assert_not_awaited()
 
     async def test_issues_exactly_one_collection_for_all_resolvable_slots(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         collect_mock = _patch_collect(
             mocker,
             records=[_record(VIDEO_ID_A), _record(VIDEO_ID_B), _record(VIDEO_ID_C)],
         )
 
-        # Act
         await fetcher.fetch_many(
             [VIDEO_ID_A, f"https://youtu.be/{VIDEO_ID_B}", _canonical(VIDEO_ID_C)]
         )
 
-        # Assert
         collect_mock.assert_awaited_once()
         call = collect_mock.await_args
         assert call.args[0] == _YOUTUBE_DATASET_ID
@@ -200,7 +184,6 @@ class TestCollectionShape:
         ]
 
     async def test_passes_configured_timing_knobs_to_collect(self, mocker) -> None:
-        # Arrange
         fetcher = BrightDataTranscriptFetcher(
             api_key=SecretStr("test-key"),
             timeout_seconds=42.0,
@@ -208,10 +191,8 @@ class TestCollectionShape:
         )
         collect_mock = _patch_collect(mocker, records=[_record(VIDEO_ID_A)])
 
-        # Act
         await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert collect_mock.await_args.kwargs == {
             "timeout_seconds": 42.0,
             "poll_interval_seconds": 1.5,
@@ -223,10 +204,8 @@ class TestCollectionShape:
         # Arrange — a repeated video is billed once, not twice.
         collect_mock = _patch_collect(mocker, records=[_record(VIDEO_ID_A)])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A, _canonical(VIDEO_ID_A)])
 
-        # Assert
         assert collect_mock.await_args.args[1] == [{"url": _canonical(VIDEO_ID_A)}]
         assert [result.metadata.video_id for result in results] == [
             VIDEO_ID_A,
@@ -244,10 +223,8 @@ class TestCollectionShape:
             ],
         )
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A, VIDEO_ID_B, VIDEO_ID_C])
 
-        # Assert
         assert [result.plain_text for result in results] == [
             "alpha",
             "bravo",
@@ -262,15 +239,12 @@ class TestCollectionShape:
     async def test_record_is_matched_by_input_url_when_url_is_absent(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         record = _record(VIDEO_ID_A, transcript="alpha")
         del record["url"]
         _patch_collect(mocker, records=[record])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].plain_text == "alpha"
 
 
@@ -284,11 +258,9 @@ class TestPerSlotMisses:
         # Arrange — invalid inputs are billable, so they must not be collected.
         collect_mock = _patch_collect(mocker, records=[_record(VIDEO_ID_A)])
 
-        # Act
         with caplog.at_level(logging.DEBUG, logger=FETCHER_LOGGER):
             results = await fetcher.fetch_many(["not-a-youtube-url", VIDEO_ID_A])
 
-        # Assert
         assert results[0] is None
         assert results[1] is not None
         assert collect_mock.await_args.args[1] == [{"url": _canonical(VIDEO_ID_A)}]
@@ -297,13 +269,10 @@ class TestPerSlotMisses:
     async def test_all_inputs_unresolvable_skips_collection_entirely(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         collect_mock = _patch_collect(mocker)
 
-        # Act
         results = await fetcher.fetch_many(["not-a-youtube-url", ""])
 
-        # Assert
         assert results == [None, None]
         collect_mock.assert_not_awaited()
 
@@ -311,10 +280,8 @@ class TestPerSlotMisses:
         # Arrange — Bright Data returned nothing for the second video.
         _patch_collect(mocker, records=[_record(VIDEO_ID_A)])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A, VIDEO_ID_B])
 
-        # Assert
         assert results[0] is not None
         assert results[1] is None
 
@@ -326,14 +293,11 @@ class TestPerSlotMisses:
     async def test_transcript_less_record_yields_none_slot(
         self, mocker, fetcher, caplog, transcript: str | None
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[_record(VIDEO_ID_A, transcript=transcript)])
 
-        # Act
         with caplog.at_level(logging.DEBUG, logger=FETCHER_LOGGER):
             results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results == [None]
         assert _warnings(caplog) == []
 
@@ -358,7 +322,6 @@ class TestBatchWideFailures:
         # so these must NOT be swallowed into all-`None` results.
         _patch_collect(mocker, side_effect=error)
 
-        # Act & Assert
         with pytest.raises(type(error)):
             await fetcher.fetch_many([VIDEO_ID_A, VIDEO_ID_B])
 
@@ -370,25 +333,19 @@ class TestRecordMapping:
     async def test_plain_text_is_the_record_transcript(
         self, mocker, fetcher, snapshot_record
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[snapshot_record])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].plain_text == snapshot_record["transcript"]
 
     async def test_segments_convert_milliseconds_to_seconds(
         self, mocker, fetcher, snapshot_record
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[snapshot_record])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         segments = results[0].segments
         assert len(segments) == len(snapshot_record["formatted_transcript"])
         assert segments[0].start_seconds == 1.36
@@ -398,13 +355,10 @@ class TestRecordMapping:
     async def test_metadata_is_mapped_from_the_record(
         self, mocker, fetcher, snapshot_record
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[snapshot_record])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         metadata = results[0].metadata
         assert metadata.video_id == VIDEO_ID_A
         assert metadata.title == snapshot_record["title"]
@@ -416,13 +370,10 @@ class TestRecordMapping:
     async def test_publish_date_is_tz_aware_utc(
         self, mocker, fetcher, snapshot_record
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[snapshot_record])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         publish_date = results[0].metadata.publish_date
         assert publish_date == datetime(2009, 10, 25, 6, 57, 33, tzinfo=UTC)
         assert publish_date.tzinfo is not None
@@ -435,24 +386,19 @@ class TestRecordMapping:
         _patch_collect(mocker, records=[snapshot_record])
         assert len(snapshot_record["transcript_language"]) > 1
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].language is None
 
     async def test_language_comes_from_transcription_language(
         self, mocker, fetcher, snapshot_record
     ) -> None:
-        # Arrange
         _patch_collect(
             mocker, records=[{**snapshot_record, "transcription_language": "English"}]
         )
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].language == "English"
 
     @pytest.mark.parametrize(
@@ -463,13 +409,10 @@ class TestRecordMapping:
     async def test_unparseable_date_posted_yields_no_publish_date(
         self, mocker, fetcher, raw_date: str | None
     ) -> None:
-        # Arrange
         _patch_collect(mocker, records=[_record(VIDEO_ID_A, date_posted=raw_date)])
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].metadata.publish_date is None
 
     async def test_naive_date_posted_is_read_as_utc(self, mocker, fetcher) -> None:
@@ -478,10 +421,8 @@ class TestRecordMapping:
             mocker, records=[_record(VIDEO_ID_A, date_posted="2009-10-25T06:57:33")]
         )
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].metadata.publish_date == datetime(
             2009, 10, 25, 6, 57, 33, tzinfo=UTC
         )
@@ -489,7 +430,6 @@ class TestRecordMapping:
     async def test_channel_falls_back_to_handle_when_display_name_is_absent(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         _patch_collect(
             mocker,
             records=[
@@ -497,16 +437,13 @@ class TestRecordMapping:
             ],
         )
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].metadata.channel == "@RickAstleyYT"
 
     async def test_missing_formatted_transcript_yields_empty_segments(
         self, mocker, fetcher
     ) -> None:
-        # Arrange
         _patch_collect(
             mocker,
             records=[
@@ -514,9 +451,7 @@ class TestRecordMapping:
             ],
         )
 
-        # Act
         results = await fetcher.fetch_many([VIDEO_ID_A])
 
-        # Assert
         assert results[0].plain_text == "plain"
         assert results[0].segments == []

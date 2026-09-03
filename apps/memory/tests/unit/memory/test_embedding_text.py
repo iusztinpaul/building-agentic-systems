@@ -89,7 +89,6 @@ class TestNodeToEmbeddingText:
     """
 
     def test_name_only(self) -> None:
-        # Arrange
         node: dict[str, Any] = {
             "_id": "u:person:alice",
             "type": "person",
@@ -97,14 +96,11 @@ class TestNodeToEmbeddingText:
             "properties": {},
         }
 
-        # Act
         text = node_to_embedding_text(node)
 
-        # Assert
         assert text == "person: Alice"
 
     def test_name_with_properties(self) -> None:
-        # Arrange
         node: dict[str, Any] = {
             "_id": "u:person:bob",
             "type": "person",
@@ -112,14 +108,12 @@ class TestNodeToEmbeddingText:
             "properties": {"role": "engineer", "team": "memory"},
         }
 
-        # Act
         text = node_to_embedding_text(node)
 
         # Assert: type+headline first, then one line per non-content prop.
         assert text == "person: Bob\nrole: engineer\nteam: memory"
 
     def test_name_with_properties_and_content(self) -> None:
-        # Arrange
         node: dict[str, Any] = {
             "_id": "u:chunk:c0",
             "type": "chunk",
@@ -127,7 +121,6 @@ class TestNodeToEmbeddingText:
             "properties": {"source_type": "substack", "content": "Hello world body"},
         }
 
-        # Act
         text = node_to_embedding_text(node)
 
         # Assert: content is appended LAST, after the other properties.
@@ -147,12 +140,10 @@ class TestNodeToEmbeddingText:
             "properties": {},
         }
 
-        # Act / Assert
         assert node_to_embedding_text(with_canonical) == "person: Carol"
         assert node_to_embedding_text(with_only_id) == "person: u:person:dave"
 
     def test_missing_fields_yields_separator_only(self) -> None:
-        # Arrange / Act
         text = node_to_embedding_text({})
 
         # Assert: backward-compat behavior from the pre-refactor builder.
@@ -168,7 +159,6 @@ class TestNodeToEmbeddingText:
             "properties": {"content": "good\x07text\x7f\x9fwith\ud800junk\nkept"},
         }
 
-        # Act
         text = node_to_embedding_text(node)
 
         # Assert: control/surrogate chars stripped, ordinary text + newline kept.
@@ -182,7 +172,6 @@ class TestNodeToEmbeddingText:
 
 class TestEmbedNodeTexts:
     async def test_embeds_each_node_text_in_a_single_call(self) -> None:
-        # Arrange
         model = _RecordingEmbeddingModel(dimensions=3)
         nodes: list[dict[str, Any]] = [
             {"type": "person", "name": "Alice", "properties": {}},
@@ -193,7 +182,6 @@ class TestEmbedNodeTexts:
             },
         ]
 
-        # Act
         vectors = await embed_node_texts(nodes, model)
 
         # Assert: one embed() call carrying both node-texts, aligned output.
@@ -201,13 +189,10 @@ class TestEmbedNodeTexts:
         assert vectors == [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
 
     async def test_empty_input_returns_empty_without_calling_model(self) -> None:
-        # Arrange
         model = _RecordingEmbeddingModel()
 
-        # Act
         vectors = await embed_node_texts([], model)
 
-        # Assert
         assert vectors == []
         assert model.calls == []
 
@@ -254,13 +239,10 @@ class TestEstimateTokens:
 
 class TestEmbedInBatches:
     async def test_empty_input_returns_empty_without_calling_model(self) -> None:
-        # Arrange
         model = _OrderEncodingEmbeddingModel()
 
-        # Act
         vectors = await embed_in_batches([], model)
 
-        # Assert
         assert vectors == []
         assert model.calls == []
 
@@ -273,7 +255,6 @@ class TestEmbedInBatches:
         model = _OrderEncodingEmbeddingModel()
         texts = [f"t{i}" for i in range(2500)]
 
-        # Act
         vectors = await embed_in_batches(
             texts,
             model,
@@ -333,7 +314,6 @@ class TestEmbedInBatches:
         model = _OrderEncodingEmbeddingModel()
         huge = "z" * 200_000  # ~66K estimated tokens, over the 32K per-input cap
 
-        # Act
         vectors = await embed_in_batches(
             [huge],
             model,
@@ -424,14 +404,12 @@ class TestEmbedInBatchesSkipsContentRejections:
         model = _PoisonEmbeddingModel(poison={"bad"})
         texts = ["a", "bad", "c"]
 
-        # Act
         vectors = await embed_in_batches(texts, model, max_inputs=1000)
 
         # Assert: good inputs embedded, poison skipped with an aligned [] slot.
         assert vectors == [[1.0, 1.0], [], [1.0, 1.0]]
 
     async def test_rate_limit_propagates_not_skipped(self) -> None:
-        # Arrange
         from tree.models.exceptions import ExtractionError
 
         model = _RateLimitedEmbeddingModel()
@@ -481,7 +459,6 @@ class TestEmbedInBatchesAlignmentAdversarial:
         model = _IdentityEncodingPoisonModel(poison={"P1", "P4"})
         texts = ["a", "P1", "c", "d", "P4", "f"]
 
-        # Act
         vectors = await embed_in_batches(texts, model, max_inputs=1000)
 
         # Assert: good inputs land in their own slots (fingerprinted by ord), the
@@ -501,7 +478,6 @@ class TestEmbedInBatchesAlignmentAdversarial:
         model = _IdentityEncodingPoisonModel(poison={"x", "y", "z"})
         texts = ["x", "y", "z"]
 
-        # Act
         vectors = await embed_in_batches(texts, model, max_inputs=1000)
 
         # Assert: each un-embeddable input gets its own aligned [] placeholder.
@@ -614,7 +590,6 @@ class TestDispatchConcurrencyDefault:
         model = _OrderEncodingEmbeddingModel()
         texts = [f"t{i}" for i in range(7)]
 
-        # Act
         vectors = await embed_in_batches(texts, model, max_inputs=3)
 
         # Assert: identical to the pre-task sequential batcher — 3 + 3 + 1

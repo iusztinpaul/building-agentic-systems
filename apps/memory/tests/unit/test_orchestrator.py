@@ -43,13 +43,10 @@ def test_serve_deployments_passes_limit_not_global_limit(mocker):
     is named ``limit`` and that ``global_limit`` is not among the kwargs.
     """
 
-    # Arrange
     spy = mocker.patch("tree.orchestrator.serve")
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     spy.assert_called_once()
     call = spy.call_args
     assert call.kwargs.get("limit") == 4
@@ -65,14 +62,11 @@ def test_serve_deployments_kwargs_bind_to_real_serve_signature(mocker):
     route to its dedicated ``limit`` parameter.
     """
 
-    # Arrange
     spy = mocker.patch("tree.orchestrator.serve")
     real_signature = inspect.signature(prefect.serve)
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     call = spy.call_args
     bound = real_signature.bind(*call.args, **call.kwargs)
     assert bound.arguments["limit"] == 4
@@ -88,13 +82,10 @@ def test_serve_deployments_registers_all_deployments(mocker):
     deployment name is asserted ABSENT.
     """
 
-    # Arrange
     spy = mocker.patch("tree.orchestrator.serve")
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     call = spy.call_args
     deployment_names = {dep.name for dep in call.args}
     assert deployment_names == {
@@ -135,10 +126,8 @@ def test_every_spec_registers_with_deploy_optional_off(mocker):
     mocker.patch.object(app_config.prefect, "deploy_optional", False)
     spy = mocker.patch("tree.orchestrator.serve")
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     assert type(app_config.prefect).model_fields["deploy_optional"].default is False
     assert not any(spec.optional for spec in orchestrator._DEPLOYMENT_SPECS)
     assert len(spy.call_args.args) == 5
@@ -176,7 +165,6 @@ def test_deploy_optional_gate_filters_an_optional_spec(
     )
     mocker.patch.object(app_config.prefect, "deploy_optional", deploy_optional)
 
-    # Act
     names = {spec.name for spec in orchestrator._active_deployment_specs()}
 
     # Assert — the core 5 always register; only the optional spec follows the flag.
@@ -198,13 +186,10 @@ def test_serve_deployments_schedules_the_offline_and_dream_pipelines(mocker):
     deployment or attached to the wrong one.
     """
 
-    # Arrange
     spy = mocker.patch("tree.orchestrator.serve")
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     call = spy.call_args
     schedules_by_name = {
         dep.name: [
@@ -241,13 +226,10 @@ def test_serve_deployments_serves_the_built_topology(mocker):
     serve and CD-apply paths can never diverge.
     """
 
-    # Arrange
     spy = mocker.patch("tree.orchestrator.serve")
 
-    # Act
     orchestrator.serve_deployments(limit=4)
 
-    # Assert
     built_names = {dep.name for dep in orchestrator.build_deployments()}
     served_names = {dep.name for dep in spy.call_args.args}
     assert served_names == built_names
@@ -270,7 +252,6 @@ def test_deploy_cloud_pipelines_binds_each_to_pool_without_serving(mocker):
     fake_flow.deploy = mocker.Mock(side_effect=[f"id-{i}" for i in range(5)])
     mocker.patch.object(prefect.Flow, "from_source", return_value=fake_flow)
 
-    # Act
     ids = orchestrator.deploy_cloud_pipelines(
         work_pool_name="tree-managed",
         git_ref="main",
@@ -301,7 +282,6 @@ def test_deployment_groups_select_whole_pipelines():
     nothing — it must raise instead.
     """
 
-    # Arrange / Act
     def names(groups: tuple[str, ...]) -> set[str]:
         return {s.name for s in orchestrator._active_deployment_specs(groups)}
 

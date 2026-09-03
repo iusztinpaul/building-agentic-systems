@@ -104,26 +104,21 @@ def _patch_expected_dim(mocker, dim: int) -> None:
 
 class TestAssertSettingsMatchLiveVectorIndex:
     async def test_match_returns_none(self, mocker) -> None:
-        # Arrange
         _patch_expected_dim(mocker, 1024)
         collection = _make_collection_with_indexes([_vector_index_doc(1024)])
         client = _wire_client(collection)
 
-        # Act
         result = await assert_settings_match_live_vector_index(client, "test_db")
 
-        # Assert
         assert result is None
 
     async def test_mismatch_raises_runtime_error_with_both_numbers(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_expected_dim(mocker, 1024)
         collection = _make_collection_with_indexes([_vector_index_doc(384)])
         client = _wire_client(collection)
 
-        # Act + Assert
         with pytest.raises(RuntimeError) as exc_info:
             await assert_settings_match_live_vector_index(client, "test_db")
 
@@ -134,7 +129,6 @@ class TestAssertSettingsMatchLiveVectorIndex:
         assert "Embedding dimension mismatch" in message
 
     async def test_missing_vector_index_raises_runtime_error(self, mocker) -> None:
-        # Arrange
         _patch_expected_dim(mocker, 1024)
         # No vector_index entry in the live result.
         collection = _make_collection_with_indexes(
@@ -142,19 +136,16 @@ class TestAssertSettingsMatchLiveVectorIndex:
         )
         client = _wire_client(collection)
 
-        # Act + Assert
         with pytest.raises(RuntimeError) as exc_info:
             await assert_settings_match_live_vector_index(client, "test_db")
 
         assert "vector_index not found" in str(exc_info.value)
 
     async def test_mismatch_message_names_config_field(self, mocker) -> None:
-        # Arrange
         _patch_expected_dim(mocker, 768)
         collection = _make_collection_with_indexes([_vector_index_doc(1024)])
         client = _wire_client(collection)
 
-        # Act + Assert
         with pytest.raises(RuntimeError) as exc_info:
             await assert_settings_match_live_vector_index(client, "test_db")
 

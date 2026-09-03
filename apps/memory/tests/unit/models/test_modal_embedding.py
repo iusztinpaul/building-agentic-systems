@@ -156,7 +156,6 @@ class TestModalEmbeddingModelInit:
             await m._ensure_initialised()
             await m._ensure_initialised()
 
-        # URL resolved only once despite two calls.
         mock_fn.get_web_url.aio.assert_awaited_once()
 
 

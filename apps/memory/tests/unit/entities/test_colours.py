@@ -1,5 +1,3 @@
-"""Unit tests for the brand colour palette enum."""
-
 import re
 
 import pytest
@@ -10,7 +8,6 @@ _HEX = re.compile(r"^#[0-9a-f]{6}$")
 
 
 def test_every_colour_is_a_lowercase_six_digit_hex() -> None:
-    # Act / Assert
     for colour in Colours:
         assert _HEX.match(colour.value), colour
 
@@ -22,7 +19,6 @@ def test_strenum_member_is_its_hex_string() -> None:
 
 
 def test_palette_has_four_levels_for_each_hue() -> None:
-    # Arrange
     hues = ("BLACK", "BROWN", "ORANGE", "BLUE", "YELLOW", "GREEN")
 
     # Act / Assert: exactly level_1..level_4 per hue, 16 members total.
@@ -43,9 +39,7 @@ def test_palette_has_four_levels_for_each_hue() -> None:
 )
 def test_black_ramp_matches_cmyk_k_conversion(colour: Colours, k: int) -> None:
     # Black is a CMYK grey ramp: each channel = round(255 * (1 - K / 100)).
-    # Arrange
     channel = round(255 * (1 - k / 100))
     expected = f"#{channel:02x}{channel:02x}{channel:02x}"
 
-    # Act / Assert
     assert colour.value == expected

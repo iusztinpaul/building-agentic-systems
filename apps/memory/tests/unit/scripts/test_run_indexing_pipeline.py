@@ -55,7 +55,6 @@ class TestRunIndexingPipeline:
     async def test_runs_the_flow_in_process_for_the_resolved_user(
         self, cli_module, mock_resolve_user, mock_indexing, resolved_user_id
     ) -> None:
-        # Act
         await cli_module._run(None, None)
 
         # Assert — a direct flow call, scoped to the resolved tenant. No
@@ -69,7 +68,6 @@ class TestRunIndexingPipeline:
         mock_indexing.side_effect = RuntimeError("mongot down")
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_module.main, [])
 
         # Assert — CLI-layer semantics: the operator sees a non-zero exit.
@@ -78,10 +76,8 @@ class TestRunIndexingPipeline:
     def test_user_identifier_option_is_forwarded(
         self, mocker, cli_module, mock_resolve_user, mock_indexing
     ) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_module.main, ["--user-identifier", "paul"])
 
         # Assert — the tenant override reaches resolution untouched.

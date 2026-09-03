@@ -118,7 +118,6 @@ class TestVariantValidation:
         assert entry.uri == "librarian-bots/arxiv-metadata-snapshot"
         assert entry.max_samples == 100
         assert entry.fetch_content is True
-        # Defaults preserved for unspecified fields.
         assert entry.batch_size == 50
         assert entry.concurrency == 10
 
@@ -293,13 +292,10 @@ class TestYamlRoundTrip:
             """)
         )
 
-        # Act
         config = SourcesConfig.model_validate(yaml.safe_load(config_file.read_text()))
 
-        # Assert
         sources = config.sources
         assert len(sources) == 6
-        # No raw dicts — every entry is a typed Pydantic instance.
         assert all(
             isinstance(
                 s,

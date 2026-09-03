@@ -1,5 +1,3 @@
-"""Unit tests for tree.data.web.web_serp.search."""
-
 from __future__ import annotations
 
 import logging
@@ -135,18 +133,14 @@ class TestSearchInputValidation:
     async def test_raises_value_error_for_empty_query(
         self, mocker, bad_query: str
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
 
-        # Act & Assert
         with pytest.raises(ValueError, match="query must not be empty"):
             await search(bad_query)
 
     async def test_raises_value_error_for_non_string_query(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
 
-        # Act & Assert
         with pytest.raises(ValueError, match="query must not be empty"):
             await search(None)  # type: ignore[arg-type]
 
@@ -154,30 +148,24 @@ class TestSearchInputValidation:
     async def test_raises_value_error_when_num_results_below_one(
         self, mocker, bad_count: int
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
 
-        # Act & Assert
         with pytest.raises(ValueError, match="num_results must be >= 1"):
             await search("python", num_results=bad_count)
 
 
 class TestSearchConfiguration:
     async def test_raises_configuration_error_when_api_key_empty(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="", zone="some-zone")
 
-        # Act & Assert
         with pytest.raises(BrightDataConfigurationError, match="BRIGHTDATA_API_KEY"):
             await search("python")
 
     async def test_raises_configuration_error_when_serp_zone_empty(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="key", zone="")
 
-        # Act & Assert
         with pytest.raises(BrightDataConfigurationError, match="BRIGHTDATA_SERP_ZONE"):
             await search("python")
 
@@ -191,17 +179,14 @@ class TestSearchHttpBehavior:
     async def test_raises_request_error_on_non_2xx(
         self, mocker, status_code: int
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         response = _build_response(status_code=status_code, text="boom")
         _patch_async_client(mocker, [response])
 
-        # Act & Assert
         with pytest.raises(BrightDataRequestError, match=str(status_code)):
             await search("python")
 
     async def test_returns_search_results_on_200(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         html = _serp_html(
             [
@@ -227,10 +212,8 @@ class TestSearchHttpBehavior:
         )
         _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
-        # Act
         results = await search("python", engine="google", num_results=10)
 
-        # Assert
         assert len(results) == 2
         assert all(isinstance(r, SearchResult) for r in results)
         assert results[0].rank == 1
@@ -245,7 +228,6 @@ class TestSearchHttpBehavior:
     async def test_returns_empty_list_when_no_organic_entries(
         self, mocker, caplog
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         # SERP HTML with no organic blocks (e.g. the "no results" page).
         empty_html = (
@@ -255,11 +237,9 @@ class TestSearchHttpBehavior:
         )
         _patch_async_client(mocker, [_build_response(status_code=200, text=empty_html)])
 
-        # Act
         with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
             results = await search("python")
 
-        # Assert
         assert results == []
         # Tighten the contract: a recognized "no-results" SERP must NOT emit
         # a WARNING. WARNING is reserved for unexpected response shapes
@@ -268,7 +248,6 @@ class TestSearchHttpBehavior:
         assert warning_records == []
 
     async def test_returns_empty_list_when_organic_key_missing(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         # SERP HTML where the body has no h3 / anchor structure at all —
         # equivalent to the old "JSON missing the organic key" case: nothing
@@ -276,14 +255,11 @@ class TestSearchHttpBehavior:
         bare_html = "<!doctype html><html><body></body></html>"
         _patch_async_client(mocker, [_build_response(status_code=200, text=bare_html)])
 
-        # Act
         results = await search("python")
 
-        # Assert
         assert results == []
 
     async def test_skips_entries_without_link(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         html = _serp_html(
             [
@@ -303,15 +279,12 @@ class TestSearchHttpBehavior:
         )
         _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
-        # Act
         results = await search("python")
 
-        # Assert
         assert len(results) == 1
         assert results[0].url == "https://a.com"
 
     async def test_assigns_positional_rank_when_entry_lacks_rank(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         # The HTML parser always assigns positional rank — there is no
         # upstream "rank" field to read. This test pins that contract.
@@ -333,10 +306,8 @@ class TestSearchHttpBehavior:
         )
         _patch_async_client(mocker, [_build_response(status_code=200, text=html)])
 
-        # Act
         results = await search("python")
 
-        # Assert
         assert [r.rank for r in results] == [1, 2]
 
 
@@ -347,7 +318,6 @@ class TestSearchEmptyResultLogging:
     """
 
     async def test_logs_info_on_legitimate_empty_serp(self, mocker, caplog) -> None:
-        # Arrange
         _patch_settings(mocker)
         # Well-formed SERP HTML carrying Google's "no results" indicator —
         # the structural anchor that says "this is a real SERP, just empty".
@@ -358,7 +328,6 @@ class TestSearchEmptyResultLogging:
         )
         _patch_async_client(mocker, [_build_response(status_code=200, text=empty_html)])
 
-        # Act
         with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
             results = await search("asdfqwerzxcvuiop1234567890nope", engine="google")
 
@@ -398,7 +367,6 @@ class TestSearchEmptyResultLogging:
     async def test_logs_warning_on_unexpected_response_shape(
         self, mocker, caplog, body: str, content_type: str
     ) -> None:
-        # Arrange
         api_key = "secret-test-api-key-do-not-leak"
         _patch_settings(mocker, api_key=api_key)
         response = httpx.Response(
@@ -409,7 +377,6 @@ class TestSearchEmptyResultLogging:
         )
         _patch_async_client(mocker, [response])
 
-        # Act
         with caplog.at_level(logging.DEBUG, logger="tree.data.web.web_serp"):
             results = await search("python", engine="google")
 
@@ -422,7 +389,6 @@ class TestSearchEmptyResultLogging:
             f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
         )
         message = warning_records[0].getMessage()
-        # Required diagnostic fields.
         assert "engine=google" in message
         assert "status=200" in message
         assert f"content_type={content_type}" in message
@@ -447,7 +413,6 @@ class TestSearchEmptyResultLogging:
 
 class TestSearchRequestShape:
     async def test_posts_expected_body_and_headers(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker, api_key="my-key", zone="my-serp-zone")
         # Empty SERP body — we only care about the outbound request shape.
         mock_client = _patch_async_client(
@@ -455,10 +420,8 @@ class TestSearchRequestShape:
             [_build_response(status_code=200, text="<html></html>")],
         )
 
-        # Act
         await search("hello world", engine="google")
 
-        # Assert
         mock_client.post.assert_awaited_once()
         call = mock_client.post.call_args
         assert call.args[0] == "https://api.brightdata.com/request"
@@ -487,14 +450,12 @@ class TestSearchRequestShape:
     async def test_google_url_includes_required_params(
         self, mocker, country: str | None, language: str | None
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
             [_build_response(status_code=200, text="<html></html>")],
         )
 
-        # Act
         await search(
             "best laptops 2025",
             engine="google",
@@ -502,7 +463,6 @@ class TestSearchRequestShape:
             language=language,
         )
 
-        # Assert
         body = mock_client.post.call_args.kwargs["json"]
         parsed = urlparse(body["url"])
         qs = parse_qs(parsed.query)
@@ -529,7 +489,6 @@ class TestSearchRequestShape:
 
 class TestSearchPagination:
     async def test_paginates_when_num_results_exceeds_page_size(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         page1_html = _serp_html(
             [
@@ -551,19 +510,15 @@ class TestSearchPagination:
             ],
         )
 
-        # Act
         results = await search("python", engine="google", num_results=15)
 
-        # Assert
         assert len(results) == 15
         assert mock_client.post.await_count == 2
 
-        # First call: no start param
         first_url = mock_client.post.call_args_list[0].kwargs["json"]["url"]
         first_qs = parse_qs(urlparse(first_url).query)
         assert "start" not in first_qs
 
-        # Second call: start=10
         second_url = mock_client.post.call_args_list[1].kwargs["json"]["url"]
         second_qs = parse_qs(urlparse(second_url).query)
         assert second_qs["start"] == ["10"]
@@ -571,7 +526,6 @@ class TestSearchPagination:
     async def test_stops_paginating_when_page_returns_fewer_than_page_size(
         self, mocker
     ) -> None:
-        # Arrange
         _patch_settings(mocker)
         # Only 3 entries on the only page — caller wants 50 but we should
         # stop after one fetch and return what we got.
@@ -585,15 +539,12 @@ class TestSearchPagination:
             mocker, [_build_response(status_code=200, text=html)]
         )
 
-        # Act
         results = await search("python", num_results=50)
 
-        # Assert
         assert len(results) == 3
         assert mock_client.post.await_count == 1
 
     async def test_truncates_to_num_results(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         html = _serp_html(
             [
@@ -605,10 +556,8 @@ class TestSearchPagination:
             mocker, [_build_response(status_code=200, text=html)]
         )
 
-        # Act
         results = await search("python", num_results=3)
 
-        # Assert
         assert len(results) == 3
         # No second page fetched — page returned == page size, but we have
         # enough results to satisfy the caller, so we stop.
@@ -617,17 +566,14 @@ class TestSearchPagination:
 
 class TestSearchEngines:
     async def test_bing_url_uses_first_offset(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
             [_build_response(status_code=200, text="<html></html>")],
         )
 
-        # Act
         await search("python", engine="bing", country="us", language="en-US")
 
-        # Assert
         body = mock_client.post.call_args.kwargs["json"]
         parsed = urlparse(body["url"])
         qs = parse_qs(parsed.query)
@@ -640,17 +586,14 @@ class TestSearchEngines:
         assert qs["first"] == ["1"]
 
     async def test_yandex_url_uses_text_param(self, mocker) -> None:
-        # Arrange
         _patch_settings(mocker)
         mock_client = _patch_async_client(
             mocker,
             [_build_response(status_code=200, text="<html></html>")],
         )
 
-        # Act
         await search("python", engine="yandex", country="ru")
 
-        # Assert
         body = mock_client.post.call_args.kwargs["json"]
         parsed = urlparse(body["url"])
         qs = parse_qs(parsed.query)

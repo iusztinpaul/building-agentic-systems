@@ -29,10 +29,8 @@ HORIZON_EGRESS_CIDR = _module.HORIZON_EGRESS_CIDR
 
 
 def test_free_tier_region_config_is_tenant_backed() -> None:
-    # Arrange
     spec = ClusterSpec(tier="M0", provider="GCP", region="WESTERN_EUROPE")
 
-    # Act
     config = spec.region_config()
 
     # Assert — M0 is a TENANT cluster naming the backing cloud; no nodeCount.
@@ -43,10 +41,8 @@ def test_free_tier_region_config_is_tenant_backed() -> None:
 
 
 def test_dedicated_tier_region_config_names_provider_directly() -> None:
-    # Arrange
     spec = ClusterSpec(tier="M10", provider="AWS", region="US_EAST_1")
 
-    # Act
     config = spec.region_config()
 
     # Assert — dedicated tiers use providerName directly + a 3-node electable set.
@@ -61,13 +57,10 @@ def test_is_free_tier_flag() -> None:
 
 
 def test_create_body_is_a_replicaset_with_one_region_config() -> None:
-    # Arrange
     spec = ClusterSpec(cluster_name="tree", tier="M0")
 
-    # Act
     body = spec.create_body()
 
-    # Assert
     assert body["name"] == "tree"
     assert body["clusterType"] == "REPLICASET"
     region_configs = body["replicationSpecs"][0]["regionConfigs"]
@@ -79,7 +72,6 @@ def test_access_cidrs_always_includes_horizon_egress(monkeypatch) -> None:
     # Arrange — no operator-supplied CIDRs.
     monkeypatch.delenv("ATLAS_ACCESS_CIDRS", raising=False)
 
-    # Act
     cidrs = _access_cidrs()
 
     # Assert — the cloud MCP runner's open CIDR is always allow-listed.
@@ -92,7 +84,6 @@ def test_access_cidrs_appends_and_dedupes_env_cidrs(monkeypatch) -> None:
         "ATLAS_ACCESS_CIDRS", f"10.0.0.0/8, {HORIZON_EGRESS_CIDR} ,1.2.3.4/32"
     )
 
-    # Act
     cidrs = _access_cidrs()
 
     # Assert — Horizon first, env extras appended in order, no duplicate.
@@ -100,13 +91,10 @@ def test_access_cidrs_appends_and_dedupes_env_cidrs(monkeypatch) -> None:
 
 
 def test_db_user_body_grants_read_write_on_admin() -> None:
-    # Arrange
     spec = ClusterSpec(db_username="tree_user", db_password="secret")
 
-    # Act
     body = spec.db_user_body()
 
-    # Assert
     assert body["username"] == "tree_user"
     assert body["password"] == "secret"
     assert body["databaseName"] == "admin"

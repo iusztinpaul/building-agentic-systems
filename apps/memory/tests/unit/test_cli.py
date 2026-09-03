@@ -22,10 +22,8 @@ class TestBuildOnlineSource:
         "url", ["https://example.com/post", "http://example.com/post"]
     )
     def test_http_url_builds_url_source(self, url: str) -> None:
-        # Act
         source = build_online_source(url, title=None)
 
-        # Assert
         assert isinstance(source, UrlSource)
         assert source.uri == url
 
@@ -34,10 +32,8 @@ class TestBuildOnlineSource:
         file = tmp_path / "notes.md"
         file.write_text("# hello")
 
-        # Act
         source = build_online_source(str(file), title="My notes")
 
-        # Assert
         assert isinstance(source, FileSource)
         assert source.path == str(file.resolve())
         assert source.content == "# hello"
@@ -46,11 +42,9 @@ class TestBuildOnlineSource:
 
 class TestWaitForDispatch:
     async def test_waits_on_the_submitted_flow_run(self, mocker) -> None:
-        # Arrange
         mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
 
         # Act — dispatch always creates a worker-side run; nothing to branch on.
         await wait_for_dispatch({"status": "scheduled", "flow_run_id": "abc"})
 
-        # Assert
         mock_wait.assert_awaited_once_with("abc")

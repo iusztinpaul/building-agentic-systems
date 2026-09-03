@@ -1,5 +1,3 @@
-"""Tests for :class:`SemanticMatchResolver`."""
-
 from __future__ import annotations
 
 import pytest
@@ -56,7 +54,6 @@ class _CountingEmbeddingModel(BaseEmbeddingModel):
 
 class TestSemanticMatchResolverBasic:
     async def test_returns_highest_above_threshold(self) -> None:
-        # Arrange
         model = _ScriptedEmbeddingModel(
             {
                 "alice": [1.0, 0.0],
@@ -66,14 +63,12 @@ class TestSemanticMatchResolverBasic:
         )
         resolver = SemanticMatchResolver(model, threshold=0.80)
 
-        # Act
         result = await resolver.resolve(
             "alice",
             NodeType.PERSON,
             candidate_names=["Alice Smith", "Bob"],
         )
 
-        # Assert
         assert isinstance(result, ResolvedEntity)
         assert result.match_type == "semantic"
         assert result.canonical_name == "Alice Smith"
@@ -91,37 +86,31 @@ class TestSemanticMatchResolverBasic:
         )
         resolver = SemanticMatchResolver(model, threshold=0.80)
 
-        # Act
         result = await resolver.resolve(
             "alice",
             NodeType.PERSON,
             candidate_names=["completely unrelated"],
         )
 
-        # Assert
         assert result.match_type == "none"
         assert result.canonical_name == "alice"
         assert result.confidence == 0.0
 
     async def test_no_match_when_candidate_list_empty(self) -> None:
-        # Arrange
         model = _ScriptedEmbeddingModel({"alice": [1.0, 0.0]})
         resolver = SemanticMatchResolver(model, threshold=0.80)
 
-        # Act
         result = await resolver.resolve(
             "alice",
             NodeType.PERSON,
             candidate_names=[],
         )
 
-        # Assert
         assert result.match_type == "none"
         # The embed should not have been invoked when there are no candidates.
         assert model.embed_call_count == 0
 
     async def test_resolve_batch_returns_one_per_input(self) -> None:
-        # Arrange
         model = _ScriptedEmbeddingModel(
             {
                 "alice": [1.0, 0.0],
@@ -132,7 +121,6 @@ class TestSemanticMatchResolverBasic:
         )
         resolver = SemanticMatchResolver(model, threshold=0.80)
 
-        # Act
         results = await resolver.resolve_batch(
             entities=[
                 ("alice", NodeType.PERSON),
@@ -141,7 +129,6 @@ class TestSemanticMatchResolverBasic:
             candidate_names=["Alice Smith", "Robert"],
         )
 
-        # Assert
         assert [r.canonical_name for r in results] == ["Alice Smith", "Robert"]
         assert all(r.match_type == "semantic" for r in results)
 
@@ -161,7 +148,6 @@ class TestSemanticMatchResolverClamping:
         )
         resolver = SemanticMatchResolver(model, threshold=0.0)
 
-        # Act
         result = await resolver.resolve(
             "alice",
             NodeType.PERSON,
@@ -181,16 +167,13 @@ class TestSemanticMatchResolverClamping:
         a = [1.0, 0.0]
         b = [-1.0e-9, 1.0]
 
-        # Act
         score = SemanticMatchResolver._cosine_similarity(a, b)
 
-        # Assert
         assert score == 0.0
 
 
 class TestSemanticMatchResolverLRU:
     async def test_cache_size_capped_after_overflow(self) -> None:
-        # Arrange
         cache_max = 50
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(
@@ -202,21 +185,18 @@ class TestSemanticMatchResolverLRU:
         for i in range(cache_max + 1000):
             await resolver._embed_cached(f"name_{i}")
 
-        # Assert
         assert len(resolver._cache) == cache_max
 
     async def test_lru_eviction_keeps_recently_accessed(self) -> None:
         """Insert k0..kN, touch k0 to refresh it, insert one more, assert
         the OLDEST non-touched key (k1) was evicted — not k0."""
 
-        # Arrange
         cache_max = 4  # tiny for clarity
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(
             model, threshold=0.80, cache_max_size=cache_max
         )
 
-        # Act
         for i in range(cache_max):
             await resolver._embed_cached(f"k{i}")  # fills the cache
         assert list(resolver._cache.keys()) == ["k0", "k1", "k2", "k3"]
@@ -230,7 +210,6 @@ class TestSemanticMatchResolverLRU:
         assert len(resolver._cache) == cache_max
 
     async def test_clear_cache_empties_and_forces_recompute(self) -> None:
-        # Arrange
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=10)
         await resolver._embed_cached("alice")
@@ -238,29 +217,24 @@ class TestSemanticMatchResolverLRU:
         assert len(resolver._cache) == 2
         calls_before = len(model.calls)
 
-        # Act
         resolver.clear_cache()
         assert len(resolver._cache) == 0
         await resolver._embed_cached("alice")  # should recompute now
 
-        # Assert
         assert len(model.calls) == calls_before + 1
         assert "alice" in resolver._cache
 
     async def test_cache_key_is_normalized(self) -> None:
         """Case/whitespace variants share a cache slot."""
 
-        # Arrange
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=10)
 
-        # Act
         await resolver._embed_cached("Alice")
         calls_after_first = len(model.calls)
         await resolver._embed_cached("  alice  ")
         await resolver._embed_cached("ALICE")
 
-        # Assert
         assert len(model.calls) == calls_after_first  # no extra calls
         assert list(resolver._cache.keys()) == ["alice"]
 
@@ -272,7 +246,6 @@ class TestSemanticMatchResolverPrewarm:
     async def test_prewarm_embeds_uncached_names_in_one_batched_request(
         self,
     ) -> None:
-        # Arrange
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=100)
 
@@ -283,7 +256,6 @@ class TestSemanticMatchResolverPrewarm:
         # separate one-name calls).
         assert len(model.calls) == 1
         assert model.calls[0] == ["alice", "bob", "carol", "dave", "erin"]
-        # All five seeded into the cache.
         assert set(resolver._cache.keys()) == {
             "alice",
             "bob",
@@ -293,7 +265,6 @@ class TestSemanticMatchResolverPrewarm:
         }
 
     async def test_prewarm_then_resolve_makes_no_further_requests(self) -> None:
-        # Arrange
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.0, cache_max_size=100)
 
@@ -328,10 +299,8 @@ class TestSemanticMatchResolverPrewarm:
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=100)
 
-        # Act
         await resolver.prewarm_cache(["Alice", "  alice ", "ALICE"])
 
-        # Assert — embedded once.
         assert len(model.calls) == 1
         assert len(model.calls[0]) == 1
         assert list(resolver._cache.keys()) == ["alice"]
@@ -344,21 +313,17 @@ class TestSemanticMatchResolverPrewarm:
             model, threshold=0.80, cache_max_size=cache_max
         )
 
-        # Act
         await resolver.prewarm_cache(["a", "b", "c", "d", "e"])
 
         # Assert — cache trimmed to the bound (oldest evicted first).
         assert len(resolver._cache) == cache_max
 
     async def test_prewarm_empty_is_noop(self) -> None:
-        # Arrange
         model = _CountingEmbeddingModel()
         resolver = SemanticMatchResolver(model, threshold=0.80, cache_max_size=10)
 
-        # Act
         await resolver.prewarm_cache([])
 
-        # Assert
         assert model.calls == []
         assert len(resolver._cache) == 0
 
@@ -383,14 +348,12 @@ class TestSemanticMatchResolverWithMockEmbeddingModel:
             threshold=0.0,  # accept anything so we test the plumbing
         )
 
-        # Act
         result = await resolver.resolve(
             "alice",
             NodeType.PERSON,
             candidate_names=["Alice Smith", "Bob"],
         )
 
-        # Assert
         assert isinstance(result, ResolvedEntity)
         assert result.match_type in {"semantic", "none"}
         assert 0.0 <= result.confidence <= 1.0
@@ -408,8 +371,6 @@ class TestSemanticMatchResolverWithMockEmbeddingModel:
 def test_cosine_similarity_edge_cases(
     vec_a: list[float], vec_b: list[float], expected: float
 ) -> None:
-    # Act
     score = SemanticMatchResolver._cosine_similarity(vec_a, vec_b)
 
-    # Assert
     assert score == pytest.approx(expected, abs=1e-9)

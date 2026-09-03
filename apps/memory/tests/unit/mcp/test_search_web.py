@@ -73,12 +73,10 @@ def _get_tool_callable():
 
 class TestSearchWebMcpTool:
     async def test_returns_json_payload_on_success(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()(
             "knowledge graphs",
             ctx,
@@ -86,7 +84,6 @@ class TestSearchWebMcpTool:
             num_results=5,
         )
 
-        # Assert
         payload = json.loads(raw)
         assert payload["query"] == "knowledge graphs"
         assert payload["engine"] == "google"
@@ -97,7 +94,6 @@ class TestSearchWebMcpTool:
         assert first["url"] == "https://example.com/kg"
         assert first["snippet"] == "An intro"
 
-        # Confirm the underlying SERP client received the right kwargs.
         mock_search.assert_awaited_once()
         kwargs = mock_search.await_args.kwargs
         assert kwargs["engine"] == "google"
@@ -106,12 +102,10 @@ class TestSearchWebMcpTool:
         assert kwargs["language"] is None
 
     async def test_passes_locale_kwargs(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=[])
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()(
             "datenschutz",
             ctx,
@@ -121,7 +115,6 @@ class TestSearchWebMcpTool:
             language="de",
         )
 
-        # Assert
         payload = json.loads(raw)
         assert payload["results"] == []
 
@@ -130,7 +123,6 @@ class TestSearchWebMcpTool:
         assert kwargs["language"] == "de"
 
     async def test_does_not_invoke_ingestion_pipeline(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         # Spy on the ingestion dispatch — search_web must NEVER call it.
@@ -139,16 +131,13 @@ class TestSearchWebMcpTool:
         )
         ctx = _make_ctx()
 
-        # Act
         await _get_tool_callable()("hello", ctx)
 
-        # Assert
         mock_ingestion.assert_not_awaited()
 
     async def test_does_not_touch_lifespan_context(self, mocker) -> None:
         """The SERP client doesn't need MongoDB/LLM/embedder; the tool must not access them."""
 
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = MagicMock()
@@ -159,7 +148,6 @@ class TestSearchWebMcpTool:
             )
         )
 
-        # Act
         raw = await _get_tool_callable()("hello", ctx)
 
         # Assert — if the tool accessed lifespan_context the property raises.
@@ -171,32 +159,26 @@ class TestSearchWebMcpTool:
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "invalid_input"
         assert "empty" in payload["detail"].lower()
 
     async def test_configuration_error_is_serialized(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(
             side_effect=BrightDataConfigurationError("BRIGHTDATA_SERP_ZONE is not set")
         )
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("anything", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "configuration_error"
         assert "BRIGHTDATA_SERP_ZONE" in payload["detail"]
 
     async def test_request_error_is_serialized_as_fetch_failed(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(
             side_effect=BrightDataRequestError(
                 "Bright Data SERP API returned HTTP 503: upstream timeout"
@@ -205,16 +187,13 @@ class TestSearchWebMcpTool:
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("anything", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "fetch_failed"
         assert "503" in payload["detail"]
 
     async def test_http_status_error_is_serialized(self, mocker) -> None:
-        # Arrange
         request = httpx.Request("POST", "https://api.brightdata.com/request")
         response = httpx.Response(status_code=500, request=request)
         mock_search = AsyncMock(
@@ -225,10 +204,8 @@ class TestSearchWebMcpTool:
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("anything", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "http_error"
         assert "500" in payload["detail"]
@@ -242,15 +219,12 @@ class TestSearchWebMcpTool:
         ids=["connect-error", "timeout"],
     )
     async def test_network_errors_are_serialized(self, mocker, exc: Exception) -> None:
-        # Arrange
         mock_search = AsyncMock(side_effect=exc)
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("anything", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "network_error"
         assert payload["detail"]
@@ -267,7 +241,6 @@ class TestSearchWebIngestPath:
     async def test_default_does_not_emit_ingest_field_or_call_trigger(
         self, mocker
     ) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = mocker.patch(
@@ -275,16 +248,13 @@ class TestSearchWebIngestPath:
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx)
 
-        # Assert
         payload = json.loads(raw)
         assert "ingest" not in payload
         mock_trigger.assert_not_awaited()
 
     async def test_ingest_true_fires_deployment_with_all_urls(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = AsyncMock(
@@ -296,10 +266,8 @@ class TestSearchWebIngestPath:
         mocker.patch("tree.mcp.tools._trigger_url_batch_ingest", mock_trigger)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx, ingest=True)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["ingest"]["triggered"] is True
         assert payload["ingest"]["flow_run_id"] == "fr-1"
@@ -313,7 +281,6 @@ class TestSearchWebIngestPath:
         )
 
     async def test_ingest_top_k_truncates_to_first_k_urls(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = AsyncMock(
@@ -325,16 +292,13 @@ class TestSearchWebIngestPath:
         mocker.patch("tree.mcp.tools._trigger_url_batch_ingest", mock_trigger)
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx, ingest=True, ingest_top_k=1)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["ingest"]["urls"] == ["https://example.com/kg"]
         mock_trigger.assert_awaited_once_with(["https://example.com/kg"], _USER_ID)
 
     async def test_ingest_urls_overrides_ingest_top_k_and_serp(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = AsyncMock(
@@ -347,7 +311,6 @@ class TestSearchWebIngestPath:
         ctx = _make_ctx()
         custom_urls = ["https://custom-a", "https://custom-b"]
 
-        # Act
         raw = await _get_tool_callable()(
             "k graphs",
             ctx,
@@ -356,13 +319,11 @@ class TestSearchWebIngestPath:
             ingest_urls=custom_urls,
         )
 
-        # Assert
         payload = json.loads(raw)
         assert payload["ingest"]["urls"] == custom_urls
         mock_trigger.assert_awaited_once_with(custom_urls, _USER_ID)
 
     async def test_ingest_false_with_top_k_returns_invalid_input(self, mocker) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = mocker.patch(
@@ -370,10 +331,8 @@ class TestSearchWebIngestPath:
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx, ingest=False, ingest_top_k=3)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "invalid_input"
         assert "ingest=false" in payload["detail"].lower()
@@ -382,18 +341,15 @@ class TestSearchWebIngestPath:
         mock_search.assert_not_awaited()
 
     async def test_ingest_false_with_urls_returns_invalid_input(self, mocker) -> None:
-        # Arrange
         mock_trigger = mocker.patch(
             "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()(
             "k graphs", ctx, ingest=False, ingest_urls=["https://a"]
         )
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "invalid_input"
         mock_trigger.assert_not_awaited()
@@ -401,16 +357,13 @@ class TestSearchWebIngestPath:
     async def test_ingest_true_with_explicit_empty_urls_returns_invalid_input(
         self, mocker
     ) -> None:
-        # Arrange
         mock_trigger = mocker.patch(
             "tree.mcp.tools._trigger_url_batch_ingest", new_callable=AsyncMock
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx, ingest=True, ingest_urls=[])
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "invalid_input"
         assert "ingest_urls is empty" in payload["detail"]
@@ -421,7 +374,6 @@ class TestSearchWebIngestPath:
     ) -> None:
         """Empty SERP + ingest=True → search succeeds, ingest is a no-op."""
 
-        # Arrange
         mock_search = AsyncMock(return_value=[])
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = mocker.patch(
@@ -429,10 +381,8 @@ class TestSearchWebIngestPath:
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("zzz", ctx, ingest=True)
 
-        # Assert
         payload = json.loads(raw)
         assert payload["results"] == []
         assert payload["ingest"]["triggered"] is False
@@ -448,7 +398,6 @@ class TestSearchWebIngestPath:
     ) -> None:
         """``ingest_top_k <= 0`` is a user error; reject before SERP call."""
 
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mock_trigger = mocker.patch(
@@ -456,12 +405,10 @@ class TestSearchWebIngestPath:
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()(
             "k graphs", ctx, ingest=True, ingest_top_k=bad_top_k
         )
 
-        # Assert
         payload = json.loads(raw)
         assert payload["error"] == "invalid_input"
         assert "ingest_top_k" in payload["detail"]
@@ -474,7 +421,6 @@ class TestSearchWebIngestPath:
     ) -> None:
         """If Prefect lookup raises, return SERP results with `triggered=false`."""
 
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("tree.mcp.tools.web_search", mock_search)
         mocker.patch(
@@ -483,10 +429,8 @@ class TestSearchWebIngestPath:
         )
         ctx = _make_ctx()
 
-        # Act
         raw = await _get_tool_callable()("k graphs", ctx, ingest=True)
 
-        # Assert
         payload = json.loads(raw)
         assert len(payload["results"]) == 2  # SERP results preserved.
         assert payload["ingest"]["triggered"] is False
@@ -510,13 +454,10 @@ def cli_main():
 
 class TestSearchWebCli:
     def test_help_lists_all_options(self, cli_main) -> None:
-        # Arrange
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--help"])
 
-        # Assert
         assert result.exit_code == 0
         for opt in (
             "--query",
@@ -531,18 +472,15 @@ class TestSearchWebCli:
             assert opt in result.output
 
     def test_runs_search_and_exits_zero_on_success(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("scripts.search_web.web_search", mock_search)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--query", "knowledge graphs", "--num-results", "5"],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         mock_search.assert_awaited_once()
         kwargs = mock_search.await_args.kwargs
@@ -552,12 +490,10 @@ class TestSearchWebCli:
         assert kwargs["language"] is None
 
     def test_passes_locale_options(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=[])
         mocker.patch("scripts.search_web.web_search", mock_search)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             [
@@ -572,7 +508,6 @@ class TestSearchWebCli:
             ],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         kwargs = mock_search.await_args.kwargs
         assert kwargs["country"] == "de"
@@ -584,52 +519,41 @@ class TestSearchWebCli:
         mocker.patch("scripts.search_web.web_search", mock_search)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--query", ""])
 
-        # Assert
         assert result.exit_code == 1
 
     def test_configuration_error_exits_one(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(
             side_effect=BrightDataConfigurationError("BRIGHTDATA_SERP_ZONE is not set")
         )
         mocker.patch("scripts.search_web.web_search", mock_search)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--query", "anything"])
 
-        # Assert
         assert result.exit_code == 1
 
     def test_request_error_exits_one(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(
             side_effect=BrightDataRequestError("HTTP 503: upstream")
         )
         mocker.patch("scripts.search_web.web_search", mock_search)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, ["--query", "anything"])
 
-        # Assert
         assert result.exit_code == 1
 
     def test_missing_query_argument_exits_nonzero(self, cli_main) -> None:
         # Arrange — Click rejects missing required option with exit code 2.
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(cli_main, [])
 
-        # Assert
         assert result.exit_code != 0
 
     def test_ingest_flag_fires_trigger_with_top_k(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("scripts.search_web.web_search", mock_search)
         mock_trigger = AsyncMock(
@@ -641,7 +565,6 @@ class TestSearchWebCli:
         mocker.patch("scripts.search_web.trigger_url_batch_ingest", mock_trigger)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             [
@@ -655,12 +578,10 @@ class TestSearchWebCli:
             ],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         mock_trigger.assert_awaited_once_with(["https://example.com/kg"], _USER_ID)
 
     def test_ingest_urls_overrides_top_k(self, mocker, cli_main) -> None:
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("scripts.search_web.web_search", mock_search)
         mock_trigger = AsyncMock(
@@ -672,7 +593,6 @@ class TestSearchWebCli:
         mocker.patch("scripts.search_web.trigger_url_batch_ingest", mock_trigger)
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             [
@@ -688,7 +608,6 @@ class TestSearchWebCli:
             ],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
         mock_trigger.assert_awaited_once_with(["https://a", "https://b"], _USER_ID)
 
@@ -701,13 +620,11 @@ class TestSearchWebCli:
         )
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--query", "k graphs", "--ingest-top-k", "1"],
         )
 
-        # Assert
         assert result.exit_code == 1
         mock_trigger.assert_not_awaited()
         mock_search.assert_not_awaited()
@@ -726,13 +643,11 @@ class TestSearchWebCli:
         )
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--query", "k graphs", "--ingest", "--ingest-top-k", bad_top_k],
         )
 
-        # Assert
         assert result.exit_code == 1
         mock_trigger.assert_not_awaited()
         mock_search.assert_not_awaited()
@@ -740,7 +655,6 @@ class TestSearchWebCli:
     def test_ingest_trigger_failure_still_exits_zero(self, mocker, cli_main) -> None:
         """Search succeeded; ingestion is best-effort — never fail the CLI for it."""
 
-        # Arrange
         mock_search = AsyncMock(return_value=_sample_results())
         mocker.patch("scripts.search_web.web_search", mock_search)
         mocker.patch(
@@ -749,11 +663,9 @@ class TestSearchWebCli:
         )
         runner = CliRunner()
 
-        # Act
         result = runner.invoke(
             cli_main,
             ["--query", "k graphs", "--ingest", "--user-id", str(_USER_ID)],
         )
 
-        # Assert
         assert result.exit_code == 0, result.output
