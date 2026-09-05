@@ -20,6 +20,7 @@ from beanie import PydanticObjectId
 from prefect.cache_policies import NO_CACHE
 
 from tests.unit.conftest import TEST_DATABASE
+from tree.config.app_config import ChunkingConfig, load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document, SourceType
@@ -126,6 +127,13 @@ def _make_document(
     return doc
 
 
+def _chunking(**overrides: Any) -> ChunkingConfig:
+    """The chunking config task ① now takes as an EXPLICIT parameter (#112
+    Issue 2), so a strategy change is part of its ``INPUTS`` cache key."""
+
+    return ChunkingConfig(**overrides)
+
+
 def _async_cursor(items: list[dict[str, Any]]) -> Any:
     """Build a mocked ``cursor`` that supports ``async for`` and ``.limit(...)``."""
 
@@ -169,14 +177,14 @@ class TestCleanAndChunkTask:
     async def test_empty_content_yields_no_parents(self) -> None:
         doc = _make_document(content="")
 
-        chunked = await _clean_and_chunk(doc)
+        chunked = await _clean_and_chunk(doc, _chunking())
 
         assert chunked.parents == []
 
     async def test_carries_document_metadata_for_the_downstream_stages(self) -> None:
         doc = _make_document(content="some content " * 50, title="Memory for Agents")
 
-        chunked = await _clean_and_chunk(doc)
+        chunked = await _clean_and_chunk(doc, _chunking())
 
         assert chunked.document_id == str(doc.id)
         assert chunked.source_uri == doc.source_uri
@@ -193,7 +201,7 @@ class TestCleanAndChunkTask:
         # never reach the chunker (ADR-006 Decision 7).
         doc = _make_document(content="Intro\nAccept all cookies\nBody")
 
-        chunked = await _clean_and_chunk(doc)
+        chunked = await _clean_and_chunk(doc, _chunking())
 
         joined = "".join(parent.content for parent in chunked.parents)
         assert "Accept all cookies" not in joined
@@ -207,7 +215,7 @@ class TestCleanAndChunkTask:
             content="The body paragraph stays.\n\nThanks for reading!\nShare this post\n"
         )
 
-        chunked = await _clean_and_chunk(doc)
+        chunked = await _clean_and_chunk(doc, _chunking())
 
         joined = "".join(parent.content for parent in chunked.parents)
         assert "Thanks for reading" not in joined
@@ -219,8 +227,8 @@ class TestCleanAndChunkTask:
         # payload, so the downstream INPUTS cache is a hit.
         content = "Intro\nAccept all cookies\nBody   text"
 
-        first = await _clean_and_chunk(_make_document(content=content))
-        second = await _clean_and_chunk(_make_document(content=content))
+        first = await _clean_and_chunk(_make_document(content=content), _chunking())
+        second = await _clean_and_chunk(_make_document(content=content), _chunking())
 
         assert first == second
 
@@ -238,7 +246,7 @@ class TestCleanAndChunkTask:
             )
         )
 
-        chunked = await _clean_and_chunk(doc)
+        chunked = await _clean_and_chunk(doc, load_app_config().memory.chunking)
 
         assert len(chunked.parents) == 3
         assert [
@@ -252,6 +260,74 @@ class TestCleanAndChunkTask:
         ] == [
             f"{doc.source_uri}#parent-0#child-{i}" for i in range(len(first_children))
         ]
+
+
+class TestChunkingConfigIsPartOfTheCacheKey:
+    """#112 Issue 2 — flipping ``memory.chunking`` must re-chunk on the next run.
+
+    The config used to be read via ``_live_app_config()`` INSIDE the task body
+    while the ``INPUTS`` cache key was the ``Document`` alone, so a reader who
+    switched to the Chapter-4 fixed-window splitter, dropped ``memory`` and
+    re-ran got the recursive parents back from the cache.
+    """
+
+    _HEADED = "# Section A\n\n" + "alpha beta gamma delta. " * 20
+
+    def _cache_key(self, document: Any, chunking: ChunkingConfig) -> str | None:
+        """The key Prefect computes for one task ① invocation."""
+
+        return clean_and_chunk_task.cache_policy.compute_key(
+            task_ctx=None,
+            inputs={
+                "document": str(document.id),
+                "chunking": chunking,
+                "opik_trace_headers": {"traceparent": "run-specific"},
+            },
+            flow_parameters={},
+        )
+
+    async def test_switching_strategy_changes_the_chunks(self) -> None:
+        doc = _make_document(content=self._HEADED)
+
+        recursive = await _clean_and_chunk(doc, _chunking(strategy="recursive"))
+        fixed = await _clean_and_chunk(
+            doc,
+            _chunking(
+                strategy="fixed_tokens",
+                parent={"size": 32, "overlap": 0},
+                child={"size": 8, "overlap": 0},
+            ),
+        )
+
+        assert recursive != fixed
+        assert [p.content for p in recursive.parents] != [
+            p.content for p in fixed.parents
+        ]
+
+    def test_switching_strategy_changes_the_cache_key(self) -> None:
+        doc = _make_document(content=self._HEADED)
+
+        recursive_key = self._cache_key(doc, _chunking(strategy="recursive"))
+        fixed_key = self._cache_key(doc, _chunking(strategy="fixed_tokens"))
+
+        assert recursive_key is not None
+        assert recursive_key != fixed_key
+
+    def test_the_same_config_keeps_the_cache_a_hit(self) -> None:
+        # The flip side: an unchanged config (and only new trace headers) must
+        # still hit, or every re-run re-chunks the whole corpus.
+        doc = _make_document(content=self._HEADED)
+
+        assert self._cache_key(doc, _chunking()) == self._cache_key(doc, _chunking())
+
+    def test_chunking_is_a_declared_task_parameter(self) -> None:
+        import inspect
+
+        params = inspect.signature(_clean_and_chunk).parameters
+
+        assert "chunking" in params
+        assert params["chunking"].annotation in (ChunkingConfig, "ChunkingConfig")
+        assert "chunking" not in (clean_and_chunk_task.cache_policy.exclude or [])
 
 
 # ---------------------------------------------------------------------------
@@ -1028,7 +1104,7 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(side_effect=_fake_task),
         )
 
-        chunked_docs = await _split_documents(docs)
+        chunked_docs = await _split_documents(docs, _chunking())
 
         # Assert: same order + contents as a straight sequential map.
         expected = [_chunked_for(str(d.id)) for d in docs]
@@ -1065,7 +1141,7 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(side_effect=_slow_task),
         )
 
-        chunked_docs = await _split_documents(docs)
+        chunked_docs = await _split_documents(docs, _chunking())
 
         # Assert: ran in parallel up to — but never beyond — the bound.
         assert max_in_flight == 4
@@ -1092,7 +1168,7 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(side_effect=_jittered_task),
         )
 
-        chunked_docs = await _split_documents(docs)
+        chunked_docs = await _split_documents(docs, _chunking())
 
         assert chunked_docs == [_chunked_for(str(d.id)) for d in docs]
 
@@ -1102,7 +1178,7 @@ class TestChunkDocumentsFanout:
             new=AsyncMock(),
         )
 
-        out = await _split_documents([])
+        out = await _split_documents([], _chunking())
 
         assert out == []
         task_spy.assert_not_called()

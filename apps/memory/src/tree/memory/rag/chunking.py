@@ -34,6 +34,7 @@ import re
 import tiktoken
 
 from tree.config.app_config import ChunkingConfig, ChunkLevelConfig
+from tree.memory.rag.cleaning import fenced_ranges
 from tree.memory.rag.types import ChildChunk, ParentChunk
 
 # ONE module-level encoder (same pattern as ``extraction/core.py``): building it
@@ -47,12 +48,13 @@ _NO_SPECIAL: tuple[str, ...] = ()
 
 # Markdown ATX heading: 1-6 hashes, a space, then the heading text.
 # ``clean_text`` has already normalised "#Heading" to "# Heading" and CRLF to
-# LF by the time the pipeline calls us.
+# LF by the time the pipeline calls us — outside fences; inside one it leaves
+# "#comment" exactly as the author typed it, which is why we skip fences here
+# too. A "# comment" line inside a fence is shell syntax, not a heading:
+# treating it as one used to leak "# ensure MONGO_SCHEME=mongodb+srv" into a
+# real tutorial's heading path. ``fenced_ranges`` is imported from the cleaner
+# (rag -> rag) so there is exactly ONE definition of what a fence is.
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$", re.MULTILINE)
-# Opening / closing marker of a fenced code block. A "# comment" line inside a
-# fence is shell syntax, not a heading — treating it as one used to leak
-# "# ensure MONGO_SCHEME=mongodb+srv" into a real tutorial's heading path.
-_CODE_FENCE_MARKERS = ("```", "~~~")
 # A blank line (possibly carrying spaces/tabs) separates two paragraphs.
 _PARAGRAPH_SEP_RE = re.compile(r"\n[ \t]*\n")
 # End of sentence: ".", "!" or "?" followed by whitespace.
@@ -132,17 +134,55 @@ def _fixed_window(text: str, level: ChunkLevelConfig) -> list[str]:
 
     ``overlap < size`` is enforced by :class:`ChunkLevelConfig`, so the stride
     is always positive and the loop always terminates.
+
+    The window is computed over token indices and then SLICED FROM THE SOURCE
+    STRING via :func:`_token_char_offsets`, exactly as ``recursive`` does.
+    Decoding a raw token slice instead would emit U+FFFD whenever a boundary
+    fell inside a multi-token character (an emoji is 2-3 cl100k tokens), and
+    that "�" is what got stored as the chunk's content.
+
+    Because the end boundary snaps FORWARD to a character, the slice can carry
+    the rest of a straddling character and re-encode to more than ``size``
+    tokens; the window is shrunk a token at a time until it fits, exactly as
+    :func:`_token_pieces` does at the recursive ladder's last level. The next
+    window starts from the token the emitted one actually ENDED at (minus the
+    overlap), so with ``overlap=0`` the windows still tile the text with no gap.
+    A single character that alone costs more than ``size`` tokens is emitted
+    whole — splitting it is what U+FFFD came from.
+
+    The stride stays the Chapter-4 one — ``size - overlap`` from the window's
+    NOMINAL end (``start + size``, even where the text ran out first) — so the
+    window sequence is unchanged for text that needs no shrinking. Only a
+    window that was actually shrunk strides from its real end instead, because
+    striding past it would skip the tokens it gave up. Advancing from the real
+    end unconditionally re-emitted the tail once per token instead (a
+    1207-token document came out as 511 near-identical parents).
     """
 
-    tokens = _ENCODER.encode(text, disallowed_special=_NO_SPECIAL)
-    if not tokens:
+    offsets = _token_char_offsets(text)
+    total = len(offsets) - 1
+    if total <= 0:
         return []
 
     chunks: list[str] = []
     start = 0
-    while start < len(tokens):
-        chunks.append(_ENCODER.decode(tokens[start : start + level.size]))
-        start += level.size - level.overlap
+    while start < total:
+        nominal_stop = min(start + level.size, total)
+        stop = nominal_stop
+        while (
+            stop > start + 1
+            and _token_count(text[offsets[start] : offsets[stop]]) > level.size
+        ):
+            stop -= 1
+        chunk = text[offsets[start] : offsets[stop]]
+        if chunk:
+            # Empty when every token from ``start`` to ``stop`` sits inside one
+            # character that an earlier window already emitted.
+            chunks.append(chunk)
+        stride_from = start + level.size if stop == nominal_stop else stop
+        # ``start + 1`` keeps the loop moving when a shrunk window is a single
+        # token wide and the overlap would otherwise pin it in place.
+        start = max(stride_from - level.overlap, start + 1)
     return chunks
 
 
@@ -320,10 +360,15 @@ def _heading_pieces(
     The heading path of a section is the stack of heading TEXTS from ``#`` down
     to that section's own level, so ``# Memory`` then ``## Parent retrieval``
     yields ``("Memory", "Parent retrieval")``.
+
+    Headings inside a fenced code block are skipped (:func:`fenced_ranges`).
+    Paragraph and sentence splitting stay fence-blind on purpose: a blank line
+    inside a fence only ever shifts a chunk boundary, whereas a fake heading
+    corrupts every child's **Contextual header** downstream.
     """
 
     window = text[start:end]
-    fenced = _fenced_ranges(window)
+    fenced = fenced_ranges(window)
     matches = [
         match
         for match in _ATX_HEADING_RE.finditer(window)
@@ -360,32 +405,6 @@ def _heading_pieces(
             (start + match.start(), start + piece_end, tuple(t for _, t in stack))
         )
     return pieces
-
-
-def _fenced_ranges(window: str) -> list[tuple[int, int]]:
-    """Character ranges covered by fenced code blocks (backticks or tildes).
-
-    Per CommonMark, an UNCLOSED fence runs to the end of the document, so no
-    later ``#`` line can be a heading either. Paragraph and sentence splitting
-    stay fence-blind on purpose: a blank line inside a fence only ever shifts a
-    chunk boundary, whereas a fake heading corrupts every child's contextual
-    header downstream.
-    """
-
-    ranges: list[tuple[int, int]] = []
-    opened_at: int | None = None
-    position = 0
-    for line in window.splitlines(keepends=True):
-        if line.strip().startswith(_CODE_FENCE_MARKERS):
-            if opened_at is None:
-                opened_at = position
-            else:
-                ranges.append((opened_at, position + len(line)))
-                opened_at = None
-        position += len(line)
-    if opened_at is not None:
-        ranges.append((opened_at, len(window)))
-    return ranges
 
 
 def _regex_pieces(
@@ -476,6 +495,16 @@ def _token_char_offsets(text: str) -> list[int]:
     an accented letter) can be split across two tokens; such a boundary is
     snapped FORWARD to the next character so every offset is a valid slice
     index and no chunk can ever contain a replacement character.
+
+    ``consumed`` is the TRUE cumulative token-byte count and is never written
+    back from a snapped value: the forward snap is applied per boundary, to a
+    copy. Accumulating on top of the snapped byte position compounds one whole
+    extra character per multi-token character — 300 emoji came out with
+    offsets 3x too far along, so ``_fixed_window`` emitted 15-token windows
+    under ``size=5`` (#112 Issue 8). Consecutive offsets may therefore REPEAT
+    (every token boundary inside one character maps to the same character),
+    which callers must treat as "this window carries no new text" rather than
+    assuming strict growth.
     """
 
     tokens = _ENCODER.encode(text, disallowed_special=_NO_SPECIAL)
@@ -490,7 +519,8 @@ def _token_char_offsets(text: str) -> list[int]:
     consumed = 0
     for token_bytes in _ENCODER.decode_tokens_bytes(tokens):
         consumed = min(consumed + len(token_bytes), byte_position)
-        while consumed not in char_at_byte:
-            consumed += 1
-        offsets.append(char_at_byte[consumed])
+        boundary = consumed
+        while boundary not in char_at_byte:
+            boundary += 1
+        offsets.append(char_at_byte[boundary])
     return offsets

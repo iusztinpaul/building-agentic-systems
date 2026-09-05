@@ -302,3 +302,11 @@ $ echo $?
 - A child row whose `parent_id` points at a `document` row (corrupted/malformed data) is silently treated as if the document were its parent chunk, producing a `RetrievedParent` with empty `content`/`heading_path`. No crash, WARNING logged, but the WARNING's phrasing ("parent %s is missing") doesn't name the row that turned out to be a document, which would slow down triage of this specific corruption. Minor, and outside the task's Scope (LLM/hand-written rows are the plausible corruption source, not anything this task's code writes).
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Rollup Issues 1, 6 and 7 touch this task. Issue 1 (the one that matters): the `nl_query` system prompt still describes node rows as `_id, kind, type, name, properties, embedding` — no `subtype`, `parent_id`, `chunk_index` — although ADR-006 § Consequences says it "must" so `query_memory` can walk the hierarchy; a grooming omission (no task carried it), now assigned. Issue 6: `top_k <= 0` logs "search unavailable" and a blank rag `search_memory` query leaks the raw Voyage 400. Issue 7: tie order in `group_children_by_parent` is non-deterministic. Parent-document retrieval itself, the CLI rag output, `No results.` and the rag-unavailable message are exactly as specified.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.

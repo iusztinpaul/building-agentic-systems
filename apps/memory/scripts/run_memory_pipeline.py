@@ -1,5 +1,9 @@
 """
-Run the MEMORY extraction pipeline (``documents`` → knowledge graph).
+Run the MEMORY pipeline (``documents`` → the ``memory`` collection).
+
+What lands there depends on ``memory.mode``: document / **Parent chunk** /
+**Child chunk** rows in ``rag``, those plus entity nodes and edges in
+``graphrag``.
 
 A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
 ``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA phase OFF, so the

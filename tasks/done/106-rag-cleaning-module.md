@@ -214,3 +214,11 @@ $ uv run python -c "clean_text('#comment no space' inside a python fence)"
 - No other issues found. Scope is clean (only the 5 files/dirs listed in the SWE summary are touched), no `print()`, all functions typed, docstrings clear with good/bad examples per CLAUDE.md's "Key Principles."
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Rollup Issue 3 is this task's: `normalize_markdown` rewrites `#comment` -> `# comment` and `collapse_whitespace` flattens indentation INSIDE fenced code blocks, so the retrieved `content` (CLI excerpt, MCP `search_memory`, LLM extraction input) carries un-runnable code for the code-heavy Substack corpus this repo ingests. #107 already made the splitter fence-aware; the Clean step must be consistent. Every AC of this task still holds — the spec (mine) did not anticipate fences.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.

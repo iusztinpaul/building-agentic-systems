@@ -71,6 +71,37 @@ class TestGroupChildrenByParent:
 
         assert [child.child_id for child in grouped["p1"]] == ["c0", "c1"]
 
+    def test_tied_children_keep_a_deterministic_order_in_either_input_order(
+        self, make_child_row
+    ) -> None:
+        # #112 Issue 7: two children of ONE parent with byte-identical fused
+        # scores used to come back in input order, so the CLI/MCP output
+        # flipped between identical runs. ``child_id`` is the tiebreak.
+        tied = [
+            ScoredHit(doc=make_child_row(_USER, cid, parent_id="p1"), score=0.5)
+            for cid in ("c1", "c0")
+        ]
+
+        forward = group_children_by_parent(tied)
+        reversed_ = group_children_by_parent(list(reversed(tied)))
+
+        assert [child.child_id for child in forward["p1"]] == ["c0", "c1"]
+        assert [child.child_id for child in reversed_["p1"]] == ["c0", "c1"]
+
+    def test_tied_parents_keep_a_deterministic_order_in_either_input_order(
+        self, make_child_row
+    ) -> None:
+        tied = [
+            ScoredHit(doc=make_child_row(_USER, f"c-{pid}", parent_id=pid), score=0.5)
+            for pid in ("p2", "p1")
+        ]
+
+        forward = group_children_by_parent(tied)
+        reversed_ = group_children_by_parent(list(reversed(tied)))
+
+        assert list(forward) == ["p1", "p2"]
+        assert list(reversed_) == ["p1", "p2"]
+
     def test_hit_without_parent_id_is_dropped_with_a_warning(
         self, make_child_row, caplog
     ) -> None:
@@ -271,3 +302,33 @@ class TestRetrieveParents:
         )
 
         assert result.parents == []
+
+
+class TestNonPositiveTopK:
+    """#112 Issue 6: ``top_k <= 0`` is a caller bug, not an outage.
+
+    ``limit=0`` used to reach both search stages, both raised, and both logged
+    "Vector search unavailable / Text search unavailable" — an on-call reader
+    reasonably concluded Atlas was down.
+    """
+
+    @pytest.mark.parametrize("top_k", [0, -1])
+    async def test_returns_no_parents_without_searching(
+        self, mocker, embedding_model, top_k: int, caplog
+    ) -> None:
+        search = mocker.patch("tree.memory.rag.retrieval.hybrid_search", autospec=True)
+
+        with caplog.at_level(logging.INFO):
+            result = await retrieve_parents(
+                _client(object()),
+                _DATABASE,
+                "q",
+                embedding_model,
+                _USER,
+                top_k=top_k,
+            )
+
+        assert result.parents == []
+        search.assert_not_called()
+        assert "unavailable" not in caplog.text
+        assert "top_k" in caplog.text

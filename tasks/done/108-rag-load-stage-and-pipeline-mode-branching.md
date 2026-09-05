@@ -479,3 +479,11 @@ FAILED tests/unit/memory/rag/test_load.py::TestPropertiesAreReplacedInMongo::tes
 **VERDICT: PASS**
 
 The properties-replace-vs-merge defect is fixed, verified live against the real Docker MongoDB independently of the SWE's own test, the fix is regression-proven (revert reddens exactly the reported tests), the consistency audit is accurate and complete for this task's scope, the full suite is green (2246/0), format/lint/pre-commit are clean, and no previously-passing criterion regressed. Ready to commit.
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Rollup Issue 2 is this task's: `clean_and_chunk_task` reads `memory.chunking` via `_live_app_config()` inside the body while its `INPUTS` cache key is the `Document` alone, so a config change is served the stale chunk shape (your Tester reproduced it across processes; the docstring at lines 316-319 claims otherwise). Pass the `ChunkingConfig` as a task parameter. The row hierarchy, mode branching, `$literal` properties replace, backfill rule and vector-index filter paths were all verified from the user side and are correct.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.

@@ -75,9 +75,20 @@ async def retrieve_parents(
     Every read is pinned to ``user_id`` — the child search server-side, the two
     ``$in`` fetches in their filters — so a parent or document belonging to
     another tenant can never be attached to a hit.
+
+    ``top_k <= 0`` asks for no results and gets an empty one, without a query:
+    passing ``limit=0`` down made BOTH search stages raise and log
+    "Vector/Text search unavailable, falling back ...", which reads as an Atlas
+    outage to whoever is on call.
     """
 
     top_k = top_k if top_k is not None else app_config.query.top_k
+    if top_k <= 0:
+        logger.info(
+            "Skipping retrieval: top_k=%d asks for no parents (must be >= 1)", top_k
+        )
+        return RetrievalResult()
+
     collection = client[database][MEMORY_COLLECTION]
 
     hits = await hybrid_search(
@@ -143,6 +154,11 @@ def group_children_by_parent(hits: list[ScoredHit]) -> dict[Any, list[MatchedChi
     dropped with a WARNING naming the child: every child written by
     :mod:`tree.memory.rag.load` has one, so its absence means a hand-written or
     pre-ADR-006 row is still in the collection.
+
+    Ties break on the id (``child_id``, then ``parent_id``) — RRF hands out
+    identical fused scores routinely (two children matched by the same single
+    stage at the same rank), and without a second key the CLI/MCP answer
+    reordered itself between two identical calls.
     """
 
     grouped: dict[Any, list[MatchedChild]] = {}
@@ -157,10 +173,10 @@ def group_children_by_parent(hits: list[ScoredHit]) -> dict[Any, list[MatchedChi
         grouped.setdefault(parent_id, []).append(_matched_child(hit))
 
     for children in grouped.values():
-        children.sort(key=lambda child: child.score, reverse=True)
+        children.sort(key=lambda child: (-child.score, child.child_id))
 
     return dict(
-        sorted(grouped.items(), key=lambda item: item[1][0].score, reverse=True)
+        sorted(grouped.items(), key=lambda item: (-item[1][0].score, str(item[0])))
     )
 
 

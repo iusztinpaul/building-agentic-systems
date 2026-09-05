@@ -119,6 +119,23 @@ All nodes and edges live in a single collection.
 - `name`: string
 - `properties`: dict (schema varies by node type)
 - `embedding`: vector (float array) — do NOT return this field
+- `subtype`: string, present on some rows. On a `chunk` row it is exactly \
+`"parent"` (large, ~4096 tokens, what a reader wants to read, never embedded) \
+or `"child"` (small, ~256 tokens, the embedded search unit). ALWAYS filter on \
+it when counting or listing chunks — `{{"$match": {{"type": "chunk", \
+"subtype": "parent"}}}}` — otherwise parents and children are counted together.
+- `parent_id`: string, the `_id` of the row that CONTAINS this one — a child \
+chunk's parent chunk, and a parent chunk's `document` row. Present on every \
+`chunk` row in both memory modes.
+- `chunk_index`: integer, the 0-based position of this row among its siblings \
+(children within their parent, parents within their document). Sort on it to \
+read a document in order.
+
+Walk the hierarchy with `parent_id` alone, in EITHER direction and WITHOUT \
+`$graphLookup`: down = `{{"$match": {{"parent_id": "<row _id>"}}}}` (the \
+children of a parent, or the parents of a document); up = read the row's own \
+`parent_id` and `$match` that `_id`. The levels are always \
+`document` -> `chunk`/`parent` -> `chunk`/`child`, so two hops reach any level.
 
 ### Edge document shape
 - `_id`: string, format `"source_node_id|edge_type|target_node_id"` \

@@ -124,8 +124,9 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, 
 
 - `data-etl-worker` (ingests ONE data shard — a platform bucket or a HuggingFace
   offset window — #072)
-- `memory-extract-etl-worker` (runs the six-task extraction body over one shard of
-  pending documents — #067)
+- `memory-extract-etl-worker` (runs the ONE memory-pipeline body — the rag stages
+  always, the graph stages only in `graphrag` — over one shard of pending
+  documents — #067)
 - `online-pipeline`, `offline-pipeline` (the two end-to-end flows in `tree/online.py` /
   `tree/offline.py`; `offline-pipeline` also carries the [nightly cron](#offline--selecting-sources))
 - `dream-consolidation-all-users` (the nightly incremental dedup sweep across every active
@@ -197,7 +198,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND extracts them into the graph AND indexes, fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes, fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 
@@ -206,7 +207,7 @@ make memory-run-data-pipeline MODE=online SOURCE="https://www.decodingai.com/p/a
 make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
+Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to write it into the `memory` collection. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory pipeline
 

@@ -443,6 +443,39 @@ class TestBuildSystemPrompt:
         assert "text index" in prompt.lower() or "Text index" in prompt
 
 
+class TestSystemPrompt:
+    """ADR-006 Consequences: the prompt must describe ``parent_id`` /
+    ``chunk_index`` / ``subtype`` so a generated pipeline can walk the chunk
+    hierarchy instead of counting parents and children together.
+    """
+
+    def _node_shape_section(self) -> str:
+        """The "Node document shape" bullets only — the LLM reads them as the
+        row contract, so the fields have to be THERE, not merely somewhere."""
+
+        prompt = build_nl_query_system_prompt()
+        start = prompt.index("### Node document shape")
+        return prompt[start : prompt.index("###", start + 1)]
+
+    @pytest.mark.parametrize("field", ["subtype", "parent_id", "chunk_index"])
+    def test_node_shape_names_every_hierarchy_field(self, field: str) -> None:
+        assert f"`{field}`" in self._node_shape_section()
+
+    def test_node_shape_names_the_two_chunk_subtypes(self) -> None:
+        section = self._node_shape_section()
+
+        assert '"parent"' in section
+        assert '"child"' in section
+
+    def test_node_shape_explains_walking_parent_id_without_graph_lookup(self) -> None:
+        # Without this sentence the LLM reaches for ``$graphLookup`` (rejected
+        # by the validator for chunk rows' plain string ids).
+        section = self._node_shape_section()
+
+        assert "$graphLookup" in section
+        assert "0-based" in section
+
+
 class TestReplaceEmbeddingPlaceholder:
     async def test_replaces_placeholder(self, mocker):
         mock_model = mocker.AsyncMock()

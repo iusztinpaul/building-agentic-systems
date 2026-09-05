@@ -170,7 +170,7 @@ run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> index; gr
 run-data-pipeline: # DATA pipeline only (sources -> `documents`; NO extraction/indexing). MODE=offline (default): ONE offline-pipeline run with the extraction phase OFF over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen set). MODE=online: ingest ONE source realtime; SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_data_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS)
 
-run-memory-pipeline: # MEMORY pipeline (`documents` -> knowledge graph, + ONE trailing index run) as ONE offline-pipeline run with the data phase OFF. MODE=offline (default): all PENDING docs (optionally narrowed with DOC_IDS="id1,id2"; NUM_SHARDS=<n> fan-out). MODE=online: exactly DOC_IDS="<id>[,<id2>]" (required; the id printed by run-data-pipeline MODE=online). Forwards USER_ID/USER_IDENTIFIER.
+run-memory-pipeline: # MEMORY pipeline (`documents` -> the `memory` collection: document/parent/child rows, plus entities and edges in `graphrag`; + ONE trailing index run) as ONE offline-pipeline run with the data phase OFF. MODE=offline (default): all PENDING docs (optionally narrowed with DOC_IDS="id1,id2"; NUM_SHARDS=<n> fan-out). MODE=online: exactly DOC_IDS="<id>[,<id2>]" (required; the id printed by run-data-pipeline MODE=online). Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_memory_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 run-indexing-pipeline: # INDEXING pipeline (reverse edges, embeddings, search indexes) — the single standalone step that works after either offline or online extraction; no modes. Forwards USER_ID/USER_IDENTIFIER.
@@ -184,7 +184,7 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-query-graph: # Query and visualize the knowledge graph for one user. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search, omit for full graph.
+query-graph: # Query memory for one user: an HTML graph in `graphrag`, ranked parent chunks as text in `rag`. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search; omit QUERY for the full graph (graphrag only).
 	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
 
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].

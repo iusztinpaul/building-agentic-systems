@@ -84,26 +84,27 @@ Use these tools when the user wants to add content to memory. All three exist in
 
 ### `ingest_url` — Ingest a web page
 - Currently supports Substack articles (including custom domains configured in the app)
-- Pass the URL; the tool fetches, extracts text, creates a Document, then runs the memory pipeline + indexing
-- Returns a JSON summary with node/edge counts
+- Pass the URL; the tool SUBMITS one pipeline run (fetch -> memory pipeline -> indexing) and returns immediately
+- Returns `{"status": <Prefect run state>, "flow_run_id": "...", "url": "..."}` — no counts: the write happens out-of-band, after the tool has answered
 - Use when: user shares a URL and wants it added to memory
 
 ### `ingest_file` — Ingest a local file
 - Supports `.txt`, `.md`, `.html` files
 - Pass the absolute file path and optional title
-- Returns a JSON summary with node/edge counts
+- Returns `{"status": <Prefect run state>, "flow_run_id": "...", "file_path": "..."}` immediately — the write happens out-of-band
 - Use when: user wants to add a local file to memory
 
 ### `ingest_conversation` — Ingest conversation text
 - Pass the raw conversation text and optional title
 - In `graphrag` it also extracts people, tasks, episodes, preferences and their relationships
-- Returns a JSON summary with node/edge counts
+- Returns `{"status": <Prefect run state>, "flow_run_id": "..."}` immediately — the write happens out-of-band
 - Use when: user wants to remember a conversation, or at the end of a session to persist learnings
 - **Proactive use:** Also ingest when meaningful topics were discussed (technical decisions, debugging sessions, architecture changes, new learnings) or when the user switches to a different topic. Always run proactive ingestion in a **background agent** to avoid blocking the user.
 
-### After ingestion
-- Confirm what was extracted (node/edge counts) in a human-readable summary
-- Optionally run a quick `search_memory` to verify the new content is queryable
+### After ingestion (both modes)
+- All three tools are ASYNC submits: they answer with the `flow_run_id` before anything is written. No counts of any kind come back — never report one.
+- Say what was submitted (the URL / path / title) and give the `flow_run_id`, then say memory is being written in the background.
+- Confirm by running `search_memory` for the new title a little later; empty results right after the submit mean "not written yet", not "nothing was found".
 
 ---
 
@@ -113,7 +114,7 @@ Use these tools when the user wants to add content to memory. All three exist in
 - Group by type (people, tasks, episodes, documents) when presenting mixed results; in `rag`, group the parents by their document title.
 - Highlight relationships and connections between entities (graphrag).
 - For deep search: present the index summary first, then offer to dive into specific entries.
-- For ingestion: report what was created (document title, node count, edge count).
+- For ingestion: report what was SUBMITTED (document title / URL) and the `flow_run_id` — there are no counts to report.
 - If results are empty, suggest rephrasing the query or trying a different tool.
 
 ---

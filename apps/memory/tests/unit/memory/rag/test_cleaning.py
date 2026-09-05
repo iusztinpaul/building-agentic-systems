@@ -25,6 +25,28 @@ from tree.memory.rag.cleaning import (
 )
 
 
+# A code-heavy article: the corpus this repo ingests (decodingai.com and other
+# technical Substacks) is full of these. Everything BETWEEN the fences has to
+# survive byte-for-byte; the "#Heading" outside still gets normalised.
+_FENCED_ARTICLE = """#Heading
+
+Prose   with   runs.
+
+```python
+#comment
+def loop():
+    if True:
+        return  "x"
+
+
+def other():
+    pass
+```
+
+Closing   prose.
+"""
+
+
 # Every text the idempotence / determinism properties are checked against.
 # Add a fixture here whenever a new cleaning behaviour is introduced.
 _FIXTURES: list[str] = [
@@ -42,6 +64,8 @@ _FIXTURES: list[str] = [
     "a\n\n\n\n\n\n\nb",
     "Sub\n-----\n\n- item\n- item\n",
     "text\n\n-----\n\nmore",
+    _FENCED_ARTICLE,
+    "# Doc\n\n```\n#unclosed comment\n    indented    code\n",
 ]
 
 
@@ -223,3 +247,70 @@ class TestCleanText:
         raw = "Title\r\n=====\r\nSubscribe\r\nBo\x00dy   text"
 
         assert clean_text(raw) == "# Title\nBody text"
+
+
+class TestFencedCodeBlocks:
+    """The Clean step must not rewrite code (#112 Issue 3).
+
+    ``#comment`` is Python syntax, not a sloppy ATX heading, and indentation is
+    load-bearing — before this fix every fenced sample came out of memory
+    un-runnable, and that text is what ``search_memory`` hands the agent to
+    quote.
+    """
+
+    def test_code_inside_a_fence_survives_byte_for_byte(self) -> None:
+        cleaned = clean_text(_FENCED_ARTICLE)
+
+        fenced = cleaned.split("```python\n")[1].split("```")[0]
+        assert fenced == (
+            "#comment\n"
+            "def loop():\n"
+            "    if True:\n"
+            '        return  "x"\n'
+            "\n"
+            "\n"
+            "def other():\n"
+            "    pass\n"
+        )
+
+    def test_prose_outside_the_fence_is_still_normalised(self) -> None:
+        cleaned = clean_text(_FENCED_ARTICLE)
+
+        assert cleaned.startswith("# Heading")
+        assert "Prose with runs." in cleaned
+        assert "Closing prose." in cleaned
+
+    def test_hash_comment_in_a_fence_is_not_turned_into_a_heading(self) -> None:
+        assert normalize_markdown("```\n#comment\n```") == "```\n#comment\n```"
+
+    def test_indentation_in_a_fence_is_not_collapsed(self) -> None:
+        text = "```\n    deep    indent\n```"
+
+        assert collapse_whitespace(text) == text
+
+    def test_setext_underline_inside_a_fence_is_not_a_heading(self) -> None:
+        text = "```\nTitle\n=====\n```"
+
+        assert normalize_markdown(text) == text
+
+    def test_blank_lines_inside_a_fence_are_not_collapsed(self) -> None:
+        # PEP 8 puts two blank lines between top-level defs; collapsing them
+        # rewrites the sample.
+        text = "```\na\n\n\nb\n```"
+
+        assert normalize_markdown(text) == text
+
+    def test_repeated_code_line_inside_a_fence_is_not_dropped_as_boilerplate(
+        self,
+    ) -> None:
+        line = "        raise ValueError(message)"
+        text = "```python\n" + f"{line}\n" * 3 + "```"
+
+        assert drop_boilerplate_lines(text) == text
+
+    def test_unclosed_fence_protects_the_rest_of_the_document(self) -> None:
+        # CommonMark: an unclosed fence runs to the end of the document — the
+        # SAME rule the splitter applies, from the SAME helper.
+        text = "```\n#comment\n    indented\n"
+
+        assert clean_text(text) == text

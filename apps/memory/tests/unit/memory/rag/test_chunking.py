@@ -16,7 +16,9 @@ import random
 import pytest
 
 from tree.config.app_config import ChunkingConfig
+from tree.memory.rag import chunking as chunking_module
 from tree.memory.rag.chunking import _ENCODER, split_document
+from tree.memory.rag.cleaning import fenced_ranges
 from tree.memory.rag.types import ParentChunk
 
 _STRATEGIES = ["fixed_tokens", "recursive"]
@@ -40,8 +42,34 @@ _WORDS = [
 ]
 
 
+# Mixed CJK + ASCII: 3-byte characters whose token boundaries land mid-character.
+_CJK_TEXT = (
+    "人工知能はメモリを必要とします。知識グラフは関係を保存します。"
+    "エージェントは検索で文脈を取り戻す。RAG と GraphRAG は別のモードです。"
+) * 8
+
+
 def _ntok(text: str) -> int:
     return len(_ENCODER.encode(text, disallowed_special=()))
+
+
+def _assert_within_budget(chunks: list[str], *, size: int) -> None:
+    """Every chunk re-encodes to ``<= size`` tokens (#112 Issue 8).
+
+    The ONE exception is a chunk of a single character that alone costs more
+    than ``size`` tokens (a 3-token 🧠 under ``child.size=2``): splitting it
+    would mean storing U+FFFD, which the same AC forbids. Over-budget chunks
+    are asserted to be exactly that case, so the carve-out cannot hide a real
+    budget violation.
+    """
+
+    assert chunks
+    over = [chunk for chunk in chunks if _ntok(chunk) > size]
+    assert all(len(chunk) == 1 for chunk in over), (
+        f"chunks over the {size}-token budget that are not a single "
+        f"indivisible character: "
+        f"{[(chunk[:20], _ntok(chunk)) for chunk in over if len(chunk) != 1][:5]}"
+    )
 
 
 def _config(
@@ -124,6 +152,51 @@ class TestFixedTokensStrategy:
         joined = "".join(parent.content for parent in parents)
         assert _ENCODER.encode(joined) == _ENCODER.encode(text)
 
+    def test_overlap_stops_at_the_last_window_instead_of_repeating_the_tail(
+        self,
+    ) -> None:
+        """250 tokens at size 100 / overlap 20 is 4 windows: 0, 80, 160, 240.
+
+        The window that reaches the end of the text is the LAST one. Advancing
+        past it by the stride once emitted 511 near-identical tail windows for a
+        1207-token document (caught by the e2e run, not by the ``> without``
+        assertion in the test below).
+        """
+
+        text = _text_of_tokens(250)
+
+        parents = split_document(
+            text,
+            _config(
+                strategy="fixed_tokens",
+                parent_size=100,
+                parent_overlap=20,
+                child_size=40,
+            ),
+        )
+
+        assert len(parents) == 4
+        contents = [parent.content for parent in parents]
+        assert len(set(contents)) == 4
+        assert contents[-1].endswith(text[-20:])
+
+    def test_a_document_shorter_than_the_window_is_one_parent_even_with_overlap(
+        self,
+    ) -> None:
+        text = _text_of_tokens(50)
+
+        parents = split_document(
+            text,
+            _config(
+                strategy="fixed_tokens",
+                parent_size=100,
+                parent_overlap=20,
+                child_size=40,
+            ),
+        )
+
+        assert [parent.content for parent in parents] == [text]
+
     def test_overlap_yields_more_parents_than_no_overlap(self) -> None:
         text = _text_of_tokens(250)
 
@@ -162,6 +235,77 @@ class TestFixedTokensStrategy:
         )
 
         assert all(_ntok(parent.content) <= 100 for parent in parents)
+
+    def test_multi_token_emoji_never_decodes_to_a_replacement_char(self) -> None:
+        # #112 Issue 8: a window boundary that lands INSIDE a 3-token emoji used
+        # to decode to U+FFFD and store "�" as the chunk's content. Windows
+        # are mapped to character offsets now, exactly as ``recursive`` does.
+        text = "🧠" * 300
+
+        parents = split_document(
+            text, _config(strategy="fixed_tokens", parent_size=5, child_size=2)
+        )
+
+        joined = "".join(parent.content for parent in parents)
+        assert "�" not in joined
+        assert _ENCODER.encode(joined) == _ENCODER.encode(text)
+
+    def test_multi_token_emoji_parents_stay_within_the_parent_size(self) -> None:
+        # #112 Issue 8 round 2: killing U+FFFD must not blow the token budget.
+        # A 🧠 is 3 cl100k tokens, so a 5-token parent holds exactly one.
+        text = "🧠" * 300
+
+        parents = split_document(
+            text, _config(strategy="fixed_tokens", parent_size=5, child_size=2)
+        )
+
+        assert parents
+        _assert_within_budget([parent.content for parent in parents], size=5)
+
+    def test_multi_token_emoji_children_carry_no_replacement_char(self) -> None:
+        text = "🧠" * 300
+
+        parents = split_document(
+            text, _config(strategy="fixed_tokens", parent_size=5, child_size=2)
+        )
+
+        children = [child.content for parent in parents for child in parent.children]
+        assert children
+        assert all("�" not in child for child in children)
+
+    def test_multi_token_emoji_children_stay_within_the_child_size(self) -> None:
+        text = "🧠" * 300
+
+        parents = split_document(
+            text, _config(strategy="fixed_tokens", parent_size=5, child_size=2)
+        )
+
+        children = [child.content for parent in parents for child in parent.children]
+        assert children
+        # child_size=2 is SMALLER than one 🧠 (3 tokens): the only chunk allowed
+        # over budget is a lone indivisible character (see ``_assert_within_budget``).
+        _assert_within_budget(children, size=2)
+
+    def test_mixed_cjk_parents_and_children_stay_within_their_sizes(self) -> None:
+        # Every CJK character is 3 UTF-8 bytes and most are 1-2 tokens, so token
+        # boundaries land mid-character constantly — the exact input that made
+        # ``_token_char_offsets`` compound its overshoot (parent.size=20 emitted
+        # 26-31 token parents before the fix).
+        parents = split_document(
+            _CJK_TEXT,
+            _config(
+                strategy="fixed_tokens", parent_size=20, child_size=8, child_overlap=0
+            ),
+        )
+
+        assert parents
+        _assert_within_budget([parent.content for parent in parents], size=20)
+        _assert_within_budget(
+            [child.content for parent in parents for child in parent.children], size=8
+        )
+        joined = "".join(parent.content for parent in parents)
+        assert "�" not in joined
+        assert _ENCODER.encode(joined) == _ENCODER.encode(_CJK_TEXT)
 
 
 class TestRecursiveHeadingPaths:
@@ -268,6 +412,13 @@ class TestFencedCodeBlocks:
         paths = {tuple(parent.heading_path) for parent in parents}
         assert paths == {("Real Heading",)}
 
+    def test_fence_detection_has_one_definition_shared_with_the_cleaner(
+        self,
+    ) -> None:
+        # #112 Issue 3: the splitter and the Clean step must agree on what a
+        # fence is, so the cleaner owns the helper and chunking imports it.
+        assert chunking_module.fenced_ranges is fenced_ranges
+
     def test_unclosed_fence_swallows_the_rest_of_the_document(self) -> None:
         """CommonMark: an unclosed fence runs to the end of the document, so no
         later ``#`` line can be a heading."""
@@ -324,6 +475,56 @@ class TestRecursiveSeparatorLadder:
         assert parents[1].content.endswith("epsilon zeta eta theta.")
         assert not parents[1].content.startswith("epsilon")
         assert parents[1].content.split()[0] in parents[0].content
+
+
+class TestMultiTokenCharacterBudget:
+    """#112 Issue 8: both strategies share ``_token_char_offsets``.
+
+    A character split across several tokens (an emoji is 3 cl100k tokens, a CJK
+    character 1-2) must neither decode to U+FFFD nor let a chunk run over its
+    configured ``size``.
+    """
+
+    @pytest.mark.parametrize("strategy", _STRATEGIES)
+    @pytest.mark.parametrize(
+        ("text", "parent_size", "child_size"),
+        [("🧠" * 300, 5, 2), (_CJK_TEXT, 20, 8)],
+        ids=["emoji", "cjk"],
+    )
+    def test_no_chunk_exceeds_its_size_on_multi_token_characters(
+        self, strategy: str, text: str, parent_size: int, child_size: int
+    ) -> None:
+        parents = split_document(
+            text,
+            _config(
+                strategy=strategy,
+                parent_size=parent_size,
+                child_size=child_size,
+                child_overlap=0,
+            ),
+        )
+
+        assert parents
+        _assert_within_budget([p.content for p in parents], size=parent_size)
+        _assert_within_budget(
+            [child.content for p in parents for child in p.children], size=child_size
+        )
+        assert "�" not in "".join(p.content for p in parents)
+
+    def test_token_offsets_track_the_true_cumulative_byte_count(self) -> None:
+        """The root cause, pinned at the helper.
+
+        A 🧠 is 4 UTF-8 bytes encoded as 3 tokens of 2/1/1 bytes, so the two
+        inner boundaries snap FORWARD to the end of the same character: five
+        emoji must map to ``[0, 1,1,1, 2,2,2, 3,3,3, 4,4,4, 5,5,5]``. Feeding
+        the snapped value back into the accumulator produced the strictly
+        increasing ``[0, 1, 2, 3, 4, 5, 5, ...]`` — three characters of
+        overshoot per emoji, which is what tripled the chunk sizes.
+        """
+
+        offsets = chunking_module._token_char_offsets("🧠" * 5)
+
+        assert offsets == [0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5]
 
 
 class TestChunkBoundsProperty:

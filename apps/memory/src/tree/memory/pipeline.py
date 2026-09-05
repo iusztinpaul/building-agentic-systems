@@ -20,7 +20,9 @@ ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
 Worker task topology. The RAG stages run in BOTH modes; the graph stages run
 only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
 
-* (rag) ① ``clean_and_chunk_task`` — per-doc, ``INPUTS`` cache, 1 retry.
+* (rag) ① ``clean_and_chunk_task`` — per-doc, ``INPUTS`` cache (the
+  ``ChunkingConfig`` is a task PARAMETER, so a strategy change is a cache
+  MISS), 1 retry.
 * (rag) ② ``embed_children_task`` — one batched embed of the run's unique
   **Contextual header** texts, ``INPUTS`` cache, 2 retries.
 * (rag) ③ ``load_rag_rows_task`` — document + parent + child rows in ONE
@@ -48,7 +50,7 @@ from prefect.cache_policies import INPUTS, NO_CACHE
 from prefect.deployments import run_deployment
 from pymongo import UpdateOne
 
-from tree.config.app_config import load_app_config
+from tree.config.app_config import ChunkingConfig, load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document
@@ -307,17 +309,25 @@ def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
 
 
 async def _clean_and_chunk(
-    document: Document, opik_trace_headers: dict[str, str] | None = None
+    document: Document,
+    chunking: ChunkingConfig,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> ChunkedDocument:
     """Clean one document and split it into its **Parent chunk** hierarchy.
 
     ADR-006 decisions 6 + 7: the **Clean step** is the FIRST memory stage (the
     splitter only ever sees cleaned text), then ``split_document`` yields the
     parents, each carrying its own children. Deterministic end-to-end — the same
-    (document, chunking config) always produces the same payload, which is what
-    keeps this task's ``INPUTS`` cache a hit across re-runs, and what lets every
-    downstream stage derive row ids from ``source_uri`` + position instead of a
-    per-run ``uuid4()``.
+    (document, chunking config) always produces the same payload, and that is
+    what lets every downstream stage derive row ids from ``source_uri`` +
+    position instead of a per-run ``uuid4()``.
+
+    ``chunking`` is an explicit PARAMETER, not a config read inside the body, so
+    it is part of the ``INPUTS`` cache key: an operator who flips
+    ``memory.chunking.strategy`` to ``fixed_tokens``, drops ``memory`` and
+    re-runs gets re-chunked parents instead of a 30-day-old cached payload
+    built by the other splitter. Pydantic models hash cleanly under the
+    ``INPUTS`` policy (JSON-serialised), so an unchanged config still hits.
 
     ``opik_trace_headers`` (passed by the flow) attaches this task's span to the
     flow's trace across the Prefect task boundary; excluded from the cache key.
@@ -330,11 +340,7 @@ async def _clean_and_chunk(
         trace_headers=opik_trace_headers,
     ):
         content = clean_text(document.content or "")
-        parents = (
-            split_document(content, _live_app_config().memory.chunking)
-            if content
-            else []
-        )
+        parents = split_document(content, chunking) if content else []
         chunked = ChunkedDocument(
             document_id=str(document.id),
             source_uri=document.source_uri,
@@ -369,10 +375,16 @@ clean_and_chunk_task = task(
 
 
 async def _split_documents(
-    docs: list[Any], opik_trace_headers: dict[str, str] | None = None
+    docs: list[Any],
+    chunking: ChunkingConfig,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> list[ChunkedDocument]:
     """Run task ① over every document, fanned out under a bounded semaphore
     sized by ``doc_concurrency`` (#059 R7).
+
+    ``chunking`` is resolved ONCE by the flow at entry (like ``memory.mode``)
+    and threaded through, so every document in a run is split by the same
+    config AND that config is in each task's cache key.
 
     Task ① is purely CPU-bound — no shared LLM quota, no read-after-write — so
     the per-doc calls parallelize safely. ``doc_concurrency`` defaults to 1
@@ -393,7 +405,7 @@ async def _split_documents(
     async def _one(doc: Any) -> ChunkedDocument:
         async with semaphore:
             return await clean_and_chunk_task(
-                doc, opik_trace_headers=opik_trace_headers
+                doc, chunking=chunking, opik_trace_headers=opik_trace_headers
             )
 
     return list(await asyncio.gather(*[_one(doc) for doc in docs]))
@@ -1923,9 +1935,11 @@ async def _run_extraction_worker_body(
     # ----- Task ① — clean + chunk (per-doc fan-out) -------------------------
     # Fans out under a bounded semaphore sized by ``doc_concurrency`` (#059 R7,
     # default 1 = serial-equivalent). gather preserves order so ``chunked_docs``
-    # stays deterministic for the loops below.
+    # stays deterministic for the loops below. The chunking config resolved at
+    # entry rides along as a task PARAMETER so it is in task ①'s cache key
+    # (#112): a re-run after a strategy flip must re-chunk, not replay.
     chunked_docs: list[ChunkedDocument] = await _split_documents(
-        docs, opik_trace_headers=headers
+        docs, config.memory.chunking, opik_trace_headers=headers
     )
 
     # ----- Task ② — embed every child's contextual-header text --------------

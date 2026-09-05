@@ -96,10 +96,19 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     ``matched_children`` that made it rank, so you can quote the passage that
     actually matched. An empty memory answers ``{"parents": []}``.
 
+    A blank query answers ``{"error": "invalid_input", ...}`` — the same
+    envelope every other tool uses — instead of forwarding the embedding
+    provider's raw ``400 Input cannot contain empty strings``.
+
     Args:
         query: Search query text.
         top_k: Maximum number of parent chunks to return (default 10).
     """
+
+    if not query.strip():
+        return json.dumps(
+            {"error": "invalid_input", "detail": "query must not be empty"}
+        )
 
     _set_retrieval_thread(ctx, "search_memory")
     lc = ctx.lifespan_context

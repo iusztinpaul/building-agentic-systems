@@ -405,3 +405,11 @@ All graph/ and rag/ submodules imported successfully
 - Stopped the Docker `tree-prefect-worker`, served workflows from the worktree in `rag` mode, ran one online-pipeline ingest, one CLI query, one MCP `search_memory` call, then: dropped the `memory` collection, killed the worktree-served orchestrator + MCP server processes, restarted `tree-prefect-worker` (confirmed `Up` afterwards), left `git status` with only the SWE's original source/test/doc changes (now fully staged via `git add -A`, nothing committed).
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Package layout, deployment topology (5, unchanged names), glossary identifiers and ADR-001 supersession line all check out; ADR-006 Decision 8's final layout matches `find apps/memory/src/tree/memory -maxdepth 1`. The docs pass is where the remaining copy drift lives — rollup Issue 4 (skill's ingest-return claim), Issue 5 (`apps/memory/Makefile:173,187` help text, `scripts/run_memory_pipeline.py:2`, `apps/memory/README.md:127,200,209` still say "knowledge graph" / "six-task" for paths that are mode-dependent). The e2e evidence in both modes was read and is convincing.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.

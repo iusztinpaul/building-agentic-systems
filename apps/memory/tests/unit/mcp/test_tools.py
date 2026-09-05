@@ -9,6 +9,8 @@ gets registered per mode is asserted in ``test_tool_gating.py``.
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from beanie import PydanticObjectId
 
 from tree.data.online_pipeline import UrlSource
@@ -156,6 +158,24 @@ class TestRagSearchMemory:
         await search_memory(query="parent chunk", ctx=_make_ctx(), top_k=3)
 
         assert mock_retrieve.await_args.kwargs["top_k"] == 3
+
+    @pytest.mark.parametrize("query", ["", "   ", "\n\t "])
+    async def test_blank_query_returns_the_standard_invalid_input_envelope(
+        self, mocker, query: str
+    ) -> None:
+        # #112 Issue 6: a blank query used to reach Voyage and surface its raw
+        # "400 Input cannot contain empty strings" text, while every sibling
+        # tool answers with the ``{"error": "invalid_input"}`` envelope.
+        mock_retrieve = mocker.patch(
+            "tree.mcp.tools.retrieve_parents", new_callable=AsyncMock
+        )
+
+        result = await search_memory(query=query, ctx=_make_ctx(), top_k=3)
+
+        payload = json.loads(result)
+        assert payload["error"] == "invalid_input"
+        assert payload["detail"]
+        mock_retrieve.assert_not_awaited()
 
     async def test_docstring_states_the_parent_document_contract(self) -> None:
         # The docstring IS the tool description an MCP client shows the model.

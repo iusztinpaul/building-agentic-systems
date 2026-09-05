@@ -234,3 +234,11 @@ memory.mode: Input should be 'rag' or 'graphrag' [type=literal_error, input_valu
 - The code-review plugin (`code-review@claude-plugins-official`) is enabled in `.claude/settings.json` but is a slash command, not invocable as a subagent tool call in this session; substituted a manual review pass covering the same ground (full type annotations on every function/method in the three touched/added source files via an AST walk, no `print()` in library code — the one `print()` in `test_tool_gating.py` is inside the subprocess-probe string, not library code — no secrets, no raw-query injection surface, no unrelated files staged).
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Tool gating is correct from the client's side: 6 vs 13 tools, the two `search_memory` signatures, mode-aware `instructions`, the unknown-tool error, the README tables. Rollup Issue 4 is adjacent: the `tree-memory` skill (rewritten in #111) still tells the agent the `ingest_*` tools "return node/edge counts" — they return `{"status", "flow_run_id"}` asynchronously. Story 4 of THIS task made the same wrong claim (`edges_written: 0`); the story is superseded by the corrected contract, the code was never wrong.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.

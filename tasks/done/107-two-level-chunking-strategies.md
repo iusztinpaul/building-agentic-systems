@@ -246,3 +246,11 @@ memory.chunking
 - Minor: `title == H1` duplicates the title in the contextual header (SWE flagged this themselves for #108) — out of scope here per ADR-006 §4 pinning the format; noted for completeness only.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 20:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level verdict for PR #41, `rag-graphrag-modes`)
+
+Two rollup items touch this task: Issue 2 — the story "Book reader switches back to the Chapter-4 fixed-window splitter" is silently broken because `clean-and-chunk`'s `INPUTS` cache key does not include the chunking config (the fix lands in `pipeline.py`, #108's file, but it is this task's story that fails); Issue 8 — `fixed_tokens` decodes raw token slices and emits U+FFFD on multi-token characters (pre-existing, but re-shipped and re-documented here; `_token_char_offsets` already exists to fix it). The `recursive` strategy, the config validators and their error messages, and the Contextual header are right.
+
+Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
