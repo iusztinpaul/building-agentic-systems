@@ -487,3 +487,11 @@ The properties-replace-vs-merge defect is fixed, verified live against the real 
 Rollup Issue 2 is this task's: `clean_and_chunk_task` reads `memory.chunking` via `_live_app_config()` inside the body while its `INPUTS` cache key is the `Document` alone, so a config change is served the stale chunk shape (your Tester reproduced it across processes; the docstring at lines 316-319 claims otherwise). Pass the `ChunkingConfig` as a task parameter. The row hierarchy, mode branching, `$literal` properties replace, backfill rule and vector-index filter paths were all verified from the user side and are correct.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issue 2 landed in this task's file: `_clean_and_chunk(document, chunking: ChunkingConfig, ...)`, config resolved once at flow entry next to `memory.mode`, docstring no longer claims a cache property the code lacked. Load stage, row ids derived from `source_uri` + position, and the mode branch unchanged.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.

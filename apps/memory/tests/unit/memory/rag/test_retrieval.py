@@ -180,6 +180,45 @@ class TestRetrieveParents:
         assert document.source_uri == "file://doc1"
         assert document.date == "2026-09-05"
 
+    async def test_missing_document_row_falls_back_to_the_chunk_metadata(
+        self,
+        mocker,
+        make_collection,
+        make_parent_row,
+        hits,
+        embedding_model,
+        caplog,
+    ) -> None:
+        # Arrange — the ``document`` row is gone (half-deleted document) but the
+        # parents survive, each carrying the loader's denormalised copy of the
+        # document metadata. A valid hit must degrade to that copy, not drop.
+        collection = make_collection(
+            [
+                make_parent_row(_USER, "p1", title="Memory for AI Agents"),
+                make_parent_row(_USER, "p2", chunk_index=1),
+            ]
+        )
+        mocker.patch(
+            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = await retrieve_parents(
+                _client(collection), _DATABASE, "q", embedding_model, _USER
+            )
+
+        # Assert — both parents are still returned, their metadata read off the
+        # chunk row, and the fallback is announced with a WARNING naming both
+        # the missing document and the parent that fell back.
+        assert [parent.parent_id for parent in result.parents] == ["p1", "p2"]
+        document = result.parents[0].document
+        assert document.document_id == "doc1"
+        assert document.title == "Memory for AI Agents"
+        assert document.source_uri == "file://doc1"
+        assert document.source_type == "file"
+        assert "doc1" in caplog.text
+        assert "p1" in caplog.text
+
     async def test_requests_four_child_hits_per_requested_parent(
         self, mocker, make_collection, make_parent_row, embedding_model
     ) -> None:

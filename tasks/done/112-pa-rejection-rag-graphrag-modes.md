@@ -36,7 +36,7 @@ enough to fold into the same pass rather than open a second cycle.
 - [x] Issue 8: `fixed_tokens` never emits U+FFFD: splitting a text of 300 `🧠` characters with `parent.size=5, child.size=2` yields chunks whose concatenation contains no `�` and re-encodes to the original token sequence; the existing `TestFixedTokensStrategy` tests still pass. NO chunk may exceed its configured `size` in tokens (Tester QA 2026-09-05: violated — fixed in SWE round 2, see Log).
 - [x] `make memory-format-check && make memory-lint-check && make memory-tests` green; test count ≥ 2400.
 - [x] Tester re-runs full QA suite and PASSES (including one live rag-mode re-ingest of the SAME document after flipping `TREE_MEMORY__CHUNKING__STRATEGY=fixed_tokens`, showing the parent count / `heading_path` change — Issue 2's user story).
-- [ ] PA re-runs acceptance review on the original tasks and ACCEPTS.
+- [x] PA re-runs acceptance review on the original tasks and ACCEPTS.
 
 ## Issues (detail)
 
@@ -519,3 +519,47 @@ cleanup: documents=303 (baseline), memory=0, tree-prefect-worker Up, no stray fi
 **VERDICT: PASS**
 
 Issue 8 is fixed and holds under adversarial testing across emoji, CJK, ZWJ, overlap, and stride edge cases, with no regression on the ASCII/Chapter-4 baseline. Issue 2's live cache-flip proof — the one item deferred from round 1 — now passes cleanly end-to-end with a fresh document and a full served-workflow restart (my first attempt on a reused, self-contaminated document was a false alarm from my own test methodology, root-caused and ruled out before concluding). Issues 1, 3, 4, 5, 6, 7 re-verified still green. Full suite green (2441 ≥ 2400), format/lint/pre-commit clean, environment cleaned up. Ready for orchestrator commit and PA re-review.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Re-read `git diff 0698e1e..08cd632` (16 code/doc files + task logs) and re-checked every rollup issue from the user's POV:
+
+1. `nl_query.py` node shape now carries `subtype` (with the `{"type": "chunk", "subtype": "parent"}` filter spelled out), `parent_id` (child → parent chunk, parent → `document`), `chunk_index` (0-based), plus a "walk with `parent_id`, no `$graphLookup`" paragraph — ADR-006 § Consequences bullet satisfied. Fixed.
+2. `_clean_and_chunk(document, chunking: ChunkingConfig, ...)`; the flow passes `config.memory.chunking` resolved at entry; the docstring's false cache claim is gone; `TestChunkingConfigIsPartOfTheCacheKey` asserts payload AND `compute_key` differ. Tester's live proof: `Completed` → flip+restart → `Completed` (not `Cached`) → repeat `Cached`. The #107 "switch back to the Chapter-4 splitter" story is restored. Fixed.
+3. `cleaning.py` owns the ONE fence definition (`fenced_line_flags` / `fenced_ranges`); `chunking.py` imports it (rag → rag). `normalize_markdown`, `drop_boilerplate_lines`, `collapse_whitespace`, `_collapse_blank_runs` all skip fenced lines; only CRLF→LF and `rstrip` reach code. `TestFencedCodeBlocks` (8 tests) + unclosed-fence fixture in the idempotence loop. Fixed.
+4. `tree-memory/SKILL.md` now states the real contract — `{"status", "flow_run_id", url|file_path}` immediately, out-of-band write, confirm via a later `search_memory`, "never report a count" — and matches `_ingest` (`{**dispatch_online_pipeline(...), **dup_extra}`). Fixed.
+5. `grep "knowledge graph"` on `Makefile` + `run_memory_pipeline.py` → empty; `grep "six-task|into the graph|to build the graph"` on `README.md` → empty; graphrag-only modules untouched. `make help` now describes the `memory` collection with the mode split. Fixed.
+6. `retrieve_parents(top_k<=0)` returns `RetrievalResult()` with one INFO line and no search call; rag `search_memory("   ")` returns the standard `{"error": "invalid_input", ...}` envelope before the embedding model. Fixed.
+7. Children sort on `(-score, child_id)`, parents on `(-best_score, str(parent_id))`; tie test in both input orders; two identical CLI calls diffed clean. Fixed.
+8. `_fixed_window` maps token windows through `_token_char_offsets` and slices the source; the compounding-offset root cause (`consumed` written back from the snapped value) is fixed; windows shrink to the token budget; `_assert_within_budget` re-encodes every chunk and allows over-budget ONLY for `len(chunk)==1`. ASCII output byte-identical to the Chapter-4 window. Fixed, including the size-bound invariant the Tester forced.
+
+Previously-PASS criteria of #105–#111 spot-checked against the touched files: the rag `search_memory` contract (`{"parents": [...]}` / `{"parents": []}`) unchanged; `query_graph.py` rag branch still prints `[score] title — heading` + 300-char excerpt + `matched children: N`, `No results.` on empty, and refuses the full graph in rag with a non-zero exit; `fixed_tokens` still yields empty heading paths; `cleaning.py` still stdlib-only (`TestModulePurity` untouched); the rag → graph import ban still holds (chunking imports cleaning, both in `rag/`). 2441 unit tests green per Tester round 2.
+
+Documentation discipline: ADR-006 needed no edit — the rollup implemented a Consequences requirement rather than changing a decision; Decision 6/7 (in-house splitter, stdlib-only Clean step) still describe the code. `docs/glossary.md` unchanged and correctly so — no new domain concept; the diff uses **Parent chunk** / **Child chunk** / **Clean step** / **Contextual header** / `parent_id` / `subtype` / `chunk_index` verbatim.
+
+**Not blocking — follow-ups, not part of this feature**
+- The single-indivisible-character carve-out in `_token_char_offsets` / `_assert_within_budget` is code-point based, not grapheme-cluster based (a ZWJ family emoji splits into per-code-point fragments, no U+FFFD). Pre-existing, codebase-wide "character = code point" convention; not a spec violation; the ingested corpus (technical Substack) does not carry ZWJ sequences. File a follow-up only if emoji-heavy chat/social content is ever ingested.
+- `_outside_fences` docstring says no newline run is split at a fence boundary, but a closing fence line keeps its own `\n` inside the range, so a run of 3+ newlines immediately AFTER a closing fence collapses to 3 newlines (two blank lines) instead of 2. Cosmetic, idempotent, no content change; tighten when the cleaner is next touched.
+- #110 Story 4's expected return value (`edges_written: 0`) is superseded by Issue 4's contract — the story text is historical; the SKILL.md is the model-visible contract and is correct.
+
+Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-09-05 — Review (PR #41, HEAD `08cd632`)
+
+**VERDICT: BLOCKERS**
+
+Reviewed 155 files, +12877/-2953 lines (`git diff main...HEAD`, read by area). Blockers: 1; Nits: 8.
+
+- BLOCKERS: filed rollup task `tasks/113-pr-review-rag-graphrag-modes.md`. Pipeline re-runs from inner loop on rollup; re-invoke me after PA ACCEPT + re-push.
+- The one Blocker: `tree.memory.embedding_text.embed_node_texts` lost its only production caller (`indexing._embed_batch` → `embed_texts`) and is now kept alive by tests alone — dead code the diff made unreachable. Delete it, retarget its tests to `embed_texts`.
+
+Evidence of what was checked and found sound:
+- Multi-tenancy: `user_id` pinned in `$vectorSearch.filter` and the text `$match` (`rag/search.py`), in both `$in` fetches (`rag/retrieval._fetch_nodes`), in `expand_graph`, in the backfill filter, in every graph-module reader (`MEMORY_COLLECTION` + `user_id`). `subtype` added to the vector-index filter paths with a self-heal test for pre-ADR-006 indexes.
+- Idempotency/retry: deterministic `_id`s (`document_row_id`/`parent_row_id`/`child_row_id`), `$literal` on `properties` (verified against a real Mongo in `test_load.py::TestPropertiesAreReplacedInMongo`), `NO_CACHE` + `retries=3` on the load, `INPUTS` on clean-and-chunk with `ChunkingConfig` as a task parameter (`TestChunkingConfigIsPartOfTheCacheKey` asserts `compute_key` differs), sorted+unique child texts on the embed task.
+- Mode gating: `MEMORY_MODE` read once at import; `graph_tools`/`graph_app`/`dashboard_app` never enter `sys.modules` in `rag` (subprocess probe test); `search_memory` has 2 vs 5 parameters per mode; instructions per mode.
+- Docs discipline: ADR-006's eight decisions match the shipped code (layout test, `RAG_NODE_TYPES`, `×4` fan-out constant, backfill selection, tool sets, no LangChain); glossary carries all seven new terms and re-scoped four; ADR-001 gained the supersession note.
+- Tests: no test weakened — deleted files (`query/test_core.py`, `test_pipeline_user_id_propagation.py`, `TestGraphToolsDualDelivery`) moved verbatim to `rag/test_search.py`, `test_pipeline.py::TestRequiredUserIdSignature`, `mcp/test_graph_tools.py`; only `run_extraction_for_documents`' test went with the deleted function. `make memory-format-check`, `make memory-lint-check` clean; `make memory-tests` → 2441 passed.
+- Simplicity pass: `fenced_ranges` sharing, `_assert_within_budget`, `_CHILD_HITS_PER_PARENT`, the mode-gated import scheme and the two `search_memory` functions are each the least mechanism for their job; nothing speculative found beyond the two dead functions (Blocker 1 + Nit 1).
+- PA's two nits classified: fence-boundary newline collapse → Nit (rollup Nit 8); #110 Story 4 historical text → not a finding. Grapheme-cluster note → Nit-level follow-up, already in the PR body.

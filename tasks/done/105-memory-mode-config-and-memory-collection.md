@@ -301,3 +301,11 @@ has knowledge_graph: False
 Nothing in this task is defective from the user's POV: `TREE_MEMORY__MODE`, the `ValidationError` naming both values, `MemoryEntry` / `MEMORY_COLLECTION` / `RAG_NODE_TYPES`, and the `memory` collection all match ADR-006 §1/§5 and the glossary. Story 2's example entry point (`make memory-check-db`) never reads app config — a spec-wording slip recorded in the rollup's "Not in this rollup" list; no code change. Rollup Issue 5 (help-text copy that still says "knowledge graph" for the memory pipeline) touches the docs this task started renaming.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issue 5 landed: `make help` for `run-memory-pipeline` / `query-graph`, the `run_memory_pipeline.py` docstring and the README now describe the `memory` collection with the rag/graphrag split instead of "knowledge graph". Mode config, `MemoryEntry`, `MEMORY_COLLECTION` and the `ValidationError` naming both modes unchanged and still correct.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.

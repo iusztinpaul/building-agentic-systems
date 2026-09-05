@@ -207,12 +207,18 @@ match the pipeline's behaviour.
 
 ```
 document text
-   └─► chunk_document()                 # 512-token / 64-overlap chunks (cl100k_base)
-        └─► for each chunk:
-              extract_entities(llm, chunk)     # ◄── THE MODEL CALL → {nodes, edges} JSON
-                 └─► validate (envelope + fields)         # Side note B
-                       └─► build structural rows + resolution + dedup + upsert   # pipeline, not model
+   └─► clean_text()                     # tree.memory.rag.cleaning — deterministic, idempotent
+        └─► split_document()            # tree.memory.rag.chunking — recursive parent/child
+                                        #   (cl100k_base tokens: parent 4096/0, child 256/32)
+             └─► for each PARENT chunk:
+                   extract_entities(llm, parent.content)   # ◄── THE MODEL CALL → {nodes, edges} JSON
+                      └─► validate (envelope + fields)         # Side note B
+                            └─► build structural rows + resolution + dedup + upsert   # pipeline, not model
 ```
+
+One LLM call per **parent** chunk — child chunks exist for retrieval (they carry the embedding),
+never for extraction. Clean + split run in BOTH memory modes (ADR-006); everything from
+`extract_entities` down is what `graphrag` layers on top.
 
 Structural node/edge types the **model must never emit** (the pipeline creates them): `document`,
 `chunk`, and the edges `part_of`, `next`, `mentions`, `referenced`, `has`, `same_as`,
@@ -323,8 +329,11 @@ only the valid person + the valid `employed_by` edge.
 # documents.jsonl: one JSON object per line with a "content" field
 #   mongoexport --uri "$MONGO_URI" --collection documents --fields content --type json --out documents.jsonl
 import asyncio, json, sys
+from tree.config.app_config import app_config
 from tree.entities.ontology import get_ontology_schema
-from tree.memory.graph.extraction import _SYSTEM_PROMPT, chunk_document
+from tree.memory.graph.extraction import _SYSTEM_PROMPT
+from tree.memory.rag.chunking import split_document
+from tree.memory.rag.cleaning import clean_text
 from tree.models.get_model import get_llm
 from build_label import build_label  # the function above
 
@@ -336,7 +345,9 @@ async def main(path: str) -> None:
         text = (json.loads(line).get("content") or "").strip()
         if not text:
             continue
-        for chunk in chunk_document(text):           # 512 / 64, cl100k_base
+        # Same clean + split the pipeline runs, so train and serve cannot drift.
+        for parent in split_document(clean_text(text), app_config.memory.chunking):
+            chunk = parent.content                   # one call per PARENT chunk
             raw = await teacher.generate_json(chunk, system=SYSTEM)
             label = build_label(raw)
             print(json.dumps({"messages": [

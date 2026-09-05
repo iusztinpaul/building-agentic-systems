@@ -66,6 +66,7 @@ _FIXTURES: list[str] = [
     "text\n\n-----\n\nmore",
     _FENCED_ARTICLE,
     "# Doc\n\n```\n#unclosed comment\n    indented    code\n",
+    "```\na\n\n\nb\n```\n\n\n\ntail",
 ]
 
 
@@ -314,3 +315,19 @@ class TestFencedCodeBlocks:
         text = "```\n#comment\n    indented\n"
 
         assert clean_text(text) == text
+
+    def test_blank_run_after_a_closing_fence_collapses_to_one_blank_line(self) -> None:
+        # The closing fence line owns the "\n" that ends it. Keeping that
+        # newline inside the fenced range hid it from the blank-run collapse,
+        # so the SAME 3-newline run left two blank lines after a fence and one
+        # after a paragraph.
+        assert clean_text("```\ncode\n```\n\n\nafter") == "```\ncode\n```\n\nafter"
+        assert clean_text("para\n\n\nafter") == "para\n\nafter"
+
+    def test_collapsing_at_the_boundary_leaves_the_code_byte_identical(self) -> None:
+        # Only the closing fence's terminator moves outside the range, so the
+        # body keeps its two blank lines and the fence keeps its own line.
+        cleaned = clean_text("```\na\n\n\nb\n```\n\n\n\ntail")
+
+        assert cleaned.split("```")[1] == "\na\n\n\nb\n"
+        assert cleaned == "```\na\n\n\nb\n```\n\ntail"

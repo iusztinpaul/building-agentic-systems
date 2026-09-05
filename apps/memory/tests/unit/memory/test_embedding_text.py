@@ -2,10 +2,10 @@
 
 Covers the generic ``node_to_embedding_text`` builder (including a
 byte-identical regression against the pre-refactor
-``indexing.core._node_to_text`` layout), the ``embed_node_texts`` batch
-helper, and the #044 real-time request batcher ``embed_in_batches``
-(chunking by input-count AND token-budget caps, order preservation across
-multiple requests).
+``indexing.core._node_to_text`` layout), the ``embed_texts`` seam the
+indexing backfill calls, and the #044 real-time request batcher
+``embed_in_batches`` (chunking by input-count AND token-budget caps, order
+preservation across multiple requests).
 """
 
 from typing import Any
@@ -16,7 +16,7 @@ from tree.memory import embedding_text
 from tree.memory.embedding_text import (
     _embed_chunk_resilient,
     embed_in_batches,
-    embed_node_texts,
+    embed_texts,
     estimate_tokens,
     node_to_embedding_text,
 )
@@ -167,11 +167,19 @@ class TestNodeToEmbeddingText:
 
 
 # ---------------------------------------------------------------------------
-# embed_node_texts
+# embed_texts — the seam the indexing backfill calls
 # ---------------------------------------------------------------------------
 
 
-class TestEmbedNodeTexts:
+class TestEmbedTexts:
+    """``embed_texts`` is the whole embedding API next to the text builder.
+
+    The backfill builds its own texts (a **Child chunk** embeds its
+    **Contextual header**, an entity row its ``node_to_embedding_text``) and
+    hands them here, so these cases drive it with node-texts — the caps,
+    request count and positional alignment are what the backfill relies on.
+    """
+
     async def test_embeds_each_node_text_in_a_single_call(self) -> None:
         model = _RecordingEmbeddingModel(dimensions=3)
         nodes: list[dict[str, Any]] = [
@@ -183,29 +191,44 @@ class TestEmbedNodeTexts:
             },
         ]
 
-        vectors = await embed_node_texts(nodes, model)
+        vectors = await embed_texts([node_to_embedding_text(n) for n in nodes], model)
 
         # Assert: one embed() call carrying both node-texts, aligned output.
         assert model.calls == [["person: Alice", "chunk: Chunk 0\nbody"]]
         assert vectors == [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
 
+    async def test_control_chars_never_reach_the_model(self) -> None:
+        # The sanitizer runs in the text builder, so what the seam sends is
+        # already free of the C0/C1/surrogate shapes Voyage 400s on.
+        model = _RecordingEmbeddingModel(dimensions=3)
+        node: dict[str, Any] = {
+            "type": "chunk",
+            "name": "chunk\x00one",
+            "properties": {"content": "good\x07text\ud800junk"},
+        }
+
+        await embed_texts([node_to_embedding_text(node)], model)
+
+        assert model.calls == [["chunk: chunkone\ngoodtextjunk"]]
+
     async def test_empty_input_returns_empty_without_calling_model(self) -> None:
         model = _RecordingEmbeddingModel()
 
-        vectors = await embed_node_texts([], model)
+        vectors = await embed_texts([], model)
 
         assert vectors == []
         assert model.calls == []
 
-    async def test_batches_many_nodes_into_multiple_requests(self) -> None:
+    async def test_batches_many_texts_into_multiple_requests(self) -> None:
         # Arrange — 2,500 short node-texts, capped at 1000 inputs per request.
         model = _OrderEncodingEmbeddingModel()
-        nodes: list[dict[str, Any]] = [
-            {"type": "person", "name": f"p{i}", "properties": {}} for i in range(2500)
+        texts = [
+            node_to_embedding_text({"type": "person", "name": f"p{i}"})
+            for i in range(2500)
         ]
 
         # Act — override the caps explicitly so the test is independent of YAML.
-        vectors = await embed_node_texts(nodes, model, max_inputs=1000)
+        vectors = await embed_texts(texts, model, max_inputs=1000)
 
         # Assert — 3 requests (1000 + 1000 + 500), 2500 vectors, original order.
         assert [len(c) for c in model.calls] == [1000, 1000, 500]

@@ -261,9 +261,15 @@ def _collapse_blank_runs(text: str) -> str:
 def _outside_fences(text: str, rewrite: Callable[[str], str]) -> str:
     """Apply ``rewrite`` to every part of ``text`` that is NOT fenced code.
 
-    Fenced ranges start at a fence line's first character, so no run of spaces
-    or newlines is ever split across the boundary — rewriting the parts
-    separately gives the same result as rewriting a fence-free document.
+    No run of spaces or newlines is ever split across a boundary, so rewriting
+    the parts separately gives the same result as rewriting a fence-free
+    document. A fenced range already starts at a fence line's first character;
+    at the other end the closing fence line carries its own ``"\\n"``, so that
+    terminator is handed back to the OUTSIDE part — otherwise a 3-newline run
+    after a fence kept two blank lines while the same run after a paragraph
+    kept one. The fenced CONTENT is untouched by the hand-back (the terminator
+    only ever ends the fence line) and every rewrite here keeps at least one
+    newline, so the fence line still ends where it did.
     """
 
     ranges = fenced_ranges(text)
@@ -273,6 +279,8 @@ def _outside_fences(text: str, rewrite: Callable[[str], str]) -> str:
     parts: list[str] = []
     cursor = 0
     for start, end in ranges:
+        if text[end - 1] == "\n":
+            end -= 1
         parts.append(rewrite(text[cursor:start]))
         parts.append(text[start:end])
         cursor = end

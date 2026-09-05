@@ -12,7 +12,7 @@ For the wider system (harness, end-to-end flow, shared infra) see the repo-root 
   - `src/tree/memory/graph/` — what Chapter 8 adds: structural edges, LLM entity extraction, resolution, dedup, review, dream consolidation, graph expansion, NL query and the HTML graph renderer.
 - **MCP + query CLI** (`src/tree/mcp/`, `scripts/query_graph.py`) — a FastMCP server exposing the memory tools to any MCP client, and a CLI that prints retrieved parents (`rag`) or renders an interactive HTML graph (`graphrag`).
 
-Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `memory` collection.
+Nodes use `_id = "{user_id}:type:name"`; edges use `_id = "source|type|target"` (both endpoints already carry the user prefix). Everything is upserted into a single mutable `memory` collection.
 
 ## Memory modes
 
@@ -31,7 +31,8 @@ Both modes write the SAME `memory` collection with the same row shapes (`parent_
 
 ```bash
 make memory-check-db                      # confirm which Mongo you are pointed at
-mongosh "$MONGO_URI" --eval 'db.memory.drop()'
+mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:$MONGO_PORT/?directConnection=true" \
+  --quiet --eval 'db.getSiblingDB("tree").memory.drop()'
 TREE_MEMORY__MODE=rag make memory-run-pipeline MODE=online SOURCE="https://…"
 ```
 

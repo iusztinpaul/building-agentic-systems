@@ -1,38 +1,29 @@
 """
 Core business logic for knowledge-graph extraction.
 
-Pure functions (aside from the LLM call and DB writes) that:
+Pure functions (aside from the LLM call) that:
 1. Ask an LLM to extract nodes & edges from one **Parent chunk**.
 2. Build the structural EDGES (PART_OF, NEXT, REFERENCED) deterministically
    from the chunk hierarchy.
-3. Upsert the result to the ``memory`` collection.
 
 Chunking moved to :mod:`tree.memory.rag.chunking` (ADR-006 decision 6) and the
 ``document`` / ``chunk`` NODE rows are written by :mod:`tree.memory.rag.load` in
 BOTH memory modes — this module only adds what ``graphrag`` layers on top.
 
-Resolution + deduplication used to live here (``normalize_nodes`` and four
-helpers); those have moved to :mod:`tree.memory.graph.resolution` (composite chain),
-:mod:`tree.memory.graph.dedup` (vector-search decision), and
-:mod:`tree.memory.graph.add_entity` (write-side orchestrator). The
-pipeline in :mod:`tree.memory.pipeline` is the single caller that ties them
-together.
+Nothing here writes to Mongo. Resolution, deduplication and the entry upserts
+live in :mod:`tree.memory.graph.resolution` (composite chain),
+:mod:`tree.memory.graph.dedup` (vector-search decision) and
+:mod:`tree.memory.graph.add_entity` (write-side orchestrator); the pipeline in
+:mod:`tree.memory.pipeline` is the single caller that ties them together.
 """
 
 import json
 import logging
-from datetime import UTC, datetime
 from typing import Any
-
-from beanie import PydanticObjectId
-from pymongo import UpdateOne
 
 from tree.entities.memory import (
     EdgeType,
-    MEMORY_COLLECTION,
     NodeType,
-    build_edge_id,
-    build_node_id,
 )
 from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
@@ -52,9 +43,6 @@ from tree.memory.types import (
 from tree.models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
-
-_MAX_ALIASES = 50
-_MAX_SOURCES = 500
 
 # ---------------------------------------------------------------------------
 # 1. LLM extraction
@@ -504,166 +492,3 @@ def build_structural_entries(
         nodes=[],
         edges=[*part_of_edges, *next_edges, *referenced_edges],
     )
-
-
-# ---------------------------------------------------------------------------
-# 3. Persistence (upsert to memory)
-# ---------------------------------------------------------------------------
-#
-# Resolution + dedup live in dedicated modules (``tree.memory.graph.resolution``,
-# ``tree.memory.graph.dedup``, ``tree.memory.graph.add_entity``).
-# The pipeline in ``tree.memory.pipeline`` is the single caller
-# that wires them together.
-
-
-async def upsert_graph_entries(
-    result: ExtractionResult,
-    *,
-    user_id: PydanticObjectId,
-    source_document_id: PydanticObjectId,
-    database: str,
-    client: Any,
-) -> int:
-    """Upsert extraction results directly to the memory collection.
-
-    Uses aggregation pipeline updates to merge properties (not overwrite)
-    and accumulate aliases and sources.
-
-    Returns the number of upsert operations executed.
-    """
-
-    now = datetime.now(tz=UTC)
-    collection = client[database][MEMORY_COLLECTION]
-    ops: list[UpdateOne] = []
-
-    for node in result.nodes:
-        node_id = build_node_id(user_id, node.type, node.name)
-        aliases = node.properties.get("aliases", [])
-        # Exclude aliases from the merge so Stage 1 does not overwrite
-        # the existing aliases array — Stage 2 handles alias accumulation.
-        props_without_aliases = {
-            k: v for k, v in node.properties.items() if k != "aliases"
-        }
-        ops.append(
-            UpdateOne(
-                {"_id": node_id},
-                [
-                    # Stage 1: merge properties and set scalar fields.
-                    {
-                        "$set": {
-                            "user_id": user_id,
-                            "kind": "node",
-                            "type": node.type.value,
-                            # #028: persist the POLE+O subtype slot. ``None``
-                            # is written as a NULL column on first insert and
-                            # left untouched on subsequent merges; once
-                            # populated, later writes overwrite with the
-                            # latest LLM-emitted value (last-write-wins on
-                            # the slot, mirroring ``properties``-merge).
-                            "subtype": node.subtype,
-                            "name": node.name,
-                            "properties": {
-                                "$mergeObjects": [
-                                    {"$ifNull": ["$properties", {}]},
-                                    props_without_aliases,
-                                ]
-                            },
-                            "sources": {
-                                "$slice": [
-                                    {
-                                        "$setUnion": [
-                                            {"$ifNull": ["$sources", []]},
-                                            [source_document_id],
-                                        ]
-                                    },
-                                    _MAX_SOURCES,
-                                ]
-                            },
-                            "created_at": {"$ifNull": ["$created_at", now]},
-                            "updated_at": now,
-                            "embedding": {"$ifNull": ["$embedding", []]},
-                        }
-                    },
-                    # Stage 2: union aliases (separate stage to avoid
-                    # conflicting paths with 'properties'). Capped to
-                    # prevent unbounded growth from typos/variants.
-                    {
-                        "$set": {
-                            "properties.aliases": {
-                                "$slice": [
-                                    {
-                                        "$setUnion": [
-                                            {"$ifNull": ["$properties.aliases", []]},
-                                            aliases,
-                                        ]
-                                    },
-                                    _MAX_ALIASES,
-                                ]
-                            },
-                        }
-                    },
-                ],
-                upsert=True,
-            )
-        )
-
-    for edge in result.edges:
-        src_id = build_node_id(user_id, edge.source_type, edge.source_node_id)
-        tgt_id = build_node_id(user_id, edge.target_type, edge.target_node_id)
-        edge_id = build_edge_id(src_id, edge.type, tgt_id)
-        ops.append(
-            UpdateOne(
-                {"_id": edge_id},
-                [
-                    {
-                        "$set": {
-                            "user_id": user_id,
-                            "kind": "edge",
-                            "type": edge.type.value,
-                            # #029: persist ``semantic_type`` on every edge
-                            # row (None for non-related_to). The partial
-                            # index ``user_type_semantic_type`` only
-                            # indexes non-null rows.
-                            "semantic_type": edge.semantic_type,
-                            "source_node_id": src_id,
-                            "source_type": edge.source_type.value,
-                            "target_node_id": tgt_id,
-                            "target_type": edge.target_type.value,
-                            "properties": {
-                                "$mergeObjects": [
-                                    {"$ifNull": ["$properties", {}]},
-                                    edge.properties,
-                                ]
-                            },
-                            "sources": {
-                                "$slice": [
-                                    {
-                                        "$setUnion": [
-                                            {"$ifNull": ["$sources", []]},
-                                            [source_document_id],
-                                        ]
-                                    },
-                                    _MAX_SOURCES,
-                                ]
-                            },
-                            "created_at": {"$ifNull": ["$created_at", now]},
-                            "updated_at": now,
-                        }
-                    }
-                ],
-                upsert=True,
-            )
-        )
-
-    if ops:
-        await collection.bulk_write(ops, ordered=False)
-
-    logger.info(
-        "Upserted %d entries (nodes=%d, edges=%d) for document %s",
-        len(ops),
-        len(result.nodes),
-        len(result.edges),
-        source_document_id,
-    )
-
-    return len(ops)

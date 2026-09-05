@@ -413,3 +413,11 @@ All graph/ and rag/ submodules imported successfully
 Package layout, deployment topology (5, unchanged names), glossary identifiers and ADR-001 supersession line all check out; ADR-006 Decision 8's final layout matches `find apps/memory/src/tree/memory -maxdepth 1`. The docs pass is where the remaining copy drift lives — rollup Issue 4 (skill's ingest-return claim), Issue 5 (`apps/memory/Makefile:173,187` help text, `scripts/run_memory_pipeline.py:2`, `apps/memory/README.md:127,200,209` still say "knowledge graph" / "six-task" for paths that are mode-dependent). The e2e evidence in both modes was read and is convincing.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issues 1, 4 and 5 landed: the `nl_query` prompt describes `subtype` / `parent_id` / `chunk_index` and how to walk the hierarchy (ADR-006 § Consequences now satisfied); `tree-memory/SKILL.md` and the README/Makefile copy are mode-neutral where rag writes no graph. ADR-006 needed no edit and `docs/glossary.md` is unchanged — the diff uses the canonical terms verbatim; the rag -> graph import ban still holds.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.

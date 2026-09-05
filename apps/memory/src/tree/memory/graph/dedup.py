@@ -355,12 +355,15 @@ def _build_pipeline(
             }
         },
         {"$addFields": {"similarity_score": {"$meta": "vectorSearchScore"}}},
-        # Tombstone exclusion is a filter on the search results because
-        # ``merged_into`` is not declared as a filter-path on the vector
-        # index (only ``kind`` and ``type`` are — see
-        # ``tree.memory.rag.indexing._ensure_vector_index``). We accept
-        # either an absent field or an explicit null/empty value so test
-        # fixtures that seed ``merged_into=None`` still pass.
+        # Tombstone exclusion is a filter on the search RESULTS even though
+        # ``merged_into`` IS one of the five declared filter paths
+        # (``tree.memory.rag.indexing._VECTOR_INDEX_FILTER_PATHS``:
+        # ``user_id``, ``kind``, ``type``, ``subtype``, ``merged_into``).
+        # A live entity carries the field absent or null, and ``null`` is not
+        # a filterable BSON type in Atlas ``$vectorSearch``, so "absent OR
+        # null" has no pre-filter form. We accept an absent field or an
+        # explicit null/empty value so test fixtures that seed
+        # ``merged_into=None`` still pass.
         {
             "$match": {
                 "$or": [

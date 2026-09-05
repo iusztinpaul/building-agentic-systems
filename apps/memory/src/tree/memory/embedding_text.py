@@ -1,8 +1,11 @@
 """Shared node-text embedding for dedup and indexing.
 
-Turns a knowledge-graph node ``dict`` into the text we embed and embeds a
-batch of such nodes with the search model. Lives at the ``memory/`` layer
-because both ``indexing/`` and ``extraction/`` depend on it.
+Two functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
+into the text we embed, and ``embed_texts`` embeds already-built texts with the
+search model in as few requests as the provider caps allow. They are separate
+because the indexing backfill embeds **Child chunk**s by their **Contextual
+header** rather than by a node-text. Lives at the ``memory/`` layer because both
+``rag/`` and ``graph/`` depend on it.
 
 PREFERENCE and FACT nodes must NOT be routed through this generic path:
 ``extraction.pipeline._dispatch_entity_write`` embeds
@@ -218,29 +221,6 @@ async def embed_texts(
 
     caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
     return await embed_in_batches(texts, embedding_model, **caps)
-
-
-async def embed_node_texts(
-    nodes: list[dict[str, Any]],
-    embedding_model: BaseEmbeddingModel,
-    *,
-    max_inputs: int | None = None,
-    max_total_tokens: int | None = None,
-    max_input_tokens: int | None = None,
-) -> list[list[float]]:
-    """Embed a list of node documents via their generic node-text.
-
-    Vectors are aligned positionally with ``nodes``. Caps default to
-    ``app_config.models.embedding_batch``; pass explicit caps to override.
-    """
-
-    return await embed_texts(
-        [node_to_embedding_text(node) for node in nodes],
-        embedding_model,
-        max_inputs=max_inputs,
-        max_total_tokens=max_total_tokens,
-        max_input_tokens=max_input_tokens,
-    )
 
 
 def _resolve_batch_caps(

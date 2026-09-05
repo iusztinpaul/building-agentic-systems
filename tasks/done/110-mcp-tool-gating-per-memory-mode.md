@@ -242,3 +242,11 @@ memory.mode: Input should be 'rag' or 'graphrag' [type=literal_error, input_valu
 Tool gating is correct from the client's side: 6 vs 13 tools, the two `search_memory` signatures, mode-aware `instructions`, the unknown-tool error, the README tables. Rollup Issue 4 is adjacent: the `tree-memory` skill (rewritten in #111) still tells the agent the `ingest_*` tools "return node/edge counts" — they return `{"status", "flow_run_id"}` asynchronously. Story 4 of THIS task made the same wrong claim (`edges_written: 0`); the story is superseded by the corrected contract, the code was never wrong.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issues 4 and 6 landed: rag `search_memory` returns the standard `{"error": "invalid_input", ...}` envelope for a blank query before touching the embedding model; the `tree-memory` skill now states the real async `ingest_*` contract. Note: Story 4's expected `edges_written: 0` return value is superseded by that contract (`{"status", "flow_run_id", url|file_path}`, confirm via a later `search_memory`) — historical story text, the code and the skill are right. Tool gating per mode unchanged.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.

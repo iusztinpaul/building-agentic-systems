@@ -254,3 +254,11 @@ memory.chunking
 Two rollup items touch this task: Issue 2 — the story "Book reader switches back to the Chapter-4 fixed-window splitter" is silently broken because `clean-and-chunk`'s `INPUTS` cache key does not include the chunking config (the fix lands in `pipeline.py`, #108's file, but it is this task's story that fails); Issue 8 — `fixed_tokens` decodes raw token slices and emits U+FFFD on multi-token characters (pre-existing, but re-shipped and re-documented here; `_token_char_offsets` already exists to fix it). The `recursive` strategy, the config validators and their error messages, and the Contextual header are right.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issues 2 and 8 landed: the "switch back to the Chapter-4 fixed-window splitter" story now works (chunking config is in task ①'s cache key — live proof `Completed` -> flip -> `Completed` -> repeat `Cached`); `fixed_tokens` slices the source string via `_token_char_offsets` (compounding-offset bug fixed), never emits U+FFFD, and no chunk exceeds its `size` except a single indivisible character. ASCII output byte-identical to the Chapter-4 window. `recursive`, validators and the **Contextual header** unchanged. Non-blocking follow-up recorded in 112: the carve-out is code-point, not grapheme-cluster, based.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.

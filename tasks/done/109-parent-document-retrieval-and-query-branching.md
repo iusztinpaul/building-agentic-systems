@@ -310,3 +310,11 @@ $ echo $?
 Rollup Issues 1, 6 and 7 touch this task. Issue 1 (the one that matters): the `nl_query` system prompt still describes node rows as `_id, kind, type, name, properties, embedding` — no `subtype`, `parent_id`, `chunk_index` — although ADR-006 § Consequences says it "must" so `query_memory` can walk the hierarchy; a grooming omission (no task carried it), now assigned. Issue 6: `top_k <= 0` logs "search unavailable" and a blank rag `search_memory` query leaks the raw Voyage 400. Issue 7: tie order in `group_children_by_parent` is non-deterministic. Parent-document retrieval itself, the CLI rag output, `No results.` and the rag-unavailable message are exactly as specified.
 
 Filed ONE rollup task for the whole feature: `tasks/112-pa-rejection-rag-graphrag-modes.md` (8 issues). Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-09-05 23:20 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT** (feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `08cd632`)
+
+Rollup Issues 6 and 7 landed: `retrieve_parents(top_k<=0)` returns an empty result with one INFO line and no fake "search unavailable" warnings; RRF ties break on `child_id` / `parent_id` so two identical CLI calls diff clean. `query_graph.py` rag branch re-checked: ranked `[score] title — heading` blocks with a 300-char excerpt and `matched children: N`, `No results.` on empty, full-graph refusal with non-zero exit in rag.
+
+Rollup `tasks/done/112-pa-rejection-rag-graphrag-modes.md` implemented and Tester-PASSED (round 2). Hand off to the PR Reviewer.
