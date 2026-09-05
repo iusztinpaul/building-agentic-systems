@@ -2,7 +2,7 @@
 
 This module decides whether a prospective entity is a duplicate of an
 existing node in the knowledge graph. It runs an Atlas ``$vectorSearch``
-against the ``knowledge_graph`` collection, re-ranks every returned
+against the ``memory`` collection, re-ranks every returned
 candidate using an optional RapidFuzz boost against the candidate's
 ``name``, ``canonical_name``, and ``aliases``, and returns a tiered
 decision based on the best-scoring candidate:
@@ -27,7 +27,7 @@ When the caller passes an ``incoming_node_id``, the candidate filter drops
 any node that already has a SAME_AS edge to/from that ``_id`` with
 ``properties.status == "rejected"``. The edge schema uses dedicated
 ``source_node_id`` / ``target_node_id`` fields on edge documents in the same
-``knowledge_graph`` collection (see ``tree.entities.knowledge_graph``), so
+``memory`` collection (see ``tree.entities.memory``), so
 the ``$lookup`` matches on those fields rather than on substrings of the
 edge ``_id``.
 
@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, MEMORY_COLLECTION, NodeType
 from tree.memory.resolution.types import _normalize
 
 if TYPE_CHECKING:
@@ -62,7 +62,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_KG_COLLECTION = "knowledge_graph"
 _VECTOR_INDEX_NAME = "vector_index"
 
 
@@ -167,7 +166,7 @@ async def dedupe_entity(
 
     The function is read-only: it never inserts, updates, or deletes
     documents. It runs an Atlas ``$vectorSearch`` against the
-    ``knowledge_graph`` collection, re-ranks every returned candidate with
+    ``memory`` collection, re-ranks every returned candidate with
     an optional RapidFuzz boost against ``name + canonical_name + aliases``,
     and returns the tiered decision based on the best-scoring candidate.
 
@@ -201,7 +200,7 @@ async def dedupe_entity(
     if not config.enabled:
         return DeduplicationResult(action="none")
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     pipeline = _build_pipeline(
         user_id=user_id,
         entity_type=entity_type,
@@ -378,7 +377,7 @@ def _build_pipeline(
             [
                 {
                     "$lookup": {
-                        "from": _KG_COLLECTION,
+                        "from": MEMORY_COLLECTION,
                         "let": {"candidate_id": "$_id"},
                         "pipeline": [
                             {

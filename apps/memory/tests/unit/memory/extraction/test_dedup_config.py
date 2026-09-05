@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.extraction.dedup import (
     DeduplicationConfig,
     DeduplicationResult,

@@ -6,7 +6,7 @@ Returns the first matching candidate with its ORIGINAL casing.
 
 from collections.abc import Iterable, Mapping
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 
 from tree.memory.resolution.base import AbstractResolver
 from tree.memory.resolution.types import ResolvedEntity

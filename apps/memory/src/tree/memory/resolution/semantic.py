@@ -16,7 +16,7 @@ import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.embedding_text import embed_in_batches
 from tree.memory.resolution.base import AbstractResolver
 from tree.memory.resolution.types import ResolvedEntity

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, NodeType, build_node_id
+from tree.entities.memory import EdgeType, NodeType, build_node_id
 from tree.memory.extraction.preference_supersession import (
     canonicalize_preference_names,
     resolve_supersessions,

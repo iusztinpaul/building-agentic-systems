@@ -43,8 +43,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
+    MEMORY_COLLECTION,
     NodeType,
     build_edge_id,
 )
@@ -61,9 +62,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-_KG_COLLECTION = "knowledge_graph"
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +104,7 @@ async def find_pending_duplicates(
     if limit <= 0:
         return []
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     pipeline: list[dict[str, Any]] = [
         {
             "$match": {
@@ -120,7 +118,7 @@ async def find_pending_duplicates(
         {"$limit": limit},
         {
             "$lookup": {
-                "from": _KG_COLLECTION,
+                "from": MEMORY_COLLECTION,
                 "let": {"src_id": "$source_node_id"},
                 "pipeline": [
                     {
@@ -135,7 +133,7 @@ async def find_pending_duplicates(
         },
         {
             "$lookup": {
-                "from": _KG_COLLECTION,
+                "from": MEMORY_COLLECTION,
                 "let": {"tgt_id": "$target_node_id"},
                 "pipeline": [
                     {
@@ -235,7 +233,7 @@ async def get_same_as_cluster(
         A set of node ``_id`` strings.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     cluster: set[str] = {node_id}
 
     cursor = collection.find(
@@ -329,7 +327,7 @@ async def review_duplicate(
             transition).
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     now = datetime.now(tz=UTC)
 
     # 1. Locate the SAME_AS edge in either direction. We don't pre-compute

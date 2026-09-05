@@ -72,7 +72,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ class NodeTypeSpec:
 
     Attributes:
         name: snake_case identifier, e.g. ``"person"``. Used as the
-            ``type`` string on every ``KnowledgeGraphEntry`` of this kind.
+            ``type`` string on every ``MemoryEntry`` of this kind.
         properties_schema: Pydantic model whose fields describe the
             type-specific ``properties`` payload. The model's JSON
             schema flows into the LLM-extraction prompt.
@@ -602,7 +602,7 @@ class SupersededByProperties(BaseModel):
     @classmethod
     def _require_tz_aware(cls, value: datetime) -> datetime:
         """Reject naive datetimes - mirrors the
-        :class:`KnowledgeGraphEntry` ``valid_from``/``valid_until`` rule."""
+        :class:`MemoryEntry` ``valid_from``/``valid_until`` rule."""
 
         if value.tzinfo is None:
             raise ValueError(
@@ -625,7 +625,7 @@ class FactProperties(BaseModel):
     (see :class:`tree.memory.query.kgquery.KGQuery`).
 
     Bi-temporal columns ``valid_from`` / ``valid_until`` live on
-    :class:`tree.entities.knowledge_graph.KnowledgeGraphEntry` and are
+    :class:`tree.entities.memory.MemoryEntry` and are
     populated at extraction time when the LLM emits them. Supersession
     of contradictory facts lands in #032; until then contradictory
     facts coexist and both surface in retrieval.
@@ -1346,7 +1346,7 @@ register_edge_type(
 # allowed_pairs are the union of every RELATION_SEMANTICS spec's
 # allowed_pairs. The per-semantic constraint (``semantic_type`` ∈ registry
 # AND (source.type, target.type) ∈ spec.allowed_pairs) is enforced by
-# the ``KnowledgeGraphEntry`` model validator.
+# the ``MemoryEntry`` model validator.
 register_edge_type(
     EdgeTypeSpec(
         name="related_to",

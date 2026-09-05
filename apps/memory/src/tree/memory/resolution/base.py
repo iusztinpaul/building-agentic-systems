@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from typing import Protocol, runtime_checkable
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 
 from tree.memory.resolution.types import ResolvedEntity, _normalize
 

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.extraction.first_person_resolver import redirect_first_person
 from tree.memory.types import ExtractedNode
 

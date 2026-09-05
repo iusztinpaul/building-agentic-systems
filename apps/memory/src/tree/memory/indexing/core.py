@@ -22,13 +22,13 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
+from tree.entities.memory import MEMORY_COLLECTION
 from tree.config.app_config import app_config
 from tree.memory.embedding_text import embed_node_texts
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 
 # Index names (shared with query module).
 _TEXT_INDEX_NAME = "text_index"
@@ -73,7 +73,7 @@ async def embed_nodes(
     """
 
     db = client[database]
-    collection = db[_KG_COLLECTION]
+    collection = db[MEMORY_COLLECTION]
 
     # Fetch only nodes whose embedding is missing/None/empty AND that
     # belong to ``user_id``. Nodes with a non-empty embedding vector are
@@ -94,7 +94,7 @@ async def embed_nodes(
     skipped = len(docs) - embedded_count
     skipped_note = f" ({skipped} skipped, will retry)" if skipped else ""
     logger.info(
-        "Embedded %d nodes in %s%s", embedded_count, _KG_COLLECTION, skipped_note
+        "Embedded %d nodes in %s%s", embedded_count, MEMORY_COLLECTION, skipped_note
     )
     return embedded_count
 
@@ -165,7 +165,7 @@ async def ensure_indexes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
 ) -> None:
-    """Create classic and search indexes on the knowledge_graph collection.
+    """Create classic and search indexes on the memory collection.
 
     ``user_id`` is the **leading key** of every compound index — that
     pattern matches every tenant-scoped read in this codebase, so a
@@ -195,12 +195,12 @@ async def ensure_indexes(
     logger.info(
         "Ensuring indexes on %s (triggered by tenant user_id=%s; indexes "
         "themselves are global to the collection)",
-        _KG_COLLECTION,
+        MEMORY_COLLECTION,
         user_id,
     )
 
     db = client[database]
-    collection = db[_KG_COLLECTION]
+    collection = db[MEMORY_COLLECTION]
 
     # Snapshot the live model's output dimension once so the reconcile
     # logic and the index definition agree even if the model is swapped
@@ -216,7 +216,7 @@ async def ensure_indexes(
         _TEXT_INDEX_FIELDS,
         name=_TEXT_INDEX_NAME,
     )
-    logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, _KG_COLLECTION)
+    logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, MEMORY_COLLECTION)
 
     # Compound indexes for common query patterns. Every key starts with
     # ``user_id`` so tenant-scoped reads hit the index prefix.
@@ -245,7 +245,7 @@ async def ensure_indexes(
     # #029: partial index for the ``related_to`` umbrella edge.
     # Filter ``semantic_type`` non-null so only ``related_to`` rows
     # carry the index cost. Idempotent on re-create. Also declared on
-    # :class:`tree.entities.knowledge_graph.KnowledgeGraphEntry`; the
+    # :class:`tree.entities.memory.MemoryEntry`; the
     # dynamic create here keeps the indexing-pipeline run-path
     # authoritative (it's the surface CI/integration tests assert on).
     # ``$ne: null`` is not a valid partial-filter expression in
@@ -256,7 +256,7 @@ async def ensure_indexes(
         name="user_type_semantic_type",
         partialFilterExpression={"semantic_type": {"$type": "string"}},
     )
-    logger.info("Compound indexes ensured on %s", _KG_COLLECTION)
+    logger.info("Compound indexes ensured on %s", MEMORY_COLLECTION)
 
     # --- Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)
@@ -282,7 +282,7 @@ async def _drop_legacy_compound_indexes(collection: Any) -> None:
                 logger.info(
                     "Dropped legacy compound index '%s' on %s",
                     name,
-                    _KG_COLLECTION,
+                    MEMORY_COLLECTION,
                 )
             except Exception:  # noqa: BLE001 — drop failures are non-fatal
                 logger.warning(
@@ -449,7 +449,7 @@ async def assert_settings_match_live_vector_index(
     ``docker/mongot/`` must reflect
     ``app_config.models.search_embedding.dimensions`` — a mismatch silently
     corrupts every ``$vectorSearch`` write. This helper inspects the live
-    ``vector_index`` definition for ``database.knowledge_graph`` and:
+    ``vector_index`` definition for ``database.memory`` and:
 
     * Returns ``None`` if ``numDimensions`` on the live index equals
       ``app_config.models.search_embedding.dimensions``.
@@ -465,7 +465,7 @@ async def assert_settings_match_live_vector_index(
 
     expected_dim = app_config.models.search_embedding.dimensions
 
-    collection = client[database][_KG_COLLECTION]
+    collection = client[database][MEMORY_COLLECTION]
     cursor = await collection.list_search_indexes()
     indexes: list[dict[str, Any]] = [idx async for idx in cursor]
 

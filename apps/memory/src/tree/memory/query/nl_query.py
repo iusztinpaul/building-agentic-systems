@@ -9,7 +9,7 @@ from pymongo import AsyncMongoClient
 from pymongo.errors import OperationFailure
 
 from tree.config.app_config import app_config
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, MEMORY_COLLECTION, NodeType
 from tree.entities.ontology import EDGE_CONSTRAINTS, NODE_PROPERTIES
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.exceptions import PipelineValidationError
@@ -17,7 +17,6 @@ from tree.observability import span, track
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 _EMBED_PLACEHOLDER = "__EMBED__"
 
 # Stages that carry nested sub-pipelines are deliberately omitted from the
@@ -39,7 +38,7 @@ _EMBED_PLACEHOLDER = "__EMBED__"
 #     is never walked. Removing ``$facet`` (rather than recursively
 #     validating it) keeps the validator simple and the blast radius low.
 #   * ``$unionWith`` — same shape: its ``pipeline`` argument is never
-#     walked, so a union against ``knowledge_graph`` would merge in
+#     walked, so a union against ``memory`` would merge in
 #     documents from every tenant.
 #
 # ``$graphLookup`` IS in the allow-list because it does NOT take a
@@ -109,7 +108,7 @@ def build_nl_query_system_prompt() -> str:
     return f"""\
 You are a MongoDB aggregation pipeline generator for a knowledge graph.
 
-## Collection: `{_KG_COLLECTION}`
+## Collection: `{MEMORY_COLLECTION}`
 
 All nodes and edges live in a single collection.
 
@@ -182,7 +181,7 @@ single-pipeline aggregations.
   - `$unionWith` — its sub-pipeline is not tenant-scoped. Run separate \
 queries and combine client-side instead.
 - Keep pipelines flat: no nested `pipeline` arrays anywhere.
-- For `$graphLookup`, the `from` field MUST be `"{_KG_COLLECTION}"`.
+- For `$graphLookup`, the `from` field MUST be `"{MEMORY_COLLECTION}"`.
 - Always include a `$limit` stage to cap results.
 - Do NOT include `embedding` in returned fields.
 - Tenant scoping is enforced by the server: a leading `{{"$match": \
@@ -254,9 +253,9 @@ def validate_pipeline(
         # comment for the rationale.)
         if stage_name == "$graphLookup":
             from_col = stage[stage_name].get("from", "")
-            if from_col != _KG_COLLECTION:
+            if from_col != MEMORY_COLLECTION:
                 raise PipelineValidationError(
-                    f"{stage_name} 'from' must be '{_KG_COLLECTION}', got '{from_col}'"
+                    f"{stage_name} 'from' must be '{MEMORY_COLLECTION}', got '{from_col}'"
                 )
 
         if stage_name == "$limit":
@@ -323,13 +322,13 @@ def _inject_user_id(
         runtime even after ``$lookup`` was removed at the top level. The
         per-field sub-pipelines never receive ``user_id``.
       * ``$unionWith`` — its ``pipeline`` argument is never walked, so
-        unioning ``knowledge_graph`` against itself merges in documents
+        unioning ``memory`` against itself merges in documents
         from every tenant.
 
     Contract for future maintainers: any new stage added to
     ``_ALLOWED_STAGES`` must be flat (no nested ``pipeline`` argument,
     no per-field sub-pipelines) AND not reach into the
-    ``knowledge_graph`` collection on its own. If a new stage carries a
+    ``memory`` collection on its own. If a new stage carries a
     sub-pipeline, EITHER omit it from the allow-list (preferred — keeps
     the validator simple and the blast radius low) OR teach this function
     to walk into it. Silently adding a sub-pipeline-bearing stage breaks
@@ -490,7 +489,7 @@ async def execute_nl_query(
     """
 
     max_retries = max_retries if max_retries is not None else app_config.mcp.max_retries
-    collection = client[database][_KG_COLLECTION]
+    collection = client[database][MEMORY_COLLECTION]
 
     current_prompt = query
     last_error: Exception | None = None

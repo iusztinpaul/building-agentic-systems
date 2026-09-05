@@ -5,6 +5,22 @@
 # DATA and live under the repo-root `sources/` directory (`sources/backfill.yaml`
 # + `sources/listen.yaml`), loaded by `tree.config.sources` — see ADR-003.
 
+# Memory modes (ADR-006). ONE switch decides how much of the memory half runs:
+#   rag      — clean -> two-level chunk (parent/child) -> embed children ->
+#              load rows; retrieval is parent-document hybrid search
+#              (vector + text, RRF) over child chunks. Node rows only:
+#              no edges, no LLM entity extraction. (The Chapter-4 system.)
+#   graphrag — everything `rag` does PLUS structural edges (part_of, next),
+#              LLM entity extraction over parent chunks, entity resolution,
+#              dedup, `mentions` edges, and graph expansion at retrieval.
+#              (What Chapter 8 adds.)
+# Read once at flow entry / MCP-server boot / CLI start, never per request.
+# Default `graphrag` keeps an unchanged checkout behaving as before.
+# Env override: TREE_MEMORY__MODE=rag. Both modes write the same `memory`
+# collection and both start from scratch — there is NO migration between them.
+memory:
+  mode: graphrag
+
 models:
   llm:
     provider: gemini

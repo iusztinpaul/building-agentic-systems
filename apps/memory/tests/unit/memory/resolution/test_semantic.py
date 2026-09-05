@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.resolution import ResolvedEntity, SemanticMatchResolver
 from tree.models.base import BaseEmbeddingModel
 

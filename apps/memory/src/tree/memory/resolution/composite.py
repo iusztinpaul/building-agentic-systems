@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.resolution.alias import AliasMatchResolver
 from tree.memory.resolution.exact import ExactMatchResolver
 from tree.memory.resolution.fuzzy import FuzzyMatchResolver

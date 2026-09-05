@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import KnowledgeGraphEntry
+from tree.entities.memory import MemoryEntry
 from tree.memory.query.kgquery import KGQuery
 
 
@@ -26,7 +26,7 @@ def _patch_find(mocker, return_value=None):
     cursor = MagicMock(name="cursor")
     cursor.to_list = AsyncMock(return_value=return_value or [])
     find_mock = MagicMock(name="find", return_value=cursor)
-    mocker.patch.object(KnowledgeGraphEntry, "find", find_mock)
+    mocker.patch.object(MemoryEntry, "find", find_mock)
     return find_mock
 
 
@@ -115,7 +115,7 @@ class TestFindFactsBySimilarity:
         collection_mock = MagicMock(name="motor_collection")
         collection_mock.aggregate = AsyncMock(return_value=agg_cursor)
         mocker.patch.object(
-            KnowledgeGraphEntry,
+            MemoryEntry,
             "get_pymongo_collection",
             return_value=collection_mock,
         )
@@ -142,7 +142,7 @@ class TestFindFactsBySimilarity:
             side_effect=RuntimeError("mongot unreachable")
         )
         mocker.patch.object(
-            KnowledgeGraphEntry,
+            MemoryEntry,
             "get_pymongo_collection",
             return_value=collection_mock,
         )

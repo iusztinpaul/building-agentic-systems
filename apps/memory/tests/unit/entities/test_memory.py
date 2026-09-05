@@ -4,14 +4,19 @@ import pytest
 from beanie import PydanticObjectId
 from pymongo import IndexModel
 
-from tree.entities.knowledge_graph import (
+from tree.db import ALL_DOCUMENT_MODELS
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    RAG_NODE_TYPES,
     EdgeType,
     ExtractorInfo,
-    KnowledgeGraphEntry,
+    MemoryEntry,
     NodeType,
     build_edge_id,
     build_node_id,
 )
+from tree.entities.meta_state import KnowledgeGraphMetaState
+from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES, NODE_REGISTRY
 
 
 def _user_id() -> PydanticObjectId:
@@ -54,10 +59,10 @@ class TestBuildEdgeId:
         assert result == f"{src}|related_to|{tgt}"
 
 
-class TestKnowledgeGraphEntry:
+class TestMemoryEntry:
     async def test_node_entry(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice",
             user_id=user_id,
             kind="node",
@@ -75,7 +80,7 @@ class TestKnowledgeGraphEntry:
 
     async def test_edge_entry(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice|related_to|{user_id}:person:bob",
             user_id=user_id,
             kind="edge",
@@ -95,7 +100,7 @@ class TestKnowledgeGraphEntry:
 
     async def test_missing_required_id_raises(self):
         with pytest.raises(Exception):
-            KnowledgeGraphEntry(
+            MemoryEntry(
                 user_id=_user_id(),
                 kind="node",
                 type=NodeType.PERSON,
@@ -106,7 +111,7 @@ class TestKnowledgeGraphEntry:
     async def test_missing_required_user_id_raises(self):
         # Per #018: user_id is required at construction (no default).
         with pytest.raises(Exception):
-            KnowledgeGraphEntry(
+            MemoryEntry(
                 id="anyuser:person:alice",
                 kind="node",
                 type=NodeType.PERSON,
@@ -115,7 +120,7 @@ class TestKnowledgeGraphEntry:
             )
 
 
-class TestKnowledgeGraphSettingsIndexes:
+class TestMemorySettingsIndexes:
     """#018: the model declares two static compound indexes with
     ``user_id`` as the leading field. The dynamic indexes
     (kind_source_node, kind_target_node, kind_embedding, canonical_name)
@@ -123,7 +128,7 @@ class TestKnowledgeGraphSettingsIndexes:
     """
 
     def test_user_kind_type_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
 
         target_key = [("user_id", 1), ("kind", 1), ("type", 1)]
         assert any(
@@ -132,7 +137,7 @@ class TestKnowledgeGraphSettingsIndexes:
         ), f"Expected compound index on {target_key}; got {index_models}"
 
     def test_user_type_name_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
 
         target_key = [("user_id", 1), ("type", 1), ("name", 1)]
         assert any(
@@ -144,10 +149,10 @@ class TestKnowledgeGraphSettingsIndexes:
 class TestResolutionDedupFields:
     """Resolution + dedup fields added in task #007.
 
-    Five new optional fields on ``KnowledgeGraphEntry`` plus ``EdgeType.SAME_AS``.
+    Five new optional fields on ``MemoryEntry`` plus ``EdgeType.SAME_AS``.
     """
 
-    def _build_node(self, **overrides) -> KnowledgeGraphEntry:
+    def _build_node(self, **overrides) -> MemoryEntry:
         user_id = _user_id()
         defaults = dict(
             id=f"{user_id}:person:alice",
@@ -159,9 +164,9 @@ class TestResolutionDedupFields:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
-    def _build_edge(self, **overrides) -> KnowledgeGraphEntry:
+    def _build_edge(self, **overrides) -> MemoryEntry:
         user_id = _user_id()
         defaults = dict(
             id=(f"{user_id}:person:alice|same_as|{user_id}:person:alice smith"),
@@ -176,7 +181,7 @@ class TestResolutionDedupFields:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
     async def test_node_default_values_for_new_fields(self):
         entry = self._build_node()
@@ -237,7 +242,7 @@ class TestResolutionDedupFields:
         )
 
         dumped = original.model_dump()
-        rehydrated = KnowledgeGraphEntry.model_validate(dumped)
+        rehydrated = MemoryEntry.model_validate(dumped)
 
         assert rehydrated.kind == "edge"
         assert rehydrated.type == EdgeType.SAME_AS
@@ -266,7 +271,7 @@ class TestResolutionDedupFields:
             "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
         }
 
-        entry = KnowledgeGraphEntry.model_validate(legacy)
+        entry = MemoryEntry.model_validate(legacy)
 
         assert entry.canonical_name is None
         assert entry.aliases == []
@@ -297,7 +302,7 @@ class TestResolutionDedupFields:
         )
 
         # Mocked Motor-style collection: in-memory dict keyed by _id.
-        collection: dict[str, KnowledgeGraphEntry] = {}
+        collection: dict[str, MemoryEntry] = {}
         for entry in (alice, alice_smith):
             collection[entry.id] = entry
 
@@ -327,7 +332,7 @@ class TestResolutionDedupFields:
         assert entry.merged_at is not None
         assert entry.merged_at.tzinfo is not None
         # Round-trip preserves the tz-aware value.
-        rehydrated = KnowledgeGraphEntry.model_validate(entry.model_dump())
+        rehydrated = MemoryEntry.model_validate(entry.model_dump())
         assert rehydrated.merged_at == merged_at
         assert rehydrated.merged_at.tzinfo is not None
 
@@ -367,7 +372,7 @@ class TestTypeFieldIsRelaxedString:
 
     async def test_node_constructed_with_raw_string_type(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice",
             user_id=user_id,
             kind="node",
@@ -383,7 +388,7 @@ class TestTypeFieldIsRelaxedString:
 
     async def test_node_constructed_with_enum_member_still_works(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice",
             user_id=user_id,
             kind="node",
@@ -401,7 +406,7 @@ class TestTypeFieldIsRelaxedString:
         # shape is ``related_to + semantic_type``. Pin the string-type
         # construction path against the new umbrella instead.
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice|related_to|{user_id}:object:write a book",
             user_id=user_id,
             kind="edge",
@@ -426,7 +431,7 @@ class TestTypeFieldValidator:
     async def test_rejects_unknown_node_type(self):
         user_id = _user_id()
         with pytest.raises(Exception) as excinfo:
-            KnowledgeGraphEntry(
+            MemoryEntry(
                 id=f"{user_id}:ferret:alice",
                 user_id=user_id,
                 kind="node",
@@ -443,7 +448,7 @@ class TestTypeFieldValidator:
     async def test_rejects_unknown_edge_type(self):
         user_id = _user_id()
         with pytest.raises(Exception) as excinfo:
-            KnowledgeGraphEntry(
+            MemoryEntry(
                 id=f"{user_id}:person:alice|owns|{user_id}:task:write",
                 user_id=user_id,
                 kind="edge",
@@ -468,7 +473,7 @@ class TestTypeFieldValidator:
 
         user_id = _user_id()
         for type_name in NODE_REGISTRY:
-            entry = KnowledgeGraphEntry(
+            entry = MemoryEntry(
                 id=f"{user_id}:{type_name}:x",
                 user_id=user_id,
                 kind="node",
@@ -525,7 +530,7 @@ class TestTypeFieldValidator:
         # Post-#029, every edge type enforces its ``allowed_pairs``;
         # ``related_to`` additionally requires ``semantic_type``.
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=(
                 f"{user_id}:{src_type.value}:{src_name}|{edge_type.value}|"
                 f"{user_id}:{tgt_type.value}:{tgt_name}"
@@ -571,8 +576,8 @@ class TestBuildIdAcceptsStringTypes:
         assert from_enum == from_str == f"{src}|related_to|{tgt}"
 
 
-class TestKnowledgeGraphEntrySubtype:
-    """Phase-3 #028: ``KnowledgeGraphEntry.subtype: str | None`` is a
+class TestMemoryEntrySubtype:
+    """Phase-3 #028: ``MemoryEntry.subtype: str | None`` is a
     live column on the model and validated against the parent type's
     closed ``subtypes`` set when the parent has one. The validator is
     intentionally loose at construction: ``subtype is None`` is
@@ -589,7 +594,7 @@ class TestKnowledgeGraphEntrySubtype:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
     async def test_subtype_field_defaults_to_none(self):
         user_id = _user_id()
@@ -652,7 +657,7 @@ class TestKnowledgeGraphEntrySubtype:
     )
     async def test_every_canonical_subtype_constructs(self, type_name, subtype):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:{type_name}:x",
             user_id=user_id,
             kind="node",
@@ -670,7 +675,7 @@ class TestKnowledgeGraphEntrySubtype:
         # even when their ``type`` is a registered edge with no
         # subtype vocabulary.
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice|related_to|{user_id}:person:bob",
             user_id=user_id,
             kind="edge",
@@ -707,7 +712,7 @@ class TestLegacyNodeTypeReroute:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
     async def test_legacy_task_enum_reroutes_to_object_task(self):
         user_id = _user_id()
@@ -756,7 +761,7 @@ class TestLegacyNodeTypeReroute:
         # ``related_to`` umbrella with a legacy-looking ``NodeType.TASK``
         # endpoint (which still exists as an enum alias).
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:alice|related_to|{user_id}:object:write",
             user_id=user_id,
             kind="edge",
@@ -780,7 +785,7 @@ class TestSubtypeIndexDeclared:
     silently drop it."""
 
     def test_user_kind_type_subtype_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
         target_key = [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)]
         assert any(
             list(im.document.get("key", {}).items()) == target_key
@@ -877,7 +882,7 @@ class TestRelatedToSemanticValidator:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
     async def test_accepts_valid_employed_by_person_to_organization(self):
         user_id = _user_id()
@@ -930,7 +935,7 @@ class TestRelatedToSemanticValidator:
     async def test_rejects_semantic_on_non_related_to(self):
         user_id = _user_id()
         with pytest.raises(Exception) as excinfo:
-            KnowledgeGraphEntry(
+            MemoryEntry(
                 id=f"{user_id}:person:alice|has|{user_id}:preference:coffee",
                 user_id=user_id,
                 kind="edge",
@@ -953,7 +958,7 @@ class TestSemanticTypeIndex:
     on the model so the indexing pipeline picks it up on boot (#029)."""
 
     def test_user_type_semantic_type_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(KnowledgeGraphEntry.Settings.indexes)
+        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
         target_key = [("user_id", 1), ("type", 1), ("semantic_type", 1)]
         match = None
         for im in index_models:
@@ -974,7 +979,7 @@ class TestStructuralHasEdgeAccepted:
 
     async def test_has_person_to_preference_accepted(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:self|has|{user_id}:preference:coffee",
             user_id=user_id,
             kind="edge",
@@ -991,7 +996,7 @@ class TestStructuralHasEdgeAccepted:
 
     async def test_has_person_to_object_accepted(self):
         user_id = _user_id()
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:person:self|has|{user_id}:object:ship-demo",
             user_id=user_id,
             kind="edge",
@@ -1033,9 +1038,9 @@ class TestExtractorInfo:
             )
 
 
-class TestKnowledgeGraphCommonColumns:
+class TestMemoryEntryCommonColumns:
     """#030 adds ``description``, ``valid_from``, ``valid_until``, and
-    ``extractor`` to :class:`KnowledgeGraphEntry`. Each is optional;
+    ``extractor`` to :class:`MemoryEntry`. Each is optional;
     legacy rows load with defaults."""
 
     def _build(self, **overrides):
@@ -1051,7 +1056,7 @@ class TestKnowledgeGraphCommonColumns:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         defaults.update(overrides)
-        return KnowledgeGraphEntry(**defaults)
+        return MemoryEntry(**defaults)
 
     async def test_defaults_none(self) -> None:
         entry = self._build()
@@ -1070,7 +1075,7 @@ class TestKnowledgeGraphCommonColumns:
             extractor=ExtractorInfo(name="gemini-2.5-pro", version="tree-memory-0.1.0"),
         )
         dumped = entry.model_dump()
-        rehydrated = KnowledgeGraphEntry.model_validate(dumped)
+        rehydrated = MemoryEntry.model_validate(dumped)
         assert rehydrated.description == "A person known for X."
         assert rehydrated.valid_from == vf
         assert rehydrated.valid_until == vu
@@ -1104,8 +1109,99 @@ class TestKnowledgeGraphCommonColumns:
             "created_at": datetime(2025, 12, 1, tzinfo=UTC),
             "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
         }
-        entry = KnowledgeGraphEntry.model_validate(legacy)
+        entry = MemoryEntry.model_validate(legacy)
         assert entry.description is None
         assert entry.valid_from is None
         assert entry.valid_until is None
         assert entry.extractor is None
+
+
+class TestMemoryCollectionName:
+    """ADR-006 decision 1 / #105: ``knowledge_graph`` -> ``memory``.
+
+    One exported constant replaces the thirteen per-module private copies, so a
+    future rename is a one-line change instead of a grep-and-pray.
+    """
+
+    def test_memory_collection_constant(self) -> None:
+        assert MEMORY_COLLECTION == "memory"
+
+    def test_entry_settings_name_is_the_shared_constant(self) -> None:
+        """Beanie and the raw-pymongo readers must target the SAME collection —
+        pinning the identity (not just the value) is what stops them drifting.
+        """
+
+        assert MemoryEntry.Settings.name == MEMORY_COLLECTION
+
+    def test_memory_entry_is_registered_with_beanie(self) -> None:
+        assert MemoryEntry in ALL_DOCUMENT_MODELS
+
+    def test_no_registered_model_still_targets_the_old_collection(self) -> None:
+        """No compat shim survived the rename: nothing Beanie initialises
+        writes to ``knowledge_graph`` any more."""
+
+        targets = {model.Settings.name for model in ALL_DOCUMENT_MODELS}
+
+        assert MEMORY_COLLECTION in targets
+        assert "knowledge_graph" not in targets
+
+    def test_dream_watermark_collection_is_deliberately_unchanged(self) -> None:
+        """``knowledge_graph_meta_state`` is graph-only state whose name stays
+        accurate, so ADR-006 leaves it alone."""
+
+        assert KnowledgeGraphMetaState in ALL_DOCUMENT_MODELS
+        assert KnowledgeGraphMetaState.Settings.name == "knowledge_graph_meta_state"
+
+    async def test_inserted_row_lands_in_the_memory_collection(self) -> None:
+        """End-to-end through Beanie: a row written via the ODM shows up in
+        ``memory``, and no ``knowledge_graph`` collection is created."""
+
+        user_id = _user_id()
+        now = datetime.now(UTC)
+        entry = MemoryEntry(
+            id=build_node_id(user_id, NodeType.PERSON, "collection-probe"),
+            user_id=user_id,
+            kind="node",
+            type=NodeType.PERSON.value,
+            name="collection-probe",
+            created_at=now,
+            updated_at=now,
+        )
+
+        await entry.insert()
+
+        database = MemoryEntry.get_pymongo_collection().database
+        collection_names = await database.list_collection_names()
+        assert MEMORY_COLLECTION in collection_names
+        assert "knowledge_graph" not in collection_names
+
+        await entry.delete()
+
+
+class TestRagNodeTypes:
+    """ADR-006 decision 1: the closed set of node types the RAG layer writes.
+
+    The rag/graph split is by MODE, not by row class — so this constant, not a
+    Beanie subclass, is the one place that says "these rows are the RAG rows".
+    Later tasks consume it (loader, child-search filter, the "rag never writes
+    anything else" test).
+    """
+
+    def test_rag_node_types_are_document_and_chunk(self) -> None:
+        assert RAG_NODE_TYPES == frozenset({"document", "chunk"})
+
+    def test_rag_node_types_is_immutable(self) -> None:
+        """A frozenset so no caller can widen the RAG surface at runtime."""
+
+        assert isinstance(RAG_NODE_TYPES, frozenset)
+
+    @pytest.mark.parametrize("node_type", sorted(RAG_NODE_TYPES))
+    def test_every_rag_node_type_is_registered(self, node_type: str) -> None:
+        assert node_type in NODE_REGISTRY
+
+    @pytest.mark.parametrize("node_type", sorted(RAG_NODE_TYPES))
+    def test_no_rag_node_type_is_llm_extractable(self, node_type: str) -> None:
+        """RAG rows are built deterministically by pipeline code; if one of them
+        ever became LLM-extractable the two layers would fight over the row."""
+
+        assert node_type not in {t.value for t in LLM_EXTRACTABLE_NODE_TYPES}

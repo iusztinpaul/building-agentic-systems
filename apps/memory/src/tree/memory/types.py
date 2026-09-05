@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 from tree.memory.resolution.types import ResolvedEntity
 
 
@@ -28,7 +28,7 @@ class ExtractedEdge(BaseModel):
     Phase-3 #029: ``semantic_type`` carries the discriminator for the
     new ``related_to`` umbrella edge. Required on every ``related_to``
     row, ``None`` on every other edge type — enforced again by the
-    :class:`KnowledgeGraphEntry` model validator at write time.
+    :class:`MemoryEntry` model validator at write time.
     """
 
     source_node_id: str

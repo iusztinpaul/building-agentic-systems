@@ -1,9 +1,9 @@
 """Unit tests for ``KGQuery``.
 
-The class is a tenant-locked reader for ``knowledge_graph``: every read
+The class is a tenant-locked reader for ``memory``: every read
 must filter on ``self.user_id``. These tests exercise that contract via
-``mocker.patch`` on the underlying ``KnowledgeGraphEntry.find`` /
-``KnowledgeGraphEntry.find_one`` calls so we can inspect the exact
+``mocker.patch`` on the underlying ``MemoryEntry.find`` /
+``MemoryEntry.find_one`` calls so we can inspect the exact
 filter dict that hit Beanie.
 """
 
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, KnowledgeGraphEntry, NodeType
+from tree.entities.memory import EdgeType, MemoryEntry, NodeType
 from tree.memory.query.kgquery import KGQuery
 
 
@@ -23,7 +23,7 @@ _USER_B = PydanticObjectId("507f1f77bcf86cd799439022")
 
 
 def _patch_find(mocker, return_value=None):
-    """Patch ``KnowledgeGraphEntry.find`` to capture the filter argument.
+    """Patch ``MemoryEntry.find`` to capture the filter argument.
 
     Beanie's ``find`` returns a query builder; the next ``.to_list()`` call
     is what actually issues the find. We return a mock that records the
@@ -33,13 +33,13 @@ def _patch_find(mocker, return_value=None):
     cursor = MagicMock(name="cursor")
     cursor.to_list = AsyncMock(return_value=return_value or [])
     find_mock = MagicMock(name="find", return_value=cursor)
-    mocker.patch.object(KnowledgeGraphEntry, "find", find_mock)
+    mocker.patch.object(MemoryEntry, "find", find_mock)
     return find_mock
 
 
 def _patch_find_one(mocker, return_value=None):
     return mocker.patch.object(
-        KnowledgeGraphEntry,
+        MemoryEntry,
         "find_one",
         new=AsyncMock(return_value=return_value),
     )

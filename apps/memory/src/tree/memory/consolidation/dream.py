@@ -61,7 +61,7 @@ from prefect.context import get_run_context
 from tree.config.app_config import load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, MEMORY_COLLECTION, NodeType
 from tree.entities.ontology import NODE_REGISTRY
 from tree.entities.users import select_active_user_ids
 from tree.memory.consolidation.meta_state import load_watermark, record_dream_run
@@ -103,7 +103,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 
 # The dream sweep drives over EVERY persisted node type. Structural rows
 # (document / chunk) carry no semantic embedding worth deduping and are
@@ -287,7 +286,7 @@ async def _same_as_edge_exists(
     duplicate" we must not re-flag.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     existing = await collection.find_one(
         {
             "user_id": user_id,
@@ -318,7 +317,7 @@ async def _iter_driving_nodes(
     space inside ``dedupe_entity`` stays the full graph.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     cursor = collection.find(
         {
             "user_id": user_id,
@@ -518,7 +517,7 @@ async def _apply_dream_decisions(
         # inline dedup/extraction path emits). The flagged tier stops here so
         # a human can review; the merged tier confirms it immediately.
         await _upsert_pending_same_as_edge(
-            collection=database[_KG_COLLECTION],
+            collection=database[MEMORY_COLLECTION],
             user_id=user_id,
             source_node_id=pair.id1,
             source_type=pair.entity_type,
@@ -577,7 +576,7 @@ async def _iter_supersession_driving_nodes(
     longer "current" and must not drive a fresh supersession.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     out: list[dict[str, Any]] = []
     for entity_type in _SUPERSESSION_NODE_TYPES:
         cursor = collection.find(

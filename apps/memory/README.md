@@ -10,7 +10,7 @@ For the wider system (harness, end-to-end flow, shared infra) see the repo-root 
 - **Memory pipelines** (`src/tree/memory/`) — `extraction/` chunks + LLM-extracts nodes and edges; `indexing/` builds reverse edges, embeds nodes, ensures text/vector/search indexes.
 - **Query + MCP** (`src/tree/memory/query/`, `src/tree/mcp/`) — a CLI that renders interactive HTML graphs, and a FastMCP server exposing the memory tools to any MCP client.
 
-Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `knowledge_graph` collection.
+Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `memory` collection.
 
 ## Setup
 
@@ -186,7 +186,7 @@ Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL 
 
 ### Memory extraction
 
-Extract knowledge-graph nodes + edges from `documents` into `knowledge_graph`. Two modes, both dispatched as ONE `offline-pipeline` run with `run_data=False` (extraction phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
+Extract knowledge-graph nodes + edges from `documents` into `memory`. Two modes, both dispatched as ONE `offline-pipeline` run with `run_data=False` (extraction phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
@@ -199,7 +199,7 @@ make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
 
 ### Memory indexing
 
-The single indexing step — works after either extraction mode. Builds reverse edges for bidirectional traversal, computes node embeddings, and ensures text / vector / Atlas-search indexes on `knowledge_graph`:
+The single indexing step — works after either extraction mode. Builds reverse edges for bidirectional traversal, computes node embeddings, and ensures text / vector / Atlas-search indexes on `memory`:
 
 ```bash
 make memory-run-indexing-pipeline

@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
     EdgeType,
     NodeType,
     build_edge_id,
@@ -59,9 +60,9 @@ from tree.memory.types import (
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _PH = str(_USER_ID)
-# The KG collection key; the bulk-write DB mock returns the same collection
+# The memory-collection key; the bulk-write DB mock returns the same collection
 # for any subscript, so the exact string is irrelevant to the assertions.
-_KG_COLLECTION_SENTINEL = "knowledge_graph"
+_MEMORY_COLLECTION_SENTINEL = MEMORY_COLLECTION
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +530,7 @@ async def _sequential_reference(
     input. ``dedupe_fn`` is the (mocked) ``dedupe_entity``.
     """
 
-    from tree.entities.knowledge_graph import build_node_id as _build_node_id
+    from tree.entities.memory import build_node_id as _build_node_id
     from tree.memory.extraction.pipeline import _normalize, _to_decision
 
     decisions: dict[str, Any] = {}
@@ -927,7 +928,7 @@ class TestValidateRawsInsertMany:
 
     @staticmethod
     def _extractor() -> Any:
-        from tree.entities.knowledge_graph import ExtractorInfo
+        from tree.entities.memory import ExtractorInfo
 
         return ExtractorInfo(name="fake-llm", version="tree-memory-0.0.0+test")
 
@@ -1760,7 +1761,7 @@ class TestApplyWritesBulkBatching:
     async def test_structural_nodes_use_single_bulk_write_no_update_one(self) -> None:
         # Arrange — two docs, each with two structural nodes (4 nodes total).
         database = _make_bulk_write_database()
-        collection = database[_KG_COLLECTION_SENTINEL]
+        collection = database[_MEMORY_COLLECTION_SENTINEL]
         raws = [
             _structural_only_raw(
                 doc_id="507f1f77bcf86cd799439011",
@@ -1798,7 +1799,7 @@ class TestApplyWritesBulkBatching:
     async def test_empty_input_issues_no_bulk_write(self) -> None:
         # Arrange — no documents → no nodes, no edges.
         database = _make_bulk_write_database()
-        collection = database[_KG_COLLECTION_SENTINEL]
+        collection = database[_MEMORY_COLLECTION_SENTINEL]
 
         summary = await _run_apply_writes(database, [])
 
@@ -1850,7 +1851,7 @@ class TestApplyWritesBulkBatching:
         )
 
         database = _make_bulk_write_database()
-        collection = database[_KG_COLLECTION_SENTINEL]
+        collection = database[_MEMORY_COLLECTION_SENTINEL]
 
         # Stub the LLM-entity write so Alice/Bob get registered in
         # name_to_target_id (the remap source for the related_to edge).
@@ -1906,7 +1907,7 @@ class TestApplyWritesBulkBatching:
         )
 
         database = _make_bulk_write_database()
-        collection = database[_KG_COLLECTION_SENTINEL]
+        collection = database[_MEMORY_COLLECTION_SENTINEL]
 
         # Stub the LLM-entity write so the PERSON registers a target id.
         async def _dispatch(**kwargs: Any) -> str:

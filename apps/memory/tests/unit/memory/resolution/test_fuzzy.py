@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 from pytest_mock import MockerFixture
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.resolution import FuzzyMatchResolver, ResolvedEntity
 
 

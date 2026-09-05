@@ -4,6 +4,9 @@
 # Holds ONLY static memory config — sources moved out to repo-root `sources/`
 # (ADR-003); the source files are covered by test_sources_files.py.
 
+memory:
+  mode: graphrag
+
 models:
   llm:
     provider: gemini

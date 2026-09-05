@@ -2,7 +2,7 @@
 
 Public surface:
 
-* :class:`KGQuery` — tenant-locked reader for ``knowledge_graph``. Every
+* :class:`KGQuery` — tenant-locked reader for ``memory``. Every
   read in production code goes through this class; a CI grep enforces
   the rule.
 * :func:`search_nodes`, :func:`expand_graph`, :func:`query_memory` — the

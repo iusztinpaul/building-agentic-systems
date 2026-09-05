@@ -1,6 +1,6 @@
 import pytest
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.resolution import ExactMatchResolver, ResolvedEntity
 
 

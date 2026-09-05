@@ -25,7 +25,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.extraction.dedup import MergeStrategy
 
 

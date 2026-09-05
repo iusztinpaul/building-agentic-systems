@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, Field
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
     EDGE_REGISTRY,
@@ -421,7 +421,7 @@ class TestEnumShim:
     def test_node_type_members_match_node_registry_plus_legacy_aliases(self):
         # Post-#028: the enum has the registry entries the LLM cares
         # about (+ DOCUMENT/CHUNK) PLUS one legacy alias — ``TASK`` —
-        # that the :class:`KnowledgeGraphEntry` mode=before validator
+        # that the :class:`MemoryEntry` mode=before validator
         # silently re-routes to the new (parent, subtype) shape. The
         # alias is intentionally NOT in :data:`NODE_REGISTRY`.
         # Post-#031: ``FACT`` joins the enum + registry as the POLE+O
@@ -1244,7 +1244,7 @@ class TestFactIslandRule:
         # envelope validator still blocks LLM-emitted attempts via the
         # ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` guard, but the registry
         # itself records ``(fact, fact)`` in superseded_by's allowed
-        # pairs so the :class:`KnowledgeGraphEntry` model validator
+        # pairs so the :class:`MemoryEntry` model validator
         # accepts the resolver's direct write.
         offenders = []
         for name, spec in EDGE_REGISTRY.items():
@@ -1305,8 +1305,8 @@ class TestFactSchemaInPrompt:
         assert required == {"subject", "predicate", "object"}
 
 
-class TestKnowledgeGraphEntryAcceptsFactNode:
-    """The Beanie ``KnowledgeGraphEntry`` model must accept a fact-typed
+class TestMemoryEntryAcceptsFactNode:
+    """The Beanie ``MemoryEntry`` model must accept a fact-typed
     node row constructed from the validator's surviving properties."""
 
     def test_construct_fact_node_entry(self):
@@ -1314,13 +1314,13 @@ class TestKnowledgeGraphEntryAcceptsFactNode:
 
         from beanie import PydanticObjectId
 
-        from tree.entities.knowledge_graph import KnowledgeGraphEntry
+        from tree.entities.memory import MemoryEntry
 
         user_id = PydanticObjectId()
         now = datetime.now(tz=UTC)
         # Wire-form ``"object"`` key — what the validator stores after
         # alias-aware ``validate_properties``.
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:fact:earth-orbits-sun",
             user_id=user_id,
             kind="node",

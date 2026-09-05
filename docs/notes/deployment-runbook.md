@@ -21,7 +21,7 @@ NOT create app data or indexes.
 * Collection (Beanie) indexes are self-healing: every `init_mongodb()` call
   (sign-up, pipelines, MCP boot) runs `init_beanie`, which ensures the declared
   indexes on all document models. No explicit step needed.
-* Atlas Search indexes (`text_index`, `vector_index` on `knowledge_graph`) are
+* Atlas Search indexes (`text_index`, `vector_index` on `memory`) are
   NOT created here — see step 3. Mind the M0 cap ("maximum number of FTS
   indexes... for this instance size"): don't point test suites at this cluster.
 

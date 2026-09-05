@@ -2,7 +2,7 @@
 
 This module turns a ``(name, type, properties, embedding, resolved,
 dedup_result)`` tuple into a single atomic upsert on the
-``knowledge_graph`` collection. It is the single write-surface for the
+``memory`` collection. It is the single write-surface for the
 extraction pipeline (#012) AND the human-review confirm path (#014), so
 the two cannot drift.
 
@@ -32,9 +32,10 @@ from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
     ExtractorInfo,
+    MEMORY_COLLECTION,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -57,7 +58,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_KG_COLLECTION = "knowledge_graph"
 _MAX_ALIASES = 50
 _MAX_SOURCES = 500
 
@@ -157,7 +157,7 @@ async def add_entity(
             f"got {incoming_confidence!r}"
         )
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     now = datetime.now(tz=UTC)
     normalized = _normalize(name)
     prospective_id = build_node_id(user_id, entity_type, normalized)

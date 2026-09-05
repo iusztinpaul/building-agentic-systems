@@ -20,7 +20,7 @@ from tree.entities.extraction_audit import (
     truncate_raw_row,
     truncate_raw_value,
 )
-from tree.entities.knowledge_graph import ExtractorInfo
+from tree.entities.memory import ExtractorInfo
 
 
 def _now() -> datetime:

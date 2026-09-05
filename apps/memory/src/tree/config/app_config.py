@@ -348,7 +348,35 @@ class MCPConfig(BaseModel):
     max_results: int = 10
 
 
+class MemoryConfig(BaseModel):
+    """The ONE memory-mode switch (ADR-006 decision 5).
+
+    ``mode`` selects how much machinery the memory half of the system runs:
+
+    * ``rag`` — clean -> two-level chunk -> embed children -> load rows, plus
+      parent-document hybrid retrieval. Node rows only: no edges, no LLM
+      entity extraction. (The Chapter-4 system.)
+    * ``graphrag`` — the rag stages PLUS structural edges, LLM entity
+      extraction over parent chunks, resolution, dedup, ``mentions`` edges and
+      graph expansion at retrieval. (What Chapter 8 adds.)
+
+    Defaults to ``graphrag`` so an unchanged checkout behaves exactly as it did
+    before ADR-006. Read ONCE at flow entry / MCP-server boot / CLI start —
+    never per request. Operators flip it without editing YAML through the
+    existing override hatch (``TREE_MEMORY__MODE=rag``, see
+    :func:`_apply_env_overrides`); an unknown value is a hard
+    ``ValidationError`` at load time, never a silent fallback.
+
+    Both modes write the SAME ``memory`` collection
+    (:data:`tree.entities.memory.MEMORY_COLLECTION`) and both start from
+    scratch — there is no migration between them.
+    """
+
+    mode: Literal["rag", "graphrag"] = "graphrag"
+
+
 class AppConfig(BaseModel):
+    memory: MemoryConfig = MemoryConfig()
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()

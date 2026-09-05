@@ -19,7 +19,7 @@ The fan-out axis is document-shards of ONE user. Topology (coordinator path):
 
 1. **Resolve pending docs.** If ``document_ids`` is ``None``, compute the user's
    not-yet-ingested documents: a :class:`~tree.entities.documents.Document` is
-   ingested iff its ``_id`` appears in some ``knowledge_graph`` object's
+   ingested iff its ``_id`` appears in some ``memory`` object's
    ``sources`` array (there is no status flag on ``Document``). An explicit list
    is used verbatim. Empty result ⇒ no-op returning a zero report.
 2. **Partition.** Split into ``min(num_shards, N)`` contiguous, disjoint, balanced
@@ -53,6 +53,7 @@ from typing import Any
 from beanie import PydanticObjectId
 from prefect import get_run_logger, tags
 
+from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.documents import Document
 from tree.config.constants import TAGS_INDEXING
 from tree.memory.indexing.pipeline import memory_indexing
@@ -78,7 +79,6 @@ __all__ = [
     "_resolve_pending_document_ids",
 ]
 
-_KG_COLLECTION = "knowledge_graph"
 # The coordinator dispatches the WORKER deployment (#067) — NOT itself. There is
 # no recursion; the worker has no ``num_shards`` param.
 _WORKER_DEPLOYMENT = "memory-extract-etl-worker/memory-extract-etl-worker"
@@ -139,10 +139,10 @@ async def _resolve_pending_document_ids(
     """Return the user's NOT-yet-ingested document ids, deterministic order.
 
     A :class:`Document` is *ingested* iff its ``_id`` appears in some
-    ``knowledge_graph`` object's ``sources`` array — there is no status flag on
+    ``memory`` object's ``sources`` array — there is no status flag on
     ``Document`` itself. So the pending set is every user-scoped ``Document``
     whose ``_id`` is absent from the union of all ``sources`` arrays in the
-    user's ``knowledge_graph`` rows.
+    user's ``memory`` rows.
 
     Only documents with non-null ``content`` are eligible (mirrors
     ``memory_extract_etl_worker``'s own ``content != None`` fetch — a contentless row
@@ -151,7 +151,7 @@ async def _resolve_pending_document_ids(
     """
 
     # All document ids referenced by any of this user's KG objects.
-    kg = database[_KG_COLLECTION]
+    kg = database[MEMORY_COLLECTION]
     ingested: set[PydanticObjectId] = set()
     cursor = kg.find({"user_id": user_id, "sources": {"$ne": []}}, {"sources": 1})
     async for row in cursor:

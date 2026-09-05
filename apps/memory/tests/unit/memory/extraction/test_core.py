@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 from tree.memory.extraction.core import (
     _MAX_ALIASES,
     _MAX_SOURCES,

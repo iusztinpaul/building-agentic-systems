@@ -63,8 +63,9 @@ from typing import Any
 from beanie import PydanticObjectId
 
 from tree.config.app_config import load_app_config
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
+    MEMORY_COLLECTION,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -76,7 +77,6 @@ from tree.models.base import BaseEmbeddingModel, BaseLLM
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 
 # Maximum slug length. Mirrors PreferenceProperties.statement's
 # max_length=80 with a bit of headroom; ``_id`` strings live forever so
@@ -301,7 +301,7 @@ async def _find_preference_candidates(
     so judge calls stay bounded per extraction batch.
     """
 
-    cursor = database[_KG_COLLECTION].find(
+    cursor = database[MEMORY_COLLECTION].find(
         {
             "user_id": user_id,
             "kind": "node",
@@ -331,7 +331,7 @@ async def _find_fact_candidates(
 ) -> list[dict[str, Any]]:
     """Fetch up to ``cap`` CURRENT fact rows on the same ``(subject, predicate)``."""
 
-    cursor = database[_KG_COLLECTION].find(
+    cursor = database[MEMORY_COLLECTION].find(
         {
             "user_id": user_id,
             "kind": "node",
@@ -510,7 +510,7 @@ async def _write_supersession(
       3. Upsert the ``superseded_by`` edge ``new -> old``.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     properties = dict(new_node.properties or {})
     set_payload: dict[str, Any] = {
         "valid_from": now,
@@ -709,7 +709,7 @@ async def write_self_has_preference_edges(
 
     now = now or datetime.now(tz=UTC)
     self_person_id = build_node_id(user_id, NodeType.PERSON, "self")
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     count = 0
     for raw in raws:
         for node in raw.extracted.nodes:

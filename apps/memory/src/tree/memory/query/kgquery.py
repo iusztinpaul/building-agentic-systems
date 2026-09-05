@@ -1,14 +1,14 @@
-"""Tenant-locked reader for ``knowledge_graph``.
+"""Tenant-locked reader for ``memory``.
 
-Every read of the ``knowledge_graph`` collection in production code MUST
+Every read of the ``memory`` collection in production code MUST
 go through :class:`KGQuery`. The class binds a ``user_id`` in its
 constructor; every method derives its ``user_id`` filter from
 ``self.user_id`` and **silently drops any caller-supplied ``user_id``** in
 ``filter=`` dicts. This eliminates the "forgot to include ``user_id``"
 class of bug at the call-site level.
 
-By convention, raw ``KnowledgeGraphEntry.find(...)`` /
-``KnowledgeGraphEntry.find_one(...)`` calls live only in this module and
+By convention, raw ``MemoryEntry.find(...)`` /
+``MemoryEntry.find_one(...)`` calls live only in this module and
 the ``tree.entities.users`` self-person hook; every other read goes
 through :class:`KGQuery`.
 """
@@ -21,18 +21,17 @@ from typing import Any
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, KnowledgeGraphEntry, NodeType
+from tree.entities.memory import EdgeType, MemoryEntry, NodeType
 from tree.entities.ontology import PreferenceCategory
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 _FACT_TYPE = NodeType.FACT.value
 _PREFERENCE_TYPE = NodeType.PREFERENCE.value
 
 
 class KGQuery:
-    """Tenant-locked reader for ``knowledge_graph``.
+    """Tenant-locked reader for ``memory``.
 
     Every method derives its ``user_id`` filter from ``self.user_id``,
     never from caller-supplied ``filter`` dicts. Passing ``user_id`` in a
@@ -80,7 +79,7 @@ class KGQuery:
         type: NodeType | None = None,
         name: str | None = None,
         filter: dict[str, Any] | None = None,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return every node row matching the supplied predicates.
 
         ``user_id=self.user_id`` and ``kind="node"`` are added unconditionally.
@@ -93,23 +92,23 @@ class KGQuery:
         if name is not None:
             f["name"] = name
         f.update(self._scrub_user_id(filter))
-        return await KnowledgeGraphEntry.find(f).to_list()
+        return await MemoryEntry.find(f).to_list()
 
-    async def find_node_by_id(self, node_id: str) -> KnowledgeGraphEntry | None:
+    async def find_node_by_id(self, node_id: str) -> MemoryEntry | None:
         """Return the node with the given ``_id`` if it belongs to ``self.user_id``."""
 
-        return await KnowledgeGraphEntry.find_one(
+        return await MemoryEntry.find_one(
             {"_id": node_id, "user_id": self.user_id, "kind": "node"}
         )
 
-    async def find_self_person(self) -> KnowledgeGraphEntry | None:
+    async def find_self_person(self) -> MemoryEntry | None:
         """Return the user's ``person:self`` node (``properties.is_active_user=True``).
 
         The flag is the single source of truth for "who am I?" — see
         :mod:`tree.entities.users` for the upsert contract.
         """
 
-        return await KnowledgeGraphEntry.find_one(
+        return await MemoryEntry.find_one(
             {
                 "user_id": self.user_id,
                 "kind": "node",
@@ -128,7 +127,7 @@ class KGQuery:
         source_node_id: str | None = None,
         target_node_id: str | None = None,
         filter: dict[str, Any] | None = None,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return every edge row matching the supplied predicates.
 
         ``user_id=self.user_id`` and ``kind="edge"`` are added unconditionally.
@@ -142,7 +141,7 @@ class KGQuery:
         if target_node_id is not None:
             f["target_node_id"] = target_node_id
         f.update(self._scrub_user_id(filter))
-        return await KnowledgeGraphEntry.find(f).to_list()
+        return await MemoryEntry.find(f).to_list()
 
     # ------------------------------------------------------------------
     # Fact reads (#031) — island-style; no edge traversal
@@ -154,7 +153,7 @@ class KGQuery:
         subject: str | None = None,
         predicate: str | None = None,
         object: str | None = None,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return ``fact`` nodes matching any combination of
         ``(subject, predicate, object)``.
 
@@ -182,14 +181,14 @@ class KGQuery:
             # ``alias="object"`` so the stored document carries
             # ``properties.object``.
             f["properties.object"] = object
-        return await KnowledgeGraphEntry.find(f).to_list()
+        return await MemoryEntry.find(f).to_list()
 
     async def find_facts_by_similarity(
         self,
         query_embedding: list[float],
         *,
         k: int = 5,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Vector-search ``fact`` nodes by embedding similarity.
 
         Reuses the existing Phase-1 Atlas ``$vectorSearch`` plumbing
@@ -214,7 +213,7 @@ class KGQuery:
         # Use the Beanie-managed PyMongo collection so we can issue
         # the ``$vectorSearch`` aggregation directly (Beanie's typed
         # ``find()`` doesn't expose ``$vectorSearch`` natively).
-        collection = KnowledgeGraphEntry.get_pymongo_collection()
+        collection = MemoryEntry.get_pymongo_collection()
         pipeline = [
             {
                 "$vectorSearch": {
@@ -242,9 +241,9 @@ class KGQuery:
             return []
 
         # Re-hydrate to Beanie objects so callers get the typed shape.
-        rows: list[KnowledgeGraphEntry] = []
+        rows: list[MemoryEntry] = []
         for doc in docs:
-            rows.append(KnowledgeGraphEntry.model_validate(doc))
+            rows.append(MemoryEntry.model_validate(doc))
         return rows
 
     # ------------------------------------------------------------------
@@ -254,7 +253,7 @@ class KGQuery:
     async def find_current_preferences(
         self,
         category: PreferenceCategory | None = None,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return preferences that are CURRENTLY valid for ``self.user_id``.
 
         "Current" = ``valid_until is None`` (the row hasn't been
@@ -277,13 +276,13 @@ class KGQuery:
         }
         if category is not None:
             f["properties.category"] = category.value
-        return await KnowledgeGraphEntry.find(f).to_list()
+        return await MemoryEntry.find(f).to_list()
 
     async def find_preferences_at(
         self,
         ts: datetime,
         category: PreferenceCategory | None = None,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return preferences that were valid at the point in time ``ts``.
 
         A row was valid at ``ts`` when ``valid_from <= ts`` AND
@@ -317,14 +316,14 @@ class KGQuery:
         }
         if category is not None:
             f["properties.category"] = category.value
-        return await KnowledgeGraphEntry.find(f).to_list()
+        return await MemoryEntry.find(f).to_list()
 
     async def find_neighbors(
         self,
         node_id: str,
         edge_types: list[EdgeType] | None = None,
         max_hops: int = 1,
-    ) -> list[KnowledgeGraphEntry]:
+    ) -> list[MemoryEntry]:
         """Return every edge incident to ``node_id`` (within ``max_hops``).
 
         ``max_hops`` is enforced via repeated 1-hop traversals so the
@@ -341,7 +340,7 @@ class KGQuery:
 
         frontier: set[str] = {node_id}
         visited_nodes: set[str] = {node_id}
-        all_edges: list[KnowledgeGraphEntry] = []
+        all_edges: list[MemoryEntry] = []
         seen_edge_ids: set[str] = set()
 
         for _ in range(max_hops):
@@ -356,7 +355,7 @@ class KGQuery:
                 ],
                 **type_filter,
             }
-            edges = await KnowledgeGraphEntry.find(hop_filter).to_list()
+            edges = await MemoryEntry.find(hop_filter).to_list()
             next_frontier: set[str] = set()
             for edge in edges:
                 if edge.id in seen_edge_ids:

@@ -1,8 +1,8 @@
 from tree.entities.colours import Colours
 from tree.entities.documents import Document, SourceType
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
-    KnowledgeGraphEntry,
+    MemoryEntry,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -17,8 +17,8 @@ __all__ = [
     "Colours",
     "Document",
     "EdgeType",
-    "KnowledgeGraphEntry",
     "KnowledgeGraphMetaState",
+    "MemoryEntry",
     "NodeType",
     "SourceType",
     "User",

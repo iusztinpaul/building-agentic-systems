@@ -2,7 +2,7 @@ import pytest
 from beanie import PydanticObjectId
 from pymongo.errors import OperationFailure
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import MEMORY_COLLECTION, EdgeType, NodeType
 from tree.memory.query.nl_query import (
     _replace_embedding_placeholder,
     build_nl_query_system_prompt,
@@ -83,7 +83,7 @@ class TestValidatePipeline:
             {"$match": {"kind": "node"}},
             {
                 "$lookup": {
-                    "from": "knowledge_graph",
+                    "from": MEMORY_COLLECTION,
                     "pipeline": [{"$match": {"kind": "edge"}}],
                     "as": "x",
                 }
@@ -100,7 +100,7 @@ class TestValidatePipeline:
             {"$match": {"kind": "node"}},
             {
                 "$lookup": {
-                    "from": "knowledge_graph",
+                    "from": MEMORY_COLLECTION,
                     "localField": "_id",
                     "foreignField": "source_node_id",
                     "as": "edges",
@@ -130,7 +130,7 @@ class TestValidatePipeline:
                     "leaked": [
                         {
                             "$lookup": {
-                                "from": "knowledge_graph",
+                                "from": MEMORY_COLLECTION,
                                 "pipeline": [{"$match": {"kind": "edge"}}],
                                 "as": "all",
                             }
@@ -148,7 +148,7 @@ class TestValidatePipeline:
     def test_unionwith_stage_rejected(self):
         """``$unionWith`` carries a sub-pipeline that targets a collection.
 
-        Even if the union targets ``knowledge_graph`` itself, the inner
+        Even if the union targets ``memory`` itself, the inner
         ``pipeline`` is not walked by ``_inject_user_id``, so the union would
         merge in documents from every tenant. Belt-and-braces: ``$unionWith``
         was already absent from the allow-list, but the regression test
@@ -159,7 +159,7 @@ class TestValidatePipeline:
             {"$match": {"kind": "node"}},
             {
                 "$unionWith": {
-                    "coll": "knowledge_graph",
+                    "coll": MEMORY_COLLECTION,
                     "pipeline": [{"$match": {"kind": "edge"}}],
                 }
             },
@@ -173,7 +173,7 @@ class TestValidatePipeline:
             {"$match": {"kind": "node"}},
             {
                 "$graphLookup": {
-                    "from": "knowledge_graph",
+                    "from": MEMORY_COLLECTION,
                     "startWith": "$_id",
                     "connectFromField": "target_node_id",
                     "connectToField": "source_node_id",
@@ -202,6 +202,32 @@ class TestValidatePipeline:
 
         with pytest.raises(PipelineValidationError, match="from"):
             validate_pipeline(pipeline, _USER_ID)
+
+    def test_graphlookup_old_collection_name_raises(self):
+        """The pre-ADR-006 name is now just a wrong collection.
+
+        A model (or a stale prompt) that emits ``from: "knowledge_graph"`` must
+        be rejected with a message naming the collection it should have used,
+        never silently joined against a collection that no longer exists.
+        """
+
+        pipeline = [
+            {"$match": {"kind": "node"}},
+            {
+                "$graphLookup": {
+                    "from": "knowledge_graph",
+                    "startWith": "$_id",
+                    "connectFromField": "target_node_id",
+                    "connectToField": "source_node_id",
+                    "as": "connected",
+                }
+            },
+        ]
+
+        with pytest.raises(PipelineValidationError) as excinfo:
+            validate_pipeline(pipeline, _USER_ID)
+
+        assert "'from' must be 'memory', got 'knowledge_graph'" in str(excinfo.value)
 
     def test_limit_injected_when_missing(self):
         pipeline = [{"$match": {"kind": "node"}}]
@@ -403,9 +429,12 @@ class TestBuildSystemPrompt:
         assert "__EMBED__" in prompt
 
     def test_contains_collection_name(self):
+        """The prompt names the renamed ``memory`` collection (ADR-006)."""
+
         prompt = build_nl_query_system_prompt()
 
-        assert "knowledge_graph" in prompt
+        assert f"`{MEMORY_COLLECTION}`" in prompt
+        assert "knowledge_graph" not in prompt
 
     def test_contains_index_info(self):
         prompt = build_nl_query_system_prompt()

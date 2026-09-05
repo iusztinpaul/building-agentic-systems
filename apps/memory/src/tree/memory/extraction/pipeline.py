@@ -53,9 +53,10 @@ from tree.entities.extraction_audit import (
     truncate_raw_row,
     truncate_raw_value,
 )
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
     ExtractorInfo,
+    MEMORY_COLLECTION,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -128,7 +129,6 @@ from tree.observability import (
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 
 # Tag every extraction task span as ingestion telemetry. Tasks open their span
 # explicitly via :func:`tree.observability.span`, attaching to the flow's trace
@@ -839,7 +839,7 @@ async def _resolve_entities(
     # to the run's ``user_id`` — cross-tenant rows are invisible to
     # resolution.
     for etype, entity_pairs in by_type.items():
-        collection = database[_KG_COLLECTION]
+        collection = database[MEMORY_COLLECTION]
         cursor = collection.find(
             {
                 "user_id": user_id,
@@ -1168,7 +1168,7 @@ async def _apply_writes(
         structural_edges.extend(raw.chunked.structural.edges)
 
     if structural_node_ops:
-        await database[_KG_COLLECTION].bulk_write(structural_node_ops, ordered=False)
+        await database[MEMORY_COLLECTION].bulk_write(structural_node_ops, ordered=False)
 
     # ----- LLM-extracted entities → add_entity ----------------------------------
     for raw in raws:
@@ -1272,7 +1272,7 @@ async def _apply_writes(
         summary.edges_written += 1
 
     if edge_ops:
-        await database[_KG_COLLECTION].bulk_write(edge_ops, ordered=False)
+        await database[MEMORY_COLLECTION].bulk_write(edge_ops, ordered=False)
 
     log.info(
         "apply_writes: nodes_written=%d edges_written=%d same_as_emitted=%d "

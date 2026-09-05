@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 from tree.memory.consolidation import dream as dream_mod
 from tree.memory.consolidation.dream import (
     _collect_dream_candidates,
@@ -58,7 +58,7 @@ class _FakeCursor:
 
 
 class _FakeCollection:
-    """Minimal stand-in for the ``knowledge_graph`` async collection.
+    """Minimal stand-in for the ``memory`` async collection.
 
     ``find`` returns the seeded nodes that satisfy the watermark/embedding
     predicate the dream sweep issues; ``find_one`` answers the SAME_AS

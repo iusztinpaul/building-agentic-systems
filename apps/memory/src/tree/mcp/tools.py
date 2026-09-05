@@ -34,7 +34,7 @@ from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 
 # dashboard_app: side-effect import — registers the custom-HTML dashboard
 # (memory_dashboard tool + ui:// resource).

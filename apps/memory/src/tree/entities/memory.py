@@ -1,3 +1,14 @@
+"""The ``memory`` collection: ONE polymorphic row model for BOTH memory modes.
+
+Renamed from ``knowledge_graph`` by ADR-006 (which supersedes ADR-001 decision 1
+on the collection NAME only). There is no compat alias for the old module or
+class name — every import site was updated.
+
+:data:`MEMORY_COLLECTION` is the single spelling of the collection name; no
+module keeps a private copy. :data:`RAG_NODE_TYPES` is the single, explicit
+place that says which rows the RAG layer writes.
+"""
+
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -35,10 +46,10 @@ class NodeType(StrEnum):
     Members map 1:1 to registered node-type names — **except** ``TASK``,
     which is retained as a **legacy alias** after #028. The string
     ``"task"`` is no longer registered as a top-level node type; it's
-    re-routed by :class:`KnowledgeGraphEntry`'s ``mode="before"``
+    re-routed by :class:`MemoryEntry`'s ``mode="before"``
     validator to ``(type="object", subtype="task")``. Reading the enum
     member in consumer code still works (StrEnum -> str), but any
-    ``KnowledgeGraphEntry`` constructed with ``type=NodeType.TASK``
+    ``MemoryEntry`` constructed with ``type=NodeType.TASK``
     silently re-shapes to the new POLE+O storage form.
 
     New code should reference type names as strings or read
@@ -92,14 +103,14 @@ class EdgeType(StrEnum):
 
 
 class ExtractorInfo(BaseModel):
-    """Provenance metadata for an LLM-extracted ``KnowledgeGraphEntry``.
+    """Provenance metadata for an LLM-extracted ``MemoryEntry``.
 
     Stored as an **embedded** Pydantic model on every row the extraction
     pipeline writes from an LLM emission. Structural rows
     (``document``, ``chunk``) leave the column ``None`` per `plan.md:210`.
 
     A query like
-    ``db.knowledge_graph.find({"extractor.name": "gemini-2.5-pro"})`` then
+    ``db.memory.find({"extractor.name": "gemini-2.5-pro"})`` then
     surfaces every LLM-extracted row, which is the audit signal `plan.md`
     calls out at line 208.
     """
@@ -164,14 +175,41 @@ def build_edge_id(
     return f"{source_node_id}|{edge_type}|{target_node_id}"
 
 
-# --- Single collection (knowledge_graph) ---
+# --- Single collection (memory) ---
 # Nodes and edges coexist with string _id values:
 #   - Nodes: _id = "{user_id}:type:name" (str), e.g. "65f...:person:alice"
 #   - Edges: _id = "source|type|target" (str), source/target carry the user prefix.
 # Upserted directly during extraction (no separate log collection).
 
+MEMORY_COLLECTION = "memory"
+"""Name of the ONE collection holding every memory row, in BOTH memory modes.
 
-class KnowledgeGraphEntry(BeanieDocument):
+The single source of truth for the string: :class:`MemoryEntry`'s
+``Settings.name``, every raw-pymongo reader (``database[MEMORY_COLLECTION]``),
+every ``$lookup`` / ``$graphLookup`` ``from:`` value and the ``nl_query``
+system prompt all read THIS constant. Renamed from ``knowledge_graph``
+(ADR-006 decision 1); ``knowledge_graph_meta_state`` (the graph-only dream
+watermark) intentionally keeps its own name.
+"""
+
+RAG_NODE_TYPES: frozenset[str] = frozenset({"document", "chunk"})
+"""The closed set of node types the RAG layer writes (ADR-006 decision 1).
+
+The rag/graph split is by MODE, not by row: every row the RAG layer writes (a
+``document`` root, its parent chunks and its child chunks) is ALSO a first-class
+graph node in ``graphrag``, with ``part_of`` / ``next`` edges hung off it. So
+there are no per-mode ODM subclasses (ADR-006 rejected that hierarchy) — this
+constant is the single, explicit place that says "these rows are the RAG rows;
+every other node type, and every ``kind: edge`` row, is graph".
+
+Both members are structural (``llm_extractable=False`` in ``NODE_REGISTRY``):
+the RAG loader builds them deterministically, the LLM never emits them.
+Consumed by the loader, the child-chunk search filter, and the "rag mode never
+writes anything else" test.
+"""
+
+
+class MemoryEntry(BeanieDocument):
     id: str
     # No standalone single-key index on ``user_id``: every compound
     # index in ``Settings.indexes`` below (and the dynamic indexes
@@ -310,12 +348,12 @@ class KnowledgeGraphEntry(BeanieDocument):
         return out
 
     @model_validator(mode="after")
-    def _check_type_against_registry(self) -> "KnowledgeGraphEntry":
+    def _check_type_against_registry(self) -> "MemoryEntry":
         """Phase-3 #027: enforce that ``type`` matches a registered
         node/edge type for the given ``kind``.
 
         Import lazily inside the validator to keep
-        ``tree.entities.knowledge_graph`` free of any top-level
+        ``tree.entities.memory`` free of any top-level
         dependency on ``tree.entities.ontology`` (the latter imports
         ``NodeType`` / ``EdgeType`` from here — a top-level import
         would be a cycle).
@@ -340,7 +378,7 @@ class KnowledgeGraphEntry(BeanieDocument):
         return self
 
     @model_validator(mode="after")
-    def _check_subtype_against_registry(self) -> "KnowledgeGraphEntry":
+    def _check_subtype_against_registry(self) -> "MemoryEntry":
         """Phase-3 #028: enforce ``subtype`` is in the parent's closed set.
 
         Loose contract at construction time:
@@ -383,7 +421,7 @@ class KnowledgeGraphEntry(BeanieDocument):
         return self
 
     @model_validator(mode="after")
-    def _check_related_to_semantic(self) -> "KnowledgeGraphEntry":
+    def _check_related_to_semantic(self) -> "MemoryEntry":
         """Phase-3 #029: enforce ``related_to`` umbrella semantics.
 
         Contract (per the task spec):
@@ -465,7 +503,7 @@ class KnowledgeGraphEntry(BeanieDocument):
         return self
 
     class Settings:
-        name = "knowledge_graph"
+        name = MEMORY_COLLECTION
         indexes = [
             # user_id-prepended compound indexes for fast filtered reads.
             # The dynamic indexes (kind_source_node, kind_target_node,

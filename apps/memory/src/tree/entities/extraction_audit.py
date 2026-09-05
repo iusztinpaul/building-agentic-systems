@@ -33,7 +33,7 @@ from beanie import PydanticObjectId
 from pydantic import Field
 from pymongo import IndexModel
 
-from tree.entities.knowledge_graph import ExtractorInfo
+from tree.entities.memory import ExtractorInfo
 
 
 # Cap on the raw-row / raw-value payloads stored in the audit rows.
@@ -77,7 +77,7 @@ class ExtractionRejection(BeanieDocument):
     """One whole-row rejection from the envelope validator (#030).
 
     The envelope validator drops the row entirely (no
-    :class:`KnowledgeGraphEntry` is written); this Document carries
+    :class:`MemoryEntry` is written); this Document carries
     enough provenance to investigate why.
     """
 
@@ -132,7 +132,7 @@ class ExtractionRejection(BeanieDocument):
 class ExtractionDroppedField(BeanieDocument):
     """One per-field drop from the lenient field-level validator (#030).
 
-    The row itself was written to ``knowledge_graph``; only the named
+    The row itself was written to ``memory``; only the named
     property was dropped (either unknown to the schema or failed type
     validation). One Document is written per dropped field; an
     emission with three bad fields produces three rows.

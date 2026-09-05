@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.review.core import _decide_winner, find_pending_duplicates
 from tree.memory.review.types import (
     MergeStrategy,

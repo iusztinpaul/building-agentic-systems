@@ -19,14 +19,13 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient
 
+from tree.entities.memory import MEMORY_COLLECTION
 from tree.config.app_config import app_config
 from tree.memory.types import QueryResult
 from tree.models.base import BaseEmbeddingModel
 from tree.observability import track
 
 logger = logging.getLogger(__name__)
-
-_KG_COLLECTION = "knowledge_graph"
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +53,7 @@ async def search_nodes(
     top_k = top_k if top_k is not None else app_config.query.top_k
     rrf_k = app_config.query.rrf_k
     db = client[database]
-    collection = db[_KG_COLLECTION]
+    collection = db[MEMORY_COLLECTION]
 
     vector_results = await _vector_search(
         collection, query, embedding_model, user_id=user_id, limit=top_k
@@ -112,7 +111,7 @@ async def _text_search(
     user_id: PydanticObjectId,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Run $text query on the knowledge_graph collection.
+    """Run $text query on the memory collection.
 
     Uses a standard MongoDB text index (not Atlas Search). ``user_id`` is
     folded into the ``$match`` so cross-tenant hits never leak.
@@ -194,7 +193,7 @@ async def expand_graph(
 
     max_hops = max_hops if max_hops is not None else app_config.query.max_hops
     db = client[database]
-    collection = db[_KG_COLLECTION]
+    collection = db[MEMORY_COLLECTION]
 
     if not node_ids or max_hops == 0:
         all_nodes: list[dict[str, Any]] = []
@@ -217,7 +216,7 @@ async def expand_graph(
         # Outgoing: seed._id → edge.source_node_id, follow edge.target_node_id
         {
             "$graphLookup": {
-                "from": _KG_COLLECTION,
+                "from": MEMORY_COLLECTION,
                 "startWith": "$_id",
                 "connectFromField": "target_node_id",
                 "connectToField": "source_node_id",
@@ -229,7 +228,7 @@ async def expand_graph(
         # Incoming: seed._id → edge.target_node_id, follow edge.source_node_id
         {
             "$graphLookup": {
-                "from": _KG_COLLECTION,
+                "from": MEMORY_COLLECTION,
                 "startWith": "$_id",
                 "connectFromField": "source_node_id",
                 "connectToField": "target_node_id",
@@ -330,7 +329,7 @@ async def fetch_full_graph(
     so it never returns another tenant's rows.
     """
 
-    collection = client[database][_KG_COLLECTION]
+    collection = client[database][MEMORY_COLLECTION]
     nodes = [doc async for doc in collection.find({"user_id": user_id, "kind": "node"})]
     edges = [doc async for doc in collection.find({"user_id": user_id, "kind": "edge"})]
     return QueryResult(nodes=nodes, edges=edges)

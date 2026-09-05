@@ -164,7 +164,7 @@ make memory-serve-workflows &   # in-process worker; (re)serve to load local cod
 
 ```bash
 make memory-run-data-pipeline              # ingests the default sources (sources/backfill.yaml + sources/listen.yaml) → documents
-make memory-run-memory-pipeline # documents → LLM → nodes + edges → knowledge_graph collection
+make memory-run-memory-pipeline # documents → LLM → nodes + edges → memory collection
 make memory-run-indexing-pipeline   # reverse edges, embeddings, search indexes
 make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
 
@@ -204,7 +204,7 @@ The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory`
 http://127.0.0.1:4200/dashboard
 ```
 
-**MongoDB Compass** — inspect the `documents` and `knowledge_graph` collections:
+**MongoDB Compass** — inspect the `documents` and `memory` collections:
 
 ```
 mongodb://tree:tree@localhost:27017/?directConnection=true&authSource=admin

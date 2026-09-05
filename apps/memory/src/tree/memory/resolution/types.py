@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 
 
 def _normalize(name: str) -> str:

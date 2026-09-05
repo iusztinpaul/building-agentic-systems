@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import KnowledgeGraphEntry
+from tree.entities.memory import MemoryEntry
 from tree.entities.ontology import PreferenceCategory
 from tree.memory.query.kgquery import KGQuery
 
@@ -24,7 +24,7 @@ def _patch_find(mocker, return_value=None):
     cursor = MagicMock(name="cursor")
     cursor.to_list = AsyncMock(return_value=return_value or [])
     find_mock = MagicMock(name="find", return_value=cursor)
-    mocker.patch.object(KnowledgeGraphEntry, "find", find_mock)
+    mocker.patch.object(MemoryEntry, "find", find_mock)
     return find_mock
 
 

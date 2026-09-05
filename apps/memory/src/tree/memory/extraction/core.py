@@ -5,7 +5,7 @@ Pure functions (aside from the LLM call and DB writes) that:
 1. Chunk a document into token-bounded pieces.
 2. Ask an LLM to extract nodes & edges per chunk.
 3. Build structural entries (PART_OF, NEXT, MENTIONS) deterministically.
-4. Upsert the result to the ``knowledge_graph`` collection.
+4. Upsert the result to the ``memory`` collection.
 
 Resolution + deduplication used to live here (``normalize_nodes`` and four
 helpers); those have moved to :mod:`tree.memory.resolution` (composite chain),
@@ -26,8 +26,9 @@ from beanie import PydanticObjectId
 from pymongo import UpdateOne
 
 from tree.config.app_config import app_config
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
+    MEMORY_COLLECTION,
     NodeType,
     build_edge_id,
     build_node_id,
@@ -49,7 +50,6 @@ from tree.models.base import BaseLLM
 
 logger = logging.getLogger(__name__)
 
-_KG_COLLECTION = "knowledge_graph"
 _MAX_ALIASES = 50
 _MAX_SOURCES = 500
 
@@ -548,7 +548,7 @@ def build_structural_entries(
 
 
 # ---------------------------------------------------------------------------
-# 4. Persistence (upsert to knowledge_graph)
+# 4. Persistence (upsert to memory)
 # ---------------------------------------------------------------------------
 #
 # Resolution + dedup live in dedicated modules (``tree.memory.resolution``,
@@ -565,7 +565,7 @@ async def upsert_graph_entries(
     database: str,
     client: Any,
 ) -> int:
-    """Upsert extraction results directly to the knowledge_graph collection.
+    """Upsert extraction results directly to the memory collection.
 
     Uses aggregation pipeline updates to merge properties (not overwrite)
     and accumulate aliases and sources.
@@ -574,7 +574,7 @@ async def upsert_graph_entries(
     """
 
     now = datetime.now(tz=UTC)
-    collection = client[database][_KG_COLLECTION]
+    collection = client[database][MEMORY_COLLECTION]
     ops: list[UpdateOne] = []
 
     for node in result.nodes:

@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.extraction.add_entity import add_entity
 from tree.memory.extraction.dedup import (

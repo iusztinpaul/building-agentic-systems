@@ -8,6 +8,7 @@ from tree.config.app_config import (
     AppConfig,
     ConcurrencyConfig,
     DreamConfig,
+    MemoryConfig,
     YouTubeConfig,
     _DEFAULT_CONFIG_PATH,
     load_app_config,
@@ -526,3 +527,74 @@ class TestExtractionConcurrencyKnobs:
         config = load_app_config(custom)
 
         assert config.extraction.doc_concurrency == 3
+
+
+class TestMemoryModeConfig:
+    """ADR-006 §5 / #105: the ONE ``memory.mode`` switch (``rag | graphrag``).
+
+    Nothing branches on it yet — these tests pin that it is *readable*, that an
+    unchanged checkout keeps today's behaviour (``graphrag``), and that the
+    existing ``TREE_<SECTION>__<KEY>`` hatch reaches it with no new mechanism.
+    """
+
+    def test_memory_mode_is_graphrag_in_frozen_config(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
+
+        assert config.memory.mode == "graphrag"
+
+    def test_memory_mode_is_graphrag_in_default_yaml(self):
+        """The real, human-tuned ``configs/default.yaml`` ships the graph mode,
+        so an unchanged checkout behaves exactly as before ADR-006."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.memory.mode == "graphrag"
+
+    def test_memory_mode_defaults_to_graphrag_when_section_absent(self, tmp_path):
+        custom = tmp_path / "no_memory.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.memory.mode == "graphrag"
+
+    def test_typed_default_memory_mode_is_graphrag(self):
+        assert MemoryConfig().mode == "graphrag"
+
+    def test_memory_mode_rag_loaded_from_yaml(self, tmp_path):
+        custom = tmp_path / "memory.yaml"
+        custom.write_text("memory:\n  mode: rag\n")
+
+        config = load_app_config(custom)
+
+        assert config.memory.mode == "rag"
+
+    def test_memory_mode_env_override_selects_rag(self, tmp_path, monkeypatch):
+        """``TREE_MEMORY__MODE=rag`` flips the mode without editing YAML."""
+
+        custom = tmp_path / "memory.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__MODE", "rag")
+
+        config = load_app_config(custom)
+
+        assert config.memory.mode == "rag"
+
+    def test_unknown_memory_mode_raises_naming_both_allowed_values(
+        self, tmp_path, monkeypatch
+    ):
+        """A mistyped mode fails the load loudly and tells the operator the two
+        allowed values, rather than silently falling back to a default."""
+
+        custom = tmp_path / "memory.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__MODE", "hybrid")
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        message = str(excinfo.value)
+        assert "memory" in message
+        assert "mode" in message
+        assert "'rag'" in message
+        assert "'graphrag'" in message

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from tree.entities.knowledge_graph import NodeType
+from tree.entities.memory import NodeType
 
 if TYPE_CHECKING:
     from tree.entities.users import User
