@@ -1,5 +1,13 @@
 """
-Query and visualize the materialized knowledge graph.
+Query the memory — parent-document search in ``rag``, graph search in ``graphrag``.
+
+Reads ``memory.mode`` ONCE at start (ADR-006 decision 5) and branches:
+
+* ``graphrag`` (default) — unchanged: query → seeds → graph expansion → HTML
+  graph; no query → the whole graph.
+* ``rag`` — there are no edges, so there is nothing to draw. With a query the
+  command prints the ranked **Parent chunk**s as text and writes no file;
+  without one it refuses and exits 1.
 
 Every read is scoped to a single ``user_id`` (#020). It defaults to the
 current-session user; override with ``USER_ID=<ObjectId>`` or
@@ -7,10 +15,10 @@ current-session user; override with ``USER_ID=<ObjectId>`` or
 :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Usage:
-    # Visualize the entire graph for the current-session user
+    # Visualize the entire graph for the current-session user (graphrag)
     make memory-query-graph
 
-    # Query and visualize matching subgraph
+    # Query: a subgraph in graphrag, ranked parent chunks in rag
     make memory-query-graph QUERY="What does Paul work on?"
 
     # Override the user by id or handle
@@ -19,25 +27,65 @@ Usage:
     # Direct invocation
     uv run python scripts/query_graph.py --user-identifier paul --query "MLOps" --top-k 5
 
-    # Pin the output file (default: .tree/graphs/<query-slug>-<UTC-stamp>.html)
+    # Pin the output file (graphrag only; default: .tree/graphs/<slug>-<stamp>.html)
     uv run python scripts/query_graph.py --query "MLOps" -o /tmp/mlops.html --no-open
 """
 
 import asyncio
 import logging
+import textwrap
 
 import click
 
-from tree.entities.sessions import resolve_user_id
 from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
-from tree.memory.query.core import fetch_full_graph, query_memory
+from tree.entities.sessions import resolve_user_id
+from tree.memory.graph.retrieval import fetch_full_graph, query_memory
 from tree.memory.query.visualize import visualize_query_result
+from tree.memory.rag.retrieval import retrieve_parents
+from tree.memory.rag.types import RetrievalResult, RetrievedParent
 from tree.models.get_model import get_embedding_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+RAG_FULL_GRAPH_UNAVAILABLE = (
+    "Full-graph visualization is unavailable in rag mode (memory.mode=rag): "
+    'there are no edges. Pass QUERY="..." for parent-document search or switch '
+    "to graphrag."
+)
+
+# How much of a parent to show per hit. A parent is ~4096 tokens; the terminal
+# is a ranking view, not a reader, so it prints an excerpt and the operator
+# opens the source if the hit looks right.
+_EXCERPT_CHARS = 300
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_parent_block(parent: RetrievedParent) -> str:
+    """Render one retrieved parent as a score / title / heading-path block."""
+
+    title = parent.document.title or parent.document.source_uri or "(untitled)"
+    heading = " > ".join(parent.heading_path)
+    header = f"[{parent.score:.3f}] {title}"
+    if heading:
+        header = f"{header} — {heading}"
+    excerpt = textwrap.indent(parent.content[:_EXCERPT_CHARS], "    ")
+    return f"{header}\n{excerpt}\n    matched children: {len(parent.matched_children)}"
+
+
+def _print_parents(result: RetrievalResult) -> None:
+    if not result.parents:
+        click.echo("No results.")
+        return
+    for parent in result.parents:
+        click.echo(_format_parent_block(parent))
+        click.echo("")
 
 
 async def _run(
@@ -49,12 +97,32 @@ async def _run(
     output: str | None,
     no_open: bool,
 ) -> None:
+    mode = app_config.memory.mode
+    if mode == "rag" and not query:
+        click.echo(RAG_FULL_GRAPH_UNAVAILABLE)
+        raise SystemExit(1)
+
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
     database = settings.mongo.mongo_initdb_database
     user_id = await resolve_user_id(user_id, user_identifier)
+
+    if mode == "rag":
+        logger.info(
+            "Retrieving parents for user_id=%s: %r (top_k=%d)", user_id, query, top_k
+        )
+        result = await retrieve_parents(
+            client,
+            database,
+            query,
+            get_embedding_model(),
+            user_id,
+            top_k=top_k,
+        )
+        _print_parents(result)
+        return
 
     if query:
         logger.info(
@@ -95,8 +163,8 @@ async def _run(
     "--user-id",
     default=None,
     help=(
-        "Override the tenant whose KG to query by Mongo ObjectId. Defaults to "
-        "the current-session user; also reads the ``USER_ID`` env var."
+        "Override the tenant whose memory to query by Mongo ObjectId. Defaults "
+        "to the current-session user; also reads the ``USER_ID`` env var."
     ),
 )
 @click.option(
@@ -111,28 +179,28 @@ async def _run(
     "--query",
     "-q",
     default=None,
-    help="Search query. Omit to visualize the full graph for ``--user-id``.",
+    help="Search query. Omit to visualize the full graph (graphrag only).",
 )
 @click.option(
     "--top-k",
     "-k",
     default=app_config.query.top_k,
     show_default=True,
-    help="Number of seed nodes to retrieve.",
+    help="Number of seed nodes (graphrag) or parent chunks (rag) to retrieve.",
 )
 @click.option(
     "--max-hops",
     "-h",
     default=app_config.query.max_hops,
     show_default=True,
-    help="Max hops for graph expansion.",
+    help="Max hops for graph expansion. Ignored in rag mode (no edges).",
 )
 @click.option(
     "--output",
     "-o",
     default=None,
     help=(
-        "Output HTML file. Defaults to "
+        "Output HTML file (graphrag only). Defaults to "
         ".tree/graphs/<query-slug>-<UTC-stamp>.html under the repo root."
     ),
 )
@@ -151,7 +219,7 @@ def main(
     output: str | None,
     no_open: bool,
 ) -> None:
-    """Query and visualize the knowledge graph for the resolved user."""
+    """Query the memory for the resolved user, in the configured memory mode."""
 
     asyncio.run(_run(user_id, user_identifier, query, top_k, max_hops, output, no_open))
 

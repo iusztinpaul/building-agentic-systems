@@ -48,7 +48,7 @@ from tree.mcp.graph_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.mcp.deep_search import write_deep_search_results
 from tree.mcp.server import mcp
 from tree.online import dispatch_online_pipeline
-from tree.memory.query.core import query_memory as structured_query_memory
+from tree.memory.graph.retrieval import query_memory as structured_query_memory
 from tree.memory.query.nl_query import execute_nl_query
 from tree.memory.query.visualize import to_graph_payload
 from tree.memory.review import (

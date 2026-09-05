@@ -58,8 +58,8 @@ from mcp import types
 
 from tree.config.paths import GRAPHS_DIR
 from tree.mcp.server import mcp
-from tree.memory.query.core import fetch_full_graph
-from tree.memory.query.core import query_memory as structured_query_memory
+from tree.memory.graph.retrieval import fetch_full_graph
+from tree.memory.graph.retrieval import query_memory as structured_query_memory
 from tree.memory.query.visualize import (
     _render_graph_file,
     _resolve_static,
