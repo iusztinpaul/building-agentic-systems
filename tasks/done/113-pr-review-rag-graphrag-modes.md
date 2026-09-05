@@ -18,8 +18,8 @@ The Blocker is small and mechanical; everything else reviewed is sound — see t
 
 - [x] Blocker 1: `tree.memory.embedding_text.embed_node_texts` is deleted (or has a production caller). `grep -rn "embed_node_texts" apps/memory/src apps/memory/scripts` returns nothing; the four `embed_node_texts` tests in `apps/memory/tests/unit/memory/test_embedding_text.py` (`# embed_node_texts` section, ~L170 onwards) are retargeted to `embed_texts` (the batching / caps / positional-alignment claims are the same) or dropped where they duplicate `embed_texts` coverage; the module docstring of `test_embedding_text.py` no longer names `embed_node_texts`.
 - [x] Tester re-runs full QA suite (`make memory-format-check && make memory-lint-check && make memory-tests`) and PASSES.
-- [ ] PA re-runs acceptance review and ACCEPTS.
-- [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
+- [x] PA re-runs acceptance review and ACCEPTS.
+- [x] PR Reviewer re-runs and reports `NO BLOCKERS`.
 
 ## Blockers (detail)
 
@@ -267,3 +267,39 @@ $ grep -rn "embed_node_texts\|upsert_graph_entries" apps/memory/src apps/memory/
   its own task, not a blocker here.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-05 — Acceptance Review (round 3, light re-confirmation)
+
+**VERDICT: ACCEPT** (stands; feature-level verdict for PR #41, `rag-graphrag-modes`, HEAD `bc8339c`)
+
+Read `git diff 08cd632..bc8339c` (20 files). The only two user-facing behaviour changes are the ones this rollup set out to make, and neither alters what I accepted at round 2:
+
+1. `_outside_fences` (Nit 8 — my own round-2 follow-up): the closing fence line's `"\n"` is handed back to the outside part, so a 3+ newline run right after a fence collapses to ONE blank line, exactly as after a paragraph. Verified safe from the code, not just the tests: `_BLANK_RUN_RE = \n{3,}` → `"\n\n"` always keeps ≥2 newlines and `_INTRA_LINE_WS_RE = [ \t]+` never touches a newline, so the handed-back terminator always survives and the fence line still ends where it did; the fenced body is never inside the rewritten slice. Unclosed-fence-at-EOF and fence-line-at-EOF-without-newline both behave (hand-back is guarded by `text[end - 1] == "\n"`). Idempotence/determinism covered by the new `_FIXTURES` entry; Tester's before/after split on real docs showed boundaries move ONLY where the collapse changed the input. From the user's side this is a consistency fix in the **Clean step**, not a new behaviour.
+2. `scripts/query_graph.py` now calls `init_logger()` (Nit 3): the CLI's log lines adopt the project format (AGENTS.md entry-point rule); `--help` and a live rag query both verified by the Tester. No change to the printed retrieval output (`[score] title — heading`, excerpt, `matched children: N`, `No results.`).
+
+Everything else is non-behavioural: two dead functions gone (`embed_node_texts`, `upsert_graph_entries` — live alias/source caps remain in `graph/add_entity.py`), tests retargeted/added with no claim dropped, a `dedup.py` comment that now says what ADR-006 §2 already says (`merged_into` IS a filter path; exclusion stays a post-`$match` because `null` is not filterable).
+
+**Copy / terminology vs `docs/glossary.md`** — all touched README and finetuning-spec lines use canonical terms: `_id = "{user_id}:type:name"` matches `build_node_id`; the mongosh drop line targets the **`memory` collection** via `getSiblingDB("tree")` with real env vars (byte-identical to `run-pipelines-e2e`); the finetuning-spec's Side note A reads **Clean step** → `split_document` (recursive **Parent chunk** / **Child chunk**, `cl100k_base` 4096/0 and 256/32 — matches ADR-006 §6 and `configs/default.yaml`) → "one LLM call per **parent** chunk", "child chunks carry the embedding", "both memory modes (ADR-006)"; the driver snippet calls `split_document(clean_text(text), app_config.memory.chunking)`, which matches the real signature `split_document(text, config: ChunkingConfig)` and `AppConfig.memory.chunking`.
+
+**Documentation discipline** — ADR-006 needs no edit: the fence fix lives inside decision 7 (the Clean step's normalisation rules, unchanged as a decision), the dedup comment converged ONTO §2, and the dead-code deletions are the same spirit as §8's `run_extraction_for_documents` removal; no new datastore, dependency or auth boundary. `docs/glossary.md` unchanged and correctly so — no new domain concept.
+
+**Not blocking — follow-up, out of this rollup's scope**
+- `docs/notes/slm-extraction-finetuning-spec.md` "End-to-end driver" still has a `mongoexport --uri "$MONGO_URI"` comment line (unchanged context, not part of Nit 5). Same phantom variable Nit 4 removed from the README; fix when the notes doc is next touched.
+
+Hand off to the PR Reviewer for the `NO BLOCKERS` re-run.
+
+### [PR Reviewer] 2026-09-05 23:20 — Re-review (round 2)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed `git diff 08cd632..bc8339c`: 20 files, +517/−359 (11 code/doc files + 9 task archives). Blockers: 0; Nits: 2 (both pre-existing, both out of this diff's modified paths).
+
+- **Blocker 1 fixed** — `embed_node_texts` deleted; `grep -rn "embed_node_texts\|upsert_graph_entries"` empty outside `tasks/`; `TestEmbedTexts` keeps the single-call / empty-input / 1000-input-cap claims verbatim (driven through `node_to_embedding_text` → `embed_texts`) and adds one control-char case. Module docstring names the real two-function API.
+- **Nits 1–8 fixed as specified**, each checked against the code rather than the log: `upsert_graph_entries` + its `_MAX_*` copies + Mongo imports gone and the only deleted tests (`TestUpsertGraphEntriesArrayCaps`, 3) had that dead function as their sole subject; the `_document_meta` fallback test seeds parent rows only (so `document_rows.get` really returns `None`), asserts `title`/`source_uri`/`source_type` off the chunk row and the WARNING naming `doc1` + `p1`; `query_graph.py` calls `init_logger()` at module level; README `_id` line matches `build_node_id` (`"{user_id}:{type}:{name}"`) and the drop snippet matches `run-pipelines-e2e` line 16 with real `.env.example` vars; finetuning spec imports (`_SYSTEM_PROMPT`, `split_document(text, config)`, `clean_text`, `app_config.memory.chunking`) resolve and "4096/0, 256/32" matches `configs/default.yaml`; `dedup.py` comment now matches `_VECTOR_INDEX_FILTER_PATHS` (5 paths incl. `merged_into`).
+- **`_outside_fences` fix is safe** — hand-back is guarded by `text[end - 1] == "\n"` and both rewrites (`\n{3,}`→`\n\n`, `[ \t]+`→` `) preserve at least one newline. Probed `clean_text` directly on 12 shapes (closed fence + 3/4 newlines, unclosed at EOF with/without trailing newline, fence as last chars with/without newline, adjacent touching / 2-blank, CRLF, fence→heading→fence, bare ``` with/without newline): idempotent and fenced bodies byte-identical in every case.
+- **No regression** — `make memory-format-check` (266 formatted) / `make memory-lint-check` (All checks passed) / `make memory-tests` **2444 passed**. `graph/add_entity.py` is a pure rename in this PR (14 path-only lines vs `main`), so the live `$slice` caps are untouched.
+- **Nits** (also appended to PR #41 description under "PR review nits"):
+  1. [Documentation] — `docs/notes/slm-extraction-finetuning-spec.md:330` — the driver comment `mongoexport --uri "$MONGO_URI" ...` names a variable that exists in no `.env.example` or Makefile (same phantom Nit 4 removed from the README). Doc polish in a notes-file comment, no code path → Nit. Cure: build the URI from the component vars as the README now does, or drop the `--uri` example.
+  2. [Untested] — `apps/memory/src/tree/memory/graph/add_entity.py:61-62` — live `_MAX_ALIASES` (50) / `_MAX_SOURCES` (500) `$slice` caps have no direct unit test (`test_add_entity.py` asserts nothing on `aliases`/`sources` caps). Pre-existing and the file is not modified by this diff, so dimension C does not apply → Nit / follow-up task, as the PR body already records.
+
+Pipeline may advance to hand-off.
