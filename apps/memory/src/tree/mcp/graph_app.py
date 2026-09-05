@@ -33,7 +33,7 @@ Either way the slow path stays off the model: it never hand-authors HTML.
 :func:`_graph_tool_result` owns the capability check and BOTH branches, and is
 the only place either exists. All three graph-capable MCP tools call it —
 ``visualize_memory_graph`` here, plus ``query_memory(visualize=True)`` and
-``search_memory(visualize=True)`` in ``tree.mcp.tools`` (via that module's
+``search_memory(visualize=True)`` in ``tree.mcp.graph_tools`` (via that module's
 ``_dual_graph_result`` seam) — so from a visualization standpoint they behave
 identically. A new graph tool builds a **Graph payload** and calls this helper;
 it never reimplements a branch.

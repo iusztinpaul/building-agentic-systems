@@ -227,20 +227,37 @@ make memory-serve-mcp TRANSPORT=streamable-http
 
 The repo-root `.mcp.json` already wires this up — Claude Code and the harness auto-spawn it. No extra setup needed from those clients.
 
-**Tools exposed:**
+**Tools exposed.** The tool set IS the memory mode (`memory.mode`, ADR-006): the server reads it once at boot and registers only what that mode can honour. A graph tool called against a `rag` server returns the standard unknown-tool error — it was never registered.
+
+*Both modes (6 tools):*
 
 | Tool | Description |
 |---|---|
-| `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
-| `search_memory` | Semantic + text search with graph expansion. Best for open-ended queries. |
-| `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
+| `search_memory` | Hybrid (vector + text) search. **Signature differs per mode** — see below. |
 | `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
 | `scrape_web` | On-demand scrape of one or more URLs via Bright Data Web Unlocker. **Does NOT touch memory.** Returns markdown (or HTML) inline for exploration; pair with `search_web` to read SERP results, then call `ingest_url` on whichever URLs are worth keeping. Max 5 URLs per call. |
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 
-`query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
+*`graphrag` only (7 more, 13 total):*
+
+| Tool | Description |
+|---|---|
+| `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
+| `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
+| `visualize_memory_graph` | Renders the graph (whole graph or one query) as an interactive HTML view. |
+| `memory_dashboard` | Graph-statistics dashboard (node/edge counts by type). |
+| `review_list_pending` / `review_confirm` / `review_reject` | Human review of the flagged `same_as` duplicate queue. |
+
+*The two `search_memory` signatures* — one name, one registered function per mode, no parameter the mode cannot honour:
+
+| Mode | Signature | Returns |
+|---|---|---|
+| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …]}`, best match first. `top_k` IS the result cap; empty memory answers `{"parents": []}`. |
+| `graphrag` | `search_memory(query: str, top_k: int = 10, max_hops: int = 1, max_results: int = 10, visualize: bool = False)` | Serialized nodes + edges after graph expansion, plus the interactive graph when `visualize=true`. |
+
+In `graphrag`, `query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
 
 #### `search_web` example
 

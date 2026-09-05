@@ -16,6 +16,9 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.data.online_pipeline import ConversationSource, FileSource, UrlSource
+from tree.memory.rag.types import RetrievalResult
+from tree.memory.types import QueryResult
+from tree.mcp import graph_tools as mcp_graph_tools
 from tree.mcp import tools as mcp_tools
 
 _SUBMITTED = {"status": "scheduled", "flow_run_id": "run-1"}
@@ -94,39 +97,49 @@ class TestIngestFilePropagatesUserId:
         assert passed_user_id == user_id
 
 
+# Every retrieval tool of both modes, with the callable it delegates to. The two
+# ``search_memory`` entries are the SAME tool name in different modes (#110):
+# rag's goes to ``retrieve_parents``, graphrag's to the graph query.
 @pytest.mark.parametrize(
-    "tool_name,tool_kwargs",
+    "tool,patch_target,query_result",
     [
-        ("query_memory", {"query": "x"}),
-        ("search_memory", {"query": "x"}),
-        ("deep_search_memory", {"query": "x"}),
+        pytest.param(
+            mcp_graph_tools.query_memory,
+            "tree.mcp.graph_tools.execute_nl_query",
+            [],
+            id="query_memory",
+        ),
+        pytest.param(
+            mcp_graph_tools.search_memory,
+            "tree.mcp.graph_tools.structured_query_memory",
+            QueryResult(nodes=[], edges=[]),
+            id="graphrag_search_memory",
+        ),
+        pytest.param(
+            mcp_graph_tools.deep_search_memory,
+            "tree.mcp.graph_tools.structured_query_memory",
+            QueryResult(nodes=[], edges=[]),
+            id="deep_search_memory",
+        ),
+        pytest.param(
+            mcp_tools.search_memory,
+            "tree.mcp.tools.retrieve_parents",
+            RetrievalResult(),
+            id="rag_search_memory",
+        ),
     ],
 )
 class TestQueryToolsPropagateUserId:
     async def test_passes_user_id_to_underlying_query(
-        self, mocker, tool_name, tool_kwargs
+        self, mocker, tool, patch_target, query_result
     ) -> None:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
+        mock_call = mocker.patch(
+            patch_target, new_callable=AsyncMock, return_value=query_result
+        )
 
-        # Patch the underlying query callable invoked by every tool.
-        if tool_name == "query_memory":
-            mock_call = mocker.patch(
-                "tree.mcp.tools.execute_nl_query",
-                new_callable=AsyncMock,
-                return_value=[],
-            )
-        else:
-            mock_call = mocker.patch(
-                "tree.mcp.tools.structured_query_memory",
-                new_callable=AsyncMock,
-            )
-            from tree.memory.types import QueryResult
-
-            mock_call.return_value = QueryResult(nodes=[], edges=[])
-
-        tool = getattr(mcp_tools, tool_name)
-        await tool(ctx=ctx, **tool_kwargs)
+        await tool(query="x", ctx=ctx)
 
         mock_call.assert_awaited_once()
         assert mock_call.await_args.kwargs["user_id"] == user_id
@@ -143,12 +156,12 @@ class TestReviewListPendingPropagatesUserId:
         ctx = _make_ctx(user_id)
 
         mock_call = mocker.patch(
-            "tree.mcp.tools._find_pending_duplicates",
+            "tree.mcp.graph_tools._find_pending_duplicates",
             new_callable=AsyncMock,
             return_value=[],
         )
 
-        await mcp_tools.review_list_pending(ctx=ctx, limit=10)
+        await mcp_graph_tools.review_list_pending(ctx=ctx, limit=10)
 
         mock_call.assert_awaited_once()
         assert mock_call.await_args.kwargs["user_id"] == user_id
@@ -166,7 +179,7 @@ class TestReviewConfirmPropagatesUserId:
         )
 
         mock_call = mocker.patch(
-            "tree.mcp.tools._review_duplicate",
+            "tree.mcp.graph_tools._review_duplicate",
             new_callable=AsyncMock,
             return_value=ReviewResult(
                 decision=ReviewDecision.CONFIRM,
@@ -178,7 +191,7 @@ class TestReviewConfirmPropagatesUserId:
             ),
         )
 
-        await mcp_tools.review_confirm(
+        await mcp_graph_tools.review_confirm(
             source_node_id="x:person:a",
             target_node_id="x:person:b",
             reviewed_by="reviewer",
@@ -197,7 +210,7 @@ class TestReviewRejectPropagatesUserId:
         from tree.memory.review.types import ReviewDecision, ReviewResult
 
         mock_call = mocker.patch(
-            "tree.mcp.tools._review_duplicate",
+            "tree.mcp.graph_tools._review_duplicate",
             new_callable=AsyncMock,
             return_value=ReviewResult(
                 decision=ReviewDecision.REJECT,
@@ -209,7 +222,7 @@ class TestReviewRejectPropagatesUserId:
             ),
         )
 
-        await mcp_tools.review_reject(
+        await mcp_graph_tools.review_reject(
             source_node_id="x:person:a",
             target_node_id="x:person:b",
             reviewed_by="reviewer",
