@@ -12,26 +12,13 @@ object-to-object). Unifying them would silently break supersession.
 """
 
 import logging
-import re
 from typing import Any
 
+from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError
 
 logger = logging.getLogger(__name__)
-
-# Voyage's embeddings endpoint 400s on control characters and unpaired
-# surrogates (common in HTML->markdown-scraped chunk content). Strip the C0
-# controls (except tab/newline/carriage-return), DEL + C1 range, and the
-# surrogate range before embedding so one bad chunk can't fail the whole batch.
-_INVALID_EMBED_CHARS_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]"
-)
-
-
-def _sanitize_for_embedding(text: str) -> str:
-    return _INVALID_EMBED_CHARS_RE.sub("", text)
-
 
 # Batching packs many texts into fewer synchronous /v1/multimodalembeddings
 # requests, bounded by the per-request caps below (Voyage voyage-multimodal-3:
@@ -206,7 +193,7 @@ def node_to_embedding_text(node: dict[str, Any]) -> str:
             parts.append(f"{key}: {value}")
     if props.get("content"):
         parts.append(str(props["content"]))
-    return _sanitize_for_embedding("\n".join(parts))
+    return strip_invalid_chars("\n".join(parts))
 
 
 async def embed_node_texts(

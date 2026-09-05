@@ -95,6 +95,7 @@ from tree.memory.extraction.validation import (
     validate_envelope,
     validate_properties,
 )
+from tree.memory.rag.cleaning import clean_text
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
@@ -301,7 +302,9 @@ async def _extract_chunks_and_structural(
         tags=_EXTRACTION_TAGS,
         trace_headers=opik_trace_headers,
     ):
-        content = document.content or ""
+        # ADR-006 Decision 7: the Clean step is the FIRST memory stage — the
+        # chunker only ever sees cleaned text.
+        content = clean_text(document.content or "")
         chunk_texts = chunk_document(content) if content else []
         chunk_ids = [str(uuid4()) for _ in chunk_texts]
 

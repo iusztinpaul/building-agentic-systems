@@ -151,6 +151,42 @@ class TestExtractChunksAndStructuralTask:
             extract_chunks_and_structural_task.name == "extract-chunks-and-structural"
         )
 
+    async def test_content_is_cleaned_before_chunking(self) -> None:
+        # The Clean step is the FIRST memory stage: the cookie-banner line must
+        # never reach the chunker (ADR-006 Decision 7).
+        doc = _make_document(content="Intro\nAccept all cookies\nBody")
+
+        chunked = await _extract_chunks_and_structural(doc)
+
+        joined = "".join(chunked.chunk_texts)
+        assert "Accept all cookies" not in joined
+        assert "Intro" in joined
+        assert "Body" in joined
+
+    async def test_substack_footer_boilerplate_never_reaches_chunks(self) -> None:
+        # User story: an ingested Substack article loses its footer boilerplate
+        # while the body paragraph survives.
+        doc = _make_document(
+            content="The body paragraph stays.\n\nThanks for reading!\nShare this post\n"
+        )
+
+        chunked = await _extract_chunks_and_structural(doc)
+
+        joined = "".join(chunked.chunk_texts)
+        assert "Thanks for reading" not in joined
+        assert "Share this post" not in joined
+        assert "The body paragraph stays." in joined
+
+    async def test_chunk_texts_are_deterministic_across_runs(self) -> None:
+        # User story: re-running task 1 on the same Document yields identical
+        # chunk payloads, so the downstream INPUTS cache is a hit.
+        content = "Intro\nAccept all cookies\nBody   text"
+
+        first = await _extract_chunks_and_structural(_make_document(content=content))
+        second = await _extract_chunks_and_structural(_make_document(content=content))
+
+        assert first.chunk_texts == second.chunk_texts
+
 
 # ---------------------------------------------------------------------------
 # Task ② — llm_extract_entities

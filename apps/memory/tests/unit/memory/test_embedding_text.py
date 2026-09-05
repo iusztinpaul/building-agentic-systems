@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from tree.memory import embedding_text
 from tree.memory.embedding_text import (
     _embed_chunk_resilient,
     embed_in_batches,
@@ -598,33 +599,29 @@ class TestDispatchConcurrencyDefault:
         assert vectors == [[float(i)] for i in range(7)]
 
 
-class TestSanitizeForEmbedding:
-    """Adversarial: sanitization strips only the chars Voyage 400s on."""
+class TestSanitizationIsDelegatedToTheCleaningModule:
+    """ONE definition: the sanitizer lives in ``tree.memory.rag.cleaning``."""
 
-    def test_preserves_legitimate_unicode_tab_and_newline(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
+    def test_module_no_longer_defines_a_private_sanitizer(self) -> None:
+        # A second copy of the regex is how train/serve drift starts.
+        assert not hasattr(embedding_text, "_sanitize_for_embedding")
+        assert not hasattr(embedding_text, "_INVALID_EMBED_CHARS_RE")
 
-        # Arrange: smart quotes, emoji, accented letters, tab, newline, CR — all
-        # legitimate and must survive sanitization untouched.
-        text = "café “smart” \U0001f600\taccenté\nline\rret"
-
-        # Act / Assert: no-op on clean-but-rich Unicode.
-        assert _sanitize_for_embedding(text) == text
-
-    def test_strips_each_invalid_class(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
-
+    def test_node_text_strips_control_chars_and_surrogates(self) -> None:
         # Arrange: one char from each stripped class — C0 (NUL, BEL, VT, FF),
         # DEL, C1 (0x80, 0x9f), and an unpaired surrogate (0xd800).
-        text = "x\x00\x07\x0b\x0c\x1f\x7f\x80\x9f\ud800y"
+        node = {
+            "type": "person",
+            "name": "Bo\x00b",
+            "properties": {"content": "x\x07\x0b\x0c\x1f\x7f\x80\x9f\ud800y"},
+        }
 
-        # Act / Assert: everything between the bookends is removed.
-        assert _sanitize_for_embedding(text) == "xy"
+        text = node_to_embedding_text(node)
 
-    def test_no_op_on_plain_ascii(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
+        assert text == "person: Bob\nxy"
 
-        # Arrange / Act / Assert: ordinary text is untouched (cheap fast path).
-        assert _sanitize_for_embedding("person: Bob\nrole: engineer") == (
-            "person: Bob\nrole: engineer"
-        )
+    def test_node_text_preserves_legitimate_unicode(self) -> None:
+        # Smart quotes, emoji and accents are legitimate and must survive.
+        node = {"type": "person", "name": "café “smart” \U0001f600 accenté"}
+
+        assert node_to_embedding_text(node) == "person: café “smart” \U0001f600 accenté"
