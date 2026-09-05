@@ -7,9 +7,9 @@ can never cross a parent boundary.
 
 Two strategies:
 
-* ``fixed_tokens`` — the Chapter-4 sliding token window (the algorithm
-  ``tree.memory.extraction.core.chunk_document`` has always used). Structure
-  blind: every parent's ``heading_path`` is empty.
+* ``fixed_tokens`` — the Chapter-4 sliding token window (the algorithm the
+  pre-ADR-006 single-level splitter used). Structure blind: every parent's
+  ``heading_path`` is empty.
 * ``recursive`` — split on the first separator level that actually cuts the
   range: markdown ATX headings (tracking the heading stack) -> blank-line
   paragraphs -> sentences -> raw tokens. Adjacent pieces are merged greedily
@@ -128,7 +128,7 @@ def _split_children(parent_content: str, config: ChunkingConfig) -> list[str]:
 
 
 def _fixed_window(text: str, level: ChunkLevelConfig) -> list[str]:
-    """The Chapter-4 sliding token window (``chunk_document``'s algorithm).
+    """The Chapter-4 sliding token window (the pre-ADR-006 algorithm).
 
     ``overlap < size`` is enforced by :class:`ChunkLevelConfig`, so the stride
     is always positive and the loop always terminates.

@@ -29,7 +29,7 @@ from fastmcp.server.lifespan import lifespan
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.users import User
-from tree.memory.indexing.core import (
+from tree.memory.rag.indexing import (
     assert_settings_match_live_vector_index,
     ensure_indexes,
 )

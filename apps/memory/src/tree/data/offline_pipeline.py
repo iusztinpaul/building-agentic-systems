@@ -34,7 +34,7 @@ from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.entities.users import select_active_user_ids
-from tree.memory.indexing.core import assert_settings_match_live_vector_index
+from tree.memory.rag.indexing import assert_settings_match_live_vector_index
 from tree.config.constants import TAGS_DATA_OFFLINE
 from tree.observability import (
     configure_opik,

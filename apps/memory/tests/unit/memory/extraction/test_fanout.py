@@ -19,8 +19,10 @@ that run's terminal state is COMPLETED.
 
 Since ``free-tier-deployments`` indexing is NOT a deployment: the trailing step is
 an INLINE ``memory_indexing`` subflow, so it is patched at
-``tree.memory.extraction.sharding.memory_indexing`` (the ``fake_indexing``
-fixture) instead of being one more ``run_deployment`` name. The invariant it
+``tree.memory.pipeline.memory_indexing`` (the ``fake_indexing`` fixture) instead
+of being one more ``run_deployment`` name — the fan-out imports the flow inside
+the function (ADR-006 decision 8 put all three flows in ``tree.memory.pipeline``,
+which imports THIS module, so a module-level import would be a cycle). The invariant it
 guards is unchanged and still asserted everywhere below: index exactly ONCE,
 AFTER the gather, NEVER per-shard.
 """
@@ -50,7 +52,7 @@ def fake_indexing(mocker):
     """
 
     return mocker.patch(
-        "tree.memory.extraction.sharding.memory_indexing", new_callable=mocker.AsyncMock
+        "tree.memory.pipeline.memory_indexing", new_callable=mocker.AsyncMock
     )
 
 

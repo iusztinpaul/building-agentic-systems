@@ -1,32 +1,38 @@
-"""Prefect tasks and flow for the memory extraction pipeline.
+"""The ONE memory ingestion module: Prefect tasks + the three memory flows.
 
-Six explicit Prefect tasks. Expensive stages (LLM extract, embedding) cache
-on ``INPUTS`` so re-runs only redo the cheap stages. The flow constructs the
-resolver + dedup config ONCE at entry; the cross-key validator on
-:class:`tree.config.app_config.ExtractionConfig` raises before any work runs
-when the resolver and dedup type-strictness disagree.
-
-Two Prefect flows live here (#067, ADR-002 §3 amended #066):
+ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
+``if`` in one file instead of a package boundary the reader has to chase:
 
 * ``memory_extract_etl_worker`` (deployment ``memory-extract-etl-worker``) — the
-  pure six-task extraction body. NO ``num_shards``, NO coordinator branch, NO
-  ``run_deployment``, NO indexing trigger. Returns a :class:`WriteSummary`.
+  ingestion body for BOTH memory modes. NO ``num_shards``, NO coordinator
+  branch, NO ``run_deployment``, NO indexing trigger. Returns a
+  :class:`WriteSummary`.
 * ``memory_extract_etl_coordinator`` (an inline subflow of ``offline-pipeline``,
-  not a deployment) — resolve pending docs → partition into ``min(num_shards, N)``
-  balanced shards → dispatch ONE ``memory-extract-etl-worker`` run per shard under
-  ``asyncio.gather(return_exceptions=True)`` → ONE trailing ``memory_indexing``
+  not a deployment) — resolve pending docs -> partition into
+  ``min(num_shards, N)`` balanced shards -> dispatch ONE
+  ``memory-extract-etl-worker`` run per shard under
+  ``asyncio.gather(return_exceptions=True)`` -> ONE trailing ``memory_indexing``
   INLINE SUBFLOW. Dispatches to the WORKER (no recursion). Returns a
   :class:`FanOutStats`.
+* ``memory_indexing`` (deployment ``memory-indexing-etl``) — the embedding
+  backfill + search-index reconcile that trails an extraction run.
 
-Internal task topology (per the §7 spec in
-``tracker/012-extraction-pipeline-six-tasks.groomed.md``):
+Worker task topology. The RAG stages run in BOTH modes; the graph stages run
+only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
 
-* ① ``extract_chunks_and_structural_task`` — per-doc, ``INPUTS`` cache.
-* ② ``llm_extract_entities_task`` — per-doc, ``INPUTS`` cache, 2 retries.
-* ③ ``resolve_entities_task`` — batched, ``NO_CACHE``, 1 retry.
-* ④ ``embed_entities_task`` — ``.map(unique_canonical_names)``, ``INPUTS`` cache.
-* ⑤ ``dedupe_entities_task`` — batched, ``NO_CACHE``, 1 retry.
-* ⑥ ``apply_writes_task`` — batched, ``NO_CACHE``, 3 retries.
+* (rag) ① ``clean_and_chunk_task`` — per-doc, ``INPUTS`` cache, 1 retry.
+* (rag) ② ``embed_children_task`` — one batched embed of the run's unique
+  **Contextual header** texts, ``INPUTS`` cache, 2 retries.
+* (rag) ③ ``load_rag_rows_task`` — document + parent + child rows in ONE
+  ``bulk_write``, ``NO_CACHE``, 3 retries. **``rag`` mode returns here.**
+* (graph) ④ ``llm_extract_entities_task`` — one LLM call per PARENT chunk,
+  ``INPUTS`` cache, 2 retries.
+* (graph) ④.5 ``validate_raws_task`` — envelope + field validation.
+* (graph) ⑤ ``resolve_entities_task`` — batched, ``NO_CACHE``, 1 retry.
+* (graph) ⑥ ``embed_entities_task`` — batched, ``INPUTS`` cache.
+* (graph) ⑦ ``dedupe_entities_task`` — batched, ``NO_CACHE``, 1 retry.
+* (graph) ⑧ ``apply_writes_task`` — entity rows, ``mentions`` and the structural
+  edges over the chunk hierarchy, batched, ``NO_CACHE``, 3 retries.
 """
 
 from __future__ import annotations
@@ -35,7 +41,6 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
 
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
@@ -65,11 +70,7 @@ from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
 from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
 from tree.memory.extraction.add_entity import add_entity
-from tree.memory.extraction.core import (
-    build_structural_entries,
-    chunk_document,
-    extract_entities,
-)
+from tree.memory.extraction.core import build_structural_entries, extract_entities
 from tree.memory.extraction.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -95,7 +96,24 @@ from tree.memory.extraction.validation import (
     validate_envelope,
     validate_properties,
 )
+from tree.memory.rag.chunking import split_document
 from tree.memory.rag.cleaning import clean_text
+from tree.memory.rag.embedding import child_embedding_text
+from tree.memory.rag.indexing import (
+    assert_settings_match_live_vector_index,
+    embed_nodes,
+    ensure_indexes,
+)
+from tree.memory.rag.types import ParentChunk
+from tree.memory.rag.load import (
+    build_rag_row_ops,
+    child_chunk_name,
+    child_row_id,
+    document_row_id,
+    load_rag_rows,
+    parent_chunk_name,
+    parent_row_id,
+)
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
@@ -114,11 +132,12 @@ from tree.memory.types import (
 )
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.get_model import (
+    get_embedding_model,
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
 )
-from tree.config.constants import TAGS_EXTRACTION
+from tree.config.constants import TAGS_EXTRACTION, TAGS_INDEXING
 from tree.observability import (
     configure_opik,
     flush_opik,
@@ -283,14 +302,22 @@ def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
 
 
 # ---------------------------------------------------------------------------
-# Task ① — extract chunks + structural entries
+# Task ① — clean + two-level chunk (rag stage: runs in BOTH modes)
 # ---------------------------------------------------------------------------
 
 
-async def _extract_chunks_and_structural(
+async def _clean_and_chunk(
     document: Document, opik_trace_headers: dict[str, str] | None = None
 ) -> ChunkedDocument:
-    """Pure-function body. Stamps chunk ids and structural entries deterministically.
+    """Clean one document and split it into its **Parent chunk** hierarchy.
+
+    ADR-006 decisions 6 + 7: the **Clean step** is the FIRST memory stage (the
+    splitter only ever sees cleaned text), then ``split_document`` yields the
+    parents, each carrying its own children. Deterministic end-to-end — the same
+    (document, chunking config) always produces the same payload, which is what
+    keeps this task's ``INPUTS`` cache a hit across re-runs, and what lets every
+    downstream stage derive row ids from ``source_uri`` + position instead of a
+    per-run ``uuid4()``.
 
     ``opik_trace_headers`` (passed by the flow) attaches this task's span to the
     flow's trace across the Prefect task boundary; excluded from the cache key.
@@ -298,48 +325,30 @@ async def _extract_chunks_and_structural(
 
     log = _get_run_logger()
     with span(
-        "_extract_chunks_and_structural",
+        "_clean_and_chunk",
         tags=_EXTRACTION_TAGS,
         trace_headers=opik_trace_headers,
     ):
-        # ADR-006 Decision 7: the Clean step is the FIRST memory stage — the
-        # chunker only ever sees cleaned text.
         content = clean_text(document.content or "")
-        chunk_texts = chunk_document(content) if content else []
-        chunk_ids = [str(uuid4()) for _ in chunk_texts]
-
-        structural = (
-            build_structural_entries(
-                document_id=document.id,
-                source_type=document.source_type.value,
-                source_uri=document.source_uri,
-                date=document.date.isoformat() if document.date else None,
-                chunk_texts=chunk_texts,
-                chunk_ids=chunk_ids,
-                extracted=ExtractionResult(),  # MENTIONS edges added in task ⑥ post-LLM
-                reference_uris=_reference_uris(document),
-            )
-            if chunk_texts
-            else ExtractionResult()
+        parents = (
+            split_document(content, _live_app_config().memory.chunking)
+            if content
+            else []
         )
-
-        reference_uris = _reference_uris(document)
         chunked = ChunkedDocument(
             document_id=str(document.id),
             source_uri=document.source_uri,
             source_type=document.source_type.value,
+            title=document.title,
             date=document.date.isoformat() if document.date else None,
-            reference_uris=reference_uris,
-            chunk_texts=chunk_texts,
-            chunk_ids=chunk_ids,
-            structural=structural,
+            reference_uris=_reference_uris(document),
+            parents=parents,
         )
         log.info(
-            "extract_chunks_and_structural: doc_id=%s n_chunks=%d "
-            "n_structural_entries=%d",
+            "clean_and_chunk: doc_id=%s n_parents=%d n_children=%d",
             chunked.document_id,
-            len(chunked.chunk_texts),
-            len(structural.nodes) + len(structural.edges),
+            len(parents),
+            sum(len(parent.children) for parent in parents),
         )
         return chunked
 
@@ -350,28 +359,28 @@ def _reference_uris(document: Document) -> list[str]:
     return [ref.source_uri for ref in document.references if isinstance(ref, Document)]
 
 
-extract_chunks_and_structural_task = task(
-    _extract_chunks_and_structural,
-    name="extract-chunks-and-structural",
+clean_and_chunk_task = task(
+    _clean_and_chunk,
+    name="clean-and-chunk",
     cache_policy=_INPUTS_NO_HEADERS,
     cache_expiration=timedelta(days=30),
     retries=1,
 )
 
 
-async def _chunk_documents(
+async def _split_documents(
     docs: list[Any], opik_trace_headers: dict[str, str] | None = None
 ) -> list[ChunkedDocument]:
-    """Run task ① (chunk + structural) over every document, fanned out under a
-    bounded semaphore sized by ``doc_concurrency`` (#059 R7).
+    """Run task ① over every document, fanned out under a bounded semaphore
+    sized by ``doc_concurrency`` (#059 R7).
 
-    Task ① is purely CPU/DB-bound — no shared LLM quota, no read-after-write —
-    so the per-doc calls parallelize safely. ``doc_concurrency`` defaults to 1
+    Task ① is purely CPU-bound — no shared LLM quota, no read-after-write — so
+    the per-doc calls parallelize safely. ``doc_concurrency`` defaults to 1
     (serial-equivalent = today's exact behavior); operators opt into overlap via
     ``TREE_EXTRACTION__DOC_CONCURRENCY``.
 
     ``asyncio.gather`` preserves INPUT order, so ``chunked_docs`` comes back in
-    the same order (and with the same contents) as the prior sequential loop —
+    the same order (and with the same contents) as a sequential loop would —
     downstream per-doc iteration stays deterministic. We keep the underlying
     Prefect task call (not ``.map()``) so its ``INPUTS`` cache still applies.
     """
@@ -383,7 +392,7 @@ async def _chunk_documents(
 
     async def _one(doc: Any) -> ChunkedDocument:
         async with semaphore:
-            return await extract_chunks_and_structural_task(
+            return await clean_and_chunk_task(
                 doc, opik_trace_headers=opik_trace_headers
             )
 
@@ -391,25 +400,163 @@ async def _chunk_documents(
 
 
 # ---------------------------------------------------------------------------
-# Task ② — LLM extraction
+# Task ② — embed children (rag stage: runs in BOTH modes)
+# ---------------------------------------------------------------------------
+
+
+def child_embedding_texts(chunked_docs: list[ChunkedDocument]) -> list[str]:
+    """Every child's **Contextual header** text for the run, sorted + unique.
+
+    Sorted so the ``INPUTS`` cache key of task ② does not depend on document
+    order; unique so two identical children (a boilerplate paragraph repeated
+    across documents) are embedded once and share the vector.
+    """
+
+    return sorted(
+        {
+            child_embedding_text(
+                title=chunked.title,
+                heading_path=parent.heading_path,
+                content=child.content,
+            )
+            for chunked in chunked_docs
+            for parent in chunked.parents
+            for child in parent.children
+        }
+    )
+
+
+async def _embed_children(
+    texts: list[str], opik_trace_headers: dict[str, str] | None = None
+) -> dict[str, list[float]]:
+    """Embed every **Child chunk** text of the run in as few requests as possible.
+
+    Children are the ONLY rows the ingestion path embeds (ADR-006 decision 4):
+    parents and documents are deliberately vector-less so parent-document
+    retrieval can search children and return parents. Uses the **search** model
+    — the persisted, index-coupled vector — through
+    :func:`tree.memory.embedding_text.embed_in_batches`, which packs the texts
+    into request-sized batches; the 429 backoff lives inside ``.embed()``.
+
+    Returns a ``text -> vector`` map the loader indexes by the same text it
+    rebuilds per child, so a missing vector degrades to ``embedding=[]`` (the
+    indexing backfill picks it up) instead of misaligning rows.
+    """
+
+    log = _get_run_logger()
+    with span(
+        "_embed_children",
+        tags=_EXTRACTION_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        if not texts:
+            return {}
+
+        vectors = await embed_in_batches(texts, get_search_embedding_model())
+        log.info(
+            "embed_children: n_texts=%d dim=%d",
+            len(texts),
+            len(vectors[0]) if vectors else 0,
+        )
+        return dict(zip(texts, vectors))
+
+
+embed_children_task = task(
+    _embed_children,
+    name="embed-children",
+    cache_policy=_INPUTS_NO_HEADERS,
+    cache_expiration=timedelta(days=90),
+    retries=2,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ③ — load the RAG rows (rag stage: runs in BOTH modes)
+# ---------------------------------------------------------------------------
+
+
+async def _load_rag_rows(
+    chunked_docs: list[ChunkedDocument],
+    embeddings: dict[str, list[float]],
+    database: Any,
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> int:
+    """Upsert the document / parent / child rows of the run in ONE ``bulk_write``.
+
+    ``NO_CACHE`` because it writes: a cache hit would skip the write on a
+    re-run that a previous crash left half-applied. Idempotent instead — every
+    ``_id`` is deterministic, so re-running a document rewrites its own rows and
+    the collection count does not move.
+
+    Returns the number of rows written.
+    """
+
+    log = _get_run_logger()
+    with span(
+        "_load_rag_rows",
+        tags=_EXTRACTION_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        ops = []
+        for chunked in chunked_docs:
+            ops.extend(
+                build_rag_row_ops(
+                    user_id=user_id,
+                    document_id=chunked.document_id,
+                    source_uri=chunked.source_uri,
+                    source_type=chunked.source_type,
+                    title=chunked.title,
+                    date=chunked.date,
+                    parents=chunked.parents,
+                    child_vectors=embeddings,
+                )
+            )
+
+        rows = await load_rag_rows(database=database, ops=ops)
+        log.info(
+            "load_rag_rows: documents=%d rows_written=%d",
+            len(chunked_docs),
+            rows,
+        )
+        return rows
+
+
+load_rag_rows_task = task(
+    _load_rag_rows,
+    name="load-rag-rows",
+    cache_policy=NO_CACHE,
+    retries=3,
+    retry_delay_seconds=10,
+)
+
+
+# ---------------------------------------------------------------------------
+# Task ④ — LLM extraction over PARENT chunks (graph stage: graphrag only)
 # ---------------------------------------------------------------------------
 
 
 async def _llm_extract_entities(
     chunked: ChunkedDocument,
+    user_id: PydanticObjectId,
     llm: BaseLLM | None = None,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> RawExtraction:
-    """Invoke the LLM per chunk and merge per-chunk extractions.
+    """Invoke the LLM once per **Parent chunk** and merge the extractions.
 
-    ``llm`` is optional so the MCP ingest path can inject a caller-owned
-    handle (the FastMCP lifespan already constructed one). When omitted the
-    flow uses the default ``get_llm()`` factory.
+    Parents (4096 tokens by default) are the extraction unit, not children:
+    ~8x fewer, larger calls than the pre-ADR-006 512-token window, and each call
+    sees a whole section instead of a sentence fragment. Each emission is
+    stamped with the parent ROW ``_id`` as its ``chunk_id`` provenance — needs
+    ``user_id`` because that id is tenant-scoped.
+
+    ``llm`` is optional so a caller that already holds a handle can inject it.
+    When omitted the flow uses the default ``get_llm()`` factory.
 
     ``opik_trace_headers`` attaches this task's span to the flow's trace. The
     nested Gemini LLM spans (with native usage + cost) attach to THIS span via
     contextvars — they're in-process under the wrapped genai client, so the
-    distributed-header hop is only needed at the task boundary, not per-chunk.
+    distributed-header hop is only needed at the task boundary, not per-parent.
     Excluded from the cache key.
     """
 
@@ -419,7 +566,7 @@ async def _llm_extract_entities(
         tags=_EXTRACTION_TAGS,
         trace_headers=opik_trace_headers,
     ):
-        if not chunked.chunk_texts:
+        if not chunked.parents:
             return RawExtraction(
                 document_id=chunked.document_id,
                 source_uri=chunked.source_uri,
@@ -431,21 +578,25 @@ async def _llm_extract_entities(
             llm = get_llm()
         semaphore = asyncio.Semaphore(_live_app_config().extraction.llm_concurrency)
 
-        async def _one(chunk: str, chunk_id: str) -> ExtractionResult:
+        async def _one(parent: ParentChunk) -> ExtractionResult:
             async with semaphore:
-                return await extract_entities(llm, chunk, chunk_id=chunk_id)
+                return await extract_entities(
+                    llm,
+                    parent.content,
+                    chunk_id=parent_row_id(user_id, chunked.source_uri, parent.index),
+                )
 
-        per_chunk = await asyncio.gather(
-            *[_one(t, cid) for t, cid in zip(chunked.chunk_texts, chunked.chunk_ids)]
-        )
+        per_parent = await asyncio.gather(*[_one(parent) for parent in chunked.parents])
 
         merged = ExtractionResult()
-        for piece in per_chunk:
+        for piece in per_parent:
             merged = merged.merge(piece)
 
         log.info(
-            "llm_extract_entities: doc_id=%s n_entities_raw=%d n_edges_raw=%d",
+            "llm_extract_entities: doc_id=%s n_parents=%d n_entities_raw=%d "
+            "n_edges_raw=%d",
             chunked.document_id,
+            len(chunked.parents),
             len(merged.nodes),
             len(merged.edges),
         )
@@ -468,7 +619,7 @@ llm_extract_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ②.5 — envelope + field validation (NEW in #030)
+# Task ④.5 — envelope + field validation (#030)
 # ---------------------------------------------------------------------------
 #
 # Lives between LLM extract and resolve so the resolver only sees rows
@@ -776,7 +927,7 @@ validate_raws_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ③ — resolve entities (batched)
+# Task ⑤ — resolve entities (batched)
 # ---------------------------------------------------------------------------
 
 
@@ -946,7 +1097,7 @@ resolve_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed (ALL run node-texts in one batched call)
+# Task ⑥ — embed entities (ALL run node-texts in one batched call)
 # ---------------------------------------------------------------------------
 
 
@@ -1004,7 +1155,7 @@ embed_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ⑤ — dedup (batched)
+# Task ⑦ — dedup (batched)
 # ---------------------------------------------------------------------------
 
 
@@ -1108,7 +1259,7 @@ dedupe_entities_task = task(
 
 
 # ---------------------------------------------------------------------------
-# Task ⑥ — apply writes (batched)
+# Task ⑧ — apply writes (batched)
 # ---------------------------------------------------------------------------
 
 
@@ -1141,37 +1292,23 @@ async def _apply_writes(
     summary = WriteSummary(documents_processed=len(raws))
     name_to_target_id: dict[str, str] = {}
 
-    # ----- Structural nodes/edges (DOCUMENT, CHUNK, PART_OF, NEXT, REFERENCED) -----
-    # Built per-doc in task ①; upserted directly here. MENTIONS edges are
-    # built locally from the LLM-extracted PERSON nodes so they can be remapped
-    # to the final target ids.
-    structural_node_ids: set[str] = set()
+    # ----- Structural edges (PART_OF at both levels, NEXT, REFERENCED) -------
+    # The document / parent / child ROWS were already upserted by the rag load
+    # stage (task ③) in BOTH modes; ``graphrag`` only adds the edges that
+    # express the same hierarchy. Seeding ``name_to_target_id`` with the
+    # loader's deterministic row ids is what pins every structural endpoint —
+    # and the MENTIONS edges built below — to the row the loader actually
+    # wrote, instead of the ``_normalize``d fallback in ``_remap_endpoint``.
     structural_edges: list[ExtractedEdge] = []
-    # #057: accumulate every structural-node upsert and flush them in a
-    # single ``bulk_write(ordered=False)`` instead of one awaited round-trip
-    # per node. ``_id``s are deterministic (``build_node_id``) and distinct,
-    # so ordering is irrelevant.
-    structural_node_ops: list[UpdateOne] = []
     for raw in raws:
-        for node in raw.chunked.structural.nodes:
-            node_id = build_node_id(user_id, node.type, node.name)
-            structural_node_ops.append(
-                _build_structural_node_op(
-                    user_id=user_id,
-                    node=node,
-                    node_id=node_id,
-                    source_document_id=raw.document_id,
-                )
-            )
-            structural_node_ids.add(node_id)
-            summary.nodes_written += 1
-            # Document and chunk nodes carry stable names — register so
-            # MENTIONS edges (built later) can find them.
-            name_to_target_id[make_type_name_key(node.type, node.name)] = node_id
-        structural_edges.extend(raw.chunked.structural.edges)
-
-    if structural_node_ops:
-        await database[MEMORY_COLLECTION].bulk_write(structural_node_ops, ordered=False)
+        structural_edges.extend(
+            build_structural_entries(
+                source_uri=raw.chunked.source_uri,
+                parents=raw.chunked.parents,
+                reference_uris=raw.chunked.reference_uris,
+            ).edges
+        )
+        name_to_target_id.update(_rag_row_id_map(user_id, raw.chunked))
 
     # ----- LLM-extracted entities → add_entity ----------------------------------
     for raw in raws:
@@ -1287,6 +1424,38 @@ async def _apply_writes(
         summary.nodes_flagged,
     )
     return summary
+
+
+def _rag_row_id_map(
+    user_id: PydanticObjectId, chunked: ChunkedDocument
+) -> dict[str, str]:
+    """Map every RAG row NAME of one document to the ``_id`` the loader wrote.
+
+    Keyed like ``name_to_target_id`` (``"{type}|{name}"``) so ``_apply_writes``
+    can merge it straight in. Pure id arithmetic — no DB read — because
+    :mod:`tree.memory.rag.load` derives every ``_id`` from ``source_uri`` +
+    position.
+    """
+
+    ids = {
+        make_type_name_key(NodeType.DOCUMENT, chunked.source_uri): document_row_id(
+            user_id, chunked.source_uri
+        )
+    }
+    for parent in chunked.parents:
+        ids[
+            make_type_name_key(
+                NodeType.CHUNK, parent_chunk_name(chunked.source_uri, parent.index)
+            )
+        ] = parent_row_id(user_id, chunked.source_uri, parent.index)
+        for child in parent.children:
+            ids[
+                make_type_name_key(
+                    NodeType.CHUNK,
+                    child_chunk_name(chunked.source_uri, parent.index, child.index),
+                )
+            ] = child_row_id(user_id, chunked.source_uri, parent.index, child.index)
+    return ids
 
 
 def _remap_endpoint(
@@ -1429,56 +1598,6 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [self._vector for _ in texts]
-
-
-def _build_structural_node_op(
-    *,
-    user_id: PydanticObjectId,
-    node: ExtractedNode,
-    node_id: str,
-    source_document_id: str,
-) -> UpdateOne:
-    """Build the upsert op for a structural node (DOCUMENT or CHUNK).
-
-    No resolution, no dedup. Returns the :class:`UpdateOne` op so the
-    caller can accumulate every structural-node write into a single
-    ``bulk_write(ops, ordered=False)`` round-trip (#057).
-    """
-
-    now = datetime.now(tz=UTC)
-    props = node.properties.copy()
-    return UpdateOne(
-        {"_id": node_id},
-        [
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "kind": "node",
-                    "type": node.type.value,
-                    "name": node.name,
-                    "canonical_name": {"$ifNull": ["$canonical_name", node.name]},
-                    "properties": {
-                        "$mergeObjects": [
-                            {"$ifNull": ["$properties", {}]},
-                            props,
-                        ]
-                    },
-                    "aliases": {"$ifNull": ["$aliases", []]},
-                    "confidence": {"$ifNull": ["$confidence", 1.0]},
-                    "embedding": {"$ifNull": ["$embedding", []]},
-                    "sources": {
-                        "$setUnion": [
-                            {"$ifNull": ["$sources", []]},
-                            [PydanticObjectId(source_document_id)],
-                        ]
-                    },
-                    "created_at": {"$ifNull": ["$created_at", now]},
-                    "updated_at": now,
-                }
-            }
-        ],
-        upsert=True,
-    )
 
 
 def _build_edge_op(
@@ -1745,10 +1864,12 @@ async def _run_extraction_worker_body(
     document_ids: list[str] | None,
     log: logging.Logger,
 ) -> WriteSummary:
-    """The six-task extraction body, run inside the worker's root Opik span.
+    """The ingestion body, run inside the worker's root Opik span.
 
-    Grabs the run's distributed-trace headers ONCE (so every task span attaches
-    to the worker trace) and threads them through every task invocation.
+    Reads ``memory.mode`` ONCE, up front (ADR-006 decision 5): the rag stages
+    always run, the graph stages only in ``graphrag``. Grabs the run's
+    distributed-trace headers ONCE (so every task span attaches to the worker
+    trace) and threads them through every task invocation.
     """
 
     # Headers for the CURRENT trace (the worker root span opened above). Passed
@@ -1757,26 +1878,20 @@ async def _run_extraction_worker_body(
 
     # Validate config invariants up-front (also re-checked on every dedup call).
     # We re-load so env-var changes since import-time are honored — gives tests
-    # a deterministic seam for the "misconfig fails at flow entry" AC.
+    # a deterministic seam for the "misconfig fails at flow entry" AC, and it is
+    # the ONE read of ``memory.mode`` for the whole run.
     try:
-        load_app_config()
+        config = load_app_config()
     except Exception as exc:
         # Surface the underlying ValueError directly (Pydantic wraps it in
         # ValidationError; unwrap so callers can match on ``ValueError``).
         unwrapped = _unwrap_validation_error(exc)
         raise unwrapped from exc
-
+    mode = config.memory.mode
+    # Built at ENTRY, not at first use: :class:`DeduplicationConfig` re-validates
+    # its threshold ordering in ``__post_init__``, so a misconfigured pair fails
+    # the run before a single row is written (only ``graphrag`` consumes it).
     dedup_config = _build_dedup_config()
-    # Two distinct embedding handles coexist in the flow:
-    #   * ``resolution_embedding_model`` — feeds the resolver's semantic stage,
-    #     which embeds the entity NAME only. Transient: discarded by the
-    #     resolver's bounded LRU, never persisted, not index-coupled.
-    #   * ``search_embedding_model`` — the persisted, index-coupled vector. Feeds
-    #     dedup, supersession (statement-vs-persisted-statement), and the node
-    #     ``embedding`` written by apply-writes.
-    resolution_embedding_model = get_resolution_embedding_model()
-    search_embedding_model = get_search_embedding_model()
-    resolver = _build_resolver(resolution_embedding_model)
 
     # Initialize the DB connection (Beanie + Motor handles) ---------------------
     client = await init_mongodb(
@@ -1799,11 +1914,61 @@ async def _run_extraction_worker_body(
         ).to_list()
 
     log.info(
-        "Processing %d documents for KG extraction (user_id=%s)", len(docs), user_id
+        "Processing %d documents in %s mode (user_id=%s)", len(docs), mode, user_id
     )
 
     if not docs:
         return WriteSummary(documents_processed=0)
+
+    # ----- Task ① — clean + chunk (per-doc fan-out) -------------------------
+    # Fans out under a bounded semaphore sized by ``doc_concurrency`` (#059 R7,
+    # default 1 = serial-equivalent). gather preserves order so ``chunked_docs``
+    # stays deterministic for the loops below.
+    chunked_docs: list[ChunkedDocument] = await _split_documents(
+        docs, opik_trace_headers=headers
+    )
+
+    # ----- Task ② — embed every child's contextual-header text --------------
+    child_vectors = await embed_children_task(
+        child_embedding_texts(chunked_docs), opik_trace_headers=headers
+    )
+
+    # ----- Task ③ — load the document / parent / child rows -----------------
+    rag_rows = await load_rag_rows_task(
+        chunked_docs,
+        child_vectors,
+        database,
+        user_id,
+        opik_trace_headers=headers,
+    )
+
+    if mode == "rag":
+        # Chapter-4 system: node rows only. No LLM call, no edges — the
+        # hierarchy lives in ``parent_id`` on the rows we just wrote.
+        summary = WriteSummary(
+            documents_processed=len(docs),
+            nodes_written=rag_rows,
+            edges_written=0,
+        )
+        log.info(
+            "memory_extract_etl_worker complete (rag): documents=%d nodes_written=%d",
+            summary.documents_processed,
+            summary.nodes_written,
+        )
+        return summary
+
+    # ====================== graphrag-only stages from here ==================
+
+    # Two distinct embedding handles coexist in the flow:
+    #   * ``resolution_embedding_model`` — feeds the resolver's semantic stage,
+    #     which embeds the entity NAME only. Transient: discarded by the
+    #     resolver's bounded LRU, never persisted, not index-coupled.
+    #   * ``search_embedding_model`` — the persisted, index-coupled vector. Feeds
+    #     dedup, supersession (statement-vs-persisted-statement), and the node
+    #     ``embedding`` written by apply-writes.
+    resolution_embedding_model = get_resolution_embedding_model()
+    search_embedding_model = get_search_embedding_model()
+    resolver = _build_resolver(resolution_embedding_model)
 
     # ----- Load the active user (for the first-person resolver) -------------
     user = await User.get(user_id)
@@ -1812,21 +1977,16 @@ async def _run_extraction_worker_body(
         # a non-None user_id, but a stale id is possible.
         raise ValueError(f"User {user_id} not found; cannot run extraction.")
 
-    # ----- Tasks ① and ② — per-doc fan-out ---------------------------------
-    # Task ① (chunk + structural) fans out under a bounded semaphore sized by
-    # ``doc_concurrency`` (#059 R7, default 1 = serial-equivalent). gather
-    # preserves order so ``chunked_docs`` stays deterministic for the loop below.
-    chunked_docs: list[ChunkedDocument] = await _chunk_documents(
-        docs, opik_trace_headers=headers
-    )
-
+    # ----- Task ④ — LLM extraction, once per PARENT chunk -------------------
     raws: list[RawExtraction] = []
     for chunked in chunked_docs:
         raws.append(
-            await llm_extract_entities_task(chunked, opik_trace_headers=headers)
+            await llm_extract_entities_task(
+                chunked, user_id, opik_trace_headers=headers
+            )
         )
 
-    # ----- Task ②.5 — envelope + field validation (#030) -------------------
+    # ----- Task ④.5 — envelope + field validation (#030) -------------------
     # Runs BEFORE the first-person resolver so the resolver never sees
     # rows the envelope would reject. The lenient field-level pass
     # also strips bad property values (e.g. ``aliases: 5``) that
@@ -1876,12 +2036,12 @@ async def _run_extraction_worker_body(
     # ``llm_extractable=False``). The pipeline owns the edge.
     await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
 
-    # ----- Task ③ — resolve ------------------------------------------------
+    # ----- Task ⑤ — resolve ------------------------------------------------
     resolved = await resolve_entities_task(
         raws, database, resolver, user_id, opik_trace_headers=headers
     )
 
-    # ----- Task ④ — embed (ALL run node-texts in one batched call) ---------
+    # ----- Task ⑥ — embed entities (ALL run node-texts in one batched call) -
     # Single batched embed of every unique node-text for the run.
     # ``embed_entities_task`` packs them into as few synchronous requests as
     # the 1000-input / 320K-token caps allow.
@@ -1889,7 +2049,7 @@ async def _run_extraction_worker_body(
     vectors = await embed_entities_task(embeddable_texts, opik_trace_headers=headers)
     embeddings = EmbeddingMap(vectors=vectors)
 
-    # ----- Task ⑤ — dedup --------------------------------------------------
+    # ----- Task ⑦ — dedup --------------------------------------------------
     dedup_results = await dedupe_entities_task(
         resolved,
         embeddings,
@@ -1899,9 +2059,9 @@ async def _run_extraction_worker_body(
         opik_trace_headers=headers,
     )
 
-    # ----- Task ⑥ — apply writes ------------------------------------------
+    # ----- Task ⑧ — apply writes ------------------------------------------
     # Apply-writes persists the node ``embedding`` → SEARCH model. (The
-    # task-④ vector reuse already pins the persisted vector to the search
+    # task-⑥ vector reuse already pins the persisted vector to the search
     # model; this handle is the fallback ``embedding_model`` for any node
     # that lacks a pre-computed vector.)
     summary = await apply_writes_task(
@@ -1917,10 +2077,13 @@ async def _run_extraction_worker_body(
         extractor,
         opik_trace_headers=headers,
     )
+    # The rag rows are nodes too — count them once, here, so the summary means
+    # "rows this run wrote" in both modes.
+    summary.nodes_written += rag_rows
 
     log.info(
-        "memory_extract_etl_worker complete: documents=%d nodes_written=%d "
-        "edges_written=%d "
+        "memory_extract_etl_worker complete (graphrag): documents=%d "
+        "nodes_written=%d edges_written=%d "
         "nodes_merged=%d nodes_flagged=%d same_as_edges_emitted=%d",
         summary.documents_processed,
         summary.nodes_written,
@@ -1933,117 +2096,125 @@ async def _run_extraction_worker_body(
 
 
 # ---------------------------------------------------------------------------
-# Backwards-compat shim for the MCP ingestion path
+# Indexing flow — memory-indexing-etl
 # ---------------------------------------------------------------------------
+#
+# Ingestion telemetry tags for the indexing tasks. Each task opens its span via
+# :func:`tree.observability.span` attached to the flow's trace through the
+# ``opik_trace_headers`` parameter (the coordinator forwards its trace headers
+# so indexing nests under the same trace as the extraction it follows). Nested
+# embedding spans (Voyage/Modal) attach to the task span via contextvars.
+#
+# Pipeline-identity tags: the memory-indexing pipeline's tags, shared 1:1 with
+# its Prefect deployment / flow-run tags. The pipeline name also rides as span
+# metadata (``pipeline="indexing"``).
+_INDEXING_TAGS = TAGS_INDEXING
+_INDEXING_METADATA = pipeline_metadata("indexing")
 
 
-async def run_extraction_for_documents(
-    document_ids: list[str],
-    *,
-    user_id: PydanticObjectId,
+async def _embed_nodes(
     client: Any,
-    database_name: str,
-    llm: BaseLLM | None = None,
-    embedding_model: BaseEmbeddingModel | None = None,
-) -> WriteSummary:
-    """Convenience entry point for callers that already hold an open client.
+    database: str,
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> int:
+    with span(
+        "embed_nodes_task", tags=_INDEXING_TAGS, trace_headers=opik_trace_headers
+    ):
+        embedding_model = get_embedding_model()
+        return await embed_nodes(client, database, embedding_model, user_id)
 
-    Mirrors :func:`memory_extract_etl_worker` but reuses caller-owned handles
-    instead of opening a new one (the MCP ingest path holds its own client
-    from the FastMCP lifespan). The flow itself is short-circuited — we
-    re-implement the same pipeline shape inline so we don't have to start a
-    Prefect flow run from inside the MCP server process.
 
-    ``user_id`` is required and threaded through every step exactly as the
-    Prefect flow does.
+async def _ensure_indexes(
+    client: Any,
+    database: str,
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> None:
+    with span(
+        "ensure_indexes_task", tags=_INDEXING_TAGS, trace_headers=opik_trace_headers
+    ):
+        embedding_model = get_embedding_model()
+        await ensure_indexes(
+            client, database, embedding_model=embedding_model, user_id=user_id
+        )
 
-    Returns:
-        A :class:`WriteSummary` for the processed documents.
+
+embed_nodes_task = task(
+    _embed_nodes,
+    name="embed-kg-nodes",
+    retries=1,
+    retry_delay_seconds=10,
+    cache_policy=NO_CACHE,
+)
+
+ensure_indexes_task = task(
+    _ensure_indexes,
+    name="ensure-kg-indexes",
+    retries=1,
+    retry_delay_seconds=5,
+    cache_policy=NO_CACHE,
+)
+
+
+@flow(name="memory-indexing-etl", log_prints=True)
+async def memory_indexing(
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> None:
+    """Backfill missing embeddings and ensure search indexes for ``user_id``.
+
+    ``user_id`` is required and threaded through both tasks. ``embed_nodes``
+    only processes rows belonging to the run's tenant — and only the rows that
+    are supposed to carry a vector (child chunks + entity nodes, ADR-006
+    decision 4); ``ensure_indexes`` re-asserts the global compound indexes whose
+    leading key is ``user_id``.
+
+    Observability: configures Opik at entry (subprocess-safe) and owns ONE
+    trace. ``opik_trace_headers`` is forwarded by the extraction coordinator so
+    the trailing indexing run nests under the SAME trace as the extraction; when
+    triggered standalone it is ``None`` and indexing starts its own trace. Both
+    tasks receive the run's distributed-trace headers so their spans nest under
+    this trace.
     """
 
-    # Re-validate config invariants.
+    configure_opik()
     try:
-        load_app_config()
-    except Exception as exc:
-        raise _unwrap_validation_error(exc) from exc
-    dedup_config = _build_dedup_config()
-    # Split the embedding handles exactly like ``memory_extract_etl_worker``:
-    #   * The injected ``embedding_model`` (the MCP lifespan's caller-owned
-    #     handle) is the SEARCH / persisted model — it drives supersession, the
-    #     node-text embed, and the apply-writes node ``embedding``. Falls back
-    #     to ``get_search_embedding_model()`` when the caller injects nothing.
-    #   * The resolver ALWAYS builds from ``get_resolution_embedding_model()``:
-    #     its semantic stage embeds the entity NAME only and the vector is
-    #     transient (never persisted). The injected handle never reaches the
-    #     resolver.
-    search_embedding_model = embedding_model or get_search_embedding_model()
-    resolver = _build_resolver(get_resolution_embedding_model())
-    database = client[database_name]
+        with span(
+            "memory-indexing-etl",
+            tags=_INDEXING_TAGS,
+            trace_headers=opik_trace_headers,
+            metadata=_INDEXING_METADATA,
+        ):
+            client = await init_mongodb(
+                settings.mongo.mongo_uri.get_secret_value(),
+                settings.mongo.mongo_initdb_database,
+            )
+            database = settings.mongo.mongo_initdb_database
 
-    docs = await Document.find(
-        {
-            "_id": {"$in": [PydanticObjectId(did) for did in document_ids]},
-            "user_id": user_id,
-        }
-    ).to_list()
+            # Headers for THIS run's trace (the indexing root span), passed to
+            # each task so its span nests here.
+            headers = get_distributed_trace_headers()
 
-    if not docs:
-        return WriteSummary(documents_processed=0)
+            count = await embed_nodes_task(
+                client, database, user_id, opik_trace_headers=headers
+            )
+            await ensure_indexes_task(
+                client, database, user_id, opik_trace_headers=headers
+            )
 
-    user = await User.get(user_id)
-    if user is None:
-        raise ValueError(f"User {user_id} not found; cannot run extraction.")
+            # Boot-time gate: assert the live mongot vector index agrees with
+            # ``app_config.models.search_embedding.dimensions``. Runs AFTER
+            # ``ensure_indexes`` so a freshly bootstrapped index passes;
+            # mismatch → hard-fail before the next pipeline run silently writes
+            # vectors of the wrong dimension.
+            await assert_settings_match_live_vector_index(client, database)
 
-    chunked = [await _extract_chunks_and_structural(d) for d in docs]
-    raws = [await _llm_extract_entities(c, llm=llm) for c in chunked]
-    extractor = _make_extractor_info()
-    await _validate_raws(
-        raws=raws, database=database, user_id=user_id, extractor=extractor
-    )
-    for raw in raws:
-        raw.extracted.nodes = redirect_first_person(raw.extracted.nodes, user)
-    # Canonicalize preference names, then supersession resolver branch,
-    # then deterministic ``has`` edges.
-    canonicalize_preference_names(raws)
-    judge_llm = llm if llm is not None else get_llm()
-    await resolve_supersessions(
-        database=database,
-        user_id=user_id,
-        llm=judge_llm,
-        # Statement-vs-persisted-statement → SEARCH model.
-        embedding_model=search_embedding_model,
-        raws=raws,
-    )
-    await write_self_has_preference_edges(database=database, user_id=user_id, raws=raws)
-    resolved = await _resolve_entities(raws, database, resolver, user_id)
-    # Embed at node-text grain (see ``memory_extract_etl_worker`` task ④). The MCP
-    # ingest path injects a caller-owned SEARCH/persisted handle; use it
-    # directly here rather than the ``get_search_embedding_model`` factory so
-    # the injected model actually drives the embed step. (The resolution model
-    # is NOT used here: the node-text vector is persisted, so it must be the
-    # search space.)
-    embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
-    vectors: dict[str, list[float]] = {}
-    if embeddable_texts:
-        # Route through the batcher so a large document set is packed into
-        # request-sized chunks (1000 inputs / 320K tokens) rather than a
-        # single call that would 400 on the per-request cap.
-        embedded = await embed_in_batches(embeddable_texts, search_embedding_model)
-        vectors = dict(zip(embeddable_texts, embedded))
-    embeddings = EmbeddingMap(vectors=vectors)
-    dedup_results = await _dedupe_entities(
-        resolved, embeddings, database, dedup_config, user_id
-    )
-    return await _apply_writes(
-        raws,
-        resolved,
-        embeddings,
-        dedup_results,
-        database,
-        resolver,
-        dedup_config,
-        # Apply-writes persists node vectors → SEARCH/persisted model.
-        search_embedding_model,
-        user_id,
-        extractor,
-    )
+            logger.info(
+                "Indexing pipeline finished for user_id=%s. Embedded %d nodes.",
+                user_id,
+                count,
+            )
+    finally:
+        # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
+        flush_opik()

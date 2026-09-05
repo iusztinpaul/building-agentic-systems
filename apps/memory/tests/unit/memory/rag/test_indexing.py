@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.memory.indexing.core import (
+from tree.memory.rag.embedding import child_embedding_text
+from tree.memory.rag.indexing import (
+    _backfill_filter,
     _build_vector_index_definition,
     _CANONICAL_NAME_INDEX,
     _TEXT_INDEX_FIELDS,
@@ -13,7 +15,9 @@ from tree.memory.indexing.core import (
     _VECTOR_INDEX_NAME,
     embed_nodes,
     ensure_indexes,
+    node_embedding_text,
 )
+from tree.memory.embedding_text import node_to_embedding_text
 from tree.models.base import BaseEmbeddingModel
 from tree.models.fake_model import FakeEmbeddingModel
 
@@ -38,7 +42,7 @@ def _no_mongot_sync_sleeps(mocker):
     """
 
     mocker.patch(
-        "tree.memory.indexing.core.asyncio",
+        "tree.memory.rag.indexing.asyncio",
         new=SimpleNamespace(sleep=AsyncMock()),
     )
 
@@ -168,8 +172,9 @@ class TestEnsureIndexes:
 
     async def test_vector_index_includes_filter_fields(self) -> None:
         """The created vector index must declare ``user_id``, ``kind``,
-        ``type``, AND ``merged_into`` as filter paths so $vectorSearch can
-        prune cross-tenant rows and tombstones server-side."""
+        ``type``, ``subtype`` AND ``merged_into`` as filter paths so
+        $vectorSearch can prune cross-tenant rows, non-child chunks and
+        tombstones server-side."""
 
         collection = _make_collection()
         client = _wire_client(collection)
@@ -189,6 +194,8 @@ class TestEnsureIndexes:
         assert "user_id" in filter_paths
         assert "kind" in filter_paths
         assert "type" in filter_paths
+        # ADR-006 decision 2: the child-only seed search filters on subtype.
+        assert "subtype" in filter_paths
         assert "merged_into" in filter_paths
 
     async def test_vector_index_uses_live_model_dimensions(self) -> None:
@@ -285,7 +292,7 @@ class TestEnsureIndexes:
         collection = _make_collection(initial_indexes=[existing])
         client = _wire_client(collection)
 
-        with caplog.at_level("WARNING", logger="tree.memory.indexing.core"):
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
             await ensure_indexes(
                 client,
                 "test_db",
@@ -325,6 +332,7 @@ class TestEnsureIndexes:
                     {"type": "filter", "path": "user_id"},
                     {"type": "filter", "path": "kind"},
                     {"type": "filter", "path": "type"},
+                    {"type": "filter", "path": "subtype"},
                     {"type": "filter", "path": "merged_into"},
                 ]
             },
@@ -332,7 +340,7 @@ class TestEnsureIndexes:
         collection = _make_collection(initial_indexes=[existing])
         client = _wire_client(collection)
 
-        with caplog.at_level("WARNING", logger="tree.memory.indexing.core"):
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
             await ensure_indexes(
                 client,
                 "test_db",
@@ -343,13 +351,52 @@ class TestEnsureIndexes:
         collection.drop_search_index.assert_not_awaited()
         collection.create_search_index.assert_not_awaited()
 
+    async def test_pre_adr006_index_missing_subtype_self_heals(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The live index of an environment provisioned before ADR-006 has every
+        filter path EXCEPT ``subtype`` — the next indexing run must quietly drop
+        and recreate it (no WARNING; only a dimension mismatch warns)."""
+
+        existing = {
+            "name": _VECTOR_INDEX_NAME,
+            "latestDefinition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 8,
+                        "similarity": "cosine",
+                    },
+                    {"type": "filter", "path": "user_id"},
+                    {"type": "filter", "path": "kind"},
+                    {"type": "filter", "path": "type"},
+                    {"type": "filter", "path": "merged_into"},
+                ]
+            },
+        }
+        collection = _make_collection(initial_indexes=[existing])
+        client = _wire_client(collection)
+
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
+            await ensure_indexes(
+                client,
+                "test_db",
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+                user_id=_TEST_USER_ID,
+            )
+
+        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.create_search_index.assert_awaited_once()
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert warnings == []
 
     async def test_missing_filter_paths_triggers_recreate_without_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An existing index missing ``merged_into`` must be recreated,
+        """An existing index missing a filter path must be recreated,
         but with no WARNING (only dimension mismatch warns)."""
 
         existing = {
@@ -370,7 +417,7 @@ class TestEnsureIndexes:
         collection = _make_collection(initial_indexes=[existing])
         client = _wire_client(collection)
 
-        with caplog.at_level("WARNING", logger="tree.memory.indexing.core"):
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
             await ensure_indexes(
                 client,
                 "test_db",
@@ -399,6 +446,7 @@ class TestVectorIndexDefinition:
             "user_id",
             "kind",
             "type",
+            "subtype",
             "merged_into",
         }
         assert _VECTOR_INDEX_FILTER_PATHS[0] == "user_id"
@@ -432,6 +480,61 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
         return [[0.1] * self._dimensions for _ in texts]
 
 
+class TestBackfillSelection:
+    """ADR-006 decision 4: the backfill embeds child chunks + entity nodes ONLY.
+
+    The rule lives in the QUERY, so these assert on the filter the function
+    issues — parents and documents are never fetched, let alone embedded.
+    """
+
+    def test_filter_is_scoped_to_the_tenant_and_to_unembedded_rows(self) -> None:
+        query = _backfill_filter(_TEST_USER_ID)
+
+        assert query["user_id"] == _TEST_USER_ID
+        assert query["kind"] == "node"
+        assert query["embedding"] == {"$in": [[], None]}
+
+    def test_filter_selects_child_chunks_and_llm_extractable_entities(self) -> None:
+        child_branch, entity_branch = _backfill_filter(_TEST_USER_ID)["$or"]
+
+        assert child_branch == {"type": "chunk", "subtype": "child"}
+        entity_types = entity_branch["type"]["$in"]
+        assert "person" in entity_types
+        # Structural rows are not LLM-extractable, so no branch can ever match
+        # a document row or a PARENT chunk — both are vector-less by design.
+        assert "document" not in entity_types
+        assert "chunk" not in entity_types
+
+
+class TestNodeEmbeddingText:
+    def test_child_chunk_embeds_its_contextual_header(self) -> None:
+        row = {
+            "type": "chunk",
+            "subtype": "child",
+            "properties": {
+                "title": "Memory for AI Agents",
+                "heading_path": ["Retrieval", "Parent-document retrieval"],
+                "content": "It stores parents without vectors.",
+            },
+        }
+
+        text = node_embedding_text(row)
+
+        # Rebuilt from the row's OWN denormalised properties — no join, and
+        # byte-identical to what the worker's embed_children task produced.
+        assert text == child_embedding_text(
+            title="Memory for AI Agents",
+            heading_path=["Retrieval", "Parent-document retrieval"],
+            content="It stores parents without vectors.",
+        )
+        assert text != "It stores parents without vectors."
+
+    def test_entity_node_embeds_the_generic_node_text(self) -> None:
+        row = {"type": "person", "name": "alice", "properties": {"email": "a@b.c"}}
+
+        assert node_embedding_text(row) == node_to_embedding_text(row)
+
+
 class TestEmbedNodesIsBackfillOnly:
     async def test_skips_nodes_with_non_empty_embedding(self, mocker) -> None:
         """Nodes with a non-empty ``embedding`` must NOT be re-embedded —
@@ -461,17 +564,62 @@ class TestEmbedNodesIsBackfillOnly:
         embedded = await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
 
         assert embedded == 1
-        # The query the function issues must exclude non-empty embeddings
-        # and be scoped to ``user_id``.
-        find_filter = collection.find.call_args.args[0]
-        assert find_filter == {
-            "user_id": _TEST_USER_ID,
-            "kind": "node",
-            "embedding": {"$in": [[], None]},
-        }
+        # The query the function issues is the ONE backfill selection rule.
+        assert collection.find.call_args.args[0] == _backfill_filter(_TEST_USER_ID)
         # Only one batch with the single empty-embedding node was embedded.
         assert len(spy_model.calls) == 1
         assert len(spy_model.calls[0]) == 1
+
+    async def test_embeds_the_child_and_the_entity_of_a_mixed_fixture(
+        self, mocker
+    ) -> None:
+        """A fixture with one unembedded child, parent, document and person:
+        the child and the person are embedded, on their own texts."""
+
+        child = {
+            "_id": "u:chunk:a#parent-0#child-0",
+            "kind": "node",
+            "type": "chunk",
+            "subtype": "child",
+            "embedding": [],
+            "properties": {
+                "title": "Memory for AI Agents",
+                "heading_path": ["Retrieval"],
+                "content": "children carry the vector",
+            },
+        }
+        person = {
+            "_id": "u:person:alice",
+            "kind": "node",
+            "type": "person",
+            "embedding": [],
+            "properties": {},
+            "name": "alice",
+        }
+        # The parent and the document rows are excluded by the QUERY, so a
+        # correct implementation never even fetches them.
+        fetched = [row for row in (child, person)]
+
+        collection = AsyncMock()
+        collection.find = MagicMock(
+            return_value=AsyncMock(to_list=AsyncMock(return_value=fetched))
+        )
+        client = _wire_client(collection)
+        spy_model = _SpyEmbeddingModel(dimensions=4)
+
+        embedded = await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
+
+        assert embedded == 2
+        assert spy_model.calls == [
+            [
+                child_embedding_text(
+                    title="Memory for AI Agents",
+                    heading_path=["Retrieval"],
+                    content="children carry the vector",
+                ),
+                node_to_embedding_text(person),
+            ]
+        ]
 
     async def test_no_docs_no_embed(self) -> None:
         """When every node already has a non-empty embedding, the embed
@@ -512,7 +660,9 @@ class TestEmbedNodesIsBackfillOnly:
         skipped = {
             "_id": "chunk:poison",
             "type": "chunk",
+            "subtype": "child",
             "kind": "node",
+            "properties": {"content": "poison"},
             "embedding": [],
         }
         collection = AsyncMock()
@@ -523,11 +673,11 @@ class TestEmbedNodesIsBackfillOnly:
         )
         client = _wire_client(collection)
         mocker.patch(
-            "tree.memory.indexing.core.embed_node_texts",
+            "tree.memory.rag.indexing.embed_texts",
             new=AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4], []]),
         )
 
-        with caplog.at_level("INFO", logger="tree.memory.indexing.core"):
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
             embedded = await embed_nodes(
                 client, "test_db", _SpyEmbeddingModel(dimensions=4), _TEST_USER_ID
             )

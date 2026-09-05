@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
+from tree.config.app_config import app_config
 from tree.data.conversation.conversation import (
     _content_hash,
     load_conversation_document,
 )
+from tree.memory.rag.chunking import _ENCODER, split_document
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -316,17 +318,14 @@ class TestSessionStartedAt:
 
 
 class TestLongTranscriptChunker:
-    """Smoke test: the existing chunker handles ~50KB transcripts cleanly.
+    """Smoke test: the two-level splitter handles ~50KB transcripts cleanly.
 
-    This is a regression guard, not a behavior change. If the chunker
-    misbehaves on long input today, a separate bug task is filed before
-    Phase-2 ships. (Per the groomed spec for #026.)
+    A regression guard, not a behavior change. Post-ADR-006 the chunker under
+    test is ``tree.memory.rag.chunking.split_document`` driven by the live
+    ``memory.chunking`` config — the same call the pipeline's task ① makes.
     """
 
     def test_50kb_transcript_chunks_cleanly(self) -> None:
-        from tree.config.app_config import app_config
-        from tree.memory.extraction.core import _ENCODER, chunk_document
-
         # Build a ~50KB transcript out of varied repeated lines so the
         # tokenizer can't trivially collapse it.
         line = (
@@ -336,22 +335,29 @@ class TestLongTranscriptChunker:
         text = (line * 600)[:50_000]
         assert 49_000 <= len(text) <= 50_000
 
-        chunks = chunk_document(text)
+        parents = split_document(text, app_config.memory.chunking)
 
-        # (a) non-empty + bounded count.
-        assert len(chunks) > 0
-        assert len(chunks) <= 200
+        # (a) non-empty + bounded count at both levels.
+        children = [child for parent in parents for child in parent.children]
+        assert len(parents) > 0
+        assert len(parents) <= 200
+        assert len(children) >= len(parents)
         # (b) every chunk non-empty.
-        for chunk in chunks:
-            assert chunk.strip(), "chunker emitted an empty chunk"
-        # (c) every chunk within (chunk_size + chunk_overlap) tokens.
-        #     The chunker operates on tokens, not characters — so the AC's
-        #     "chars" wording is interpreted as tokens (the unit the
-        #     splitter actually bounds). chunk_size=512, overlap=64 →
-        #     max-tokens-per-chunk = 512.
-        max_tokens = app_config.extraction.chunk_size
-        for chunk in chunks:
-            token_count = len(_ENCODER.encode(chunk))
-            assert token_count <= max_tokens, (
-                f"chunk exceeds bound: {token_count} > {max_tokens}"
+        for parent in parents:
+            assert parent.content.strip(), "chunker emitted an empty parent"
+        for child in children:
+            assert child.content.strip(), "chunker emitted an empty child"
+        # (c) every chunk within its level's token budget. The splitter
+        #     operates on tokens, not characters — so the AC's "chars" wording
+        #     is interpreted as tokens (the unit the splitter actually bounds).
+        chunking = app_config.memory.chunking
+        for parent in parents:
+            token_count = len(_ENCODER.encode(parent.content))
+            assert token_count <= chunking.parent.size, (
+                f"parent exceeds bound: {token_count} > {chunking.parent.size}"
+            )
+        for child in children:
+            token_count = len(_ENCODER.encode(child.content))
+            assert token_count <= chunking.child.size, (
+                f"child exceeds bound: {token_count} > {chunking.child.size}"
             )

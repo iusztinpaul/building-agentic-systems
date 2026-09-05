@@ -20,7 +20,7 @@ Both helpers are tenant-scoped: every read and write carries ``user_id``
 and keys off the deterministic ``_id = "{user_id}:{job}"``. They operate
 on the pymongo collection of the supplied ``database`` (an
 ``AsyncDatabase`` such as ``client[database_name]``), matching the
-data-layer access style in :mod:`tree.memory.indexing.core`.
+data-layer access style in :mod:`tree.memory.rag.indexing`.
 """
 
 from __future__ import annotations

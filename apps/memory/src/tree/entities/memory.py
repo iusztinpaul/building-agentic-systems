@@ -213,7 +213,7 @@ class MemoryEntry(BeanieDocument):
     id: str
     # No standalone single-key index on ``user_id``: every compound
     # index in ``Settings.indexes`` below (and the dynamic indexes
-    # created in :mod:`tree.memory.indexing.core`) leads with
+    # created in :mod:`tree.memory.rag.indexing`) leads with
     # ``user_id``, so tenant-scoped queries hit the index prefix
     # without a redundant single-key maintenance cost per row.
     user_id: PydanticObjectId
@@ -531,7 +531,7 @@ class MemoryEntry(BeanieDocument):
             # user_id-prepended compound indexes for fast filtered reads.
             # The dynamic indexes (kind_source_node, kind_target_node,
             # kind_embedding, canonical_name) created in
-            # tree.memory.indexing.core get user_id prepended in #019 —
+            # tree.memory.rag.indexing get user_id prepended in #019 —
             # this declaration only covers the two static compound indexes
             # the entry model owns directly.
             IndexModel(

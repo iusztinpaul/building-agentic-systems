@@ -1329,9 +1329,12 @@ def _pole_o_llm_extractable_for_same_as() -> list[str]:
 register_edge_type(
     EdgeTypeSpec(
         name="part_of",
-        allowed_pairs=[("chunk", "document")],
+        # ADR-006 decision 3: the hierarchy is TWO levels deep, so ``part_of``
+        # carries both hops — a child chunk into its parent chunk, and a parent
+        # chunk into its document.
+        allowed_pairs=[("chunk", "document"), ("chunk", "chunk")],
         properties_schema=None,
-        description="Chunk belongs to a document",
+        description="Chunk belongs to a parent chunk or a document",
         llm_extractable=False,
     )
 )
@@ -1456,7 +1459,7 @@ register_edge_type(
 # ---------------------------------------------------------------------------
 #
 # Existing call sites in ``tree.memory.extraction.core``,
-# ``tree.memory.extraction.pipeline``, and ``tree.memory.query.nl_query``
+# ``tree.memory.pipeline``, and ``tree.memory.query.nl_query``
 # read these constants directly. They MUST keep working unchanged after
 # this refactor — task #027 is behavior-neutral. Downstream tasks
 # (#028–#032) will migrate consumers to read the registry directly.

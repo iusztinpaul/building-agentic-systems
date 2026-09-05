@@ -3,7 +3,7 @@
 
 The coordinator flow ``memory-extract-etl-coordinator`` consumes these helpers to
 resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once (see
-:func:`tree.memory.extraction.pipeline.memory_extract_etl_coordinator`). This module
+:func:`tree.memory.pipeline.memory_extract_etl_coordinator`). This module
 holds the reusable PURE helpers — there is NO Prefect ``@flow`` and NO deployment
 here.
 
@@ -56,7 +56,6 @@ from prefect import get_run_logger, tags
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.documents import Document
 from tree.config.constants import TAGS_INDEXING
-from tree.memory.indexing.pipeline import memory_indexing
 
 # The balanced-contiguous partitioning math now lives in the neutral, pipeline-
 # agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
@@ -197,12 +196,12 @@ async def _fan_out_extraction(
       COMPLETED (``_shard_failure_reason``, #095) — ``run_deployment`` RETURNS a
       Failed / Crashed / Cancelled run instead of raising, and counting that as a
       success made the summary read green while extraction output was missing.
-    * After the gather, :func:`~tree.memory.indexing.pipeline.memory_indexing` runs
+    * After the gather, :func:`~tree.memory.pipeline.memory_indexing` runs
       ONCE for the user as an INLINE SUBFLOW — never per-shard (indexing is a
       global backfill; per-shard would race writers). It runs regardless of how
       many shards failed, so a partial extraction is still indexed. Indexing is
       NOT injected like ``run_deployment``: it is a plain in-process call, so
-      tests patch ``tree.memory.extraction.sharding.memory_indexing``.
+      tests patch ``tree.memory.pipeline.memory_indexing``.
 
     ``opik_trace_headers`` (the coordinator's distributed-trace headers) is
     forwarded to every worker AND to the indexing subflow, so the whole
@@ -261,6 +260,14 @@ async def _fan_out_extraction(
     )
 
     # Index ONCE after every shard's extraction has settled — never per-shard.
+    #
+    # Imported HERE, not at module scope: ``tree.memory.pipeline`` imports this
+    # module for the fan-out helpers, so a top-level import would be a cycle
+    # (ADR-006 decision 8 put all three flows in one module). Function-scope
+    # import also means tests patch the flow at
+    # ``tree.memory.pipeline.memory_indexing`` and this call sees the patch.
+    from tree.memory.pipeline import memory_indexing  # noqa: PLC0415
+
     log.info("extraction fan-out: running single memory_indexing subflow inline")
     with tags(*TAGS_INDEXING):
         await memory_indexing(user_id=user_id, opik_trace_headers=opik_trace_headers)

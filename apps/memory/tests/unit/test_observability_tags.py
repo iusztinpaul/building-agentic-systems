@@ -71,8 +71,7 @@ class TestPipelineIdentityTags:
         from tree.data.conversation.conversation_pipeline import _CONVERSATION_TAGS
         from tree.data.file.file_pipeline import _FILE_TAGS
         from tree.data.offline_pipeline import _DATA_TAGS
-        from tree.memory.extraction.pipeline import _EXTRACTION_TAGS
-        from tree.memory.indexing.pipeline import _INDEXING_TAGS
+        from tree.memory.pipeline import _EXTRACTION_TAGS, _INDEXING_TAGS
 
         assert _DATA_TAGS == consts.TAGS_DATA_OFFLINE
         assert _FILE_TAGS == consts.TAGS_DATA_ONLINE

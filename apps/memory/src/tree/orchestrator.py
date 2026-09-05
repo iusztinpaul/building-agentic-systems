@@ -37,7 +37,7 @@ from tree.data.offline_pipeline import data_etl_worker
 from tree.offline import TAGS_OFFLINE_PIPELINE, offline_pipeline
 from tree.online import TAGS_ONLINE_PIPELINE, online_pipeline
 from tree.memory.consolidation.dream import dream_consolidation_all_users
-from tree.memory.extraction.pipeline import memory_extract_etl_worker
+from tree.memory.pipeline import memory_extract_etl_worker
 from tree.config.constants import (
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,
@@ -171,7 +171,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         memory_extract_etl_worker,
         "memory-extract-etl-worker",
-        "apps/memory/src/tree/memory/extraction/pipeline.py:memory_extract_etl_worker",
+        "apps/memory/src/tree/memory/pipeline.py:memory_extract_etl_worker",
         TAGS_EXTRACTION,
     ),
     _DeploymentSpec(

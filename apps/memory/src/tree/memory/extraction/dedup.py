@@ -358,7 +358,7 @@ def _build_pipeline(
         # Tombstone exclusion is a filter on the search results because
         # ``merged_into`` is not declared as a filter-path on the vector
         # index (only ``kind`` and ``type`` are — see
-        # ``tree.memory.indexing.core._ensure_vector_index``). We accept
+        # ``tree.memory.rag.indexing._ensure_vector_index``). We accept
         # either an absent field or an explicit null/empty value so test
         # fixtures that seed ``merged_into=None`` still pass.
         {

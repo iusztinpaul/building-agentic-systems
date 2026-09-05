@@ -2,7 +2,7 @@
 
 Every concrete embedding model must report a positive integer dimensionality
 so ``ensure_indexes`` can drive the Atlas vector index's ``numDimensions``
-from the live model instance (see ``tree.memory.indexing.core``). These
+from the live model instance (see ``tree.memory.rag.indexing``). These
 tests pin the property down per subclass without touching any external
 network/process.
 """

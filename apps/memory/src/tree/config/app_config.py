@@ -38,7 +38,7 @@ class EmbeddingConfig(BaseModel):
     :attr:`ModelsConfig.search_embedding`. Only the **search** embedding's
     ``dimensions`` is dimension-coupled to the Atlas Vector Search index
     under ``docker/mongot/``;
-    :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
+    :func:`tree.memory.rag.indexing.assert_settings_match_live_vector_index`
     asserts it matches the live ``vector_index`` at boot so a mismatch is a
     hard startup error rather than silent data loss. The **resolution**
     embedding is transient (computed on the entity name and never
@@ -148,8 +148,10 @@ class DedupConfig(BaseModel):
 
 
 class ExtractionConfig(BaseModel):
-    chunk_size: int = 512
-    chunk_overlap: int = 64
+    # Chunking knobs live under ``memory.chunking`` (ADR-006 decision 6): the
+    # two-level splitter is mode-independent, so a chunk size under
+    # ``extraction`` would read as graph-only. The old
+    # ``chunk_size``/``chunk_overlap`` pair went out with their only consumer.
     llm_concurrency: int = 5
     # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
     # override hatch via :func:`_apply_env_overrides`.

@@ -111,6 +111,23 @@ def test_serve_deployments_registers_all_deployments(mocker):
     assert "memory-extraction-fanout-etl" not in deployment_names
 
 
+def test_memory_worker_entrypoint_points_at_the_one_pipeline_module():
+    """ADR-006 decision 8 moved the flows into ``tree/memory/pipeline.py``.
+
+    The entrypoint is a FILE PATH Prefect resolves at run time, so a stale one
+    fails only when the deployment next runs — pin it here instead.
+    """
+
+    entrypoints = {
+        spec.name: spec.entrypoint for spec in orchestrator._DEPLOYMENT_SPECS
+    }
+
+    assert entrypoints["memory-extract-etl-worker"] == (
+        "apps/memory/src/tree/memory/pipeline.py:memory_extract_etl_worker"
+    )
+    assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
 def test_every_spec_registers_with_deploy_optional_off(mocker):
     """All 5 specs register under the default flag — because NONE is optional.
 

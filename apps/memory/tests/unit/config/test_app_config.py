@@ -45,7 +45,6 @@ class TestLoadAppConfig:
         assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
         assert config.models.embedding_batch.dispatch_concurrency == 1
-        assert config.extraction.chunk_size == 512
         assert config.extraction.llm_concurrency == 5
         # #054: intra-run fan-out knobs.
         assert config.extraction.doc_concurrency == 1
@@ -258,7 +257,7 @@ class TestLoadAppConfig:
                   llm:
                     model: gemini-2.0-flash
                 extraction:
-                  chunk_size: 256
+                  llm_concurrency: 9
                   resolution:
                     fuzzy_threshold: 0.9
             """)
@@ -268,9 +267,9 @@ class TestLoadAppConfig:
 
         assert config.models.llm.model == "gemini-2.0-flash"
         assert config.models.llm.provider == "gemini"
-        assert config.extraction.chunk_size == 256
+        assert config.extraction.llm_concurrency == 9
         assert config.extraction.resolution.fuzzy_threshold == 0.9
-        assert config.extraction.chunk_overlap == 64
+        assert config.extraction.doc_concurrency == 1
         # Embedding dimensions fall back to the plain Pydantic default
         # (1024) when the custom YAML doesn't override them (#034/#039).
         assert config.models.resolution_embedding.dimensions == 1024
@@ -321,12 +320,12 @@ class TestLoadAppConfig:
 
     def test_env_var_override(self, tmp_path, monkeypatch):
         custom = tmp_path / "env.yaml"
-        custom.write_text("extraction:\n  chunk_size: 1024\n")
+        custom.write_text("extraction:\n  llm_concurrency: 11\n")
         monkeypatch.setenv("APP_CONFIG_PATH", str(custom))
 
         config = load_app_config()
 
-        assert config.extraction.chunk_size == 1024
+        assert config.extraction.llm_concurrency == 11
 
 
 class TestConcurrencyConfig:
@@ -727,11 +726,13 @@ class TestChunkingConfig:
         assert "'fixed_tokens'" in message
         assert "'recursive'" in message
 
-    def test_extraction_chunk_knobs_are_left_in_place(self, frozen_config_path):
-        """#108 removes ``extraction.chunk_size``/``chunk_overlap`` together with
-        their only consumer; until then they must keep loading."""
+    def test_extraction_chunk_knobs_are_gone(self, frozen_config_path):
+        """#108 removed ``extraction.chunk_size``/``chunk_overlap`` together with
+        their only consumer — chunking is configured under ``memory.chunking``."""
 
         config = load_app_config(frozen_config_path)
 
-        assert config.extraction.chunk_size == 512
-        assert config.extraction.chunk_overlap == 64
+        assert not hasattr(config.extraction, "chunk_size")
+        assert not hasattr(config.extraction, "chunk_overlap")
+        assert config.memory.chunking.parent.size == 4096
+        assert config.memory.chunking.child.size == 256

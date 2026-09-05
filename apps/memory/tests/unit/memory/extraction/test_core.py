@@ -8,38 +8,12 @@ from tree.memory.extraction.core import (
     _MAX_SOURCES,
     _parse_extraction,
     build_structural_entries,
-    chunk_document,
     extract_entities,
     upsert_graph_entries,
 )
+from tree.memory.rag.types import ChildChunk, ParentChunk
 from tree.memory.types import ExtractionResult, ExtractedEdge, ExtractedNode
 from tree.models.fake_model import FakeLLM
-
-
-# ---------------------------------------------------------------------------
-# chunk_document
-# ---------------------------------------------------------------------------
-
-
-class TestChunkDocument:
-    def test_short_text_single_chunk(self):
-        chunks = chunk_document("Hello world", chunk_size=100)
-        assert len(chunks) == 1
-        assert "Hello world" in chunks[0]
-
-    def test_empty_text(self):
-        assert chunk_document("") == []
-
-    def test_long_text_multiple_chunks(self):
-        text = "word " * 1000
-        chunks = chunk_document(text, chunk_size=100, chunk_overlap=20)
-        assert len(chunks) > 1
-
-    def test_overlap_produces_more_chunks(self):
-        text = "word " * 200
-        no_overlap = chunk_document(text, chunk_size=100, chunk_overlap=0)
-        with_overlap = chunk_document(text, chunk_size=100, chunk_overlap=50)
-        assert len(with_overlap) > len(no_overlap)
 
 
 # ---------------------------------------------------------------------------
@@ -293,100 +267,116 @@ class TestExtractEntities:
 # ---------------------------------------------------------------------------
 
 
+_SOURCE_URI = "https://example.com/article"
+
+
+def _parents(*shape: int) -> list[ParentChunk]:
+    """Build a hierarchy with ``shape[i]`` children under parent ``i``."""
+
+    return [
+        ParentChunk(
+            index=parent_index,
+            content=f"parent {parent_index}",
+            children=[
+                ChildChunk(index=child_index, content=f"child {child_index}")
+                for child_index in range(n_children)
+            ],
+        )
+        for parent_index, n_children in enumerate(shape)
+    ]
+
+
 def _build(
-    chunk_texts: list[str],
-    extracted: ExtractionResult | None = None,
+    parents: list[ParentChunk],
     reference_uris: list[str] | None = None,
 ) -> ExtractionResult:
-    """Helper to call build_structural_entries with sensible defaults."""
-    chunk_ids = [f"cid-{i}" for i in range(len(chunk_texts))]
+    """Call build_structural_entries with sensible defaults."""
+
     return build_structural_entries(
-        document_id=PydanticObjectId(),
-        source_type="substack",
-        source_uri="https://example.com/article",
-        date="2026-01-01",
-        chunk_texts=chunk_texts,
-        chunk_ids=chunk_ids,
-        extracted=extracted or ExtractionResult(),
+        source_uri=_SOURCE_URI,
+        parents=parents,
         reference_uris=reference_uris,
     )
 
 
 class TestBuildStructuralEntries:
-    def test_creates_document_node(self):
-        result = _build(["chunk 0"])
+    def test_emits_no_nodes_because_the_rag_loader_owns_the_rows(self):
+        result = _build(_parents(2, 2))
 
-        doc_nodes = [n for n in result.nodes if n.type == NodeType.DOCUMENT]
-        assert len(doc_nodes) == 1
-        assert doc_nodes[0].name == "https://example.com/article"
+        assert result.nodes == []
 
-    def test_creates_chunk_nodes(self):
-        result = _build(["chunk 0", "chunk 1", "chunk 2"])
-
-        chunk_nodes = [n for n in result.nodes if n.type == NodeType.CHUNK]
-        assert len(chunk_nodes) == 3
-
-    def test_creates_part_of_edges(self):
-        result = _build(["a", "b"])
+    def test_part_of_edges_cover_both_levels(self):
+        # 2 parents x 3 children: 6 child->parent hops + 2 parent->document.
+        result = _build(_parents(3, 3))
 
         part_of = [e for e in result.edges if e.type == EdgeType.PART_OF]
-        assert len(part_of) == 2
+        child_to_parent = [e for e in part_of if e.target_type == NodeType.CHUNK]
+        parent_to_document = [e for e in part_of if e.target_type == NodeType.DOCUMENT]
+        assert len(child_to_parent) == 6
+        assert len(parent_to_document) == 2
 
-    def test_creates_next_edges(self):
-        result = _build(["a", "b", "c"])
+    def test_part_of_endpoints_are_the_deterministic_row_names(self):
+        result = _build(_parents(1))
 
-        next_edges = [e for e in result.edges if e.type == EdgeType.NEXT]
-        assert len(next_edges) == 2
+        part_of = {(e.source_node_id, e.target_node_id) for e in result.edges}
+        assert part_of == {
+            (f"{_SOURCE_URI}#parent-0#child-0", f"{_SOURCE_URI}#parent-0"),
+            (f"{_SOURCE_URI}#parent-0", _SOURCE_URI),
+        }
 
-    def test_creates_mentions_edges(self):
-        extracted = ExtractionResult(
-            nodes=[
-                ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
-                ExtractedNode(name="bob", type=NodeType.PERSON, properties={}),
-            ],
-        )
-
-        result = _build(["text"], extracted=extracted)
-
-        mentions = [e for e in result.edges if e.type == EdgeType.MENTIONS]
-        assert len(mentions) == 2
-        target_names = {e.target_node_id for e in mentions}
-        assert target_names == {"alice", "bob"}
-
-    def test_no_next_edge_for_single_chunk(self):
-        result = _build(["only one"])
+    def test_next_edges_link_siblings_at_both_levels(self):
+        # 3 parents x 2 children: 2 parent-level hops + 3 x 1 child-level hops.
+        result = _build(_parents(2, 2, 2))
 
         next_edges = [e for e in result.edges if e.type == EdgeType.NEXT]
-        assert len(next_edges) == 0
+        assert len(next_edges) == 5
+
+    def test_next_never_crosses_a_parent_boundary(self):
+        result = _build(_parents(2, 2))
+
+        next_edges = [e for e in result.edges if e.type == EdgeType.NEXT]
+        child_hops = {
+            (e.source_node_id, e.target_node_id)
+            for e in next_edges
+            if "#child-" in e.source_node_id
+        }
+        assert child_hops == {
+            (f"{_SOURCE_URI}#parent-0#child-0", f"{_SOURCE_URI}#parent-0#child-1"),
+            (f"{_SOURCE_URI}#parent-1#child-0", f"{_SOURCE_URI}#parent-1#child-1"),
+        }
+
+    def test_no_next_edge_for_a_single_parent_with_a_single_child(self):
+        result = _build(_parents(1))
+
+        assert [e for e in result.edges if e.type == EdgeType.NEXT] == []
+
+    def test_emits_no_mentions_because_apply_writes_owns_them(self):
+        result = _build(_parents(1))
+
+        assert [e for e in result.edges if e.type == EdgeType.MENTIONS] == []
 
     def test_creates_referenced_edges(self):
         refs = ["https://ref1.com/article", "https://ref2.com/article"]
-        result = _build(["text"], reference_uris=refs)
+
+        result = _build(_parents(1), reference_uris=refs)
 
         referenced = [e for e in result.edges if e.type == EdgeType.REFERENCED]
         assert len(referenced) == 2
-        targets = {e.target_node_id for e in referenced}
-        assert targets == set(refs)
+        assert {e.target_node_id for e in referenced} == set(refs)
         for edge in referenced:
             assert edge.source_type == NodeType.DOCUMENT
             assert edge.target_type == NodeType.DOCUMENT
 
     def test_no_referenced_edges_when_none(self):
-        result = _build(["text"], reference_uris=None)
+        result = _build(_parents(1), reference_uris=None)
 
-        referenced = [e for e in result.edges if e.type == EdgeType.REFERENCED]
-        assert len(referenced) == 0
+        assert [e for e in result.edges if e.type == EdgeType.REFERENCED] == []
 
-    def test_chunk_ids_stamped_on_entries(self):
-        result = _build(["a", "b"])
+    def test_empty_hierarchy_emits_nothing(self):
+        result = _build([])
 
-        chunk_nodes = [n for n in result.nodes if n.type == NodeType.CHUNK]
-        assert chunk_nodes[0].chunk_id == "cid-0"
-        assert chunk_nodes[1].chunk_id == "cid-1"
-
-        part_of = [e for e in result.edges if e.type == EdgeType.PART_OF]
-        assert part_of[0].chunk_id == "cid-0"
-        assert part_of[1].chunk_id == "cid-1"
+        assert result.nodes == []
+        assert result.edges == []
 
 
 # ---------------------------------------------------------------------------

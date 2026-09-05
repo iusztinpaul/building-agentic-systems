@@ -1,4 +1,4 @@
-"""Unit tests for :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`.
+"""Unit tests for :func:`tree.memory.rag.indexing.assert_settings_match_live_vector_index`.
 
 Post-#034 the helper is the hard-error gate between
 ``app_config.models.search_embedding.dimensions`` (#039: pinned to the
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tree.memory.indexing.core import (
+from tree.memory.rag.indexing import (
     _VECTOR_INDEX_NAME,
     assert_settings_match_live_vector_index,
 )
@@ -97,7 +97,7 @@ def _patch_expected_dim(mocker, dim: int) -> None:
     """
 
     mocker.patch(
-        "tree.memory.indexing.core.app_config.models.search_embedding.dimensions",
+        "tree.memory.rag.indexing.app_config.models.search_embedding.dimensions",
         new=dim,
     )
 

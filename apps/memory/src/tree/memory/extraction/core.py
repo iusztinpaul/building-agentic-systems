@@ -2,30 +2,31 @@
 Core business logic for knowledge-graph extraction.
 
 Pure functions (aside from the LLM call and DB writes) that:
-1. Chunk a document into token-bounded pieces.
-2. Ask an LLM to extract nodes & edges per chunk.
-3. Build structural entries (PART_OF, NEXT, MENTIONS) deterministically.
-4. Upsert the result to the ``memory`` collection.
+1. Ask an LLM to extract nodes & edges from one **Parent chunk**.
+2. Build the structural EDGES (PART_OF, NEXT, REFERENCED) deterministically
+   from the chunk hierarchy.
+3. Upsert the result to the ``memory`` collection.
+
+Chunking moved to :mod:`tree.memory.rag.chunking` (ADR-006 decision 6) and the
+``document`` / ``chunk`` NODE rows are written by :mod:`tree.memory.rag.load` in
+BOTH memory modes — this module only adds what ``graphrag`` layers on top.
 
 Resolution + deduplication used to live here (``normalize_nodes`` and four
 helpers); those have moved to :mod:`tree.memory.resolution` (composite chain),
 :mod:`tree.memory.extraction.dedup` (vector-search decision), and
 :mod:`tree.memory.extraction.add_entity` (write-side orchestrator). The
-pipeline in :mod:`tree.memory.extraction.pipeline` is the single caller that
-ties them together.
+pipeline in :mod:`tree.memory.pipeline` is the single caller that ties them
+together.
 """
 
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
-import tiktoken
 from beanie import PydanticObjectId
 from pymongo import UpdateOne
 
-from tree.config.app_config import app_config
 from tree.entities.memory import (
     EdgeType,
     MEMORY_COLLECTION,
@@ -40,6 +41,8 @@ from tree.entities.ontology import (
     RELATION_SEMANTICS,
     get_ontology_schema,
 )
+from tree.memory.rag.load import child_chunk_name, parent_chunk_name
+from tree.memory.rag.types import ParentChunk
 from tree.memory.types import (
     ExtractedEdge,
     ExtractedNode,
@@ -54,42 +57,7 @@ _MAX_ALIASES = 50
 _MAX_SOURCES = 500
 
 # ---------------------------------------------------------------------------
-# 1. Chunking
-# ---------------------------------------------------------------------------
-
-_ENCODER = tiktoken.get_encoding("cl100k_base")
-
-
-def chunk_document(
-    text: str,
-    chunk_size: int | None = None,
-    chunk_overlap: int | None = None,
-) -> list[str]:
-    chunk_size = (
-        chunk_size if chunk_size is not None else app_config.extraction.chunk_size
-    )
-    chunk_overlap = (
-        chunk_overlap
-        if chunk_overlap is not None
-        else app_config.extraction.chunk_overlap
-    )
-    tokens = _ENCODER.encode(text)
-    if not tokens:
-        return []
-
-    chunks: list[str] = []
-    start = 0
-    while start < len(tokens):
-        end = start + chunk_size
-        chunk_tokens = tokens[start:end]
-        chunks.append(_ENCODER.decode(chunk_tokens))
-        start += chunk_size - chunk_overlap
-
-    return chunks
-
-
-# ---------------------------------------------------------------------------
-# 2. LLM extraction
+# 1. LLM extraction
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
@@ -243,7 +211,7 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
     violations) are carried forward as
     :class:`tree.memory.types.RawRejection` entries on
     :attr:`ExtractionResult.raw_rejections`. The validator-pipeline
-    step at :mod:`tree.memory.extraction.pipeline` then turns each one
+    step at :mod:`tree.memory.pipeline` then turns each one
     into an ``extraction_rejections`` row so the signal is structured
     rather than lost to ``logger.warning``.
     """
@@ -440,120 +408,111 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
 
 
 # ---------------------------------------------------------------------------
-# 3. Structural entries (deterministic, not LLM)
+# 2. Structural edges (deterministic, not LLM)
 # ---------------------------------------------------------------------------
 
 
 def build_structural_entries(
     *,
-    document_id: PydanticObjectId,
-    source_type: str,
     source_uri: str,
-    date: str | None,
-    chunk_texts: list[str],
-    chunk_ids: list[str],
-    extracted: ExtractionResult,
+    parents: list[ParentChunk],
     reference_uris: list[str] | None = None,
 ) -> ExtractionResult:
-    """Create DOCUMENT, CHUNK, PART_OF, NEXT, MENTIONS, and REFERENCED entries."""
+    """Build the ``graphrag``-only structural EDGES over one document's hierarchy.
 
-    structural_chunk_id = str(uuid4())
+    ADR-006 decision 3. Two levels, so four edge families:
+
+    * ``part_of`` child chunk -> its parent chunk,
+    * ``part_of`` parent chunk -> the document,
+    * ``next`` between sibling children AND between sibling parents,
+    * ``referenced`` document -> every already-resolved reference.
+
+    Endpoints are the deterministic ROW NAMES the RAG loader wrote
+    (:func:`tree.memory.rag.load.parent_chunk_name` /
+    :func:`~tree.memory.rag.load.child_chunk_name`); the pipeline remaps them to
+    ``_id``s in ``apply_writes`` through the same ``name_to_target_id`` map the
+    LLM-extracted edges use.
+
+    NODES are NOT returned: ``document`` / ``chunk`` rows are written by
+    :func:`tree.memory.rag.load.build_rag_row_ops` in BOTH modes. ``mentions``
+    edges are NOT built here either — they need the resolved PERSON target ids,
+    so ``apply_writes`` owns them (unchanged).
+    """
+
     doc_name = source_uri
-    doc_node = ExtractedNode(
-        name=doc_name,
-        type=NodeType.DOCUMENT,
-        properties={
-            "source_type": source_type,
-            "source_uri": source_uri,
-            "date": date,
-        },
-        chunk_id=structural_chunk_id,
-    )
-
-    chunk_nodes: list[ExtractedNode] = []
     part_of_edges: list[ExtractedEdge] = []
     next_edges: list[ExtractedEdge] = []
 
-    for idx, text in enumerate(chunk_texts):
-        cid = chunk_ids[idx] if idx < len(chunk_ids) else structural_chunk_id
-        chunk_name = f"{doc_name}#chunk-{idx}"
-        chunk_nodes.append(
-            ExtractedNode(
-                name=chunk_name,
-                type=NodeType.CHUNK,
-                properties={
-                    "source_type": source_type,
-                    "source_uri": source_uri,
-                    "content": text,
-                    "date": date,
-                },
-                chunk_id=cid,
-            )
-        )
+    for parent in parents:
+        parent_name = parent_chunk_name(source_uri, parent.index)
         part_of_edges.append(
             ExtractedEdge(
-                source_node_id=chunk_name,
+                source_node_id=parent_name,
                 source_type=NodeType.CHUNK,
                 target_node_id=doc_name,
                 target_type=NodeType.DOCUMENT,
                 type=EdgeType.PART_OF,
-                chunk_id=cid,
             )
         )
-        if idx > 0:
-            prev_name = f"{doc_name}#chunk-{idx - 1}"
+        if parent.index > 0:
             next_edges.append(
                 ExtractedEdge(
-                    source_node_id=prev_name,
+                    source_node_id=parent_chunk_name(source_uri, parent.index - 1),
                     source_type=NodeType.CHUNK,
-                    target_node_id=chunk_name,
+                    target_node_id=parent_name,
                     target_type=NodeType.CHUNK,
                     type=EdgeType.NEXT,
-                    chunk_id=cid,
                 )
             )
 
-    # MENTIONS: Document → Person for every unique person node extracted.
-    person_names = {n.name for n in extracted.nodes if n.type == NodeType.PERSON}
-    mentions_edges = [
+        for child in parent.children:
+            child_name = child_chunk_name(source_uri, parent.index, child.index)
+            part_of_edges.append(
+                ExtractedEdge(
+                    source_node_id=child_name,
+                    source_type=NodeType.CHUNK,
+                    target_node_id=parent_name,
+                    target_type=NodeType.CHUNK,
+                    type=EdgeType.PART_OF,
+                )
+            )
+            if child.index > 0:
+                next_edges.append(
+                    ExtractedEdge(
+                        source_node_id=child_chunk_name(
+                            source_uri, parent.index, child.index - 1
+                        ),
+                        source_type=NodeType.CHUNK,
+                        target_node_id=child_name,
+                        target_type=NodeType.CHUNK,
+                        type=EdgeType.NEXT,
+                    )
+                )
+
+    referenced_edges = [
         ExtractedEdge(
             source_node_id=doc_name,
             source_type=NodeType.DOCUMENT,
-            target_node_id=person,
-            target_type=NodeType.PERSON,
-            type=EdgeType.MENTIONS,
-            chunk_id=structural_chunk_id,
+            target_node_id=ref_uri,
+            target_type=NodeType.DOCUMENT,
+            type=EdgeType.REFERENCED,
         )
-        for person in person_names
+        for ref_uri in reference_uris or []
     ]
 
-    # REFERENCED: Document → Document for pre-populated references.
-    referenced_edges: list[ExtractedEdge] = []
-    for ref_uri in reference_uris or []:
-        referenced_edges.append(
-            ExtractedEdge(
-                source_node_id=doc_name,
-                source_type=NodeType.DOCUMENT,
-                target_node_id=ref_uri,
-                target_type=NodeType.DOCUMENT,
-                type=EdgeType.REFERENCED,
-                chunk_id=structural_chunk_id,
-            )
-        )
-
     return ExtractionResult(
-        nodes=[doc_node, *chunk_nodes],
-        edges=[*part_of_edges, *next_edges, *mentions_edges, *referenced_edges],
+        nodes=[],
+        edges=[*part_of_edges, *next_edges, *referenced_edges],
     )
 
 
 # ---------------------------------------------------------------------------
-# 4. Persistence (upsert to memory)
+# 3. Persistence (upsert to memory)
 # ---------------------------------------------------------------------------
 #
 # Resolution + dedup live in dedicated modules (``tree.memory.resolution``,
 # ``tree.memory.extraction.dedup``, ``tree.memory.extraction.add_entity``).
-# The pipeline in ``tree.memory.extraction.pipeline`` is the single caller
+# The pipeline in ``tree.memory.pipeline`` is the single caller
 # that wires them together.
 
 

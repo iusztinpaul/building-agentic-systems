@@ -196,6 +196,30 @@ def node_to_embedding_text(node: dict[str, Any]) -> str:
     return strip_invalid_chars("\n".join(parts))
 
 
+async def embed_texts(
+    texts: list[str],
+    embedding_model: BaseEmbeddingModel,
+    *,
+    max_inputs: int | None = None,
+    max_total_tokens: int | None = None,
+    max_input_tokens: int | None = None,
+) -> list[list[float]]:
+    """Embed already-built texts under the configured per-request caps.
+
+    The seam the indexing backfill uses, because its texts are NOT all generic
+    node-texts: a **Child chunk** embeds its **Contextual header**
+    (:func:`tree.memory.rag.embedding.child_embedding_text`) while an entity row
+    embeds ``node_to_embedding_text``. Vectors are aligned positionally with
+    ``texts``. Caps default to ``app_config.models.embedding_batch``.
+    """
+
+    if not texts:
+        return []
+
+    caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
+    return await embed_in_batches(texts, embedding_model, **caps)
+
+
 async def embed_node_texts(
     nodes: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
@@ -210,12 +234,13 @@ async def embed_node_texts(
     ``app_config.models.embedding_batch``; pass explicit caps to override.
     """
 
-    if not nodes:
-        return []
-
-    caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
-    texts = [node_to_embedding_text(node) for node in nodes]
-    return await embed_in_batches(texts, embedding_model, **caps)
+    return await embed_texts(
+        [node_to_embedding_text(node) for node in nodes],
+        embedding_model,
+        max_inputs=max_inputs,
+        max_total_tokens=max_total_tokens,
+        max_input_tokens=max_input_tokens,
+    )
 
 
 def _resolve_batch_caps(

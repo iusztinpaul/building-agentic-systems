@@ -42,8 +42,6 @@ models:
     dispatch_concurrency: 1
 
 extraction:
-  chunk_size: 512
-  chunk_overlap: 64
   llm_concurrency: 5
   doc_concurrency: 1
   dedup_concurrency: 8

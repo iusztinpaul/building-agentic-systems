@@ -3,13 +3,13 @@
 Multi-tenant isolation depends on the index declaration carrying
 ``user_id`` as a filter path so ``$vectorSearch`` prunes other tenants'
 rows server-side. The actual declaration lives in
-``tree.memory.indexing.core._VECTOR_INDEX_FILTER_PATHS``; this test
+``tree.memory.rag.indexing._VECTOR_INDEX_FILTER_PATHS``; this test
 locks in the contract so a future refactor cannot silently drop it.
 """
 
 from __future__ import annotations
 
-from tree.memory.indexing.core import (
+from tree.memory.rag.indexing import (
     _VECTOR_INDEX_FILTER_PATHS,
     _build_vector_index_definition,
 )

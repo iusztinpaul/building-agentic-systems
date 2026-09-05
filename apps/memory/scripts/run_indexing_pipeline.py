@@ -29,7 +29,7 @@ import click
 
 from tree.cli import connect_and_resolve_user, user_options
 from tree.logging import init_logger
-from tree.memory.indexing.pipeline import memory_indexing
+from tree.memory.pipeline import memory_indexing
 
 init_logger()
 logger = logging.getLogger(__name__)

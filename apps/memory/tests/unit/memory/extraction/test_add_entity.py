@@ -788,7 +788,7 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         self, mocker
     ) -> None:
         # Arrange — the real cache shim the pipeline injects on a cache hit.
-        from tree.memory.extraction.pipeline import _CachedSingleEmbedding
+        from tree.memory.pipeline import _CachedSingleEmbedding
 
         text_rate_limit = mocker.patch(
             "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock

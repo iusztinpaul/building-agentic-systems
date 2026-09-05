@@ -1,47 +1,77 @@
-"""Unit tests for the six-task extraction pipeline.
+"""Unit tests for the memory ingestion pipeline (``tree.memory.pipeline``).
 
-Each test exercises a single task body (``task.fn``) with mocked Mongo /
-embedding / LLM dependencies.
+The rag stages (clean+chunk -> embed children -> load rows) run in BOTH modes;
+the graph stages run only in ``graphrag``. Most tests exercise a single task
+body (``task.fn``) with mocked Mongo / embedding / LLM dependencies; the
+mode-branching tests drive the whole worker body against the real test database
+(``unit_tests_twin``), because "1 document + 2 parent + 6 child rows and ZERO
+edges" is a claim about what landed in Mongo, not about which mock was called.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from prefect.cache_policies import NO_CACHE
 
+from tests.unit.conftest import TEST_DATABASE
+from tree.config.settings import settings
+from tree.db import init_mongodb
+from tree.entities.documents import Document, SourceType
 from tree.entities.memory import (
     MEMORY_COLLECTION,
+    RAG_NODE_TYPES,
     EdgeType,
     NodeType,
     build_edge_id,
     build_node_id,
 )
+from tree.entities.users import User
 from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
+from tree import offline, online
+from tree.memory import pipeline
 from tree.memory.embedding_text import node_to_embedding_text
-from tree.memory.extraction.pipeline import (
+from tree.memory.pipeline import (
     _CachedSingleEmbedding,
-    _chunk_documents,
+    _split_documents,
+    _clean_and_chunk,
     _dedupe_entities,
     _dispatch_entity_write,
+    _embed_children,
     _embed_entities,
     _entity_embeddable_text,
-    _extract_chunks_and_structural,
     _llm_extract_entities,
+    _load_rag_rows,
+    _rag_row_id_map,
     _resolve_entities,
+    _run_extraction_worker_body,
     _validate_raws,
+    child_embedding_texts,
+    clean_and_chunk_task,
+    embed_children_task,
     embed_entities_task,
-    extract_chunks_and_structural_task,
     llm_extract_entities_task,
+    load_rag_rows_task,
     memory_extract_etl_worker,
-    run_extraction_for_documents,
 )
+from tree.memory.rag.embedding import child_embedding_text
+from tree.memory.rag.load import (
+    child_chunk_name,
+    child_row_id,
+    document_row_id,
+    parent_chunk_name,
+    parent_row_id,
+)
+from tree.memory.rag.types import ChildChunk, ParentChunk
 from tree.memory.resolution.composite import CompositeResolver
 from tree.memory.resolution.types import ResolvedEntity
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -56,6 +86,12 @@ from tree.memory.types import (
     make_entity_key,
 )
 
+
+# The canned LLM emission the extraction tests drive through the pipeline.
+_PERSON_RESPONSE = {
+    "nodes": [{"name": "alice", "type": "person", "properties": {}}],
+    "edges": [],
+}
 
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -75,13 +111,15 @@ def _make_document(
     doc_id: str = "507f1f77bcf86cd799439011",
     content: str = "Alice ships ML pipelines.",
     source_uri: str = "https://example.com/a",
+    title: str | None = "A Title",
 ) -> Any:
-    """Build a minimal Document-like object that ``_extract_chunks_and_structural`` accepts."""
+    """Build a minimal Document-like object that ``_clean_and_chunk`` accepts."""
 
     doc = MagicMock(name="Document")
     doc.id = doc_id
     doc.source_uri = source_uri
     doc.source_type = MagicMock(value="huggingface")
+    doc.title = title
     doc.date = None
     doc.content = content
     doc.references = []
@@ -123,42 +161,41 @@ def _make_database_with_candidates(
 
 
 # ---------------------------------------------------------------------------
-# Task ① — extract_chunks_and_structural
+# Task ① — clean_and_chunk
 # ---------------------------------------------------------------------------
 
 
-class TestExtractChunksAndStructuralTask:
-    async def test_empty_content_returns_empty_chunks(self) -> None:
+class TestCleanAndChunkTask:
+    async def test_empty_content_yields_no_parents(self) -> None:
         doc = _make_document(content="")
-        chunked = await _extract_chunks_and_structural(doc)
-        assert chunked.chunk_texts == []
-        assert chunked.chunk_ids == []
-        assert chunked.structural.nodes == []
-        assert chunked.structural.edges == []
 
-    async def test_content_produces_chunks_and_structural_doc_node(self) -> None:
-        doc = _make_document(content="some content " * 50)
-        chunked = await _extract_chunks_and_structural(doc)
-        assert len(chunked.chunk_texts) >= 1
-        # Exactly one DOCUMENT node in the structural payload.
-        doc_nodes = [n for n in chunked.structural.nodes if n.type == NodeType.DOCUMENT]
-        assert len(doc_nodes) == 1
-        assert doc_nodes[0].name == doc.source_uri
+        chunked = await _clean_and_chunk(doc)
+
+        assert chunked.parents == []
+
+    async def test_carries_document_metadata_for_the_downstream_stages(self) -> None:
+        doc = _make_document(content="some content " * 50, title="Memory for Agents")
+
+        chunked = await _clean_and_chunk(doc)
+
+        assert chunked.document_id == str(doc.id)
+        assert chunked.source_uri == doc.source_uri
+        assert chunked.source_type == "huggingface"
+        # ``title`` is one of the two Contextual-header inputs — it has to
+        # survive task ① or every child embeds a headerless text.
+        assert chunked.title == "Memory for Agents"
 
     async def test_task_decorator_is_registered(self) -> None:
-        # Identity check on the registered task name.
-        assert (
-            extract_chunks_and_structural_task.name == "extract-chunks-and-structural"
-        )
+        assert clean_and_chunk_task.name == "clean-and-chunk"
 
     async def test_content_is_cleaned_before_chunking(self) -> None:
         # The Clean step is the FIRST memory stage: the cookie-banner line must
         # never reach the chunker (ADR-006 Decision 7).
         doc = _make_document(content="Intro\nAccept all cookies\nBody")
 
-        chunked = await _extract_chunks_and_structural(doc)
+        chunked = await _clean_and_chunk(doc)
 
-        joined = "".join(chunked.chunk_texts)
+        joined = "".join(parent.content for parent in chunked.parents)
         assert "Accept all cookies" not in joined
         assert "Intro" in joined
         assert "Body" in joined
@@ -170,77 +207,248 @@ class TestExtractChunksAndStructuralTask:
             content="The body paragraph stays.\n\nThanks for reading!\nShare this post\n"
         )
 
-        chunked = await _extract_chunks_and_structural(doc)
+        chunked = await _clean_and_chunk(doc)
 
-        joined = "".join(chunked.chunk_texts)
+        joined = "".join(parent.content for parent in chunked.parents)
         assert "Thanks for reading" not in joined
         assert "Share this post" not in joined
         assert "The body paragraph stays." in joined
 
-    async def test_chunk_texts_are_deterministic_across_runs(self) -> None:
-        # User story: re-running task 1 on the same Document yields identical
-        # chunk payloads, so the downstream INPUTS cache is a hit.
+    async def test_output_is_identical_across_two_calls(self) -> None:
+        # User story: re-running task ① on the same Document yields an identical
+        # payload, so the downstream INPUTS cache is a hit.
         content = "Intro\nAccept all cookies\nBody   text"
 
-        first = await _extract_chunks_and_structural(_make_document(content=content))
-        second = await _extract_chunks_and_structural(_make_document(content=content))
+        first = await _clean_and_chunk(_make_document(content=content))
+        second = await _clean_and_chunk(_make_document(content=content))
 
-        assert first.chunk_texts == second.chunk_texts
+        assert first == second
+
+    async def test_three_parent_document_yields_deterministic_row_names(
+        self, monkeypatch
+    ) -> None:
+        # Squeeze the parent budget so a short document really splits into three
+        # parents, then check the names the loader derives from the result.
+        monkeypatch.setenv("TREE_MEMORY__CHUNKING__PARENT__SIZE", "20")
+        monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__SIZE", "8")
+        monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__OVERLAP", "0")
+        doc = _make_document(
+            content="\n\n".join(
+                f"Paragraph {i} " + "filler words here " * 4 for i in range(3)
+            )
+        )
+
+        chunked = await _clean_and_chunk(doc)
+
+        assert len(chunked.parents) == 3
+        assert [
+            parent_chunk_name(chunked.source_uri, parent.index)
+            for parent in chunked.parents
+        ] == [f"{doc.source_uri}#parent-{i}" for i in range(3)]
+        first_children = chunked.parents[0].children
+        assert [
+            child_chunk_name(chunked.source_uri, 0, child.index)
+            for child in first_children
+        ] == [
+            f"{doc.source_uri}#parent-0#child-{i}" for i in range(len(first_children))
+        ]
 
 
 # ---------------------------------------------------------------------------
-# Task ② — llm_extract_entities
+# Task ② — embed_children
+# ---------------------------------------------------------------------------
+
+
+class _SpyEmbeddingModel(BaseEmbeddingModel):
+    """Records every text it is asked to embed."""
+
+    def __init__(self, dimensions: int = 4) -> None:
+        self._dimensions = dimensions
+        self.texts: list[str] = []
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.texts.extend(texts)
+        return [[0.5] * self._dimensions for _ in texts]
+
+
+def _chunked_with_children(
+    *,
+    document_id: str = "507f1f77bcf86cd799439011",
+    source_uri: str = "https://example.com/a",
+    title: str | None = "A Title",
+    shape: tuple[int, ...] = (2,),
+) -> ChunkedDocument:
+    """A ChunkedDocument with ``shape[i]`` children under parent ``i``."""
+
+    return ChunkedDocument(
+        document_id=document_id,
+        source_uri=source_uri,
+        source_type="huggingface",
+        title=title,
+        parents=[
+            ParentChunk(
+                index=parent_index,
+                content=f"parent {parent_index} body",
+                heading_path=["Memory", f"Section {parent_index}"],
+                children=[
+                    ChildChunk(
+                        index=child_index,
+                        content=f"child {parent_index}.{child_index} body",
+                    )
+                    for child_index in range(n_children)
+                ],
+            )
+            for parent_index, n_children in enumerate(shape)
+        ],
+    )
+
+
+class TestChildEmbeddingTexts:
+    def test_returns_contextual_header_text_not_raw_content(self) -> None:
+        chunked = _chunked_with_children(shape=(1,))
+
+        texts = child_embedding_texts([chunked])
+
+        assert texts == [
+            child_embedding_text(
+                title="A Title",
+                heading_path=["Memory", "Section 0"],
+                content="child 0.0 body",
+            )
+        ]
+        assert texts[0] != "child 0.0 body"
+
+    def test_is_sorted_and_deduplicated(self) -> None:
+        # Two documents whose (title, heading path, content) collide embed once.
+        chunked = _chunked_with_children(shape=(2, 1))
+        twin = _chunked_with_children(shape=(2, 1))
+
+        texts = child_embedding_texts([chunked, twin])
+
+        assert texts == sorted(set(texts))
+        assert len(texts) == 3
+
+
+class TestEmbedChildrenTask:
+    async def test_embeds_every_text_and_returns_a_text_to_vector_map(
+        self, mocker
+    ) -> None:
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        vectors = await _embed_children(["a", "b"])
+
+        assert model.texts == ["a", "b"]
+        assert vectors == {"a": [0.5] * 4, "b": [0.5] * 4}
+
+    async def test_empty_input_returns_empty_without_calling_model(
+        self, mocker
+    ) -> None:
+        factory = mocker.patch("tree.memory.pipeline.get_search_embedding_model")
+
+        assert await _embed_children([]) == {}
+
+        factory.assert_not_called()
+
+    async def test_task_decorator_is_registered(self) -> None:
+        assert embed_children_task.name == "embed-children"
+
+
+# ---------------------------------------------------------------------------
+# Task ③ — load_rag_rows
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRagRowsTask:
+    async def test_writes_every_row_in_one_unordered_bulk_write(self) -> None:
+        chunked = _chunked_with_children(shape=(2, 1))
+        collection = MagicMock(name="memory_collection")
+        collection.bulk_write = AsyncMock(return_value=MagicMock())
+        collection.update_one = AsyncMock(return_value=MagicMock())
+        database = MagicMock(name="database")
+        database.__getitem__.return_value = collection
+
+        rows = await _load_rag_rows([chunked], {}, database, _USER_ID)
+
+        # 1 document + 2 parents + 3 children.
+        assert rows == 6
+        collection.update_one.assert_not_awaited()
+        assert collection.bulk_write.await_count == 1
+        assert collection.bulk_write.await_args.kwargs.get("ordered") is False
+        assert len(collection.bulk_write.await_args.args[0]) == 6
+
+    async def test_no_documents_issues_no_write(self) -> None:
+        collection = MagicMock(name="memory_collection")
+        collection.bulk_write = AsyncMock(return_value=MagicMock())
+        database = MagicMock(name="database")
+        database.__getitem__.return_value = collection
+
+        rows = await _load_rag_rows([], {}, database, _USER_ID)
+
+        assert rows == 0
+        collection.bulk_write.assert_not_awaited()
+
+    async def test_task_is_uncached_and_retried(self) -> None:
+        assert load_rag_rows_task.name == "load-rag-rows"
+        assert load_rag_rows_task.cache_policy is NO_CACHE
+        assert load_rag_rows_task.retries == 3
+
+
+# ---------------------------------------------------------------------------
+# Task ④ — llm_extract_entities (graphrag only)
 # ---------------------------------------------------------------------------
 
 
 class TestLlmExtractEntitiesTask:
-    async def test_no_chunks_returns_empty(self) -> None:
+    async def test_no_parents_returns_empty(self) -> None:
         chunked = ChunkedDocument(
-            document_id="d1",
-            source_uri="u1",
-            source_type="huggingface",
-            chunk_texts=[],
-            chunk_ids=[],
+            document_id="d1", source_uri="u1", source_type="huggingface"
         )
-        raw = await _llm_extract_entities(chunked)
+
+        raw = await _llm_extract_entities(chunked, _USER_ID)
+
         assert raw.extracted.nodes == []
         assert raw.extracted.edges == []
 
-    async def test_calls_llm_per_chunk(self, mocker) -> None:
-        from tree.models.fake_model import FakeLLM
+    async def test_calls_llm_once_per_parent(self, mocker) -> None:
+        fake = FakeLLM(responses=[_PERSON_RESPONSE] * 3)
+        mocker.patch("tree.memory.pipeline.get_llm", return_value=fake)
+        chunked = _chunked_with_children(shape=(2, 2, 2))
 
-        fake = FakeLLM(
-            responses=[
-                {
-                    "nodes": [{"name": "alice", "type": "person", "properties": {}}],
-                    "edges": [],
-                }
-            ]
-            * 3
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_llm",
-            return_value=fake,
-        )
-        chunked = ChunkedDocument(
-            document_id="d1",
-            source_uri="u1",
-            source_type="huggingface",
-            chunk_texts=["c1", "c2", "c3"],
-            chunk_ids=["cid-0", "cid-1", "cid-2"],
-        )
+        raw = await _llm_extract_entities(chunked, _USER_ID)
 
-        raw = await _llm_extract_entities(chunked)
-
+        # 3 parents -> 3 calls (NOT 6, one per child).
         assert fake.call_count == 3
         assert len(raw.extracted.nodes) == 3
+
+    async def test_stamps_the_parent_row_id_as_chunk_id_provenance(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.memory.pipeline.get_llm",
+            return_value=FakeLLM(responses=[_PERSON_RESPONSE] * 2),
+        )
+        chunked = _chunked_with_children(shape=(1, 1))
+
+        raw = await _llm_extract_entities(chunked, _USER_ID)
+
+        assert {node.chunk_id for node in raw.extracted.nodes} == {
+            parent_row_id(_USER_ID, chunked.source_uri, 0),
+            parent_row_id(_USER_ID, chunked.source_uri, 1),
+        }
 
     async def test_task_decorator_is_registered(self) -> None:
         assert llm_extract_entities_task.name == "llm-extract-entities"
 
 
 # ---------------------------------------------------------------------------
-# Task ③ — resolve_entities
+# Task ⑤ — resolve_entities
 # ---------------------------------------------------------------------------
 
 
@@ -390,7 +598,7 @@ class TestResolveEntitiesTask:
 
 
 # ---------------------------------------------------------------------------
-# Task ④ — embed_entities (batched, #044)
+# Task ⑥ — embed_entities (batched, #044)
 # ---------------------------------------------------------------------------
 
 
@@ -402,7 +610,7 @@ class TestEmbedEntitiesTask:
         model = MagicMock()
         model.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
         search_factory = mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            "tree.memory.pipeline.get_search_embedding_model",
             return_value=model,
         )
 
@@ -426,7 +634,7 @@ class TestEmbedEntitiesTask:
         model = MagicMock()
         model.embed = AsyncMock()
         mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
+            "tree.memory.pipeline.get_search_embedding_model",
             return_value=model,
         )
 
@@ -443,7 +651,7 @@ class TestEmbedEntitiesTask:
 
 
 # ---------------------------------------------------------------------------
-# Task ⑤ — dedupe_entities
+# Task ⑦ — dedupe_entities
 # ---------------------------------------------------------------------------
 
 
@@ -466,7 +674,7 @@ class TestDedupeEntitiesTask:
 
         database = MagicMock()
         dedupe_spy = mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(),
         )
 
@@ -478,7 +686,7 @@ class TestDedupeEntitiesTask:
         cfg = DeduplicationConfig()
         # ``dedupe_entity`` returns a "merged" with the same id as prospective.
         mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(
                 return_value=DeduplicationResult(
                     action="merged",
@@ -508,7 +716,7 @@ class TestDedupeEntitiesTask:
 
 
 # ---------------------------------------------------------------------------
-# Task ⑤ — dedupe_entities parallelization (#058)
+# Task ⑦ — dedupe_entities parallelization (#058)
 # ---------------------------------------------------------------------------
 
 
@@ -567,7 +775,7 @@ async def _sequential_reference(
     """
 
     from tree.entities.memory import build_node_id as _build_node_id
-    from tree.memory.extraction.pipeline import _normalize, _to_decision
+    from tree.memory.pipeline import _normalize, _to_decision
 
     decisions: dict[str, Any] = {}
     n_merged = n_flagged = n_none = 0
@@ -665,7 +873,7 @@ class TestDedupeEntitiesParallelization:
             return _result_for_name(kwargs["name"])
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(side_effect=_slow_dedupe),
         )
 
@@ -681,7 +889,7 @@ class TestDedupeEntitiesParallelization:
         # must NOT iterate with a bare ``for ... await dedupe_entity`` loop.
         import inspect
 
-        from tree.memory.extraction.pipeline import _dedupe_entities as fn
+        from tree.memory.pipeline import _dedupe_entities as fn
 
         src = inspect.getsource(fn)
         assert "asyncio.gather" in src
@@ -692,7 +900,7 @@ class TestDedupeEntitiesParallelization:
         # The dedupe task must read precomputed vectors only — no Voyage embed.
         import inspect
 
-        from tree.memory.extraction.pipeline import _dedupe_entities as fn
+        from tree.memory.pipeline import _dedupe_entities as fn
 
         src = inspect.getsource(fn)
         assert ".embed(" not in src
@@ -707,7 +915,7 @@ class TestDedupeEntitiesParallelization:
             return _result_for_name(kwargs["name"])
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(side_effect=_dedupe),
         )
 
@@ -746,7 +954,7 @@ class TestDedupeEntitiesParallelization:
             return _result_for_name(kwargs["name"])
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(side_effect=_dedupe),
         )
 
@@ -771,7 +979,7 @@ class TestDedupeEntitiesParallelization:
         embeddings.vectors.pop("text-name1")
 
         dedupe_spy = mocker.patch(
-            "tree.memory.extraction.pipeline.dedupe_entity",
+            "tree.memory.pipeline.dedupe_entity",
             new=AsyncMock(side_effect=lambda **kw: _result_for_name(kw["name"])),
         )
 
@@ -796,8 +1004,7 @@ def _chunked_for(doc_id: str) -> ChunkedDocument:
         document_id=doc_id,
         source_uri=f"u-{doc_id}",
         source_type="huggingface",
-        chunk_texts=[f"chunk-{doc_id}"],
-        chunk_ids=[f"cid-{doc_id}"],
+        parents=[ParentChunk(index=0, content=f"parent-{doc_id}")],
     )
 
 
@@ -817,11 +1024,11 @@ class TestChunkDocumentsFanout:
             return _chunked_for(str(doc.id))
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(side_effect=_fake_task),
         )
 
-        chunked_docs = await _chunk_documents(docs)
+        chunked_docs = await _split_documents(docs)
 
         # Assert: same order + contents as a straight sequential map.
         expected = [_chunked_for(str(d.id)) for d in docs]
@@ -854,11 +1061,11 @@ class TestChunkDocumentsFanout:
             return _chunked_for(str(doc.id))
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(side_effect=_slow_task),
         )
 
-        chunked_docs = await _chunk_documents(docs)
+        chunked_docs = await _split_documents(docs)
 
         # Assert: ran in parallel up to — but never beyond — the bound.
         assert max_in_flight == 4
@@ -881,21 +1088,21 @@ class TestChunkDocumentsFanout:
             return _chunked_for(str(doc.id))
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(side_effect=_jittered_task),
         )
 
-        chunked_docs = await _chunk_documents(docs)
+        chunked_docs = await _split_documents(docs)
 
         assert chunked_docs == [_chunked_for(str(d.id)) for d in docs]
 
     async def test_empty_docs_returns_empty_list(self, mocker) -> None:
         task_spy = mocker.patch(
-            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(),
         )
 
-        out = await _chunk_documents([])
+        out = await _split_documents([])
 
         assert out == []
         task_spy.assert_not_called()
@@ -905,7 +1112,7 @@ class TestChunkDocumentsFanout:
         # sized by ``doc_concurrency`` — not a bare sequential await loop.
         import inspect
 
-        from tree.memory.extraction.pipeline import _chunk_documents as fn
+        fn = _split_documents
 
         src = inspect.getsource(fn)
         assert "asyncio.gather" in src
@@ -913,21 +1120,16 @@ class TestChunkDocumentsFanout:
         assert "doc_concurrency" in src
 
     async def test_llm_task_loop_left_sequential(self) -> None:
-        # R6 is OUT OF SCOPE: the LLM task ② loop in the flow body must remain a
+        # R6 is OUT OF SCOPE: the LLM task loop in the flow body must remain a
         # plain sequential ``for chunked in chunked_docs`` await loop with NO
         # added fan-out around ``llm_extract_entities_task``.
         import inspect
 
-        # The six-task body now lives in ``_run_extraction_worker_body`` (the
-        # flow wraps it in the worker's root Opik span). The loop shape is
-        # unchanged; only the headers kwarg is threaded through each task call.
-        from tree.memory.extraction.pipeline import _run_extraction_worker_body
-
         src = inspect.getsource(_run_extraction_worker_body)
         assert "for chunked in chunked_docs:" in src
-        assert "llm_extract_entities_task(chunked, opik_trace_headers=headers)" in src
-        # The chunking task ① loop is now the bounded gather helper.
-        assert "_chunk_documents(" in src
+        assert "llm_extract_entities_task(" in src
+        # The chunking task ① loop is the bounded gather helper.
+        assert "_split_documents(" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1138,13 +1340,8 @@ class TestConfigAlignmentValidator:
         monkeypatch.setenv("TREE_EXTRACTION__DEDUP__MATCH_SAME_TYPE_ONLY", "false")
 
         with pytest.raises(ValueError, match="type_strict.*match_same_type_only"):
-            # Drive directly through the helper that the flow calls at entry.
-            await run_extraction_for_documents(
-                ["507f1f77bcf86cd799439011"],
-                user_id=_USER_ID,
-                client=MagicMock(),
-                database_name="test",
-            )
+            # The flow re-loads the config at entry, before any work runs.
+            await memory_extract_etl_worker.fn(user_id=_USER_ID)
 
     async def test_dedup_threshold_inversion_raises_value_error(
         self, monkeypatch
@@ -1154,12 +1351,7 @@ class TestConfigAlignmentValidator:
         monkeypatch.setenv("TREE_EXTRACTION__DEDUP__FLAG_THRESHOLD", "0.8")
 
         with pytest.raises(ValueError, match="auto_merge_threshold.*flag_threshold"):
-            await run_extraction_for_documents(
-                ["507f1f77bcf86cd799439011"],
-                user_id=_USER_ID,
-                client=MagicMock(),
-                database_name="test",
-            )
+            await memory_extract_etl_worker.fn(user_id=_USER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -1185,33 +1377,51 @@ class TestCachedSingleEmbedding:
 
 
 class TestPipelineExports:
-    """AC: ``pipeline.py`` exports exactly one flow and six tasks."""
+    """ADR-006 decision 8: ONE module holding the rag tasks, the graph tasks and
+    all three memory flows — under their UNCHANGED names."""
 
-    def test_six_tasks_exported(self) -> None:
-        from tree.memory.extraction import pipeline
-
-        expected = {
-            "extract_chunks_and_structural_task",
+    @pytest.mark.parametrize(
+        "task_name",
+        [
+            "clean_and_chunk_task",
+            "embed_children_task",
+            "load_rag_rows_task",
             "llm_extract_entities_task",
             "resolve_entities_task",
             "embed_entities_task",
             "dedupe_entities_task",
             "apply_writes_task",
-        }
-        for name in expected:
-            assert hasattr(pipeline, name), f"Missing task export: {name}"
+            "embed_nodes_task",
+            "ensure_indexes_task",
+        ],
+    )
+    def test_task_exported(self, task_name: str) -> None:
+        assert hasattr(pipeline, task_name), f"Missing task export: {task_name}"
 
-    def test_flow_exported(self) -> None:
-        from tree.memory.extraction import pipeline
-
-        assert hasattr(pipeline, "memory_extract_etl_worker")
-        # The worker flow name (referenced by the worker deployment, #067).
+    def test_flow_names_are_unchanged(self) -> None:
+        # Renaming a deployment would orphan its Cloud definition, so the three
+        # flow names are part of the contract this move must NOT break.
         assert memory_extract_etl_worker.name == "memory-extract-etl-worker"
-        assert hasattr(pipeline, "memory_extract_etl_coordinator")
         assert (
             pipeline.memory_extract_etl_coordinator.name
             == "memory-extract-etl-coordinator"
         )
+        assert pipeline.memory_indexing.name == "memory-indexing-etl"
+
+    def test_the_pipeline_entrypoints_import_the_flows_from_here(self) -> None:
+        # ``tree.offline`` / ``tree.online`` must bind the SAME flow objects the
+        # deployments serve — a second copy would run un-deployed code.
+        assert (
+            offline.memory_extract_etl_coordinator
+            is pipeline.memory_extract_etl_coordinator
+        )
+        assert online.memory_extract_etl_worker is pipeline.memory_extract_etl_worker
+        assert online.memory_indexing is pipeline.memory_indexing
+
+    def test_legacy_run_extraction_helper_is_gone(self) -> None:
+        # #108 deleted the no-production-caller helper; its coverage lives in
+        # the worker-body tests.
+        assert not hasattr(pipeline, "run_extraction_for_documents")
 
 
 # ---------------------------------------------------------------------------
@@ -1231,13 +1441,9 @@ class TestRequiredUserIdSignature:
         with pytest.raises(TypeError, match="user_id"):
             await memory_extract_etl_worker.fn(document_ids=["x"])  # type: ignore[call-arg]
 
-    async def test_run_helper_missing_user_id_raises_type_error(self) -> None:
+    async def test_indexing_flow_missing_user_id_raises_type_error(self) -> None:
         with pytest.raises(TypeError, match="user_id"):
-            await run_extraction_for_documents(  # type: ignore[call-arg]
-                ["x"],
-                client=MagicMock(),
-                database_name="test",
-            )
+            await pipeline.memory_indexing.fn()  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -1325,7 +1531,7 @@ class TestDispatchEntityWriteReusesVector:
             return ("target-id", None, DeduplicationResult(action="none"))
 
         mocker.patch(
-            "tree.memory.extraction.pipeline.add_entity",
+            "tree.memory.pipeline.add_entity",
             new=AsyncMock(side_effect=_fake_add_entity),
         )
 
@@ -1398,7 +1604,7 @@ class TestResolverUsesResolutionModel:
     """
 
     def test_build_resolver_threads_model_into_semantic_stage(self) -> None:
-        from tree.memory.extraction.pipeline import _build_resolver
+        from tree.memory.pipeline import _build_resolver
 
         sentinel_model = MagicMock(spec=BaseEmbeddingModel)
 
@@ -1412,7 +1618,7 @@ class TestResolverUsesResolutionModel:
 
 
 class TestFlowEmbeddingModelSplit:
-    """Both flow entry points hold two distinct embedding handles.
+    """The graphrag worker holds two distinct embedding handles.
 
     Resolver ← ``get_resolution_embedding_model()`` (transient name vector).
     Dedup / writes / supersession ← ``get_search_embedding_model()``
@@ -1421,95 +1627,45 @@ class TestFlowEmbeddingModelSplit:
     persisted-vector space.
     """
 
-    async def test_memory_extraction_builds_resolver_from_resolution_model(
-        self, mocker
-    ) -> None:
-        # Distinct sentinels so we can prove which handle reached the resolver.
+    @pytest.fixture
+    def stubbed_graph_stages(self, mocker) -> dict[str, Any]:
+        """Mock every stage of the worker body except the model wiring."""
+
         resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
         search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
-        res_factory = mocker.patch(
-            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
+        mocker.patch(
+            "tree.memory.pipeline.get_resolution_embedding_model",
             return_value=resolution_model,
         )
-        search_factory = mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model",
             return_value=search_model,
         )
         build_resolver = mocker.patch(
-            "tree.memory.extraction.pipeline._build_resolver",
+            "tree.memory.pipeline._build_resolver",
             return_value=MagicMock(spec=CompositeResolver),
         )
 
-        # No-docs early-exit — the resolver/model handles are constructed
-        # BEFORE the document fetch, so we never need to mock the LLM/embed
-        # stages here.
         mock_client = MagicMock()
         mock_client.__getitem__.return_value = MagicMock()
         mocker.patch(
-            "tree.memory.extraction.pipeline.init_mongodb",
-            new=AsyncMock(return_value=mock_client),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.Document.find",
-            return_value=MagicMock(to_list=AsyncMock(return_value=[])),
-        )
-
-        await memory_extract_etl_worker.fn(user_id=_USER_ID)
-
-        # The resolver is built from the RESOLUTION model, never the search model.
-        res_factory.assert_called_once()
-        build_resolver.assert_called_once_with(resolution_model)
-        # The search model factory is still wired up for dedup/writes/supersession.
-        assert search_factory.call_count >= 1
-        assert resolution_model is not search_model
-
-    async def test_memory_extraction_threads_search_model_into_supersession_and_writes(
-        self, mocker
-    ) -> None:
-        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
-        search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
-            return_value=resolution_model,
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
-            return_value=search_model,
-        )
-        resolver = MagicMock(spec=CompositeResolver)
-        mocker.patch(
-            "tree.memory.extraction.pipeline._build_resolver",
-            return_value=resolver,
-        )
-
-        # DB plumbing — one document so the flow runs past the early-exit and
-        # reaches supersession + apply-writes.
-        mock_client = MagicMock()
-        mock_client.__getitem__.return_value = MagicMock()
-        mocker.patch(
-            "tree.memory.extraction.pipeline.init_mongodb",
+            "tree.memory.pipeline.init_mongodb",
             new=AsyncMock(return_value=mock_client),
         )
         doc = _make_document()
         mocker.patch(
-            "tree.memory.extraction.pipeline.Document.find",
+            "tree.memory.pipeline.Document.find",
             return_value=MagicMock(to_list=AsyncMock(return_value=[doc])),
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.User.get",
-            new=AsyncMock(return_value=MagicMock()),
+            "tree.memory.pipeline.User.get", new=AsyncMock(return_value=MagicMock())
         )
 
-        # No-op the heavy stages; we only care about the model handle wiring.
         chunked = ChunkedDocument(
             document_id="507f1f77bcf86cd799439011",
             source_uri="https://example.com/a",
             source_type="huggingface",
-            date=None,
-            reference_uris=[],
-            chunk_texts=[],
-            chunk_ids=[],
-            structural=ExtractionResult(),
+            parents=[],
         )
         raw = RawExtraction(
             document_id="507f1f77bcf86cd799439011",
@@ -1518,197 +1674,105 @@ class TestFlowEmbeddingModelSplit:
             extracted=ExtractionResult(),
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.extract_chunks_and_structural_task",
+            "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(return_value=chunked),
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.llm_extract_entities_task",
+            "tree.memory.pipeline.embed_children_task", new=AsyncMock(return_value={})
+        )
+        mocker.patch(
+            "tree.memory.pipeline.load_rag_rows_task", new=AsyncMock(return_value=0)
+        )
+        mocker.patch(
+            "tree.memory.pipeline.llm_extract_entities_task",
             new=AsyncMock(return_value=raw),
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.validate_raws_task",
-            new=AsyncMock(return_value=[raw]),
+            "tree.memory.pipeline.validate_raws_task", new=AsyncMock(return_value=[raw])
         )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.redirect_first_person",
-            return_value=[],
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.canonicalize_preference_names",
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_llm",
-            return_value=MagicMock(),
-        )
+        mocker.patch("tree.memory.pipeline.redirect_first_person", return_value=[])
+        mocker.patch("tree.memory.pipeline.canonicalize_preference_names")
+        mocker.patch("tree.memory.pipeline.get_llm", return_value=MagicMock())
         supersession = mocker.patch(
-            "tree.memory.extraction.pipeline.resolve_supersessions",
-            new=AsyncMock(),
+            "tree.memory.pipeline.resolve_supersessions", new=AsyncMock()
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.write_self_has_preference_edges",
-            new=AsyncMock(),
+            "tree.memory.pipeline.write_self_has_preference_edges", new=AsyncMock()
         )
         mocker.patch(
-            "tree.memory.extraction.pipeline.resolve_entities_task",
+            "tree.memory.pipeline.resolve_entities_task",
             new=AsyncMock(return_value=ResolutionOutput()),
         )
+        mocker.patch(
+            "tree.memory.pipeline.embed_entities_task", new=AsyncMock(return_value={})
+        )
+        mocker.patch(
+            "tree.memory.pipeline.dedupe_entities_task",
+            new=AsyncMock(return_value=DedupMap()),
+        )
         apply_writes = mocker.patch(
-            "tree.memory.extraction.pipeline.apply_writes_task",
+            "tree.memory.pipeline.apply_writes_task",
             new=AsyncMock(return_value=WriteSummary()),
         )
+        return {
+            "resolution_model": resolution_model,
+            "search_model": search_model,
+            "build_resolver": build_resolver,
+            "supersession": supersession,
+            "apply_writes": apply_writes,
+        }
 
+    async def test_builds_the_resolver_from_the_resolution_model(
+        self, stubbed_graph_stages
+    ) -> None:
         await memory_extract_etl_worker.fn(
             user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
         )
 
+        # The resolver is built from the RESOLUTION model, never the search model.
+        stubbed_graph_stages["build_resolver"].assert_called_once_with(
+            stubbed_graph_stages["resolution_model"]
+        )
+        assert (
+            stubbed_graph_stages["resolution_model"]
+            is not stubbed_graph_stages["search_model"]
+        )
+
+    async def test_threads_the_search_model_into_supersession_and_writes(
+        self, stubbed_graph_stages
+    ) -> None:
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        search_model = stubbed_graph_stages["search_model"]
+        supersession = stubbed_graph_stages["supersession"]
+        apply_writes = stubbed_graph_stages["apply_writes"]
         # Supersession compares against PERSISTED preference vectors → SEARCH model.
         assert supersession.await_args.kwargs["embedding_model"] is search_model
-        # apply-writes persists node vectors → SEARCH model (positional arg #8).
+        # apply-writes persists node vectors → SEARCH model.
         assert search_model in apply_writes.await_args.args
-        assert resolution_model not in apply_writes.await_args.args
-
-    async def test_run_extraction_helper_builds_resolver_from_resolution_model(
-        self, mocker
-    ) -> None:
-        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
-        search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
-        res_factory = mocker.patch(
-            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
-            return_value=resolution_model,
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_search_embedding_model",
-            return_value=search_model,
-        )
-        build_resolver = mocker.patch(
-            "tree.memory.extraction.pipeline._build_resolver",
-            return_value=MagicMock(spec=CompositeResolver),
-        )
-        # No-docs early-exit.
-        mocker.patch(
-            "tree.memory.extraction.pipeline.Document.find",
-            return_value=MagicMock(to_list=AsyncMock(return_value=[])),
-        )
-        client = MagicMock()
-        client.__getitem__.return_value = MagicMock()
-
-        await run_extraction_for_documents(
-            ["507f1f77bcf86cd799439011"],
-            user_id=_USER_ID,
-            client=client,
-            database_name="test",
-        )
-
-        res_factory.assert_called_once()
-        build_resolver.assert_called_once_with(resolution_model)
-
-    async def test_run_extraction_helper_uses_injected_search_model_for_writes(
-        self, mocker
-    ) -> None:
-        # When the MCP path injects an ``embedding_model`` it must drive the
-        # SEARCH/persisted path (supersession + writes), NOT the resolver.
-        injected_search_model = MagicMock(
-            spec=BaseEmbeddingModel, name="injected_search"
-        )
-        injected_search_model.embed = AsyncMock(return_value=[])
-        resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_resolution_embedding_model",
-            return_value=resolution_model,
-        )
-        resolver = MagicMock(spec=CompositeResolver)
-        build_resolver = mocker.patch(
-            "tree.memory.extraction.pipeline._build_resolver",
-            return_value=resolver,
-        )
-
-        doc = _make_document()
-        mocker.patch(
-            "tree.memory.extraction.pipeline.Document.find",
-            return_value=MagicMock(to_list=AsyncMock(return_value=[doc])),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.User.get",
-            new=AsyncMock(return_value=MagicMock()),
-        )
-        chunked = ChunkedDocument(
-            document_id="507f1f77bcf86cd799439011",
-            source_uri="https://example.com/a",
-            source_type="huggingface",
-            date=None,
-            reference_uris=[],
-            chunk_texts=[],
-            chunk_ids=[],
-            structural=ExtractionResult(),
-        )
-        raw = RawExtraction(
-            document_id="507f1f77bcf86cd799439011",
-            source_uri="https://example.com/a",
-            chunked=chunked,
-            extracted=ExtractionResult(),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline._extract_chunks_and_structural",
-            new=AsyncMock(return_value=chunked),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline._llm_extract_entities",
-            new=AsyncMock(return_value=raw),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline._validate_raws",
-            new=AsyncMock(return_value=[raw]),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.redirect_first_person",
-            return_value=[],
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.canonicalize_preference_names",
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.get_llm",
-            return_value=MagicMock(),
-        )
-        supersession = mocker.patch(
-            "tree.memory.extraction.pipeline.resolve_supersessions",
-            new=AsyncMock(),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline.write_self_has_preference_edges",
-            new=AsyncMock(),
-        )
-        mocker.patch(
-            "tree.memory.extraction.pipeline._resolve_entities",
-            new=AsyncMock(return_value=ResolutionOutput()),
-        )
-        apply_writes = mocker.patch(
-            "tree.memory.extraction.pipeline._apply_writes",
-            new=AsyncMock(return_value=WriteSummary()),
-        )
-        client = MagicMock()
-        client.__getitem__.return_value = MagicMock()
-
-        await run_extraction_for_documents(
-            ["507f1f77bcf86cd799439011"],
-            user_id=_USER_ID,
-            client=client,
-            database_name="test",
-            embedding_model=injected_search_model,
-        )
-
-        # Resolver built from the resolution model, NOT the injected search model.
-        build_resolver.assert_called_once_with(resolution_model)
-        # Supersession + writes use the injected search/persisted model.
         assert (
-            supersession.await_args.kwargs["embedding_model"] is injected_search_model
+            stubbed_graph_stages["resolution_model"] not in apply_writes.await_args.args
         )
-        assert injected_search_model in apply_writes.await_args.args
-        assert resolution_model not in apply_writes.await_args.args
+
+    async def test_rag_mode_never_builds_the_graph_model_handles(
+        self, mocker, monkeypatch, stubbed_graph_stages
+    ) -> None:
+        monkeypatch.setenv("TREE_MEMORY__MODE", "rag")
+
+        summary = await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        # The whole graph half is skipped: no resolver, no LLM writes, no edges.
+        stubbed_graph_stages["build_resolver"].assert_not_called()
+        stubbed_graph_stages["apply_writes"].assert_not_awaited()
+        assert summary.edges_written == 0
 
 
 # ---------------------------------------------------------------------------
-# Task ⑥ — _apply_writes bulk_write batching (#057)
+# Task ⑧ — _apply_writes bulk_write batching (#057)
 # ---------------------------------------------------------------------------
 
 
@@ -1734,30 +1798,25 @@ def _structural_only_raw(
     doc_id: str = "507f1f77bcf86cd799439011",
     source_uri: str = "https://example.com/a",
 ) -> RawExtraction:
-    """A RawExtraction carrying two structural nodes + one structural edge.
+    """A RawExtraction whose ONLY output is the structural hierarchy.
 
-    No LLM-extracted nodes — keeps ``_apply_writes`` on the structural path
-    so the test isolates the two bulk_write loops without exercising
-    ``add_entity``.
+    One parent with one child, no LLM-extracted nodes — keeps ``_apply_writes``
+    on the structural path (2 ``part_of`` edges) without exercising
+    ``add_entity``. Post-ADR-006 the document / chunk ROWS are the rag loader's
+    job, so this fixture deliberately carries no structural nodes.
     """
 
-    doc_node = ExtractedNode(name=source_uri, type=NodeType.DOCUMENT)
-    chunk_node = ExtractedNode(name=f"{source_uri}#0", type=NodeType.CHUNK)
-    part_of = ExtractedEdge(
-        source_node_id=f"{source_uri}#0",
-        source_type=NodeType.CHUNK,
-        target_node_id=source_uri,
-        target_type=NodeType.DOCUMENT,
-        type=EdgeType.PART_OF,
-    )
-    structural = ExtractionResult(nodes=[doc_node, chunk_node], edges=[part_of])
     chunked = ChunkedDocument(
         document_id=doc_id,
         source_uri=source_uri,
         source_type="huggingface",
-        chunk_texts=["chunk text"],
-        chunk_ids=[f"{source_uri}#0"],
-        structural=structural,
+        parents=[
+            ParentChunk(
+                index=0,
+                content="parent text",
+                children=[ChildChunk(index=0, content="child text")],
+            )
+        ],
     )
     return RawExtraction(
         document_id=doc_id,
@@ -1775,7 +1834,7 @@ async def _run_apply_writes(
 ) -> WriteSummary:
     """Invoke the bare ``_apply_writes`` body with stubbed collaborators."""
 
-    from tree.memory.extraction.pipeline import _apply_writes
+    from tree.memory.pipeline import _apply_writes
 
     return await _apply_writes(
         raws=raws,
@@ -1794,8 +1853,8 @@ async def _run_apply_writes(
 class TestApplyWritesBulkBatching:
     """#057 — the structural-node and edge loops each issue ONE bulk_write."""
 
-    async def test_structural_nodes_use_single_bulk_write_no_update_one(self) -> None:
-        # Arrange — two docs, each with two structural nodes (4 nodes total).
+    async def test_edges_use_a_single_unordered_bulk_write_no_update_one(self) -> None:
+        # Arrange — two docs, each contributing 2 part_of edges.
         database = _make_bulk_write_database()
         collection = database[_MEMORY_COLLECTION_SENTINEL]
         raws = [
@@ -1811,26 +1870,53 @@ class TestApplyWritesBulkBatching:
 
         summary = await _run_apply_writes(database, raws)
 
-        # Assert — no per-item update_one anywhere in the two loops.
+        # Assert — no per-item update_one anywhere in the loop.
         collection.update_one.assert_not_awaited()
-        # One bulk_write for the structural nodes + one for the edges.
-        assert collection.bulk_write.await_count == 2
-        # Every bulk_write was issued unordered.
+        # ONE bulk_write: the structural node rows are the rag loader's, so the
+        # only write left in apply-writes is the edge flush.
+        assert collection.bulk_write.await_count == 1
         for call in collection.bulk_write.await_args_list:
             assert call.kwargs.get("ordered") is False
-        # nodes_written counts every structural node (4), unchanged.
-        assert summary.nodes_written == 4
+        # 2 docs x (child->parent + parent->document).
+        assert summary.edges_written == 4
+        # apply-writes no longer counts (or writes) the rag rows.
+        assert summary.nodes_written == 0
 
     async def test_node_and_edge_counts_match_golden(self) -> None:
-        # Arrange — single doc: 2 structural nodes, 1 PART_OF edge.
+        # Arrange — single doc: 1 parent + 1 child, so 2 PART_OF edges.
         database = _make_bulk_write_database()
         raws = [_structural_only_raw()]
 
         summary = await _run_apply_writes(database, raws)
 
         # Assert — golden counts for this fixed input.
-        assert summary.nodes_written == 2
-        assert summary.edges_written == 1
+        assert summary.nodes_written == 0
+        assert summary.edges_written == 2
+
+    async def test_structural_edge_endpoints_are_the_loader_row_ids(self) -> None:
+        # The endpoints must be the ids the rag loader actually wrote — NOT the
+        # ``_normalize``d fallback, which lowercases and would orphan the edge.
+        database = _make_bulk_write_database()
+        collection = database[_MEMORY_COLLECTION_SENTINEL]
+        raw = _structural_only_raw(source_uri="https://example.com/Mixed-Case")
+
+        await _run_apply_writes(database, [raw])
+
+        ops = collection.bulk_write.await_args.args[0]
+        edge_ids = {op._filter["_id"] for op in ops}
+        uri = "https://example.com/Mixed-Case"
+        assert edge_ids == {
+            build_edge_id(
+                child_row_id(_USER_ID, uri, 0, 0),
+                EdgeType.PART_OF,
+                parent_row_id(_USER_ID, uri, 0),
+            ),
+            build_edge_id(
+                parent_row_id(_USER_ID, uri, 0),
+                EdgeType.PART_OF,
+                document_row_id(_USER_ID, uri),
+            ),
+        }
 
     async def test_empty_input_issues_no_bulk_write(self) -> None:
         # Arrange — no documents → no nodes, no edges.
@@ -1851,9 +1937,9 @@ class TestApplyWritesBulkBatching:
 
         extractor = ExtractorInfo(name="gemini", version="2.5")
 
-        # A doc carrying a structural PART_OF edge and an LLM related_to edge
-        # between two PERSON nodes that resolve via name_to_target_id.
-        doc_node = ExtractedNode(name="https://example.com/a", type=NodeType.DOCUMENT)
+        # A doc whose hierarchy contributes a structural PART_OF edge, plus an
+        # LLM related_to edge between two PERSON nodes that resolve via
+        # name_to_target_id.
         alice = ExtractedNode(name="Alice", type=NodeType.PERSON)
         bob = ExtractedNode(name="Bob", type=NodeType.PERSON)
         related = ExtractedEdge(
@@ -1864,20 +1950,11 @@ class TestApplyWritesBulkBatching:
             type=EdgeType.RELATED_TO,
             semantic_type="knows",
         )
-        part_of = ExtractedEdge(
-            source_node_id="https://example.com/a#0",
-            source_type=NodeType.CHUNK,
-            target_node_id="https://example.com/a",
-            target_type=NodeType.DOCUMENT,
-            type=EdgeType.PART_OF,
-        )
         chunked = ChunkedDocument(
             document_id="507f1f77bcf86cd799439011",
             source_uri="https://example.com/a",
             source_type="huggingface",
-            chunk_texts=["t"],
-            chunk_ids=["https://example.com/a#0"],
-            structural=ExtractionResult(nodes=[doc_node], edges=[part_of]),
+            parents=[ParentChunk(index=0, content="parent text")],
         )
         raw = RawExtraction(
             document_id="507f1f77bcf86cd799439011",
@@ -1896,7 +1973,7 @@ class TestApplyWritesBulkBatching:
             return build_node_id(_USER_ID, node.type, node.name)
 
         mocker.patch(
-            "tree.memory.extraction.pipeline._dispatch_entity_write",
+            "tree.memory.pipeline._dispatch_entity_write",
             side_effect=_dispatch,
         )
 
@@ -1924,16 +2001,13 @@ class TestApplyWritesBulkBatching:
 
     async def test_name_to_target_id_resolves_mentions_edges(self, mocker) -> None:
         # Arrange — a doc with a PERSON node produces a MENTIONS edge whose
-        # endpoints must resolve through name_to_target_id / structural_node_ids.
-        doc_node = ExtractedNode(name="https://example.com/a", type=NodeType.DOCUMENT)
+        # document endpoint must resolve through the loader's row-id map.
         person = ExtractedNode(name="Alice", type=NodeType.PERSON)
         chunked = ChunkedDocument(
             document_id="507f1f77bcf86cd799439011",
             source_uri="https://example.com/a",
             source_type="huggingface",
-            chunk_texts=["t"],
-            chunk_ids=["https://example.com/a#0"],
-            structural=ExtractionResult(nodes=[doc_node], edges=[]),
+            parents=[],
         )
         raw = RawExtraction(
             document_id="507f1f77bcf86cd799439011",
@@ -1951,7 +2025,7 @@ class TestApplyWritesBulkBatching:
             return build_node_id(_USER_ID, node.type, node.name)
 
         mocker.patch(
-            "tree.memory.extraction.pipeline._dispatch_entity_write",
+            "tree.memory.pipeline._dispatch_entity_write",
             side_effect=_dispatch,
         )
 
@@ -1979,13 +2053,14 @@ class TestApplyWritesBulkBatching:
 class TestTraceHeadersCacheExclusion:
     """The ``opik_trace_headers`` parameter MUST be excluded from the cache key
     of every cached task — otherwise a new run's headers bust the cache every
-    time, defeating the INPUTS cache on the expensive chunk / LLM / embed tasks
+    time, defeating the INPUTS cache on the expensive chunk / embed / LLM tasks
     (the CRITICAL Prefect-caching concern in the monitoring fix)."""
 
     @pytest.mark.parametrize(
         "cached_task",
         [
-            extract_chunks_and_structural_task,
+            clean_and_chunk_task,
+            embed_children_task,
             llm_extract_entities_task,
             embed_entities_task,
         ],
@@ -2002,10 +2077,465 @@ class TestTraceHeadersCacheExclusion:
         import inspect
 
         for fn in (
-            _extract_chunks_and_structural,
+            _clean_and_chunk,
+            _embed_children,
+            _load_rag_rows,
             _llm_extract_entities,
             _embed_entities,
         ):
             params = inspect.signature(fn).parameters
             assert "opik_trace_headers" in params
             assert params["opik_trace_headers"].default is None
+
+
+# ---------------------------------------------------------------------------
+# Worker body — the ONE mode switch (ADR-006 decisions 3, 5 and 8)
+# ---------------------------------------------------------------------------
+#
+# These drive the whole worker body against the real ``unit_tests_twin``
+# database: the claims under test ("1 document + 2 parent + 6 child rows, ZERO
+# edges", "a re-run does not grow the collection") are about what LANDED in
+# Mongo, and a bulk_write mock cannot answer them.
+
+# Exactly 48 cl100k_base tokens: with the fixed-token strategy below it splits
+# into 2 parents of 24 tokens, each into 3 children of 8 — the shape the
+# acceptance criteria count rows against.
+_ARTICLE = " ".join(f"word{i}" for i in range(24))
+_EXPECTED_PARENTS = 2
+_EXPECTED_CHILDREN_PER_PARENT = 3
+_EMBEDDING_DIMENSIONS = 4
+
+
+class _RecordingLLM(BaseLLM):
+    """Records every prompt and returns one canned ``person`` emission."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def generate_json(
+        self, prompt: str, *, system: str | None = None
+    ) -> dict[str, Any]:
+        self.prompts.append(prompt)
+        return {
+            "nodes": [{"name": "alice", "type": "person", "properties": {}}],
+            "edges": [],
+        }
+
+
+class _ClientToTestDatabase:
+    """Stand-in for the Mongo client: every database name maps to the test DB.
+
+    The worker asks for ``settings.mongo.mongo_initdb_database``; unit tests must
+    write to ``unit_tests_twin`` instead of the operator's live database.
+    """
+
+    def __init__(self, database: Any) -> None:
+        self._database = database
+
+    def __getitem__(self, _name: str) -> Any:
+        return self._database
+
+
+@pytest.fixture
+async def test_database() -> Any:
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(), TEST_DATABASE
+    )
+    database = client[TEST_DATABASE]
+    yield database
+    await database[MEMORY_COLLECTION].delete_many({})
+
+
+@pytest.fixture
+async def ingested_document(test_database) -> Any:
+    """A real user + a real 48-token document, on a clean ``memory`` collection.
+
+    Inserting a ``User`` writes its ``person:self`` node, so the collection is
+    cleared AFTER the user exists — otherwise every row count below would be
+    off by one.
+    """
+
+    user = User(identifier=f"pipeline-test-{PydanticObjectId()}")
+    await user.insert()
+    document = Document(
+        source_type=SourceType.WEB,
+        source_uri="https://example.com/rag-vs-graphrag",
+        user_id=user.id,
+        # Unique per test: the title is part of every child's Contextual header,
+        # so it is also part of task ②'s INPUTS cache key. A shared title would
+        # let one test's embed result be served from Prefect's cache to the
+        # next, and the spy model would record nothing.
+        title=f"Memory for AI Agents {PydanticObjectId()}",
+        content=_ARTICLE,
+    )
+    await document.insert()
+    await test_database[MEMORY_COLLECTION].delete_many({})
+
+    yield user, document
+
+    await document.delete()
+    await user.delete()
+
+
+@pytest.fixture
+def fixed_two_by_three_chunking(monkeypatch) -> None:
+    """Pin the splitter so ``_ARTICLE`` yields exactly 2 parents x 3 children."""
+
+    monkeypatch.setenv("TREE_MEMORY__CHUNKING__STRATEGY", "fixed_tokens")
+    monkeypatch.setenv("TREE_MEMORY__CHUNKING__PARENT__SIZE", "24")
+    monkeypatch.setenv("TREE_MEMORY__CHUNKING__PARENT__OVERLAP", "0")
+    monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__SIZE", "8")
+    monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__OVERLAP", "0")
+
+
+async def _run_worker(
+    mocker,
+    monkeypatch,
+    *,
+    mode: str,
+    test_database: Any,
+    user: User,
+    document: Document,
+    llm: BaseLLM | None = None,
+    embedding_model: BaseEmbeddingModel | None = None,
+) -> WriteSummary:
+    """Run the worker body in ``mode`` against the real test database."""
+
+    monkeypatch.setenv("TREE_MEMORY__MODE", mode)
+    # Dedup would issue a ``$vectorSearch`` against an index the test database
+    # does not carry; it has its own test module.
+    monkeypatch.setenv("TREE_EXTRACTION__DEDUP__ENABLED", "false")
+    mocker.patch(
+        "tree.memory.pipeline.init_mongodb",
+        new=AsyncMock(return_value=_ClientToTestDatabase(test_database)),
+    )
+    mocker.patch(
+        "tree.memory.pipeline.get_search_embedding_model",
+        return_value=embedding_model or FakeEmbeddingModel(_EMBEDDING_DIMENSIONS),
+    )
+    mocker.patch(
+        "tree.memory.pipeline.get_resolution_embedding_model",
+        return_value=MockEmbeddingModel(_EMBEDDING_DIMENSIONS),
+    )
+    mocker.patch("tree.memory.pipeline.get_llm", return_value=llm or _RecordingLLM())
+    # Supersession + the deterministic ``has`` edge have their own test modules;
+    # stubbing them keeps the LLM call count equal to the extraction calls.
+    mocker.patch("tree.memory.pipeline.resolve_supersessions", new=AsyncMock())
+    mocker.patch(
+        "tree.memory.pipeline.write_self_has_preference_edges", new=AsyncMock()
+    )
+
+    return await _run_extraction_worker_body(
+        user_id=user.id,
+        document_ids=[str(document.id)],
+        log=logging.getLogger("test.worker"),
+    )
+
+
+@pytest.mark.usefixtures("fixed_two_by_three_chunking")
+class TestWorkerRagMode:
+    """``rag``: node rows only, no edges, no LLM (the Chapter-4 system)."""
+
+    async def test_writes_one_document_two_parent_and_six_child_rows(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        summary = await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert await collection.count_documents({"type": "document"}) == 1
+        assert await collection.count_documents({"subtype": "parent"}) == 2
+        assert await collection.count_documents({"subtype": "child"}) == 6
+        assert await collection.count_documents({}) == 9
+        assert summary.nodes_written == 9
+        assert summary.documents_processed == 1
+
+    async def test_writes_no_edges_and_no_non_rag_node_types(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        summary = await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert await collection.count_documents({"kind": "edge"}) == 0
+        assert summary.edges_written == 0
+        written_types = await collection.distinct("type")
+        assert set(written_types) <= RAG_NODE_TYPES
+
+    async def test_never_calls_the_llm(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        llm = _RecordingLLM()
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+            llm=llm,
+        )
+
+        assert llm.prompts == []
+
+    async def test_rerunning_the_same_document_is_idempotent(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+        first_count = await collection.count_documents({})
+        first_row = await collection.find_one(
+            {"_id": document_row_id(user.id, document.source_uri)}
+        )
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert await collection.count_documents({}) == first_count
+        second_row = await collection.find_one(
+            {"_id": document_row_id(user.id, document.source_uri)}
+        )
+        # Same row, refreshed: created_at is preserved, updated_at moves.
+        assert second_row["created_at"] == first_row["created_at"]
+        assert second_row["updated_at"] >= first_row["updated_at"]
+
+
+@pytest.mark.usefixtures("fixed_two_by_three_chunking")
+class TestWorkerRowShape:
+    """The rows themselves — identical in BOTH modes (ADR-006 decision 3)."""
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    async def test_only_children_carry_a_vector(
+        self, mocker, monkeypatch, test_database, ingested_document, mode: str
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode=mode,
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        async for row in collection.find({"subtype": "child"}):
+            assert len(row["embedding"]) == _EMBEDDING_DIMENSIONS
+        async for row in collection.find(
+            {"$or": [{"subtype": "parent"}, {"type": "document"}]}
+        ):
+            assert row["embedding"] == []
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    async def test_hierarchy_columns_and_denormalised_properties(
+        self, mocker, monkeypatch, test_database, ingested_document, mode: str
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+        uri = document.source_uri
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode=mode,
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        parent = await collection.find_one({"_id": parent_row_id(user.id, uri, 1)})
+        assert parent["subtype"] == "parent"
+        assert parent["parent_id"] == document_row_id(user.id, uri)
+        assert parent["chunk_index"] == 1
+        assert parent["name"] == parent_chunk_name(uri, 1)
+
+        child = await collection.find_one({"_id": child_row_id(user.id, uri, 1, 2)})
+        assert child["subtype"] == "child"
+        assert child["parent_id"] == parent_row_id(user.id, uri, 1)
+        assert child["chunk_index"] == 2
+        assert child["name"] == child_chunk_name(uri, 1, 2)
+        # Denormalised so the indexing backfill needs no join.
+        assert child["properties"]["title"] == document.title
+        assert (
+            child["properties"]["heading_path"] == parent["properties"]["heading_path"]
+        )
+        assert child["properties"]["content"] in parent["properties"]["content"]
+
+    async def test_children_are_embedded_on_their_contextual_header_text(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+        spy = _SpyEmbeddingModel(dimensions=_EMBEDDING_DIMENSIONS)
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+            embedding_model=spy,
+        )
+
+        expected = []
+        async for row in collection.find({"subtype": "child"}):
+            expected.append(
+                child_embedding_text(
+                    title=row["properties"]["title"],
+                    heading_path=row["properties"]["heading_path"],
+                    content=row["properties"]["content"],
+                )
+            )
+        # The embedded text is the contextual header, NEVER the raw content.
+        assert sorted(spy.texts) == sorted(expected)
+        raw_contents = [
+            row["properties"]["content"]
+            async for row in collection.find({"subtype": "child"})
+        ]
+        assert set(spy.texts).isdisjoint(raw_contents)
+
+
+@pytest.mark.usefixtures("fixed_two_by_three_chunking")
+class TestWorkerGraphragMode:
+    """``graphrag``: the same rows PLUS structural edges and LLM extraction."""
+
+    async def test_writes_part_of_and_next_edges_at_both_levels(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        summary = await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        # 6 child->parent + 2 parent->document.
+        assert await collection.count_documents({"type": "part_of"}) == 8
+        # 2 x (3 children - 1) sibling hops + 1 parent-level hop.
+        assert await collection.count_documents({"type": "next"}) == 5
+        assert summary.edges_written >= 13
+
+    async def test_calls_the_llm_once_per_parent_with_the_parent_content(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        llm = _RecordingLLM()
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user=user,
+            document=document,
+            llm=llm,
+        )
+
+        assert len(llm.prompts) == _EXPECTED_PARENTS
+        collection = test_database[MEMORY_COLLECTION]
+        async for row in collection.find({"subtype": "parent"}):
+            assert any(row["properties"]["content"] in p for p in llm.prompts)
+
+    async def test_writes_the_same_rag_rows_as_rag_mode(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert await collection.count_documents({"type": "document"}) == 1
+        assert await collection.count_documents({"subtype": "parent"}) == 2
+        assert await collection.count_documents({"subtype": "child"}) == 6
+
+    async def test_rerunning_the_same_document_is_idempotent(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        collection = test_database[MEMORY_COLLECTION]
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+        first_count = await collection.count_documents({})
+
+        await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert await collection.count_documents({}) == first_count
+
+
+class TestRagRowIdMap:
+    """``_apply_writes`` remaps structural endpoints through this map."""
+
+    def test_maps_every_row_name_to_the_loader_id(self) -> None:
+        chunked = _chunked_with_children(shape=(2,))
+        uri = chunked.source_uri
+
+        ids = _rag_row_id_map(_USER_ID, chunked)
+
+        assert ids[f"{NodeType.DOCUMENT.value}|{uri}"] == document_row_id(_USER_ID, uri)
+        assert ids[
+            f"{NodeType.CHUNK.value}|{parent_chunk_name(uri, 0)}"
+        ] == parent_row_id(_USER_ID, uri, 0)
+        assert ids[
+            f"{NodeType.CHUNK.value}|{child_chunk_name(uri, 0, 1)}"
+        ] == child_row_id(_USER_ID, uri, 0, 1)

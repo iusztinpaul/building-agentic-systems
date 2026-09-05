@@ -42,7 +42,7 @@ from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.flow_runs import flow_run_status
-from tree.memory.extraction.pipeline import memory_extract_etl_coordinator
+from tree.memory.pipeline import memory_extract_etl_coordinator
 from tree.config.constants import (
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,

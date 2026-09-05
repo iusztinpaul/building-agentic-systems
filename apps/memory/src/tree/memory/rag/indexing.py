@@ -1,11 +1,14 @@
-"""
-Indexing pipeline for the knowledge graph.
+"""Indexing over the ``memory`` collection: embedding backfill + search indexes.
 
-Post-extraction steps that prepare the graph for querying:
-1. Compute embeddings for nodes that lack them (backfill, no-op when present).
-2. Ensure text and vector search indexes exist; reconcile the vector
-   index's ``numDimensions`` against the live embedding model on every
-   call.
+Post-ingestion steps that prepare the collection for querying, in BOTH memory
+modes (ADR-006 decision 4):
+
+1. Backfill embeddings for the rows that are SUPPOSED to carry one and don't —
+   **Child chunk**s and LLM-extractable entity nodes. Parents and documents are
+   never selected: they are deliberately vector-less, so embedding them would
+   pull them into ``$vectorSearch`` results and break parent-document retrieval.
+2. Ensure the text and vector search indexes exist; reconcile the vector index's
+   ``numDimensions`` against the live embedding model on every call.
 
 The vector-search index declares ``merged_into`` as a filter path so
 ``$vectorSearch`` queries can exclude tombstoned nodes natively. Existing
@@ -23,8 +26,10 @@ from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.entities.memory import MEMORY_COLLECTION
+from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.config.app_config import app_config
-from tree.memory.embedding_text import embed_node_texts
+from tree.memory.embedding_text import embed_texts, node_to_embedding_text
+from tree.memory.rag.embedding import child_embedding_text
 from tree.models.base import BaseEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -57,34 +62,36 @@ async def embed_nodes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
 ) -> int:
-    """Compute embeddings for nodes belonging to ``user_id`` that lack one.
+    """Backfill embeddings for ``user_id``'s rows that should carry one and don't.
 
-    Backfill semantics: only nodes whose ``embedding`` is missing, ``None``,
-    or an empty list are re-embedded. Nodes whose embeddings were already
-    written inline by the extraction pipeline (task ④ in
-    ``tree.memory.extraction.pipeline``) are skipped — running this
-    function repeatedly is a no-op once every node has a vector.
+    Selection rule (ADR-006 decision 4) — a row is embedded when its
+    ``embedding`` is missing / ``None`` / ``[]`` **and** it is either
 
-    Cross-tenant rows are invisible to this function. A two-tenant database
-    that runs ``embed_nodes`` once per user produces two disjoint
-    embedding batches.
+    * a **Child chunk** (``type="chunk"``, ``subtype="child"``), embedded on its
+      **Contextual header** text rebuilt from its OWN denormalised
+      ``properties.title`` / ``properties.heading_path`` — no join back to the
+      document, so the text is byte-identical to the one the worker's
+      ``embed_children`` task produced; or
+    * an LLM-extractable entity node (``person``, ``organization``, ...),
+      embedded on its generic node-text exactly as before.
 
-    Returns the number of nodes embedded.
+    ``document`` rows and PARENT chunks are excluded BY QUERY: they carry no
+    vector by design (parent-document retrieval searches children only), so a
+    backfill that embedded them would make every run write the same rows again
+    and pollute ``$vectorSearch`` with duplicates of their children.
+
+    Rows whose embedding was written inline by the worker are skipped — running
+    this repeatedly is a no-op once every eligible row has a vector. Cross-tenant
+    rows are invisible: a two-tenant database that runs ``embed_nodes`` once per
+    user produces two disjoint embedding batches.
+
+    Returns the number of rows embedded.
     """
 
     db = client[database]
     collection = db[MEMORY_COLLECTION]
 
-    # Fetch only nodes whose embedding is missing/None/empty AND that
-    # belong to ``user_id``. Nodes with a non-empty embedding vector are
-    # intentionally excluded so this stays a backfill, not a re-embedder.
-    docs = await collection.find(
-        {
-            "user_id": user_id,
-            "kind": "node",
-            "embedding": {"$in": [[], None]},
-        },
-    ).to_list()
+    docs = await collection.find(_backfill_filter(user_id)).to_list()
 
     embedded_count = await _embed_batch(collection, docs, embedding_model)
 
@@ -99,22 +106,57 @@ async def embed_nodes(
     return embedded_count
 
 
+def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
+    """The ONE query that decides what the backfill embeds (see ``embed_nodes``)."""
+
+    return {
+        "user_id": user_id,
+        "kind": "node",
+        "embedding": {"$in": [[], None]},
+        "$or": [
+            {"type": "chunk", "subtype": "child"},
+            {"type": {"$in": sorted(t.value for t in LLM_EXTRACTABLE_NODE_TYPES)}},
+        ],
+    }
+
+
+def node_embedding_text(node: dict[str, Any]) -> str:
+    """The text ONE fetched row is embedded on.
+
+    Child chunks embed their **Contextual header** (title + heading path +
+    content); every other eligible row embeds the generic node-text. Keeping the
+    two in ONE function is what stops the backfill and the inline
+    ``embed_children`` task from drifting into two different vectors for the
+    same row.
+    """
+
+    properties = node.get("properties") or {}
+    if node.get("type") == "chunk" and node.get("subtype") == "child":
+        return child_embedding_text(
+            title=properties.get("title"),
+            heading_path=properties.get("heading_path") or [],
+            content=properties.get("content") or "",
+        )
+    return node_to_embedding_text(node)
+
+
 async def _embed_batch(
     collection: Any,
     docs: list[dict[str, Any]],
     embedding_model: BaseEmbeddingModel,
 ) -> int:
-    """Embed node documents and write vectors back.
+    """Embed fetched rows and write the vectors back.
 
-    Embedding is delegated to
-    :func:`tree.memory.embedding_text.embed_node_texts`, which packs the
-    node-texts into as few synchronous Voyage requests as the per-request
-    caps allow (1000 inputs / 320K tokens). The returned vectors are
-    positionally aligned with ``docs`` (across multiple requests), so the
-    zip below is safe.
+    Embedding is delegated to :func:`tree.memory.embedding_text.embed_texts`,
+    which packs the texts into as few synchronous Voyage requests as the
+    per-request caps allow (1000 inputs / 320K tokens). The returned vectors are
+    positionally aligned with ``docs`` (across multiple requests), so the zip
+    below is safe.
     """
 
-    vectors = await embed_node_texts(docs, embedding_model)
+    vectors = await embed_texts(
+        [node_embedding_text(doc) for doc in docs], embedding_model
+    )
 
     # Skip inputs the batcher could not embed (empty placeholder from a Voyage
     # content rejection) — leave the node unembedded so a later run retries it.
@@ -149,11 +191,16 @@ _TEXT_INDEX_FIELDS: list[tuple[str, str]] = [
 # Filter paths the vector-search index must expose so $vectorSearch
 # queries can prune candidates server-side. ``user_id`` is first — every
 # tenant-scoped $vectorSearch carries a ``user_id`` filter; ``merged_into``
-# lets dedup exclude tombstones without a post-aggregation $match.
+# lets dedup exclude tombstones without a post-aggregation $match; ``subtype``
+# (ADR-006 decision 2) is what restricts the seed search to CHILD chunks. Adding
+# ``subtype`` makes the live index miss a required path once per environment,
+# which the quiet drop-and-recreate branch in ``_ensure_vector_index`` heals on
+# the next indexing run.
 _VECTOR_INDEX_FILTER_PATHS: tuple[str, ...] = (
     "user_id",
     "kind",
     "type",
+    "subtype",
     "merged_into",
 )
 
