@@ -120,7 +120,7 @@ class ResolutionConfig(BaseModel):
 
 class DedupConfig(BaseModel):
     """Read-only dedup-decision tuning. Mirrors
-    :class:`tree.memory.extraction.dedup.DeduplicationConfig` field-for-field
+    :class:`tree.memory.graph.dedup.DeduplicationConfig` field-for-field
     so the YAML can drive both.
 
     Post-#034 this is the *sole* source of truth for dedup behavior:

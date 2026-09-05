@@ -172,7 +172,7 @@ class TestReviewConfirmPropagatesUserId:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
 
-        from tree.memory.review.types import (
+        from tree.memory.graph.review.types import (
             MergeStrategy,
             ReviewDecision,
             ReviewResult,
@@ -207,7 +207,7 @@ class TestReviewRejectPropagatesUserId:
         user_id = PydanticObjectId()
         ctx = _make_ctx(user_id)
 
-        from tree.memory.review.types import ReviewDecision, ReviewResult
+        from tree.memory.graph.review.types import ReviewDecision, ReviewResult
 
         mock_call = mocker.patch(
             "tree.mcp.graph_tools._review_duplicate",

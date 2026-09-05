@@ -7,7 +7,7 @@ validation, building a training set) is in **Side notes** at the end.
 
 Source of truth in the repo:
 
-- System prompt + model call: `apps/memory/src/tree/memory/extraction/core.py`
+- System prompt + model call: `apps/memory/src/tree/memory/graph/extraction.py`
 - Ontology (single source of truth): `apps/memory/src/tree/entities/ontology.py`
 - **Exact ontology JSON the model receives:**
   `apps/memory/tests/unit/entities/snapshots/ontology_schema.json`
@@ -221,7 +221,7 @@ Structural node/edge types the **model must never emit** (the pipeline creates t
 ## B. Validation — what gets dropped
 
 The pipeline applies **strict envelope, lenient field** (`validate_envelope` + `validate_properties`
-in `apps/memory/src/tree/memory/extraction/validation.py`; full flow in `pipeline.py` ~L565–694):
+in `apps/memory/src/tree/memory/graph/validation.py`; full flow in `pipeline.py` ~L565–694):
 
 - **Whole row dropped** if: type not registered/extractable; `related_to` `semantic_type` missing,
   unknown, or pair not allowed; any edge endpoint pair disallowed; any edge endpoint is a `fact`;
@@ -259,7 +259,7 @@ what the cleaner below is for). Use low temperature (≈0–0.3) for label stabi
 
 ```python
 import json
-from tree.memory.extraction.core import _SYSTEM_PROMPT
+from tree.memory.graph.extraction import _SYSTEM_PROMPT
 from tree.entities.ontology import get_ontology_schema
 open("frozen_system_prompt.txt", "w").write(
     _SYSTEM_PROMPT.format(ontology=json.dumps(get_ontology_schema(), indent=2)))
@@ -281,8 +281,8 @@ Prefect/DB flow; this is a faithful standalone extract (verified to reproduce th
 
 ```python
 # build_label.py — raw teacher JSON -> training label. Mirrors pipeline.py:565-694.
-from tree.memory.extraction.core import _parse_extraction
-from tree.memory.extraction.validation import (
+from tree.memory.graph.extraction import _parse_extraction
+from tree.memory.graph.validation import (
     validate_envelope, validate_properties,
     get_node_property_schemas, get_edge_property_schema,
 )
@@ -324,7 +324,7 @@ only the valid person + the valid `employed_by` edge.
 #   mongoexport --uri "$MONGO_URI" --collection documents --fields content --type json --out documents.jsonl
 import asyncio, json, sys
 from tree.entities.ontology import get_ontology_schema
-from tree.memory.extraction.core import _SYSTEM_PROMPT, chunk_document
+from tree.memory.graph.extraction import _SYSTEM_PROMPT, chunk_document
 from tree.models.get_model import get_llm
 from build_label import build_label  # the function above
 

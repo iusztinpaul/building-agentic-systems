@@ -1,16 +1,39 @@
 # Tree Memory
 
-The memory half of **Tree: Your Rooted Personal Assistant**. A Python app that ingests documents from multiple sources, extracts a knowledge graph with an LLM, indexes it for hybrid search on MongoDB, and exposes the result over a [FastMCP](https://gofastmcp.com/) server.
+The memory half of **Tree: Your Rooted Personal Assistant**. A Python app that ingests documents from multiple sources, turns them into memory (vanilla RAG rows, plus an LLM-extracted knowledge graph in `graphrag` mode), indexes it for hybrid search on MongoDB, and exposes the result over a [FastMCP](https://gofastmcp.com/) server.
 
 For the wider system (harness, end-to-end flow, shared infra) see the repo-root [`README.md`](../../README.md). For the harness that drives this memory, see [`../harness/README.md`](../harness/README.md).
 
 ## What this app contains
 
 - **Data pipelines** (`src/tree/data/`) — one Prefect flow per source. Normalizes everything into the `documents` collection.
-- **Memory pipelines** (`src/tree/memory/`) — `extraction/` chunks + LLM-extracts nodes and edges; `indexing/` builds reverse edges, embeds nodes, ensures text/vector/search indexes.
-- **Query + MCP** (`src/tree/memory/query/`, `src/tree/mcp/`) — a CLI that renders interactive HTML graphs, and a FastMCP server exposing the memory tools to any MCP client.
+- **Memory pipeline** (`src/tree/memory/pipeline.py`) — the three Prefect flows (extraction worker, coordinator fan-out, indexing). ONE flow body: the `rag/` stages always, the `graph/` stages behind `if mode == "graphrag"`.
+  - `src/tree/memory/rag/` — clean → chunk (parent/child) → embed children → load rows, plus hybrid search, parent-document retrieval and the index builder. The complete Chapter-4 system; it never imports `graph/`.
+  - `src/tree/memory/graph/` — what Chapter 8 adds: structural edges, LLM entity extraction, resolution, dedup, review, dream consolidation, graph expansion, NL query and the HTML graph renderer.
+- **MCP + query CLI** (`src/tree/mcp/`, `scripts/query_graph.py`) — a FastMCP server exposing the memory tools to any MCP client, and a CLI that prints retrieved parents (`rag`) or renders an interactive HTML graph (`graphrag`).
 
 Nodes use `_id = "type:name"`; edges use `_id = "source|type|target"`. Everything is upserted into a single mutable `memory` collection.
+
+## Memory modes
+
+ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), default `graphrag`, overridable per process with `TREE_MEMORY__MODE=rag|graphrag` — decides how much of the memory half runs (ADR-006). It is read ONCE at flow entry, at MCP-server boot and at CLI start; never per request.
+
+| | `rag` | `graphrag` |
+|---|---|---|
+| **Pipeline stages** | `clean_text` → `split_document` → `embed_children` → `load_rag_rows` | the same four, then structural edges → LLM extract → validate → resolve + embed entities → `apply_writes` |
+| **Writes to `memory`** | node rows only: one `document` row, its `chunk`/`parent` rows and its embedded `chunk`/`child` rows | the same rows **plus** `part_of` / `next` / `mentions` / `referenced` edges and entity nodes |
+| **Embedded** | child chunks | child chunks + entity nodes |
+| **Retrieval** | `retrieve_parents` — hybrid search (vector + text, RRF) over children, grouped by `parent_id`, returning whole parents with their document metadata | the same parent resolution, then `expand_graph` from the parent ids ∪ entity seeds |
+| **MCP tools** | 6 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`) | those 6 + 7 graph tools (see [MCP server](#mcp-server)) |
+| **`make memory-query-graph`** | prints the retrieved parents as text | writes + opens `.tree/graphs/<slug>-<stamp>.html` |
+
+Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes means dropping the collection and re-ingesting from scratch.
+
+```bash
+make memory-check-db                      # confirm which Mongo you are pointed at
+mongosh "$MONGO_URI" --eval 'db.memory.drop()'
+TREE_MEMORY__MODE=rag make memory-run-pipeline MODE=online SOURCE="https://…"
+```
 
 ## Setup
 
@@ -129,22 +152,22 @@ when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — s
 
 ### Pipelines at a glance
 
-Two stages — **data** (sources → `documents`) then **memory** (extraction → knowledge graph, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand):
+Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand):
 
 | stage | offline | online |
 |---|---|---|
 | **data** → `documents` | `run-data-pipeline` | `run-data-pipeline MODE=online SOURCE=…` |
-| **memory** → graph (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **memory** → `memory` rows (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
 | **index** (shared, standalone) | `run-indexing-pipeline` | `run-indexing-pipeline` |
 
-**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; extraction fires the trailing index, so the graph is queryable when it returns:
+**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; the memory pipeline fires the trailing index, so memory is queryable when it returns:
 
 ```bash
-# Offline: every configured source -> documents -> graph (+ index)
+# Offline: every configured source -> documents -> memory collection (+ index)
 make memory-run-pipeline                                                  # default sources (backfill + listen)
 make memory-run-pipeline USER_IDENTIFIER=paul SOURCE_FILE="sources/listen.yaml"   # chosen file, another user
 
-# Online: one source -> document -> graph (+ index), end to end
+# Online: one source -> document -> memory collection (+ index), end to end
 make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
 make memory-run-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
@@ -185,9 +208,22 @@ make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My n
 
 Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to build the graph. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
-### Memory extraction
+### Memory pipeline
 
-Extract knowledge-graph nodes + edges from `documents` into `memory`. Two modes, both dispatched as ONE `offline-pipeline` run with `run_data=False` (extraction phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
+Turn `documents` into rows of the `memory` collection. The worker flow
+(`memory-extract-etl-worker`, `src/tree/memory/pipeline.py`) runs ONE body whose stages depend
+on [`memory.mode`](#memory-modes):
+
+1. `clean-and-chunk` — `clean_text` then two-level splitting into parent + child chunks.
+2. `embed-children` — the **contextual header** text (`title` + heading path + content) of every child.
+3. `load-rag-rows` — one unordered `bulk_write` of the `document` / parent / child rows.
+4. *(graphrag only)* structural edges → `llm-extract-entities` over parent chunks → `validate-raws`
+   → first-person + supersession → `resolve-entities` → `embed-entities` → `dedupe-entities` →
+   `apply-writes`.
+
+Both run modes below are dispatched as ONE `offline-pipeline` run with `run_data=False` (memory
+phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the
+pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
@@ -200,7 +236,10 @@ make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
 
 ### Memory indexing
 
-The single indexing step — works after either extraction mode. Builds reverse edges for bidirectional traversal, computes node embeddings, and ensures text / vector / Atlas-search indexes on `memory`:
+The single indexing step (`memory-indexing-etl`) — works in both memory modes. `embed-kg-nodes`
+backfills the vectors that are missing on the rows that are supposed to carry one (child chunks
+always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index and the vector
+index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on `memory`:
 
 ```bash
 make memory-run-indexing-pipeline
@@ -208,17 +247,23 @@ make memory-run-indexing-pipeline
 
 ### Query CLI
 
+The output follows [`memory.mode`](#memory-modes): in `graphrag` it renders an interactive HTML
+graph under `.tree/graphs/` and opens it; in `rag` there is no graph to draw, so it prints the
+retrieved parents (score, document title, heading path, a 300-char excerpt and the matched-children
+count) as text — and a full-graph run with no `QUERY` exits 1 with an explanatory message.
+
 ```bash
-# Visualize the entire graph
+# graphrag: visualize the entire graph
 make memory-query-graph
 
-# Query a specific topic — renders an interactive HTML graph and opens it
+# Query a specific topic — HTML graph in graphrag, retrieved parents as text in rag
 make memory-query-graph QUERY="Paul Iusztin"
+TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 ```
 
 ### MCP server
 
-Expose the knowledge graph to any MCP-aware client (Claude Code, Claude Desktop, Cursor, the bundled harness):
+Expose the memory to any MCP-aware client (Claude Code, Claude Desktop, Cursor, the bundled harness):
 
 ```bash
 make memory-serve-mcp                       # stdio transport (default)
@@ -340,7 +385,7 @@ Then flip `models.search_embedding` (and, if desired, `models.resolution_embeddi
 make memory-tests              # unit suite (needs the local MongoDB from make local-start)
 ```
 
-Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). There is no integration suite (see `AGENTS.md`); e2e verification happens by running the real pipelines (see "Running pipelines").
+Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). The mirroring is enforced for the memory layers by `tests/unit/memory/test_package_layout.py`, which also asserts that no module under `rag/` imports `graph/`. There is no integration suite (see `AGENTS.md`); e2e verification happens by running the real pipelines (see "Running pipelines").
 
 Auto-format + lint before committing:
 
@@ -365,9 +410,15 @@ apps/memory/
       file.py           # local file ingestion
       pipeline.py       # data_pipeline (dispatcher over sources.sources)
     memory/
-      extraction/       # chunk + LLM extract → nodes + edges
-      indexing/         # reverse edges, embeddings, indexes
-      query/            # hybrid search + NL query + HTML visualize
+      pipeline.py       # the 3 Prefect flows (worker, coordinator, indexing)
+      embedding_text.py # shared batching + entity node text
+      types.py          # transit types shared by both layers
+      rag/              # Chapter 4: cleaning, chunking, embedding, load,
+                        #   search, retrieval, indexing — never imports graph/
+      graph/            # Chapter 8: extraction, add_entity, dedup, validation,
+                        #   judge, first_person_resolver, preference_supersession,
+                        #   sharding, resolution/, review/, consolidation/,
+                        #   retrieval, kgquery, nl_query, visualize
     mcp/                # FastMCP server + tools
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments

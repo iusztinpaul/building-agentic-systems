@@ -26,13 +26,31 @@ admission-control guards (``limit`` not ``global_limit``; binding to the real
 
 from __future__ import annotations
 
+import importlib
 import inspect
+from pathlib import Path
 
 import prefect
 import pytest
 
+import tree
 from tree import orchestrator
 from tree.config.app_config import app_config
+
+# Entrypoints are REPO-relative (``apps/memory/src/tree/…``) because Prefect
+# resolves them inside a fresh clone: .../apps/memory/src/tree/__init__.py → up
+# four levels is the repo root.
+_REPO_ROOT = Path(tree.__file__).parents[4]
+_SRC_PREFIX = "apps/memory/src/"
+
+
+def _module_name(entrypoint_path: str) -> str:
+    """``apps/memory/src/tree/x/y.py`` → ``tree.x.y``."""
+
+    assert entrypoint_path.startswith(_SRC_PREFIX)
+    return (
+        entrypoint_path.removeprefix(_SRC_PREFIX).removesuffix(".py").replace("/", ".")
+    )
 
 
 def test_serve_deployments_passes_limit_not_global_limit(mocker):
@@ -125,7 +143,61 @@ def test_memory_worker_entrypoint_points_at_the_one_pipeline_module():
     assert entrypoints["memory-extract-etl-worker"] == (
         "apps/memory/src/tree/memory/pipeline.py:memory_extract_etl_worker"
     )
+    assert entrypoints["dream-consolidation-all-users"] == (
+        "apps/memory/src/tree/memory/graph/consolidation/dream.py"
+        ":dream_consolidation_all_users"
+    )
     assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
+class TestEveryEntrypointResolves:
+    """Each spec's ``path:function`` must resolve — file AND flow (#111).
+
+    Prefect resolves the entrypoint at RUN time, inside a fresh clone on the
+    managed worker, so a path left stale by a package move (ADR-006 §8 moved
+    ``dream.py`` under ``graph/``) fails hours later in Cloud rather than in
+    CI. These walk every spec and resolve its entrypoint against the tree.
+    """
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_file_exists(self, spec) -> None:
+        path = _REPO_ROOT / spec.entrypoint.split(":")[0]
+
+        assert path.is_file(), f"{spec.name}: no file at {spec.entrypoint}"
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_names_a_flow_in_that_module(self, spec) -> None:
+        file_path, _, function_name = spec.entrypoint.partition(":")
+        module = importlib.import_module(_module_name(file_path))
+
+        attribute = getattr(module, function_name, None)
+        assert attribute is not None, (
+            f"{spec.name}: {_module_name(file_path)} has no {function_name!r}"
+        )
+        assert isinstance(attribute, prefect.Flow)
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_names_the_same_flow_the_spec_holds(self, spec) -> None:
+        """The two halves of a spec must not drift apart.
+
+        ``spec.flow`` drives the local-serve path and ``spec.entrypoint`` the
+        Cloud one; an import fixed in only one of them would leave the two
+        execution models running different code.
+        """
+
+        file_path, _, function_name = spec.entrypoint.partition(":")
+        module = importlib.import_module(_module_name(file_path))
+
+        assert getattr(module, function_name) is spec.flow
+
+    def test_the_topology_is_exactly_the_free_tier_five(self) -> None:
+        assert len(orchestrator._DEPLOYMENT_SPECS) == 5
 
 
 def test_every_spec_registers_with_deploy_optional_off(mocker):

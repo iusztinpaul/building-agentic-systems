@@ -33,7 +33,7 @@ from mcp import types
 from tree.mcp.server import mcp
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
-from tree.memory.query.visualize import to_graph_payload
+from tree.memory.graph.visualize import to_graph_payload
 
 DASHBOARD_VIEW_URI = "ui://tree-memory/dashboard.html"
 

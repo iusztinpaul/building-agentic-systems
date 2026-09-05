@@ -6,7 +6,7 @@ Build a personal assistant rooted in a knowledge-graph memory, powered by ontolo
 
 Tree has two halves, wired together by [MCP](https://modelcontextprotocol.io/):
 
-- **Memory** (`apps/memory/`) — a Python app that ingests documents from multiple sources (Substack, arXiv, files, conversations), extracts a knowledge graph with an LLM, indexes it for hybrid text + vector + graph search on MongoDB, and exposes the whole thing over a FastMCP server.
+- **Memory** (`apps/memory/`) — a Python app that ingests documents from multiple sources (Substack, arXiv, files, conversations), turns them into memory (chunk rows in `rag` mode, plus an LLM-extracted knowledge graph in `graphrag`), indexes it for hybrid text + vector + graph search on MongoDB, and exposes the whole thing over a FastMCP server.
 - **Harness** (`apps/harness/`) — a minimal TypeScript coding-agent (`tree` CLI, Bun + Ink) that spawns the memory's MCP server automatically and lets you query, explore, and write to the graph in natural language.
 
 The goal: a personal assistant whose memory is a graph you own, queryable by any MCP-aware client (the bundled harness, Claude Code, Claude Desktop, Cursor, …).
@@ -160,13 +160,13 @@ make memory-serve-workflows &   # in-process worker; (re)serve to load local cod
 
 (Step 2's Dockerized `prefect-worker` already serves every deployment from the in-container code, so if you're not iterating on pipeline code you can rely on that instead — just don't run both, or you'll get duplicate workers.)
 
-**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the knowledge graph.
+**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the `memory` collection — how much of it runs depends on `memory.mode` (see [Memory modes](apps/memory/README.md#memory-modes)).
 
 ```bash
 make memory-run-data-pipeline              # ingests the default sources (sources/backfill.yaml + sources/listen.yaml) → documents
-make memory-run-memory-pipeline # documents → LLM → nodes + edges → memory collection
-make memory-run-indexing-pipeline   # reverse edges, embeddings, search indexes
-make memory-query-graph QUERY="AI agents"  # renders interactive HTML of the result
+make memory-run-memory-pipeline     # documents → clean → chunk → embed → memory collection (+ LLM nodes + edges in graphrag)
+make memory-run-indexing-pipeline   # embedding backfill, text + vector search indexes
+make memory-query-graph QUERY="AI agents"  # interactive HTML graph (graphrag) or ranked parents as text (rag)
 
 make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user
 

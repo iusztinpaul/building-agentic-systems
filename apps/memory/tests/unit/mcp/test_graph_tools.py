@@ -177,7 +177,7 @@ class TestGraphToolsDualDelivery:
     ) -> None:
         # Arrange: a client that renders no MCP App UIs (e.g. the terminal).
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
-        mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
         mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
         ctx = _make_graph_ctx(ui_supported=False)
 

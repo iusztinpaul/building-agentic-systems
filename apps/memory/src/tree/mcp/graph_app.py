@@ -12,7 +12,7 @@ low-level MCP Apps pattern (https://gofastmcp.com/apps/low-level):
 
 **Rendering stack.** This module owns MCP concerns ONLY. The **Graph renderer**
 itself — the **Graph payload** builder, the shared CSS/DOM/JS templates, and
-the self-contained-file writer — lives in ``tree.memory.query.visualize`` and
+the self-contained-file writer — lives in ``tree.memory.graph.visualize`` and
 is imported from here (dependency direction memory ← mcp). What stays local:
 the ext-apps iframe runtime CDN, the ``ui://`` HTML variant, CSP wiring, the
 tool, and the ``graphs://`` resource.
@@ -60,7 +60,7 @@ from tree.config.paths import GRAPHS_DIR
 from tree.mcp.server import mcp
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
-from tree.memory.query.visualize import (
+from tree.memory.graph.visualize import (
     _render_graph_file,
     _resolve_static,
     to_graph_payload,

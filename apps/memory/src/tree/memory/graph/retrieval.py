@@ -1,6 +1,6 @@
 """GraphRAG retrieval: hybrid seeds -> parent resolution -> graph expansion.
 
-The graph half of the pre-ADR-006 ``tree.memory.query.core``. Two steps, every
+The graph half of the pre-ADR-006 ``tree.memory.graph.core``. Two steps, every
 one scoped to the run's ``user_id``:
 
 1. :func:`~tree.memory.rag.search.hybrid_search` with ``node_filter={}`` — in

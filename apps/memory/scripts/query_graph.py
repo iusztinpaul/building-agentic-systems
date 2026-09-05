@@ -42,7 +42,7 @@ from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.sessions import resolve_user_id
 from tree.memory.graph.retrieval import fetch_full_graph, query_memory
-from tree.memory.query.visualize import visualize_query_result
+from tree.memory.graph.visualize import visualize_query_result
 from tree.memory.rag.retrieval import retrieve_parents
 from tree.memory.rag.types import RetrievalResult, RetrievedParent
 from tree.models.get_model import get_embedding_model

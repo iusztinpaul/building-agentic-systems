@@ -647,7 +647,7 @@ class FactProperties(BaseModel):
     validator rejects every edge with a ``fact`` endpoint, so a fact
     has zero edges to or from it. Retrieval is by ``name`` /
     ``subject`` / ``object`` string match or vector similarity only
-    (see :class:`tree.memory.query.kgquery.KGQuery`).
+    (see :class:`tree.memory.graph.kgquery.KGQuery`).
 
     Bi-temporal columns ``valid_from`` / ``valid_until`` live on
     :class:`tree.entities.memory.MemoryEntry` and are
@@ -745,7 +745,7 @@ class SameAsStatus(StrEnum):
 
     ``PENDING`` rows surface in the human-review queue; ``CONFIRMED``
     rows have been merged; ``REJECTED`` rows are skipped on future
-    dedup passes (see ``tree.memory.extraction.dedup``'s reject-pair
+    dedup passes (see ``tree.memory.graph.dedup``'s reject-pair
     filter).
     """
 
@@ -1073,7 +1073,7 @@ register_node_type(
 # propositions that don't fit any registered relation semantic. Island
 # rule: the envelope validator rejects every edge whose source or
 # target is a ``fact`` row (see ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` in
-# :mod:`tree.memory.extraction.validation`). Subtypes are ``None``
+# :mod:`tree.memory.graph.validation`). Subtypes are ``None``
 # (freeform — facts are not categorized).
 register_node_type(
     NodeTypeSpec(
@@ -1458,8 +1458,8 @@ register_edge_type(
 # Backward-compat views derived from the registry
 # ---------------------------------------------------------------------------
 #
-# Existing call sites in ``tree.memory.extraction.core``,
-# ``tree.memory.pipeline``, and ``tree.memory.query.nl_query``
+# Existing call sites in ``tree.memory.graph.extraction``,
+# ``tree.memory.pipeline``, and ``tree.memory.graph.nl_query``
 # read these constants directly. They MUST keep working unchanged after
 # this refactor — task #027 is behavior-neutral. Downstream tasks
 # (#028–#032) will migrate consumers to read the registry directly.

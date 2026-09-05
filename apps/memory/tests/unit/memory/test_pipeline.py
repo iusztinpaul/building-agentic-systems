@@ -32,7 +32,7 @@ from tree.entities.memory import (
     build_node_id,
 )
 from tree.entities.users import User
-from tree.memory.extraction.dedup import DeduplicationConfig, DeduplicationResult
+from tree.memory.graph.dedup import DeduplicationConfig, DeduplicationResult
 from tree import offline, online
 from tree.memory import pipeline
 from tree.memory.embedding_text import node_to_embedding_text
@@ -68,8 +68,8 @@ from tree.memory.rag.load import (
     parent_row_id,
 )
 from tree.memory.rag.types import ChildChunk, ParentChunk
-from tree.memory.resolution.composite import CompositeResolver
-from tree.memory.resolution.types import ResolvedEntity
+from tree.memory.graph.resolution.composite import CompositeResolver
+from tree.memory.graph.resolution.types import ResolvedEntity
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
 from tree.memory.types import (

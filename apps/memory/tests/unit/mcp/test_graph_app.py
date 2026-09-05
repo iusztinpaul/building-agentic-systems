@@ -7,8 +7,8 @@ JSON block, because the App-UI host does not forward ``structuredContent`` to a
 custom iframe), the file fallback's ``graphs://`` resource link, and the
 resource handler itself. The Graph renderer it delegates to
 (``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives in
-``tree.memory.query.visualize`` and is tested in
-``tests/unit/memory/query/test_visualize.py``; the ``query_memory`` /
+``tree.memory.graph.visualize`` and is tested in
+``tests/unit/memory/graph/test_visualize.py``; the ``query_memory`` /
 ``search_memory`` half of the shared helper is tested in ``test_tools.py``.
 """
 
@@ -29,7 +29,7 @@ from tree.mcp.graph_app import (
     visualize_memory_graph,
 )
 from tree.mcp.server import mcp
-from tree.memory.query.visualize import _render_graph_file, to_graph_payload
+from tree.memory.graph.visualize import _render_graph_file, to_graph_payload
 from tree.memory.types import QueryResult
 
 _UID = "65f1a2b3c4d5e6f7a8b9c0d1"
@@ -113,7 +113,7 @@ def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only() -
 def test_graph_tool_result_writes_a_file_and_links_it_for_non_ui_clients(
     mocker, tmp_path: Path
 ) -> None:
-    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=False)
@@ -136,7 +136,7 @@ def test_graph_tool_result_survives_a_headless_browser_open(
     mocker, tmp_path: Path
 ) -> None:
     # Arrange: a headless / remote server has no browser to open.
-    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch(
         "tree.mcp.graph_app.webbrowser.open",
         side_effect=RuntimeError("no browser"),
@@ -218,7 +218,7 @@ async def test_visualize_fallback_returns_path_and_resource_link(
         "tree.mcp.graph_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
-    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     ctx = _make_ctx(ui_supported=False)
 
@@ -244,7 +244,7 @@ async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
         "tree.mcp.graph_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
-    mocker.patch("tree.memory.query.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
     mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
     ctx = _make_ctx(ui_supported=True)
 

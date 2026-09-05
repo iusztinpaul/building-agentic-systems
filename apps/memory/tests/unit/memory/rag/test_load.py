@@ -22,7 +22,12 @@ from beanie import PydanticObjectId
 from tests.unit.conftest import TEST_DATABASE
 from tree.config.settings import settings
 from tree.db import init_mongodb
-from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_node_id
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    RAG_NODE_TYPES,
+    NodeType,
+    build_node_id,
+)
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.load import (
     _build_node_op,
@@ -245,6 +250,13 @@ class TestBuildRagRowOps:
 
 
 class TestRagNodeTypeGuard:
+    """ADR-006 §1: ``rag/`` writes ``RAG_NODE_TYPES`` node rows and NOTHING else.
+
+    The two halves of that claim — no foreign node type in, no ``kind: edge``
+    out — are what keeps ``rag`` mode edge-free without the loader knowing the
+    graph layer exists.
+    """
+
     def test_a_non_rag_node_type_raises(self) -> None:
         with pytest.raises(ValueError, match="only writes"):
             _build_node_op(
@@ -260,6 +272,68 @@ class TestRagNodeTypeGuard:
                 source_document_id=_DOCUMENT_ID,
                 now=None,
             )
+
+    @pytest.mark.parametrize(
+        "node_type", sorted(set(NodeType) - {NodeType(t) for t in RAG_NODE_TYPES})
+    )
+    def test_every_non_rag_node_type_of_the_ontology_is_rejected(
+        self, node_type: NodeType
+    ) -> None:
+        """Not just ``person`` — EVERY graph-owned node type is refused.
+
+        Parametrised off the ontology so a new ``NodeType`` is covered the day
+        it is added, instead of silently becoming loadable from ``rag``.
+        """
+
+        with pytest.raises(ValueError, match="only writes"):
+            _build_node_op(
+                user_id=_USER_ID,
+                node_id="x",
+                node_type=node_type.value,
+                name="whatever",
+                subtype=None,
+                parent_id=None,
+                chunk_index=None,
+                properties={},
+                embedding=[],
+                source_document_id=_DOCUMENT_ID,
+                now=None,
+            )
+
+    def test_the_edge_kind_is_rejected_like_any_other_foreign_type(self) -> None:
+        """``kind`` is not a node type, so it cannot sneak in through ``type``."""
+
+        with pytest.raises(ValueError, match="only writes"):
+            _build_node_op(
+                user_id=_USER_ID,
+                node_id="x",
+                node_type="part_of",
+                name="child -> parent",
+                subtype=None,
+                parent_id=None,
+                chunk_index=None,
+                properties={},
+                embedding=[],
+                source_document_id=_DOCUMENT_ID,
+                now=None,
+            )
+
+    def test_no_op_of_a_full_hierarchy_is_an_edge_row(self) -> None:
+        """Every op the builder emits is ``kind: node`` with no edge endpoints.
+
+        ``part_of`` / ``next`` are graphrag-only (ADR-006 §3): a rag-mode run
+        must leave the ``memory`` collection with zero ``kind: edge`` rows, and
+        this is where that starts.
+        """
+
+        rows = _by_id(_ops(2, 3))
+
+        assert {row["kind"] for row in rows.values()} == {"node"}
+        assert not any(
+            key in row
+            for row in rows.values()
+            for key in ("source_node_id", "target_node_id")
+        )
 
 
 # ---------------------------------------------------------------------------

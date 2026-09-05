@@ -64,8 +64,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         memory_extract_etl_worker,
         "memory-extract-etl-worker",
-        "apps/memory/src/tree/memory/extraction/"
-        "pipeline.py:memory_extract_etl_worker",
+        "apps/memory/src/tree/memory/pipeline.py:memory_extract_etl_worker",
         TAGS_EXTRACTION,
     ),
     _DeploymentSpec(
@@ -85,7 +84,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         dream_consolidation_all_users,
         "dream-consolidation-all-users",
-        "apps/memory/src/tree/memory/consolidation/"
+        "apps/memory/src/tree/memory/graph/consolidation/"
         "dream.py:dream_consolidation_all_users",
         ["memory-pipeline", "dream", "consolidation"],
         cron=app_config.dream.cron,

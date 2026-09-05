@@ -145,12 +145,12 @@ async def _ingest(
 @mcp.tool
 @track(tags=TAGS_INGESTION_MCP, name="ingest_url", create_duplicate_root_span=False)
 async def ingest_url(url: str, ctx: Context) -> str:
-    """Fetch a web page and ingest its content into the knowledge graph.
+    """Fetch a web page and ingest its content into memory.
 
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (fetch +
-    extraction inline, indexing submitted after) and returns immediately —
+    memory pipeline inline, indexing submitted after) and returns immediately —
     ``{"status": "scheduled", "flow_run_id": ...}``, where ``status`` is the
-    new run's Prefect state. It does not wait for the graph to be built, so
+    new run's Prefect state. It does not wait for the memory to be written, so
     the page is NOT searchable yet when this returns.
 
     Args:
@@ -186,12 +186,12 @@ async def ingest_file(
     ctx: Context,
     title: str | None = None,
 ) -> str:
-    """Ingest a file's text content into the knowledge graph.
+    """Ingest a file's text content into memory.
 
     The server never opens ``file_path`` — it may not share a filesystem with
     you. Read the file YOURSELF and pass its text as ``content``. Async
-    ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + extraction
-    inline, indexing submitted after) and returns immediately —
+    ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + memory
+    pipeline inline, indexing submitted after) and returns immediately —
     ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
     state — so the file is NOT searchable yet when this returns.
 
@@ -231,7 +231,7 @@ async def search_web(
     """Run an on-demand web search via Bright Data's SERP API.
 
     Returns SERP results (rank, title, URL, snippet) directly to the caller.
-    By default, does NOT ingest anything into the knowledge graph — call
+    By default, does NOT ingest anything into memory — call
     `ingest_url` afterwards on URLs you want to keep, or call `search_web`
     with `ingest=true` for ingestion.
 
@@ -443,13 +443,14 @@ async def ingest_conversation(
     session_uri: str | None = None,
     session_started_at: str | None = None,
 ) -> str:
-    """Extract knowledge from a conversation and add it to the knowledge graph.
+    """Extract knowledge from a conversation and add it to memory.
 
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (document +
-    extraction inline, indexing submitted after) and returns immediately —
-    people, tasks, preferences, and relationships are built out-of-band by a
-    worker. Returns ``{"status": "scheduled", "flow_run_id": ...}``, the new
-    run's Prefect state; the conversation is NOT searchable yet at that point.
+    memory pipeline inline, indexing submitted after) and returns immediately —
+    the chunk rows (and, in ``graphrag``, the people / tasks / preferences and
+    their relationships) are written out-of-band by a worker. Returns
+    ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
+    state; the conversation is NOT searchable yet at that point.
 
     Args:
         conversation_text: The full conversation text to process.

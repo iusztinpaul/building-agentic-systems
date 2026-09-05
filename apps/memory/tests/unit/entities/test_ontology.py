@@ -1503,7 +1503,7 @@ class TestSupersededByEdgeConstraints:
     cross-type / unsupported endpoints (#032)."""
 
     def test_preference_to_preference_accepted(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1522,7 +1522,7 @@ class TestSupersededByEdgeConstraints:
         # envelope validator (the resolver writes directly), but the
         # validator surface is the right place for this contract: any
         # LLM-emitted attempt is rejected.
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1535,7 +1535,7 @@ class TestSupersededByEdgeConstraints:
         assert result.reason == "fact_endpoint_disallowed"
 
     def test_cross_type_preference_to_fact_rejected(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1548,7 +1548,7 @@ class TestSupersededByEdgeConstraints:
         assert result.reason == "fact_endpoint_disallowed"
 
     def test_person_to_person_rejected(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         # ``(person, person)`` is not in ``superseded_by`` allowed pairs.
         result = validate_envelope(
@@ -1565,7 +1565,7 @@ class TestSupersededByEdgeConstraints:
         # #029 carve-out: ``mentions`` never targets ``preference``.
         # Pinned here so #032's preference refactor doesn't accidentally
         # let it back in.
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",

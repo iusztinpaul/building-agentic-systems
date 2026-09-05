@@ -12,7 +12,7 @@ modes (ADR-006 decision 4):
 
 The vector-search index declares ``merged_into`` as a filter path so
 ``$vectorSearch`` queries can exclude tombstoned nodes natively. Existing
-callers (e.g. ``tree.memory.extraction.dedup.dedupe_entity``) still do a
+callers (e.g. ``tree.memory.graph.dedup.dedupe_entity``) still do a
 post-``$vectorSearch`` ``$match`` for backward compatibility with seeded
 fixtures; a future PR can promote that to a vector-index filter clause
 now that the path is indexed.

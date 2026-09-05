@@ -44,16 +44,16 @@ from tree.mcp.graph_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.mcp.server import mcp
 from tree.mcp.tools import _set_retrieval_thread
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
-from tree.memory.query.nl_query import execute_nl_query
-from tree.memory.query.visualize import to_graph_payload
-from tree.memory.review import (
+from tree.memory.graph.nl_query import execute_nl_query
+from tree.memory.graph.visualize import to_graph_payload
+from tree.memory.graph.review import (
     MergeStrategy,
     ReviewDecision,
 )
-from tree.memory.review import (
+from tree.memory.graph.review import (
     find_pending_duplicates as _find_pending_duplicates,
 )
-from tree.memory.review import (
+from tree.memory.graph.review import (
     review_duplicate as _review_duplicate,
 )
 from tree.memory.types import QueryResult

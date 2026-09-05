@@ -9,7 +9,7 @@ Two claims are pinned here:
   (a parent row whose content matches the query is absent from the results).
 
 ``TestRRFFuse`` moved here verbatim with ``_rrf_fuse`` (was
-``tests/unit/memory/query/test_core.py``).
+``tests/unit/memory/graph/test_retrieval.py``).
 """
 
 from __future__ import annotations

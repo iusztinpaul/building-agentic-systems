@@ -36,7 +36,7 @@ from tree.config.app_config import app_config
 from tree.data.offline_pipeline import data_etl_worker
 from tree.offline import TAGS_OFFLINE_PIPELINE, offline_pipeline
 from tree.online import TAGS_ONLINE_PIPELINE, online_pipeline
-from tree.memory.consolidation.dream import dream_consolidation_all_users
+from tree.memory.graph.consolidation.dream import dream_consolidation_all_users
 from tree.memory.pipeline import memory_extract_etl_worker
 from tree.config.constants import (
     TAGS_DATA_OFFLINE,
@@ -191,7 +191,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
     _DeploymentSpec(
         dream_consolidation_all_users,
         "dream-consolidation-all-users",
-        "apps/memory/src/tree/memory/consolidation/dream.py:dream_consolidation_all_users",
+        "apps/memory/src/tree/memory/graph/consolidation/dream.py:dream_consolidation_all_users",
         ["memory-pipeline", "dream", "consolidation"],
         cron=app_config.dream.cron,
     ),

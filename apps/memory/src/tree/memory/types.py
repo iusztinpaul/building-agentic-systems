@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from tree.entities.memory import EdgeType, NodeType
 from tree.memory.rag.types import ParentChunk
-from tree.memory.resolution.types import ResolvedEntity
+from tree.memory.graph.resolution.types import ResolvedEntity
 
 
 class ExtractedNode(BaseModel):

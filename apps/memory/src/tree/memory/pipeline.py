@@ -69,28 +69,28 @@ from tree.entities.memory import (
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
 from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
-from tree.memory.extraction.add_entity import add_entity
-from tree.memory.extraction.core import build_structural_entries, extract_entities
-from tree.memory.extraction.dedup import (
+from tree.memory.graph.add_entity import add_entity
+from tree.memory.graph.extraction import build_structural_entries, extract_entities
+from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
     MergeStrategy,
     dedupe_entity,
 )
-from tree.memory.extraction.first_person_resolver import redirect_first_person
-from tree.memory.extraction.preference_supersession import (
+from tree.memory.graph.first_person_resolver import redirect_first_person
+from tree.memory.graph.preference_supersession import (
     canonicalize_preference_names,
     resolve_supersessions,
     write_self_has_preference_edges,
 )
-from tree.memory.extraction.sharding import (
+from tree.memory.graph.sharding import (
     FanOutStats,
     _fan_out_extraction,
     _partition_into_shards,
     _resolve_num_shards,
     _resolve_pending_document_ids,
 )
-from tree.memory.extraction.validation import (
+from tree.memory.graph.validation import (
     get_edge_property_schema,
     get_node_property_schemas,
     validate_envelope,
@@ -114,8 +114,8 @@ from tree.memory.rag.load import (
     parent_chunk_name,
     parent_row_id,
 )
-from tree.memory.resolution.composite import CompositeResolver
-from tree.memory.resolution.types import ResolvedEntity, _normalize
+from tree.memory.graph.resolution.composite import CompositeResolver
+from tree.memory.graph.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -256,7 +256,7 @@ def _entity_embeddable_text(
 ) -> str:
     """Embeddable text for one extracted entity.
 
-    Mirrors :func:`tree.memory.extraction.add_entity._embeddable_text` so
+    Mirrors :func:`tree.memory.graph.add_entity._embeddable_text` so
     the vector task ④ pre-computes (that ⑤ deduplicates against and ⑥
     persists) is byte-for-byte the text ``add_entity`` would build for the
     same node — GENERIC types embed their node-text, PREFERENCE / FACT embed
