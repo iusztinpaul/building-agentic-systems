@@ -40,6 +40,8 @@ from tree.entities.ontology import (
     EdgeTypeSpec,
     EmployedByProperties,
     MentionsProperties,
+    ChunkProperties,
+    DocumentProperties,
     NodeTypeSpec,
     PersonProperties,
     RelationSemanticSpec,
@@ -1574,3 +1576,69 @@ class TestSupersededByEdgeConstraints:
         )
         assert result.ok is False
         assert result.reason == "disallowed_pair"
+
+
+class TestChunkAndDocumentContextProperties:
+    """ADR-006 §4 / #107: the **Contextual header** inputs live ON the row.
+
+    ``title`` and ``heading_path`` are denormalised onto every chunk (exactly
+    like the existing ``source_type`` / ``source_uri`` / ``date``) so the
+    indexing backfill rebuilds the identical embedding text without a join.
+    """
+
+    def test_chunk_properties_accept_title_and_heading_path(self):
+        props = ChunkProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            content="body",
+            title="Memory for AI Agents",
+            heading_path=["Retrieval", "Parents"],
+        )
+
+        assert props.title == "Memory for AI Agents"
+        assert props.heading_path == ["Retrieval", "Parents"]
+
+    def test_chunk_context_fields_are_optional(self):
+        """A chunk from an untitled, heading-less document still validates."""
+
+        props = ChunkProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            content="body",
+        )
+
+        assert props.title is None
+        assert props.heading_path == []
+
+    def test_document_properties_accept_title(self):
+        props = DocumentProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            title="Memory for AI Agents",
+        )
+
+        assert props.title == "Memory for AI Agents"
+
+    def test_document_title_is_optional(self):
+        props = DocumentProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+        )
+
+        assert props.title is None
+
+    @pytest.mark.parametrize(
+        "model, field",
+        [
+            (ChunkProperties, "title"),
+            (ChunkProperties, "heading_path"),
+            (DocumentProperties, "title"),
+        ],
+    )
+    def test_new_fields_carry_a_description(self, model, field):
+        """ADR-001 §13 — the sweep in test_field_descriptions.py enforces this
+        for every registered model; pinned here per field for a named failure."""
+
+        description = model.model_fields[field].description
+
+        assert description is not None and description.strip()

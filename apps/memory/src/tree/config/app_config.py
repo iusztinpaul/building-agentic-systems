@@ -348,6 +348,74 @@ class MCPConfig(BaseModel):
     max_results: int = 10
 
 
+class ChunkLevelConfig(BaseModel):
+    """Token budget for ONE chunking level — a parent or a child (ADR-006 §6).
+
+    ``size`` and ``overlap`` are counted in tiktoken ``cl100k_base`` tokens (the
+    encoder :mod:`tree.memory.rag.chunking` bounds every chunk with), never in
+    characters. ``overlap`` is the number of trailing tokens of a chunk that are
+    repeated at the head of the next chunk at the SAME level, so a sentence cut
+    by a boundary is still whole in one of the two chunks.
+
+    ``overlap < size`` is a hard invariant: at ``overlap >= size`` a chunk would
+    carry over everything it just emitted and the splitter would stop making
+    forward progress. Good: ``size=256, overlap=32`` (12% carry-over). Bad:
+    ``size=256, overlap=256``.
+    """
+
+    size: int = Field(gt=0, description="Chunk budget in cl100k_base tokens.")
+    overlap: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Tokens of the previous chunk repeated at the head of the next "
+            "chunk at the same level. Must be < size."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_overlap_below_size(self) -> "ChunkLevelConfig":
+        if self.overlap >= self.size:
+            raise ValueError(
+                "Misconfigured chunking level: overlap must be smaller than "
+                f"size. Found size={self.size}, overlap={self.overlap}."
+            )
+        return self
+
+
+class ChunkingConfig(BaseModel):
+    """Two-level (parent/child) chunking knobs for the memory pipeline (ADR-006 §6).
+
+    ``strategy`` picks the SAME splitting algorithm for both levels:
+
+    * ``fixed_tokens`` — the Chapter-4 sliding token window.
+    * ``recursive`` — markdown headings -> blank-line paragraphs -> sentences ->
+      raw tokens, greedily merged up to ``size`` (the default; it keeps a
+      section's prose together and gives every parent a ``heading_path``).
+
+    ``parent`` chunks are the retrieval + LLM-extraction unit (never embedded);
+    ``child`` chunks are the embedded search unit. ``child.size < parent.size``
+    is a hard invariant — a child at least as large as its parent would make the
+    parent level pure overhead (one child per parent, no fan-out) and defeat
+    parent-document retrieval.
+    """
+
+    strategy: Literal["fixed_tokens", "recursive"] = "recursive"
+    parent: ChunkLevelConfig = ChunkLevelConfig(size=4096, overlap=0)
+    child: ChunkLevelConfig = ChunkLevelConfig(size=256, overlap=32)
+
+    @model_validator(mode="after")
+    def _check_child_smaller_than_parent(self) -> "ChunkingConfig":
+        if self.child.size >= self.parent.size:
+            raise ValueError(
+                "Misconfigured chunking: memory.chunking.child.size must be "
+                "smaller than memory.chunking.parent.size. Found "
+                f"child.size={self.child.size}, "
+                f"parent.size={self.parent.size}."
+            )
+        return self
+
+
 class MemoryConfig(BaseModel):
     """The ONE memory-mode switch (ADR-006 decision 5).
 
@@ -370,9 +438,14 @@ class MemoryConfig(BaseModel):
     Both modes write the SAME ``memory`` collection
     (:data:`tree.entities.memory.MEMORY_COLLECTION`) and both start from
     scratch — there is no migration between them.
+
+    ``chunking`` is mode-independent: BOTH modes split documents into parent and
+    child chunks with the same knobs (ADR-006 §6), so chunk rows are
+    byte-identical across modes.
     """
 
     mode: Literal["rag", "graphrag"] = "graphrag"
+    chunking: ChunkingConfig = ChunkingConfig()
 
 
 class AppConfig(BaseModel):

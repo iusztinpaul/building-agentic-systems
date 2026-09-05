@@ -6,6 +6,8 @@ from pydantic import TypeAdapter, ValidationError
 
 from tree.config.app_config import (
     AppConfig,
+    ChunkingConfig,
+    ChunkLevelConfig,
     ConcurrencyConfig,
     DreamConfig,
     MemoryConfig,
@@ -598,3 +600,138 @@ class TestMemoryModeConfig:
         assert "mode" in message
         assert "'rag'" in message
         assert "'graphrag'" in message
+
+
+class TestChunkingConfig:
+    """ADR-006 §6 / #107: the two-level (parent/child) chunking knobs.
+
+    Nothing wires the splitter into the pipeline yet (#108) — these tests pin
+    that the block is READABLE from both YAML files, that its two cross-key
+    invariants fail loudly, and that the existing ``TREE_<SECTION>__<KEY>``
+    hatch reaches a nested level with no new mechanism.
+    """
+
+    def test_chunking_block_loaded_from_frozen_config(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
+
+        assert config.memory.chunking.strategy == "recursive"
+        assert config.memory.chunking.parent.size == 4096
+        assert config.memory.chunking.parent.overlap == 0
+        assert config.memory.chunking.child.size == 256
+        assert config.memory.chunking.child.overlap == 32
+
+    def test_chunking_block_loaded_from_default_yaml(self):
+        """The real, human-tuned ``configs/default.yaml`` ships the same block,
+        so an unchanged checkout chunks the way ADR-006 describes."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.memory.chunking.strategy == "recursive"
+        assert config.memory.chunking.parent.size == 4096
+        assert config.memory.chunking.child.size == 256
+        assert config.memory.chunking.child.overlap == 32
+
+    def test_chunking_defaults_when_section_absent(self, tmp_path):
+        custom = tmp_path / "no_chunking.yaml"
+        custom.write_text("memory:\n  mode: rag\n")
+
+        config = load_app_config(custom)
+
+        assert config.memory.chunking.strategy == "recursive"
+        assert config.memory.chunking.parent == ChunkLevelConfig(size=4096, overlap=0)
+        assert config.memory.chunking.child == ChunkLevelConfig(size=256, overlap=32)
+
+    def test_typed_defaults_match_the_yaml(self):
+        chunking = ChunkingConfig()
+
+        assert chunking.strategy == "recursive"
+        assert (chunking.parent.size, chunking.parent.overlap) == (4096, 0)
+        assert (chunking.child.size, chunking.child.overlap) == (256, 32)
+
+    def test_child_size_env_override(self, tmp_path, monkeypatch):
+        """``TREE_MEMORY__CHUNKING__CHILD__SIZE=128`` reaches a THIRD-level key
+        through the unchanged hatch — no new mechanism for nested blocks."""
+
+        custom = tmp_path / "chunking.yaml"
+        custom.write_text(
+            "memory:\n"
+            "  mode: graphrag\n"
+            "  chunking:\n"
+            "    strategy: recursive\n"
+            "    parent:\n"
+            "      size: 4096\n"
+            "      overlap: 0\n"
+            "    child:\n"
+            "      size: 256\n"
+            "      overlap: 32\n"
+        )
+        monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__SIZE", "128")
+
+        config = load_app_config(custom)
+
+        assert config.memory.chunking.child.size == 128
+        # Untouched siblings keep their YAML values.
+        assert config.memory.chunking.child.overlap == 32
+        assert config.memory.chunking.parent.size == 4096
+
+    def test_overlap_at_or_above_size_raises(self):
+        with pytest.raises(ValidationError) as excinfo:
+            ChunkingConfig(
+                parent={"size": 4096, "overlap": 0},
+                child={"size": 300, "overlap": 400},
+            )
+
+        message = str(excinfo.value)
+        assert "overlap" in message
+        assert "size" in message
+
+    def test_child_size_at_or_above_parent_size_raises(self):
+        with pytest.raises(ValidationError) as excinfo:
+            ChunkingConfig(parent={"size": 200}, child={"size": 256})
+
+        message = str(excinfo.value)
+        assert "child.size" in message
+        assert "parent.size" in message
+
+    def test_child_size_env_override_above_parent_fails_the_load(
+        self, tmp_path, monkeypatch
+    ):
+        """The operator story: ``TREE_MEMORY__CHUNKING__CHILD__SIZE=8192`` with a
+        4096-token parent must refuse to boot, naming both keys."""
+
+        custom = tmp_path / "chunking.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__CHUNKING__CHILD__SIZE", "8192")
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        message = str(excinfo.value)
+        assert "child.size" in message
+        assert "parent.size" in message
+
+    @pytest.mark.parametrize("size", [0, -1])
+    def test_non_positive_size_raises(self, size):
+        with pytest.raises(ValidationError):
+            ChunkLevelConfig(size=size)
+
+    def test_negative_overlap_raises(self):
+        with pytest.raises(ValidationError):
+            ChunkLevelConfig(size=256, overlap=-1)
+
+    def test_unknown_strategy_raises_naming_both_allowed_values(self):
+        with pytest.raises(ValidationError) as excinfo:
+            ChunkingConfig(strategy="semantic")
+
+        message = str(excinfo.value)
+        assert "'fixed_tokens'" in message
+        assert "'recursive'" in message
+
+    def test_extraction_chunk_knobs_are_left_in_place(self, frozen_config_path):
+        """#108 removes ``extraction.chunk_size``/``chunk_overlap`` together with
+        their only consumer; until then they must keep loading."""
+
+        config = load_app_config(frozen_config_path)
+
+        assert config.extraction.chunk_size == 512
+        assert config.extraction.chunk_overlap == 64

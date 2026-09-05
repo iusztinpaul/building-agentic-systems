@@ -1205,3 +1205,87 @@ class TestRagNodeTypes:
         ever became LLM-extractable the two layers would fight over the row."""
 
         assert node_type not in {t.value for t in LLM_EXTRACTABLE_NODE_TYPES}
+
+
+class TestChunkHierarchyFields:
+    """ADR-006 §2 / #107: the two-level chunk hierarchy in the row model.
+
+    ``parent_id`` + ``chunk_index`` are top-level graph-modeling meta fields
+    (ADR-001 §11) and the ``chunk`` registry entry closes its subtype vocabulary
+    to ``{parent, child}`` — the level marker is the EXISTING ``subtype`` column,
+    not a new ``level`` field.
+    """
+
+    def _chunk_kwargs(self, **overrides: object) -> dict[str, object]:
+        now = datetime.now(UTC)
+        kwargs: dict[str, object] = {
+            "id": "u:chunk:x#parent-0#child-3",
+            "user_id": _user_id(),
+            "kind": "node",
+            "type": "chunk",
+            "name": "x#parent-0#child-3",
+            "created_at": now,
+            "updated_at": now,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_child_chunk_row_validates(self) -> None:
+        entry = MemoryEntry(
+            **self._chunk_kwargs(
+                subtype="child",
+                parent_id="u:chunk:x#parent-0",
+                chunk_index=3,
+            )
+        )
+
+        assert entry.subtype == "child"
+        assert entry.parent_id == "u:chunk:x#parent-0"
+        assert entry.chunk_index == 3
+
+    def test_parent_chunk_row_validates(self) -> None:
+        entry = MemoryEntry(
+            **self._chunk_kwargs(
+                id="u:chunk:x#parent-0",
+                subtype="parent",
+                parent_id="u:document:x",
+                chunk_index=0,
+            )
+        )
+
+        assert entry.subtype == "parent"
+        assert entry.parent_id == "u:document:x"
+        assert entry.chunk_index == 0
+
+    def test_unknown_chunk_subtype_is_rejected(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            MemoryEntry(**self._chunk_kwargs(subtype="section"))
+
+        assert "['child', 'parent']" in str(excinfo.value)
+
+    def test_chunk_subtype_may_stay_none(self) -> None:
+        """Loose at construction, like every other closed-vocabulary type."""
+
+        entry = MemoryEntry(**self._chunk_kwargs())
+
+        assert entry.subtype is None
+
+    def test_hierarchy_fields_default_to_none(self) -> None:
+        """Entity rows (and pre-#107 rows) carry neither field."""
+
+        now = datetime.now(UTC)
+        entry = MemoryEntry(
+            id="u:person:alice",
+            user_id=_user_id(),
+            kind="node",
+            type="person",
+            name="alice",
+            created_at=now,
+            updated_at=now,
+        )
+
+        assert entry.parent_id is None
+        assert entry.chunk_index is None
+
+    def test_chunk_registry_subtypes_are_closed_to_parent_and_child(self) -> None:
+        assert NODE_REGISTRY["chunk"].subtypes == frozenset({"parent", "child"})

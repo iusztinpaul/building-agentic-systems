@@ -319,6 +319,14 @@ class DocumentProperties(BaseModel):
 
     source_type: str = Field(description="Source platform (e.g., substack, youtube)")
     source_uri: str = Field(description="URI of the source document")
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable document title. Prefixed onto every child chunk's "
+            "contextual header (ADR-006 decision 4); None when the source "
+            "exposes no title."
+        ),
+    )
     date: str | None = Field(
         default=None, description="Publication date (ISO 8601 format)"
     )
@@ -330,6 +338,23 @@ class ChunkProperties(BaseModel):
     source_type: str = Field(description="Source platform of the parent document")
     source_uri: str = Field(description="URI of the parent document")
     content: str = Field(description="Text content of the chunk")
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Title of the parent document, denormalised onto the chunk (like "
+            "source_type / source_uri / date) so the indexing backfill rebuilds "
+            "the identical contextual-header embedding text without a join."
+        ),
+    )
+    heading_path: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Markdown heading stack in force at the parent chunk's first token, "
+            "outermost first (e.g. ['Memory', 'Parent retrieval']). A child "
+            "chunk inherits its parent's path; empty under the fixed_tokens "
+            "strategy or before the first heading."
+        ),
+    )
     date: str | None = Field(
         default=None, description="Publication date of the parent document"
     )
@@ -944,7 +969,13 @@ register_node_type(
         name="chunk",
         properties_schema=ChunkProperties,
         description=ChunkProperties.__doc__ or "",
-        subtypes=None,
+        # ADR-006 decision 2: the chunk LEVEL is the existing ``subtype``
+        # column, closed to the two-level hierarchy — a ``parent`` chunk
+        # (4096 tokens, never embedded, the retrieval + LLM-extraction unit)
+        # and a ``child`` chunk (256 tokens, embedded, the search unit). No
+        # new ``level`` field: ``subtype`` is already indexed
+        # (``user_kind_type_subtype``) and already validated.
+        subtypes=frozenset({"parent", "child"}),
         llm_extractable=False,
     )
 )

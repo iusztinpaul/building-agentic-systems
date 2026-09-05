@@ -6,6 +6,22 @@
 
 memory:
   mode: graphrag
+  # Two-level chunking (ADR-006 §6). Sizes are tiktoken `cl100k_base` TOKENS.
+  #   strategy — the same splitter at both levels:
+  #     recursive     markdown headings -> paragraphs -> sentences -> tokens,
+  #                   greedily merged up to `size`; parents carry a heading_path.
+  #     fixed_tokens  plain sliding token window (the Chapter-4 first version).
+  #   parent — retrieval + LLM-extraction unit, never embedded.
+  #   child  — the embedded search unit; must stay smaller than the parent.
+  # Env overrides work as usual, e.g. TREE_MEMORY__CHUNKING__CHILD__SIZE=128.
+  chunking:
+    strategy: recursive
+    parent:
+      size: 4096
+      overlap: 0
+    child:
+      size: 256
+      overlap: 32
 
 models:
   llm:

@@ -238,6 +238,29 @@ class MemoryEntry(BeanieDocument):
     properties: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] = Field(default_factory=list)
 
+    # --- ADR-006 decision 2: the two-level chunk hierarchy ---
+    #
+    # Top-level graph-modeling meta fields (ADR-001 §11), NOT properties: a
+    # parent chunk points at its ``document`` row, a child chunk at its parent
+    # chunk. In ``rag`` mode these two columns ARE the hierarchy (the
+    # collection holds no edge rows); in ``graphrag`` the same values are also
+    # materialised as ``part_of`` edges, so chunk rows stay byte-identical
+    # across modes. ``None`` on every non-chunk row.
+    parent_id: str | None = Field(
+        default=None,
+        description=(
+            "_id of this row's parent row — the document row for a parent "
+            "chunk, the parent chunk row for a child chunk. None elsewhere."
+        ),
+    )
+    chunk_index: int | None = Field(
+        default=None,
+        description=(
+            "0-based position among siblings: parent chunks within their "
+            "document, child chunks within their parent. None on non-chunk rows."
+        ),
+    )
+
     # Resolution + dedup (node-only; edge rows keep documented defaults)
     canonical_name: str | None = None
     aliases: list[str] = Field(default_factory=list)
