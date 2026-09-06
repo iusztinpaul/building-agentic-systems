@@ -127,6 +127,29 @@ class ExtractorInfo(BaseModel):
     )
 
 
+# --- ADR-007 §3: Embedding-map coordinates on a child chunk ---
+
+
+class ChunkViz(BaseModel):
+    """A **Child chunk**'s position on the **Embedding map** (ADR-007 §3).
+
+    Written as an embedded block by a **Clustering run** so the coordinates and
+    the run that produced them can never be separated: a chunk whose ``run_id``
+    differs from the latest run is STALE and is dropped from the map (and
+    counted in its legend) rather than drawn at coordinates from an older UMAP
+    fit, which would place it in a space nothing else shares.
+    """
+
+    x: float = Field(description="x coordinate in the 2-D Embedding map space.")
+    y: float = Field(description="y coordinate in the 2-D Embedding map space.")
+    run_id: str = Field(
+        description=(
+            "The Clustering run that produced these coordinates (the Prefect "
+            "flow-run id). Coordinates from an older run are stale."
+        ),
+    )
+
+
 # --- ID builders ---
 
 
@@ -258,6 +281,30 @@ class MemoryEntry(BeanieDocument):
         description=(
             "0-based position among siblings: parent chunks within their "
             "document, child chunks within their parent. None on non-chunk rows."
+        ),
+    )
+
+    # --- ADR-007 §3: clustering membership + map coordinates ---
+    #
+    # Two more top-level graph-modeling meta fields (ADR-001 §11), written ONLY
+    # by a Clustering run and ONLY on child chunk rows (validator below). Both
+    # default to ``None``, so every row written before ADR-007 validates
+    # unchanged — there is no migration. Membership lives here rather than on
+    # the cluster row because the chunk is what the Embedding map draws.
+    cluster_id: int | None = Field(
+        default=None,
+        description=(
+            "Memory cluster this child chunk belongs to in the latest "
+            "Clustering run. -1 = noise (HDBSCAN placed it in no cluster); "
+            "None = never clustered. Child chunk rows only."
+        ),
+    )
+    viz: ChunkViz | None = Field(
+        default=None,
+        description=(
+            "This child chunk's Embedding map coordinates and the Clustering "
+            "run that produced them. None until the chunk is clustered. Child "
+            "chunk rows only."
         ),
     )
 
@@ -442,6 +489,34 @@ class MemoryEntry(BeanieDocument):
                 f"{sorted(spec.subtypes)} for node type {self.type!r}"
             )
         return self
+
+    @model_validator(mode="after")
+    def _check_cluster_fields_are_child_only(self) -> "MemoryEntry":
+        """ADR-007 §3: only a **Child chunk** may carry ``cluster_id`` / ``viz``.
+
+        A Clustering run reads exactly the ``type="chunk", subtype="child"``
+        rows with an embedding, and the Embedding map plots exactly those. A
+        ``document``, a parent chunk or an entity node carrying coordinates
+        would either be silently ignored by every surface or — worse — drawn as
+        a point that no cluster ever counted, so make it a write-time error.
+        """
+
+        if self.cluster_id is None and self.viz is None:
+            return self
+        if self.type == "chunk" and self.subtype == "child":
+            return self
+
+        populated = [
+            name
+            for name, value in (("cluster_id", self.cluster_id), ("viz", self.viz))
+            if value is not None
+        ]
+        raise ValueError(
+            f"{' and '.join(populated)} may only be set on a child chunk row "
+            "(type='chunk', subtype='child') — clustering reads and the "
+            f"Embedding map draws child chunks only; got type={self.type!r}, "
+            f"subtype={self.subtype!r}"
+        )
 
     @model_validator(mode="after")
     def _check_related_to_semantic(self) -> "MemoryEntry":

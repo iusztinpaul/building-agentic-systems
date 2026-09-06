@@ -26,6 +26,14 @@ dependencies = [
     "youtube-transcript-api>=1.2.4",
     "rapidfuzz>=3",
     "opik>=2.0.60",
+    # Clustering stack (ADR-007 §6). MAIN dependencies, not an extra: the
+    # Prefect Managed per-run `pip install ./apps/memory` must be able to run
+    # the clustering phase without a second install step. Imported LAZILY,
+    # inside the two function bodies that call them, so the nightly run, the
+    # MCP server and every other script never pay the ~40s cold numba compile
+    # (~3s warm) — asserted by tests/unit/test_clustering_dependencies.py.
+    "umap-learn>=0.5.12",
+    "scikit-learn>=1.9",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +69,9 @@ asyncio_default_test_loop_scope = "session"
 # Default per-test timeout (seconds): a per-test hang net with ample headroom.
 timeout = 300
 timeout_method = "signal"
+markers = [
+    "slow: runs real UMAP/HDBSCAN; numba JIT compiles on the first call",
+]
 filterwarnings = [
     "ignore:Logger 'prefect:UserWarning",
     "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",
