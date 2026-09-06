@@ -18,6 +18,12 @@ ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
   search-index reconcile, run as phase 3 of ``offline-pipeline`` (once per
   target user) and inline by ``online-pipeline`` for a single document. Returns
   the number of rows it embedded.
+* ``memory_clustering`` (flow ``memory-clustering-etl``) — the OFF-by-default
+  fourth **Offline phase** (ADR-007 Decision 5): UMAP -> HDBSCAN over one user's
+  **Child chunk** embeddings, one LLM summary per **Memory cluster**, one
+  wholesale write of the **Clustering run**. Mode-orthogonal (identical in
+  ``rag`` and ``graphrag``; no graph rows, no edges). Returns a
+  :class:`ClusteringStats`.
 
 Worker task topology. The RAG stages run in BOTH modes; the graph stages run
 only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
@@ -45,14 +51,18 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
+import numpy as np
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import INPUTS, NO_CACHE
 from prefect.deployments import run_deployment
+from prefect.runtime import flow_run as prefect_flow_run
+from pydantic import BaseModel, Field
 from pymongo import UpdateOne
 
-from tree.config.app_config import ChunkingConfig, load_app_config
+from tree.config.app_config import ChunkingConfig, ClusteringConfig, load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document
@@ -118,6 +128,29 @@ from tree.memory.rag.load import (
     parent_chunk_name,
     parent_row_id,
 )
+from tree.memory.clustering.core import (
+    cluster_centroids_2d,
+    cluster_sizes,
+    noise_count,
+    reduce_and_cluster,
+    sample_cluster_members,
+)
+from tree.memory.clustering.store import (
+    ChildEmbeddingRow,
+    ClusterWriteCounts,
+    load_child_embeddings,
+    write_clustering_run,
+)
+from tree.memory.clustering.summaries import (
+    SUMMARY_PROMPT_VERSION,
+    fallback_summary,
+    summarise_cluster,
+)
+from tree.memory.clustering.types import (
+    ClusteringResult,
+    ClusterSummary,
+    MemoryClusterInfo,
+)
 from tree.memory.graph.resolution.composite import CompositeResolver
 from tree.memory.graph.resolution.types import ResolvedEntity, _normalize
 from tree.memory.types import (
@@ -141,7 +174,7 @@ from tree.models.get_model import (
     get_resolution_embedding_model,
     get_search_embedding_model,
 )
-from tree.config.constants import TAGS_EXTRACTION, TAGS_INDEXING
+from tree.config.constants import TAGS_CLUSTERING, TAGS_EXTRACTION, TAGS_INDEXING
 from tree.observability import (
     configure_opik,
     flush_opik,
@@ -2240,6 +2273,501 @@ async def memory_indexing(
                 count,
             )
             return count
+    finally:
+        # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
+        flush_opik()
+
+
+# ---------------------------------------------------------------------------
+# Clustering flow — memory-clustering-etl (ADR-007 Decision 5, Offline phase 4)
+# ---------------------------------------------------------------------------
+#
+# Mode-orthogonal: a **Clustering run** reads the same **Child chunk** rows and
+# writes the same ``memory_clusters`` rows in ``rag`` and in ``graphrag``. It
+# writes NO graph rows and NO edges.
+#
+# Pipeline-identity tags: the memory pipeline's tag only — clustering is a
+# maintenance phase of whatever run triggers it, not an offline/online variant.
+# The pipeline name rides as span metadata (``pipeline="clustering"``).
+_CLUSTERING_TAGS = TAGS_CLUSTERING
+_CLUSTERING_METADATA = pipeline_metadata("clustering")
+
+
+class ClusteringStats(BaseModel):
+    """What one **Clustering run** did — the flow's JSON-safe return value.
+
+    ``skipped_reason`` is the ONE non-failure exit: a corpus below
+    ``min_cluster_size`` cannot form a cluster, so the run completes having
+    written nothing and the PREVIOUS run's rows stay readable.
+    """
+
+    run_id: str | None = Field(
+        default=None,
+        description="This run's id (the Prefect flow-run id); stamped on every row.",
+    )
+    chunks_total: int = Field(
+        default=0, description="Embedded child chunks the run loaded."
+    )
+    clustered: int = Field(
+        default=0, description="Chunks HDBSCAN placed in a cluster (non-noise)."
+    )
+    noise: int = Field(default=0, description="Chunks labelled -1 (placed nowhere).")
+    clusters: int = Field(default=0, description="Memory clusters written.")
+    summaries_failed: int = Field(
+        default=0,
+        description="Clusters stored with the fail-open 'Cluster {id}' fallback.",
+    )
+    skipped_reason: str | None = Field(
+        default=None,
+        description="Why nothing was written; None on a run that clustered.",
+    )
+
+
+def _clustering_run_id() -> str:
+    """This run's id: the Prefect flow-run id, or a fresh uuid outside a run.
+
+    The id ties a ``memory_clusters`` row to the ``viz.run_id`` on every chunk
+    it drew, which is how the surfaces detect STALE coordinates. Using the
+    flow-run id means an operator can paste it into the Prefect UI; the uuid
+    fallback only happens when the flow body is called directly (tests, a
+    notebook), where there is no run to point at.
+    """
+
+    run_id = prefect_flow_run.id
+    return str(run_id) if run_id else uuid4().hex
+
+
+def _stack_embeddings(embeddings: list[list[float]]) -> np.ndarray:
+    """Stack the loaded vectors into the ``(n, d)`` matrix the recipe expects.
+
+    ``float32`` halves the working set of a 1024-d corpus at no cost to UMAP,
+    which computes in single precision anyway.
+
+    Both failure modes are turned into messages that name the fix, because both
+    otherwise surface from deep inside umap-learn — a raw
+    ``ValueError: setting an array element with a sequence`` for ragged rows, or
+    ``Input contains NaN`` from a sklearn validator four frames down:
+
+    * mixed widths — the embedding model changed under a partially re-embedded
+      corpus;
+    * NaN/inf — a corrupt vector. UMAP rejects those rows outright, so the run
+      must stop here rather than half-way through a 40 s fit.
+    """
+
+    try:
+        matrix = np.asarray(embeddings, dtype=np.float32)
+    except ValueError as exc:
+        widths = sorted({len(vector) for vector in embeddings})
+        raise ValueError(
+            f"Child embeddings have mixed widths {widths}: every row must carry "
+            "the same number of dimensions. Re-embed the corpus after an "
+            "embedding-model change (make memory-run-indexing-pipeline)."
+        ) from exc
+
+    if matrix.ndim != 2:
+        raise ValueError(
+            f"Child embeddings must stack into an (n, d) matrix; got shape "
+            f"{matrix.shape}. Some rows carry an empty embedding."
+        )
+
+    non_finite = int(np.count_nonzero(~np.isfinite(matrix).all(axis=1)))
+    if non_finite:
+        raise ValueError(
+            f"{non_finite} of {len(matrix)} child embeddings contain NaN or inf "
+            "values; UMAP refuses them, so the run cannot produce coordinates. "
+            "Re-embed those chunks (make memory-run-indexing-pipeline)."
+        )
+    return matrix
+
+
+# --- Task ① — load the run's input -----------------------------------------
+
+
+async def _load_child_embeddings(
+    client: Any,
+    database: str,
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> list[ChildEmbeddingRow]:
+    """Load ``user_id``'s embedded **Child chunk**s in ``_id`` order."""
+
+    with span(
+        "load_child_embeddings_task",
+        tags=_CLUSTERING_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        return await load_child_embeddings(client, database, user_id)
+
+
+load_child_embeddings_task = task(
+    _load_child_embeddings,
+    name="load-child-embeddings",
+    retries=3,
+    retry_delay_seconds=5,
+    cache_policy=NO_CACHE,
+)
+
+
+# --- Task ② — the recipe ----------------------------------------------------
+
+
+async def _reduce_and_cluster(
+    embeddings: list[list[float]],
+    config: ClusteringConfig,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> ClusteringResult:
+    """UMAP -> HDBSCAN -> a separate 2-D UMAP over the loaded vectors.
+
+    The long-compute step, and a task for exactly that reason: it is the one
+    part of the run worth seeing separately in the Prefect UI. ``config`` is a
+    PARAMETER (not read inside ``core``) so the recipe stays runnable from a
+    notebook with a numpy array and a config object.
+    """
+
+    with span(
+        "reduce_and_cluster_task",
+        tags=_CLUSTERING_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        return reduce_and_cluster(_stack_embeddings(embeddings), config)
+
+
+reduce_and_cluster_task = task(
+    _reduce_and_cluster,
+    name="reduce-and-cluster",
+    # ONE retry: it covers a cold numba-cache race on a fresh container (two
+    # processes compiling umap's kernels into the same cache dir), and the
+    # retry is cheap once compiled. Beyond that a failure is a data problem —
+    # retrying a deterministic fit would only repeat it.
+    retries=1,
+    retry_delay_seconds=5,
+    cache_policy=NO_CACHE,
+)
+
+
+# --- Task ③ — one LLM summary per cluster -----------------------------------
+
+
+async def _summarise_cluster(
+    samples: list[str],
+    cluster_id: int,
+    prompt_version: str,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> ClusterSummary:
+    """Name and describe ONE **Memory cluster** from its sampled members.
+
+    ``cluster_id`` and ``prompt_version`` are parameters so they join the
+    ``INPUTS`` cache key: a re-run on an unchanged corpus samples the same
+    chunks (seeded) and is served from cache, while editing the prompt (and
+    bumping :data:`SUMMARY_PROMPT_VERSION`) is a cache MISS.
+
+    ``get_llm()`` is built INSIDE the task: Prefect may run it in another
+    thread/process, where a handle created at flow scope is not reusable.
+    """
+
+    log = _get_run_logger()
+    with span(
+        "summarise_cluster_task",
+        tags=_CLUSTERING_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        log.info(
+            "summarise_cluster: cluster_id=%d n_samples=%d prompt_version=%s",
+            cluster_id,
+            len(samples),
+            prompt_version,
+        )
+        return await summarise_cluster(get_llm(), samples)
+
+
+summarise_cluster_task = task(
+    _summarise_cluster,
+    name="summarise-cluster",
+    cache_policy=_INPUTS_NO_HEADERS,
+    # 90 days: the samples are seeded and the corpus changes slowly, so a
+    # monthly re-run should not re-buy labels it already paid for.
+    cache_expiration=timedelta(days=90),
+    retries=2,  # billable — capped at 2
+    retry_delay_seconds=5,
+)
+
+
+async def _summarise_clusters(
+    samples_by_cluster: dict[int, list[str]],
+    config: ClusteringConfig,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> tuple[dict[int, ClusterSummary], int]:
+    """Summarise every cluster concurrently, failing OPEN per cluster.
+
+    ADR-007 §4: one call per cluster, bounded by
+    ``memory.clustering.summaries.llm_concurrency`` — its OWN knob, because
+    clustering is mode-orthogonal while ``extraction.llm_concurrency`` is
+    graph-only in meaning.
+
+    ``return_exceptions=True`` is the fail-open: a cluster whose task blew
+    through its retries (Gemini 429s, a model that keeps returning a 9-word
+    label) is stored as ``Cluster {id}`` with an empty summary and a WARNING.
+    One bad cluster never fails a run that already did the expensive part.
+
+    Returns:
+        ``({cluster_id: summary}, n_failed)``.
+    """
+
+    log = _get_run_logger()
+    semaphore = asyncio.Semaphore(config.summaries.llm_concurrency)
+
+    async def _one(cluster_id: int) -> ClusterSummary:
+        async with semaphore:
+            return await summarise_cluster_task(
+                samples_by_cluster[cluster_id],
+                cluster_id,
+                SUMMARY_PROMPT_VERSION,
+                opik_trace_headers=opik_trace_headers,
+            )
+
+    ordered = sorted(samples_by_cluster)
+    outcomes = await asyncio.gather(
+        *[_one(cluster_id) for cluster_id in ordered], return_exceptions=True
+    )
+
+    summaries: dict[int, ClusterSummary] = {}
+    failed = 0
+    for cluster_id, outcome in zip(ordered, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            failed += 1
+            summaries[cluster_id] = fallback_summary(cluster_id)
+            log.warning(
+                "summarise-cluster failed for cluster %d after retries — storing "
+                "the fallback summary %r: %s",
+                cluster_id,
+                summaries[cluster_id].label,
+                outcome,
+            )
+        else:
+            summaries[cluster_id] = outcome
+    return summaries, failed
+
+
+# --- Task ④ — the wholesale write -------------------------------------------
+
+
+async def _write_clustering_run(
+    client: Any,
+    database: str,
+    user_id: PydanticObjectId,
+    *,
+    run_id: str,
+    chunk_ids: list[str],
+    labels: list[int],
+    coords: list[tuple[float, float]],
+    clusters: list[MemoryClusterInfo],
+    now: datetime,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> ClusterWriteCounts:
+    """Replace the user's previous **Clustering run** with this one."""
+
+    with span(
+        "write_clustering_run_task",
+        tags=_CLUSTERING_TAGS,
+        trace_headers=opik_trace_headers,
+    ):
+        return await write_clustering_run(
+            client,
+            database,
+            user_id,
+            run_id=run_id,
+            chunk_ids=chunk_ids,
+            labels=labels,
+            coords=coords,
+            clusters=clusters,
+            now=now,
+        )
+
+
+write_clustering_run_task = task(
+    _write_clustering_run,
+    name="write-clustering-run",
+    retries=3,
+    retry_delay_seconds=5,
+    cache_policy=NO_CACHE,
+)
+
+
+def _build_cluster_infos(
+    *,
+    rows: list[ChildEmbeddingRow],
+    sizes: dict[int, int],
+    centroids: dict[int, tuple[float, float]],
+    sample_indices: dict[int, list[int]],
+    summaries: dict[int, ClusterSummary],
+) -> list[MemoryClusterInfo]:
+    """Assemble the ``memory_clusters`` rows from the run's four by-cluster maps.
+
+    ``sample_chunk_ids`` is the EVIDENCE trail: exactly the chunks the
+    summariser saw, so a reader who doubts a label can go read them.
+    """
+
+    return [
+        MemoryClusterInfo(
+            cluster_id=cluster_id,
+            label=summaries[cluster_id].label,
+            summary=summaries[cluster_id].summary,
+            keywords=summaries[cluster_id].keywords,
+            size=sizes[cluster_id],
+            sample_chunk_ids=[
+                rows[index].chunk_id for index in sample_indices[cluster_id]
+            ],
+            centroid_x=centroids[cluster_id][0],
+            centroid_y=centroids[cluster_id][1],
+        )
+        for cluster_id in sorted(sizes)
+    ]
+
+
+@flow(name="memory-clustering-etl", log_prints=True)
+async def memory_clustering(
+    user_id: PydanticObjectId,
+    opik_trace_headers: dict[str, str] | None = None,
+) -> ClusteringStats:
+    """Cluster ``user_id``'s **Child chunk** embeddings and write the run.
+
+    Phase 4 of ``offline-pipeline`` (ADR-007 Decision 5), OFF by default: the
+    nightly cron never runs it, and neither does any other script. Four steps —
+    load, reduce+cluster, summarise per cluster, write — each a task, so the
+    Prefect UI shows where a 40 s cold numba compile or a slow Gemini call went.
+
+    A corpus below ``memory.clustering.hdbscan.min_cluster_size`` is SKIPPED
+    without touching the store: nothing could form a cluster, and wiping the
+    previous run's labels to write nothing is strictly worse than keeping them.
+
+    ``run_id`` is the Prefect flow-run id, stamped on every cluster row and on
+    every chunk's ``viz`` — that pairing is what lets a surface tell fresh
+    coordinates from stale ones.
+
+    Observability: configures Opik at entry (subprocess-safe) and owns ONE
+    trace, or nests under the caller's when ``opik_trace_headers`` is passed.
+
+    Returns:
+        :class:`ClusteringStats` — JSON-safe, so ``offline_pipeline`` can put it
+        straight into its per-user result.
+    """
+
+    configure_opik()
+    log = _get_run_logger()
+    try:
+        with span(
+            "memory-clustering-etl",
+            tags=_CLUSTERING_TAGS,
+            trace_headers=opik_trace_headers,
+            metadata=_CLUSTERING_METADATA,
+        ):
+            config = _live_app_config().memory.clustering
+            run_id = _clustering_run_id()
+            client = await init_mongodb(
+                settings.mongo.mongo_uri.get_secret_value(),
+                settings.mongo.mongo_initdb_database,
+            )
+            database = settings.mongo.mongo_initdb_database
+
+            # Headers for THIS run's trace, passed to each task so its span
+            # nests here rather than minting a root trace per task.
+            headers = get_distributed_trace_headers()
+
+            rows = await load_child_embeddings_task(
+                client, database, user_id, opik_trace_headers=headers
+            )
+
+            minimum = config.hdbscan.min_cluster_size
+            if len(rows) < minimum:
+                reason = f"{len(rows)} child embeddings < min_cluster_size {minimum}"
+                log.warning(
+                    "clustering skipped: %s. Ingest more documents, or lower "
+                    "memory.clustering.hdbscan.min_cluster_size "
+                    "(TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE).",
+                    reason,
+                )
+                return ClusteringStats(
+                    run_id=run_id, chunks_total=len(rows), skipped_reason=reason
+                )
+
+            result = await reduce_and_cluster_task(
+                [row.embedding for row in rows], config, opik_trace_headers=headers
+            )
+
+            sizes = cluster_sizes(result.labels)
+            centroids = cluster_centroids_2d(result.coords, result.labels)
+            noise = noise_count(result.labels)
+
+            # The sampling reads the ORIGINAL embedding space (cosine to the
+            # cluster centroid), not the projections — a 5-d or 2-D neighbour is
+            # a neighbour of the picture, not of the text.
+            matrix = _stack_embeddings([row.embedding for row in rows])
+            sample_indices = {
+                cluster_id: sample_cluster_members(
+                    matrix,
+                    result.labels,
+                    cluster_id,
+                    nearest=config.sampling.nearest,
+                    random=config.sampling.random,
+                    seed=config.umap.random_state,
+                )
+                for cluster_id in sorted(sizes)
+            }
+            summaries, summaries_failed = await _summarise_clusters(
+                {
+                    cluster_id: [rows[index].content for index in indices]
+                    for cluster_id, indices in sample_indices.items()
+                },
+                config,
+                opik_trace_headers=headers,
+            )
+
+            clusters = _build_cluster_infos(
+                rows=rows,
+                sizes=sizes,
+                centroids=centroids,
+                sample_indices=sample_indices,
+                summaries=summaries,
+            )
+            await write_clustering_run_task(
+                client,
+                database,
+                user_id,
+                run_id=run_id,
+                chunk_ids=[row.chunk_id for row in rows],
+                labels=result.labels,
+                coords=result.coords,
+                clusters=clusters,
+                now=datetime.now(UTC),
+                opik_trace_headers=headers,
+            )
+
+            if not clusters:
+                # Still a written run (every chunk has coordinates and
+                # cluster_id -1), so the map draws a grey cloud rather than
+                # nothing — but the operator needs the knob that fixes it.
+                log.warning(
+                    "0 clusters found — all %d chunks are noise; lower "
+                    "memory.clustering.hdbscan.min_cluster_size",
+                    len(rows),
+                )
+            log.info(
+                "clustering run %s: %d clusters, %d chunks, %d noise, "
+                "%d fallback summaries",
+                run_id,
+                len(clusters),
+                len(rows) - noise,
+                noise,
+                summaries_failed,
+            )
+            return ClusteringStats(
+                run_id=run_id,
+                chunks_total=len(rows),
+                clustered=len(rows) - noise,
+                noise=noise,
+                clusters=len(clusters),
+                summaries_failed=summaries_failed,
+            )
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
         flush_opik()

@@ -2,6 +2,7 @@
 
 ``offline_pipeline`` composes the **Offline phase**s (data coordinator, then one
 extraction coordinator per target user, then one ``memory_indexing`` subflow per
+target user, then — on request only — one ``memory_clustering`` subflow per
 target user) without re-implementing any of them; these tests pin that
 composition contract: pass-through of source selectors, the per-user fan-out of
 each phase, the sequential phase blocks (every user extracted BEFORE any user is
@@ -9,13 +10,15 @@ indexed), and per-user failure isolation. The phase bodies themselves are covere
 in their own suites.
 
 They also pin the single-step surface — the ``run_data`` / ``run_extraction`` /
-``run_indexing`` phase flags (#098, extended by ADR-007 Decision 5) that let the
+``run_indexing`` / ``run_clustering`` phase flags (#098, extended by ADR-007
+Decision 5) that let the
 step CLIs funnel through this ONE flow, the ``document_ids`` narrowing forwarded
 to every per-user extraction call, and the single-tenant guard that fires at BOTH
 edges (flow and fire-and-forget dispatcher).
 """
 
 import inspect
+import json
 import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -25,6 +28,7 @@ import pytest
 from beanie import PydanticObjectId
 from prefect.client.schemas.objects import State, StateType
 
+from tree.memory.pipeline import ClusteringStats
 from tree.offline import dispatch_offline_pipeline, offline_pipeline
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -43,11 +47,19 @@ class _FakeStats:
 # The embedded-row count a stubbed ``memory_indexing`` phase reports back.
 _EMBEDDED = 7
 
+# What a stubbed ``memory_clustering`` phase reports back (ADR-007 phase 4).
+_CLUSTERING_STATS = ClusteringStats(
+    run_id="run-1", chunks_total=40, clustered=35, noise=5, clusters=2
+)
+
 
 def _patch_coordinators(
     mocker,
-) -> tuple[AsyncMock, AsyncMock, AsyncMock, AsyncMock]:
-    """Stub every phase body + user resolution: ``(data, extract, index, users)``."""
+) -> tuple[AsyncMock, AsyncMock, AsyncMock, AsyncMock, AsyncMock]:
+    """Stub every phase body + user resolution.
+
+    Returns ``(data, extract, index, cluster, users)``.
+    """
 
     data = mocker.patch(
         "tree.offline.data_etl_coordinator",
@@ -64,12 +76,17 @@ def _patch_coordinators(
         new_callable=AsyncMock,
         return_value=_EMBEDDED,
     )
+    cluster = mocker.patch(
+        "tree.offline.memory_clustering",
+        new_callable=AsyncMock,
+        return_value=_CLUSTERING_STATS,
+    )
     users = mocker.patch(
         "tree.offline.resolve_target_user_ids",
         new_callable=AsyncMock,
         return_value=[_USER_ID],
     )
-    return data, extract, index, users
+    return data, extract, index, cluster, users
 
 
 def _flow_run(
@@ -82,7 +99,7 @@ def _flow_run(
 
 class TestEtlOffline:
     async def test_passes_selectors_through_and_chains_extraction(self, mocker) -> None:
-        data, extract, _index, _users = _patch_coordinators(mocker)
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(
             user_id=_USER_ID,
@@ -102,7 +119,7 @@ class TestEtlOffline:
         assert result["extraction"][str(_USER_ID)]["succeeded"] == 1
 
     async def test_all_users_mode_extracts_per_active_user(self, mocker) -> None:
-        _data, extract, _index, users = _patch_coordinators(mocker)
+        _data, extract, _index, _cluster, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
 
         result = await offline_pipeline(user_id=None)
@@ -114,7 +131,7 @@ class TestEtlOffline:
         assert set(result["extraction"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
 
     async def test_one_users_extraction_failure_is_isolated(self, mocker) -> None:
-        _data, extract, _index, users = _patch_coordinators(mocker)
+        _data, extract, _index, _cluster, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         extract.side_effect = [RuntimeError("llm down"), _FakeStats()]
 
@@ -133,7 +150,7 @@ class TestOfflinePipelinePhaseFlags:
     async def test_run_data_false_skips_ingestion_and_still_extracts(
         self, mocker
     ) -> None:
-        data, extract, _index, _users = _patch_coordinators(mocker)
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(user_id=_USER_ID, run_data=False)
 
@@ -146,7 +163,7 @@ class TestOfflinePipelinePhaseFlags:
     async def test_data_only_run_skips_user_resolution_extraction_and_indexing(
         self, mocker
     ) -> None:
-        data, extract, index, users = _patch_coordinators(mocker)
+        data, extract, index, _cluster, users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(
             user_id=_USER_ID, run_extraction=False, run_indexing=False
@@ -162,7 +179,7 @@ class TestOfflinePipelinePhaseFlags:
         assert result["indexing"] == {}
 
     async def test_all_phases_disabled_is_a_logged_no_op(self, mocker, caplog) -> None:
-        data, extract, index, users = _patch_coordinators(mocker)
+        data, extract, index, cluster, users = _patch_coordinators(mocker)
 
         with caplog.at_level(logging.INFO, logger="tree.offline"):
             result = await offline_pipeline(
@@ -170,14 +187,21 @@ class TestOfflinePipelinePhaseFlags:
                 run_data=False,
                 run_extraction=False,
                 run_indexing=False,
+                run_clustering=False,
             )
 
         # A misconfigured caller gets a Completed run it can read, not a crash.
-        assert result == {"data": None, "extraction": {}, "indexing": {}}
+        assert result == {
+            "data": None,
+            "extraction": {},
+            "indexing": {},
+            "clustering": {},
+        }
         data.assert_not_awaited()
         users.assert_not_awaited()
         extract.assert_not_awaited()
         index.assert_not_awaited()
+        cluster.assert_not_awaited()
         no_op_logs = [
             record
             for record in caplog.records
@@ -189,7 +213,7 @@ class TestOfflinePipelinePhaseFlags:
     async def test_document_ids_are_forwarded_to_every_extraction_call(
         self, mocker
     ) -> None:
-        _data, extract, _index, _users = _patch_coordinators(mocker)
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
 
         await offline_pipeline(
             user_id=_USER_ID, document_ids=[_DOC_ID], num_shards=2, run_data=False
@@ -200,7 +224,7 @@ class TestOfflinePipelinePhaseFlags:
         extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=2)
 
     async def test_document_ids_without_user_id_is_rejected(self, mocker) -> None:
-        data, extract, _index, _users = _patch_coordinators(mocker)
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
 
         with pytest.raises(ValueError, match="document_ids is single-tenant"):
             await offline_pipeline(user_id=None, document_ids=[_DOC_ID])
@@ -220,7 +244,7 @@ class TestOfflineIndexingPhase:
     """
 
     async def test_indexes_the_target_user_once_after_extraction(self, mocker) -> None:
-        _data, extract, index, _users = _patch_coordinators(mocker)
+        _data, extract, index, _cluster, _users = _patch_coordinators(mocker)
         manager = MagicMock()
         manager.attach_mock(extract, "extract")
         manager.attach_mock(index, "index")
@@ -237,7 +261,7 @@ class TestOfflineIndexingPhase:
     async def test_all_users_mode_indexes_every_user_after_all_extractions(
         self, mocker
     ) -> None:
-        _data, extract, index, users = _patch_coordinators(mocker)
+        _data, extract, index, _cluster, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         manager = MagicMock()
         manager.attach_mock(extract, "extract")
@@ -260,7 +284,7 @@ class TestOfflineIndexingPhase:
         assert set(result["indexing"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
 
     async def test_run_indexing_false_never_indexes(self, mocker) -> None:
-        _data, extract, index, _users = _patch_coordinators(mocker)
+        _data, extract, index, _cluster, _users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(user_id=_USER_ID, run_indexing=False)
 
@@ -271,7 +295,7 @@ class TestOfflineIndexingPhase:
         assert result["indexing"] == {}
 
     async def test_indexing_only_run_still_resolves_target_users(self, mocker) -> None:
-        data, extract, index, users = _patch_coordinators(mocker)
+        data, extract, index, _cluster, users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(
             user_id=_USER_ID, run_data=False, run_extraction=False
@@ -286,7 +310,7 @@ class TestOfflineIndexingPhase:
         assert result["indexing"][str(_USER_ID)] == {"embedded": _EMBEDDED}
 
     async def test_one_users_indexing_failure_is_isolated(self, mocker) -> None:
-        _data, _extract, index, users = _patch_coordinators(mocker)
+        _data, _extract, index, _cluster, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         index.side_effect = [RuntimeError("boom"), _EMBEDDED]
 
@@ -298,15 +322,114 @@ class TestOfflineIndexingPhase:
         assert result["indexing"][str(_USER_ID)] == {"error": "boom"}
         assert result["indexing"][str(_OTHER_USER_ID)] == {"embedded": _EMBEDDED}
 
-    def test_run_indexing_sits_between_run_extraction_and_document_ids(self) -> None:
-        """Parameter ORDER is the contract: phases read as 1 → 2 → 3."""
+    def test_the_phase_flags_read_in_execution_order(self) -> None:
+        """Parameter ORDER is the contract: phases read as 1 → 2 → 3 → 4."""
 
-        names = list(inspect.signature(offline_pipeline).parameters)
+        parameters = inspect.signature(offline_pipeline).parameters
+        names = list(parameters)
+        assert names.index("run_data") + 1 == names.index("run_extraction")
         assert names.index("run_extraction") + 1 == names.index("run_indexing")
-        assert names.index("run_indexing") + 1 == names.index("document_ids")
+        assert names.index("run_indexing") + 1 == names.index("run_clustering")
+        assert names.index("run_clustering") + 1 == names.index("document_ids")
+        assert parameters["run_indexing"].default is True
+
+
+class TestOfflineClusteringPhase:
+    """Phase 4: clustering — the ONE phase that is OFF by default (ADR-007 §5).
+
+    The default matters as much as the behaviour: the nightly cron runs with
+    these defaults, and a clustering run costs a ~40 s cold ``import umap`` plus
+    one Gemini call per cluster. The switch is the flow PARAMETER — there is
+    deliberately no ``memory.clustering.enabled`` YAML key that could disagree
+    with it.
+    """
+
+    async def test_clusters_the_target_user_once_after_indexing(self, mocker) -> None:
+        _data, _extract, index, cluster, _users = _patch_coordinators(mocker)
+        manager = MagicMock()
+        manager.attach_mock(index, "index")
+        manager.attach_mock(cluster, "cluster")
+
+        result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
+
+        # Clustering reads the embeddings indexing just backfilled, so it runs
+        # LAST — a map of the whole corpus, not of yesterday's part of it.
+        cluster.assert_awaited_once_with(user_id=_USER_ID)
+        assert [call[0] for call in manager.mock_calls] == ["index", "cluster"]
+        assert result["clustering"][str(_USER_ID)] == _CLUSTERING_STATS.model_dump()
+
+    async def test_is_off_by_default(self, mocker) -> None:
+        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
+
+        result = await offline_pipeline(user_id=_USER_ID)
+
+        # The nightly cron's shape: three phases on, clustering untouched — so
+        # no worker ever imports the UMAP stack for a run that never asked.
+        cluster.assert_not_awaited()
+        assert result["clustering"] == {}
+
+    def test_run_clustering_defaults_to_false_on_both_edges(self) -> None:
+        for entry_point in (offline_pipeline, dispatch_offline_pipeline):
+            parameter = inspect.signature(entry_point).parameters["run_clustering"]
+            assert parameter.default is False, entry_point.__name__
+
+    async def test_a_clustering_only_run_still_resolves_target_users(
+        self, mocker
+    ) -> None:
+        data, extract, index, cluster, users = _patch_coordinators(mocker)
+
+        result = await offline_pipeline(
+            user_id=_USER_ID,
+            run_data=False,
+            run_extraction=False,
+            run_indexing=False,
+            run_clustering=True,
+        )
+
+        # The ``run-clustering-pipeline`` shape: no data, no extraction, no
+        # indexing — but the per-user phase still needs its target users.
+        data.assert_not_awaited()
+        extract.assert_not_awaited()
+        index.assert_not_awaited()
+        users.assert_awaited_once_with(_USER_ID)
+        cluster.assert_awaited_once_with(user_id=_USER_ID)
+        assert result["clustering"][str(_USER_ID)]["clusters"] == 2
+
+    async def test_all_users_mode_clusters_every_user(self, mocker) -> None:
+        _data, _extract, _index, cluster, users = _patch_coordinators(mocker)
+        users.return_value = [_USER_ID, _OTHER_USER_ID]
+
+        result = await offline_pipeline(user_id=None, run_clustering=True)
+
+        assert [call.kwargs["user_id"] for call in cluster.await_args_list] == [
+            _USER_ID,
+            _OTHER_USER_ID,
+        ]
+        assert set(result["clustering"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
+
+    async def test_one_users_clustering_failure_is_isolated(self, mocker) -> None:
+        _data, _extract, _index, cluster, users = _patch_coordinators(mocker)
+        users.return_value = [_USER_ID, _OTHER_USER_ID]
+        cluster.side_effect = [RuntimeError("umap blew up"), _CLUSTERING_STATS]
+
+        result = await offline_pipeline(user_id=None, run_clustering=True)
+
+        # Same convention as the other per-user phases: one tenant's blown
+        # clustering never sinks the run for everyone else.
+        assert cluster.await_count == 2
+        assert result["clustering"][str(_USER_ID)] == {"error": "umap blew up"}
+        assert result["clustering"][str(_OTHER_USER_ID)]["clusters"] == 2
+
+    async def test_the_result_is_json_safe(self, mocker) -> None:
+        """The flow-run result is serialized by Prefect — no Pydantic models."""
+
+        _patch_coordinators(mocker)
+
+        result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
+
         assert (
-            inspect.signature(offline_pipeline).parameters["run_indexing"].default
-            is True
+            json.loads(json.dumps(result["clustering"]))[str(_USER_ID)]["run_id"]
+            == "run-1"
         )
 
 
@@ -344,9 +467,38 @@ class TestDispatchOfflineIngest:
             "run_data": True,
             "run_extraction": True,
             "run_indexing": True,
+            "run_clustering": False,
             "document_ids": None,
         }
         mock_flow.assert_not_awaited()
+
+    async def test_forwards_the_clustering_phase_flag(self, mocker) -> None:
+        """``run-clustering-pipeline`` is glue over THIS: the flag must survive.
+
+        A dropped flag here would submit a run with clustering off — which
+        completes green, having done nothing.
+        """
+
+        mock_run = mocker.patch(
+            "tree.offline.run_deployment",
+            new_callable=AsyncMock,
+            return_value=_flow_run(),
+        )
+
+        await dispatch_offline_pipeline(
+            user_id=_USER_ID,
+            run_data=False,
+            run_extraction=False,
+            run_indexing=False,
+            run_clustering=True,
+        )
+
+        parameters = mock_run.await_args.kwargs["parameters"]
+        assert parameters["run_clustering"] is True
+        assert not any(
+            parameters[phase]
+            for phase in ("run_data", "run_extraction", "run_indexing")
+        )
 
     @pytest.mark.parametrize(
         ("state_type", "expected"),

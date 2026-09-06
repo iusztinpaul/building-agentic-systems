@@ -139,9 +139,10 @@ they are no longer Deployments: each runs as an **inline subflow**. The Coordina
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
 `memory_indexing` runs as that same run's third **Offline phase** — once per target user, after
 every user's extraction (ADR-007) — or inline inside `online-pipeline` for a single document.
-Every manual single-step run is the same `offline-pipeline` deployment with the other phases off
-(`make memory-run-data-pipeline` / `make memory-run-memory-pipeline` /
-`make memory-run-indexing-pipeline`); no script runs a flow in the operator's own process.
+`memory_clustering` is the fourth phase, OFF by default. Every manual single-step run is the same
+`offline-pipeline` deployment with the other phases off (`make memory-run-data-pipeline` /
+`make memory-run-memory-pipeline` / `make memory-run-indexing-pipeline` /
+`make memory-run-clustering-pipeline`); no script runs a flow in the operator's own process.
 
 Both end-to-end pipelines carry BOTH identity tags, so they belong to BOTH the `data` and `memory`
 deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-down GROUPS=data`)
@@ -154,13 +155,14 @@ when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — s
 
 ### Pipelines at a glance
 
-Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand). Offline, each row below is ONE `offline-pipeline` run with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing`):
+Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand). Offline, each row below is ONE `offline-pipeline` run with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing` / `run_clustering`):
 
 | stage | offline | online |
 |---|---|---|
 | **data** → `documents` | `run-data-pipeline` (phase: `data`) | `run-data-pipeline MODE=online SOURCE=…` |
 | **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` |
 | **index** (shared, standalone) | `run-indexing-pipeline` (phase: `index`) | `run-indexing-pipeline` |
+| **clustering** → `memory_clusters` | `run-clustering-pipeline` (phase: `clustering`) | — (maintenance phase; no online form) |
 
 **Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; offline that is all three phases in a row, so memory is queryable when it returns:
 
@@ -249,6 +251,37 @@ run_extraction=False` — so it needs served workflows, like every other pipelin
 ```bash
 make memory-run-indexing-pipeline
 ```
+
+### Memory clustering
+
+The clustering **Offline phase** (`memory-clustering-etl`) — the data behind the **Embedding
+map**. Works in both memory modes and writes no graph rows and no edges (ADR-007). Four tasks:
+`load-child-embeddings` (every embedded **child chunk** of the user, in `_id` order) →
+`reduce-and-cluster` (UMAP to 5-d, `sklearn` HDBSCAN there, then a SEPARATE 2-D UMAP fit on the raw
+embeddings for display) → `summarise-cluster` (one Gemini call per cluster over ≤ 20 sampled
+members: a ≤ 6-word label, a ≤ 100-word summary, 3–5 keywords) → `write-clustering-run`.
+
+Where it lands: one row per cluster in the **`memory_clusters`** collection (`label`, `summary`,
+`keywords`, `size`, `sample_chunk_ids`, `centroid`, `run_id`), plus `cluster_id` and
+`viz {x, y, run_id}` on every child chunk. Noise gets `cluster_id: -1` and coordinates but no
+row. A run REPLACES the previous one wholesale — there is no run history — so chunks ingested
+after the last run show up as "unclustered / stale" on the map until you re-run the phase.
+
+```bash
+make memory-run-clustering-pipeline
+```
+
+It is OFF in every other entry point, the nightly cron included: this is the only command that
+clusters. Two notes:
+
+- **Cold start.** The first `import umap` on a machine compiles numba's kernels (~40 s; ~3 s
+  afterwards from the on-disk cache), and Prefect Managed runs are fresh containers, so every
+  cloud run pays it. Nothing else imports the stack — that is why the phase is a flag, not a
+  YAML switch.
+- **Small corpora.** Below `memory.clustering.hdbscan.min_cluster_size` (default 15) embedded
+  children the run is skipped and nothing is written (the previous run stays readable); if every
+  chunk comes back as noise the run IS written and warns. Both log the knob to turn:
+  `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5 make memory-run-clustering-pipeline`.
 
 ### Query CLI
 

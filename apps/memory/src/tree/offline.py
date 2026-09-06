@@ -6,7 +6,7 @@ The MOTHER pipeline: it spans BOTH pipelines — the data step
 and ``memory_indexing``). Neither pipeline package may import the other; this
 module imports both.
 
-:func:`offline_pipeline` runs the whole chain in ONE flow run as THREE explicit,
+:func:`offline_pipeline` runs the whole chain in ONE flow run as FOUR explicit,
 independently switchable **Offline phase**s (ADR-007 Decision 5), executed as
 SEQUENTIAL BLOCKS:
 
@@ -19,14 +19,19 @@ SEQUENTIAL BLOCKS:
    every user's extraction. Indexing is a PHASE here, not something the
    extraction Coordinator does on the side (this superseded ADR-002 §3's
    trailing-index rule).
+4. ``run_clustering`` — one ``memory_clustering`` subflow per target user: the
+   **Embedding map**'s data (UMAP + HDBSCAN + one LLM summary per **Memory
+   cluster**). OFF by default — it is a maintenance phase whose cold ``import
+   umap`` costs ~40 s on a fresh container, so the nightly cron never pays for
+   it and nobody who does not ask for it imports the stack.
 
 Worker fan-outs inside the coordinators still run as separate deployment runs;
 only the coordinators and the indexing flow execute inline here, so the
 end-to-end run costs the same single admission slot a lone coordinator already
 does.
 
-Any phase can be turned OFF (``run_data`` / ``run_extraction`` / ``run_indexing``,
-mirroring ``tree.online.online_pipeline``'s ``run_extraction`` idiom), and an
+Any phase can be turned OFF (``run_data`` / ``run_extraction`` / ``run_indexing``
+/ ``run_clustering``, mirroring ``tree.online.online_pipeline``'s ``run_extraction`` idiom), and an
 extraction run can be narrowed to an explicit ``document_ids`` set. That is what
 lets the single-step entry points funnel through this ONE flow instead of forking
 into their own chains; with every default left alone the behavior is unchanged.
@@ -52,8 +57,13 @@ from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.flow_runs import flow_run_status
-from tree.memory.pipeline import memory_extract_etl_coordinator, memory_indexing
+from tree.memory.pipeline import (
+    memory_clustering,
+    memory_extract_etl_coordinator,
+    memory_indexing,
+)
 from tree.config.constants import (
+    TAGS_CLUSTERING,
     TAGS_DATA_OFFLINE,
     TAGS_EXTRACTION,
     TAGS_INDEXING,
@@ -102,9 +112,10 @@ async def offline_pipeline(
     run_data: bool = True,
     run_extraction: bool = True,
     run_indexing: bool = True,
+    run_clustering: bool = False,
     document_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run the offline pipeline: data ingest, then extraction, then indexing.
+    """Run the offline pipeline: data, extraction, indexing, then clustering.
 
     Phase 1 — data: :func:`data_etl_coordinator` as an inline subflow, passing
     the source selectors through untouched (it owns resolution, so the source
@@ -123,10 +134,16 @@ async def offline_pipeline(
     failure isolation. Skipped entirely when ``run_indexing`` is false; the
     result then carries ``"indexing": {}``.
 
+    Phase 4 — clustering: one :func:`memory_clustering` inline subflow per
+    target user (the **Embedding map**'s data), with the SAME per-user failure
+    isolation. OFF by default, so the nightly cron and every other script leave
+    ``memory_clusters`` alone and never import the UMAP stack; the result then
+    carries ``"clustering": {}``.
+
     The phases run as sequential BLOCKS — every user is extracted, THEN every
     user is indexed — so the Prefect UI shows extraction and indexing as sibling
     subflows instead of indexing hiding inside the Coordinator. Target users are
-    resolved ONCE for both per-user phases (skipped when neither runs, so a
+    resolved ONCE for all three per-user phases (skipped when none runs, so a
     data-only run never touches the users collection).
 
     ``document_ids`` narrows extraction to that exact set for that ONE user
@@ -143,19 +160,21 @@ async def offline_pipeline(
 
     Returns ``{"data": <DataFanOutStats | None>, "extraction": {user_id:
     <FanOutStats | {"error": ...}>}, "indexing": {user_id: {"embedded": <int>} |
-    {"error": ...}}}`` as plain dicts (JSON-safe for the flow-run result).
+    {"error": ...}}, "clustering": {user_id: <ClusteringStats | {"error":
+    ...}>}}`` as plain dicts (JSON-safe for the flow-run result).
 
     Raises:
         ValueError: ``document_ids`` passed without a ``user_id``.
     """
 
     _validate_document_ids_scope(document_ids, user_id)
-    if not run_data and not run_extraction and not run_indexing:
+    if not run_data and not run_extraction and not run_indexing and not run_clustering:
         logger.info(
             "offline-pipeline: all phases disabled (run_data=False, "
-            "run_extraction=False, run_indexing=False) — nothing to do"
+            "run_extraction=False, run_indexing=False, run_clustering=False) "
+            "— nothing to do"
         )
-        return {"data": None, "extraction": {}, "indexing": {}}
+        return {"data": None, "extraction": {}, "indexing": {}, "clustering": {}}
 
     configure_opik()
     try:
@@ -175,7 +194,7 @@ async def offline_pipeline(
             # them once — and only when a per-user phase actually runs.
             target_user_ids = (
                 await resolve_target_user_ids(user_id)
-                if (run_extraction or run_indexing)
+                if (run_extraction or run_indexing or run_clustering)
                 else []
             )
 
@@ -210,10 +229,27 @@ async def offline_pipeline(
                         )
                         indexing[str(uid)] = {"error": str(exc)}
 
+            # Phase 4 runs LAST and only on request: clustering reads the
+            # embeddings phase 3 just backfilled, so a run that does both gets a
+            # map of the whole corpus rather than of yesterday's part of it.
+            clustering: dict[str, Any] = {}
+            if run_clustering:
+                for uid in target_user_ids:
+                    try:
+                        with tags(*TAGS_CLUSTERING):
+                            stats = await memory_clustering(user_id=uid)
+                        clustering[str(uid)] = stats.model_dump()
+                    except Exception as exc:  # noqa: BLE001 — isolate per user.
+                        logger.exception(
+                            "offline-pipeline: clustering failed for user %s", uid
+                        )
+                        clustering[str(uid)] = {"error": str(exc)}
+
             return {
                 "data": asdict(data_stats) if data_stats is not None else None,
                 "extraction": extraction,
                 "indexing": indexing,
+                "clustering": clustering,
             }
     finally:
         # Fail-open telemetry flush — the worker subprocess exits after the run.
@@ -228,13 +264,15 @@ async def dispatch_offline_pipeline(
     run_data: bool = True,
     run_extraction: bool = True,
     run_indexing: bool = True,
+    run_clustering: bool = False,
     document_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Submit the offline run; the ONE entry point for callers.
 
     The offline twin of ``tree.online.dispatch_online_pipeline``: fires the
     ``offline-pipeline`` core deployment fire-and-forget (``timeout=0``) — a
-    Prefect worker runs the whole data → extraction → index chain — and returns
+    Prefect worker runs the whole data → extraction → index (→ cluster) chain —
+    and returns
     at once with::
 
         {"status": <flow-run state, lowercased>, "flow_run_id": ...}
@@ -272,6 +310,7 @@ async def dispatch_offline_pipeline(
         "run_data": run_data,
         "run_extraction": run_extraction,
         "run_indexing": run_indexing,
+        "run_clustering": run_clustering,
         "document_ids": document_ids,
     }
     flow_run = await run_deployment(

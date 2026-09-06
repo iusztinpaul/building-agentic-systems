@@ -39,6 +39,11 @@ TAGS_EXTRACTION = [
     TAG_OFFLINE,
 ]  # memory extraction — coordinator + worker, the offline fan-out
 TAGS_INDEXING = [TAG_MEMORY_PIPELINE]  # memory indexing (mode comes from the caller)
+# Memory clustering (ADR-007 §5) — the off-by-default fourth Offline phase.
+# Same pipeline-identity tag as indexing and no offline/online tag: clustering
+# is a maintenance phase of whatever run triggers it, and it is
+# mode-orthogonal (identical in ``rag`` and ``graphrag``).
+TAGS_CLUSTERING = [TAG_MEMORY_PIPELINE]
 
 # Dream consolidation — the remaining batch pipeline still on the MCP-surface family.
 TAGS_INGESTION_BATCH = [TAG_INGESTION, TAG_BATCH]

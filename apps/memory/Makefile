@@ -176,6 +176,9 @@ run-memory-pipeline: # MEMORY pipeline (`documents` -> the `memory` collection: 
 run-indexing-pipeline: # INDEXING phase only (embeddings backfill, search indexes), as ONE offline-pipeline run with the data + extraction phases OFF (needs served workflows). Works after either offline or online extraction; no modes. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_indexing_pipeline.py $(USER_FLAGS)
 
+run-clustering-pipeline: # CLUSTERING phase only (UMAP + HDBSCAN over child-chunk embeddings, one LLM summary per cluster -> `memory_clusters` + each chunk's cluster_id/viz), as ONE offline-pipeline run with the data + extraction + indexing phases OFF (needs served workflows). Off everywhere else, including the nightly cron. Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_clustering_pipeline.py $(USER_FLAGS)
+
 
 # --- Dream Consolidation ---
 

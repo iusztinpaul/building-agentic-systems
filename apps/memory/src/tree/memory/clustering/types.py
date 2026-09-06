@@ -210,3 +210,22 @@ class EmbeddingMap(BaseModel):
             "omitted from points and reported in the warning and the legend."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_unclustered_fits_the_corpus(self) -> "EmbeddingMap":
+        """``unclustered`` is a SUBSET count of ``total_children``.
+
+        The store computes it as ``total_children - len(points)``, so a value
+        above the total (or below zero) means the two queries disagreed about
+        what an embedded child chunk is — and the warning line would read "7 of
+        5 chunks have no cluster assignment", which reads to an operator as a
+        broken map rather than a broken query.
+        """
+
+        if not 0 <= self.unclustered <= self.total_children:
+            raise ValueError(
+                "unclustered must be between 0 and total_children: got "
+                f"unclustered={self.unclustered}, "
+                f"total_children={self.total_children}"
+            )
+        return self

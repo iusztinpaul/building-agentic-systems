@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from beanie import PydanticObjectId
 from prefect.cache_policies import NO_CACHE
@@ -37,8 +41,14 @@ from tree.memory.graph.dedup import DeduplicationConfig, DeduplicationResult
 from tree import offline, online
 from tree.memory import pipeline
 from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.clustering.store import ChildEmbeddingRow, ClusterWriteCounts
+from tree.memory.clustering.types import (
+    ClusteringResult,
+    ClusterSummary,
+)
 from tree.memory.pipeline import (
     _CachedSingleEmbedding,
+    _clustering_run_id,
     _split_documents,
     _clean_and_chunk,
     _dedupe_entities,
@@ -51,14 +61,22 @@ from tree.memory.pipeline import (
     _rag_row_id_map,
     _resolve_entities,
     _run_extraction_worker_body,
+    _stack_embeddings,
+    _summarise_cluster,
+    _summarise_clusters,
     _validate_raws,
     child_embedding_texts,
     clean_and_chunk_task,
     embed_children_task,
     embed_entities_task,
     llm_extract_entities_task,
+    load_child_embeddings_task,
     load_rag_rows_task,
+    memory_clustering,
     memory_extract_etl_worker,
+    reduce_and_cluster_task,
+    summarise_cluster_task,
+    write_clustering_run_task,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.load import (
@@ -2670,3 +2688,517 @@ class TestRagRowIdMap:
         assert ids[
             f"{NodeType.CHUNK.value}|{child_chunk_name(uri, 0, 1)}"
         ] == child_row_id(_USER_ID, uri, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Clustering flow — memory-clustering-etl (ADR-007 Decision 5, Offline phase 4)
+# ---------------------------------------------------------------------------
+#
+# The four tasks are patched and the store is faked: what this flow OWNS is the
+# orchestration — the skip guard, the per-cluster fan-out under a semaphore, the
+# fail-open fallback, and the shape of the rows it hands the writer. The recipe
+# is covered in ``clustering/test_core.py``, the queries in
+# ``clustering/test_store.py``, the prompt in ``clustering/test_summaries.py``.
+
+_CLUSTER_ROWS = 40
+_MIN_CLUSTER_SIZE = 15
+
+
+def _child_rows(count: int = _CLUSTER_ROWS) -> list[ChildEmbeddingRow]:
+    """``count`` embedded child chunks with distinguishable 4-d vectors."""
+
+    return [
+        ChildEmbeddingRow(
+            chunk_id=f"c{index:03d}",
+            embedding=[0.1 * index, 0.2, 0.3, 0.4],
+            title="Memory for AI Agents",
+            heading_path=["Retrieval"],
+            content=f"chunk {index} content",
+        )
+        for index in range(count)
+    ]
+
+
+def _summary(label: str = "Agent memory design") -> ClusterSummary:
+    return ClusterSummary(
+        label=label,
+        summary="What these chunks share.",
+        keywords=["memory", "agents", "rag"],
+    )
+
+
+@pytest.fixture
+def clustering_doubles(mocker, monkeypatch):
+    """Patch the four tasks + Mongo init; hand the test a knob for each.
+
+    Returns a namespace with ``load`` / ``reduce`` / ``summarise`` / ``write``
+    mocks and a ``set_labels`` helper — the labels ARE the scenario (how many
+    clusters, how much noise).
+    """
+
+    monkeypatch.setenv(
+        "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", str(_MIN_CLUSTER_SIZE)
+    )
+    mocker.patch(
+        "tree.memory.pipeline.init_mongodb", new=AsyncMock(return_value=MagicMock())
+    )
+    doubles = SimpleNamespace(
+        load=mocker.patch(
+            "tree.memory.pipeline.load_child_embeddings_task",
+            new=AsyncMock(return_value=_child_rows()),
+        ),
+        reduce=mocker.patch(
+            "tree.memory.pipeline.reduce_and_cluster_task", new=AsyncMock()
+        ),
+        summarise=mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(return_value=_summary()),
+        ),
+        write=mocker.patch(
+            "tree.memory.pipeline.write_clustering_run_task",
+            new=AsyncMock(
+                return_value=ClusterWriteCounts(
+                    clusters_written=1, chunks_updated=_CLUSTER_ROWS, clusters_deleted=0
+                )
+            ),
+        ),
+    )
+
+    def set_labels(labels: list[int]) -> None:
+        doubles.load.return_value = _child_rows(len(labels))
+        doubles.reduce.return_value = ClusteringResult(
+            labels=labels,
+            coords=[(float(index), float(index) + 0.5) for index in range(len(labels))],
+        )
+
+    doubles.set_labels = set_labels
+    set_labels([0] * _CLUSTER_ROWS)
+    return doubles
+
+
+@pytest.mark.usefixtures("clustering_doubles")
+class TestMemoryClusteringFlow:
+    async def test_runs_each_task_once(self, clustering_doubles) -> None:
+        await memory_clustering(user_id=_USER_ID)
+
+        # One load, one (expensive) fit, one summary for the single cluster,
+        # one wholesale write. Nothing here is per-chunk.
+        clustering_doubles.load.assert_awaited_once()
+        clustering_doubles.reduce.assert_awaited_once()
+        clustering_doubles.summarise.assert_awaited_once()
+        clustering_doubles.write.assert_awaited_once()
+
+    async def test_clusters_the_loaded_embeddings_with_the_live_config(
+        self, clustering_doubles
+    ) -> None:
+        await memory_clustering(user_id=_USER_ID)
+
+        embeddings, config = clustering_doubles.reduce.await_args.args
+        assert embeddings == [row.embedding for row in _child_rows()]
+        # The config is a task PARAMETER, so the recipe stays runnable outside
+        # a flow — and an env override is picked up per run.
+        assert config.hdbscan.min_cluster_size == _MIN_CLUSTER_SIZE
+
+    async def test_stamps_the_prefect_flow_run_id_on_the_write(
+        self, clustering_doubles
+    ) -> None:
+        """``run_id`` is the flow-run id — the operator can paste it into the UI.
+
+        It is also the pairing that lets a surface tell a chunk's coordinates
+        apart from a previous run's.
+        """
+
+        state = await memory_clustering(user_id=_USER_ID, return_state=True)
+        stats = await state.result()
+
+        assert stats.run_id == str(state.state_details.flow_run_id)
+        assert clustering_doubles.write.await_args.kwargs["run_id"] == stats.run_id
+
+    async def test_writes_every_chunk_with_its_label_and_coordinates(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+
+        await memory_clustering(user_id=_USER_ID)
+
+        kwargs = clustering_doubles.write.await_args.kwargs
+        # Noise is written too: it has coordinates, it is just in no cluster.
+        assert kwargs["chunk_ids"] == [row.chunk_id for row in _child_rows()]
+        assert kwargs["labels"][-1] == -1
+        assert len(kwargs["coords"]) == _CLUSTER_ROWS
+
+    async def test_builds_one_cluster_row_per_non_noise_label(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+
+        await memory_clustering(user_id=_USER_ID)
+
+        clusters = clustering_doubles.write.await_args.kwargs["clusters"]
+        assert [cluster.cluster_id for cluster in clusters] == [0, 1]
+        assert [cluster.size for cluster in clusters] == [20, 15]
+
+    async def test_a_cluster_row_carries_its_evidence_and_centroid(
+        self, clustering_doubles
+    ) -> None:
+        await memory_clustering(user_id=_USER_ID)
+
+        cluster = clustering_doubles.write.await_args.kwargs["clusters"][0]
+        # The sample is capped at nearest + random (10 + 10), even for a
+        # 40-member cluster — one call per cluster stays bounded by size.
+        assert len(cluster.sample_chunk_ids) == 20
+        assert set(cluster.sample_chunk_ids) <= {row.chunk_id for row in _child_rows()}
+        # The centroid is the mean of the members' MAP points (coords are
+        # (i, i + 0.5) for i in 0..39).
+        assert cluster.centroid_x == pytest.approx(19.5)
+        assert cluster.centroid_y == pytest.approx(20.0)
+        assert cluster.label == "Agent memory design"
+
+    async def test_summarises_every_non_noise_cluster_exactly_once(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+
+        await memory_clustering(user_id=_USER_ID)
+
+        # Noise never gets a summary: it is not a topic, it is the absence of one.
+        assert clustering_doubles.summarise.await_count == 2
+        assert [
+            call.args[1] for call in clustering_doubles.summarise.await_args_list
+        ] == [
+            0,
+            1,
+        ]
+
+    async def test_the_summariser_sees_the_sampled_chunks_text(
+        self, clustering_doubles
+    ) -> None:
+        await memory_clustering(user_id=_USER_ID)
+
+        samples = clustering_doubles.summarise.await_args.args[0]
+        contents = {row.content for row in _child_rows()}
+        assert len(samples) == 20
+        assert set(samples) <= contents
+
+    async def test_returns_the_runs_counts(self, clustering_doubles) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        assert stats.chunks_total == _CLUSTER_ROWS
+        assert stats.clusters == 2
+        assert stats.clustered == 35
+        assert stats.noise == 5
+        assert stats.summaries_failed == 0
+        assert stats.skipped_reason is None
+
+    async def test_logs_the_summary_line(self, clustering_doubles, caplog) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.pipeline"):
+            stats = await memory_clustering(user_id=_USER_ID)
+
+        assert (
+            f"clustering run {stats.run_id}: 2 clusters, 35 chunks, 5 noise, "
+            "0 fallback summaries" in caplog.text
+        )
+
+
+@pytest.mark.usefixtures("clustering_doubles")
+class TestMemoryClusteringSkipsATinyCorpus:
+    """Below ``min_cluster_size`` the run writes NOTHING (ADR-007 §5).
+
+    Wiping a previous run's labels to write nothing back is strictly worse than
+    keeping them, and the operator needs to be told which knob to turn.
+    """
+
+    async def test_returns_a_skip_reason_naming_both_numbers(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.load.return_value = _child_rows(10)
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        assert stats.skipped_reason == "10 child embeddings < min_cluster_size 15"
+        assert stats.chunks_total == 10
+        assert stats.clusters == 0
+
+    async def test_neither_clusters_nor_writes(self, clustering_doubles) -> None:
+        clustering_doubles.load.return_value = _child_rows(10)
+
+        await memory_clustering(user_id=_USER_ID)
+
+        # The previous run's rows stay readable, and no 40 s numba compile is
+        # paid to discover there was nothing to do.
+        clustering_doubles.reduce.assert_not_awaited()
+        clustering_doubles.summarise.assert_not_awaited()
+        clustering_doubles.write.assert_not_awaited()
+
+    async def test_warns_with_the_knob_that_fixes_it(
+        self, clustering_doubles, caplog
+    ) -> None:
+        clustering_doubles.load.return_value = _child_rows(10)
+
+        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
+            await memory_clustering(user_id=_USER_ID)
+
+        assert "clustering skipped: 10 child embeddings" in caplog.text
+        assert "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE" in caplog.text
+
+
+@pytest.mark.usefixtures("clustering_doubles")
+class TestMemoryClusteringAllNoise:
+    """An all-noise run IS a run: coordinates, no cluster rows, one warning."""
+
+    async def test_still_writes_the_coordinates(self, clustering_doubles) -> None:
+        clustering_doubles.set_labels([-1] * _CLUSTER_ROWS)
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        clustering_doubles.write.assert_awaited_once()
+        assert clustering_doubles.write.await_args.kwargs["clusters"] == []
+        assert stats.clusters == 0
+        assert stats.noise == _CLUSTER_ROWS
+        assert stats.clustered == 0
+
+    async def test_never_calls_the_llm(self, clustering_doubles) -> None:
+        clustering_doubles.set_labels([-1] * _CLUSTER_ROWS)
+
+        await memory_clustering(user_id=_USER_ID)
+
+        clustering_doubles.summarise.assert_not_awaited()
+
+    async def test_warns_with_the_knob_that_fixes_it(
+        self, clustering_doubles, caplog
+    ) -> None:
+        clustering_doubles.set_labels([-1] * _CLUSTER_ROWS)
+
+        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
+            await memory_clustering(user_id=_USER_ID)
+
+        assert f"0 clusters found — all {_CLUSTER_ROWS} chunks are noise" in caplog.text
+        assert "memory.clustering.hdbscan.min_cluster_size" in caplog.text
+
+
+@pytest.mark.usefixtures("clustering_doubles")
+class TestMemoryClusteringFailsOpenPerCluster:
+    """ADR-007 §4: one cluster's dead LLM never fails the run.
+
+    The expensive part (the fit) is already paid by then; dropping the whole
+    run because Gemini 429'd on one of seven summaries would throw it away.
+    """
+
+    async def test_a_failing_cluster_is_stored_as_its_fallback(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        cluster = clustering_doubles.write.await_args.kwargs["clusters"][0]
+        assert cluster.label == "Cluster 0"
+        assert cluster.summary == ""
+        assert cluster.keywords == []
+        assert stats.summaries_failed == 1
+
+    async def test_the_run_still_completes(self, clustering_doubles) -> None:
+        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
+
+        state = await memory_clustering(user_id=_USER_ID, return_state=True)
+
+        assert state.is_completed()
+
+    async def test_the_other_clusters_keep_their_real_labels(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.set_labels([0] * 20 + [1] * 20)
+        clustering_doubles.summarise.side_effect = [
+            RuntimeError("429 rate limited"),
+            _summary("Retrieval augmentation"),
+        ]
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        labels = [
+            cluster.label
+            for cluster in clustering_doubles.write.await_args.kwargs["clusters"]
+        ]
+        assert labels == ["Cluster 0", "Retrieval augmentation"]
+        assert stats.summaries_failed == 1
+
+    async def test_warns_naming_the_cluster(self, clustering_doubles, caplog) -> None:
+        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
+
+        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
+            await memory_clustering(user_id=_USER_ID)
+
+        assert "summarise-cluster failed for cluster 0" in caplog.text
+
+
+class TestSummariseClustersParallelization:
+    """The per-cluster fan-out is bounded by clustering's OWN concurrency knob."""
+
+    async def test_calls_run_concurrently_under_the_semaphore(
+        self, mocker, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__SUMMARIES__LLM_CONCURRENCY", "4")
+        config = load_app_config().memory.clustering
+        in_flight = 0
+        max_in_flight = 0
+        started = 0
+        gate = asyncio.Event()
+
+        async def _slow_summary(*_args: Any, **_kwargs: Any) -> ClusterSummary:
+            nonlocal in_flight, max_in_flight, started
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            started += 1
+            if started >= 4:
+                gate.set()
+            await gate.wait()
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return _summary()
+
+        mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(side_effect=_slow_summary),
+        )
+
+        summaries, failed = await _summarise_clusters(
+            {cluster_id: ["sample"] for cluster_id in range(12)}, config
+        )
+
+        # Never more than the bound in flight, and the bound WAS reached (so
+        # the calls really are concurrent, not serial).
+        assert max_in_flight == 4
+        assert len(summaries) == 12
+        assert failed == 0
+
+    def test_the_fan_out_uses_its_own_knob(self) -> None:
+        """Diff-guard: gather + Semaphore + clustering's OWN concurrency key.
+
+        Reusing ``extraction.llm_concurrency`` would tie a mode-orthogonal phase
+        to a graph-only knob (ADR-007 §4).
+        """
+
+        import inspect
+
+        source = inspect.getsource(_summarise_clusters)
+        body = source.split('"""', 2)[-1]
+
+        assert "asyncio.gather" in body
+        assert "Semaphore" in body
+        assert "summaries.llm_concurrency" in body
+        assert "extraction" not in body
+
+
+class TestClusteringTaskConfiguration:
+    """Retries and caches follow ADR-002's tiers; the LLM task is Tier B."""
+
+    @pytest.mark.parametrize(
+        ("clustering_task", "retries"),
+        [
+            (load_child_embeddings_task, 3),
+            (reduce_and_cluster_task, 1),
+            (write_clustering_run_task, 3),
+        ],
+    )
+    def test_the_io_tasks_retry_without_caching(
+        self, clustering_task, retries: int
+    ) -> None:
+        # NO_CACHE: two of these touch Mongo and the third is the long compute
+        # whose input is the whole corpus — nothing here is cache-worthy.
+        assert clustering_task.cache_policy is NO_CACHE
+        assert clustering_task.retries == retries
+        assert clustering_task.retry_delay_seconds == 5
+
+    def test_the_summary_task_is_capped_at_two_billable_retries(self) -> None:
+        assert summarise_cluster_task.retries == 2
+
+    def test_the_summary_tasks_retry_cap_is_documented_inline(self) -> None:
+        """ADR-002 Tier B: a billable retry count must say so where it is set."""
+
+        import inspect
+
+        source = inspect.getsource(pipeline)
+
+        assert "retries=2,  # billable — capped at 2" in source
+
+    def test_the_summary_task_caches_on_the_samples_and_prompt_version(self) -> None:
+        import inspect
+
+        # Trace headers change every run; they must not bust a 90-day cache.
+        assert "opik_trace_headers" in (
+            summarise_cluster_task.cache_policy.exclude or []
+        )
+        assert summarise_cluster_task.cache_expiration == timedelta(days=90)
+        # ``prompt_version`` is a PARAMETER, so editing the prompt (and bumping
+        # SUMMARY_PROMPT_VERSION) is a cache MISS rather than a stale label.
+        assert "prompt_version" in inspect.signature(_summarise_cluster).parameters
+
+    @pytest.mark.parametrize(
+        ("clustering_task", "name"),
+        [
+            (load_child_embeddings_task, "load-child-embeddings"),
+            (reduce_and_cluster_task, "reduce-and-cluster"),
+            (summarise_cluster_task, "summarise-cluster"),
+            (write_clustering_run_task, "write-clustering-run"),
+        ],
+    )
+    def test_task_names_are_the_ones_the_prefect_ui_shows(
+        self, clustering_task, name: str
+    ) -> None:
+        assert clustering_task.name == name
+
+
+class TestClusteringRunId:
+    def test_falls_back_to_a_uuid_outside_a_flow_run(self) -> None:
+        """A notebook / direct call still produces a usable run id."""
+
+        run_id = _clustering_run_id()
+
+        assert len(run_id) == 32
+        assert run_id != _clustering_run_id()
+
+
+class TestStackEmbeddings:
+    """The one place a corrupt corpus is turned into a message, not a traceback."""
+
+    def test_stacks_to_a_float32_matrix(self) -> None:
+        matrix = _stack_embeddings([[0.1, 0.2], [0.3, 0.4]])
+
+        assert matrix.shape == (2, 2)
+        assert matrix.dtype == np.float32
+
+    def test_rejects_a_nan_embedding_naming_how_many(self) -> None:
+        """UMAP refuses NaN rows; without this the failure surfaces four frames
+        down inside a sklearn validator, mid-fit."""
+
+        with pytest.raises(ValueError, match="1 of 2 child embeddings contain NaN"):
+            _stack_embeddings([[0.1, 0.2], [float("nan"), 0.4]])
+
+    def test_rejects_an_infinite_embedding(self) -> None:
+        with pytest.raises(ValueError, match="NaN or inf"):
+            _stack_embeddings([[0.1, 0.2], [float("inf"), 0.4]])
+
+    def test_rejects_mixed_widths_naming_them(self) -> None:
+        with pytest.raises(ValueError, match=r"mixed widths \[2, 3\]"):
+            _stack_embeddings([[0.1, 0.2], [0.3, 0.4, 0.5]])
+
+
+class TestClusteringWritesNoGraphRows:
+    """Mode-orthogonality, asserted from the source (ADR-007 §3 + §7).
+
+    The phase is identical in ``rag`` and ``graphrag``; a single edge write here
+    would make the **Embedding map** a graphrag-only feature.
+    """
+
+    def test_the_clustering_layer_never_builds_an_edge(self) -> None:
+        clustering_dir = Path(pipeline.__file__).parent / "clustering"
+        sources = "\n".join(
+            path.read_text(encoding="utf-8") for path in clustering_dir.rglob("*.py")
+        )
+
+        assert "build_edge_id" not in sources
+        assert '"edge"' not in sources

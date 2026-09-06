@@ -116,6 +116,77 @@ class TestDeclaredDependencies:
         assert any(marker.startswith("slow:") for marker in markers)
 
 
+_SKIP_PATH_PROBE = textwrap.dedent(
+    f"""
+    import asyncio, json, sys
+    from unittest.mock import AsyncMock, MagicMock
+
+    from beanie import PydanticObjectId
+
+    import tree.memory.pipeline as pipeline
+    from tree.memory.clustering.store import ChildEmbeddingRow
+
+    # A corpus of 10 embedded children, below the default min_cluster_size 15.
+    rows = [
+        ChildEmbeddingRow(chunk_id=f"c{{i}}", embedding=[0.1, 0.2, 0.3, 0.4])
+        for i in range(10)
+    ]
+    pipeline.init_mongodb = AsyncMock(return_value=MagicMock())
+    pipeline.load_child_embeddings_task = AsyncMock(return_value=rows)
+
+    # ``.fn`` runs the flow BODY: the claim is about imports, and a real flow
+    # run would need a Prefect API in this fresh interpreter.
+    stats = asyncio.run(pipeline.memory_clustering.fn(user_id=PydanticObjectId()))
+    print("{_MARKER}" + json.dumps({{
+        "skipped_reason": stats.skipped_reason,
+        "loaded": [m for m in {_FORBIDDEN_MODULES!r} if m in sys.modules],
+    }}))
+    """
+)
+
+
+@lru_cache(maxsize=1)
+def _skip_path_probe() -> tuple[str, tuple[str, ...]]:
+    """Run the flow body over 10 child chunks in a FRESH interpreter.
+
+    Returns ``(skipped_reason, modules_of_the_stack_that_got_loaded)``.
+    """
+
+    result = subprocess.run(
+        [sys.executable, "-c", _SKIP_PATH_PROBE],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE": "15",
+        },
+    )
+    assert result.returncode == 0, f"the skip-path probe failed: {result.stderr}"
+    payload = next(
+        line for line in result.stdout.splitlines() if line.startswith(_MARKER)
+    )
+    parsed = json.loads(payload.removeprefix(_MARKER))
+    return parsed["skipped_reason"], tuple(parsed["loaded"])
+
+
+class TestTheSkipPathImportsNothing:
+    """A corpus too small to cluster must cost MILLISECONDS, not a numba compile.
+
+    ADR-007 §5 puts the guard in the flow (before ``reduce-and-cluster``) and
+    ADR-007 §1 repeats it inside ``core.reduce_and_cluster``. This asserts the
+    OUTER one really short-circuits: a fresh interpreter runs the whole flow
+    body over 10 child chunks and must come back with the skip reason AND an
+    unloaded clustering stack. In-process this would be vacuous — the
+    ``slow``-marked test elsewhere in the suite may already have imported umap.
+    """
+
+    def test_the_run_is_skipped_with_both_numbers(self) -> None:
+        assert _skip_path_probe()[0] == "10 child embeddings < min_cluster_size 15"
+
+    def test_no_module_of_the_clustering_stack_was_loaded(self) -> None:
+        assert _skip_path_probe()[1] == ()
+
+
 class TestNothingImportsTheClusteringStack:
     """ADR-007 §6: lazy imports, asserted from the outside.
 

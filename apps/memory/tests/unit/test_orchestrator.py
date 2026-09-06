@@ -152,6 +152,21 @@ def test_memory_worker_entrypoint_points_at_the_one_pipeline_module():
     assert len(orchestrator._DEPLOYMENT_SPECS) == 5
 
 
+def test_clustering_did_not_take_a_deployment_slot():
+    """ADR-007 §5: phase 4 is an INLINE subflow of ``offline-pipeline``.
+
+    The five free-tier slots are all spent (see the module docstring), so the
+    new clustering phase had to be free. A sixth spec would break the serve —
+    hours later, in Cloud — so the absence is asserted here.
+    """
+
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+
+    assert "memory_clustering" not in source
+    assert "memory-clustering" not in source
+    assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
 class TestEveryEntrypointResolves:
     """Each spec's ``path:function`` must resolve — file AND flow (#111).
 
