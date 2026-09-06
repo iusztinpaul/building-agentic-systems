@@ -541,3 +541,15 @@ def test_legend_rows_are_taken_from_the_payload_when_present() -> None:
         "const colorByType = new Map(nodes.map((n) => [n.type, n.color]));"
         in _RENDER_JS
     )
+
+
+def test_the_header_counts_read_the_map_summary_on_a_fixed_layout() -> None:
+    # Assert (source-level): a map has no edges, so the graph's header line
+    # ("1448 nodes · 0 edges") reads as a broken graph. On the fixed-layout
+    # branch the header shows the map's own summary instead — the ONE template,
+    # two headers, chosen by the payload.
+    assert 'countsEl.textContent = isFixed && typeof payload.summary === "string"' in (
+        _RENDER_JS
+    )
+    assert '? payload.summary.replace(/^Embedding map: /, "")' in _RENDER_JS
+    assert ': nodes.length + " nodes · " + edges.length + " edges";' in _RENDER_JS

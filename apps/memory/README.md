@@ -272,7 +272,9 @@ make memory-run-clustering-pipeline
 ```
 
 It is OFF in every other entry point, the nightly cron included: this is the only command that
-clusters. Two notes:
+clusters. What READS the result is the [Embedding map](#embedding-map) (`make
+memory-visualize-embeddings` and the `visualize_memory_embeddings` MCP tool) — surfaces draw the
+stored coordinates, they never cluster. Two notes:
 
 - **Cold start.** The first `import umap` on a machine compiles numba's kernels (~40 s; ~3 s
   afterwards from the on-disk cache), and Prefect Managed runs are fresh containers, so every
@@ -299,6 +301,32 @@ make memory-query-graph QUERY="Paul Iusztin"
 TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 ```
 
+#### Embedding map
+
+The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its
+stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
+legend and the document title / heading path / snippet in the tooltip. Same renderer as the graph
+(fixed coordinates, ForceAtlas2 skipped) — and identical in both memory modes, because the map has
+no edges to miss.
+
+```bash
+make memory-visualize-embeddings                        # open the latest map
+make memory-visualize-embeddings HULLS=true             # outline each cluster
+make memory-visualize-embeddings OUTPUT=/tmp/map.html USER_IDENTIFIER=paul
+```
+
+It READS; it never clusters (ADR-007 Decision 8), so two outcomes are contracts rather than bugs:
+
+- **No clustering run for this user** — it prints `No clustering run found for this user — run make
+  memory-run-clustering-pipeline to build the embedding map.` and exits 1. No empty canvas.
+- **A stale map** — chunks ingested since the last run have no coordinates, so the FIRST line of
+  output is `N of M chunks have no cluster assignment (or a stale one) — run make
+  memory-run-clustering-pipeline`; those points are left off the map and counted in the legend as
+  "unclustered / stale (not shown)". Re-run the clustering phase to clear it.
+
+The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
+and the same message — one behaviour, two surfaces.
+
 ### MCP server
 
 Expose the memory to any MCP-aware client (Claude Code, Claude Desktop, Cursor, the bundled harness):
@@ -312,7 +340,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 **Tools exposed.** The tool set IS the memory mode (`memory.mode`, ADR-006): the server reads it once at boot and registers only what that mode can honour. A graph tool called against a `rag` server returns the standard unknown-tool error — it was never registered.
 
-*Both modes (6 tools):*
+*Both modes (7 tools):*
 
 | Tool | Description |
 |---|---|
@@ -322,8 +350,9 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: chunks as points coloured by cluster, `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
 
-*`graphrag` only (7 more, 13 total):*
+*`graphrag` only (7 more, 14 total):*
 
 | Tool | Description |
 |---|---|
@@ -460,12 +489,14 @@ apps/memory/
       clustering/       # neutral: the Clustering run (core, summaries, store)
       visualize/        # neutral: the Graph renderer (graph.py) + the
                         #   Embedding map payload (embeddings.py)
-    mcp/                # FastMCP server + tools
+    mcp/                # FastMCP server + tools; viz_app.py = the neutral
+                        #   MCP App layer (ui:// + graphs:// + dual delivery)
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
   configs/default.yaml  # app tuning
   deploy/               # Modal deployments (vLLM embedding)
-  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph, signup, check_db)
+  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph,
+                        #   visualize_embeddings, signup, check_db)
   tests/unit
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)

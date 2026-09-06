@@ -249,14 +249,28 @@ local-start`) and the serve runner.
 Deployments (all 5 bound to `tree-managed` in prod; `flow_name/deployment_name`):
 `data-etl-worker`, `memory-extract-etl-worker`, `online-pipeline`, `offline-pipeline`,
 `dream-consolidation-all-users` (core, no longer optional — it carries its own `0 4 * * *`
-consolidation cron). The `data_etl_coordinator` /
-`memory_extract_etl_coordinator` flows are NOT deployments — they run as inline subflows of an
-`offline-pipeline` run, which also carries the nightly `0 3 * * *` listen-sources cron. Neither is
-`memory_indexing` (flow `memory-indexing-etl`): since ADR-007 it runs as the `offline-pipeline`
-run's own third **Offline phase** — one inline subflow per target user, a SIBLING of the extraction
-Coordinator rather than something the Coordinator triggers — or inline inside `online-pipeline` for
-a single document. `make memory-run-indexing-pipeline` is that same deployment with the data and
-extraction phases off, so it needs served workflows like every other pipeline command.
+consolidation cron).
+
+`offline-pipeline` is the mother pipeline: FOUR independently switchable **Offline phase**s
+(ADR-007), each a flow parameter, run as sequential blocks fanned per target user.
+
+| Phase | Flag (default) | What runs | Single-step command |
+|---|---|---|---|
+| ① data | `run_data=True` | `data_etl_coordinator` (inline subflow) → `data-etl-worker` runs | `make memory-run-data-pipeline` |
+| ② extraction | `run_extraction=True` | `memory_extract_etl_coordinator` (inline) → `memory-extract-etl-worker` shards | `make memory-run-memory-pipeline` |
+| ③ indexing | `run_indexing=True` | `memory_indexing` (`memory-indexing-etl`), one inline subflow per user | `make memory-run-indexing-pipeline` |
+| ④ clustering | `run_clustering=False` | `memory_clustering` (`memory-clustering-etl`), one **Clustering run** per user | `make memory-run-clustering-pipeline` |
+
+So the `data_etl_coordinator` / `memory_extract_etl_coordinator` flows are NOT deployments — they
+run as inline subflows of an `offline-pipeline` run, which also carries the nightly `0 3 * * *`
+listen-sources cron (phases ①②③ on, ④ off). Neither is `memory_indexing`: since ADR-007 it is the
+run's own third phase — a SIBLING of the extraction Coordinator rather than something the
+Coordinator triggers — or inline inside `online-pipeline` for a single document. Every single-step
+command above is that ONE deployment with the other phases off, so each needs served workflows like
+every other pipeline command. Phase ④ is the only one off by default: it is the only phase that
+imports the UMAP/HDBSCAN stack (~40 s of cold numba compile in a fresh Managed container), and its
+output — the **Embedding map** — is read by `make memory-visualize-embeddings` and the
+`visualize_memory_embeddings` MCP tool, never recomputed by them.
 
 ## Concurrency — the layered governor (orthogonal to topology)
 

@@ -24,7 +24,9 @@ By default, use the "Paul Iusztin" user when testing.
 
 2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here). Each pipeline target takes `MODE=offline` (default) or `MODE=online`: step-by-step is `make memory-run-data-pipeline` → `make memory-run-memory-pipeline` → `make memory-run-indexing-pipeline`; or end-to-end in one run with `make memory-run-pipeline` (offline batch) / `make memory-run-pipeline MODE=online SOURCE="<url|path>"` (one realtime source).
 
-   Every offline target is the SAME `offline-pipeline` deployment with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing`) — including `make memory-run-indexing-pipeline`, which since ADR-007 dispatches instead of running the flow in-process. So step 1's serve process is required for all of them, and the Prefect UI shows one flow run whose children are exactly the phases you asked for.
+   Every offline target is the SAME `offline-pipeline` deployment with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing` / `run_clustering`) — including `make memory-run-indexing-pipeline`, which since ADR-007 dispatches instead of running the flow in-process. So step 1's serve process is required for all of them, and the Prefect UI shows one flow run whose children are exactly the phases you asked for.
+
+   **Clustering (optional, after indexing).** `make memory-run-clustering-pipeline` runs the fourth phase alone — it needs embeddings, so run it after indexing, and it is off everywhere else including the nightly cron. Two gotchas that look like failures and are not: the first run on a fresh env spends ~40 s compiling umap's numba kernels before it clusters anything, and a corpus below `min_cluster_size` (default 15) is skipped with a log line naming the knob — for a small local corpus export `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5` in the SERVING shell (the flow reads it inside the serve process, not in yours).
 
 3. **Verify the result.** Count what landed with `mongosh` over the `memory` collection, grouped by `kind` / `type` / `subtype` (in `rag`: `edge` count 0, parents with `embedding: []`, children with a 1024-length vector), then read it back:
 
@@ -34,6 +36,14 @@ By default, use the "Paul Iusztin" user when testing.
 
    The output follows the mode: `graphrag` writes and opens an interactive HTML graph under `.tree/graphs/<slug>-<UTC-stamp>.html`; **`rag` prints the ranked parent chunks as TEXT** (score, document title, heading path, a 300-char excerpt, matched-children count) and writes no file — a missing HTML file in `rag` is the expected outcome, not a failure. `make memory-query-graph` with no `QUERY` is graphrag-only (in `rag` it exits 1: there are no edges to draw).
 
-   For the MCP surface, serve it in the same mode (`TREE_MEMORY__MODE=rag make memory-serve-mcp TRANSPORT=streamable-http`) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`. `rag` registers 6 tools, `graphrag` 13.
+   If you clustered, check the **Embedding map** too — the one visual surface that works in BOTH modes:
+
+   ```bash
+   make memory-visualize-embeddings HULLS=true
+   ```
+
+   It writes `.tree/graphs/embedding-map-<UTC-stamp>.html` and opens it; the legend shows one row per cluster. Two expected outcomes, not failures: with no clustering run it prints `No clustering run found for this user …` and exits 1, and after ingesting anything since the last run the FIRST output line is `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` (those points are off the map and counted in the legend). Ingest one document and re-run to see that stale warning appear — then re-cluster to clear it.
+
+   For the MCP surface, serve it in the same mode (`TREE_MEMORY__MODE=rag make memory-serve-mcp TRANSPORT=streamable-http`) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 7 tools, `graphrag` 14.
 
 4. **Clean up.** Stop the serve process and any MCP server you started, and remove stray artefacts (`.tree/graphs/*.html`) so the worktree stays clean.

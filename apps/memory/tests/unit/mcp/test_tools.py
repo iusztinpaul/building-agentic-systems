@@ -4,23 +4,34 @@ The graphrag-only tools moved to ``tests/unit/mcp/test_graph_tools.py`` with
 their module (#110); ``search_memory`` here is the rag-mode function — the one
 :mod:`tree.mcp.server` registers when ``memory.mode == "rag"``. Which of the two
 gets registered per mode is asserted in ``test_tool_gating.py``.
+
+``visualize_memory_embeddings`` is here for the same reason it lives in
+``tree.mcp.tools``: clustering is mode-orthogonal, so the map tool is part of
+BOTH surfaces. Its payload builder is tested in
+``tests/unit/memory/visualize/test_embeddings.py`` and its dual delivery in
+``tests/unit/mcp/test_viz_app.py`` — what is asserted here is the tool's
+contract: read, warn, deliver.
 """
 
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from beanie import PydanticObjectId
+from fastmcp.tools import ToolResult
 
 from tree.data.online_pipeline import UrlSource
-from tree.mcp.tools import _ingest, search_memory
+from tree.mcp.tools import _ingest, search_memory, visualize_memory_embeddings
+from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.rag.types import (
     DocumentMeta,
     MatchedChild,
     RetrievalResult,
     RetrievedParent,
 )
+from tree.memory.visualize.embeddings import NO_CLUSTERING_RUN_MESSAGE
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -185,3 +196,174 @@ class TestRagSearchMemory:
             "Hybrid (vector + text) search over child chunks, returning the "
             "distinct parent chunks with their document metadata."
         )
+
+
+# ---------------------------------------------------------------------------
+# ``visualize_memory_embeddings`` — the **Embedding map**, in BOTH modes
+# ---------------------------------------------------------------------------
+
+
+def _viz_ctx(*, ui_supported: bool) -> MagicMock:
+    ctx = _make_ctx()
+    ctx.client_supports_extension.return_value = ui_supported
+    return ctx
+
+
+def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> EmbeddingMap:
+    """A two-cluster map with ``total_children - unclustered`` drawn points."""
+
+    drawn = total_children - unclustered
+    return EmbeddingMap(
+        run_id="run-1",
+        clusters=[
+            MemoryClusterInfo(
+                cluster_id=0,
+                label="Agent memory design",
+                summary="How agents remember.",
+                keywords=["memory", "agents", "design"],
+                size=drawn,
+                sample_chunk_ids=["chunk-0"],
+                centroid_x=0.5,
+                centroid_y=0.5,
+            )
+        ],
+        points=[
+            MapPoint(
+                chunk_id=f"chunk-{index}",
+                x=float(index),
+                y=float(index) / 2,
+                cluster_id=0,
+                title="Memory for AI Agents",
+                heading_path=["Memory"],
+                snippet=f"Snippet {index}.",
+            )
+            for index in range(drawn)
+        ],
+        total_children=total_children,
+        unclustered=unclustered,
+    )
+
+
+class TestVisualizeMemoryEmbeddings:
+    """READS the latest **Clustering run** and delivers it (ADR-007 §8)."""
+
+    async def test_no_clustering_run_answers_with_the_command_to_run(
+        self, mocker
+    ) -> None:
+        # Story 4: a fresh user gets an explanation, never an empty canvas —
+        # and never a ToolResult, because there is no payload to deliver.
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+        deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
+
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+
+        assert result == NO_CLUSTERING_RUN_MESSAGE
+        assert isinstance(result, str)
+        deliver.assert_not_called()
+
+    async def test_a_ui_capable_client_gets_the_map_inline_with_hulls_on(
+        self, mocker
+    ) -> None:
+        # Story 2: the iframe gets the full payload (fixed layout, hulls on);
+        # the model reads only the summary line.
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), hulls=True
+        )
+
+        assert isinstance(result, ToolResult)
+        summary_block, payload_block = result.content
+        assert summary_block.text.startswith("Embedding map:")
+        assert payload_block.annotations.audience == ["user"]
+        payload = json.loads(payload_block.text)
+        assert payload["layout"] == "fixed"
+        assert payload["hulls"] is True
+
+    async def test_hulls_default_off_leaves_the_toggle_unchecked(self, mocker) -> None:
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+
+        assert json.loads(result.content[1].text)["hulls"] is False
+
+    async def test_a_stale_map_answers_with_the_warning_line_first(
+        self, mocker
+    ) -> None:
+        # Story 3: the model's FIRST line says the map under-reports the corpus,
+        # so an agent relaying one line still relays the warning.
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(unclustered=2),
+        )
+
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+
+        assert result.content[0].text.startswith(
+            "2 of 12 chunks have no cluster assignment (or a stale one) — run "
+            "make memory-run-clustering-pipeline"
+        )
+        assert "Embedding map:" in result.content[0].text
+
+    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
+        self, mocker, tmp_path
+    ) -> None:
+        # Story 1: the Claude Code terminal renders no MCP App UI, so the same
+        # map arrives as a self-contained file plus a downloadable resource.
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=False))
+
+        _, link_block = result.content
+        assert link_block.type == "resource_link"
+        assert re.fullmatch(
+            r"graphs://embedding-map-\d{8}-\d{6}\.html", str(link_block.uri)
+        ), link_block.uri
+        assert (tmp_path / link_block.name).is_file()
+
+    async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
+        self, mocker, tmp_path
+    ) -> None:
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), as_html_file=True
+        )
+
+        assert result.content[1].type == "resource_link"
+        assert list(tmp_path.glob("embedding-map-*.html"))
+
+    async def test_the_docstring_tells_the_model_when_to_draw_a_map(self) -> None:
+        # The docstring IS the tool description an MCP client shows the model.
+        summary = " ".join(visualize_memory_embeddings.__doc__.split())
+
+        assert summary.startswith(
+            "Show the memory's embedding space as a 2D map: every child chunk "
+            "is a point, coloured by its cluster from the latest clustering run"
+        )
+        assert "no clustering run exists" in summary

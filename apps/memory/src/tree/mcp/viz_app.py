@@ -74,13 +74,14 @@ _EXT_APPS_CDN = "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with
 
 def _graph_tool_result(
     ctx: Context,
-    payload: dict[str, list[dict[str, Any]]],
+    payload: dict[str, Any],
     summary: str,
     *,
     query: str = "",
     as_html_file: bool = False,
 ) -> ToolResult:
-    """Deliver a **Graph payload** to whichever channel the client can render.
+    """Deliver a **Graph payload** or **Embedding map** to whichever channel
+    the client can render.
 
     The ONE dual-path seam behind every graph-capable MCP tool (ADR-005,
     decision 4) — both paths, chosen by client capability, never one or the
@@ -97,7 +98,9 @@ def _graph_tool_result(
 
     Args:
         ctx: The MCP request context (used for the capability check).
-        payload: The **Graph payload** from ``to_graph_payload``.
+        payload: The **Graph payload** from ``to_graph_payload``, or the
+            **Embedding map** payload from ``to_embedding_map_payload`` (the
+            same ``{nodes, edges}`` shape plus the template's optional keys).
         summary: The model-visible text. Callers whose tool contract is
             answering a question (``query_memory`` / ``search_memory``) put
             their serialized results in here — both branches keep it verbatim,
@@ -210,7 +213,8 @@ def graph_file(name: str) -> str:
     ),
 )
 def graph_view() -> str:
-    """Interactive Sigma.js knowledge-graph viewer (read-only)."""
+    """Interactive Sigma.js viewer for knowledge graphs and embedding maps
+    (read-only)."""
 
     return _GRAPH_HTML
 

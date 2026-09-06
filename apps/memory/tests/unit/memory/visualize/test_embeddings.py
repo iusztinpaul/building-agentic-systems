@@ -337,3 +337,33 @@ def test_default_map_path_lives_under_the_shared_graphs_dir() -> None:
     # Assert: the ONE output convention — maps land beside graphs, not in a
     # directory of their own (the graphs:// resource serves both).
     assert GRAPHS_DIR.name == "graphs"
+
+
+def test_render_embedding_map_file_headers_the_map_with_its_summary(
+    tmp_path: Path,
+) -> None:
+    payload = to_embedding_map_payload(_map())
+    out = tmp_path / "m.html"
+
+    render_embedding_map_file(payload, out)
+
+    # The header line the reader sees is "47 chunks in 2 clusters (+5 noise)",
+    # not "47 nodes · 0 edges" — both the summary and the branch that shows it
+    # have to reach the browser.
+    html = out.read_text(encoding="utf-8")
+    assert '"summary": "Embedding map: 47 chunks in 2 clusters (+5 noise)"' in html
+    assert 'payload.summary.replace(/^Embedding map: /, "")' in html
+
+
+def test_render_embedding_map_file_accepts_a_string_output_path(
+    tmp_path: Path,
+) -> None:
+    # The CLI's ``--output`` flag hands over a plain ``str``; a raw string would
+    # otherwise reach ``Path.parent`` inside the writer and raise.
+    payload = to_embedding_map_payload(_map())
+    out = tmp_path / "m.html"
+
+    path = render_embedding_map_file(payload, str(out))
+
+    assert path == out
+    assert out.is_file()

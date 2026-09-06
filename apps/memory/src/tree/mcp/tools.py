@@ -1,10 +1,19 @@
 """MCP tool handlers registered in BOTH **Memory modes** — thin delegation.
 
-The six tools here (``search_memory``, ``ingest_url``, ``ingest_file``,
-``ingest_conversation``, ``search_web``, ``scrape_web``) work with node rows
-alone, so :mod:`tree.mcp.server` imports this module unconditionally. The seven
-tools that presuppose edges live in :mod:`tree.mcp.graph_tools`, imported only
-in ``graphrag`` (ADR-006 decision 5).
+The seven tools here (``search_memory``, ``ingest_url``, ``ingest_file``,
+``ingest_conversation``, ``search_web``, ``scrape_web``,
+``visualize_memory_embeddings``) work with node rows alone, so
+:mod:`tree.mcp.server` imports this module unconditionally. The seven tools that
+presuppose edges live in :mod:`tree.mcp.graph_tools`, imported only in
+``graphrag`` (ADR-006 decision 5).
+
+The **Embedding map** tool is here rather than with the graph tools because
+clustering is mode-orthogonal (ADR-007 §8): the map draws points and their
+clusters, never edges, so it says exactly as much in ``rag`` as in ``graphrag``.
+It delivers through the SAME dual path as the graph tools, which is why this
+module imports the MODE-NEUTRAL :mod:`tree.mcp.viz_app` (whose ``ui://`` and
+``graphs://`` resources therefore exist in rag mode too) and never
+:mod:`tree.mcp.graph_tools`.
 
 ``search_memory`` is the one tool whose SIGNATURE depends on the mode — the rag
 version below returns **Parent-document retrieval** results and takes ``top_k``
@@ -22,6 +31,8 @@ from typing import Any, Literal
 import httpx
 from beanie import PydanticObjectId
 from fastmcp import Context
+from fastmcp.apps import AppConfig
+from fastmcp.tools import ToolResult
 
 from tree.config.constants import (
     TAGS_INGESTION_MCP,
@@ -51,7 +62,18 @@ from tree.data.web.web_unlocker import (
     BrightDataRequestError,
 )
 from tree.mcp.server import MEMORY_MODE, mcp
+
+# viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
+# ``ui://`` and ``graphs://`` resources as a side effect and owns the one
+# dual-delivery helper. It imports neither this module nor the graph tools, so
+# there is no cycle and rag mode stays free of graph code.
+from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
+from tree.memory.clustering.store import load_embedding_map
 from tree.memory.rag.retrieval import retrieve_parents
+from tree.memory.visualize.embeddings import (
+    NO_CLUSTERING_RUN_MESSAGE,
+    to_embedding_map_payload,
+)
 from tree.online import dispatch_online_pipeline
 from tree.observability import (
     track,
@@ -125,6 +147,57 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
 
 if MEMORY_MODE == "rag":
     mcp.tool(search_memory)
+
+
+# ---------------------------------------------------------------------------
+# Embedding map — READS the latest **Clustering run**, never computes it
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+@track(
+    tags=TAGS_RETRIEVAL_MCP,
+    name="visualize_memory_embeddings",
+    create_duplicate_root_span=False,
+)
+async def visualize_memory_embeddings(
+    ctx: Context, hulls: bool = False, as_html_file: bool = False
+) -> str | ToolResult:
+    """Show the memory's embedding space as a 2D map: every child chunk is a
+    point, coloured by its cluster from the latest clustering run, with an
+    LLM-written label per cluster. Use when the user wants to *see* what topics
+    the memory holds or how it is organised. ``hulls=true`` outlines each
+    cluster. If no clustering run exists, this returns a message telling the
+    operator which command to run; if the map is stale, the answer starts with
+    a warning line.
+
+    Args:
+        hulls: Draw a convex hull around each cluster (default off).
+        as_html_file: Set true when the user explicitly asks for a downloadable
+            / openable HTML file instead of the inline interactive view.
+    """
+
+    _set_retrieval_thread(ctx, "visualize_memory_embeddings")
+    lc = ctx.lifespan_context
+    embedding_map = await load_embedding_map(
+        lc["client"], lc["database"], lc["user_id"]
+    )
+    # Never an empty canvas: a user nobody has clustered gets the command to run
+    # (ADR-007 §8). A plain ``str`` — there is no payload to deliver.
+    if embedding_map is None:
+        return NO_CLUSTERING_RUN_MESSAGE
+
+    payload = to_embedding_map_payload(embedding_map, hulls=hulls)
+    summary = payload["summary"]
+    warning = payload["warning"]
+    if warning:
+        # The warning goes FIRST so a model relaying only the opening line
+        # still tells the user the map under-reports the corpus.
+        summary = f"{warning}\n{summary}"
+
+    return _graph_tool_result(
+        ctx, payload, summary, query="embedding-map", as_html_file=as_html_file
+    )
 
 
 # ---------------------------------------------------------------------------

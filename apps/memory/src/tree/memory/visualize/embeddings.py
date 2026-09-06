@@ -212,12 +212,19 @@ def _legend_rows(embedding_map: EmbeddingMap, *, noise: int) -> list[dict[str, A
 
 
 def render_embedding_map_file(
-    payload: dict[str, Any], output: Path | None = None
+    payload: dict[str, Any], output: str | Path | None = None
 ) -> Path:
     """Write the map as a self-contained HTML file and return its path.
 
     The graph's file convention, with the map's stem: ``output`` wins, else
     ``.tree/graphs/embedding-map-<UTC-stamp>.html``.
+
+    ``output`` takes a ``str`` as well as a ``Path`` — it comes straight off a
+    CLI ``--output`` flag (``visualize_query_result`` accepts the same), and a
+    raw string would otherwise reach ``Path.parent`` inside the writer and
+    raise ``AttributeError``.
     """
 
-    return _render_graph_file(payload, query="embedding-map", output=output)
+    return _render_graph_file(
+        payload, query="embedding-map", output=Path(output) if output else None
+    )

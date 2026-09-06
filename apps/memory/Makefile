@@ -190,6 +190,9 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 query-graph: # Query memory for one user: an HTML graph in `graphrag`, ranked parent chunks as text in `rag`. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search; omit QUERY for the full graph (graphrag only).
 	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
 
+visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/visualize_embeddings.py $(USER_FLAGS) $(if $(filter true,$(HULLS)),--hulls,) $(if $(OUTPUT),--output "$(OUTPUT)",)
+
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi
 	uv run python scripts/search_web.py --query "$(QUERY)" \

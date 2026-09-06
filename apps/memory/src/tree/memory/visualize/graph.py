@@ -434,13 +434,19 @@ _RENDER_JS = """\
       container.innerHTML = "";
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
-      countsEl.textContent = nodes.length + " nodes · " + edges.length + " edges";
 
       // Optional Embedding-map keys. Absent (a Graph payload) => today's graph:
       // random start + ForceAtlas2, per-type legend, no banner, no hulls.
       const isFixed = payload.layout === "fixed";
       const nodeSize = typeof payload.nodeSize === "number" ? payload.nodeSize : 6;
       const legendRows = Array.isArray(payload.legend) ? payload.legend : null;
+
+      // Header counts. A map has no edges, so "N nodes · 0 edges" would read as
+      // a broken graph; its payload summary already counts the two things that
+      // matter ("1448 chunks in 37 clusters (+63 noise)").
+      countsEl.textContent = isFixed && typeof payload.summary === "string"
+        ? payload.summary.replace(/^Embedding map: /, "")
+        : nodes.length + " nodes · " + edges.length + " edges";
       const hullsEnabled = legendRows !== null && typeof payload.hulls === "boolean";
 
       const nodeById = new Map(nodes.map((n) => [n.id, n]));
