@@ -119,3 +119,13 @@ on:
 
 **Notes**
 - End-to-end verification is the push itself: the fixed workflow must land on the branch before GitHub can evaluate the new trigger. Run URL recorded in the hand-off to On-Call.
+
+### [On-Call] 2026-09-06 20:40 — CI Resolution
+
+Watched run https://github.com/iusztinpaul/building-agentic-systems/actions/runs/34058359919 (PR #42, head `d016ff5`) to completion with `gh run watch 34058359919`.
+
+**Result:** GREEN.
+- `harness (typescript)` — pass, 13s
+- `memory (python)` — pass, 3m10s (Install dependencies: 20s despite the new `umap-learn`/`scikit-learn`/`numba` deps; Tests: 1m55s, covering the `slow`-marked real-UMAP test and the fresh-interpreter subprocess guard tests with no OOM/timeout)
+
+`gh pr checks 42` confirms both checks report `pass`. The stacked-PR trigger fix in `.github/workflows/ci.yml` is verified working end-to-end. Confirmed already `status: done` under `tasks/done/` — no further move needed.
