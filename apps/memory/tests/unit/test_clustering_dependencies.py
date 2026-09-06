@@ -132,12 +132,17 @@ class TestNothingImportsTheClusteringStack:
             ("tree.offline", "graphrag"),
             ("tree.mcp.server", "rag"),
             ("tree.mcp.server", "graphrag"),
+            # The clustering module itself: even the code that CALLS umap must
+            # be importable for free, so #117's flow can import it at module
+            # level and still leave the stack unloaded when the phase is off.
+            ("tree.memory.clustering.core", "graphrag"),
         ],
         ids=[
             "memory-pipeline",
             "offline-pipeline",
             "mcp-server-rag",
             "mcp-server-graphrag",
+            "clustering-core",
         ],
     )
     def test_entry_point_leaves_the_clustering_stack_unimported(

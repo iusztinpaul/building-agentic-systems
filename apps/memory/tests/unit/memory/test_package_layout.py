@@ -1,4 +1,4 @@
-"""Structural guards on the ``tree.memory`` package layout (ADR-006 §8).
+"""Structural guards on the ``tree.memory`` package layout (ADR-006 §8, ADR-007 §7).
 
 The layout is not decoration: ``rag/`` is the complete Chapter-4 system a
 reader must be able to read end to end without meeting the graph, and
@@ -8,15 +8,24 @@ undo it and no test would go red. So the invariants are asserted here, on the
 source tree itself:
 
 1. the top level of ``tree/memory/`` holds only the flow module, the two
-   shared helpers and the two layer packages;
+   shared helpers and the layer packages;
 2. no module under ``rag/`` imports ``tree.memory.graph`` or the flow module
    ``tree.memory.pipeline`` (``graph`` → ``rag`` is allowed, never the
    reverse);
-3. every module under ``rag/`` and ``graph/`` has a mirroring test module.
+3. ``clustering/`` is NEUTRAL: it imports neither ``graph/`` nor the flow
+   module, and ``rag/`` does not import it either;
+4. nothing under ``tree/memory/`` imports the clustering stack (``umap``,
+   ``sklearn``, ``numba``, ``pynndescent``) at MODULE level — function-scope
+   imports are the only allowed form (ADR-007 §6);
+5. every module under ``rag/``, ``graph/`` and ``clustering/`` has a mirroring
+   test module.
 
 The related stdlib-only purity of ``rag/cleaning.py`` (#106) is asserted where
 the module is tested:
-``tests/unit/memory/rag/test_cleaning.py::TestModulePurity``.
+``tests/unit/memory/rag/test_cleaning.py::TestModulePurity``. The runtime half
+of guard 4 — that a fresh interpreter importing an entry point really leaves
+those modules out of ``sys.modules`` — lives in
+``tests/unit/test_clustering_dependencies.py``.
 """
 
 from __future__ import annotations
@@ -27,12 +36,17 @@ from pathlib import Path
 import pytest
 
 import tree.memory
-from tree.memory import graph, rag
+from tree.memory import clustering, graph, rag
 
 _MEMORY_DIR = Path(tree.memory.__file__).parent
 _RAG_DIR = Path(rag.__file__).parent
 _GRAPH_DIR = Path(graph.__file__).parent
+_CLUSTERING_DIR = Path(clustering.__file__).parent
 _TESTS_DIR = Path(__file__).parent
+
+# The stack ADR-007 §6 keeps out of every import-time path: the two declared
+# dependencies plus the two transitive heavyweights ``umap`` pulls in.
+_HEAVY_ROOTS = ("umap", "sklearn", "numba", "pynndescent")
 
 # Packages have no module of their own to test, and ``types.py`` files are
 # plain Pydantic transit models covered wherever they are produced.
@@ -60,6 +74,41 @@ def _imported_modules(path: Path) -> set[str]:
     return imported
 
 
+def _module_level_imports(path: Path) -> set[str]:
+    """The dotted names imported when the file is IMPORTED.
+
+    Function bodies are skipped: a function-scope import costs nothing until the
+    function runs, which is exactly the form ADR-007 §6 requires for the
+    clustering stack. Everything else — module scope, class bodies, ``try`` and
+    ``if TYPE_CHECKING`` blocks — executes on import and counts.
+    """
+
+    imported: set[str] = set()
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if isinstance(child, ast.Import):
+                imported.update(alias.name for alias in child.names)
+            elif isinstance(child, ast.ImportFrom) and child.module is not None:
+                imported.add(child.module)
+            visit(child)
+
+    visit(ast.parse(path.read_text(encoding="utf-8")))
+    return imported
+
+
+def _imports_of(imported: set[str], *roots: str) -> set[str]:
+    """The subset of ``imported`` that is (or lives under) one of ``roots``."""
+
+    return {
+        name
+        for name in imported
+        if any(name == root or name.startswith(f"{root}.") for root in roots)
+    }
+
+
 def _mirror_candidates(package_dir: Path) -> list[Path]:
     """The modules that must have a mirroring ``test_<name>.py``."""
 
@@ -73,9 +122,9 @@ def _relative_id(path: Path) -> str:
 
 
 class TestTopLevelLayout:
-    """ADR-006 §8: the final shape of ``tree/memory/``."""
+    """ADR-006 §8 + ADR-007 §7: the final shape of ``tree/memory/``."""
 
-    def test_top_level_holds_exactly_the_two_layers_and_three_modules(self) -> None:
+    def test_top_level_holds_exactly_the_layers_and_three_modules(self) -> None:
         entries = {
             entry.name for entry in _MEMORY_DIR.iterdir() if entry.name != "__pycache__"
         }
@@ -87,6 +136,7 @@ class TestTopLevelLayout:
             "types.py",
             "rag",
             "graph",
+            "clustering",
         }
 
     @pytest.mark.parametrize("retired", ["extraction", "indexing", "query"])
@@ -134,6 +184,75 @@ class TestRagNeverDependsOnGraph:
         assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
 
 
+class TestClusteringNeverDependsOnGraph:
+    """``clustering/`` is NEUTRAL — it is the same code in both **Memory mode**s.
+
+    A **Clustering run** reads child-chunk embeddings and writes
+    ``memory_clusters`` rows; it has nothing to do with entities and edges. One
+    import of ``graph/`` here would make the phase graphrag-flavoured and stop
+    ``rag`` mode from drawing its own map (ADR-007 §7). The reverse guard —
+    ``rag/`` importing ``clustering/`` — matters just as much: it would drag the
+    UMAP stack into the Chapter-4 read path.
+    """
+
+    @pytest.mark.parametrize("path", _module_paths(_CLUSTERING_DIR), ids=_relative_id)
+    def test_no_clustering_module_imports_the_graph_layer(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.graph")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_CLUSTERING_DIR), ids=_relative_id)
+    def test_no_clustering_module_imports_the_flow_module(self, path: Path) -> None:
+        """The flow (#117) imports the library, never the other way round."""
+
+        offenders = _imports_of(_imported_modules(path), "tree.memory.pipeline")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_RAG_DIR), ids=_relative_id)
+    def test_no_rag_module_imports_the_clustering_layer(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.clustering")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+
+class TestHeavyImportsAreLazy:
+    """ADR-007 §6: ``umap`` / ``sklearn`` are function-scope imports, always.
+
+    A single module-level ``import umap`` anywhere under ``tree/memory/`` makes
+    every nightly run, MCP boot and CLI start pay ~3 s (~40 s on a fresh machine,
+    where numba compiles umap's kernels) for a phase that is off by default. The
+    cost is invisible in a green test run, so it is asserted from the source.
+    """
+
+    @pytest.mark.parametrize("path", _module_paths(_MEMORY_DIR), ids=_relative_id)
+    def test_no_module_imports_the_clustering_stack_at_module_level(
+        self, path: Path
+    ) -> None:
+        offenders = _imports_of(_module_level_imports(path), *_HEAVY_ROOTS)
+
+        assert not offenders, (
+            f"{_relative_id(path)} imports {sorted(offenders)} at module level; "
+            "move it inside the function that uses it (ADR-007 §6)"
+        )
+
+    def test_the_guard_sees_a_module_level_import(self, tmp_path: Path) -> None:
+        """The guard's own red case, so a refactor cannot leave it always green."""
+
+        offender = tmp_path / "offender.py"
+        offender.write_text("import umap\n", encoding="utf-8")
+
+        assert _imports_of(_module_level_imports(offender), *_HEAVY_ROOTS) == {"umap"}
+
+    def test_the_guard_ignores_a_function_scope_import(self, tmp_path: Path) -> None:
+        allowed = tmp_path / "allowed.py"
+        allowed.write_text(
+            "def reduce():\n    import umap\n    return umap\n", encoding="utf-8"
+        )
+
+        assert _imports_of(_module_level_imports(allowed), *_HEAVY_ROOTS) == set()
+
+
 class TestTestsMirrorTheModules:
     """Every moved module kept its test, under the mirroring path.
 
@@ -143,7 +262,9 @@ class TestTestsMirrorTheModules:
 
     @pytest.mark.parametrize(
         "path",
-        _mirror_candidates(_RAG_DIR) + _mirror_candidates(_GRAPH_DIR),
+        _mirror_candidates(_RAG_DIR)
+        + _mirror_candidates(_GRAPH_DIR)
+        + _mirror_candidates(_CLUSTERING_DIR),
         ids=_relative_id,
     )
     def test_module_has_a_mirroring_test_module(self, path: Path) -> None:

@@ -75,4 +75,9 @@ markers = [
 filterwarnings = [
     "ignore:Logger 'prefect:UserWarning",
     "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",
+    # umap-learn forces n_jobs to 1 whenever random_state is set, and warns
+    # about it. Deterministic runs ARE the point (ADR-007 §1), and our own
+    # UMAP is built with n_jobs=1 so it never trips the branch — this covers
+    # the instances umap-learn constructs internally.
+    "ignore:n_jobs value 1 overridden to 1 by setting random_state:UserWarning",
 ]
