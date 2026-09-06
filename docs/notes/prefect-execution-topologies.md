@@ -161,8 +161,8 @@ Per-run, each container:
 
 The coordinator→worker fan-out is unchanged: `data_etl_coordinator` shards by platform and
 `run_deployment`s one `data-etl-worker` per shard back through the queue → Prefect launches a
-container for each → each writes `documents`. (Data pipeline has **no** trailing index; that's the
-extraction pipeline.) Since `free-tier-deployments` the Coordinator is no longer a deployment of
+container for each → each writes `documents`. (The data pipeline never indexes; indexing is its own
+**Offline phase**, ADR-007.) Since `free-tier-deployments` the Coordinator is no longer a deployment of
 its own: it executes as an **inline subflow inside the `offline-pipeline` run**, so it's that
 parent container — not a dedicated coordinator container — that holds the slot while the workers
 run.
@@ -252,9 +252,11 @@ Deployments (all 5 bound to `tree-managed` in prod; `flow_name/deployment_name`)
 consolidation cron). The `data_etl_coordinator` /
 `memory_extract_etl_coordinator` flows are NOT deployments — they run as inline subflows of an
 `offline-pipeline` run, which also carries the nightly `0 3 * * *` listen-sources cron. Neither is
-`memory_indexing` (flow `memory-indexing-etl`): it runs as an inline subflow of whichever flow just
-extracted, and standalone via `make memory-run-indexing-pipeline`, which executes it in the
-operator's own process.
+`memory_indexing` (flow `memory-indexing-etl`): since ADR-007 it runs as the `offline-pipeline`
+run's own third **Offline phase** — one inline subflow per target user, a SIBLING of the extraction
+Coordinator rather than something the Coordinator triggers — or inline inside `online-pipeline` for
+a single document. `make memory-run-indexing-pipeline` is that same deployment with the data and
+extraction phases off, so it needs served workflows like every other pipeline command.
 
 ## Concurrency — the layered governor (orthogonal to topology)
 
@@ -300,7 +302,7 @@ decide real parallelism:
      unset  → plan cap decides (free tier: a few at a time, not all 6)
 5. each worker: platform ETL → dedupe-insert `documents` → exit → frees a slot
 6. all 6 done → gather returns → coordinator subflow (and its parent run) exits.
-   No trailing index (data pipeline).
+   No indexing (it is a separate Offline phase, off for a data-only run).
 ```
 
 Slot math is unchanged by the inline-subflow move: the `offline-pipeline` run costs the same single

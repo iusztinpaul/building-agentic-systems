@@ -24,6 +24,8 @@ By default, use the "Paul Iusztin" user when testing.
 
 2. **Run a pipeline** via its Make command (which streams logs to the terminal — use these instead of `prefect deployment run` directly so errors surface here). Each pipeline target takes `MODE=offline` (default) or `MODE=online`: step-by-step is `make memory-run-data-pipeline` → `make memory-run-memory-pipeline` → `make memory-run-indexing-pipeline`; or end-to-end in one run with `make memory-run-pipeline` (offline batch) / `make memory-run-pipeline MODE=online SOURCE="<url|path>"` (one realtime source).
 
+   Every offline target is the SAME `offline-pipeline` deployment with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing`) — including `make memory-run-indexing-pipeline`, which since ADR-007 dispatches instead of running the flow in-process. So step 1's serve process is required for all of them, and the Prefect UI shows one flow run whose children are exactly the phases you asked for.
+
 3. **Verify the result.** Count what landed with `mongosh` over the `memory` collection, grouped by `kind` / `type` / `subtype` (in `rag`: `edge` count 0, parents with `embedding: []`, children with a 1024-length vector), then read it back:
 
    ```bash

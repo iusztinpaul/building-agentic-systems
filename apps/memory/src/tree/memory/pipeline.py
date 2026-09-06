@@ -11,11 +11,13 @@ ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
   not a deployment) — resolve pending docs -> partition into
   ``min(num_shards, N)`` balanced shards -> dispatch ONE
   ``memory-extract-etl-worker`` run per shard under
-  ``asyncio.gather(return_exceptions=True)`` -> ONE trailing ``memory_indexing``
-  INLINE SUBFLOW. Dispatches to the WORKER (no recursion). Returns a
-  :class:`FanOutStats`.
-* ``memory_indexing`` (deployment ``memory-indexing-etl``) — the embedding
-  backfill + search-index reconcile that trails an extraction run.
+  ``asyncio.gather(return_exceptions=True)``. It does NOT index: since ADR-007
+  Decision 5 indexing is its own **Offline phase**. Dispatches to the WORKER (no
+  recursion). Returns a :class:`FanOutStats`.
+* ``memory_indexing`` (flow ``memory-indexing-etl``) — the embedding backfill +
+  search-index reconcile, run as phase 3 of ``offline-pipeline`` (once per
+  target user) and inline by ``online-pipeline`` for a single document. Returns
+  the number of rows it embedded.
 
 Worker task topology. The RAG stages run in BOTH modes; the graph stages run
 only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
@@ -1687,19 +1689,19 @@ async def _coordinate_sharded_extraction(
     num_shards: int,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
-    """Run the coordinator path: resolve pending docs, partition, fan out, index.
+    """Run the coordinator path: resolve pending docs, partition, fan out.
 
     The body of the ``memory-extract-etl-coordinator`` flow. Resolves the user's
     pending documents when ``document_ids is None`` (an explicit list is used
     verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
     dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
     ``{user_id, document_ids}`` — NO ``num_shards`` key, the worker has no such
-    param) under ``asyncio.gather(return_exceptions=True)``, and finally runs
-    exactly ONE trailing ``memory_indexing`` subflow inline after the gather
-    settles. Dispatches to the WORKER deployment — there is NO recursion.
+    param) under ``asyncio.gather(return_exceptions=True)``. Dispatches to the
+    WORKER deployment — there is NO recursion. Indexing is NOT part of this path:
+    it is phase 3 of ``offline_pipeline`` (ADR-007 Decision 5).
 
     An empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
-    zero indexing run, ``FanOutStats(shards_total=0)``.
+    ``FanOutStats(shards_total=0)``.
     """
 
     log = _get_run_logger()
@@ -1729,7 +1731,7 @@ async def _coordinate_sharded_extraction(
     if not ids:
         log.info(
             "extraction fan-out: no pending documents for user_id=%s — nothing "
-            "to do (no child runs, no indexing run)",
+            "to do (no child runs)",
             user_id,
         )
         return FanOutStats(shards_total=0)
@@ -1762,7 +1764,7 @@ async def memory_extract_etl_coordinator(
     document_ids: list[str] | None = None,
     num_shards: int = 1,
 ) -> FanOutStats:
-    """Resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once.
+    """Resolve → partition → dispatch ``memory-extract-etl-worker`` runs.
 
     The operator entrypoint for memory extraction (ADR-002 §3, amended #066). Resolves
     the user's pending documents when ``document_ids is None`` (an explicit list is used
@@ -1770,21 +1772,25 @@ async def memory_extract_etl_coordinator(
     ONE ``memory-extract-etl-worker`` run per shard via ``run_deployment`` under
     ``asyncio.gather(return_exceptions=True)``. Each worker dispatch carries only
     ``{user_id, document_ids}`` — there is NO ``num_shards`` child key (the worker has no
-    such param) and NO recursion (it dispatches a DISTINCT worker deployment). After the
-    gather settles, runs exactly ONE trailing ``memory_indexing`` subflow inline,
-    regardless of how many shards failed (a partial extraction is still indexed). One
+    such param) and NO recursion (it dispatches a DISTINCT worker deployment). One
     shard's failure is isolated and recorded in :class:`FanOutStats.failures`.
 
-    ``num_shards=1`` (the default) dispatches 1 worker run + 1 inline index — it is NOT a
+    Extraction ONLY: the Coordinator does not index. ``memory_indexing`` runs as
+    phase 3 of ``offline_pipeline``, once per target user, after every user's
+    extraction (ADR-007 Decision 5 — this superseded ADR-002 §3's trailing-index
+    rule). A partial extraction is still indexed, because the phase runs
+    regardless of how many shards failed.
+
+    ``num_shards=1`` (the default) dispatches 1 worker run — it is NOT a
     byte-identical in-process extraction (that is the worker, triggered directly). An
-    empty resolved/explicit doc set is a clean no-op: zero worker dispatch, zero index
-    run, ``FanOutStats(shards_total=0)``.
+    empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
+    ``FanOutStats(shards_total=0)``.
     """
 
     # Configure Opik in this flow-run process (idempotent; no-op without a key)
     # and own ONE trace for the whole coordinated run. The trace's distributed
-    # headers are forwarded to each worker + the trailing indexing subflow so the
-    # coordinator → workers → indexing chain renders as a SINGLE trace.
+    # headers are forwarded to each worker so the coordinator → workers chain
+    # renders as a SINGLE trace.
     configure_opik()
     try:
         with span(
@@ -1828,7 +1834,7 @@ async def memory_extract_etl_worker(
     This is PURE extraction: NO ``num_shards``, NO coordinator branch, NO
     ``run_deployment`` (no self-dispatch), NO ``memory_indexing`` call. It is the
     coordinator's internal dispatch target, but may also be triggered directly for a
-    bare extraction with no trailing index (e.g. debugging).
+    bare extraction with no indexing (e.g. debugging).
 
     Observability (#monitoring-fix): configures Opik at entry (Prefect runs flow
     runs in subprocesses where serve-time config never happened — without this
@@ -2175,7 +2181,7 @@ ensure_indexes_task = task(
 async def memory_indexing(
     user_id: PydanticObjectId,
     opik_trace_headers: dict[str, str] | None = None,
-) -> None:
+) -> int:
     """Backfill missing embeddings and ensure search indexes for ``user_id``.
 
     ``user_id`` is required and threaded through both tasks. ``embed_nodes``
@@ -2184,12 +2190,16 @@ async def memory_indexing(
     decision 4); ``ensure_indexes`` re-asserts the global compound indexes whose
     leading key is ``user_id``.
 
+    Returns the number of rows embedded — the count the flow already computes
+    for its final log line — so ``offline_pipeline``'s indexing phase can report
+    ``{"embedded": n}`` per user instead of an opaque ``None``.
+
     Observability: configures Opik at entry (subprocess-safe) and owns ONE
-    trace. ``opik_trace_headers`` is forwarded by the extraction coordinator so
-    the trailing indexing run nests under the SAME trace as the extraction; when
-    triggered standalone it is ``None`` and indexing starts its own trace. Both
-    tasks receive the run's distributed-trace headers so their spans nest under
-    this trace.
+    trace. ``opik_trace_headers`` is forwarded by the caller (``online_pipeline``
+    for its single-document run) so the indexing run nests under the SAME trace;
+    when triggered standalone it is ``None`` and indexing starts its own trace.
+    Both tasks receive the run's distributed-trace headers so their spans nest
+    under this trace.
     """
 
     configure_opik()
@@ -2229,6 +2239,7 @@ async def memory_indexing(
                 user_id,
                 count,
             )
+            return count
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
         flush_opik()

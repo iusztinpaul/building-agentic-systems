@@ -7,7 +7,7 @@ the PURE logic with no Prefect server and ``run_deployment`` mocked:
 
 * ``_partition_into_shards`` — contiguous, disjoint, balanced shard partitioning;
 * ``_resolve_num_shards`` — the non-positive→1 clamp;
-* ``_fan_out_extraction`` — the gather + failure-isolation + single-index core. Each
+* ``_fan_out_extraction`` — the gather + failure-isolation core. Each
   child dispatch targets the WORKER deployment and carries only
   ``{user_id, document_ids}`` (NO ``num_shards`` key — the worker has no such
   param), driven through a fake ``run_deployment`` so we never touch a real
@@ -17,43 +17,28 @@ Since #095 every fake returns a real ``FlowRun`` — the shape ``run_deployment`
 actually returns — because the fan-out now counts a shard as succeeded only when
 that run's terminal state is COMPLETED.
 
-Since ``free-tier-deployments`` indexing is NOT a deployment: the trailing step is
-an INLINE ``memory_indexing`` subflow, so it is patched at
-``tree.memory.pipeline.memory_indexing`` (the ``fake_indexing`` fixture) instead
-of being one more ``run_deployment`` name — the fan-out imports the flow inside
-the function (ADR-006 decision 8 put all three flows in ``tree.memory.pipeline``,
-which imports THIS module, so a module-level import would be a cycle). The invariant it
-guards is unchanged and still asserted everywhere below: index exactly ONCE,
-AFTER the gather, NEVER per-shard.
+Since ADR-007 Decision 5 the fan-out does NOT index: indexing is an **Offline
+phase** of ``offline_pipeline`` (covered in ``tests/unit/test_offline.py``), so
+nothing here patches ``memory_indexing`` and the index-ordering tests are gone.
+``test_the_coordinator_fan_out_no_longer_indexes`` guards the removal.
 """
 
 from __future__ import annotations
+
+import inspect
 
 import pytest
 from beanie import PydanticObjectId
 from prefect.client.schemas.objects import StateType
 
 from tests.prefect_doubles import completed_flow_run, flow_run_in_state
+from tree.memory.graph import sharding
 from tree.memory.graph.sharding import (
     FanOutStats,
     _fan_out_extraction,
     _partition_into_shards,
     _resolve_num_shards,
 )
-
-
-@pytest.fixture
-def fake_indexing(mocker):
-    """Stub the INLINE ``memory_indexing`` subflow the fan-out ends with.
-
-    Autouse-free on purpose: every fan-out test takes it explicitly, so a test
-    that forgets it would hit the real flow (and Mongo) loudly rather than
-    silently skipping the index step.
-    """
-
-    return mocker.patch(
-        "tree.memory.pipeline.memory_indexing", new_callable=mocker.AsyncMock
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,10 +164,8 @@ def test_clamped_nonpositive_shards_into_one_shard_with_all_ids(bad) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_fan_out_issues_one_run_per_shard_then_single_index(
-    mocker, fake_indexing
-) -> None:
-    """Each shard fans out one worker run; exactly one INLINE index call follows."""
+async def test_fan_out_issues_one_run_per_shard(mocker) -> None:
+    """Each shard fans out exactly one worker run — and nothing else."""
 
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(6)]
@@ -200,11 +183,9 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(
         user_id=user_id, shards=shards, run_deployment=runner
     )
 
-    # One worker dispatch per shard; exactly one indexing call — and indexing is
-    # never a dispatch any more.
+    # One worker dispatch per shard, and every dispatch is a worker.
     assert len(calls) == len(shards)
     assert all("worker" in name for name, _p in calls)
-    fake_indexing.assert_awaited_once()
 
     # Report accounting.
     assert stats.shards_total == len(shards)
@@ -213,7 +194,7 @@ async def test_fan_out_issues_one_run_per_shard_then_single_index(
     assert stats.failures == {}
 
 
-async def test_fan_out_dispatches_the_worker_deployment(mocker, fake_indexing) -> None:
+async def test_fan_out_dispatches_the_worker_deployment(mocker) -> None:
     """Every shard dispatch targets the WORKER deployment (no recursion/self).
 
     The dispatched name contains ``worker`` and NOT ``coordinator`` — the #067
@@ -239,9 +220,7 @@ async def test_fan_out_dispatches_the_worker_deployment(mocker, fake_indexing) -
     assert all("coordinator" not in name for name in dispatch_names)
 
 
-async def test_fan_out_extraction_passes_user_and_shard_ids(
-    mocker, fake_indexing
-) -> None:
+async def test_fan_out_extraction_passes_user_and_shard_ids(mocker) -> None:
     """Each worker run carries str(user_id) + its shard's document_ids."""
 
     user_id = PydanticObjectId()
@@ -265,7 +244,7 @@ async def test_fan_out_extraction_passes_user_and_shard_ids(
     assert flat == ids
 
 
-async def test_fan_out_children_carry_no_num_shards_key(mocker, fake_indexing) -> None:
+async def test_fan_out_children_carry_no_num_shards_key(mocker) -> None:
     """Every worker dispatch carries ONLY ``{user_id, document_ids}``.
 
     The worker has no ``num_shards`` param — passing one would be a Prefect
@@ -293,25 +272,8 @@ async def test_fan_out_children_carry_no_num_shards_key(mocker, fake_indexing) -
     assert all(set(p) == {"user_id", "document_ids"} for p in worker_params)
 
 
-async def test_fan_out_indexing_carries_user_id_only(mocker, fake_indexing) -> None:
-    """The single inline index call is scoped to the user, with NO document_ids.
-
-    The typed flow call takes the ``PydanticObjectId`` itself — no stringification,
-    which only ever existed for the deployment's JSON parameter payload.
-    """
-
-    user_id = PydanticObjectId()
-    shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(4)], 4)
-
-    runner = mocker.AsyncMock(side_effect=lambda *a, **kw: completed_flow_run())
-
-    await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
-
-    fake_indexing.assert_awaited_once_with(user_id=user_id, opik_trace_headers=None)
-
-
-async def test_fan_out_isolates_one_shard_failure(mocker, fake_indexing) -> None:
-    """One shard raising does not abort the batch; the index call STILL happens."""
+async def test_fan_out_isolates_one_shard_failure(mocker) -> None:
+    """One shard raising does not abort the batch; the others still complete."""
 
     user_id = PydanticObjectId()
     ids = [str(PydanticObjectId()) for _ in range(8)]
@@ -344,9 +306,6 @@ async def test_fan_out_isolates_one_shard_failure(mocker, fake_indexing) -> None
     assert len(stats.failures) == 1
     assert "shard blew up" in next(iter(stats.failures.values()))
 
-    # The single indexing call still happens AFTER the gather.
-    fake_indexing.assert_awaited_once()
-
 
 class TestNonCompletedWorkerRuns:
     """A worker that hard-FAILS is counted as failed, never as succeeded (#095).
@@ -363,7 +322,7 @@ class TestNonCompletedWorkerRuns:
         ids=["Failed", "Crashed", "Cancelled"],
     )
     async def test_terminal_non_completed_state_counts_as_failed(
-        self, mocker, fake_indexing, state_type: StateType
+        self, mocker, state_type: StateType
     ) -> None:
         user_id = PydanticObjectId()
         shards = _partition_into_shards([str(PydanticObjectId())], 1)
@@ -382,10 +341,10 @@ class TestNonCompletedWorkerRuns:
         assert stats.failed == 1
         assert "worker exploded" in stats.failures["0"]
 
-    async def test_index_run_still_fires_after_a_failed_worker_state(
-        self, mocker, fake_indexing
+    async def test_a_failed_worker_state_does_not_abort_the_other_shards(
+        self, mocker
     ) -> None:
-        """A state-failed shard is a PARTIAL extraction — still indexed, as before."""
+        """A state-failed shard is isolated: its siblings still count as succeeded."""
 
         user_id = PydanticObjectId()
         ids = [str(PydanticObjectId()) for _ in range(2)]
@@ -405,11 +364,10 @@ class TestNonCompletedWorkerRuns:
 
         assert stats.succeeded == 1
         assert stats.failed == 1
-        fake_indexing.assert_awaited_once()
 
 
-async def test_fan_out_no_shards_is_noop(mocker, fake_indexing) -> None:
-    """Zero shards ⇒ no dispatches, NO indexing call, and a zero report."""
+async def test_fan_out_no_shards_is_noop(mocker) -> None:
+    """Zero shards ⇒ no dispatches and a zero report."""
 
     runner = mocker.AsyncMock()
 
@@ -418,40 +376,24 @@ async def test_fan_out_no_shards_is_noop(mocker, fake_indexing) -> None:
     )
 
     runner.assert_not_called()
-    fake_indexing.assert_not_awaited()
     assert stats == FanOutStats(shards_total=0)
     assert stats.succeeded == 0
     assert stats.failed == 0
 
 
-async def test_fan_out_all_worker_runs_precede_the_index_run(
-    mocker, fake_indexing
-) -> None:
-    """Call ORDER: every worker run is issued before the ONE indexing call.
+def test_the_coordinator_fan_out_no_longer_indexes() -> None:
+    """The Coordinator does ONE thing: indexing left the module entirely.
 
-    The load-bearing invariant: index exactly once, AFTER the gather, never
-    per-shard. Both the dispatches and the inline indexing call record into one
-    ordered list so the sequence itself is asserted, not just the counts.
+    ADR-007 Decision 5 moved ``memory_indexing`` into ``offline_pipeline``'s
+    third **Offline phase**, superseding ADR-002 §3's trailing-index rule. A
+    re-added inline index would be invisible to the behavioural tests above
+    (they mock ``run_deployment`` only), so the module source is the assertion.
     """
 
-    user_id = PydanticObjectId()
-    shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(5)], 4)
+    source = inspect.getsource(sharding)
 
-    order: list[str] = []
-
-    async def _fake_run_deployment(name, parameters=None, **kwargs):
-        order.append("worker")
-        return completed_flow_run()
-
-    runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
-    fake_indexing.side_effect = lambda **kwargs: order.append("index")
-
-    await _fan_out_extraction(user_id=user_id, shards=shards, run_deployment=runner)
-
-    # All worker runs come first, exactly one index last.
-    assert order.count("index") == 1
-    assert order[-1] == "index"
-    assert order[:-1] == ["worker"] * len(shards)
+    assert "memory_indexing" not in source
+    assert "TAGS_INDEXING" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -459,11 +401,9 @@ async def test_fan_out_all_worker_runs_precede_the_index_run(
 # ---------------------------------------------------------------------------
 
 
-async def test_fan_out_forwards_trace_headers_to_workers_and_index(
-    mocker, fake_indexing
-) -> None:
+async def test_fan_out_forwards_trace_headers_to_workers(mocker) -> None:
     """When the coordinator owns a trace, its headers are forwarded to every
-    worker AND the inline indexing subflow, so the whole run is ONE Opik trace."""
+    worker, so coordinator + workers render as ONE Opik trace."""
 
     user_id = PydanticObjectId()
     shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(6)], 3)
@@ -492,14 +432,10 @@ async def test_fan_out_forwards_trace_headers_to_workers_and_index(
         for p in worker_params
     )
 
-    fake_indexing.assert_awaited_once_with(user_id=user_id, opik_trace_headers=headers)
 
-
-async def test_fan_out_omits_headers_when_none(mocker, fake_indexing) -> None:
+async def test_fan_out_omits_headers_when_none(mocker) -> None:
     """No active trace (Opik off) ⇒ no ``opik_trace_headers`` key on any DISPATCH,
-    so worker flow-run parameter validation stays exactly as before. The inline
-    indexing call takes ``None`` as a plain keyword — its own default, meaning
-    "start your own trace"; there is no parameter payload to keep clean."""
+    so worker flow-run parameter validation stays exactly as before."""
 
     user_id = PydanticObjectId()
     shards = _partition_into_shards([str(PydanticObjectId()) for _ in range(4)], 2)
@@ -520,4 +456,3 @@ async def test_fan_out_omits_headers_when_none(mocker, fake_indexing) -> None:
     )
 
     assert all("opik_trace_headers" not in p for _name, p in calls)
-    fake_indexing.assert_awaited_once_with(user_id=user_id, opik_trace_headers=None)

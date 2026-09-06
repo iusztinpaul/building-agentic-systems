@@ -134,14 +134,14 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, 
   user, on its own cron — `dream.cron`, `0 4 * * *` UTC)
 
 The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) and the
-indexing step (`memory_indexing` — reverse edges, embeddings, search indexes) are still FLOWS, but
+indexing step (`memory_indexing` — embeddings backfill, search indexes) are still FLOWS, but
 they are no longer Deployments: each runs as an **inline subflow**. The Coordinators run inside an
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
-`memory_indexing` runs inside whichever flow just extracted (the extraction Coordinator, or
-`online-pipeline`). Standalone indexing
-(`make memory-run-indexing-pipeline`) now executes in the operator's own process. Manual
-single-step runs go through `make memory-run-data-pipeline` / `make memory-run-memory-pipeline`,
-which dispatch `offline-pipeline` with the other phase off.
+`memory_indexing` runs as that same run's third **Offline phase** — once per target user, after
+every user's extraction (ADR-007) — or inline inside `online-pipeline` for a single document.
+Every manual single-step run is the same `offline-pipeline` deployment with the other phases off
+(`make memory-run-data-pipeline` / `make memory-run-memory-pipeline` /
+`make memory-run-indexing-pipeline`); no script runs a flow in the operator's own process.
 
 Both end-to-end pipelines carry BOTH identity tags, so they belong to BOTH the `data` and `memory`
 deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-down GROUPS=data`)
@@ -154,15 +154,15 @@ when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — s
 
 ### Pipelines at a glance
 
-Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand):
+Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand). Offline, each row below is ONE `offline-pipeline` run with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing`):
 
 | stage | offline | online |
 |---|---|---|
-| **data** → `documents` | `run-data-pipeline` | `run-data-pipeline MODE=online SOURCE=…` |
-| **memory** → `memory` rows (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
-| **index** (shared, standalone) | `run-indexing-pipeline` | `run-indexing-pipeline` |
+| **data** → `documents` | `run-data-pipeline` (phase: `data`) | `run-data-pipeline MODE=online SOURCE=…` |
+| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **index** (shared, standalone) | `run-indexing-pipeline` (phase: `index`) | `run-indexing-pipeline` |
 
-**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; the memory pipeline fires the trailing index, so memory is queryable when it returns:
+**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; offline that is all three phases in a row, so memory is queryable when it returns:
 
 ```bash
 # Offline: every configured source -> documents -> memory collection (+ index)
@@ -174,7 +174,7 @@ make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agenti
 make memory-run-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-`run-pipeline MODE=online` ingests the source and runs extraction inline in the SAME flow run, then submits the trailing indexing run (a duplicate source skips extraction). The sections below break each step out for running them individually.
+`run-pipeline MODE=online` ingests the source and runs extraction inline in the SAME flow run, then indexes that document inline (a duplicate source skips extraction). The sections below break each step out for running them individually.
 
 ### Data pipelines
 
@@ -190,7 +190,7 @@ make memory-run-data-pipeline URI="https://blog.com/feed=substack_rss https://ne
 make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
-Dispatches ONE `offline-pipeline` run with `run_extraction=False` (data phase only). Inside it, the data **Coordinator** runs as an inline subflow: it resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
+Dispatches ONE `offline-pipeline` run with `run_extraction=False, run_indexing=False` (data phase only). Inside it, the data **Coordinator** runs as an inline subflow: it resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No extraction, no indexing — those phases are off. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
 
 Source selection is freely combinable (ADR-003):
 
@@ -223,9 +223,10 @@ on [`memory.mode`](#memory-modes):
    → first-person + supersession → `resolve-entities` → `embed-entities` → `dedupe-entities` →
    `apply-writes`.
 
-Both run modes below are dispatched as ONE `offline-pipeline` run with `run_data=False` (memory
-phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the
-pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
+Both run modes below are dispatched as ONE `offline-pipeline` run with `run_data=False` (the two
+memory phases only); inside it the extraction **Coordinator** runs as an inline subflow that shards
+the pending documents across `memory-extract-etl-worker` runs, and the indexing phase then runs
+once for the user as a sibling subflow:
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
@@ -238,10 +239,12 @@ make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
 
 ### Memory indexing
 
-The single indexing step (`memory-indexing-etl`) — works in both memory modes. `embed-kg-nodes`
-backfills the vectors that are missing on the rows that are supposed to carry one (child chunks
-always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index and the vector
-index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on `memory`:
+The indexing **Offline phase** (`memory-indexing-etl`) — works in both memory modes.
+`embed-kg-nodes` backfills the vectors that are missing on the rows that are supposed to carry one
+(child chunks always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index
+and the vector index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on
+`memory`. Running it alone dispatches ONE `offline-pipeline` run with `run_data=False,
+run_extraction=False` — so it needs served workflows, like every other pipeline command:
 
 ```bash
 make memory-run-indexing-pipeline

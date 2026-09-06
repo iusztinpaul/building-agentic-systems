@@ -208,7 +208,7 @@ async def data_etl_worker(
     with unknown-id ``ValueError``, web via ``ingest_web_url_batch`` (last)). A variant
     absent from the shard is skipped. This is PURE ingestion: NO partitioning, NO
     ``run_deployment``,
-    NO coordination, NO trailing index.
+    NO coordination, NO indexing (the data pipeline never indexes).
 
     ``sources`` arrives serialized (``list[dict]``) when dispatched by the
     coordinator (Prefect JSON-serializes flow-run parameters); already-typed
@@ -427,7 +427,7 @@ async def _fan_out_data(
         stats.succeeded += 1
 
     log.info(
-        "data fan-out: shards_total=%d succeeded=%d failed=%d (NO trailing index)",
+        "data fan-out: shards_total=%d succeeded=%d failed=%d (NO indexing)",
         stats.shards_total,
         stats.succeeded,
         stats.failed,

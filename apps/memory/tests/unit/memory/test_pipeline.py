@@ -1523,6 +1523,61 @@ class TestRequiredUserIdSignature:
 
 
 # ---------------------------------------------------------------------------
+# Indexing flow — the embedded-row count it reports back (ADR-007 Decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexingFlowReturnsEmbeddedCount:
+    """``memory_indexing`` returns ``embed_nodes``' count so a caller can report it.
+
+    Phase 3 of ``offline_pipeline`` puts the number in its result
+    (``{"embedded": n}``); the flow already computed it for its log line, so
+    returning it is the whole contract here. Both tasks + the Mongo/index
+    boundaries are mocked — this is about the return value, not about indexing.
+    """
+
+    async def test_returns_the_embed_nodes_count(self, mocker) -> None:
+        # Arrange — every external boundary of the flow body is stubbed.
+        mocker.patch.object(pipeline, "init_mongodb", new_callable=AsyncMock)
+        embed = mocker.patch.object(
+            pipeline, "embed_nodes_task", new_callable=AsyncMock, return_value=42
+        )
+        ensure = mocker.patch.object(
+            pipeline, "ensure_indexes_task", new_callable=AsyncMock
+        )
+        mocker.patch.object(
+            pipeline,
+            "assert_settings_match_live_vector_index",
+            new_callable=AsyncMock,
+        )
+        user_id = PydanticObjectId()
+
+        embedded = await pipeline.memory_indexing.fn(user_id=user_id)
+
+        assert embedded == 42
+        assert embed.await_args.args[2] == user_id
+        ensure.assert_awaited_once()
+
+    async def test_returns_zero_when_nothing_needed_embedding(self, mocker) -> None:
+        mocker.patch.object(pipeline, "init_mongodb", new_callable=AsyncMock)
+        mocker.patch.object(
+            pipeline, "embed_nodes_task", new_callable=AsyncMock, return_value=0
+        )
+        mocker.patch.object(pipeline, "ensure_indexes_task", new_callable=AsyncMock)
+        mocker.patch.object(
+            pipeline,
+            "assert_settings_match_live_vector_index",
+            new_callable=AsyncMock,
+        )
+
+        # A no-op backfill still reports a number, never ``None`` — the phase
+        # result reads ``{"embedded": 0}``, not a missing key.
+        embedded = await pipeline.memory_indexing.fn(user_id=PydanticObjectId())
+
+        assert embedded == 0
+
+
+# ---------------------------------------------------------------------------
 # #042 — node-text embeddable-text selection + reuse plumbing
 # ---------------------------------------------------------------------------
 

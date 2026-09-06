@@ -2,7 +2,7 @@
 (#067, ADR-002 §3 as amended #066).
 
 The coordinator flow ``memory-extract-etl-coordinator`` consumes these helpers to
-resolve → partition → dispatch ``memory-extract-etl-worker`` runs → index once (see
+resolve → partition → dispatch ``memory-extract-etl-worker`` runs (see
 :func:`tree.memory.pipeline.memory_extract_etl_coordinator`). This module
 holds the reusable PURE helpers — there is NO Prefect ``@flow`` and NO deployment
 here.
@@ -30,13 +30,12 @@ The fan-out axis is document-shards of ONE user. Topology (coordinator path):
    coordinator dispatches a DISTINCT worker deployment — there is NO recursion and
    each child carries only ``{user_id, document_ids}`` (the worker has no
    ``num_shards`` param).
-4. **Index ONCE.** After the gather, run the ``memory_indexing`` flow ONCE for the
-   user as an INLINE SUBFLOW — NEVER per-shard (indexing is a global backfill over
-   unembedded nodes; per-shard would race writers). Since
-   ``free-tier-deployments`` indexing is no longer a deployment: the previous
-   ``run_deployment`` call carried no ``timeout=0`` and so already blocked until
-   indexing finished, so running it inline changes no wall-clock semantics — it
-   just stops spending a second admission slot (and a free-tier deployment slot).
+
+The topology STOPS at the gather: there is NO indexing here. Indexing is its own
+**Offline phase** (``run_indexing``), run once per target user by
+:func:`tree.offline.offline_pipeline` after every user's extraction — ADR-007
+Decision 5, which superseded ADR-002 §3's rule of indexing ONCE right after the
+shards. The Coordinator does one thing.
 
 Per ``CLAUDE.md`` the Prefect ``@flow`` wiring is covered by integration tests;
 the pure decision logic here is unit-tested directly with ``run_deployment``
@@ -51,11 +50,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import get_run_logger, tags
+from prefect import get_run_logger
 
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.documents import Document
-from tree.config.constants import TAGS_INDEXING
 
 # The balanced-contiguous partitioning math now lives in the neutral, pipeline-
 # agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
@@ -179,12 +177,11 @@ async def _fan_out_extraction(
     run_deployment: Any,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
-    """Fan one worker dispatch out per shard, isolate failures, index ONCE.
+    """Fan one worker dispatch out per shard and isolate per-shard failures.
 
     Pure coordination core (no DB, no partitioning) so the gather /
-    failure-isolation / single-index contract is unit-testable directly.
-    ``run_deployment`` is injected (the Prefect entrypoint in the flow; a fake in
-    tests).
+    failure-isolation contract is unit-testable directly. ``run_deployment`` is
+    injected (the Prefect entrypoint in the flow; a fake in tests).
 
     * One ``memory-extract-etl-worker`` run per shard under
       ``asyncio.gather(return_exceptions=True)``, each carrying only
@@ -196,20 +193,14 @@ async def _fan_out_extraction(
       COMPLETED (``_shard_failure_reason``, #095) — ``run_deployment`` RETURNS a
       Failed / Crashed / Cancelled run instead of raising, and counting that as a
       success made the summary read green while extraction output was missing.
-    * After the gather, :func:`~tree.memory.pipeline.memory_indexing` runs
-      ONCE for the user as an INLINE SUBFLOW — never per-shard (indexing is a
-      global backfill; per-shard would race writers). It runs regardless of how
-      many shards failed, so a partial extraction is still indexed. Indexing is
-      NOT injected like ``run_deployment``: it is a plain in-process call, so
-      tests patch ``tree.memory.pipeline.memory_indexing``.
+    * NOTHING follows the gather: indexing is an **Offline phase** of
+      ``offline_pipeline`` (ADR-007 Decision 5), not the Coordinator's job.
 
     ``opik_trace_headers`` (the coordinator's distributed-trace headers) is
-    forwarded to every worker AND to the indexing subflow, so the whole
-    coordinated run renders as ONE Opik trace across the process hops that
-    ``run_deployment`` introduces. Workers get it as a flow PARAMETER and only
-    when set — ``None`` is omitted from the parameter dict so flow-run parameter
-    validation is untouched; the inline indexing call takes it as a plain keyword
-    (``None`` is its own default, meaning "start your own trace").
+    forwarded to every worker, so the coordinated run renders as ONE Opik trace
+    across the process hops that ``run_deployment`` introduces. Workers get it as
+    a flow PARAMETER and only when set — ``None`` is omitted from the parameter
+    dict so flow-run parameter validation is untouched.
     """
 
     log = _get_run_logger()
@@ -258,18 +249,5 @@ async def _fan_out_extraction(
         stats.succeeded,
         stats.failed,
     )
-
-    # Index ONCE after every shard's extraction has settled — never per-shard.
-    #
-    # Imported HERE, not at module scope: ``tree.memory.pipeline`` imports this
-    # module for the fan-out helpers, so a top-level import would be a cycle
-    # (ADR-006 decision 8 put all three flows in one module). Function-scope
-    # import also means tests patch the flow at
-    # ``tree.memory.pipeline.memory_indexing`` and this call sees the patch.
-    from tree.memory.pipeline import memory_indexing  # noqa: PLC0415
-
-    log.info("extraction fan-out: running single memory_indexing subflow inline")
-    with tags(*TAGS_INDEXING):
-        await memory_indexing(user_id=user_id, opik_trace_headers=opik_trace_headers)
 
     return stats

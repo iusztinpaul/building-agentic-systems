@@ -1,22 +1,25 @@
 """Unit tests for ``tree.offline`` — the offline end-to-end glue flow.
 
-``offline_pipeline`` composes the two coordinators (data as inline subflow, then one
-extraction coordinator per target user) without re-implementing either; these
-tests pin that composition contract: pass-through of source selectors, the
-per-user extraction fan-out, and per-user failure isolation. The coordinators
-themselves are covered in their own suites.
+``offline_pipeline`` composes the **Offline phase**s (data coordinator, then one
+extraction coordinator per target user, then one ``memory_indexing`` subflow per
+target user) without re-implementing any of them; these tests pin that
+composition contract: pass-through of source selectors, the per-user fan-out of
+each phase, the sequential phase blocks (every user extracted BEFORE any user is
+indexed), and per-user failure isolation. The phase bodies themselves are covered
+in their own suites.
 
-They also pin the #098 single-step surface — the ``run_data`` / ``run_extraction``
-phase flags that let the step CLIs funnel through this ONE flow, the
-``document_ids`` narrowing forwarded to every per-user extraction call, and the
-single-tenant guard that fires at BOTH edges (flow and fire-and-forget
-dispatcher).
+They also pin the single-step surface — the ``run_data`` / ``run_extraction`` /
+``run_indexing`` phase flags (#098, extended by ADR-007 Decision 5) that let the
+step CLIs funnel through this ONE flow, the ``document_ids`` narrowing forwarded
+to every per-user extraction call, and the single-tenant guard that fires at BOTH
+edges (flow and fire-and-forget dispatcher).
 """
 
+import inspect
 import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
@@ -37,7 +40,15 @@ class _FakeStats:
     failures: dict = field(default_factory=dict)
 
 
-def _patch_coordinators(mocker) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
+# The embedded-row count a stubbed ``memory_indexing`` phase reports back.
+_EMBEDDED = 7
+
+
+def _patch_coordinators(
+    mocker,
+) -> tuple[AsyncMock, AsyncMock, AsyncMock, AsyncMock]:
+    """Stub every phase body + user resolution: ``(data, extract, index, users)``."""
+
     data = mocker.patch(
         "tree.offline.data_etl_coordinator",
         new_callable=AsyncMock,
@@ -48,12 +59,17 @@ def _patch_coordinators(mocker) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
         new_callable=AsyncMock,
         return_value=_FakeStats(),
     )
+    index = mocker.patch(
+        "tree.offline.memory_indexing",
+        new_callable=AsyncMock,
+        return_value=_EMBEDDED,
+    )
     users = mocker.patch(
         "tree.offline.resolve_target_user_ids",
         new_callable=AsyncMock,
         return_value=[_USER_ID],
     )
-    return data, extract, users
+    return data, extract, index, users
 
 
 def _flow_run(
@@ -66,7 +82,7 @@ def _flow_run(
 
 class TestEtlOffline:
     async def test_passes_selectors_through_and_chains_extraction(self, mocker) -> None:
-        data, extract, _ = _patch_coordinators(mocker)
+        data, extract, _index, _users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(
             user_id=_USER_ID,
@@ -86,7 +102,7 @@ class TestEtlOffline:
         assert result["extraction"][str(_USER_ID)]["succeeded"] == 1
 
     async def test_all_users_mode_extracts_per_active_user(self, mocker) -> None:
-        _, extract, users = _patch_coordinators(mocker)
+        _data, extract, _index, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
 
         result = await offline_pipeline(user_id=None)
@@ -98,7 +114,7 @@ class TestEtlOffline:
         assert set(result["extraction"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
 
     async def test_one_users_extraction_failure_is_isolated(self, mocker) -> None:
-        _, extract, users = _patch_coordinators(mocker)
+        _data, extract, _index, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         extract.side_effect = [RuntimeError("llm down"), _FakeStats()]
 
@@ -112,12 +128,12 @@ class TestEtlOffline:
 
 
 class TestOfflinePipelinePhaseFlags:
-    """The #098 single-step surface: either phase can be turned off."""
+    """The single-step surface: ANY of the three phases can be turned off."""
 
     async def test_run_data_false_skips_ingestion_and_still_extracts(
         self, mocker
     ) -> None:
-        data, extract, _ = _patch_coordinators(mocker)
+        data, extract, _index, _users = _patch_coordinators(mocker)
 
         result = await offline_pipeline(user_id=_USER_ID, run_data=False)
 
@@ -127,37 +143,45 @@ class TestOfflinePipelinePhaseFlags:
         extract.assert_awaited_once_with(_USER_ID, document_ids=None, num_shards=1)
         assert result["data"] is None
 
-    async def test_run_extraction_false_skips_user_resolution_and_extraction(
+    async def test_data_only_run_skips_user_resolution_extraction_and_indexing(
         self, mocker
     ) -> None:
-        data, extract, users = _patch_coordinators(mocker)
+        data, extract, index, users = _patch_coordinators(mocker)
 
-        result = await offline_pipeline(user_id=_USER_ID, run_extraction=False)
+        result = await offline_pipeline(
+            user_id=_USER_ID, run_extraction=False, run_indexing=False
+        )
 
-        # Target-user resolution is part of the memory phase, so it is skipped
-        # too — a data-only run must not touch the users collection.
+        # Target-user resolution belongs to the per-user phases, so a data-only
+        # run must not touch the users collection — nor index anything.
         data.assert_awaited_once_with(user_id=_USER_ID, source_files=None, sources=None)
         users.assert_not_awaited()
         extract.assert_not_awaited()
+        index.assert_not_awaited()
         assert result["extraction"] == {}
+        assert result["indexing"] == {}
 
-    async def test_both_phases_disabled_is_a_logged_no_op(self, mocker, caplog) -> None:
-        data, extract, users = _patch_coordinators(mocker)
+    async def test_all_phases_disabled_is_a_logged_no_op(self, mocker, caplog) -> None:
+        data, extract, index, users = _patch_coordinators(mocker)
 
         with caplog.at_level(logging.INFO, logger="tree.offline"):
             result = await offline_pipeline(
-                user_id=_USER_ID, run_data=False, run_extraction=False
+                user_id=_USER_ID,
+                run_data=False,
+                run_extraction=False,
+                run_indexing=False,
             )
 
         # A misconfigured caller gets a Completed run it can read, not a crash.
-        assert result == {"data": None, "extraction": {}}
+        assert result == {"data": None, "extraction": {}, "indexing": {}}
         data.assert_not_awaited()
         users.assert_not_awaited()
         extract.assert_not_awaited()
+        index.assert_not_awaited()
         no_op_logs = [
             record
             for record in caplog.records
-            if "both phases disabled" in record.getMessage()
+            if "all phases disabled" in record.getMessage()
         ]
         assert len(no_op_logs) == 1
         assert no_op_logs[0].levelno == logging.INFO
@@ -165,7 +189,7 @@ class TestOfflinePipelinePhaseFlags:
     async def test_document_ids_are_forwarded_to_every_extraction_call(
         self, mocker
     ) -> None:
-        _, extract, _ = _patch_coordinators(mocker)
+        _data, extract, _index, _users = _patch_coordinators(mocker)
 
         await offline_pipeline(
             user_id=_USER_ID, document_ids=[_DOC_ID], num_shards=2, run_data=False
@@ -176,7 +200,7 @@ class TestOfflinePipelinePhaseFlags:
         extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=2)
 
     async def test_document_ids_without_user_id_is_rejected(self, mocker) -> None:
-        data, extract, _ = _patch_coordinators(mocker)
+        data, extract, _index, _users = _patch_coordinators(mocker)
 
         with pytest.raises(ValueError, match="document_ids is single-tenant"):
             await offline_pipeline(user_id=None, document_ids=[_DOC_ID])
@@ -184,6 +208,106 @@ class TestOfflinePipelinePhaseFlags:
         # Guarded at the edge — no phase runs against the wrong tenant.
         data.assert_not_awaited()
         extract.assert_not_awaited()
+
+
+class TestOfflineIndexingPhase:
+    """Phase 3: indexing is its own **Offline phase**, not the Coordinator's job.
+
+    ADR-007 Decision 5 moved ``memory_indexing`` out of ``_fan_out_extraction``
+    into ``offline_pipeline``, so these pin what the fan-out tests used to: the
+    flow runs ONE indexing subflow per target user, AFTER every extraction, and
+    isolates a per-user failure.
+    """
+
+    async def test_indexes_the_target_user_once_after_extraction(self, mocker) -> None:
+        _data, extract, index, _users = _patch_coordinators(mocker)
+        manager = MagicMock()
+        manager.attach_mock(extract, "extract")
+        manager.attach_mock(index, "index")
+
+        result = await offline_pipeline(user_id=_USER_ID)
+
+        # Exactly one indexing subflow for the tenant, and it reports the
+        # embedded-row count the flow returned.
+        index.assert_awaited_once_with(user_id=_USER_ID)
+        assert result["indexing"][str(_USER_ID)] == {"embedded": _EMBEDDED}
+        # Ordering is the load-bearing part: extraction first, then indexing.
+        assert [call[0] for call in manager.mock_calls] == ["extract", "index"]
+
+    async def test_all_users_mode_indexes_every_user_after_all_extractions(
+        self, mocker
+    ) -> None:
+        _data, extract, index, users = _patch_coordinators(mocker)
+        users.return_value = [_USER_ID, _OTHER_USER_ID]
+        manager = MagicMock()
+        manager.attach_mock(extract, "extract")
+        manager.attach_mock(index, "index")
+
+        result = await offline_pipeline(user_id=None)
+
+        # Phases are sequential BLOCKS: every user is extracted before any user
+        # is indexed (not extract→index interleaved per user).
+        assert [call[0] for call in manager.mock_calls] == [
+            "extract",
+            "extract",
+            "index",
+            "index",
+        ]
+        assert [call.kwargs["user_id"] for call in index.await_args_list] == [
+            _USER_ID,
+            _OTHER_USER_ID,
+        ]
+        assert set(result["indexing"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
+
+    async def test_run_indexing_false_never_indexes(self, mocker) -> None:
+        _data, extract, index, _users = _patch_coordinators(mocker)
+
+        result = await offline_pipeline(user_id=_USER_ID, run_indexing=False)
+
+        # An extraction-only run (``run-memory-pipeline`` with the phase off)
+        # leaves the embeddings backfill for a later run.
+        extract.assert_awaited_once()
+        index.assert_not_awaited()
+        assert result["indexing"] == {}
+
+    async def test_indexing_only_run_still_resolves_target_users(self, mocker) -> None:
+        data, extract, index, users = _patch_coordinators(mocker)
+
+        result = await offline_pipeline(
+            user_id=_USER_ID, run_data=False, run_extraction=False
+        )
+
+        # The ``run-indexing-pipeline`` shape: no data, no extraction, but the
+        # per-user phase still needs its target users resolved.
+        data.assert_not_awaited()
+        extract.assert_not_awaited()
+        users.assert_awaited_once_with(_USER_ID)
+        index.assert_awaited_once_with(user_id=_USER_ID)
+        assert result["indexing"][str(_USER_ID)] == {"embedded": _EMBEDDED}
+
+    async def test_one_users_indexing_failure_is_isolated(self, mocker) -> None:
+        _data, _extract, index, users = _patch_coordinators(mocker)
+        users.return_value = [_USER_ID, _OTHER_USER_ID]
+        index.side_effect = [RuntimeError("boom"), _EMBEDDED]
+
+        result = await offline_pipeline(user_id=None)
+
+        # Same convention as the extraction phase: one tenant's blown index
+        # (e.g. mongot down for its namespace) never sinks the nightly run.
+        assert index.await_count == 2
+        assert result["indexing"][str(_USER_ID)] == {"error": "boom"}
+        assert result["indexing"][str(_OTHER_USER_ID)] == {"embedded": _EMBEDDED}
+
+    def test_run_indexing_sits_between_run_extraction_and_document_ids(self) -> None:
+        """Parameter ORDER is the contract: phases read as 1 → 2 → 3."""
+
+        names = list(inspect.signature(offline_pipeline).parameters)
+        assert names.index("run_extraction") + 1 == names.index("run_indexing")
+        assert names.index("run_indexing") + 1 == names.index("document_ids")
+        assert (
+            inspect.signature(offline_pipeline).parameters["run_indexing"].default
+            is True
+        )
 
 
 class TestDispatchOfflineIngest:
@@ -219,6 +343,7 @@ class TestDispatchOfflineIngest:
             "num_shards": 2,
             "run_data": True,
             "run_extraction": True,
+            "run_indexing": True,
             "document_ids": None,
         }
         mock_flow.assert_not_awaited()
@@ -267,6 +392,7 @@ class TestDispatchOfflineIngest:
             user_id=_USER_ID,
             run_data=False,
             run_extraction=True,
+            run_indexing=False,
             document_ids=[_DOC_ID],
         )
 
@@ -275,6 +401,7 @@ class TestDispatchOfflineIngest:
         parameters = mock_run.await_args.kwargs["parameters"]
         assert parameters["run_data"] is False
         assert parameters["run_extraction"] is True
+        assert parameters["run_indexing"] is False
         assert parameters["document_ids"] == [_DOC_ID]
 
     async def test_document_ids_without_user_id_never_creates_a_flow_run(
