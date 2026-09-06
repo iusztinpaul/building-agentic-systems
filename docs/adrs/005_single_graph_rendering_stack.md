@@ -1,6 +1,6 @@
 # ADR-005: Single Browser-Side Graph Rendering Stack
 
-- **Status:** Accepted
+- **Status:** Accepted — Decision 3's module paths amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (renderer in `tree.memory.visualize.graph`, dual-delivery helper in `tree.mcp.viz_app`); the single-renderer decision stands and now also draws the Embedding map
 - **Date:** 2026-08-26
 - **Deciders:** Paul (project owner)
 - **Context references:**

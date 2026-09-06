@@ -1,6 +1,6 @@
 # ADR-006: Modular Memory — Vanilla RAG Mode and GraphRAG Mode over One `memory` Collection
 
-- **Status:** Accepted
+- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes)
 - **Date:** 2026-09-05
 - **Deciders:** Paul (project owner)
 - **Context references:**
