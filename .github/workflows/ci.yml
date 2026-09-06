@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  # No `branches:` filter on `pull_request`: that filter matches the PR's BASE
+  # ref, so scoping it to `main` skipped CI entirely for stacked PRs (e.g. #42,
+  # based on `feat/rag-graphrag-modes` — 0 check-runs across three pushes).
+  # Unfiltered, every PR gets CI regardless of base; CD stays safe because it
+  # only fires on `workflow_run.event == 'push'` + `branches: [main]`.
+  pull_request: {}
 
 # Keep only the latest run per branch/PR: a new push cancels any in-progress run
 # for the same ref so we never burn runners on superseded commits.
