@@ -298,3 +298,9 @@ parent row cluster_id=None, viz=None -> ALLOWED (as expected)
 **VERDICT: no issues for this task** (feature-level verdict: REJECT via `tasks/120-pa-rejection-embedding-clusters-viz.md`; none of its items touch #115)
 
 Config knobs, `extra="forbid"` on `memory.clustering` (the `enabled` trap reads as a clear ValidationError naming the key), the `memory_clusters` shape and the child-only `cluster_id`/`viz` validator all match the glossary (**Memory cluster**, **Child chunk**) and ADR-007 Decisions 1/3/6. Nothing to fix here; re-acceptance after the rollup is a formality.
+
+### [PA] 2026-09-06 23:16 — Acceptance Review (round 2)
+
+**VERDICT: ACCEPT**
+
+Round-2 re-review after rollup `tasks/done/120`: only the `min_cluster_size` comment in `configs/default.yaml` changed (says where the override must live); schema and deps untouched. Hand off to the PR Reviewer.

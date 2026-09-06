@@ -27,7 +27,7 @@ the tool signature or the tool counts (7 / 14). Do not touch those.
 - [x] Issue 3: after `make memory-run-clustering-pipeline USER_IDENTIFIER=paul` the CLI stream (the PARENT `offline-pipeline` run's logs, which `tree.cli.wait_for_flow_run` already streams) shows the clustering outcome for each target user — the `N clusters, M chunks, K noise, F fallback summaries` counts on success, or the `skipped_reason` text on a skip — and after `make memory-run-indexing-pipeline …` it shows the embedded-node count (`Embedded N nodes` or equivalent). Unit tests in `tests/unit/test_offline.py` assert the parent-level log records (caplog) for both phases, including the skip case.
 - [x] `make memory-format-check && make memory-lint-check && make memory-tests` green; test count ≥ 2876.
 - [x] Tester re-runs full QA suite and PASSES (live re-smoke of `make memory-run-clustering-pipeline`, `make memory-visualize-embeddings HULLS=true` and one rag-mode `fastmcp call … visualize_memory_embeddings` is enough — the map/warning/no-run contracts were verified live in #119 and are untouched).
-- [ ] PA re-runs acceptance review on the original tasks and ACCEPTS.
+- [x] PA re-runs acceptance review on the original tasks and ACCEPTS.
 
 ## Issues (detail)
 
@@ -395,3 +395,41 @@ $ env -u PREFECT_API_URL uv run pytest tests/unit/test_offline.py -q
   the follow-up polish task, not this rollout.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 23:16 — Acceptance Review (round 2, PR #42 HEAD 2a58545)
+
+**VERDICT: ACCEPT**
+
+Re-read `git diff acbbd6e..2a58545` (README, `configs/default.yaml`, `tree/cli.py`,
+`scripts/run_clustering_pipeline.py`, `visualize/graph.py`, `mcp/viz_app.py`, `tree/offline.py`,
+8 test files) and the Tester's live terminal evidence. All three round-1 issues are fixed as specified:
+
+- Issue 1 — the README "Small corpora" bullet names the process that reads the knob (the
+  `make memory-serve-workflows` shell locally / the deployment's environment on Prefect Managed);
+  `grep "MIN_CLUSTER_SIZE=5 make"` is clean; `default.yaml:52` says the same. The new dispatch-shell
+  warning names the variable, both correct locations and the word IGNORED — a first-run reader
+  landing on it knows exactly what to change and where; it stays a hint, not a gate.
+- Issue 2 — one mechanism (`_payload_noun`, `layout == "fixed"`) drives the UI suffix, the file
+  sentence, the `graphs://` link description and the writer's log line (`… embedding map HTML
+  (N points) …`, no edge count). Graph-path strings asserted byte-identical
+  (`test_graph_tool_result_calls_a_graph_a_graph_in_both_branches`) and confirmed live in graphrag.
+- Issue 3 — parent-level `get_run_logger()` lines reach the CLI stream: the Tester's pasted
+  `make memory-run-clustering-pipeline` output shows `clustering: … clusters=37 clustered=1524
+  noise=99 fallbacks=0`, the serving-shell-knob run shows `WARNING | clustering SKIPPED: … reason=…`,
+  and indexing shows `indexing: user_id=… embedded=N` (the "or equivalent" form of #114 Story 1's
+  `Embedded N nodes`). Extraction gets the same shape — consistent, not scope creep.
+
+Spot-check of #114–#119: no phase semantics, payload shape, warning text, no-run message, tool
+signature or tool counts changed (the diff adds logging and copy only; baseline 2876 tests intact,
++18). ADR-007 and `docs/glossary.md` untouched and still match what shipped — the run-logger lines
+and the dispatch warning are implementation detail, not new decisions; the delivered noun
+"embedding map" is the glossary term.
+
+Two disclosed nits are follow-up polish, not REJECT-worthy (outside this rollup's AC, error/duplicate
+paths only): the map CLI prints the destination twice (`Wrote self-contained embedding map HTML …
+to <path>` log line, then `Wrote <path>` on stdout — the graph CLI prints only the log line); and
+`graphs://` says "No rendered graph named … — run visualize_memory_graph first" for a missing map
+file, naming a tool that is not registered in `rag` mode. Recommend one polish task bundling these
+with the tooltip items already listed under "Out of scope" above.
+
+Hand off to the PR Reviewer.
