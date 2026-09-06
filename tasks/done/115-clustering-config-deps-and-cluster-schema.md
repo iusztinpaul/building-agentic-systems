@@ -292,3 +292,9 @@ parent row cluster_id=None, viz=None -> ALLOWED (as expected)
 - The 4-boot lazy-import guard (`test_clustering_dependencies.py::TestNothingImportsTheClusteringStack`) is un-`slow`-marked and costs ~8s of the ~30s suite. Judged acceptable: it is the only regression guard for #116/#117's lazy-import contract, and the SWE already flagged the tradeoff explicitly with a plan to `slow`-mark it later if it becomes annoying.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: no issues for this task** (feature-level verdict: REJECT via `tasks/120-pa-rejection-embedding-clusters-viz.md`; none of its items touch #115)
+
+Config knobs, `extra="forbid"` on `memory.clustering` (the `enabled` trap reads as a clear ValidationError naming the key), the `memory_clusters` shape and the child-only `cluster_id`/`viz` validator all match the glossary (**Memory cluster**, **Child chunk**) and ADR-007 Decisions 1/3/6. Nothing to fix here; re-acceptance after the rollup is a formality.

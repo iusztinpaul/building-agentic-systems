@@ -436,3 +436,9 @@ $ diff run_a.json run_b.json   # separate `uv run python` subprocesses
   with a slightly less friendly message than the ones this module writes itself.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: no issues for this task** (feature-level verdict: REJECT via `tasks/120-pa-rejection-embedding-clusters-viz.md`; none of its items touch #116)
+
+The recipe ships as ADR-007 Decision 1 records it (5-d cluster space, SEPARATE 2-D fit on the raw embeddings, seeded sampling, lazy imports), and the tiny-corpus refusal message names both numbers and the knob. The real run's output is good evidence the recipe works on Voyage embeddings (37 clusters / 99 noise over 1623 chunks, labels that read as real topics). `numpy` used directly but undeclared is noted for the PR Reviewer, not a product issue.

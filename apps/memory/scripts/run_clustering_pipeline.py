@@ -11,7 +11,9 @@ UMAP + HDBSCAN over the user's child-chunk embeddings, one LLM summary per
 The phase is OFF in every other entry point (the nightly cron included), so this
 is the ONE command that clusters. Re-running replaces the previous run entirely;
 a corpus below ``memory.clustering.hdbscan.min_cluster_size`` is skipped with a
-log line naming the knob. The first run on a machine spends ~40 s compiling
+log line naming the knob — which has to be set where the FLOW runs (the
+``make memory-serve-workflows`` process), not here; this command warns when it
+sees one set in the dispatching shell. The first run on a machine spends ~40 s compiling
 umap's numba kernels before it clusters anything.
 
 The command blocks streaming the run's logs and exits non-zero on failure. The
@@ -38,7 +40,12 @@ import logging
 
 import click
 
-from tree.cli import connect_and_resolve_user, user_options, wait_for_dispatch
+from tree.cli import (
+    connect_and_resolve_user,
+    user_options,
+    wait_for_dispatch,
+    warn_ignored_config_overrides,
+)
 from tree.logging import init_logger
 from tree.observability import flush_opik
 from tree.offline import dispatch_offline_pipeline
@@ -48,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 
 async def _run(user_id: str | None, user_identifier: str | None) -> None:
+    # The small-corpus knob is read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,

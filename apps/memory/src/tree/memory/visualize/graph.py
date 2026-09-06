@@ -206,6 +206,20 @@ def _default_graph_path(query: str) -> Path:
     return GRAPHS_DIR / f"{_slugify(query)}-{stamp}.html"
 
 
+def _payload_noun(payload: dict[str, Any]) -> str:
+    """What this payload IS, in the operator's words: a map or a graph.
+
+    ONE mechanism behind every user-visible string about a rendered payload
+    (this module's log line and ``tree.mcp.viz_app``'s three delivery
+    sentences): an **Embedding map** is the payload that draws stored
+    coordinates (``layout: "fixed"``), everything else is a **Graph payload**.
+    Calling a map a "graph" is wrong in `rag` mode, where no graph exists at
+    all, and the glossary keeps the two terms distinct — the map has no edges.
+    """
+
+    return "embedding map" if payload.get("layout") == "fixed" else "graph"
+
+
 def _render_graph_file(
     payload: dict[str, Any],
     query: str = "",
@@ -234,12 +248,15 @@ def _render_graph_file(
     path = output or _default_graph_path(query)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")
-    logger.info(
-        "Wrote self-contained graph HTML (%d nodes, %d edges) to %s",
-        len(payload["nodes"]),
-        len(payload["edges"]),
-        path,
+    # A map has no edges BY DESIGN, so "0 edges" would read as a broken render
+    # (the same reasoning as the template's header counts).
+    noun = _payload_noun(payload)
+    counts = (
+        f"{len(payload['nodes'])} points"
+        if noun == "embedding map"
+        else f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
+    logger.info("Wrote self-contained %s HTML (%s) to %s", noun, counts, path)
     return path
 
 

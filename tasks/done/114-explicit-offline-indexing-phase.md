@@ -263,3 +263,9 @@ $ prefect deployment run offline-pipeline/offline-pipeline -p run_data=false -p 
 - The scope stretch into `tutorials/2_4_1_serving_locally.md` and `data/offline_pipeline.py` wording is accurate and net-positive (removes now-false claims); reviewed both diffs, no issues.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level, PR #42)
+
+Reviewed from the operator's POV: the three explicit phases, the nightly-cron defaults (indexing on, clustering off), the data-only run, per-user isolation, the docs ("trailing index" gone, phases table) — all right. One issue is carried into the rollup: User Story 1 step 3 (`Embedded N nodes` in the CLI stream) is not met, and the same gap makes a skipped clustering run look like a success from the terminal. Filed rollup task `tasks/120-pa-rejection-embedding-clusters-viz.md` (Issue 3 is this task's). Pipeline re-runs from the inner loop on the rollup; on green, re-run acceptance on this task.

@@ -30,6 +30,7 @@ from tree.mcp.viz_app import (
 from tree.memory.types import QueryResult
 from tree.memory.visualize.graph import (
     _FILE_HTML_BASE,
+    _payload_noun,
     _render_graph_file,
     to_graph_payload,
 )
@@ -137,6 +138,84 @@ def test_graph_tool_result_survives_a_headless_browser_open(
     # Assert: swallowed — a missing browser never turns a good query into an error.
     assert isinstance(result, ToolResult)
     assert result.content[1].type == "resource_link"
+
+
+def _map_payload() -> dict:
+    """A fixed-layout payload, as ``to_embedding_map_payload`` builds it."""
+
+    return {
+        "nodes": [
+            {
+                "id": "chunk-1",
+                "type": "chunk",
+                "name": "Paper",
+                "label": "",
+                "x": 1.0,
+                "y": 2.0,
+                "cluster_id": 0,
+                "color": "#1f77b4",
+                "meta": {},
+            }
+        ],
+        "edges": [],
+        "layout": "fixed",
+        "summary": "Embedding map: 1 chunks in 1 clusters (+0 noise)",
+    }
+
+
+def test_graph_tool_result_calls_a_graph_a_graph_in_both_branches(
+    mocker, tmp_path: Path
+) -> None:
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    payload = to_graph_payload(_seed_result())
+
+    inline = _graph_tool_result(_make_ctx(ui_supported=True), payload, "SUMMARY")
+    fallback = _graph_tool_result(_make_ctx(ui_supported=False), payload, "SUMMARY")
+
+    # Assert: the graph strings are BYTE-IDENTICAL to what graph tools have
+    # always returned — deriving the noun from the payload changes nothing here.
+    assert inline.content[0].text == "SUMMARY (interactive graph view)."
+    text_block, link_block = fallback.content
+    assert (
+        "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
+        "a self-contained interactive graph to:\n"
+    ) in text_block.text
+    assert link_block.description == "Self-contained interactive graph (download me)"
+
+
+def test_graph_tool_result_calls_an_embedding_map_a_map_in_both_branches(
+    mocker, tmp_path: Path
+) -> None:
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    payload = _map_payload()
+
+    inline = _graph_tool_result(_make_ctx(ui_supported=True), payload, "SUMMARY")
+    fallback = _graph_tool_result(_make_ctx(ui_supported=False), payload, "SUMMARY")
+
+    # Assert: in rag mode there is no graph at all, so every string the model
+    # (or the user) reads calls the map a map — the glossary keeps **Embedding
+    # map** and **Graph payload** distinct, and the copy follows.
+    assert inline.content[0].text == "SUMMARY (interactive embedding map view)."
+    text_block, link_block = fallback.content
+    assert (
+        "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
+        "a self-contained interactive embedding map to:\n"
+    ) in text_block.text
+    assert (
+        link_block.description
+        == "Self-contained interactive embedding map (download me)"
+    )
+    assert "graph" not in inline.content[0].text
+    assert "interactive graph" not in text_block.text
+
+
+def test_the_delivered_noun_comes_from_the_payloads_layout_key() -> None:
+    # Assert: ONE mechanism decides the wording everywhere (the delivery helper
+    # AND the file writer's log line) — the payload's own ``layout`` key.
+    assert _payload_noun({"layout": "fixed"}) == "embedding map"
+    assert _payload_noun({"nodes": [], "edges": []}) == "graph"
 
 
 # ---------------------------------------------------------------------------

@@ -52,12 +52,13 @@ from dataclasses import asdict
 from typing import Any
 
 from beanie import PydanticObjectId
-from prefect import flow, tags
+from prefect import flow, get_run_logger, tags
 from prefect.deployments import run_deployment
 
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.flow_runs import flow_run_status
 from tree.memory.pipeline import (
+    ClusteringStats,
     memory_clustering,
     memory_extract_etl_coordinator,
     memory_indexing,
@@ -83,6 +84,25 @@ logger = logging.getLogger(__name__)
 TAGS_OFFLINE_PIPELINE = [TAG_DATA_PIPELINE, TAG_MEMORY_PIPELINE, TAG_OFFLINE]
 
 
+def _get_run_logger() -> logging.Logger:
+    """The PARENT run's logger inside a flow run; the module logger otherwise.
+
+    Load-bearing for the phase lines below: ``tree.cli.wait_for_flow_run``
+    streams the logs Prefect stores for THIS flow run, and only the run logger
+    writes there — a plain module logger reaches the worker's stdout alone, and
+    a subflow's own logger reaches only that subflow's run. Outside a flow run
+    (unit tests calling the body directly) it degrades to the module logger so
+    the lines stay visible to ``caplog``. Same helper as
+    ``tree.memory.pipeline`` / ``tree.memory.graph.sharding``; each binds its
+    OWN module logger as the fallback, which is why it is not shared.
+    """
+
+    try:
+        return get_run_logger()  # type: ignore[return-value]
+    except Exception:  # noqa: BLE001 — Prefect raises a typed context error
+        return logger
+
+
 def _validate_document_ids_scope(
     document_ids: list[str] | None, user_id: PydanticObjectId | None
 ) -> None:
@@ -101,6 +121,34 @@ def _validate_document_ids_scope(
 
     if document_ids and user_id is None:
         raise ValueError("document_ids is single-tenant — pass user_id too.")
+
+
+def _log_clustering_outcome(
+    log: logging.Logger, user_id: PydanticObjectId, stats: ClusteringStats
+) -> None:
+    """Report ONE clustering phase at the parent level: summary, or the skip.
+
+    A corpus below ``min_cluster_size`` is a NON-failure exit — the run
+    completes having written nothing — so without this line the terminal reads
+    identically whether 37 clusters were written or the corpus was skipped
+    (#117 Story 3). WARNING for the skip, because it names an action.
+    """
+
+    if stats.skipped_reason:
+        log.warning(
+            "clustering SKIPPED: user_id=%s reason=%s", user_id, stats.skipped_reason
+        )
+        return
+    log.info(
+        "clustering: user_id=%s run_id=%s clusters=%d clustered=%d noise=%d "
+        "fallbacks=%d",
+        user_id,
+        stats.run_id,
+        stats.clusters,
+        stats.clustered,
+        stats.noise,
+        stats.summaries_failed,
+    )
 
 
 @flow(name="offline-pipeline", log_prints=True)
@@ -155,6 +203,14 @@ async def offline_pipeline(
     returns the empty result, so a misconfigured caller gets a Completed flow
     run it can read rather than a crash.
 
+    Every per-user phase logs ONE line at THIS flow's level once it returns
+    (``extraction: user_id=… shards=…`` / ``indexing: user_id=… embedded=N`` /
+    ``clustering: user_id=… clusters=k …``, or ``clustering SKIPPED:
+    user_id=… reason=…``). ``tree.cli.wait_for_flow_run`` streams the PARENT
+    run's logs only, so a subflow's own summary never reaches the terminal the
+    operator dispatched from — these lines are what tells them a skipped
+    clustering run from a 37-cluster one.
+
     Observability: owns one span the phases' spans nest under (same-process
     contextvars), so the end-to-end run renders as ONE trace.
 
@@ -168,8 +224,9 @@ async def offline_pipeline(
     """
 
     _validate_document_ids_scope(document_ids, user_id)
+    log = _get_run_logger()
     if not run_data and not run_extraction and not run_indexing and not run_clustering:
-        logger.info(
+        log.info(
             "offline-pipeline: all phases disabled (run_data=False, "
             "run_extraction=False, run_indexing=False, run_clustering=False) "
             "— nothing to do"
@@ -207,8 +264,15 @@ async def offline_pipeline(
                                 uid, document_ids=document_ids, num_shards=num_shards
                             )
                         extraction[str(uid)] = asdict(stats)
+                        log.info(
+                            "extraction: user_id=%s shards=%d succeeded=%d failed=%d",
+                            uid,
+                            stats.shards_total,
+                            stats.succeeded,
+                            stats.failed,
+                        )
                     except Exception as exc:  # noqa: BLE001 — isolate per user.
-                        logger.exception(
+                        log.exception(
                             "offline-pipeline: extraction failed for user %s", uid
                         )
                         extraction[str(uid)] = {"error": str(exc)}
@@ -223,8 +287,9 @@ async def offline_pipeline(
                         with tags(*TAGS_INDEXING):
                             embedded = await memory_indexing(user_id=uid)
                         indexing[str(uid)] = {"embedded": embedded}
+                        log.info("indexing: user_id=%s embedded=%d", uid, embedded)
                     except Exception as exc:  # noqa: BLE001 — isolate per user.
-                        logger.exception(
+                        log.exception(
                             "offline-pipeline: indexing failed for user %s", uid
                         )
                         indexing[str(uid)] = {"error": str(exc)}
@@ -239,8 +304,9 @@ async def offline_pipeline(
                         with tags(*TAGS_CLUSTERING):
                             stats = await memory_clustering(user_id=uid)
                         clustering[str(uid)] = stats.model_dump()
+                        _log_clustering_outcome(log, uid, stats)
                     except Exception as exc:  # noqa: BLE001 — isolate per user.
-                        logger.exception(
+                        log.exception(
                             "offline-pipeline: clustering failed for user %s", uid
                         )
                         clustering[str(uid)] = {"error": str(exc)}

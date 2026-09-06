@@ -8,12 +8,17 @@ the real pipelines (see AGENTS.md "Running pipelines & E2E"), not unit-tested.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from tree.cli import build_online_source, wait_for_dispatch
+from tree.cli import (
+    build_online_source,
+    warn_ignored_config_overrides,
+    wait_for_dispatch,
+)
 from tree.data.online_pipeline import FileSource, UrlSource
 
 
@@ -48,3 +53,45 @@ class TestWaitForDispatch:
         await wait_for_dispatch({"status": "scheduled", "flow_run_id": "abc"})
 
         mock_wait.assert_awaited_once_with("abc")
+
+
+class TestWarnIgnoredConfigOverrides:
+    """``TREE_…`` overrides set in the DISPATCHING shell never reach the flow.
+
+    ``dispatch_*_pipeline`` forwards no environment: the flow reads its config
+    through ``_live_app_config()`` inside the ``serve-workflows`` process. A
+    reader who prefixes the make command therefore changes nothing and has no
+    hint why (the loop this warning closes).
+    """
+
+    def test_it_warns_naming_every_matching_variable(self, caplog, monkeypatch) -> None:
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", "5")
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__UMAP__N_NEIGHBORS", "3")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE" in message
+        assert "TREE_MEMORY__CLUSTERING__UMAP__N_NEIGHBORS" in message
+        assert "make memory-serve-workflows" in message
+
+    def test_it_says_nothing_when_no_override_is_set(self, caplog, monkeypatch) -> None:
+        monkeypatch.delenv(
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", raising=False
+        )
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
+
+        # The normal run must stay quiet — a warning nobody needs is noise.
+        assert caplog.records == []
+
+    def test_it_ignores_variables_outside_the_prefix(self, caplog, monkeypatch) -> None:
+        monkeypatch.setenv("TREE_MEMORY__MODE", "rag")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
+
+        assert caplog.records == []

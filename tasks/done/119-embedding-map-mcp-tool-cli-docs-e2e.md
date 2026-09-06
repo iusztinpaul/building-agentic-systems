@@ -506,3 +506,9 @@ Embedding map: 1623 chunks in 37 clusters (+99 noise)
 **VERDICT: PASS**
 
 Round-1's single actionable issue (the self-referential, vacuous `graph_app` rename guard) is fixed and independently re-verified from scratch: the literal AC grep is clean, the `git add -N` staging simulation is clean, and a freshly-planted probe file (different name from the SWE's own evidence, to rule out a stale artifact) proves the guard is non-vacuous — it fails red with the probe present and returns green once removed. Full suite is green at 2876, format/lint/pre-commit clean, `git status`/`git diff --stat` match the pre-round-1 shape with no leftover probe files, and the CLI happy path is unaffected. Ready to commit.
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level, PR #42)
+
+Walked both surfaces from the reader's and the operator's POV: 7 / 14 tools, the model-facing docstring and both instruction texts, the warning-first contract (CLI first line, tool text, banner, legend row, omitted points), the no-run message + script exit 1 (`make` exit 2 is make's own semantics — not a bug), the README "Embedding map" section and both skills — all consistent with the glossary and ADR-007 Decision 8. The graphrag-mode pipeline e2e with a rag-mode MCP boot is accepted (clustering is mode-orthogonal; the mode-sensitive surface was exercised in both modes). One issue carried into the rollup: the tool's non-UI answer and resource link call the map a "self-contained interactive graph", and the UI branch appends "(interactive graph view)" — in `rag` mode the user has no graph at all. Filed rollup task `tasks/120-pa-rejection-embedding-clusters-viz.md` (Issue 2). Pipeline re-runs from the inner loop on the rollup; on green, re-run acceptance on this task.

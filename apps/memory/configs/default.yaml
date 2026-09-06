@@ -49,7 +49,9 @@ memory:
   # nightly cron leaves it off). A second switch here could contradict it, so
   # an `enabled` key is a hard ValidationError.
   # Env overrides work as usual, e.g.
-  # TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5 for a small corpus.
+  # TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5 for a small corpus —
+  # set them where the FLOW runs (the `make memory-serve-workflows` process,
+  # or the deployment's env), never in the shell that dispatches the run.
   clustering:
     umap:
       n_neighbors: 15 # local neighbourhood size; clamped to n-1 on small corpora

@@ -11,6 +11,7 @@ CLI-layer rule that a failure exits non-zero rather than reading green.
 from __future__ import annotations
 
 import inspect
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -97,6 +98,51 @@ class TestRunClusteringPipeline:
         mock_wait_for_dispatch.assert_awaited_once_with(
             mock_dispatch_offline.return_value
         )
+
+    async def test_it_warns_when_a_clustering_knob_is_set_in_this_shell(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # The README's small-corpus knob only works in the SERVING process;
+        # prefixing this command with it is a silent no-op, so the dispatcher
+        # says so at the moment the operator makes the mistake.
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", "5")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run(None, None)
+
+        assert any(
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE" in record.getMessage()
+            and "make memory-serve-workflows" in record.getMessage()
+            for record in caplog.records
+        )
+        # It is a hint, not a gate: the run still dispatches.
+        mock_dispatch_offline.assert_awaited_once()
+
+    async def test_a_clean_shell_dispatches_without_a_warning(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        monkeypatch.delenv(
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", raising=False
+        )
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run(None, None)
+
+        assert caplog.records == []
 
     def test_a_failing_run_exits_non_zero(
         self,

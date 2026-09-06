@@ -53,6 +53,22 @@ class TestMemoryReadme:
         # — asserted against the real servers in ``mcp/test_tool_gating.py``.
         assert needle in _read(_MEMORY_README)
 
+    def test_the_small_corpus_knob_names_the_process_that_reads_it(self) -> None:
+        # The clustering command only DISPATCHES (it forwards no env) and the
+        # flow reads its config inside the serving process, so a
+        # ``TREE_…=5 make memory-run-clustering-pipeline`` prefix is a silent
+        # no-op — the README has to say where the override actually lives,
+        # like ``run-pipelines-e2e`` step 2 does.
+        readme = _read(_MEMORY_README)
+        bullet = " ".join(
+            readme.split("- **Small corpora.**")[1].split("###")[0].split()
+        )
+
+        assert "MIN_CLUSTER_SIZE=5 make" not in readme
+        assert "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE" in bullet
+        assert "make memory-serve-workflows" in bullet
+        assert "deployment's environment" in bullet
+
 
 class TestTreeMemorySkill:
     def test_the_tool_is_listed_as_available_in_both_modes(self) -> None:

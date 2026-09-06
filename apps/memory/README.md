@@ -282,8 +282,13 @@ stored coordinates, they never cluster. Two notes:
   YAML switch.
 - **Small corpora.** Below `memory.clustering.hdbscan.min_cluster_size` (default 15) embedded
   children the run is skipped and nothing is written (the previous run stays readable); if every
-  chunk comes back as noise the run IS written and warns. Both log the knob to turn:
-  `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5 make memory-run-clustering-pipeline`.
+  chunk comes back as noise the run IS written and warns. Both log the knob to turn,
+  `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE` — but set it where the FLOW runs, not where
+  you type `make`: the command only dispatches and forwards no environment, so a variable in your
+  shell is a silent no-op (the command warns when it sees one). Locally, `export
+  TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5` in the shell that runs `make
+  memory-serve-workflows` and restart it; on Prefect Managed put it in the deployment's
+  environment. Then re-run `make memory-run-clustering-pipeline` as usual.
 
 ### Query CLI
 

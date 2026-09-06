@@ -11,6 +11,7 @@ result channels, ``graphs://`` resource) live in
 ``tests/unit/mcp/test_viz_app.py``.
 """
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -553,3 +554,64 @@ def test_the_header_counts_read_the_map_summary_on_a_fixed_layout() -> None:
     )
     assert '? payload.summary.replace(/^Embedding map: /, "")' in _RENDER_JS
     assert ': nodes.length + " nodes · " + edges.length + " edges";' in _RENDER_JS
+
+
+# ---------------------------------------------------------------------------
+# The writer's log line — it names WHAT it drew, in the payload's own words
+# ---------------------------------------------------------------------------
+
+
+def _map_payload() -> dict:
+    """The minimal fixed-layout payload the **Embedding map** builds."""
+
+    return {
+        "nodes": [
+            {
+                "id": "chunk-1",
+                "type": "chunk",
+                "name": "Paper",
+                "label": "",
+                "x": 3.5,
+                "y": -1.25,
+                "cluster_id": 0,
+                "color": "#1f77b4",
+                "meta": {},
+            }
+        ],
+        "edges": [],
+        "layout": "fixed",
+        "summary": "Embedding map: 1 chunks in 1 clusters (+0 noise)",
+    }
+
+
+def test_render_graph_file_logs_a_graph_with_its_node_and_edge_counts(
+    tmp_path: Path, caplog
+) -> None:
+    payload = to_graph_payload(_seed_result())
+    out = tmp_path / "graph.html"
+
+    with caplog.at_level(logging.INFO, logger="tree.memory.visualize.graph"):
+        _render_graph_file(payload, output=out)
+
+    # Assert: the GRAPH wording is unchanged, verbatim — a Graph payload has
+    # edges, and this is the line the terminal has printed all along.
+    assert f"Wrote self-contained graph HTML (2 nodes, 1 edges) to {out}" in [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+def test_render_graph_file_logs_a_fixed_layout_payload_as_a_map_and_no_edges(
+    tmp_path: Path, caplog
+) -> None:
+    out = tmp_path / "map.html"
+
+    with caplog.at_level(logging.INFO, logger="tree.memory.visualize.graph"):
+        _render_graph_file(_map_payload(), output=out)
+
+    # Assert: an Embedding map has no edges BY DESIGN (glossary), so
+    # "1 nodes, 0 edges" would read as a broken graph — same reasoning as the
+    # header counts. One mechanism decides both: payload["layout"] == "fixed".
+    messages = [record.getMessage() for record in caplog.records]
+    assert f"Wrote self-contained embedding map HTML (1 points) to {out}" in messages
+    assert not any("edges" in message for message in messages)
+    assert not any("graph HTML" in message for message in messages)

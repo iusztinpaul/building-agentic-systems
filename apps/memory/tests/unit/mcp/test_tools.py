@@ -340,6 +340,31 @@ class TestVisualizeMemoryEmbeddings:
         ), link_block.uri
         assert (tmp_path / link_block.name).is_file()
 
+    async def test_the_delivered_copy_calls_the_picture_a_map_not_a_graph(
+        self, mocker, tmp_path
+    ) -> None:
+        # Story 1 in rag mode: there is no graph anywhere in this server, so
+        # "I saved a self-contained interactive graph" is a lie the model
+        # relays. Both delivery branches name the **Embedding map**.
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        answer = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=False))
+        inline = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+
+        text_block, link_block = answer.content
+        assert "self-contained interactive embedding map to:" in text_block.text
+        assert "interactive graph" not in text_block.text
+        assert link_block.description == (
+            "Self-contained interactive embedding map (download me)"
+        )
+        assert inline.content[0].text.endswith("(interactive embedding map view).")
+
     async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
         self, mocker, tmp_path
     ) -> None:

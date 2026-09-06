@@ -8,6 +8,7 @@ run → the warning on the FIRST line, and the flags reaching the renderer.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,10 @@ from beanie import PydanticObjectId
 from click.testing import CliRunner
 
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
-from tree.memory.visualize.embeddings import NO_CLUSTERING_RUN_MESSAGE
+from tree.memory.visualize.embeddings import (
+    NO_CLUSTERING_RUN_MESSAGE,
+    render_embedding_map_file,
+)
 
 
 @pytest.fixture
@@ -192,6 +196,33 @@ class TestRenderedMap:
         CliRunner().invoke(cli_module.main, [])
 
         cli_module.webbrowser.open.assert_called_once()
+
+    def test_the_render_log_never_reports_edges_for_a_map(
+        self, cli_module, mocked_boundaries, loaded_map, mocker, tmp_path, caplog
+    ) -> None:
+        # The map has no edges by design, so "0 edges" on the terminal reads as
+        # a broken render. Runs the REAL writer (the boundary this one test
+        # cares about) so the assertion covers the line an operator sees.
+        mocker.patch.object(
+            cli_module, "render_embedding_map_file", render_embedding_map_file
+        )
+        loaded_map(_embedding_map())
+        out = tmp_path / "map.html"
+
+        with caplog.at_level(logging.INFO):
+            result = CliRunner().invoke(
+                cli_module.main, ["--no-open", "--output", str(out)]
+            )
+
+        assert result.exit_code == 0, result.output
+        terminal = result.output + "\n".join(
+            record.getMessage() for record in caplog.records
+        )
+        assert "0 edges" not in terminal
+        assert "edges" not in terminal
+        assert f"Wrote self-contained embedding map HTML (12 points) to {out}" in (
+            terminal
+        )
 
 
 class TestMakefileWiring:

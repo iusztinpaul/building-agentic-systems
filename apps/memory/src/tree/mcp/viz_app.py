@@ -61,7 +61,11 @@ from mcp import types
 
 from tree.config.paths import GRAPHS_DIR
 from tree.mcp.server import mcp
-from tree.memory.visualize.graph import _render_graph_file, _resolve_static
+from tree.memory.visualize.graph import (
+    _payload_noun,
+    _render_graph_file,
+    _resolve_static,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +113,11 @@ def _graph_tool_result(
         as_html_file: Force the file branch even for a UI-capable client.
     """
 
+    # What the payload IS, in one word, for every string below: a Graph
+    # payload is a "graph", an Embedding map is an "embedding map" (ADR-007 §2
+    # — in rag mode there is no graph anywhere to confuse it with).
+    noun = _payload_noun(payload)
+
     ui_supported = ctx.client_supports_extension(UI_EXTENSION_ID)
     if ui_supported and not as_html_file:
         # A CUSTOM HTML app's iframe reads the tool result's ``content`` via
@@ -121,7 +130,7 @@ def _graph_tool_result(
             content=[
                 types.TextContent(
                     type="text",
-                    text=f"{summary} (interactive graph view).",
+                    text=f"{summary} (interactive {noun} view).",
                 ),
                 types.TextContent(
                     type="text",
@@ -168,7 +177,7 @@ def _graph_tool_result(
                 type="text",
                 text=(
                     f"{summary}. Since {reason}, I saved a self-contained "
-                    f"interactive graph to:\n{path}\n{closing}"
+                    f"interactive {noun} to:\n{path}\n{closing}"
                 ),
             ),
             types.ResourceLink(
@@ -176,7 +185,7 @@ def _graph_tool_result(
                 uri=f"graphs://{path.name}",  # type: ignore[arg-type]
                 name=path.name,
                 mimeType="text/html",
-                description="Self-contained interactive graph (download me)",
+                description=f"Self-contained interactive {noun} (download me)",
             ),
         ]
     )

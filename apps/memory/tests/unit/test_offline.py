@@ -433,6 +433,137 @@ class TestOfflineClusteringPhase:
         )
 
 
+class TestOfflinePhaseLogLines:
+    """What the operator's TERMINAL says each phase did.
+
+    ``tree.cli.wait_for_flow_run`` streams the PARENT run's logs only, so a
+    subflow's own summary (``clustering run …: 37 clusters, …``) never reaches
+    the terminal — it lands in the ``serve-workflows`` process / the Prefect UI.
+    These pin ONE parent-level line per user per phase, which does reach it:
+    a success line, a skip WARNING, and the isolated per-user failure.
+    """
+
+    @staticmethod
+    def _messages(caplog) -> list[str]:
+        return [record.getMessage() for record in caplog.records]
+
+    async def test_indexing_logs_the_embedded_count_for_each_user(
+        self, mocker, caplog
+    ) -> None:
+        _data, _extract, _index, _cluster, users = _patch_coordinators(mocker)
+        users.return_value = [_USER_ID, _OTHER_USER_ID]
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(user_id=None, run_data=False, run_extraction=False)
+
+        # #114 Story 1 step 3: "the CLI streams … Embedded N nodes".
+        messages = self._messages(caplog)
+        assert f"indexing: user_id={_USER_ID} embedded={_EMBEDDED}" in messages
+        assert f"indexing: user_id={_OTHER_USER_ID} embedded={_EMBEDDED}" in messages
+
+    async def test_extraction_logs_its_fan_out_counts_for_each_user(
+        self, mocker, caplog
+    ) -> None:
+        _data, _extract, _index, _cluster, _users = _patch_coordinators(mocker)
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(user_id=_USER_ID, run_data=False, run_indexing=False)
+
+        # Same shape as the other two phases: one line, ``phase: key=value``.
+        assert (
+            f"extraction: user_id={_USER_ID} shards=1 succeeded=1 failed=0"
+            in self._messages(caplog)
+        )
+
+    async def test_clustering_logs_the_run_summary(self, mocker, caplog) -> None:
+        _data, _extract, _index, _cluster, _users = _patch_coordinators(mocker)
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(
+                user_id=_USER_ID,
+                run_data=False,
+                run_extraction=False,
+                run_indexing=False,
+                run_clustering=True,
+            )
+
+        # #117 Story 3: the counts the subflow logs, repeated where the
+        # operator is actually looking.
+        assert (
+            f"clustering: user_id={_USER_ID} run_id=run-1 clusters=2 "
+            "clustered=35 noise=5 fallbacks=0" in self._messages(caplog)
+        )
+
+    async def test_a_skipped_clustering_run_warns_with_its_reason(
+        self, mocker, caplog
+    ) -> None:
+        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
+        cluster.return_value = ClusteringStats(
+            run_id="run-2",
+            chunks_total=3,
+            skipped_reason="3 child embeddings < min_cluster_size 15",
+        )
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(
+                user_id=_USER_ID,
+                run_data=False,
+                run_extraction=False,
+                run_indexing=False,
+                run_clustering=True,
+            )
+
+        # The corpus-too-small exit is a NON-failure, so the run still completes
+        # — without this line the terminal reads exactly like a 37-cluster run.
+        skips = [
+            record
+            for record in caplog.records
+            if record.getMessage()
+            == (
+                f"clustering SKIPPED: user_id={_USER_ID} reason=3 child "
+                "embeddings < min_cluster_size 15"
+            )
+        ]
+        assert len(skips) == 1
+        assert skips[0].levelno == logging.WARNING
+        assert not any(
+            message.startswith(f"clustering: user_id={_USER_ID}")
+            for message in self._messages(caplog)
+        )
+
+    async def test_a_failed_phase_is_reported_at_the_parent_level(
+        self, mocker, caplog
+    ) -> None:
+        _data, _extract, index, cluster, _users = _patch_coordinators(mocker)
+        index.side_effect = RuntimeError("mongot down")
+        cluster.side_effect = RuntimeError("umap blew up")
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(
+                user_id=_USER_ID,
+                run_data=False,
+                run_extraction=False,
+                run_clustering=True,
+            )
+
+        # Isolated per user, but never silent: the failure reaches the same
+        # stream as the success lines, at ERROR.
+        failures = {
+            record.getMessage(): record.levelno
+            for record in caplog.records
+            if "failed for user" in record.getMessage()
+        }
+        assert failures == {
+            f"offline-pipeline: indexing failed for user {_USER_ID}": logging.ERROR,
+            f"offline-pipeline: clustering failed for user {_USER_ID}": logging.ERROR,
+        }
+        # A blown phase logs no success line for that user.
+        assert not any(
+            message.startswith(("indexing: user_id", "clustering: user_id"))
+            for message in self._messages(caplog)
+        )
+
+
 class TestDispatchOfflineIngest:
     """The caller-edge dispatcher: ONE path — submit the core deployment.
 

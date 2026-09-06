@@ -342,3 +342,9 @@ name='courageous-perch' … parent_task_run_id=UUID('c0053e7b-…')   # a SUBFLO
 - `git status --short` after QA shows only the SWE's original changes — no stray files.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level, PR #42)
+
+Read the real run via `mongosh` (37 rows, one `run_id` shared by every cluster row and every child's `viz.run_id`, 0 null assignments, 0 fallback labels, 0 empty summaries, all labels ≤ 6 words, 36/37 with 5 keywords; labels such as "LLM-maintained personal research wikis", "Implementing LLM Structured Outputs" and their summaries are genuinely useful). Skip / all-noise / fallback wording is clear. Found 2 issues carried into the rollup: (1) `apps/memory/README.md:286` tells the operator to prefix `make memory-run-clustering-pipeline` with the `MIN_CLUSTER_SIZE` env var, which is a silent no-op (the flow reads config in the serve process — the e2e skill says so correctly); (2) the CLI cannot distinguish a skipped run from a success (subflow-only logs). Filed rollup task `tasks/120-pa-rejection-embedding-clusters-viz.md` (Issues 1 and 3). Pipeline re-runs from the inner loop on the rollup; on green, re-run acceptance on this task.

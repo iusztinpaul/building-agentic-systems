@@ -304,3 +304,9 @@ Confirmed: `sklearn.cluster.HDBSCAN` (used in `clustering/core.py`) always retur
 - `#counts` still reads "N nodes · 0 edges" on a map (SWE's own judgement call 3) — cosmetic, out of scope per the task's template list, `payload.summary` exists for #119 to surface properly.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-06 22:32 — Acceptance Review
+
+**VERDICT: REJECT** (feature-level, PR #42)
+
+Opened the screenshots (`.tree/screenshots/task-118*/`, `apps/memory/.tree/e2e-119/`): fixed placement, 20-colour palette + grey noise, legend with sizes, hull toggle, amber banner with the exact warning text, tooltip with cluster / document / heading path / snippet, `noise` on a noise point, graph view untouched (force layout, per-type legend, no toggle/banner). The `#counts` header now reads the map summary (verified fixed in #119), and `render_embedding_map_file` accepts `str` (verified). One issue carried into the rollup: `_render_graph_file`'s log line `Wrote self-contained graph HTML (N nodes, 0 edges)` is what the operator sees for a map. Filed rollup task `tasks/120-pa-rejection-embedding-clusters-viz.md` (Issue 2). Tooltip polish (redundant `Type`/`Document` rows, `Heading_path` key casing) and legend hover are noted as follow-ups, not blockers. Pipeline re-runs from the inner loop on the rollup; on green, re-run acceptance on this task.
