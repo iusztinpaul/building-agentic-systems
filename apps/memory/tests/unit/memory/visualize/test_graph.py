@@ -1,18 +1,23 @@
-"""Unit tests for the Graph renderer — the single home of graph rendering.
+"""Unit tests for the Graph renderer — the single home of every rendering.
 
 Covers the pure ``to_graph_payload`` transform (the **Graph payload**), the
 self-contained-file writer, the ``.tree/graphs/<slug>-<stamp>.html`` output
-convention, and the CLI-facing ``visualize_query_result`` entry point. The
-MCP-layer concerns (tool result channels, ``graphs://`` resource) live in
-``tests/unit/mcp/test_graph_app.py``.
+convention, the CLI-facing ``visualize_query_result`` entry point, and the ONE
+template's OPTIONAL **Embedding map** keys — asserted here from the graph's
+side: a payload without them must still render the force-directed graph it
+always did. The map payload that switches those keys on is built (and its
+rendering asserted) in ``test_embeddings.py``; the MCP-layer concerns (tool
+result channels, ``graphs://`` resource) live in
+``tests/unit/mcp/test_viz_app.py``.
 """
 
 from datetime import UTC, datetime
 from pathlib import Path
 
 from tree.config.paths import GRAPHS_DIR
-from tree.memory.graph.visualize import (
+from tree.memory.visualize.graph import (
     _FALLBACK_COLOUR,
+    _RENDER_JS,
     _default_graph_path,
     _render_graph_file,
     _slugify,
@@ -337,7 +342,7 @@ def test_default_graph_path_is_unique_html_under_graphs_dir() -> None:
 
 def test_visualize_query_result_writes_explicit_output(mocker, tmp_path: Path) -> None:
     open_mock = mocker.patch(
-        "tree.memory.graph.visualize.webbrowser.open", return_value=False
+        "tree.memory.visualize.graph.webbrowser.open", return_value=False
     )
     out = tmp_path / "pinned.html"
 
@@ -352,8 +357,8 @@ def test_visualize_query_result_writes_explicit_output(mocker, tmp_path: Path) -
 
 
 def test_visualize_query_result_defaults_to_graphs_dir(mocker, tmp_path: Path) -> None:
-    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.memory.graph.visualize.webbrowser.open", return_value=False)
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.visualize.graph.webbrowser.open", return_value=False)
 
     path = visualize_query_result(_seed_result(), open_browser=True, query="MLOps talk")
 
@@ -367,8 +372,8 @@ def test_visualize_query_result_defaults_to_graphs_dir(mocker, tmp_path: Path) -
 def test_visualize_query_result_empty_query_uses_graph_stem(
     mocker, tmp_path: Path
 ) -> None:
-    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.memory.graph.visualize.webbrowser.open", return_value=False)
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.visualize.graph.webbrowser.open", return_value=False)
 
     path = visualize_query_result(_seed_result(), open_browser=False)
 
@@ -380,9 +385,9 @@ def test_visualize_query_result_survives_a_headless_browser_open(
     mocker, tmp_path: Path
 ) -> None:
     # Arrange: a host with no browser makes webbrowser.open raise.
-    mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
     mocker.patch(
-        "tree.memory.graph.visualize.webbrowser.open",
+        "tree.memory.visualize.graph.webbrowser.open",
         side_effect=RuntimeError("no browser"),
     )
 
@@ -410,3 +415,129 @@ def test_truncate_clips_long_text_with_ellipsis() -> None:
 
 def test_truncate_leaves_exact_length_unchanged() -> None:
     assert _truncate("12345", 5) == "12345"
+
+
+# ---------------------------------------------------------------------------
+# The ONE shared template — a Graph payload never triggers the map extensions
+# ---------------------------------------------------------------------------
+
+
+def test_graph_payload_render_asks_for_no_fixed_layout(tmp_path: Path) -> None:
+    payload = to_graph_payload(_seed_result())
+    out = tmp_path / "graph.html"
+
+    _render_graph_file(payload, output=out)
+
+    # Assert: none of the Embedding-map keys reach the embedded data, so the
+    # template takes exactly the branches it took before the map existed.
+    html = out.read_text(encoding="utf-8")
+    assert '"layout": "fixed"' not in html
+    # ``:`` anchors these to the embedded JSON — the DOM ids are still there.
+    assert '"nodeSize":' not in html
+    assert '"legend":' not in html
+    assert '"warning":' not in html
+
+
+def test_graph_payload_render_leaves_the_hull_toggle_and_banner_hidden(
+    tmp_path: Path,
+) -> None:
+    payload = to_graph_payload(_seed_result())
+    out = tmp_path / "graph.html"
+
+    _render_graph_file(payload, output=out)
+
+    # Assert: the markup ships (ONE template) but stays hidden — only a payload
+    # with a legend + a boolean ``hulls`` un-hides the toggle, only a
+    # ``warning`` un-hides the banner.
+    html = out.read_text(encoding="utf-8")
+    assert '<label id="hulls-toggle" hidden>' in html
+    assert '<div id="warning" hidden></div>' in html
+    assert "toggle.hidden = false" in html
+    assert "warningEl.hidden = false" in html
+
+
+def test_force_atlas_runs_only_outside_the_fixed_layout_branch(
+    tmp_path: Path,
+) -> None:
+    payload = to_graph_payload(_seed_result())
+    out = tmp_path / "graph.html"
+
+    _render_graph_file(payload, output=out)
+
+    # Assert: the layout pass is guarded, not unconditional — a fixed-layout
+    # payload must keep its stored coordinates.
+    html = out.read_text(encoding="utf-8")
+    assert 'const isFixed = payload.layout === "fixed";' in html
+    guard = "      if (!isFixed) {\n        const settings = forceAtlas2.inferSettings(graph);"
+    assert guard in html
+    assert "forceAtlas2.assign" in html
+    assert html.index(guard) < html.index("forceAtlas2.assign")
+
+
+def test_fixed_layout_payload_keeps_its_stored_coordinates(tmp_path: Path) -> None:
+    # Arrange: the minimal fixed-layout payload the Embedding map builds.
+    payload = {
+        "nodes": [
+            {
+                "id": "chunk-1",
+                "type": "chunk",
+                "name": "Paper",
+                "label": "",
+                "x": 3.5,
+                "y": -1.25,
+                "cluster_id": 0,
+                "color": "#1f77b4",
+                "meta": {},
+            }
+        ],
+        "edges": [],
+        "layout": "fixed",
+        "nodeSize": 4,
+        "hulls": True,
+        "legend": [{"label": "Topic", "size": 1, "color": "#1f77b4"}],
+        "warning": None,
+    }
+    out = tmp_path / "map.html"
+
+    _render_graph_file(payload, output=out)
+
+    # Assert: the coordinates travel verbatim and the node reads them.
+    html = out.read_text(encoding="utf-8")
+    assert '"x": 3.5' in html
+    assert '"y": -1.25' in html
+    assert "x: isFixed ? n.x : Math.random()" in html
+
+
+def test_template_carries_the_hull_overlay_machinery(tmp_path: Path) -> None:
+    payload = to_graph_payload(_seed_result())
+    out = tmp_path / "graph.html"
+
+    _render_graph_file(payload, output=out)
+
+    # Assert: ONE template — the hull code ships with the graph variant too,
+    # dormant until a payload asks for it (Sigma has no hull primitive, so it
+    # is a canvas overlay redrawn on afterRender / resize).
+    html = out.read_text(encoding="utf-8")
+    assert '<canvas id="hulls-layer"></canvas>' in html
+    assert "function convexHull(points)" in html
+    assert "renderer.graphToViewport({ x: p[0], y: p[1] })" in html
+    assert 'renderer.on("afterRender", drawHulls)' in html
+    assert 'renderer.on("resize", drawHulls)' in html
+
+
+def test_hulls_are_never_drawn_for_noise() -> None:
+    # Assert (source-level): the hull loop skips every negative cluster id, so
+    # noise can never gain an outline.
+    assert (
+        'if (typeof n.cluster_id !== "number" || n.cluster_id < 0) continue;'
+        in _RENDER_JS
+    )
+
+
+def test_legend_rows_are_taken_from_the_payload_when_present() -> None:
+    # Assert (source-level): the per-type legend is the ELSE branch now.
+    assert "if (legendRows) {" in _RENDER_JS
+    assert (
+        "const colorByType = new Map(nodes.map((n) => [n.type, n.color]));"
+        in _RENDER_JS
+    )

@@ -31,7 +31,14 @@ being vendored — ADR-005 decision 2); offline, the page renders an empty canva
 Dependency direction is memory ← mcp: this module imports NOTHING from
 ``tree.mcp``. MCP-only concerns (the tools, the ``ui://`` / ``graphs://``
 resources, CSP wiring, the ext-apps iframe runtime) live in
-``tree.mcp.graph_app``, which imports from here.
+``tree.mcp.viz_app``, which imports from here.
+
+The template also draws the **Embedding map** (ADR-007 §2) through four
+OPTIONAL payload keys — ``layout: "fixed"`` (use each node's ``x``/``y`` and
+skip ForceAtlas2), ``legend`` (explicit rows instead of the per-type one),
+``warning`` (an amber banner) and ``hulls`` (the convex-hull overlay), plus
+``nodeSize``. A payload without them renders exactly the graph it did before;
+the map payload builder is :mod:`tree.memory.visualize.embeddings`.
 """
 
 import json
@@ -200,11 +207,15 @@ def _default_graph_path(query: str) -> Path:
 
 
 def _render_graph_file(
-    payload: dict[str, list[dict[str, Any]]],
+    payload: dict[str, Any],
     query: str = "",
     output: Path | None = None,
 ) -> Path:
     """Write a self-contained HTML file (data embedded inline) and return it.
+
+    Takes any payload the ONE template understands: a **Graph payload** or an
+    **Embedding map** payload (the same ``{nodes, edges}`` plus the optional
+    ``layout`` / ``legend`` / ``warning`` / ``hulls`` / ``nodeSize`` keys).
 
     Used as the fallback when the client does not render MCP App UIs, or when
     the caller explicitly asks for an openable file. The HTML carries its data
@@ -323,12 +334,23 @@ _GRAPH_STYLE = """\
     #search { margin-left: auto; width: 240px; max-width: 45%; padding: 6px 10px;
       background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
       color: var(--text); font-size: 12px; outline: none; }
+    /* Embedding-map extras. Both carry the `hidden` attribute until the payload
+       asks for them, so the ``display:flex`` needs the explicit override. */
+    #warning { display: block; font-size: 12px; padding: 4px 9px; border-radius: 6px;
+      background: #fff3bf; border: 1px solid #f08c00; color: #7c4a03; }
+    #warning[hidden] { display: none; }
+    #hulls-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px;
+      color: var(--muted); cursor: pointer; user-select: none; }
+    #hulls-toggle[hidden] { display: none; }
     #search:focus { border-color: var(--accent1); }
     #search::placeholder { color: var(--muted); }
 
     /* Graph stage */
     #stage { position: relative; flex: 1; min-height: 0; }
     #sigma-container { width: 100%; height: 100%; }
+    /* Cluster hulls are drawn ON TOP of Sigma's canvases (Sigma has no hull
+       primitive) but must never swallow a hover / drag — hence pointer-events. */
+    #hulls-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
 
     /* Legend */
     #legend { position: absolute; top: 10px; right: 12px; font-size: 11px; z-index: 2;
@@ -338,6 +360,7 @@ _GRAPH_STYLE = """\
       font-size: 9px; margin-bottom: 5px; }
     #legend div.row { display: flex; align-items: center; gap: 7px; margin: 3px 0; }
     #legend span.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    #legend span.size { margin-left: auto; padding-left: 10px; color: var(--muted); }
 
     /* Hover tooltip: full, untruncated name + type/subtype + curated metadata. */
     #tooltip { position: absolute; z-index: 5; display: none; pointer-events: none;
@@ -368,10 +391,13 @@ _BODY_MARKUP = """\
     <div id="header">
       <span id="brand">Tree: Your Rooted Memory</span>
       <span id="counts">loading…</span>
+      <div id="warning" hidden></div>
+      <label id="hulls-toggle" hidden><input type="checkbox" id="hulls"> Cluster hulls</label>
       <input id="search" type="search" placeholder="Search nodes…" autocomplete="off" />
     </div>
     <div id="stage">
       <div id="sigma-container"></div>
+      <canvas id="hulls-layer"></canvas>
       <div id="legend"></div>
       <div id="tooltip"></div>
       <div id="zoom">
@@ -402,12 +428,20 @@ _RENDER_JS = """\
       ).join("") + "</div>";
     }
 
-    function render({ nodes, edges }) {
+    function render(payload) {
+      const { nodes, edges } = payload;
       const container = document.getElementById("sigma-container");
       container.innerHTML = "";
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
       countsEl.textContent = nodes.length + " nodes · " + edges.length + " edges";
+
+      // Optional Embedding-map keys. Absent (a Graph payload) => today's graph:
+      // random start + ForceAtlas2, per-type legend, no banner, no hulls.
+      const isFixed = payload.layout === "fixed";
+      const nodeSize = typeof payload.nodeSize === "number" ? payload.nodeSize : 6;
+      const legendRows = Array.isArray(payload.legend) ? payload.legend : null;
+      const hullsEnabled = legendRows !== null && typeof payload.hulls === "boolean";
 
       const nodeById = new Map(nodes.map((n) => [n.id, n]));
 
@@ -419,9 +453,11 @@ _RENDER_JS = """\
           label: n.label,            // labels in-view show ONLY the name
           nodeType: n.type,          // (Sigma reserves "type" for the program)
           color: n.color,
-          size: 6,
-          x: Math.random(),          // ForceAtlas2 needs distinct starts
-          y: Math.random(),
+          size: nodeSize,
+          // A fixed layout draws the STORED coordinates (Sigma throws on a
+          // non-numeric x/y); otherwise ForceAtlas2 needs distinct starts.
+          x: isFixed ? n.x : Math.random(),
+          y: isFixed ? n.y : Math.random(),
         });
       }
       for (const e of edges) {
@@ -433,9 +469,13 @@ _RENDER_JS = """\
         }
       }
 
-      // Layout.
-      const settings = forceAtlas2.inferSettings(graph);
-      forceAtlas2.assign(graph, { iterations: 300, settings });
+      // Layout. ForceAtlas2 runs ONLY when layout !== "fixed": an Embedding
+      // map's coordinates come from the stored UMAP projection, and a force
+      // pass would drift every point off the position it was clustered at.
+      if (!isFixed) {
+        const settings = forceAtlas2.inferSettings(graph);
+        forceAtlas2.assign(graph, { iterations: 300, settings });
+      }
 
       // Interaction state, applied via reducers.
       const state = { search: "", selected: null, hovered: null, hoveredEdge: null };
@@ -563,12 +603,111 @@ _RENDER_JS = """\
       });
       renderer.getMouseCaptor().on("mouseup", () => { dragged = null; });
 
-      // --- Legend (one swatch per node type present) ---
-      const colorByType = new Map(nodes.map((n) => [n.type, n.color]));
-      const rows = [...colorByType.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-        .map(([t, c]) => '<div class="row"><span class="dot" style="background:' + c + '"></span>' + t + "</div>")
-        .join("");
+      // --- Legend: the payload's own rows (Embedding map), else one swatch
+      //     per node type present (Graph payload). ---
+      let rows;
+      if (legendRows) {
+        rows = legendRows.map((r) =>
+          '<div class="row"><span class="dot" style="background:' + esc(r.color) + '"></span>' +
+          "<span>" + esc(r.label) + "</span>" +
+          (r.size === undefined || r.size === null
+            ? ""
+            : '<span class="size">· ' + esc(r.size) + "</span>") + "</div>"
+        ).join("");
+      } else {
+        const colorByType = new Map(nodes.map((n) => [n.type, n.color]));
+        rows = [...colorByType.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([t, c]) => '<div class="row"><span class="dot" style="background:' + c + '"></span>' + t + "</div>")
+          .join("");
+      }
       document.getElementById("legend").innerHTML = '<div class="title">Legend</div>' + rows;
+
+      // --- Stale-map banner: shown only when the payload carries one. ---
+      if (payload.warning) {
+        const warningEl = document.getElementById("warning");
+        warningEl.textContent = payload.warning;
+        warningEl.hidden = false;
+      }
+
+      // --- Cluster hulls (Embedding map only) ---
+      // Sigma has no hull primitive, so the hulls are a plain <canvas> overlay
+      // drawn in VIEWPORT coordinates: the hull of each cluster is computed once
+      // in graph space, then mapped through graphToViewport on every render, so
+      // it stays glued to its points through pan and zoom.
+      if (hullsEnabled) {
+        const toggle = document.getElementById("hulls-toggle");
+        const checkbox = document.getElementById("hulls");
+        toggle.hidden = false;
+        checkbox.checked = payload.hulls;
+
+        const byCluster = new Map();
+        for (const n of nodes) {
+          // Noise (-1) is a residue, not a group: it never gets a hull.
+          if (typeof n.cluster_id !== "number" || n.cluster_id < 0) continue;
+          let entry = byCluster.get(n.cluster_id);
+          if (!entry) { entry = { color: n.color, points: [] }; byCluster.set(n.cluster_id, entry); }
+          entry.points.push([n.x, n.y]);
+        }
+        // Andrew's monotone chain: sort by (x, y), then walk the lower and the
+        // upper hull, popping any point that does not turn counter-clockwise.
+        function convexHull(points) {
+          const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+          const cross = (o, a, b) =>
+            (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+          const build = (seq) => {
+            const out = [];
+            for (const p of seq) {
+              while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+              out.push(p);
+            }
+            out.pop();
+            return out;
+          };
+          return build(pts).concat(build(pts.slice().reverse()));
+        }
+        // Fewer than 3 points cannot bound an area — those clusters draw nothing.
+        const hulls = [...byCluster.values()]
+          .filter((c) => c.points.length >= 3)
+          .map((c) => ({ color: c.color, hull: convexHull(c.points) }))
+          .filter((h) => h.hull.length >= 3);
+
+        function rgba(hex, alpha) {
+          const m = /^#?([0-9a-f]{6})$/i.exec(String(hex));
+          if (!m) return hex;
+          const v = parseInt(m[1], 16);
+          return "rgba(" + ((v >> 16) & 255) + "," + ((v >> 8) & 255) + "," + (v & 255) + "," + alpha + ")";
+        }
+
+        const layer = document.getElementById("hulls-layer");
+        const hullCtx = layer.getContext("2d");
+        function drawHulls() {
+          const dpr = window.devicePixelRatio || 1;
+          const width = container.offsetWidth, height = container.offsetHeight;
+          layer.width = Math.round(width * dpr);      // also clears the canvas
+          layer.height = Math.round(height * dpr);
+          layer.style.width = width + "px";
+          layer.style.height = height + "px";
+          hullCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          if (!checkbox.checked) return;              // unchecked => cleared
+          for (const { color, hull } of hulls) {
+            hullCtx.beginPath();
+            hull.forEach((p, i) => {
+              const vp = renderer.graphToViewport({ x: p[0], y: p[1] });
+              if (i === 0) hullCtx.moveTo(vp.x, vp.y); else hullCtx.lineTo(vp.x, vp.y);
+            });
+            hullCtx.closePath();
+            hullCtx.fillStyle = rgba(color, 0.12);
+            hullCtx.fill();
+            hullCtx.lineWidth = 1.5;
+            hullCtx.strokeStyle = rgba(color, 0.6);
+            hullCtx.stroke();
+          }
+        }
+        checkbox.onchange = drawHulls;
+        renderer.on("afterRender", drawHulls);   // pan / zoom / drag / refresh
+        renderer.on("resize", drawHulls);        // container size changed
+        drawHulls();
+      }
     }"""
 
 # Self-contained file: data embedded inline, no ext-apps round-trip.
@@ -603,7 +742,7 @@ def _resolve_static(template: str, app_height: str) -> str:
     iframe variant, ``"100vh"`` for the standalone file (fills the window).
 
     Deliberately does NOT resolve ``__EXT_APPS_CDN__``: the MCP Apps iframe
-    runtime is an MCP-layer concern, so ``tree.mcp.graph_app`` splices that
+    runtime is an MCP-layer concern, so ``tree.mcp.viz_app`` splices that
     token itself and this module stays free of any ``tree.mcp`` coupling.
     """
 

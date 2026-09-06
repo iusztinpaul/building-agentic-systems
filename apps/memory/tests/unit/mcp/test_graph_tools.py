@@ -2,8 +2,10 @@
 
 Registered only when the server boots in graphrag mode (#110); the behaviour
 asserted here — the dual graph delivery of ``query_memory`` /
-``search_memory(visualize=True)`` and the embedding-stripping serializer — is
-unchanged by that move.
+``search_memory(visualize=True)``, the rendering-channel contract of
+``visualize_memory_graph`` (which moved here with the neutral-MCP-App split,
+ADR-007 §7) and the embedding-stripping serializer — is unchanged by either
+move.
 """
 
 import json
@@ -16,7 +18,14 @@ import pytest
 from bson import ObjectId
 from fastmcp.tools import ToolResult
 
-from tree.mcp.graph_tools import _serialize, query_memory, search_memory
+from tree.mcp.graph_tools import (
+    _serialize,
+    query_memory,
+    search_memory,
+    visualize_memory_graph,
+)
+from tree.mcp.server import mcp
+from tree.mcp.viz_app import GRAPH_VIEW_URI
 from tree.memory.types import QueryResult
 
 
@@ -61,7 +70,7 @@ class TestSerialize:
 # ---------------------------------------------------------------------------
 # query_memory / search_memory with visualize=True — the dual delivery
 # (ADR-005, decision 4): both tools route through the ONE shared seam
-# ``_dual_graph_result`` → ``graph_app._graph_tool_result``, so from a
+# ``_dual_graph_result`` → ``viz_app._graph_tool_result``, so from a
 # visualization standpoint they behave exactly like visualize_memory_graph.
 # ---------------------------------------------------------------------------
 
@@ -107,6 +116,29 @@ def _make_graph_ctx(*, ui_supported: bool) -> MagicMock:
         "user_id": _GRAPH_UID,
     }
     return ctx
+
+
+def _seed_result() -> QueryResult:
+    """The two-node / one-edge graph ``visualize_memory_graph`` is stubbed with."""
+
+    return QueryResult(
+        nodes=[d for d in _GRAPH_DOCS if d["kind"] == "node"],
+        edges=[d for d in _GRAPH_DOCS if d["kind"] == "edge"],
+    )
+
+
+def _content_payload(result: ToolResult) -> dict[str, Any]:
+    """Extract the JSON payload block the iframe reads (mirrors its JS)."""
+
+    for block in result.content:
+        if block.type == "text":
+            try:
+                parsed = json.loads(block.text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and isinstance(parsed.get("nodes"), list):
+                return parsed
+    raise AssertionError("No JSON payload content block found in tool result.")
 
 
 def _patch_query(mocker, tool_name: str, docs: list[dict[str, Any]]) -> None:
@@ -177,8 +209,8 @@ class TestGraphToolsDualDelivery:
     ) -> None:
         # Arrange: a client that renders no MCP App UIs (e.g. the terminal).
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
-        mocker.patch("tree.memory.graph.visualize.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.graph_app.webbrowser.open", return_value=False)
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
         ctx = _make_graph_ctx(ui_supported=False)
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
@@ -205,3 +237,113 @@ class TestGraphToolsDualDelivery:
         assert not isinstance(result, ToolResult)
         assert result.startswith(_serialize(docs))
         assert "Visualization skipped" in result
+
+
+# ---------------------------------------------------------------------------
+# visualize_memory_graph — the graphrag-only tool, moved here with the split
+# (ADR-007 §7): the rendering-channel contract of the tool itself. The helper
+# it delivers through lives in the neutral ``viz_app`` and is tested there.
+# ---------------------------------------------------------------------------
+
+
+async def test_all_three_graph_tools_declare_the_shared_ui_resource() -> None:
+    # Arrange / Act: importing ``tree.mcp.graph_tools`` (module level) registered
+    # all three graph tools on the server.
+    uris = {
+        name: ((await mcp.get_tool(name)).meta or {}).get("ui", {}).get("resourceUri")
+        for name in ("visualize_memory_graph", "query_memory", "search_memory")
+    }
+
+    # Assert: one ui:// resource serves all three (ADR-005, decision 4).
+    assert set(uris.values()) == {GRAPH_VIEW_URI}
+    assert (await mcp.get_resource(GRAPH_VIEW_URI)) is not None
+
+
+# ---------------------------------------------------------------------------
+# visualize_memory_graph tool — rendering-channel contract
+# ---------------------------------------------------------------------------
+
+
+async def test_visualize_ships_payload_in_content_block_for_ui_clients(
+    mocker,
+) -> None:
+    mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    ctx = _make_graph_ctx(ui_supported=True)
+
+    result = await visualize_memory_graph(ctx, query="alice")
+
+    # Assert: payload rides in a content JSON block (the channel the iframe
+    # actually receives), marked audience=["user"] so the model skips it.
+    assert isinstance(result, ToolResult)
+    payload = _content_payload(result)
+    assert len(payload["nodes"]) == 2
+    assert len(payload["edges"]) == 1
+    json_block = next(
+        b for b in result.content if b.type == "text" and b.text.startswith("{")
+    )
+    assert json_block.annotations.audience == ["user"]
+    assert result.structured_content is not None
+
+
+async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:
+    query_mock = mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory", new=AsyncMock()
+    )
+    full_graph_mock = mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    ctx = _make_graph_ctx(ui_supported=True)
+
+    result = await visualize_memory_graph(ctx)
+
+    full_graph_mock.assert_awaited_once()
+    query_mock.assert_not_awaited()
+    assert "your full memory" in result.content[0].text
+
+
+async def test_visualize_fallback_returns_path_and_resource_link(
+    mocker, tmp_path: Path
+) -> None:
+    # Arrange: no UI extension → file fallback (browser-open suppressed).
+    mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    ctx = _make_graph_ctx(ui_supported=False)
+
+    result = await visualize_memory_graph(ctx, query="alice")
+
+    # Assert: the text block carries the server-side path; the resource link
+    # lets a client of a REMOTE server download the same HTML over MCP.
+    assert isinstance(result, ToolResult)
+    text_block, link_block = result.content
+    assert str(tmp_path) in text_block.text
+    assert link_block.type == "resource_link"
+    assert str(link_block.uri).startswith("graphs://")
+    assert link_block.mimeType == "text/html"
+    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://")
+    assert rendered.is_file()
+
+
+async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
+    mocker, tmp_path: Path
+) -> None:
+    # Arrange: UI extension present but the caller asked for a file.
+    mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    ctx = _make_graph_ctx(ui_supported=True)
+
+    result = await visualize_memory_graph(ctx, query="alice", as_html_file=True)
+
+    assert result.content[0].text.count("you asked for an HTML file") == 1
+    assert result.content[1].type == "resource_link"

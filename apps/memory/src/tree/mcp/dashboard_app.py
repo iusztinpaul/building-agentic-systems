@@ -1,6 +1,6 @@
 """MCP App dashboard — a custom-HTML interactive view over the knowledge graph.
 
-A companion to the Sigma graph view (``graph_app``). Where the graph view shows
+A companion to the Sigma graph view (``viz_app``). Where the graph view shows
 topology, this shows a **dashboard**: KPI metrics + a node-type bar chart +
 searchable/sortable tables of the returned nodes and relationships, each row
 carrying the curated metadata from ``_curated_meta``.
@@ -17,7 +17,7 @@ carrying the curated metadata from ``_curated_meta``.
 It deliberately does NOT use FastMCP's Prefab renderer: the Prefab renderer
 iframe reads ONLY ``structuredContent`` from the tool result, and the App-UI
 host forwards only ``content`` blocks to app iframes (the same host behaviour
-that broke the graph view — see ``graph_app``'s module docstring). A Prefab
+that broke the graph view — see ``viz_app``'s module docstring). A Prefab
 dashboard therefore renders blank; a custom HTML app reading ``content`` works.
 """
 
@@ -33,7 +33,7 @@ from mcp import types
 from tree.mcp.server import mcp
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
-from tree.memory.graph.visualize import to_graph_payload
+from tree.memory.visualize.graph import to_graph_payload
 
 DASHBOARD_VIEW_URI = "ui://tree-memory/dashboard.html"
 

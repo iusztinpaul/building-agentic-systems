@@ -12,13 +12,15 @@ source tree itself:
 2. no module under ``rag/`` imports ``tree.memory.graph`` or the flow module
    ``tree.memory.pipeline`` (``graph`` → ``rag`` is allowed, never the
    reverse);
-3. ``clustering/`` is NEUTRAL: it imports neither ``graph/`` nor the flow
-   module, and ``rag/`` does not import it either;
+3. ``clustering/`` and ``visualize/`` are NEUTRAL: they import neither
+   ``graph/`` nor the flow module, and ``rag/`` does not import them either.
+   ``visualize/`` additionally stays off ``clustering.store`` — it renders the
+   **Embedding map** it is HANDED and never reads Mongo itself (ADR-007 §7, §8);
 4. nothing under ``tree/memory/`` imports the clustering stack (``umap``,
    ``sklearn``, ``numba``, ``pynndescent``) at MODULE level — function-scope
    imports are the only allowed form (ADR-007 §6);
-5. every module under ``rag/``, ``graph/`` and ``clustering/`` has a mirroring
-   test module.
+5. every module under ``rag/``, ``graph/``, ``clustering/`` and ``visualize/``
+   has a mirroring test module.
 
 The related stdlib-only purity of ``rag/cleaning.py`` (#106) is asserted where
 the module is tested:
@@ -36,12 +38,13 @@ from pathlib import Path
 import pytest
 
 import tree.memory
-from tree.memory import clustering, graph, rag
+from tree.memory import clustering, graph, rag, visualize
 
 _MEMORY_DIR = Path(tree.memory.__file__).parent
 _RAG_DIR = Path(rag.__file__).parent
 _GRAPH_DIR = Path(graph.__file__).parent
 _CLUSTERING_DIR = Path(clustering.__file__).parent
+_VISUALIZE_DIR = Path(visualize.__file__).parent
 _TESTS_DIR = Path(__file__).parent
 
 # The stack ADR-007 §6 keeps out of every import-time path: the two declared
@@ -137,6 +140,7 @@ class TestTopLevelLayout:
             "rag",
             "graph",
             "clustering",
+            "visualize",
         }
 
     @pytest.mark.parametrize("retired", ["extraction", "indexing", "query"])
@@ -216,6 +220,68 @@ class TestClusteringNeverDependsOnGraph:
         assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
 
 
+class TestVisualizeNeverDependsOnGraphOrStorage:
+    """``visualize/`` is NEUTRAL — the renderer draws what it is HANDED.
+
+    The same template draws a **Graph payload** and an **Embedding map**, so a
+    single import of ``graph/`` here would make the drawing code graphrag-only
+    and stop ``rag`` mode from rendering its own map (ADR-007 §7). The
+    ``clustering.store`` guard is the same rule one layer down: surfaces READ
+    the map and pass it in (ADR-007 §8) — a renderer that queried Mongo itself
+    would drag pymongo (and a tenant scope) into the HTML writer, and could no
+    longer be tested with a plain Pydantic object.
+    """
+
+    @pytest.mark.parametrize("path", _module_paths(_VISUALIZE_DIR), ids=_relative_id)
+    def test_no_visualize_module_imports_the_graph_layer(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.graph")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_VISUALIZE_DIR), ids=_relative_id)
+    def test_no_visualize_module_imports_the_flow_module(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.pipeline")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_VISUALIZE_DIR), ids=_relative_id)
+    def test_no_visualize_module_imports_the_clustering_store(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.clustering.store")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_RAG_DIR), ids=_relative_id)
+    def test_no_rag_module_imports_the_visualize_layer(self, path: Path) -> None:
+        offenders = _imports_of(_imported_modules(path), "tree.memory.visualize")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_VISUALIZE_DIR), ids=_relative_id)
+    def test_no_visualize_module_imports_the_mcp_layer(self, path: Path) -> None:
+        """The dependency direction is memory ← mcp, and only that way.
+
+        ``tree.mcp.viz_app`` imports the renderer; the renderer importing back
+        would make a cycle and drag FastMCP into the CLI's render path.
+        """
+
+        offenders = _imports_of(_imported_modules(path), "tree.mcp")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+    @pytest.mark.parametrize("path", _module_paths(_VISUALIZE_DIR), ids=_relative_id)
+    def test_no_visualize_module_imports_a_mongo_driver(self, path: Path) -> None:
+        """Surfaces READ, renderers DRAW (ADR-007 §8).
+
+        A renderer that could query Mongo would need a tenant scope and a
+        client to be testable at all; as it stands every test here hands it a
+        plain Pydantic object.
+        """
+
+        offenders = _imports_of(_imported_modules(path), "pymongo", "beanie", "motor")
+
+        assert not offenders, f"{_relative_id(path)} imports {sorted(offenders)}"
+
+
 class TestHeavyImportsAreLazy:
     """ADR-007 §6: ``umap`` / ``sklearn`` are function-scope imports, always.
 
@@ -264,7 +330,8 @@ class TestTestsMirrorTheModules:
         "path",
         _mirror_candidates(_RAG_DIR)
         + _mirror_candidates(_GRAPH_DIR)
-        + _mirror_candidates(_CLUSTERING_DIR),
+        + _mirror_candidates(_CLUSTERING_DIR)
+        + _mirror_candidates(_VISUALIZE_DIR),
         ids=_relative_id,
     )
     def test_module_has_a_mirroring_test_module(self, path: Path) -> None:

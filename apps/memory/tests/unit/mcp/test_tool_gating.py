@@ -42,11 +42,13 @@ _GRAPH_ONLY_TOOLS = [
 ]
 
 # Modules that may only ever be imported by a graphrag server: the graph tool
-# module plus the two MCP App modules it pulls in as side-effect imports.
+# module plus the dashboard MCP App it pulls in as a side-effect import.
+# ``tree.mcp.viz_app`` is deliberately NOT here — it is the MODE-NEUTRAL MCP App
+# layer (the ``ui://`` / ``graphs://`` resources and the one dual-delivery
+# helper), which rag mode is free to import.
 _GRAPH_MODULES = [
-    "tree.mcp.dashboard_app",
-    "tree.mcp.graph_app",
     "tree.mcp.graph_tools",
+    "tree.mcp.dashboard_app",
 ]
 
 _MARKER = "__PROBE__"

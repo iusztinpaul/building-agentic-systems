@@ -456,7 +456,10 @@ apps/memory/
       graph/            # Chapter 8: extraction, add_entity, dedup, validation,
                         #   judge, first_person_resolver, preference_supersession,
                         #   sharding, resolution/, review/, consolidation/,
-                        #   retrieval, kgquery, nl_query, visualize
+                        #   retrieval, kgquery, nl_query
+      clustering/       # neutral: the Clustering run (core, summaries, store)
+      visualize/        # neutral: the Graph renderer (graph.py) + the
+                        #   Embedding map payload (embeddings.py)
     mcp/                # FastMCP server + tools
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
