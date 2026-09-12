@@ -46,4 +46,27 @@ By default, use the "Paul Iusztin" user when testing.
 
    For the MCP surface, serve it in the same mode (`TREE_MEMORY__MODE=rag make memory-serve-mcp TRANSPORT=streamable-http`) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 7 tools, `graphrag` 14.
 
+   **The four tool-contract checks (ADR-008).** Every answer is JSON, so read the named field — not the prose:
+
+   * **Duplicate receipt.** Ingest the same URL twice: the first answers `"duplicate": false` + a `flow_run_id`, the second `"duplicate": true`, `"status": "duplicate"`, `flow_run_id: null` and dispatches nothing. Same `source_uri` both times — that is the key the retry (`SOURCE_URIS=`) takes.
+   * **`nothing_found` vs `found`.** An on-topic query answers `"outcome": "found"`; nonsense (`"zzzq wamble frobnitz"`) answers `"outcome": "nothing_found"` with `"parents": []` — empty now means empty, and that is what makes `min_vector_score` (ADR-008 §4) observable.
+   * **`text_only` degradation.** Drop the vector index and query again: the answer carries `"search_mode": "text_only"` (never an empty list), i.e. degraded shows up as degraded. Restore it right away — leave nothing dropped while you write things up:
+
+     ```bash
+     mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:$MONGO_PORT/?directConnection=true" \
+       --quiet --eval 'db.getSiblingDB("tree").memory.dropSearchIndex("vector_index")'
+     make memory-run-indexing-pipeline   # rebuilds it; the log ends in `ready (status=…)`
+     ```
+
+   * **Tool error envelope.** A blank `search_memory` query answers `{"error_type": "invalid_input", "retryable": false, "message": …}` — never an MCP protocol error.
+
+   **Session-end hook.** Verify the harness boundary the same way Claude Code does — pipe the `SessionEnd` JSON in (the unit fixture doubles as the payload) and read the receipt line:
+
+   ```bash
+   echo '{"session_id":"e2e-1","transcript_path":"tests/unit/mcp/fixtures/session_end_transcript.jsonl","cwd":"'"$PWD"'","hook_event_name":"SessionEnd","reason":"other"}' \
+     | uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local
+   ```
+
+   Expect: under 60 s (Claude Code's raised `SessionEnd` budget), one `Ingested session claude-session://e2e-1 duplicate=False flow_run_id=…` line, exit 0. Re-run it for `duplicate=True`. After the run indexes, a phrase from the transcript must come back through `search_memory` / `make memory-query-graph`. Every failure path is a skip + exit 0 by design, so read the LOG, not the exit code.
+
 4. **Clean up.** Stop the serve process and any MCP server you started, and remove stray artefacts (`.tree/graphs/*.html`) so the worktree stays clean.

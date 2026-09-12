@@ -444,6 +444,62 @@ does not kill the batch; order of results matches input order.
 Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_UNLOCKER_ZONE` (the
 *Unlocker* zone, distinct from the SERP zone used by `search_web`).
 
+#### SessionEnd hook
+
+Claude Code sessions persist themselves through the same MCP surface — there is
+no second path into memory (ADR-008 §5). The repo-root `.claude/settings.json`
+wires `SessionEnd` to `scripts/hook_session_end.py`, which is glue around
+`tree.mcp.hooks` (stdlib + `fastmcp` + `pydantic` only, AST-enforced — the hook
+cannot drift into pipeline internals):
+
+```json
+"hooks": {
+  "SessionEnd": [{"hooks": [{
+    "type": "command",
+    "command": "uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local",
+    "timeout": 60
+  }]}]
+}
+```
+
+**What it stores.** The `user` / `assistant` turns of the transcript, text
+blocks only — `thinking`, `tool_use` and `tool_result` blocks never reach
+memory — as one `ingest_conversation` call with
+`session_uri="claude-session://<session_id>"`,
+`title="Claude Code session <id[:8]> — <YYYY-MM-DD>"` and `session_started_at`
+from the first turn. `session_uri` is the natural key, and the first write
+wins: ending the same session twice answers `duplicate: true` and re-ingests
+nothing. The receipt is logged as one line (`source_uri`, `duplicate`,
+`flow_run_id`, `status`); ingestion itself runs out-of-band, so the session is
+searchable only after the `online-pipeline` run finishes.
+
+**Guards — the hook always exits 0.** A session ending must never fail on
+memory, so each of these is one log line and a skip: a transcript under **200
+words** (`Transcript 30 words < 200 — skipped.` — a two-line session is noise),
+a missing transcript, an unreachable server (Mongo down → the spawned server
+dies in its lifespan), or a **Tool error envelope** in the answer (the log names
+`error_type` and `retryable`). The spawned local server is started with
+`MCP_SKIP_INDEX_BOOTSTRAP=1`, so it queries indexes instead of building them and
+boots in seconds — `SessionEnd` hooks share a 1.5 s budget that the configured
+`timeout: 60` raises to 60 s.
+
+**Cloud server (opt-in).** Change the argument to `tree-memory` to send sessions
+to the Horizon deployment instead; the remote `.mcp.json` entry is used
+unchanged, so complete its OAuth flow once (any MCP client will prompt — e.g.
+`uv run fastmcp inspect https://tree-memory.fastmcp.app/mcp`) before relying on
+the hook, or every session end logs a skip.
+
+**Disable it.** Drop the `hooks` block from `.claude/settings.json` (or set
+`"timeout": 0` for a single session). Nothing else reads it.
+
+Smoke-test it without ending a session — the fixture transcript doubles as the
+e2e payload:
+
+```bash
+echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session_end_transcript.jsonl","cwd":"'"$PWD"'","hook_event_name":"SessionEnd","reason":"other"}' \
+  | uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local
+```
+
 ## Modal embedding deployment (optional)
 
 The default embedding model is local sentence-transformers (`all-MiniLM-L6-v2`). For heavier workloads, swap in a Modal-hosted vLLM server running `voyageai/voyage-4-nano` on an A10G.
