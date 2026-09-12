@@ -24,7 +24,7 @@ ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), 
 | **Writes to `memory`** | node rows only: one `document` row, its `chunk`/`parent` rows and its embedded `chunk`/`child` rows | the same rows **plus** `part_of` / `next` / `mentions` / `referenced` edges and entity nodes |
 | **Embedded** | child chunks | child chunks + entity nodes |
 | **Retrieval** | `retrieve_parents` — hybrid search (vector + text, RRF) over children, grouped by `parent_id`, returning whole parents with their document metadata | the same parent resolution, then `expand_graph` from the parent ids ∪ entity seeds |
-| **MCP tools** | 6 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`) | those 6 + 7 graph tools (see [MCP server](#mcp-server)) |
+| **MCP tools** | 7 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`, `visualize_memory_embeddings`) | those 7 + 7 graph tools (see [MCP server](#mcp-server)) |
 | **`make memory-query-graph`** | prints the retrieved parents as text | writes + opens `.tree/graphs/<slug>-<stamp>.html` |
 
 Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes means dropping the collection and re-ingesting from scratch.
@@ -70,7 +70,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
-- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`.
+- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
 
 ### Environment variables
@@ -353,6 +353,8 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 *Both modes (7 tools):*
 
+Every tool answers failures as data, never as an MCP protocol error: `{"error_type": …, "retryable": true|false, "message": …}` (ADR-008 §2). Retry the same call only when `retryable` is true; otherwise change the input or stop.
+
 | Tool | Description |
 |---|---|
 | `search_memory` | Hybrid (vector + text) search. **Signature differs per mode** — see below. |
@@ -377,7 +379,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 | Mode | Signature | Returns |
 |---|---|---|
-| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …]}`, best match first. `top_k` IS the result cap; empty memory answers `{"parents": []}`. |
+| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …], "outcome": "found" \| "nothing_found", "search_mode": "hybrid" \| "text_only" \| "vector_only"}`, best match first. `top_k` IS the result cap; nothing above `min_vector_score` (or an empty memory) answers `"outcome": "nothing_found"` with `"parents": []`; a dead search leg shows as a non-`hybrid` `search_mode` (ADR-008 §3). |
 | `graphrag` | `search_memory(query: str, top_k: int = 10, max_hops: int = 1, max_results: int = 10, visualize: bool = False)` | Serialized nodes + edges after graph expansion, plus the interactive graph when `visualize=true`. |
 
 In `graphrag`, `query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
