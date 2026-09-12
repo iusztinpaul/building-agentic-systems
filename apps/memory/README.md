@@ -160,7 +160,7 @@ Two stages — **data** (sources → `documents`) then **memory** (documents →
 | stage | offline | online |
 |---|---|---|
 | **data** → `documents` | `run-data-pipeline` (phase: `data`) | `run-data-pipeline MODE=online SOURCE=…` |
-| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` or `SOURCE_URIS=…` |
 | **index** (shared, standalone) | `run-indexing-pipeline` (phase: `index`) | `run-indexing-pipeline` |
 | **clustering** → `memory_clusters` | `run-clustering-pipeline` (phase: `clustering`) | — (maintenance phase; no online form) |
 
@@ -210,7 +210,7 @@ make memory-run-data-pipeline MODE=online SOURCE="https://www.decodingai.com/p/a
 make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to write it into the `memory` collection. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
+Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` (or `SOURCE_URIS=<uri>`, the `source_uri` an ingest receipt carries) to write it into the `memory` collection. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory pipeline
 
@@ -231,12 +231,18 @@ the pending documents across `memory-extract-etl-worker` runs, and the indexing 
 once for the user as a sibling subflow:
 
 ```bash
-# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
+# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>),
+# optionally narrowed with DOC_IDS="<id>[,<id2>]" or SOURCE_URIS="<uri>[,<uri2>]"
 make memory-run-memory-pipeline
 make memory-run-memory-pipeline DOC_IDS="507f1f77bcf86cd799439011,507f1f77bcf86cd799439012"
 
 # Online — ONE document (e.g. the one just produced by run-data-pipeline MODE=online)
 make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
+
+# Online — retry from an ingest receipt's source_uri (resolved to ids at flow
+# entry; an unknown URI fails the run instead of extracting nothing). Mixable
+# with DOC_IDS.
+make memory-run-memory-pipeline MODE=online SOURCE_URIS="https://www.youtube.com/watch?v=abc"
 ```
 
 ### Memory indexing

@@ -32,7 +32,9 @@ does.
 
 Any phase can be turned OFF (``run_data`` / ``run_extraction`` / ``run_indexing``
 / ``run_clustering``, mirroring ``tree.online.online_pipeline``'s ``run_extraction`` idiom), and an
-extraction run can be narrowed to an explicit ``document_ids`` set. That is what
+extraction run can be narrowed to an explicit ``document_ids`` set or to the
+``source_uris`` an **Ingest receipt** carries (resolved to ids at flow entry —
+the retry path for a failed online extraction, ADR-008 §1). That is what
 lets the single-step entry points funnel through this ONE flow instead of forking
 into their own chains; with every default left alone the behavior is unchanged.
 
@@ -55,7 +57,10 @@ from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, tags
 from prefect.deployments import run_deployment
 
+from tree.config.settings import settings
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
+from tree.db import init_mongodb
+from tree.entities.documents import Document
 from tree.flow_runs import flow_run_status
 from tree.memory.pipeline import (
     ClusteringStats,
@@ -103,24 +108,80 @@ def _get_run_logger() -> logging.Logger:
         return logger
 
 
-def _validate_document_ids_scope(
-    document_ids: list[str] | None, user_id: PydanticObjectId | None
+def _validate_single_tenant_scope(
+    document_ids: list[str] | None,
+    source_uris: list[str] | None,
+    user_id: PydanticObjectId | None,
 ) -> None:
-    """Reject an explicit doc-id list that has no tenant to belong to.
+    """Reject a document selector that has no tenant to belong to.
 
-    Document ids are single-tenant: fanned across ALL active users (the
-    ``user_id=None`` nightly-cron semantics) they would either extract another
-    tenant's documents or fail deep inside a worker. Checked at BOTH edges —
-    the flow and the fire-and-forget dispatcher — because a dispatcher-side run
-    surfaces errors only as a remote flow-run failure (same rationale as
-    ``tree.online.validate_online_source``).
+    BOTH selectors are single-tenant: fanned across ALL active users (the
+    ``user_id=None`` nightly-cron semantics) an id set would extract another
+    tenant's documents or fail deep inside a worker, and a URI set would resolve
+    against another tenant's ``documents`` rows (``(user_id, source_type,
+    source_uri)`` is unique per TENANT, so the same URI legitimately exists for
+    several users). Checked at BOTH edges — the flow and the fire-and-forget
+    dispatcher — because a dispatcher-side run surfaces errors only as a remote
+    flow-run failure (same rationale as ``tree.online.validate_online_source``).
+
+    The message names the offending selector, since an operator passing
+    ``SOURCE_URIS=`` must not be told to fix ``DOC_IDS=``.
 
     Raises:
-        ValueError: ``document_ids`` passed without a ``user_id``.
+        ValueError: ``document_ids`` or ``source_uris`` passed without a
+            ``user_id``.
     """
 
-    if document_ids and user_id is None:
+    if user_id is not None:
+        return
+    if document_ids:
         raise ValueError("document_ids is single-tenant — pass user_id too.")
+    if source_uris:
+        raise ValueError("source_uris is single-tenant — pass user_id too.")
+
+
+async def _resolve_source_uris(
+    user_id: PydanticObjectId, source_uris: list[str]
+) -> list[str]:
+    """Resolve **Ingest receipt** URIs to this tenant's document ids.
+
+    ADR-008 Decision 1: a receipt carries ``source_uri`` — the **Document**'s
+    natural key — not its random ``_id``, so ``SOURCE_URIS=`` is what an operator
+    retries a failed extraction with. ONE indexed
+    ``{"user_id", "source_uri": {"$in": …}}`` read over the
+    ``user_source_uri_unique`` index covers the whole set; the connection is
+    opened here because this is the flow's only own I/O (same "connect only when
+    needed" shape as :func:`resolve_target_user_ids`).
+
+    A retry selector over ALREADY-INGESTED documents, NOT an ingest selector: it
+    runs before the data phase, so a URI this run would ingest does not resolve.
+    Use ``make memory-run-pipeline MODE=online SOURCE=<uri>`` to ingest.
+
+    Order follows the URIs the caller passed, not the cursor (Mongo guarantees
+    none), and a URI matching several rows (the same URI under two
+    ``source_type``s) yields all of them.
+
+    Raises:
+        ValueError: a URI with no document for this user — a typo must fail loud,
+            because a silently empty doc set makes a broken retry read green.
+    """
+
+    await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(),
+        settings.mongo.mongo_initdb_database,
+    )
+    documents = await Document.find(
+        {"user_id": user_id, "source_uri": {"$in": source_uris}}
+    ).to_list()
+    ids_by_uri: dict[str, list[str]] = {}
+    for document in documents:
+        ids_by_uri.setdefault(document.source_uri, []).append(str(document.id))
+    resolved: list[str] = []
+    for uri in source_uris:
+        if uri not in ids_by_uri:
+            raise ValueError(f"No document for source_uri {uri} (user {user_id})")
+        resolved.extend(ids_by_uri[uri])
+    return resolved
 
 
 def _log_clustering_outcome(
@@ -162,6 +223,7 @@ async def offline_pipeline(
     run_indexing: bool = True,
     run_clustering: bool = False,
     document_ids: list[str] | None = None,
+    source_uris: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the offline pipeline: data, extraction, indexing, then clustering.
 
@@ -196,8 +258,12 @@ async def offline_pipeline(
 
     ``document_ids`` narrows extraction to that exact set for that ONE user
     (forwarded verbatim to every coordinator call) instead of the user's
-    resolved PENDING documents; it requires ``user_id`` (see
-    :func:`_validate_document_ids_scope`).
+    resolved PENDING documents. ``source_uris`` narrows it the same way but by
+    **Ingest receipt** key: the URIs are resolved to this user's document ids at
+    flow entry (:func:`_resolve_source_uris`) and UNIONED with ``document_ids``
+    (order preserved, no duplicates), so ``DOC_IDS=`` and ``SOURCE_URIS=`` can be
+    mixed in one run. Both selectors require ``user_id`` (see
+    :func:`_validate_single_tenant_scope`).
 
     All phases disabled is a LOGGED no-op, not an error: the run completes and
     returns the empty result, so a misconfigured caller gets a Completed flow
@@ -220,10 +286,12 @@ async def offline_pipeline(
     ...}>}}`` as plain dicts (JSON-safe for the flow-run result).
 
     Raises:
-        ValueError: ``document_ids`` passed without a ``user_id``.
+        ValueError: ``document_ids`` or ``source_uris`` passed without a
+            ``user_id``, or a ``source_uris`` entry with no document for this
+            user (raised BEFORE any phase runs).
     """
 
-    _validate_document_ids_scope(document_ids, user_id)
+    _validate_single_tenant_scope(document_ids, source_uris, user_id)
     log = _get_run_logger()
     if not run_data and not run_extraction and not run_indexing and not run_clustering:
         log.info(
@@ -232,6 +300,21 @@ async def offline_pipeline(
             "— nothing to do"
         )
         return {"data": None, "extraction": {}, "indexing": {}, "clustering": {}}
+
+    # Resolve the receipt keys BEFORE any phase: an unknown URI is an operator
+    # typo, and failing at entry costs nothing, while failing later leaves a
+    # half-run to reason about. ``user_id`` is non-None here (guarded above).
+    extraction_document_ids = document_ids
+    if source_uris:
+        resolved = await _resolve_source_uris(user_id, source_uris)
+        extraction_document_ids = list(
+            dict.fromkeys([*(document_ids or []), *resolved])
+        )
+        log.info(
+            "offline-pipeline: resolved %d source_uris to %d document_ids",
+            len(source_uris),
+            len(resolved),
+        )
 
     configure_opik()
     try:
@@ -261,7 +344,9 @@ async def offline_pipeline(
                     try:
                         with tags(*TAGS_EXTRACTION):
                             stats = await memory_extract_etl_coordinator(
-                                uid, document_ids=document_ids, num_shards=num_shards
+                                uid,
+                                document_ids=extraction_document_ids,
+                                num_shards=num_shards,
                             )
                         extraction[str(uid)] = asdict(stats)
                         log.info(
@@ -332,6 +417,7 @@ async def dispatch_offline_pipeline(
     run_indexing: bool = True,
     run_clustering: bool = False,
     document_ids: list[str] | None = None,
+    source_uris: list[str] | None = None,
 ) -> dict[str, Any]:
     """Submit the offline run; the ONE entry point for callers.
 
@@ -352,21 +438,24 @@ async def dispatch_offline_pipeline(
     deployment, parameter validation, auth) PROPAGATE — a caller must see them
     rather than have them silently swapped for a long blocking in-process run.
 
-    The phase flags and ``document_ids`` are forwarded unchanged to the
-    deployment — see :func:`offline_pipeline` for their semantics.
+    The phase flags, ``document_ids`` and ``source_uris`` are forwarded unchanged
+    to the deployment — see :func:`offline_pipeline` for their semantics. URI
+    resolution happens THERE, not here: the flow is the contract, and the
+    dispatcher does no I/O.
 
     Callers that want to BLOCK on the run (the CLI) poll the returned
     ``flow_run_id`` themselves — waiting is a caller concern, not the
     dispatcher's.
 
     Raises:
-        ValueError: ``document_ids`` passed without a ``user_id`` — validated at
-            the edge, BEFORE any flow run is created, since dispatch is
-            fire-and-forget and this is the only synchronous failure a caller
-            would otherwise never see.
+        ValueError: ``document_ids`` or ``source_uris`` passed without a
+            ``user_id`` — validated at the edge, BEFORE any flow run is created,
+            since dispatch is fire-and-forget and this is the only synchronous
+            failure a caller would otherwise never see. An unresolvable URI is
+            NOT checked here (it needs a DB read); it fails the flow run.
     """
 
-    _validate_document_ids_scope(document_ids, user_id)
+    _validate_single_tenant_scope(document_ids, source_uris, user_id)
 
     parameters: dict[str, Any] = {
         "user_id": str(user_id) if user_id is not None else None,
@@ -378,6 +467,7 @@ async def dispatch_offline_pipeline(
         "run_indexing": run_indexing,
         "run_clustering": run_clustering,
         "document_ids": document_ids,
+        "source_uris": source_uris,
     }
     flow_run = await run_deployment(
         "offline-pipeline/offline-pipeline", parameters=parameters, timeout=0

@@ -16,9 +16,11 @@ the doc set:
 * ``--mode offline`` (default) — batch: every PENDING document for the
   resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``
   sets the fan-out width.
-* ``--mode online`` — realtime: exactly the ``--doc-ids`` you pass (required;
-  e.g. the id printed by ``run_data_pipeline.py --mode online``). No shard
-  fan-out — a handful of docs needs one worker.
+* ``--mode online`` — realtime: exactly the documents you select with
+  ``--doc-ids`` (e.g. the id printed by ``run_data_pipeline.py --mode online``)
+  and/or ``--source-uris`` (the ``source_uri`` an **Ingest receipt** carries,
+  resolved to ids by the flow) — one of the two is required. No shard fan-out —
+  a handful of docs needs one worker.
 
 The command blocks streaming the run's logs and exits non-zero on failure. The
 ``offline-pipeline`` deployment is core (always registered), and dispatch needs
@@ -37,6 +39,7 @@ Usage:
     make memory-run-memory-pipeline                                # offline, all pending docs
     make memory-run-memory-pipeline NUM_SHARDS=4
     make memory-run-memory-pipeline MODE=online DOC_IDS="<id1>,<id2>"
+    make memory-run-memory-pipeline MODE=online SOURCE_URIS="<uri>[,<uri2>]"
     uv run python scripts/run_memory_pipeline.py --mode online --doc-ids "id1,id2"
 """
 
@@ -64,18 +67,28 @@ async def _run(
     user_id: str | None,
     user_identifier: str | None,
     document_ids: list[str] | None,
+    source_uris: list[str] | None,
     num_shards: int | None,
 ) -> None:
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,
         document_ids=document_ids,
+        source_uris=source_uris,
         num_shards=num_shards if num_shards is not None else 1,
         run_data=False,
     )
     await wait_for_dispatch(result)
     # The dispatcher's spans belong to this short-lived process — flush before exit.
     flush_opik()
+
+
+def _parse_csv(raw: str | None) -> list[str] | None:
+    """Split a comma-separated option into entries; ``None`` when unset/empty."""
+
+    if not raw:
+        return None
+    return [entry.strip() for entry in raw.split(",") if entry.strip()] or None
 
 
 @click.command()
@@ -86,8 +99,19 @@ async def _run(
     default=None,
     help=(
         "Comma-separated document ObjectIds to extract. REQUIRED for --mode "
-        "online; optional narrowing for --mode offline (omit → every PENDING "
-        "document for the resolved user)."
+        "online unless --source-uris is given; optional narrowing for --mode "
+        "offline (omit → every PENDING document for the resolved user)."
+    ),
+)
+@click.option(
+    "--source-uris",
+    default=None,
+    help=(
+        "Comma-separated source_uris to extract — the natural key an ingest "
+        "receipt carries (e.g. the canonical YouTube URL, file:///path). "
+        "Resolved to this user's document ids by the flow; an unknown URI fails "
+        "the run. Satisfies --mode online in place of --doc-ids, and may be "
+        "combined with it."
     ),
 )
 @click.option(
@@ -105,26 +129,32 @@ def main(
     user_id: str | None,
     user_identifier: str | None,
     doc_ids: str | None,
+    source_uris: str | None,
     num_shards: int | None,
 ) -> None:
     """Run the memory extraction pipeline: offline batch or specific online docs."""
 
     if mode == MODE_ONLINE:
-        if not doc_ids:
+        if not doc_ids and not source_uris:
             raise click.UsageError(
                 "--mode online requires --doc-ids '<id>[,<id2>]' (the id printed "
-                "by run_data_pipeline.py --mode online)."
+                "by run_data_pipeline.py --mode online) or --source-uris "
+                "'<uri>[,<uri2>]' (the source_uri an ingest receipt carries)."
             )
         if num_shards is not None:
             raise click.UsageError("--num-shards is an offline-only fan-out knob.")
     if num_shards is not None and num_shards < 1:
         raise click.UsageError(f"--num-shards must be >= 1 (got {num_shards}).")
 
-    parsed_doc_ids: list[str] | None = None
-    if doc_ids:
-        parsed_doc_ids = [d.strip() for d in doc_ids.split(",") if d.strip()]
-
-    asyncio.run(_run(user_id, user_identifier, parsed_doc_ids, num_shards))
+    asyncio.run(
+        _run(
+            user_id,
+            user_identifier,
+            _parse_csv(doc_ids),
+            _parse_csv(source_uris),
+            num_shards,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -12,14 +12,17 @@ in their own suites.
 They also pin the single-step surface — the ``run_data`` / ``run_extraction`` /
 ``run_indexing`` / ``run_clustering`` phase flags (#098, extended by ADR-007
 Decision 5) that let the
-step CLIs funnel through this ONE flow, the ``document_ids`` narrowing forwarded
-to every per-user extraction call, and the single-tenant guard that fires at BOTH
-edges (flow and fire-and-forget dispatcher).
+step CLIs funnel through this ONE flow, the ``document_ids`` / ``source_uris``
+narrowing forwarded to every per-user extraction call (the latter resolved to ids
+ONCE at flow entry — the **Ingest receipt**'s retry key, ADR-008 §1), and the
+single-tenant guard that fires at BOTH edges (flow and fire-and-forget
+dispatcher).
 """
 
 import inspect
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -34,6 +37,10 @@ from tree.offline import dispatch_offline_pipeline, offline_pipeline
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _OTHER_USER_ID = PydanticObjectId("507f1f77bcf86cd799439012")
 _DOC_ID = "68a1f1f77bcf86cd799439ab"
+_OTHER_DOC_ID = "68a1f1f77bcf86cd799439ac"
+# The natural key an **Ingest receipt** hands the operator back (ADR-008 §1).
+_SOURCE_URI = "https://www.youtube.com/watch?v=abc"
+_OTHER_SOURCE_URI = "file:///tmp/a.md"
 
 
 @dataclass
@@ -87,6 +94,26 @@ def _patch_coordinators(
         return_value=[_USER_ID],
     )
     return data, extract, index, cluster, users
+
+
+def _patch_document_lookup(mocker, documents: list[SimpleNamespace]) -> MagicMock:
+    """Stub the Mongo boundary the URI→id resolution reads.
+
+    ``init_mongodb`` (Beanie init) and ``Document.find`` are the ONLY I/O the
+    flow itself does; the cursor stub mirrors ``to_list()``'s shape.
+    """
+
+    mocker.patch("tree.offline.init_mongodb", new_callable=AsyncMock)
+    return mocker.patch(
+        "tree.offline.Document.find",
+        return_value=MagicMock(to_list=AsyncMock(return_value=documents)),
+    )
+
+
+def _document(document_id: str, source_uri: str) -> SimpleNamespace:
+    """A ``documents`` row as the resolution reads it: its id and natural key."""
+
+    return SimpleNamespace(id=document_id, source_uri=source_uri)
 
 
 def _flow_run(
@@ -234,6 +261,99 @@ class TestOfflinePipelinePhaseFlags:
         extract.assert_not_awaited()
 
 
+class TestSourceUris:
+    """The retry selector an **Ingest receipt** hands back (ADR-008 §1).
+
+    A receipt carries ``source_uri``, never a ``Document._id``, so the operator
+    retrying a failed online extraction types the URI they already have. The
+    flow resolves it to document ids ONCE at entry and feeds the unchanged
+    ``document_ids`` path — an unknown URI fails loud, because a silent
+    "0 documents" is what makes a broken retry look successful.
+    """
+
+    async def test_resolves_uris_to_document_ids(self, mocker) -> None:
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        find = _patch_document_lookup(mocker, [_document(_DOC_ID, _SOURCE_URI)])
+
+        await offline_pipeline(
+            user_id=_USER_ID, source_uris=[_SOURCE_URI], run_data=False
+        )
+
+        # ONE tenant-scoped ``$in`` lookup, and the id it yields is what the
+        # extraction Coordinator is narrowed to.
+        find.assert_called_once_with(
+            {"user_id": _USER_ID, "source_uri": {"$in": [_SOURCE_URI]}}
+        )
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+
+    async def test_unions_with_document_ids(self, mocker) -> None:
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        # Cursor order is NOT the selector order — the resolved ids follow the
+        # URIs the operator typed, and the id they ALSO passed is not repeated.
+        _patch_document_lookup(
+            mocker,
+            [
+                _document(_OTHER_DOC_ID, _OTHER_SOURCE_URI),
+                _document(_DOC_ID, _SOURCE_URI),
+            ],
+        )
+
+        await offline_pipeline(
+            user_id=_USER_ID,
+            document_ids=[_DOC_ID],
+            source_uris=[_SOURCE_URI, _OTHER_SOURCE_URI],
+            run_data=False,
+        )
+
+        extract.assert_awaited_once_with(
+            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID], num_shards=1
+        )
+
+    async def test_unknown_uri_fails_loud(self, mocker) -> None:
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        _patch_document_lookup(mocker, [_document(_DOC_ID, _SOURCE_URI)])
+
+        with pytest.raises(
+            ValueError,
+            match=f"No document for source_uri {re.escape(_OTHER_SOURCE_URI)}",
+        ):
+            await offline_pipeline(
+                user_id=_USER_ID,
+                source_uris=[_SOURCE_URI, _OTHER_SOURCE_URI],
+                run_data=False,
+            )
+
+        # A typo must fail at entry, not extract the OTHER URI and read green.
+        data.assert_not_awaited()
+        extract.assert_not_awaited()
+
+    async def test_source_uris_require_user_id(self, mocker) -> None:
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        find = _patch_document_lookup(mocker, [])
+
+        with pytest.raises(ValueError, match="source_uris is single-tenant"):
+            await offline_pipeline(user_id=None, source_uris=[_SOURCE_URI])
+
+        # Single-tenant like ``document_ids``: fanned across every active user
+        # the lookup would reach another tenant's documents.
+        find.assert_not_called()
+        data.assert_not_awaited()
+        extract.assert_not_awaited()
+
+    async def test_a_run_without_source_uris_never_touches_mongo(self, mocker) -> None:
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        init = mocker.patch("tree.offline.init_mongodb", new_callable=AsyncMock)
+        find = mocker.patch("tree.offline.Document.find")
+
+        await offline_pipeline(user_id=_USER_ID, document_ids=[_DOC_ID])
+
+        # Resolution connects only when asked for — the nightly cron and every
+        # doc-id run keep the exact I/O they had before the selector existed.
+        init.assert_not_awaited()
+        find.assert_not_called()
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+
+
 class TestOfflineIndexingPhase:
     """Phase 3: indexing is its own **Offline phase**, not the Coordinator's job.
 
@@ -331,6 +451,8 @@ class TestOfflineIndexingPhase:
         assert names.index("run_extraction") + 1 == names.index("run_indexing")
         assert names.index("run_indexing") + 1 == names.index("run_clustering")
         assert names.index("run_clustering") + 1 == names.index("document_ids")
+        # The two doc selectors read side by side — both narrow extraction.
+        assert names.index("document_ids") + 1 == names.index("source_uris")
         assert parameters["run_indexing"].default is True
 
 
@@ -600,6 +722,7 @@ class TestDispatchOfflineIngest:
             "run_indexing": True,
             "run_clustering": False,
             "document_ids": None,
+            "source_uris": None,
         }
         mock_flow.assert_not_awaited()
 
@@ -686,6 +809,41 @@ class TestDispatchOfflineIngest:
         assert parameters["run_extraction"] is True
         assert parameters["run_indexing"] is False
         assert parameters["document_ids"] == [_DOC_ID]
+
+    async def test_dispatch_forwards_source_uris(self, mocker) -> None:
+        """The retry selector must survive the trip to the deployment.
+
+        Dropped here, ``SOURCE_URIS=`` would submit an un-narrowed run that
+        re-extracts every PENDING document instead of the one that failed.
+        """
+
+        mock_run = mocker.patch(
+            "tree.offline.run_deployment",
+            new_callable=AsyncMock,
+            return_value=_flow_run("run-3"),
+        )
+
+        await dispatch_offline_pipeline(
+            user_id=_USER_ID,
+            source_uris=[_SOURCE_URI],
+            run_data=False,
+        )
+
+        parameters = mock_run.await_args.kwargs["parameters"]
+        assert parameters["source_uris"] == [_SOURCE_URI]
+        assert parameters["document_ids"] is None
+
+    async def test_source_uris_without_user_id_never_creates_a_flow_run(
+        self, mocker
+    ) -> None:
+        mock_run = mocker.patch("tree.offline.run_deployment", new_callable=AsyncMock)
+
+        with pytest.raises(ValueError, match="source_uris is single-tenant"):
+            await dispatch_offline_pipeline(user_id=None, source_uris=[_SOURCE_URI])
+
+        # Same both-edges guard as ``document_ids``: the dispatcher is
+        # fire-and-forget, so this is the caller's only synchronous signal.
+        mock_run.assert_not_awaited()
 
     async def test_document_ids_without_user_id_never_creates_a_flow_run(
         self, mocker

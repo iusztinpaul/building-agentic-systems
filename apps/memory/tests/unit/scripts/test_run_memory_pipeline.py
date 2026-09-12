@@ -1,8 +1,9 @@
 """Unit tests for the ``scripts/run_memory_pipeline.py`` CLI wiring.
 
 Operator surface only: the ``--mode`` offline/online validation split and
-``--doc-ids`` parsing. The Prefect/Mongo work in ``_run`` is mocked (an
-external boundary), so nothing touches a real server.
+``--doc-ids`` / ``--source-uris`` parsing (either selector satisfies ``--mode
+online`` — a receipt hands back a URI, not a document id). The Prefect/Mongo work
+in ``_run`` is mocked (an external boundary), so nothing touches a real server.
 
 ``TestRunMemoryPipelineDispatch`` goes one level deeper (#099): it exercises
 ``_run`` itself with the dispatcher mocked, asserting the extraction step is a
@@ -87,14 +88,16 @@ def mock_flush_opik(mocker):
 
 
 class TestRunMemoryPipelineCliOptions:
-    def test_online_without_doc_ids_is_a_usage_error(self, mock_run, cli_main) -> None:
+    def test_online_requires_a_selector(self, mock_run, cli_main) -> None:
         runner = CliRunner()
 
         result = runner.invoke(cli_main, ["--mode", "online"])
 
-        # Assert — hard CLI error BEFORE any flow is dispatched.
+        # Assert — hard CLI error BEFORE any flow is dispatched, naming BOTH
+        # selectors: an Ingest receipt carries a URI, a data run prints an id.
         assert result.exit_code != 0
         assert "--doc-ids" in result.output
+        assert "--source-uris" in result.output
         mock_run.assert_not_awaited()
 
     def test_online_rejects_num_shards(self, mock_run, cli_main) -> None:
@@ -128,7 +131,8 @@ class TestRunMemoryPipelineForwarding:
         assert result.exit_code == 0, result.output
         mock_run.assert_awaited_once()
         assert mock_run.await_args.args[2] is None  # document_ids
-        assert mock_run.await_args.args[3] is None  # num_shards
+        assert mock_run.await_args.args[3] is None  # source_uris
+        assert mock_run.await_args.args[4] is None  # num_shards
 
     def test_online_parses_comma_separated_doc_ids(self, mock_run, cli_main) -> None:
         runner = CliRunner()
@@ -140,6 +144,17 @@ class TestRunMemoryPipelineForwarding:
         # Assert — split on commas, whitespace stripped, empties dropped.
         assert result.exit_code == 0, result.output
         assert mock_run.await_args.args[2] == ["68a1", "68b2"]
+
+    def test_source_uris_option(self, mock_run, cli_main) -> None:
+        runner = CliRunner()
+
+        result = runner.invoke(cli_main, ["--mode", "online", "--source-uris", "a, b,"])
+
+        # Assert — the URI selector alone satisfies --mode online and parses
+        # exactly like --doc-ids (commas, stripped, empties dropped).
+        assert result.exit_code == 0, result.output
+        assert mock_run.await_args.args[2] is None  # document_ids
+        assert mock_run.await_args.args[3] == ["a", "b"]
 
 
 class TestRunMemoryPipelineDispatch:
@@ -157,12 +172,13 @@ class TestRunMemoryPipelineDispatch:
         # Arrange — a narrowed doc set with an explicit fan-out width.
         document_ids = ["68a1", "68b2"]
 
-        await cli_module._run(None, None, document_ids, 4)
+        await cli_module._run(None, None, document_ids, None, 4)
 
         # Assert — the extraction step is the offline flow with data disabled.
         mock_dispatch_offline.assert_awaited_once_with(
             user_id=resolved_user_id,
             document_ids=document_ids,
+            source_uris=None,
             num_shards=4,
             run_data=False,
         )
@@ -180,9 +196,33 @@ class TestRunMemoryPipelineDispatch:
     ) -> None:
         # Arrange — the batch default: no doc narrowing, no fan-out knob.
 
-        await cli_module._run(None, None, None, None)
+        await cli_module._run(None, None, None, None, None)
 
         # Assert — one worker run, every PENDING document for the tenant.
         kwargs = mock_dispatch_offline.await_args.kwargs
         assert kwargs["num_shards"] == 1
         assert kwargs["document_ids"] is None
+        assert kwargs["source_uris"] is None
+
+    async def test_forwards_source_uris_to_the_dispatcher(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        resolved_user_id,
+    ) -> None:
+        # Arrange — the receipt retry shape: a URI, no id, no fan-out knob.
+        source_uris = ["https://www.youtube.com/watch?v=abc"]
+
+        await cli_module._run(None, None, None, source_uris, None)
+
+        # Assert — the flow (not this glue) resolves URIs to document ids.
+        mock_dispatch_offline.assert_awaited_once_with(
+            user_id=resolved_user_id,
+            document_ids=None,
+            source_uris=source_uris,
+            num_shards=1,
+            run_data=False,
+        )

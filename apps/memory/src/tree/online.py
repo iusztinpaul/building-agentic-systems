@@ -97,7 +97,8 @@ async def online_pipeline(
     Returns the ingested document id (a caller polling the run to completion can
     recover it from the flow-run result), or ``None`` for a duplicate. A
     failed extraction fails THIS run (visible, retryable via
-    ``make memory-run-memory-pipeline MODE=online DOC_IDS=<id>`` — a
+    ``make memory-run-memory-pipeline MODE=online DOC_IDS=<id>`` or
+    ``SOURCE_URIS=<uri>`` — the key the **Ingest receipt** carries; a
     plain re-run would dedupe on the data step and skip the memory step).
     """
 
