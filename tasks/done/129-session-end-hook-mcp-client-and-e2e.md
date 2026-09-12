@@ -372,3 +372,12 @@ feature (this task).
   `tasks/132-prefect-run-log-for-memory-module-loggers.md` (feature
   `mcp-tool-contracts-followups`).
 - Commit `1b25a22`'s lost `§` glyph: cosmetic, ignored.
+
+### [PA] 2026-09-12 19:05 — Acceptance Review, round 2 (PR #43, HEAD f9962c8)
+
+**VERDICT: ACCEPT**
+
+Rollup `tasks/done/130-pa-rejection-mcp-tool-contracts.md` (commit `f9962c8`) closed all five
+round-1 issues; full evidence in its `[PA]` round-2 entry. Story 5 ("Developer opts into the cloud
+server") stays `[HUMAN]` and deferred — README/ADR-008 §5/glossary now say the cloud entry is
+unsupported by the hook until persistent OAuth token storage exists. Hand off to the PR Reviewer.

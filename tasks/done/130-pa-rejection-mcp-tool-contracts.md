@@ -35,7 +35,7 @@ point at stake (issue 2), and the fix stays inside the hook.
 - [x] Issue 5: `.agents/skills/tree-memory/SKILL.md` Search loop rule 2 says what an empty answer means in `graphrag` (`[]` from `search_memory` / `query_memory`, `No results found.` from `deep_search_memory` — there is no `outcome`), and rule 4 says `search_mode` is rag-only; `wc -l` ≤ 153; every task-128 grep AC still holds (`grep -c "PROACTIVE\|background agent"` → 0, `grep -c '"error"'` → 0, tool table 13 rows, `disable-model-invocation: true`).
 - [x] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green (env `local`).
 - [x] Tester re-runs full QA suite and PASSES.
-- [ ] PA re-runs acceptance review on the feature and ACCEPTS.
+- [x] PA re-runs acceptance review on the feature and ACCEPTS.
 
 ## Issues (detail)
 
@@ -213,3 +213,44 @@ EXIT=0
 - The one prior-session flake noted by the SWE (a single non-zero `make memory-tests` run right after the revert, output truncated) did not reproduce across my two full runs plus the SWE's four; treating it as noise per the SWE's own assessment.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-12 19:05 — Acceptance Review, round 2 (feature mcp-tool-contracts, PR #43, HEAD f9962c8)
+
+**VERDICT: ACCEPT**
+
+Re-verified every issue against the pushed tree (grep ACs re-run, docs re-read, wired command run
+live from the repo root: `echo '{}' | …` → `skipped.` exit 0; a rerun of the already-ingested
+`rollup130-smoke-1` → `duplicate=True … status=duplicate` exit 0 in 5.5 s):
+
+- Issue 1 — fixed. README "Disable it" names `disableAllHooks` (settings file or `--settings` for
+  one run), the merge-across-levels caveat, and "drop the `hooks` block" for permanent removal.
+  `"timeout": 0` gone.
+- Issue 2 — fallback accepted; the revert of `auth: "oauth"` was the right call. With fastmcp
+  3.2.0's `MemoryStore` the "preferred" default would trade one silent 401 → skip for a browser
+  popup plus a 30 s stall at EVERY session end — strictly worse for the user. What ships is honest:
+  README "Local server only, for now" says exactly what happens when `tree-memory` is used (401 →
+  one skip), names persistent token storage as the prerequisite, and says nobody has walked the
+  cloud path; the Tester walked the 401 → skip claim live (~1.2 s, exit 0). ADR-008 §5 and the
+  glossary "Session-end hook" row say the same thing (diff limited to that one clause each — an
+  in-place correction of this feature's own unmerged ADR, not an edit of a shipped decision).
+  The `[HUMAN]` cloud-login AC stays unchecked and deferred to the owner post-merge.
+- Issue 3 — fixed. One command string across `.claude/settings.json`, README ×2 and the e2e skill
+  (`uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local`), no
+  `--env-file`; `.mcp.json` keeps its own `--env-file` so the spawned server still loads `.env`
+  (proven by the live receipt). `test_wired_hook_command_carries_no_env_file` pins it.
+- Issue 4 — fixed. e2e skill quotes the local mongot line verbatim, says it prints in the
+  `make memory-serve-workflows` terminal (not the streamed run log, until `tasks/132`), and names
+  `ready (status=READY)` as the Atlas wording.
+- Issue 5 — fixed. Rule 2 maps graphrag's `[]` / `No results found.` onto `nothing_found`; rule 4
+  says `search_mode` is rag-only. 150 lines; every task-128 grep still holds.
+
+Spot-check of previously-PASS surfaces: hook JSON snippet, guards paragraph, smoke test and
+`load_server_config` docstring all consistent with the wired behaviour; `.mcp.json` untouched.
+
+Tester's non-blocking note (fixture line 4 prints one `Skipping malformed transcript line 4`
+WARNING on every documented smoke test, undocumented) — confirmed live; not REJECT-worthy (the
+line names its own cause and the receipt follows). Folded as one doc AC into
+`tasks/131-session-end-hook-transcript-cap.md`, which already rewrites that README paragraph.
+
+Hand off to the PR Reviewer.
+

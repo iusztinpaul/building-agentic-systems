@@ -44,6 +44,7 @@ Tester reproduced it with a 5 MB transcript). Trim on the client so the call alw
 - [ ] A transcript under the cap is byte-identical to today's output (no notice, no WARNING) — `::test_small_transcript_is_untouched`.
 - [ ] `session_started_at` comes from the first ORIGINAL turn even when that turn was dropped — `::test_session_started_at_survives_trimming`.
 - [ ] Live: the 129 Tester's synthetic 12 000-turn transcript piped through the wired command logs `Ingested session … duplicate=False flow_run_id=…` (no `invalid_input`) — recorded in `## Log`.
+- [ ] The README `SessionEnd hook` smoke-test blurb and the e2e skill's Session-end hook step each say, in ONE sentence, that the fixture's line 4 is deliberately malformed and prints one `Skipping malformed transcript line 4` WARNING before the receipt — `grep -c "malformed transcript line 4" apps/memory/README.md .agents/skills/run-pipelines-e2e/SKILL.md` → 1 each. (PA round-2 acceptance review, from the Tester's note on `tasks/done/130`.)
 - [ ] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green.
 
 ## User Stories
@@ -79,3 +80,11 @@ The hook trims the oldest turns to the server's payload cap so the longest sessi
 - 2 stories covering: oversized session, normal session.
 
 Ready for implementation.
+
+### [PA] 2026-09-12 19:05 — Grooming addendum
+
+Added one doc AC from the round-2 acceptance review of PR #43: the documented smoke test prints an
+unexplained `Skipping malformed transcript line 4` WARNING (the fixture's line 4 is malformed on
+purpose, to exercise the guard). This task already rewrites the same README paragraph for the cap
+notice, so the sentence lands here rather than in a task of its own.
+
