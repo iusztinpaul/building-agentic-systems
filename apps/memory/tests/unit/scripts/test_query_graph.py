@@ -140,6 +140,55 @@ class TestRagMode:
         assert result.exit_code == 0
         assert "No results." in result.output
 
+    def test_a_degraded_search_prints_the_caveat_as_the_first_line(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        # The vector index is mid-rebuild: the operator must read the short list
+        # as "half the index answered", not as "the memory has nothing".
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent()], search_mode="text_only"),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "voyage rate limit"])
+
+        assert result.output.splitlines()[0] == (
+            "Search ran text_only — the other leg was unavailable; "
+            "results may miss matches."
+        )
+        assert "[0.032] Memory for AI Agents" in result.output
+
+    def test_a_degraded_empty_search_still_prints_the_caveat(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(search_mode="vector_only"),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "q"])
+
+        assert result.output.splitlines()[0].startswith("Search ran vector_only —")
+        assert "No results." in result.output
+
+    def test_a_hybrid_search_prints_no_caveat(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent()]),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "q"])
+
+        assert "Search ran" not in result.output
+
     def test_without_a_query_it_refuses_and_exits_one(
         self, cli_module, rag_mode, mocked_boundaries
     ) -> None:

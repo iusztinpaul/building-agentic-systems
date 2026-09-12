@@ -190,7 +190,7 @@ class TestRagSearchMemory:
 
         result = await search_memory(query="nothing here", ctx=_make_ctx(), top_k=3)
 
-        assert json.loads(result) == {"parents": []}
+        assert json.loads(result) == {"parents": [], "search_mode": "hybrid"}
 
     async def test_top_k_is_the_result_cap_passed_to_retrieval(self, mocker) -> None:
         # ``top_k`` IS the cap in rag mode — there is no second ``max_results``.

@@ -173,9 +173,13 @@ async def query_memory(
     top_k = top_k if top_k is not None else app_config.query.top_k
     collection = client[database][MEMORY_COLLECTION]
 
-    hits = await hybrid_search(
-        collection, query, embedding_model, user_id, limit=top_k, node_filter={}
-    )
+    # graphrag reads the hits and IGNORES the **Search mode**: ``QueryResult``
+    # is Chapter 8's contract and stays unchanged (ADR-008 §3).
+    hits = (
+        await hybrid_search(
+            collection, query, embedding_model, user_id, limit=top_k, node_filter={}
+        )
+    ).hits
     if not hits:
         logger.info("No seed nodes found for query: %s", query[:100])
         return QueryResult()

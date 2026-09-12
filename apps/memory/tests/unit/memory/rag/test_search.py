@@ -6,7 +6,10 @@ Two claims are pinned here:
   reaches only one of the two stages would let fusion resurrect the rows the
   caller excluded;
 * the "a **Parent chunk** is never a seed" invariant, asserted behaviourally
-  (a parent row whose content matches the query is absent from the results).
+  (a parent row whose content matches the query is absent from the results);
+* the **Search mode** each leg-failure combination reports (``TestSearchMode``,
+  ADR-008 §3) — a dead leg used to be swallowed into ``[]``, so "Mongo is
+  down" and "nothing matches" were the same answer.
 
 ``TestRRFFuse`` moved here verbatim with ``_rrf_fuse`` (was
 ``tests/unit/memory/graph/test_retrieval.py``).
@@ -14,19 +17,42 @@ Two claims are pinned here:
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from beanie import PydanticObjectId
 
-from tree.memory.rag.search import _rrf_fuse, hybrid_search
+from tree.memory.rag.search import SearchUnavailableError, _rrf_fuse, hybrid_search
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
 _CHILD_FILTER = {"type": "chunk", "subtype": "child"}
 
+# The first-stage key that identifies each leg's pipeline.
+_VECTOR_STAGE = "$vectorSearch"
+_TEXT_STAGE = "$match"
+
 
 @pytest.fixture
 def embedding_model() -> FakeEmbeddingModel:
     return FakeEmbeddingModel(dimensions=4)
+
+
+def _break_leg(collection, stage: str) -> None:
+    """Make ONE leg's aggregate raise, leaving the other leg working.
+
+    The real triggers are a dropped ``vector_index`` (mid-rebuild) and a missing
+    text index on a fresh collection; both surface as the aggregate raising.
+    """
+
+    working_aggregate = collection.aggregate
+
+    async def flaky_aggregate(pipeline):
+        if stage in pipeline[0]:
+            raise RuntimeError(f"{stage} is unavailable")
+        return await working_aggregate(pipeline)
+
+    collection.aggregate = flaky_aggregate
 
 
 class TestChildOnlyFilter:
@@ -109,7 +135,7 @@ class TestGraphSeedFilter:
         child = make_child_row(_USER, "c0", content="parent chunk retrieval")
         collection = make_collection([parent, child])
 
-        hits = await hybrid_search(
+        result = await hybrid_search(
             collection,
             "parent chunk",
             embedding_model,
@@ -118,7 +144,7 @@ class TestGraphSeedFilter:
             node_filter={},
         )
 
-        assert [hit.doc["_id"] for hit in hits] == ["c0"]
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
 
     async def test_entity_and_child_rows_are_both_seeds(
         self, make_collection, embedding_model, make_child_row, make_entity_row
@@ -127,11 +153,11 @@ class TestGraphSeedFilter:
         entity = make_entity_row(_USER, "e1", name="alice")
         collection = make_collection([child, entity])
 
-        hits = await hybrid_search(
+        result = await hybrid_search(
             collection, "alice", embedding_model, _USER, limit=10, node_filter={}
         )
 
-        assert {hit.doc["_id"] for hit in hits} == {"c0", "e1"}
+        assert {hit.doc["_id"] for hit in result.hits} == {"c0", "e1"}
 
 
 class TestFusedOutput:
@@ -144,12 +170,12 @@ class TestFusedOutput:
         ]
         collection = make_collection(rows)
 
-        hits = await hybrid_search(
+        result = await hybrid_search(
             collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
         )
 
-        assert [hit.doc["_id"] for hit in hits] == ["c0", "c1"]
-        assert hits[0].score > hits[1].score
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0", "c1"]
+        assert result.hits[0].score > result.hits[1].score
 
     async def test_truncates_to_limit(
         self, make_collection, embedding_model, make_child_row
@@ -157,32 +183,182 @@ class TestFusedOutput:
         rows = [make_child_row(_USER, f"c{i}", content="alpha") for i in range(5)]
         collection = make_collection(rows)
 
-        hits = await hybrid_search(
+        result = await hybrid_search(
             collection, "alpha", embedding_model, _USER, limit=2, node_filter={}
         )
 
-        assert len(hits) == 2
+        assert len(result.hits) == 2
 
-    async def test_a_text_stage_failure_degrades_to_vector_only(
+
+class TestSearchMode:
+    """One leg down is a **Search mode**; both down is an error (ADR-008 §3)."""
+
+    async def test_vector_leg_failure_reports_text_only(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # Arrange — ``vector_index`` was dropped for a dimension change, so
+        # the $vectorSearch aggregate raises while $text still answers.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+        _break_leg(collection, _VECTOR_STAGE)
+
+        result = await hybrid_search(
+            collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "text_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
+
+    async def test_text_leg_failure_reports_vector_only(
         self, make_collection, embedding_model, make_child_row
     ) -> None:
         # Arrange — no text index (the state of a fresh collection before the
         # indexing pipeline runs): the $text aggregate raises.
         collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
-        working_aggregate = collection.aggregate
+        _break_leg(collection, _TEXT_STAGE)
 
-        async def flaky_aggregate(pipeline):
-            if "$match" in pipeline[0]:
-                raise RuntimeError("text index missing")
-            return await working_aggregate(pipeline)
-
-        collection.aggregate = flaky_aggregate
-
-        hits = await hybrid_search(
+        result = await hybrid_search(
             collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
         )
 
-        assert [hit.doc["_id"] for hit in hits] == ["c0"]
+        assert result.search_mode == "vector_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
+
+    async def test_both_legs_failing_raises(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # Arrange — Mongo is unreachable: every aggregate raises. An empty hit
+        # list here would read as "nothing matches" to the caller.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+        _break_leg(collection, _VECTOR_STAGE)
+        _break_leg(collection, _TEXT_STAGE)
+
+        with pytest.raises(SearchUnavailableError, match="both unavailable"):
+            await hybrid_search(
+                collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+            )
+
+    async def test_empty_leg_is_hybrid_not_degraded(
+        self, make_collection, embedding_model
+    ) -> None:
+        # A leg that RAN and matched nothing is not a failure: the collection is
+        # empty, so both legs answer ``[]`` and the mode stays ``hybrid``.
+        result = await hybrid_search(
+            make_collection(), "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "hybrid"
+        assert result.hits == []
+
+    async def test_missing_vector_index_reports_text_only(
+        self, make_collection, embedding_model, make_document_row
+    ) -> None:
+        # Arrange — the indexing pipeline never ran (or ``vector_index`` was
+        # dropped): $vectorSearch does NOT raise, it answers zero rows. The row
+        # carries no embedding, so the vector leg is empty either way and the
+        # text leg still matches it.
+        collection = make_collection(
+            [make_document_row(_USER, "doc1", content="alpha")], search_indexes=[]
+        )
+
+        result = await hybrid_search(
+            collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "text_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["doc1"]
+
+    async def test_building_vector_index_reports_text_only(
+        self, make_collection, embedding_model, make_document_row, caplog
+    ) -> None:
+        # Arrange — the index exists but mongot is still building it, so it
+        # serves no queries yet (ADR-008 §5: "not-yet-ready" is text_only, not
+        # an empty memory).
+        collection = make_collection(
+            [make_document_row(_USER, "doc1", content="alpha")],
+            search_indexes=[
+                {"name": "vector_index", "status": "BUILDING", "queryable": False}
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = await hybrid_search(
+                collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+            )
+
+        assert result.search_mode == "text_only"
+        assert "status=BUILDING" in caplog.text
+        assert "queryable=False" in caplog.text
+
+    async def test_empty_but_queryable_index_stays_hybrid(
+        self, make_collection, embedding_model, make_document_row
+    ) -> None:
+        # A queryable index that matched nothing IS a result: the leg ran.
+        collection = make_collection(
+            [make_document_row(_USER, "doc1", content="alpha")],
+            search_indexes=[
+                {"name": "vector_index", "status": "READY", "queryable": True}
+            ],
+        )
+
+        result = await hybrid_search(
+            collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "hybrid"
+        assert [hit.doc["_id"] for hit in result.hits] == ["doc1"]
+
+    async def test_index_entry_without_status_or_queryable_stays_hybrid(
+        self, make_collection, embedding_model, make_document_row
+    ) -> None:
+        # The LOCAL mongot reports neither field (verified 2026-09-12: the entry
+        # is ``{id, name, type, latestDefinition}``), so "present but silent"
+        # must read as healthy — otherwise every empty vector leg on a working
+        # local stack would claim to be degraded.
+        collection = make_collection(
+            [make_document_row(_USER, "doc1", content="alpha")],
+            search_indexes=[{"name": "vector_index", "type": "vectorSearch"}],
+        )
+
+        result = await hybrid_search(
+            collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "hybrid"
+
+    async def test_index_probe_only_runs_on_empty_leg(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # The probe is an extra command per query; a leg that returned hits is
+        # self-evidently queryable, so the hot path must not pay for it.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+
+        result = await hybrid_search(
+            collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "hybrid"
+        assert collection.search_index_probes == []
+
+    async def test_leg_failure_logs_traceback(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # The WARNING is the only trace of a degraded leg an operator gets, so it
+        # must carry the Mongo error — the pre-ADR-008 bare message did not.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+        _break_leg(collection, _VECTOR_STAGE)
+
+        with caplog.at_level(logging.WARNING):
+            await hybrid_search(
+                collection, "alpha", embedding_model, _USER, limit=10, node_filter={}
+            )
+
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "Vector search leg" in record.msg
+        ]
+        assert len(warnings) == 1
+        assert warnings[0].exc_info is not None
 
 
 class TestRRFFuse:

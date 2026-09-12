@@ -19,7 +19,7 @@ Two families live here:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -81,6 +81,38 @@ class ScoredHit(BaseModel):
 
     doc: dict[str, Any] = Field(description="The raw ``memory`` row that matched.")
     score: float = Field(description="Fused RRF score; higher is better.")
+
+
+SearchMode = Literal["hybrid", "text_only", "vector_only"]
+"""**Search mode** — which legs of the hybrid search answered (ADR-008 §3).
+
+A leg that RAN and matched nothing is still ``hybrid``: "empty" is a result,
+"raised" is a mode. Both legs raising is
+:class:`tree.memory.rag.search.SearchUnavailableError`, not a mode. NOT the
+**Memory mode** (``rag`` / ``graphrag``): that is what the server IS, this is
+how ONE query went.
+"""
+
+
+class HybridSearchResult(BaseModel):
+    """What :func:`tree.memory.rag.search.hybrid_search` returns.
+
+    The mode travels WITH the hits so a caller cannot read a degraded result as
+    a complete one — pre-ADR-008 a dead leg was swallowed into ``[]`` and
+    "Mongo is down" read exactly like "nothing matches".
+    """
+
+    hits: list[ScoredHit] = Field(
+        default_factory=list, description="Fused hits, best score first."
+    )
+    search_mode: SearchMode = Field(
+        default="hybrid",
+        description=(
+            "Which legs answered: ``hybrid`` = both ran, ``text_only`` = the "
+            "vector leg was unavailable, ``vector_only`` = the text leg was "
+            "unavailable."
+        ),
+    )
 
 
 class DocumentMeta(BaseModel):
@@ -145,4 +177,12 @@ class RetrievalResult(BaseModel):
 
     parents: list[RetrievedParent] = Field(
         default_factory=list, description="Best-scoring parent first."
+    )
+    search_mode: SearchMode = Field(
+        default="hybrid",
+        description=(
+            "The **Search mode** the seed search ran in, copied off "
+            "``HybridSearchResult``: ``text_only`` / ``vector_only`` means one "
+            "leg was unavailable, so these parents may miss matches."
+        ),
     )

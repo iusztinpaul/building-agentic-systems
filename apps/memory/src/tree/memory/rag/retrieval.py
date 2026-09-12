@@ -78,8 +78,13 @@ async def retrieve_parents(
 
     ``top_k <= 0`` asks for no results and gets an empty one, without a query:
     passing ``limit=0`` down made BOTH search stages raise and log
-    "Vector/Text search unavailable, falling back ...", which reads as an Atlas
-    outage to whoever is on call.
+    "Vector/Text search leg unavailable ...", which reads as an Atlas outage to
+    whoever is on call (and now raises :class:`SearchUnavailableError`).
+
+    Every returned result carries the seed search's **Search mode**; only the
+    ``top_k <= 0`` early return keeps the ``hybrid`` default, because it never
+    searched. :class:`~tree.memory.rag.search.SearchUnavailableError` (both legs
+    dead) propagates — a caller must not read that as "nothing found".
     """
 
     top_k = top_k if top_k is not None else app_config.query.top_k
@@ -91,7 +96,7 @@ async def retrieve_parents(
 
     collection = client[database][MEMORY_COLLECTION]
 
-    hits = await hybrid_search(
+    result = await hybrid_search(
         collection,
         query,
         embedding_model,
@@ -99,10 +104,15 @@ async def retrieve_parents(
         limit=top_k * _CHILD_HITS_PER_PARENT,
         node_filter=_CHILD_NODE_FILTER,
     )
+    hits = result.hits
     grouped = group_children_by_parent(hits)
     if not grouped:
-        logger.info("No child hits for query: %s", query[:100])
-        return RetrievalResult()
+        logger.info(
+            "No child hits for query (search_mode=%s): %s",
+            result.search_mode,
+            query[:100],
+        )
+        return RetrievalResult(search_mode=result.search_mode)
 
     parent_rows = await _fetch_nodes(collection, user_id, list(grouped))
     document_ids = [
@@ -142,7 +152,7 @@ async def retrieve_parents(
         len(parents),
         min(len(parents), top_k),
     )
-    return RetrievalResult(parents=parents[:top_k])
+    return RetrievalResult(parents=parents[:top_k], search_mode=result.search_mode)
 
 
 def group_children_by_parent(hits: list[ScoredHit]) -> dict[Any, list[MatchedChild]]:

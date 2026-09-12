@@ -1,8 +1,18 @@
-"""Unit tests for the splitter's output shapes (``tree.memory.rag.types``)."""
+"""Unit tests for the rag layer's transit shapes (``tree.memory.rag.types``).
+
+The splitter's output (``ChildChunk`` / ``ParentChunk``) plus the retrieval
+contract's **Search mode** field, which an MCP client reads off the serialized
+answer — so it has to be in the schema, not only on the instance.
+"""
 
 from __future__ import annotations
 
-from tree.memory.rag.types import ChildChunk, ParentChunk
+from tree.memory.rag.types import (
+    ChildChunk,
+    HybridSearchResult,
+    ParentChunk,
+    RetrievalResult,
+)
 
 
 class TestChildChunk:
@@ -42,3 +52,17 @@ class TestParentChunk:
         first.heading_path.append("Memory")
 
         assert second.heading_path == []
+
+
+def test_retrieval_result_has_search_mode() -> None:
+    schema = RetrievalResult.model_json_schema()
+
+    assert "search_mode" in schema["properties"]
+    assert RetrievalResult().search_mode == "hybrid"
+
+
+def test_hybrid_search_result_defaults_to_no_hits_in_hybrid_mode() -> None:
+    result = HybridSearchResult()
+
+    assert result.hits == []
+    assert result.search_mode == "hybrid"

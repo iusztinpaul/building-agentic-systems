@@ -14,12 +14,13 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.entities.memory import MEMORY_COLLECTION
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.rag.retrieval import (
     _CHILD_HITS_PER_PARENT,
     group_children_by_parent,
     retrieve_parents,
 )
-from tree.memory.rag.types import ScoredHit
+from tree.memory.rag.types import HybridSearchResult, ScoredHit
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -133,7 +134,9 @@ class TestRetrieveParents:
             ]
         )
         mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
         )
 
         result = await retrieve_parents(
@@ -167,7 +170,9 @@ class TestRetrieveParents:
             ]
         )
         mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
         )
 
         result = await retrieve_parents(
@@ -199,7 +204,9 @@ class TestRetrieveParents:
             ]
         )
         mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
         )
 
         with caplog.at_level(logging.WARNING):
@@ -223,7 +230,9 @@ class TestRetrieveParents:
         self, mocker, make_collection, make_parent_row, embedding_model
     ) -> None:
         search = mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=[], autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(),
+            autospec=True,
         )
 
         await retrieve_parents(
@@ -258,7 +267,7 @@ class TestRetrieveParents:
             )
         mocker.patch(
             "tree.memory.rag.retrieval.hybrid_search",
-            return_value=many_hits,
+            return_value=HybridSearchResult(hits=many_hits),
             autospec=True,
         )
 
@@ -288,7 +297,9 @@ class TestRetrieveParents:
             [make_document_row(_USER, "doc1"), make_parent_row(_USER, "p2")]
         )
         mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
         )
 
         with caplog.at_level(logging.WARNING):
@@ -317,7 +328,9 @@ class TestRetrieveParents:
             ]
         )
         mocker.patch(
-            "tree.memory.rag.retrieval.hybrid_search", return_value=hits, autospec=True
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
         )
 
         await retrieve_parents(
@@ -371,3 +384,92 @@ class TestNonPositiveTopK:
         search.assert_not_called()
         assert "unavailable" not in caplog.text
         assert "top_k" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Search mode (ADR-008 §3) — module-level: these assert the FIELD's journey
+# from the hybrid search onto the result, not the grouping this file's classes
+# cover.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("search_mode", ["hybrid", "text_only", "vector_only"])
+async def test_search_mode_copied_onto_result(
+    mocker,
+    make_collection,
+    make_parent_row,
+    make_document_row,
+    hits,
+    embedding_model,
+    search_mode: str,
+) -> None:
+    """A degraded seed search must stay visible on the parents it produced."""
+
+    collection = make_collection(
+        [
+            make_document_row(_USER, "doc1"),
+            make_parent_row(_USER, "p1"),
+            make_parent_row(_USER, "p2", chunk_index=1),
+        ]
+    )
+    mocker.patch(
+        "tree.memory.rag.retrieval.hybrid_search",
+        return_value=HybridSearchResult(hits=hits, search_mode=search_mode),
+        autospec=True,
+    )
+
+    result = await retrieve_parents(
+        _client(collection), _DATABASE, "q", embedding_model, _USER
+    )
+
+    assert result.parents
+    assert result.search_mode == search_mode
+
+
+async def test_search_mode_survives_a_degraded_search_with_no_hits(
+    mocker, make_collection, embedding_model
+) -> None:
+    """Degraded AND empty is the case a caller must not read as "no matches"."""
+
+    mocker.patch(
+        "tree.memory.rag.retrieval.hybrid_search",
+        return_value=HybridSearchResult(search_mode="text_only"),
+        autospec=True,
+    )
+
+    result = await retrieve_parents(
+        _client(make_collection()), _DATABASE, "q", embedding_model, _USER
+    )
+
+    assert result.parents == []
+    assert result.search_mode == "text_only"
+
+
+async def test_top_k_zero_keeps_default_mode(mocker, embedding_model) -> None:
+    """The early return never searched, so it reports the ``hybrid`` default."""
+
+    search = mocker.patch("tree.memory.rag.retrieval.hybrid_search", autospec=True)
+
+    result = await retrieve_parents(
+        _client(object()), _DATABASE, "q", embedding_model, _USER, top_k=0
+    )
+
+    assert result.search_mode == "hybrid"
+    search.assert_not_called()
+
+
+async def test_search_unavailable_error_propagates(mocker, embedding_model) -> None:
+    """Both legs dead is an error, not an empty answer (the MCP boundary catches it)."""
+
+    mocker.patch(
+        "tree.memory.rag.retrieval.hybrid_search",
+        side_effect=SearchUnavailableError(
+            "vector and text search are both unavailable"
+        ),
+        autospec=True,
+    )
+
+    with pytest.raises(SearchUnavailableError):
+        await retrieve_parents(
+            _client(object()), _DATABASE, "q", embedding_model, _USER
+        )

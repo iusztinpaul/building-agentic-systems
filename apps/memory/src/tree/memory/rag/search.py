@@ -39,7 +39,8 @@ from typing import Any
 from beanie import PydanticObjectId
 
 from tree.config.app_config import app_config
-from tree.memory.rag.types import ScoredHit
+from tree.memory.rag.indexing import _VECTOR_INDEX_NAME
+from tree.memory.rag.types import HybridSearchResult, ScoredHit, SearchMode
 from tree.models.base import BaseEmbeddingModel
 from tree.observability import track
 
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 # The one row shape that must never be a search seed (ADR-006 decision 2).
 _PARENT_ROW: dict[str, Any] = {"type": "chunk", "subtype": "parent"}
+
+
+class SearchUnavailableError(RuntimeError):
+    """Both search legs raised, so no hit list exists — degraded, not empty."""
 
 
 @track(name="hybrid_search")
@@ -58,7 +63,7 @@ async def hybrid_search(
     *,
     limit: int,
     node_filter: dict[str, Any],
-) -> list[ScoredHit]:
+) -> HybridSearchResult:
     """Vector + text search over ``collection``, fused with RRF.
 
     ``node_filter`` narrows BOTH stages to one row family and is merged into the
@@ -69,6 +74,16 @@ async def hybrid_search(
     ``user_id`` is pinned into both stages server-side, so cross-tenant rows are
     pruned before fusion rather than after. Returns at most ``limit`` hits,
     best fused score first.
+
+    Each leg answers ``list[dict] | None``: ``None`` means the leg RAISED,
+    ``[]`` means it ran and matched nothing (ADR-008 §3). This function turns
+    that pair into a **Search mode** — one dead leg is ``text_only`` /
+    ``vector_only``, two live legs are ``hybrid`` even when both are empty —
+    so a caller can tell "no matches" from "half the index is gone".
+
+    Raises:
+        SearchUnavailableError: both legs raised; there is no hit list to
+            report, and an empty one would read as "nothing matches".
     """
 
     vector_results = await _vector_search(
@@ -83,10 +98,26 @@ async def hybrid_search(
         collection, query, user_id=user_id, limit=limit, node_filter=node_filter
     )
 
-    fused = _rrf_fuse(vector_results, text_results, k=app_config.query.rrf_k)
+    if vector_results is None and text_results is None:
+        raise SearchUnavailableError("vector and text search are both unavailable")
+
+    search_mode: SearchMode = "hybrid"
+    if vector_results is None:
+        search_mode = "text_only"
+    elif text_results is None:
+        search_mode = "vector_only"
+
+    fused = _rrf_fuse(
+        vector_results or [], text_results or [], k=app_config.query.rrf_k
+    )
     ranked = sorted(fused.values(), key=lambda item: item["score"], reverse=True)
 
-    return [ScoredHit(doc=item["doc"], score=item["score"]) for item in ranked[:limit]]
+    return HybridSearchResult(
+        hits=[
+            ScoredHit(doc=item["doc"], score=item["score"]) for item in ranked[:limit]
+        ],
+        search_mode=search_mode,
+    )
 
 
 @track(name="_vector_search")
@@ -98,8 +129,16 @@ async def _vector_search(
     user_id: PydanticObjectId,
     limit: int,
     node_filter: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Approximate-nearest-neighbour stage.
+) -> list[dict[str, Any]] | None:
+    """Approximate-nearest-neighbour stage. ``None`` when the leg is unavailable.
+
+    Unavailable is TWO states, because ``$vectorSearch`` only raises for one of
+    them: the aggregate raising (mongot unreachable), and the aggregate quietly
+    answering ``[]`` because ``vector_index`` is absent or still building —
+    verified 2026-09-12 against the local mongot, which returns an empty result
+    set rather than an error for a missing index. Both must read as
+    ``text_only``, so the empty answer is confirmed against
+    :func:`_vector_index_is_queryable` before it counts as "no matches".
 
     No parent exclusion here: parents are written with ``embedding: []`` and so
     are absent from the vector index — adding a filter clause for them would
@@ -111,7 +150,7 @@ async def _vector_search(
     pipeline = [
         {
             "$vectorSearch": {
-                "index": "vector_index",
+                "index": _VECTOR_INDEX_NAME,
                 "path": "embedding",
                 "queryVector": query_vector,
                 "numCandidates": limit * 10,
@@ -127,10 +166,73 @@ async def _vector_search(
         results = []
         async for doc in cursor:
             results.append(doc)
-        return results
     except Exception:
-        logger.warning("Vector search unavailable, falling back to text-only")
-        return []
+        logger.warning(
+            "Vector search leg unavailable; the query runs text-only", exc_info=True
+        )
+        return None
+
+    if results:
+        return results
+    return [] if await _vector_index_is_queryable(collection) else None
+
+
+async def _vector_index_is_queryable(collection: Any) -> bool:
+    """Is ``vector_index`` present AND queryable? Probes ONLY an empty leg.
+
+    One extra ``listSearchIndexes`` command, and only on the path where the ANN
+    stage matched nothing — rare for a real query (``retrieve_parents`` asks for
+    40 candidates over a non-empty collection), so the hot path pays nothing.
+
+    Fail-OPEN twice, because only an ABSENT index is unambiguous:
+
+    * the probe raising — an undeterminable state must not turn every empty
+      vector leg into a degraded query (an unreachable mongot already fails the
+      aggregate above, which is the loud path);
+    * an entry that reports NEITHER ``queryable`` NOR ``status``. Atlas sends
+      both; the local mongot sends neither (verified 2026-09-12: the entry is
+      ``{id, name, type, latestDefinition}``), so requiring ``queryable is
+      True`` would report ``text_only`` for every empty vector leg on a healthy
+      local stack.
+
+    So: no entry → unavailable; ``queryable: false`` or a ``status`` other than
+    ``READY`` → unavailable; anything else → available.
+    """
+
+    try:
+        cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
+        entries = await cursor.to_list()
+    except Exception:
+        logger.warning(
+            "Could not probe search index '%s'; reading the empty vector leg as "
+            "a real empty result",
+            _VECTOR_INDEX_NAME,
+            exc_info=True,
+        )
+        return True
+
+    if not entries:
+        logger.warning(
+            "Vector search leg unavailable: search index '%s' absent; the query "
+            "runs text-only",
+            _VECTOR_INDEX_NAME,
+        )
+        return False
+
+    entry = entries[0]
+    queryable = entry.get("queryable")
+    status = entry.get("status")
+    if queryable is False or (queryable is None and status not in (None, "READY")):
+        logger.warning(
+            "Vector search leg unavailable: search index '%s' is not queryable "
+            "(status=%s, queryable=%s); the query runs text-only",
+            _VECTOR_INDEX_NAME,
+            status,
+            queryable,
+        )
+        return False
+
+    return True
 
 
 async def _text_search(
@@ -140,8 +242,10 @@ async def _text_search(
     user_id: PydanticObjectId,
     limit: int,
     node_filter: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Run ``$text`` on the memory collection (a standard text index, not Atlas Search).
+) -> list[dict[str, Any]] | None:
+    """Run ``$text`` on the memory collection — ``None`` when the leg raised.
+
+    (A standard text index, not Atlas Search.)
 
     The ``$nor`` clause is the parent-exclusion invariant: unlike the vector
     stage, ``$text`` happily matches a parent's content, and a parent seed would
@@ -172,8 +276,10 @@ async def _text_search(
             results.append(doc)
         return results
     except Exception:
-        logger.warning("Text search unavailable, falling back to vector-only")
-        return []
+        logger.warning(
+            "Text search leg unavailable; the query runs vector-only", exc_info=True
+        )
+        return None
 
 
 def _rrf_fuse(

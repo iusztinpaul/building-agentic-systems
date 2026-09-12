@@ -57,6 +57,14 @@ RAG_FULL_GRAPH_UNAVAILABLE = (
     "to graphrag."
 )
 
+# The one caveat line a degraded query prints before its results (ADR-008 §3):
+# a text_only / vector_only answer ranked half the index, so "nothing relevant"
+# is not a safe read of a short list. Printed FIRST, and also above
+# "No results." — degraded-and-empty is exactly when the operator needs it.
+DEGRADED_SEARCH_CAVEAT = (
+    "Search ran {mode} — the other leg was unavailable; results may miss matches."
+)
+
 # How much of a parent to show per hit. A parent is ~4096 tokens; the terminal
 # is a ranking view, not a reader, so it prints an excerpt and the operator
 # opens the source if the hit looks right.
@@ -81,6 +89,8 @@ def _format_parent_block(parent: RetrievedParent) -> str:
 
 
 def _print_parents(result: RetrievalResult) -> None:
+    if result.search_mode != "hybrid":
+        click.echo(DEGRADED_SEARCH_CAVEAT.format(mode=result.search_mode))
     if not result.parents:
         click.echo("No results.")
         return

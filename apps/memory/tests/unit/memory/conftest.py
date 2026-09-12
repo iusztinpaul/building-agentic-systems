@@ -29,6 +29,11 @@ class FakeCursor:
         for row in self._rows:
             yield row
 
+    async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
+        """What ``listSearchIndexes`` callers use instead of iterating."""
+
+        return list(self._rows) if length is None else list(self._rows[:length])
+
 
 def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
     """Evaluate the query-operator subset our retrieval pipelines emit."""
@@ -56,17 +61,52 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
     return True
 
 
+# The ``listSearchIndexes`` entry a collection has AFTER the indexing pipeline
+# ran: mongot serves queries from it. The default, because every pipeline-shape
+# test stands for a properly indexed collection.
+_QUERYABLE_VECTOR_INDEX: dict[str, Any] = {
+    "name": "vector_index",
+    "status": "READY",
+    "queryable": True,
+}
+
+
 class FakeMemoryCollection:
     """Records aggregate pipelines / find filters and applies them to ``rows``."""
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        search_indexes: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.rows = list(rows or [])
         self.pipelines: list[list[dict[str, Any]]] = []
         self.find_filters: list[dict[str, Any]] = []
+        # ``search_indexes=[]`` is the never-indexed / dropped-index state;
+        # ``[{"status": "BUILDING", "queryable": False}]`` the mid-build one.
+        self.search_indexes = (
+            [_QUERYABLE_VECTOR_INDEX]
+            if search_indexes is None
+            else list(search_indexes)
+        )
+        self.search_index_probes: list[str | None] = []
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
         self.pipelines.append(pipeline)
         return FakeCursor(self._apply(pipeline))
+
+    async def list_search_indexes(self, name: str | None = None) -> FakeCursor:
+        """The Atlas-Search index catalogue, recorded so a test can assert the
+        probe did NOT run on a leg that returned hits."""
+
+        self.search_index_probes.append(name)
+        return FakeCursor(
+            [
+                index
+                for index in self.search_indexes
+                if name is None or index.get("name") == name
+            ]
+        )
 
     def find(self, query: dict[str, Any]) -> FakeCursor:
         self.find_filters.append(query)
