@@ -18,7 +18,7 @@ The Blocker is small and mechanical (a ~6-line delegation the feature's own task
 
 - [x] Blocker 1: `apps/memory/src/tree/memory/rag/search.py::_vector_index_is_queryable` decides the per-entry verdict by calling `tree.memory.rag.indexing.index_entry_is_queryable` — `grep -n 'entry.get("queryable")\|entry.get("status")' apps/memory/src/tree/memory/rag/search.py` returns nothing; the "Mirrors … case for case" sentences in BOTH docstrings (`search.py` and `indexing.py::index_entry_is_queryable`) are gone; `tests/unit/memory/rag/test_search.py::TestSearchMode` (`test_missing_vector_index_reports_text_only`, `test_building_vector_index_reports_text_only`, `test_empty_but_queryable_index_stays_hybrid`, `test_index_entry_without_status_or_queryable_stays_hybrid`) still green unchanged — they are behavioural and must not need edits.
 - [x] Tester re-runs full QA suite (`make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests`, env `local`) and PASSES.
-- [ ] PA re-runs acceptance review and ACCEPTS.
+- [x] PA re-runs acceptance review and ACCEPTS.
 - [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
 
 ## Blockers (detail)
@@ -221,3 +221,45 @@ EXIT=0
 - Note for the record: the `code-review` plugin is enabled in `.claude/settings.json`, but this Tester agent's toolset has no way to launch the plugin's multi-subagent `/code-review` command (no Task/agent-launch tool available); the manual review above (CLAUDE.md adherence: types, Pydantic, no `print`, async; bug scan of every changed file; docstring-vs-code cross-check) covers the same ground the plugin targets.
 
 **VERDICT: PASS**
+
+
+### [PA] 2026-09-12 19:50 — Acceptance Review, round 3 (feature mcp-tool-contracts, PR #43, HEAD cbb593f)
+
+**VERDICT: ACCEPT**
+
+Scoped to whether rollup 133 (`cbb593f`, one Blocker + seven nits) disturbed any user-facing
+behaviour accepted in round 2 (`f9962c8`). Re-walked all three surfaces live on the local stack
+(`make env-status` → local):
+
+- (a) rag `search_memory` / CLI caveat — `retrieval.py` (`outcome`), `query_graph.py`
+  (`DEGRADED_SEARCH_CAVEAT`, `No results.`) and the `search_memory` tool are NOT in the diff; the
+  only (a)-relevant change is `search.py::_vector_index_is_queryable` delegating to
+  `index_entry_is_queryable`. Ran the production function against the live local mongot
+  catalogue: entry keys `[id, latestDefinition, name, type]` (`status=None`, `queryable=None`),
+  `index_entry_is_queryable(entry) -> None`, `_vector_index_is_queryable(collection) -> True`,
+  no WARNING — the healthy local stack still reads as `hybrid`. Two rag-mode CLI runs
+  (`TREE_MEMORY__MODE=rag make memory-query-graph QUERY=…`, off-topic + on-topic) printed
+  results with NO caveat line. `test_search.py` untouched since round 2 (`git diff --stat`
+  empty); Tester's mutation run confirms the `is False` row is pinned.
+- (b) wired SessionEnd command (`.claude/settings.json`, run verbatim from the repo root):
+  `echo '{}'` → `skipped.` exit 0; `echo 'not json at all'` → one `Unreadable SessionEnd input
+  (… json_invalid …) — read as empty.` WARNING + `skipped.` exit 0; `{"session_id": 5, "cwd": 7}`
+  → one validation WARNING + `skipped.` exit 0; fixture transcript (`rollup130-smoke-1`) →
+  `duplicate=True flow_run_id=None status=duplicate` exit 0 in 11 s (the known line-4
+  `Skipping malformed transcript line` WARNING, already folded into task 131). `cwd` is now read
+  off the same parsed model — one stdin read, same `.mcp.json` resolution.
+- (c) `ingest_url` at the real tool boundary (`ingest_url.fn`, stub ctx): `ftp://…`, `not-a-url`,
+  `mailto:…`, `""` → all `unsupported_url`, `retryable: false`, key set exactly
+  `{error_type, retryable, message}`; `tool_error` / `storage_error` / `internal_error` each emit
+  exactly those three keys. The four removed arms' types (`BrightData*Error`, `httpx.*`,
+  `_http_retryable`) are still live in `search_web` (`tools.py:597-610`), so the module
+  docstring, glossary row and skill §"Errors" that enumerate those codes remain accurate; the
+  `ingest_url` docstring promises only `pipeline_unavailable` / `unsupported_url`, matching the
+  code.
+
+Observation, out of scope (min_vector_score is task 125, untouched here): a pure-gibberish query
+(`xqzvptr wkjfhqm blorvitz`) scored 0.783 on the vector leg and returned 10 parents as `found`,
+so `nothing_found` could not be triggered live against the populated local memory. Not a
+regression of this rollup; noted for the owner.
+
+Hand off to the PR Reviewer.
