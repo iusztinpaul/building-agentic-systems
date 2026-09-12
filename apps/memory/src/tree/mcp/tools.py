@@ -211,17 +211,19 @@ async def _ingest(
     user_id: PydanticObjectId,
     dup_extra: dict[str, Any],
 ) -> str:
-    """Shared MCP ingest tail: dispatch to the online pipeline, serialize to JSON.
+    """Shared MCP ingest tail: dispatch to the online pipeline, serialize the receipt.
 
-    ``dispatch_online_pipeline`` owns the whole contract — edge validation and
-    the fire-and-forget ``online-pipeline`` deployment submit (ONE worker-side
-    run ingests AND extracts), returning ``{"status": <flow-run state>,
-    "flow_run_id": ...}``. There is no in-process path, so a Prefect failure
-    raises here and surfaces through each tool's error handling.
+    ``dispatch_online_pipeline`` owns the whole contract — edge validation, the
+    pre-flight duplicate lookup and the fire-and-forget ``online-pipeline``
+    deployment submit (ONE worker-side run ingests AND extracts) — and answers
+    an :class:`~tree.online.IngestReceipt`. Its five fields plus the tool's own
+    ``dup_extra`` echo (``url`` / ``file_path``) ARE the tool's answer. There is
+    no in-process path, so a Prefect failure raises here and surfaces through
+    each tool's error handling.
     """
 
-    result = await dispatch_online_pipeline(source, user_id)
-    return json.dumps({**result, **dup_extra})
+    receipt = await dispatch_online_pipeline(source, user_id)
+    return json.dumps({**receipt.model_dump(), **dup_extra})
 
 
 @mcp.tool
@@ -229,11 +231,18 @@ async def _ingest(
 async def ingest_url(url: str, ctx: Context) -> str:
     """Fetch a web page and ingest its content into memory.
 
-    Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (fetch +
-    memory pipeline inline, indexing submitted after) and returns immediately —
-    ``{"status": "scheduled", "flow_run_id": ...}``, where ``status`` is the
-    new run's Prefect state. It does not wait for the memory to be written, so
-    the page is NOT searchable yet when this returns.
+    Answers an **Ingest receipt** — ``{"source_uri", "duplicate",
+    "document_id", "flow_run_id", "status"}``. ``source_uri`` is the memory's
+    natural key for the source. ``duplicate: true`` means it was ALREADY in
+    memory at submit time: ``document_id`` names the existing Document,
+    ``flow_run_id`` is null, ``status`` is ``"duplicate"`` and nothing was
+    re-ingested — tell the user it is already known. ``duplicate: false`` means
+    ONE ``online-pipeline`` flow run was submitted (``flow_run_id`` set,
+    ``status`` its Prefect state, normally ``"scheduled"``): ingestion +
+    extraction run out-of-band, so the source is NOT searchable yet when this
+    returns. The answer also echoes the ``url`` you passed;
+    ``source_uri`` may differ from it (a YouTube link canonicalises to
+    ``https://www.youtube.com/watch?v=<id>``).
 
     Args:
         url: The web URL to fetch and ingest.
@@ -271,11 +280,19 @@ async def ingest_file(
     """Ingest a file's text content into memory.
 
     The server never opens ``file_path`` — it may not share a filesystem with
-    you. Read the file YOURSELF and pass its text as ``content``. Async
-    ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + memory
-    pipeline inline, indexing submitted after) and returns immediately —
-    ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
-    state — so the file is NOT searchable yet when this returns.
+    you. Read the file YOURSELF and pass its text as ``content``.
+
+    Answers an **Ingest receipt** — ``{"source_uri", "duplicate",
+    "document_id", "flow_run_id", "status"}``. ``source_uri`` is the memory's
+    natural key for the source. ``duplicate: true`` means it was ALREADY in
+    memory at submit time: ``document_id`` names the existing Document,
+    ``flow_run_id`` is null, ``status`` is ``"duplicate"`` and nothing was
+    re-ingested — tell the user it is already known. ``duplicate: false`` means
+    ONE ``online-pipeline`` flow run was submitted (``flow_run_id`` set,
+    ``status`` its Prefect state, normally ``"scheduled"``): ingestion +
+    extraction run out-of-band, so the source is NOT searchable yet when this
+    returns. The answer also echoes the ``file_path`` you passed
+    (``source_uri`` is ``file://<path>``).
 
     Args:
         file_path: Absolute path of the file on YOUR machine. Identity only:
@@ -527,12 +544,18 @@ async def ingest_conversation(
 ) -> str:
     """Extract knowledge from a conversation and add it to memory.
 
-    Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (document +
-    memory pipeline inline, indexing submitted after) and returns immediately —
-    the chunk rows (and, in ``graphrag``, the people / tasks / preferences and
-    their relationships) are written out-of-band by a worker. Returns
-    ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
-    state; the conversation is NOT searchable yet at that point.
+    Answers an **Ingest receipt** — ``{"source_uri", "duplicate",
+    "document_id", "flow_run_id", "status"}``. ``source_uri`` is the memory's
+    natural key for the source. ``duplicate: true`` means it was ALREADY in
+    memory at submit time: ``document_id`` names the existing Document,
+    ``flow_run_id`` is null, ``status`` is ``"duplicate"`` and nothing was
+    re-ingested — tell the user it is already known. ``duplicate: false`` means
+    ONE ``online-pipeline`` flow run was submitted (``flow_run_id`` set,
+    ``status`` its Prefect state, normally ``"scheduled"``): ingestion +
+    extraction run out-of-band, so the source is NOT searchable yet when this
+    returns. The chunk rows (and, in ``graphrag``, the people /
+    tasks / preferences and their relationships) are written out-of-band by a
+    worker.
 
     Args:
         conversation_text: The full conversation text to process.

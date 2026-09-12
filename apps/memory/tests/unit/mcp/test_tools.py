@@ -23,7 +23,14 @@ from beanie import PydanticObjectId
 from fastmcp.tools import ToolResult
 
 from tree.data.online_pipeline import UrlSource
-from tree.mcp.tools import _ingest, search_memory, visualize_memory_embeddings
+from tree.mcp.tools import (
+    _ingest,
+    ingest_conversation,
+    ingest_file,
+    ingest_url,
+    search_memory,
+    visualize_memory_embeddings,
+)
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.rag.types import (
     DocumentMeta,
@@ -32,8 +39,32 @@ from tree.memory.rag.types import (
     RetrievedParent,
 )
 from tree.memory.visualize.embeddings import NO_CLUSTERING_RUN_MESSAGE
+from tree.online import IngestReceipt
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+# The two **Ingest receipt** shapes every ingest tool can answer with.
+_DISPATCHED = IngestReceipt(
+    source_uri="https://example.com",
+    duplicate=False,
+    document_id=None,
+    flow_run_id="run-1",
+    status="scheduled",
+)
+_DUPLICATE = IngestReceipt(
+    source_uri="https://example.com",
+    duplicate=True,
+    document_id="507f1f77bcf86cd799439012",
+    flow_run_id=None,
+    status="duplicate",
+)
+_RECEIPT_KEYS = {"source_uri", "duplicate", "document_id", "flow_run_id", "status"}
+
+
+def _tool_fn(tool):
+    """Unwrap FastMCP's ``FunctionTool`` back to the coroutine it registered."""
+
+    return getattr(tool, "fn", tool)
 
 
 class TestIngestTail:
@@ -43,11 +74,11 @@ class TestIngestTail:
     propagating) is the dispatcher's, covered in ``tests/unit/test_online.py``.
     """
 
-    async def test_merges_dup_extra_into_the_dispatch_result(self, mocker):
+    async def test_merges_dup_extra_into_the_receipt(self, mocker):
         mock_dispatch = mocker.patch(
             "tree.mcp.tools.dispatch_online_pipeline",
             new_callable=AsyncMock,
-            return_value={"status": "scheduled", "flow_run_id": "run-1"},
+            return_value=_DISPATCHED,
         )
 
         result = await _ingest(
@@ -57,8 +88,11 @@ class TestIngestTail:
         )
 
         assert json.loads(result) == {
-            "status": "scheduled",
+            "source_uri": "https://example.com",
+            "duplicate": False,
+            "document_id": None,
             "flow_run_id": "run-1",
+            "status": "scheduled",
             "url": "https://example.com",
         }
         mock_dispatch.assert_awaited_once_with(
@@ -392,3 +426,71 @@ class TestVisualizeMemoryEmbeddings:
             "is a point, coloured by its cluster from the latest clustering run"
         )
         assert "no clustering run exists" in summary
+
+
+class TestIngestReceipt:
+    """Every ingest tool answers the **Ingest receipt** — and nothing else.
+
+    A model reads ``duplicate`` to tell "already in memory" from "on its way",
+    and ``source_uri`` is the key an operator retries with, so the key set is
+    the contract (ADR-008 §1): the receipt's five fields plus the tool's own
+    echo (``url`` / ``file_path``).
+    """
+
+    @pytest.mark.parametrize(
+        "receipt", [_DISPATCHED, _DUPLICATE], ids=["dispatched", "duplicate"]
+    )
+    async def test_ingest_url_answers_the_receipt_plus_the_url(
+        self, mocker, receipt: IngestReceipt
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            return_value=receipt,
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com", _make_ctx())
+        )
+
+        assert set(payload) == _RECEIPT_KEYS | {"url"}
+        assert payload == {**receipt.model_dump(), "url": "https://example.com"}
+
+    @pytest.mark.parametrize(
+        "receipt", [_DISPATCHED, _DUPLICATE], ids=["dispatched", "duplicate"]
+    )
+    async def test_ingest_file_answers_the_receipt_plus_the_path(
+        self, mocker, receipt: IngestReceipt
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            return_value=receipt,
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_file)("/tmp/notes.md", "body", _make_ctx())
+        )
+
+        assert set(payload) == _RECEIPT_KEYS | {"file_path"}
+        assert payload == {**receipt.model_dump(), "file_path": "/tmp/notes.md"}
+
+    @pytest.mark.parametrize(
+        "receipt", [_DISPATCHED, _DUPLICATE], ids=["dispatched", "duplicate"]
+    )
+    async def test_ingest_conversation_answers_the_receipt_alone(
+        self, mocker, receipt: IngestReceipt
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            return_value=receipt,
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_conversation)("Alice likes Python.", _make_ctx())
+        )
+
+        # No echo field: the conversation text is not an identifier.
+        assert set(payload) == _RECEIPT_KEYS
+        assert payload == receipt.model_dump()

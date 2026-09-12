@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +21,9 @@ from tree.data.online_pipeline import (
     _get_configured_substack_domains,
     _ingest_url,
     online_ingest,
+    source_uri_for,
 )
+from tree.data.youtube.youtube import canonical_video_url
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -455,3 +458,54 @@ class TestOnlineIngestRouting:
         assert captured["name"] == "online_ingest"
         assert captured["tags"] == ["data-pipeline", "online"]
         assert captured["meta"] == {"pipeline": "data"}
+
+
+class TestSourceUriFor:
+    """``source_uri_for`` mirrors each leaf's OWN ``source_uri`` derivation.
+
+    The dispatcher's pre-flight duplicate lookup (``tree.online``) and the leaf
+    that later inserts the Document must key on the SAME string: a helper that
+    drifted from a leaf would report ``duplicate: false`` at submit time and
+    then dedupe on the worker (ADR-008 §1).
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=abc123XYZ_-",
+            "https://youtu.be/abc123XYZ_-",
+            "https://m.youtube.com/watch?v=abc123XYZ_-",
+        ],
+        ids=["long", "short", "mobile"],
+    )
+    def test_youtube_video_urls_canonicalise_like_the_leaf(self, url: str) -> None:
+        assert source_uri_for(UrlSource(uri=url)) == canonical_video_url("abc123XYZ_-")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://example.substack.com/p/post",
+            "https://example.com/blog/post",
+            "https://www.youtube.com/@channel",
+        ],
+        ids=["substack", "web", "youtube-without-video-id"],
+    )
+    def test_other_urls_round_trip_verbatim(self, url: str) -> None:
+        # The substack + web leaves store the URL as given; a YouTube URL with
+        # no extractable video id has nothing to canonicalise.
+        assert source_uri_for(UrlSource(uri=url)) == url
+
+    def test_file_source_uses_the_file_scheme(self) -> None:
+        source = FileSource(path="/tmp/a.md", content="body")
+
+        assert source_uri_for(source) == "file:///tmp/a.md"
+
+    def test_conversation_with_a_session_uri_is_verbatim(self) -> None:
+        source = ConversationSource(text="hi", session_uri="claude-session://abc")
+
+        assert source_uri_for(source) == "claude-session://abc"
+
+    def test_conversation_without_a_session_uri_hashes_the_text(self) -> None:
+        uri = source_uri_for(ConversationSource(text="hi"))
+
+        assert re.fullmatch(r"conversation://[0-9a-f]{16}", uri)

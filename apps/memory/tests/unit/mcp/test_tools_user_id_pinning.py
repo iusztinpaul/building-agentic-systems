@@ -20,8 +20,16 @@ from tree.memory.rag.types import RetrievalResult
 from tree.memory.types import QueryResult
 from tree.mcp import graph_tools as mcp_graph_tools
 from tree.mcp import tools as mcp_tools
+from tree.online import IngestReceipt
 
-_SUBMITTED = {"status": "scheduled", "flow_run_id": "run-1"}
+# What the dispatcher answers for a NEW source: an **Ingest receipt** naming one
+# submitted flow run (the tools serialize it verbatim).
+_SUBMITTED = IngestReceipt(
+    source_uri="https://example.com",
+    duplicate=False,
+    flow_run_id="run-1",
+    status="scheduled",
+)
 
 
 def _make_ctx(user_id: PydanticObjectId) -> MagicMock:

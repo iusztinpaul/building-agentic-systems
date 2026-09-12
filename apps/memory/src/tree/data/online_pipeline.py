@@ -22,6 +22,9 @@ from tree.config.sources import (
     SubstackRssSource,
 )
 from tree.config.sources import default_configured_sources
+from tree.data.conversation.conversation import conversation_source_uri
+from tree.data.file.file import file_source_uri
+from tree.data.youtube.youtube import canonical_video_url, extract_video_id
 from tree.entities.documents import Document
 from tree.config.constants import TAGS_DATA_ONLINE
 from tree.observability import (
@@ -75,6 +78,14 @@ _URL_HANDLERS: list[
     ("youtube.com", _ingest_youtube_video),
     ("youtu.be", _ingest_youtube_video),
     ("substack.com", _ingest_substack_article),
+]
+
+
+# Which registry patterns route to YouTube — read off the registry so
+# ``source_uri_for`` canonicalises exactly the URLs ``_ingest_url`` sends to the
+# YouTube leaf.
+_YOUTUBE_URL_PATTERNS: list[str] = [
+    pattern for pattern, handler in _URL_HANDLERS if handler is _ingest_youtube_video
 ]
 
 
@@ -241,6 +252,46 @@ async def _ingest_conversation(
         session_uri=source.session_uri,
         session_started_at=source.session_started_at,
     )
+
+
+def source_uri_for(source: OnlineSource) -> str:
+    """The ``source_uri`` the leaf pipeline WILL store for ``source`` — pure, no I/O.
+
+    The ONE entry the dispatcher uses for its pre-flight duplicate lookup
+    (:func:`tree.online.dispatch_online_pipeline`): it delegates to the same
+    per-leaf helper the leaf itself calls, so a submit-time verdict and the
+    worker-side insert can never key on different strings (ADR-008 §1).
+
+    Per variant:
+
+    * :class:`UrlSource` — a YouTube video URL canonicalises to
+      ``https://www.youtube.com/watch?v=<id>`` (what the YouTube leaf stores);
+      every other URL, including a YouTube URL with no extractable video id, is
+      stored verbatim by the substack / web leaves.
+    * :class:`FileSource` — :func:`tree.data.file.file.file_source_uri`.
+    * :class:`ConversationSource` —
+      :func:`tree.data.conversation.conversation.conversation_source_uri`.
+
+    Raises:
+        ValueError: From :func:`conversation_source_uri` when ``session_uri``
+            is supplied but blank.
+    """
+
+    match source:
+        case UrlSource():
+            domain = urlparse(source.uri).netloc.lower()
+            if any(pattern in domain for pattern in _YOUTUBE_URL_PATTERNS):
+                video_id = extract_video_id(source.uri)
+                if video_id is not None:
+                    return canonical_video_url(video_id)
+            return source.uri
+        case FileSource():
+            return file_source_uri(source.path)
+        case ConversationSource():
+            return conversation_source_uri(source.text, source.session_uri)
+        # ponytail: unreachable (discriminated union); guard a silent None.
+        case _:
+            raise TypeError(f"Unsupported online source: {type(source).__name__}")
 
 
 async def online_ingest(

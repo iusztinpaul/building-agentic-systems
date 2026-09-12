@@ -20,6 +20,7 @@ from tree.cli import (
     wait_for_dispatch,
 )
 from tree.data.online_pipeline import FileSource, UrlSource
+from tree.online import IngestReceipt
 
 
 class TestBuildOnlineSource:
@@ -49,10 +50,47 @@ class TestWaitForDispatch:
     async def test_waits_on_the_submitted_flow_run(self, mocker) -> None:
         mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
 
-        # Act — dispatch always creates a worker-side run; nothing to branch on.
+        # Act — every dispatcher but the online one answers a plain dict.
         await wait_for_dispatch({"status": "scheduled", "flow_run_id": "abc"})
 
         mock_wait.assert_awaited_once_with("abc")
+
+    async def test_waits_on_a_dispatched_ingest_receipt(self, mocker) -> None:
+        mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
+
+        await wait_for_dispatch(
+            IngestReceipt(
+                source_uri="file:///tmp/notes.md",
+                duplicate=False,
+                flow_run_id="abc",
+                status="scheduled",
+            )
+        )
+
+        mock_wait.assert_awaited_once_with("abc")
+
+    async def test_wait_for_dispatch_skips_duplicate_receipt(
+        self, mocker, caplog
+    ) -> None:
+        mock_wait = mocker.patch("tree.cli.wait_for_flow_run", new_callable=AsyncMock)
+        receipt = IngestReceipt(
+            source_uri="file:///tmp/notes.md",
+            duplicate=True,
+            document_id="507f1f77bcf86cd799439012",
+            flow_run_id=None,
+            status="duplicate",
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.cli"):
+            await wait_for_dispatch(receipt)
+
+        # A duplicate dispatched no run, so there is nothing to poll: say which
+        # Document already holds the source and return.
+        mock_wait.assert_not_awaited()
+        assert (
+            "Already ingested: file:///tmp/notes.md (document 507f1f77bcf86cd799439012)"
+            in caplog.text
+        )
 
 
 class TestWarnIgnoredConfigOverrides:

@@ -1,7 +1,7 @@
 ---
 id: 122-ingest-receipt-and-source-uri-helper
 feature: mcp-tool-contracts
-status: in-progress
+status: done
 ---
 
 # Ingest receipt: shared `source_uri` derivation + pre-flight duplicate lookup on dispatch

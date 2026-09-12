@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 
-from tree.data.file.file import _SUPPORTED_EXTENSIONS, read_file
+from tree.data.file.file import (
+    _SUPPORTED_EXTENSIONS,
+    file_source_uri,
+    load_file_document,
+    read_file,
+)
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
@@ -144,3 +149,27 @@ class TestLoadFileDocument:
 
         with pytest.raises(ValueError, match="must not be empty"):
             await load_file_document("/home/u/empty.txt", content, _USER_ID)
+
+
+class TestFileSourceUri:
+    """``file_source_uri`` is the ONE derivation; the leaf calls it.
+
+    Shared with the dispatcher's pre-flight duplicate lookup
+    (``source_uri_for``), so the two can never disagree (ADR-008 §1).
+    """
+
+    def test_prefixes_the_path_with_the_file_scheme(self) -> None:
+        assert file_source_uri("/home/u/data.txt") == "file:///home/u/data.txt"
+
+    async def test_file_source_uri_matches_leaf(self, mocker) -> None:
+        mocker.patch(
+            "tree.data.file.file.Document.find_one",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+        mocker.patch("tree.data.file.file.Document.insert", new_callable=AsyncMock)
+
+        doc = await load_file_document("/home/u/data.txt", "text", _USER_ID)
+
+        assert doc is not None
+        assert doc.source_uri == file_source_uri("/home/u/data.txt")
