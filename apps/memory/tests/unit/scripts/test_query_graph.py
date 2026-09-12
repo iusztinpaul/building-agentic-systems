@@ -14,6 +14,7 @@ import pytest
 from beanie import PydanticObjectId
 from click.testing import CliRunner
 
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.rag.types import (
     DocumentMeta,
     MatchedChild,
@@ -253,3 +254,44 @@ class TestGraphragModeUnchanged:
 
         assert result.exit_code == 1
         mocked_boundaries.assert_not_called()
+
+
+class TestSearchUnavailable:
+    """Both search legs down is an operator outcome, not a traceback (#126).
+
+    ``retrieve_parents`` / ``query_memory`` raise ``SearchUnavailableError``
+    since #124; before this, the CLI ended in a raw stack trace in BOTH modes,
+    which reads like a code bug rather than "Mongo is down, run it again".
+    """
+
+    @pytest.mark.parametrize(
+        "mode_fixture,retrieval_attr",
+        [("rag_mode", "retrieve_parents"), ("graphrag_mode", "query_memory")],
+        ids=["rag", "graphrag"],
+    )
+    def test_one_retryable_line_and_exit_one(
+        self,
+        request,
+        mocker,
+        cli_module,
+        mocked_boundaries,
+        mode_fixture: str,
+        retrieval_attr: str,
+    ) -> None:
+        request.getfixturevalue(mode_fixture)
+        mocker.patch.object(
+            cli_module,
+            retrieval_attr,
+            new_callable=AsyncMock,
+            side_effect=SearchUnavailableError(
+                "vector and text search are both unavailable"
+            ),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "prefect"])
+
+        assert result.exit_code == 1
+        assert result.output.splitlines() == [
+            "Search unavailable: vector and text search are both unavailable "
+            "— retryable"
+        ]

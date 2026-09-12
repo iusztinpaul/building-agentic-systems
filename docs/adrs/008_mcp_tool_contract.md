@@ -50,7 +50,9 @@ Five related choices, one contract:
    exceptions (embedding provider, PyMongo, `SearchUnavailableError`) are caught at the tool
    boundary as `search_unavailable` (true), anything else as `internal_error` (false); Prefect
    unreachable on dispatch is `pipeline_unavailable` (true), an unregistered deployment
-   `configuration_error` (false). A model reads `retryable`, not the code string.
+   `configuration_error` (false); a `PyMongoError` outside the retrieval legs (the ingest
+   pre-flight lookup, the review tools) is `storage_unavailable` (true). A model reads `retryable`,
+   not the code string.
 
 3. **The retrieval contract names its mode and its outcome.** `hybrid_search` returns
    `HybridSearchResult(hits, search_mode ∈ {hybrid, text_only, vector_only})`: each leg reports its

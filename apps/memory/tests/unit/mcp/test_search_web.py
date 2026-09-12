@@ -162,8 +162,9 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()("", ctx)
 
         payload = json.loads(raw)
-        assert payload["error"] == "invalid_input"
-        assert "empty" in payload["detail"].lower()
+        assert payload["error_type"] == "invalid_input"
+        assert payload["retryable"] is False
+        assert "empty" in payload["message"].lower()
 
     async def test_configuration_error_is_serialized(self, mocker) -> None:
         mock_search = AsyncMock(
@@ -175,8 +176,9 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()("anything", ctx)
 
         payload = json.loads(raw)
-        assert payload["error"] == "configuration_error"
-        assert "BRIGHTDATA_SERP_ZONE" in payload["detail"]
+        assert payload["error_type"] == "configuration_error"
+        assert payload["retryable"] is False
+        assert "BRIGHTDATA_SERP_ZONE" in payload["message"]
 
     async def test_request_error_is_serialized_as_fetch_failed(self, mocker) -> None:
         mock_search = AsyncMock(
@@ -190,8 +192,9 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()("anything", ctx)
 
         payload = json.loads(raw)
-        assert payload["error"] == "fetch_failed"
-        assert "503" in payload["detail"]
+        assert payload["error_type"] == "fetch_failed"
+        assert payload["retryable"] is True
+        assert "503" in payload["message"]
 
     async def test_http_status_error_is_serialized(self, mocker) -> None:
         request = httpx.Request("POST", "https://api.brightdata.com/request")
@@ -207,8 +210,10 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()("anything", ctx)
 
         payload = json.loads(raw)
-        assert payload["error"] == "http_error"
-        assert "500" in payload["detail"]
+        assert payload["error_type"] == "http_error"
+        # 5xx is the upstream having a bad day — the same call is worth retrying.
+        assert payload["retryable"] is True
+        assert "500" in payload["message"]
 
     @pytest.mark.parametrize(
         "exc",
@@ -226,8 +231,9 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()("anything", ctx)
 
         payload = json.loads(raw)
-        assert payload["error"] == "network_error"
-        assert payload["detail"]
+        assert payload["error_type"] == "network_error"
+        assert payload["retryable"] is True
+        assert payload["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +340,8 @@ class TestSearchWebIngestPath:
         raw = await _get_tool_callable()("k graphs", ctx, ingest=False, ingest_top_k=3)
 
         payload = json.loads(raw)
-        assert payload["error"] == "invalid_input"
-        assert "ingest=false" in payload["detail"].lower()
+        assert payload["error_type"] == "invalid_input"
+        assert "ingest=false" in payload["message"].lower()
         mock_trigger.assert_not_awaited()
         # SERP call should also be skipped — fail fast on misuse.
         mock_search.assert_not_awaited()
@@ -351,7 +357,7 @@ class TestSearchWebIngestPath:
         )
 
         payload = json.loads(raw)
-        assert payload["error"] == "invalid_input"
+        assert payload["error_type"] == "invalid_input"
         mock_trigger.assert_not_awaited()
 
     async def test_ingest_true_with_explicit_empty_urls_returns_invalid_input(
@@ -365,8 +371,8 @@ class TestSearchWebIngestPath:
         raw = await _get_tool_callable()("k graphs", ctx, ingest=True, ingest_urls=[])
 
         payload = json.loads(raw)
-        assert payload["error"] == "invalid_input"
-        assert "ingest_urls is empty" in payload["detail"]
+        assert payload["error_type"] == "invalid_input"
+        assert "ingest_urls is empty" in payload["message"]
         mock_trigger.assert_not_awaited()
 
     async def test_ingest_true_with_empty_serp_results_does_not_fire(
@@ -410,8 +416,8 @@ class TestSearchWebIngestPath:
         )
 
         payload = json.loads(raw)
-        assert payload["error"] == "invalid_input"
-        assert "ingest_top_k" in payload["detail"]
+        assert payload["error_type"] == "invalid_input"
+        assert "ingest_top_k" in payload["message"]
         # Don't burn a SERP credit on a misuse.
         mock_search.assert_not_awaited()
         mock_trigger.assert_not_awaited()

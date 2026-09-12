@@ -33,6 +33,9 @@ from beanie import PydanticObjectId
 from fastmcp import Context
 from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
+from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
+from pydantic import BaseModel, Field
+from pymongo.errors import PyMongoError
 
 from tree.config.constants import (
     TAGS_INGESTION_MCP,
@@ -70,10 +73,12 @@ from tree.mcp.server import MEMORY_MODE, mcp
 from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.memory.clustering.store import load_embedding_map
 from tree.memory.rag.retrieval import retrieve_parents
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.visualize.embeddings import (
     NO_CLUSTERING_RUN_MESSAGE,
     to_embedding_map_payload,
 )
+from tree.models.exceptions import ModelError
 from tree.online import dispatch_online_pipeline
 from tree.observability import (
     track,
@@ -81,6 +86,151 @@ from tree.observability import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# The **Tool error envelope** — ONE failure shape, every tool, both modes
+# ---------------------------------------------------------------------------
+
+#: The shared docstring line: tools describe their OWN codes (the full list
+#: lives on :class:`ToolErrorEnvelope`), this sentence describes the shape. It
+#: is a TEST ANCHOR, not the source of the prose — every envelope-answering
+#: tool's docstring must CONTAIN it verbatim (modulo line wrapping), asserted in
+#: ``test_error_envelope.py``. It cannot be interpolated: FastMCP reads
+#: ``__doc__`` at import time, so editing this string does not edit the
+#: docstrings — it turns the test red instead.
+ERROR_CONTRACT = (
+    "Errors answer ``{error_type, retryable, message}`` — retry only when "
+    "``retryable`` is true."
+)
+
+#: What "retrieval is DOWN" looks like, as opposed to "retrieval found
+#: nothing": the search legs gave up (:class:`SearchUnavailableError`), Mongo is
+#: unreachable (:class:`PyMongoError`), or the embedding provider failed
+#: (:class:`~tree.models.exceptions.ModelError` — the BASE, since both a
+#: Voyage ``ExtractionError`` and a bare ``ModelError`` from an unresolvable
+#: Modal endpoint escape ``embed()``). All three are transient infrastructure,
+#: so all three answer ``search_unavailable`` with ``retryable=True``.
+_RETRIEVAL_UNAVAILABLE = (SearchUnavailableError, PyMongoError, ModelError)
+
+
+class ToolErrorEnvelope(BaseModel):
+    """The ONE failure shape every MCP tool answers with (ADR-008 §2).
+
+    ``retryable`` is the field a model acts on — not the ``error_type`` string:
+
+    * ``true`` — the SAME call may succeed later: transient infrastructure
+      (network, provider, Prefect, Mongo). Codes: ``network_error``,
+      ``fetch_failed``, ``search_unavailable``, ``storage_unavailable``,
+      ``pipeline_unavailable``, ``http_error`` on 429 / 5xx.
+    * ``false`` — change the input or stop: validation, configuration,
+      unsupported input, a bug. Codes: ``invalid_input``, ``unsupported_url``,
+      ``configuration_error``, ``file_error``, ``invalid_state``,
+      ``internal_error``, ``http_error`` on any other 4xx.
+
+    Replaces the pre-ADR-008 ``{"error", "detail"}`` outright — no alias.
+    """
+
+    error_type: str = Field(description="Stable machine code, e.g. invalid_input.")
+    retryable: bool = Field(description="True iff the SAME call may succeed later.")
+    message: str = Field(description="One human-readable sentence for the model.")
+
+
+def tool_error(error_type: str, message: str, *, retryable: bool) -> str:
+    """Build the **Tool error envelope** as the JSON string a tool returns.
+
+    The codes and their retryability are enumerated on
+    :class:`ToolErrorEnvelope`; the two that are easy to confuse are
+    ``search_unavailable`` (the RETRIEVAL legs are down — vector / text /
+    embedding provider) and ``storage_unavailable`` (Mongo is unreachable
+    outside retrieval: the ingest pre-flight, the review queue).
+
+    ``retryable`` is keyword-only on purpose: it is the field the model acts on,
+    and a bare positional ``False`` at a call site reads as noise.
+    """
+
+    return ToolErrorEnvelope(
+        error_type=error_type, retryable=retryable, message=message
+    ).model_dump_json()
+
+
+#: The ONE message a Mongo outage answers with, wherever it is caught outside
+#: retrieval. A model reads it and retries the identical call later.
+STORAGE_UNAVAILABLE_MESSAGE = "memory store unreachable — try again"
+
+#: The ONE message a blank free-text query answers with, in BOTH modes. Every
+#: search-shaped tool guards on it BEFORE any tracing or retrieval, so a model
+#: that sends whitespace gets the same ``invalid_input`` everywhere instead of
+#: the embedding provider's raw ``400 Input cannot contain empty strings``.
+BLANK_QUERY_MESSAGE = "query must not be empty"
+
+
+def storage_error(tool: str, exc: Exception) -> str:
+    """Map an unreachable Mongo to ``storage_unavailable``, logging the traceback.
+
+    The boundaries ADR-008 §2 does not name — the ingest pre-flight
+    ``Document.find_one`` and the three review-queue tools — still talk to
+    Mongo, and a :class:`~pymongo.errors.PyMongoError` escaping to FastMCP is a
+    protocol error the model cannot read. Deliberately NOT
+    ``search_unavailable``: that code means the retrieval legs are down, and a
+    model told "search is unavailable" after an ``ingest_url`` call learns the
+    wrong thing about the memory.
+
+    Called from INSIDE an ``except`` block, so ``logger.exception`` records the
+    traceback.
+    """
+
+    logger.exception("%s failed: memory store unreachable: %s", tool, exc)
+    return tool_error(
+        "storage_unavailable", STORAGE_UNAVAILABLE_MESSAGE, retryable=True
+    )
+
+
+def _http_retryable(status_code: int) -> bool:
+    """429 and 5xx come back; every other 4xx needs a different call, not a retry."""
+
+    return status_code == 429 or status_code >= 500
+
+
+def internal_error(tool: str, exc: Exception) -> str:
+    """The last-resort catch-all: an unenumerated failure, as an envelope.
+
+    ADR-008 §2 is "no tool raises through FastMCP any more", not "no tool raises
+    at the two named boundaries": a protocol error carries no ``retryable`` and
+    no message the model can act on. ``retryable=False`` because an unexpected
+    exception is a bug until someone reads the traceback this logs — the model
+    must stop, not loop.
+
+    Called from INSIDE an ``except`` block, so ``logger.exception`` records the
+    traceback.
+    """
+
+    logger.exception("%s failed: %s", tool, exc)
+    return tool_error("internal_error", f"{tool} failed: {exc}", retryable=False)
+
+
+def _retrieval_error(tool: str, exc: Exception) -> str:
+    """Map ANY retrieval failure to an envelope, always logging the traceback.
+
+    The retrieval boundary of ADR-008 §2, shared by the rag ``search_memory``
+    here and the four graphrag readers in :mod:`tree.mcp.graph_tools`: a dead
+    index, an unreachable Mongo or a failing embedding provider must reach the
+    model as a JSON answer it can retry — never as an MCP protocol error — and
+    everything else as a non-retryable ``internal_error``. One mapping, five
+    call sites, so the two codes cannot drift apart per tool.
+
+    Called from INSIDE an ``except`` block, so ``logger.exception`` records the
+    traceback whichever branch is taken.
+    """
+
+    if isinstance(exc, _RETRIEVAL_UNAVAILABLE):
+        logger.exception("%s failed: %s", tool, exc)
+        return tool_error(
+            "search_unavailable",
+            f"Memory search is temporarily unavailable: {exc}",
+            retryable=True,
+        )
+    return internal_error(tool, exc)
 
 
 def _set_retrieval_thread(ctx: Context, tool: str) -> None:
@@ -125,9 +275,11 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     ``text_only`` / ``vector_only`` means one leg was unavailable, so these
     results may be incomplete — worth one caveat line.
 
-    A blank query answers ``{"error": "invalid_input", ...}`` — the same
-    envelope every other tool uses — instead of forwarding the embedding
-    provider's raw ``400 Input cannot contain empty strings``.
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. A blank query is ``invalid_input`` (not retryable)
+    rather than the embedding provider's raw ``400 Input cannot contain empty
+    strings``; an unreachable index or provider is ``search_unavailable``
+    (retryable) — a JSON answer, never a protocol error.
 
     Args:
         query: Search query text.
@@ -135,20 +287,21 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     """
 
     if not query.strip():
-        return json.dumps(
-            {"error": "invalid_input", "detail": "query must not be empty"}
-        )
+        return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
     _set_retrieval_thread(ctx, "search_memory")
     lc = ctx.lifespan_context
-    result = await retrieve_parents(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        top_k=top_k,
-    )
+    try:
+        result = await retrieve_parents(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            top_k=top_k,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("search_memory", exc)
     return result.model_dump_json(indent=2)
 
 
@@ -224,12 +377,53 @@ async def _ingest(
     pre-flight duplicate lookup and the fire-and-forget ``online-pipeline``
     deployment submit (ONE worker-side run ingests AND extracts) — and answers
     an :class:`~tree.online.IngestReceipt`. Its five fields plus the tool's own
-    ``dup_extra`` echo (``url`` / ``file_path``) ARE the tool's answer. There is
-    no in-process path, so a Prefect failure raises here and surfaces through
-    each tool's error handling.
+    ``dup_extra`` echo (``url`` / ``file_path``) ARE the tool's answer.
+
+    The dispatch boundary of ADR-008 §2 lives here, and catches exactly two
+    Prefect failures — there is NO in-process fallback (ADR-002), so the model
+    must be able to tell "come back later" from "an operator has to act":
+
+    * API unreachable (``ConnectError`` / a timeout / a Prefect HTTP status) →
+      ``pipeline_unavailable``, retryable;
+    * the deployment was never registered (``ObjectNotFound``) →
+      ``configuration_error``, NOT retryable — the same call fails identically
+      until someone serves the workflows.
+
+    A ``PyMongoError`` from the dispatcher's pre-flight ``Document.find_one`` is
+    caught FIRST as ``storage_unavailable`` (retryable): that lookup happens
+    before any Prefect call, so an unreachable memory store is neither a
+    pipeline nor a validation failure.
+
+    Everything else propagates to the calling tool, which owns its own codes —
+    notably the ``ValueError`` that ``validate_online_source`` raises for a bad
+    URL (``unsupported_url``) or an oversized payload (``file_error``).
     """
 
-    receipt = await dispatch_online_pipeline(source, user_id)
+    try:
+        receipt = await dispatch_online_pipeline(source, user_id)
+    except PyMongoError as exc:
+        # FIRST clause: the dispatcher's pre-flight ``Document.find_one`` runs
+        # BEFORE any Prefect call, so an unreachable Mongo must not be read as
+        # a pipeline problem.
+        return storage_error("ingest", exc)
+    except ObjectNotFound:
+        logger.exception("online-pipeline deployment is not registered")
+        return tool_error(
+            "configuration_error",
+            "The 'online-pipeline/online-pipeline' deployment is not registered "
+            "on the Prefect API — run `make memory-serve-workflows` (local) or "
+            "deploy it, then retry.",
+            retryable=False,
+        )
+    except (httpx.ConnectError, httpx.TimeoutException, PrefectHTTPStatusError) as exc:
+        logger.exception(
+            "Prefect API unreachable while dispatching the ingest: %s", exc
+        )
+        return tool_error(
+            "pipeline_unavailable",
+            "Prefect API unreachable — try again",
+            retryable=True,
+        )
     return json.dumps({**receipt.model_dump(), **dup_extra})
 
 
@@ -251,6 +445,11 @@ async def ingest_url(url: str, ctx: Context) -> str:
     ``source_uri`` may differ from it (a YouTube link canonicalises to
     ``https://www.youtube.com/watch?v=<id>``).
 
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. A Prefect API that is down is
+    ``pipeline_unavailable`` and worth retrying; a non-http(s) link is
+    ``unsupported_url`` and is not.
+
     Args:
         url: The web URL to fetch and ingest.
     """
@@ -261,19 +460,24 @@ async def ingest_url(url: str, ctx: Context) -> str:
             UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
         )
     except ValueError as exc:
-        return json.dumps({"error": "unsupported_url", "detail": str(exc)})
+        return tool_error("unsupported_url", str(exc), retryable=False)
     except BrightDataConfigurationError as exc:
-        return json.dumps({"error": "configuration_error", "detail": str(exc)})
+        return tool_error("configuration_error", str(exc), retryable=False)
     except BrightDataRequestError as exc:
-        return json.dumps({"error": "fetch_failed", "detail": str(exc)})
+        return tool_error("fetch_failed", str(exc), retryable=True)
     except httpx.HTTPStatusError as exc:
-        return json.dumps(
-            {"error": "http_error", "detail": f"HTTP {exc.response.status_code}: {url}"}
+        status_code = exc.response.status_code
+        return tool_error(
+            "http_error",
+            f"HTTP {status_code}: {url}",
+            retryable=_http_retryable(status_code),
         )
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        return json.dumps(
-            {"error": "network_error", "detail": f"Could not reach {url}: {exc}"}
+        return tool_error(
+            "network_error", f"Could not reach {url}: {exc}", retryable=True
         )
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("ingest_url", exc)
 
 
 @mcp.tool
@@ -301,6 +505,9 @@ async def ingest_file(
     returns. The answer also echoes the ``file_path`` you passed
     (``source_uri`` is ``file://<path>``).
 
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
+
     Args:
         file_path: Absolute path of the file on YOUR machine. Identity only:
             it becomes the dedup key (source_uri) and default title, so always
@@ -318,7 +525,9 @@ async def ingest_file(
             dup_extra={"file_path": file_path},
         )
     except ValueError as exc:
-        return json.dumps({"error": "file_error", "detail": str(exc)})
+        return tool_error("file_error", str(exc), retryable=False)
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("ingest_file", exc)
 
 
 @mcp.tool
@@ -341,6 +550,11 @@ async def search_web(
     `ingest_url` afterwards on URLs you want to keep, or call `search_web`
     with `ingest=true` for ingestion.
 
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. (The nested ``ingest`` block of a SUCCESSFUL answer
+    is a sub-result, not an envelope: it reports ``triggered`` plus, on a
+    failed trigger, its own ``error`` text.)
+
     Args:
         query: The search query.
         engine: Search engine to query. Defaults to "google".
@@ -358,25 +572,21 @@ async def search_web(
     # Validate ingestion flags BEFORE the SERP call. Misuse is a user error;
     # don't burn a SERP credit just to reject the request.
     if not ingest and (ingest_top_k is not None or ingest_urls is not None):
-        return json.dumps(
-            {
-                "error": "invalid_input",
-                "detail": "ingest_urls/ingest_top_k passed but ingest=false",
-            }
+        return tool_error(
+            "invalid_input",
+            "ingest_urls/ingest_top_k passed but ingest=false",
+            retryable=False,
         )
 
     if ingest and ingest_urls is not None and len(ingest_urls) == 0:
-        return json.dumps({"error": "invalid_input", "detail": "ingest_urls is empty"})
+        return tool_error("invalid_input", "ingest_urls is empty", retryable=False)
 
     if ingest_top_k is not None and ingest_top_k < 1:
-        return json.dumps(
-            {
-                "error": "invalid_input",
-                "detail": (
-                    f"ingest_top_k must be >= 1 (got {ingest_top_k}); omit it to "
-                    "ingest all SERP results"
-                ),
-            }
+        return tool_error(
+            "invalid_input",
+            f"ingest_top_k must be >= 1 (got {ingest_top_k}); omit it to "
+            "ingest all SERP results",
+            retryable=False,
         )
 
     try:
@@ -388,25 +598,26 @@ async def search_web(
             language=language,
         )
     except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+        return tool_error("invalid_input", str(exc), retryable=False)
     except BrightDataConfigurationError as exc:
-        return json.dumps({"error": "configuration_error", "detail": str(exc)})
+        return tool_error("configuration_error", str(exc), retryable=False)
     except BrightDataRequestError as exc:
-        return json.dumps({"error": "fetch_failed", "detail": str(exc)})
+        return tool_error("fetch_failed", str(exc), retryable=True)
     except httpx.HTTPStatusError as exc:
-        return json.dumps(
-            {
-                "error": "http_error",
-                "detail": f"HTTP {exc.response.status_code} from Bright Data SERP API",
-            }
+        status_code = exc.response.status_code
+        return tool_error(
+            "http_error",
+            f"HTTP {status_code} from Bright Data SERP API",
+            retryable=_http_retryable(status_code),
         )
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        return json.dumps(
-            {
-                "error": "network_error",
-                "detail": f"Could not reach Bright Data SERP API: {exc}",
-            }
+        return tool_error(
+            "network_error",
+            f"Could not reach Bright Data SERP API: {exc}",
+            retryable=True,
         )
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("search_web", exc)
 
     payload: dict[str, Any] = {
         "query": query,
@@ -482,6 +693,10 @@ async def scrape_web(
     ``search_web`` to read SERP results inline; call ``ingest_url``
     afterwards on whichever URLs are worth keeping.
 
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. Per-URL failures are NOT errors: they come back
+    inside ``results`` with ``success: false``.
+
     Args:
         urls: List of absolute http:// or https:// URLs. Max 5 per call.
         data_format: ``"markdown"`` (default, best for LLM input) or
@@ -492,37 +707,36 @@ async def scrape_web(
     """
 
     if not urls:
-        return json.dumps({"error": "invalid_input", "detail": "urls is empty"})
+        return tool_error("invalid_input", "urls is empty", retryable=False)
 
     if len(urls) > _SCRAPE_MAX_URLS_PER_CALL:
-        return json.dumps(
-            {
-                "error": "invalid_input",
-                "detail": (
-                    f"max {_SCRAPE_MAX_URLS_PER_CALL} urls per call (got {len(urls)})"
-                ),
-            }
+        return tool_error(
+            "invalid_input",
+            f"max {_SCRAPE_MAX_URLS_PER_CALL} urls per call (got {len(urls)})",
+            retryable=False,
         )
 
     if max_chars is not None and max_chars < 1:
-        return json.dumps(
-            {
-                "error": "invalid_input",
-                "detail": "max_chars must be >= 1 or None",
-            }
+        return tool_error(
+            "invalid_input", "max_chars must be >= 1 or None", retryable=False
         )
 
-    results = await asyncio.gather(
-        *[
-            _scrape_one(
-                u,
-                data_format=data_format,
-                max_chars=max_chars,
-                timeout_seconds=timeout_seconds,
-            )
-            for u in urls
-        ]
-    )
+    try:
+        results = await asyncio.gather(
+            *[
+                _scrape_one(
+                    u,
+                    data_format=data_format,
+                    max_chars=max_chars,
+                    timeout_seconds=timeout_seconds,
+                )
+                for u in urls
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        # ``_scrape_one`` answers per-URL failures in its own result dict, so
+        # reaching here means the fan-out itself broke, not one bad URL.
+        return internal_error("scrape_web", exc)
 
     succeeded = sum(1 for r in results if r["success"])
 
@@ -564,6 +778,9 @@ async def ingest_conversation(
     tasks / preferences and their relationships) are written out-of-band by a
     worker.
 
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
+
     Args:
         conversation_text: The full conversation text to process.
         title: Optional title for the conversation document.
@@ -581,8 +798,8 @@ async def ingest_conversation(
     """
 
     if not conversation_text.strip():
-        return json.dumps(
-            {"error": "empty_input", "detail": "Conversation text must not be empty."}
+        return tool_error(
+            "invalid_input", "Conversation text must not be empty.", retryable=False
         )
 
     parsed_session_started_at = None
@@ -594,14 +811,11 @@ async def ingest_conversation(
                 session_started_at.replace("Z", "+00:00")
             )
         except ValueError as exc:
-            return json.dumps(
-                {
-                    "error": "invalid_input",
-                    "detail": (
-                        "session_started_at must be an ISO-8601 datetime string "
-                        f"(e.g. '2026-05-17T14:30:00Z'); got {session_started_at!r}: {exc}"
-                    ),
-                }
+            return tool_error(
+                "invalid_input",
+                "session_started_at must be an ISO-8601 datetime string "
+                f"(e.g. '2026-05-17T14:30:00Z'); got {session_started_at!r}: {exc}",
+                retryable=False,
             )
 
     lc = ctx.lifespan_context
@@ -617,4 +831,6 @@ async def ingest_conversation(
             dup_extra={},
         )
     except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+        return tool_error("invalid_input", str(exc), retryable=False)
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("ingest_conversation", exc)

@@ -18,14 +18,21 @@ import pytest
 from bson import ObjectId
 from fastmcp.tools import ToolResult
 
+from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
+
 from tree.mcp.graph_tools import (
     _serialize,
+    deep_search_memory,
     query_memory,
+    review_confirm,
+    review_list_pending,
+    review_reject,
     search_memory,
     visualize_memory_graph,
 )
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import GRAPH_VIEW_URI
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.types import QueryResult
 
 
@@ -103,6 +110,12 @@ _GRAPH_DOCS = [
     _node("paper", "document"),
     _edge(_ALICE, "mentions", _PAPER),
 ]
+
+
+def _tool_fn(tool):
+    """Unwrap FastMCP's ``FunctionTool`` back to the coroutine it registered."""
+
+    return getattr(tool, "fn", tool)
 
 
 def _make_graph_ctx(*, ui_supported: bool) -> MagicMock:
@@ -347,3 +360,190 @@ async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
 
     assert result.content[0].text.count("you asked for an HTML file") == 1
     assert result.content[1].type == "resource_link"
+
+
+# ---------------------------------------------------------------------------
+# The retrieval boundary — the SAME two envelopes as rag mode (ADR-008 §2)
+# ---------------------------------------------------------------------------
+
+
+# Every graphrag reader, with the engine it delegates to and the args that
+# reach it. ``visualize_memory_graph`` is listed on its query path — the shape
+# the story describes — and its no-query path is covered separately below.
+_READERS = [
+    ("search_memory", search_memory, "structured_query_memory", {"query": "prefect"}),
+    ("query_memory", query_memory, "execute_nl_query", {"query": "who is paul?"}),
+    (
+        "deep_search_memory",
+        deep_search_memory,
+        "structured_query_memory",
+        {"query": "prefect"},
+    ),
+    (
+        "visualize_memory_graph",
+        visualize_memory_graph,
+        "structured_query_memory",
+        {"query": "prefect"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,tool,engine,kwargs", _READERS, ids=[r[0] for r in _READERS]
+)
+class TestReaderErrors:
+    """Mongo down / a dead embedding provider reads the same in BOTH modes.
+
+    The graph readers import the one helper from :mod:`tree.mcp.tools`, so the
+    codes cannot drift from the rag ``search_memory`` — that sameness IS the
+    contract a model relies on when it moves between servers.
+    """
+
+    async def test_unavailable_retrieval_is_a_retryable_envelope(
+        self, mocker, name: str, tool, engine: str, kwargs: dict[str, Any]
+    ) -> None:
+        mocker.patch(
+            f"tree.mcp.graph_tools.{engine}",
+            new=AsyncMock(side_effect=SearchUnavailableError("both legs down")),
+        )
+
+        payload = json.loads(
+            await tool(ctx=_make_graph_ctx(ui_supported=False), **kwargs)
+        )
+
+        assert payload["error_type"] == "search_unavailable"
+        assert payload["retryable"] is True
+        assert set(payload) == {"error_type", "retryable", "message"}
+
+    async def test_any_other_failure_is_a_non_retryable_internal_error(
+        self, mocker, name: str, tool, engine: str, kwargs: dict[str, Any]
+    ) -> None:
+        mocker.patch(
+            f"tree.mcp.graph_tools.{engine}",
+            new=AsyncMock(side_effect=RuntimeError("aggregation blew up")),
+        )
+
+        payload = json.loads(
+            await tool(ctx=_make_graph_ctx(ui_supported=False), **kwargs)
+        )
+
+        assert payload["error_type"] == "internal_error"
+        assert payload["retryable"] is False
+
+
+async def test_full_graph_visualization_shares_the_retrieval_envelope(mocker) -> None:
+    # No query = no search, but the SAME Mongo: an unreachable database must not
+    # answer differently just because the caller omitted a query.
+    mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(side_effect=PyMongoError("connection refused")),
+    )
+
+    payload = json.loads(
+        await visualize_memory_graph(_make_graph_ctx(ui_supported=False))
+    )
+
+    assert payload["error_type"] == "search_unavailable"
+    assert payload["retryable"] is True
+
+
+class TestReviewToolErrors:
+    """The review queue answers the envelope when Mongo is down, too.
+
+    These three are the boundary ADR-008 §2 did not name, and they are NOT
+    retrieval: ``storage_unavailable`` says the memory STORE is unreachable, so
+    a model that just tried to confirm a duplicate does not conclude that search
+    is broken.
+    """
+
+    async def test_review_list_pending_reports_storage_unavailable(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.graph_tools._find_pending_duplicates",
+            new=AsyncMock(side_effect=ServerSelectionTimeoutError("no servers")),
+        )
+
+        payload = json.loads(
+            await _tool_fn(review_list_pending)(_make_graph_ctx(ui_supported=False))
+        )
+
+        assert payload == {
+            "error_type": "storage_unavailable",
+            "retryable": True,
+            "message": "memory store unreachable — try again",
+        }
+
+    @pytest.mark.parametrize(
+        "tool", [review_confirm, review_reject], ids=["confirm", "reject"]
+    )
+    async def test_review_decisions_report_storage_unavailable(self, mocker, tool):
+        mocker.patch(
+            "tree.mcp.graph_tools._review_duplicate",
+            new=AsyncMock(side_effect=ServerSelectionTimeoutError("no servers")),
+        )
+
+        payload = json.loads(
+            await _tool_fn(tool)(
+                "node-a", "node-b", "paul", _make_graph_ctx(ui_supported=False)
+            )
+        )
+
+        assert payload["error_type"] == "storage_unavailable"
+        assert payload["retryable"] is True
+
+
+_FREE_TEXT_READERS = [
+    ("search_memory", search_memory),
+    ("query_memory", query_memory),
+    ("deep_search_memory", deep_search_memory),
+]
+
+
+@pytest.mark.parametrize(
+    "name,tool", _FREE_TEXT_READERS, ids=[r[0] for r in _FREE_TEXT_READERS]
+)
+@pytest.mark.parametrize("query", ["", "   ", "\n\t "])
+async def test_blank_query_is_invalid_input(
+    mocker, name: str, tool, query: str
+) -> None:
+    """graphrag's readers reject a blank query exactly like rag's (#126 QA).
+
+    ``graphrag`` is the DEFAULT mode, so without this guard the most common
+    server answered a whitespace query with a real (and meaningless) search
+    while the rag server answered the envelope — one tool name, two behaviours.
+    ``visualize_memory_graph`` is deliberately NOT guarded: an empty query
+    there MEANS "draw the whole graph".
+    """
+
+    engine = mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory", new=AsyncMock()
+    )
+    nl_engine = mocker.patch("tree.mcp.graph_tools.execute_nl_query", new=AsyncMock())
+
+    result = await tool(query=query, ctx=_make_graph_ctx(ui_supported=False))
+
+    assert json.loads(result) == {
+        "error_type": "invalid_input",
+        "retryable": False,
+        "message": "query must not be empty",
+    }
+    engine.assert_not_awaited()
+    nl_engine.assert_not_awaited()
+
+
+async def test_visualize_memory_graph_still_draws_the_whole_graph_on_no_query(
+    mocker,
+) -> None:
+    # The counter-case that keeps the guard from spreading: no query is a
+    # feature here, not a validation failure.
+    mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", Path("/tmp"))
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+
+    result = await visualize_memory_graph(_make_graph_ctx(ui_supported=True))
+
+    assert isinstance(result, ToolResult)

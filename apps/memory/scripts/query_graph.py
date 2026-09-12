@@ -45,6 +45,7 @@ from tree.logging import init_logger
 from tree.memory.graph.retrieval import fetch_full_graph, query_memory
 from tree.memory.visualize.graph import visualize_query_result
 from tree.memory.rag.retrieval import retrieve_parents
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.rag.types import RetrievalResult, RetrievedParent
 from tree.models.get_model import get_embedding_model
 
@@ -64,6 +65,12 @@ RAG_FULL_GRAPH_UNAVAILABLE = (
 DEGRADED_SEARCH_CAVEAT = (
     "Search ran {mode} — the other leg was unavailable; results may miss matches."
 )
+
+# BOTH legs down (``SearchUnavailableError``) is an operator-facing outcome, not
+# a bug: the terminal gets the MCP tools' ``retryable`` hint as ONE line and
+# exit 1, instead of a traceback that reads like a crash. No envelope JSON —
+# that shape is for the model (ADR-008 §2), not for a human at a prompt.
+SEARCH_UNAVAILABLE_LINE = "Search unavailable: {message} — retryable"
 
 # How much of a parent to show per hit. A parent is ~4096 tokens; the terminal
 # is a ranking view, not a reader, so it prints an excerpt and the operator
@@ -120,42 +127,51 @@ async def _run(
     database = settings.mongo.mongo_initdb_database
     user_id = await resolve_user_id(user_id, user_identifier)
 
-    if mode == "rag":
-        logger.info(
-            "Retrieving parents for user_id=%s: %r (top_k=%d)", user_id, query, top_k
-        )
-        result = await retrieve_parents(
-            client,
-            database,
-            query,
-            get_embedding_model(),
-            user_id,
-            top_k=top_k,
-        )
-        _print_parents(result)
-        return
+    try:
+        if mode == "rag":
+            logger.info(
+                "Retrieving parents for user_id=%s: %r (top_k=%d)",
+                user_id,
+                query,
+                top_k,
+            )
+            parents = await retrieve_parents(
+                client,
+                database,
+                query,
+                get_embedding_model(),
+                user_id,
+                top_k=top_k,
+            )
+            _print_parents(parents)
+            return
 
-    if query:
-        logger.info(
-            "Querying graph for user_id=%s: %r (top_k=%d, max_hops=%d)",
-            user_id,
-            query,
-            top_k,
-            max_hops,
-        )
-        embedding_model = get_embedding_model()
-        result = await query_memory(
-            client,
-            database,
-            query,
-            embedding_model,
-            user_id,
-            top_k=top_k,
-            max_hops=max_hops,
-        )
-    else:
-        logger.info("No query provided — loading full graph for user_id=%s", user_id)
-        result = await fetch_full_graph(client, database, user_id)
+        if query:
+            logger.info(
+                "Querying graph for user_id=%s: %r (top_k=%d, max_hops=%d)",
+                user_id,
+                query,
+                top_k,
+                max_hops,
+            )
+            embedding_model = get_embedding_model()
+            result = await query_memory(
+                client,
+                database,
+                query,
+                embedding_model,
+                user_id,
+                top_k=top_k,
+                max_hops=max_hops,
+            )
+        else:
+            logger.info(
+                "No query provided — loading full graph for user_id=%s", user_id
+            )
+            result = await fetch_full_graph(client, database, user_id)
+    except SearchUnavailableError as exc:
+        click.echo(SEARCH_UNAVAILABLE_LINE.format(message=exc))
+        raise SystemExit(1) from exc
 
     if not result.nodes and not result.edges:
         logger.error(

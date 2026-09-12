@@ -14,13 +14,17 @@ contract: read, warn, deliver.
 """
 
 import json
+import logging
 import re
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from beanie import PydanticObjectId
 from fastmcp.tools import ToolResult
+from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
+from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 from tree.data.online_pipeline import UrlSource
 from tree.mcp.tools import (
@@ -38,7 +42,9 @@ from tree.memory.rag.types import (
     RetrievalResult,
     RetrievedParent,
 )
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.visualize.embeddings import NO_CLUSTERING_RUN_MESSAGE
+from tree.models.exceptions import ExtractionError, ModelError
 from tree.online import IngestReceipt
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -216,16 +222,18 @@ class TestRagSearchMemory:
     ) -> None:
         # #112 Issue 6: a blank query used to reach Voyage and surface its raw
         # "400 Input cannot contain empty strings" text, while every sibling
-        # tool answers with the ``{"error": "invalid_input"}`` envelope.
+        # tool answers with the **Tool error envelope**.
         mock_retrieve = mocker.patch(
             "tree.mcp.tools.retrieve_parents", new_callable=AsyncMock
         )
 
         result = await search_memory(query=query, ctx=_make_ctx(), top_k=3)
 
-        payload = json.loads(result)
-        assert payload["error"] == "invalid_input"
-        assert payload["detail"]
+        assert json.loads(result) == {
+            "error_type": "invalid_input",
+            "retryable": False,
+            "message": "query must not be empty",
+        }
         mock_retrieve.assert_not_awaited()
 
     async def test_docstring_states_the_parent_document_contract(self) -> None:
@@ -236,6 +244,191 @@ class TestRagSearchMemory:
             "Hybrid (vector + text) search over child chunks, returning the "
             "distinct parent chunks with their document metadata."
         )
+
+
+class TestSearchMemoryErrors:
+    """The retrieval boundary (ADR-008 §2): a JSON answer, never a protocol error.
+
+    A model that gets an MCP protocol error learns nothing; it gets the
+    **Tool error envelope** instead, and reads ``retryable`` to decide whether
+    to call again. The server log keeps the traceback either way.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            SearchUnavailableError("vector and text search are both unavailable"),
+            PyMongoError("connection refused"),
+            ExtractionError("Voyage embedding call failed"),
+            ModelError("Failed to resolve Modal web URL"),
+        ],
+        ids=["search-legs", "pymongo", "voyage", "modal"],
+    )
+    async def test_unavailable_retrieval_is_a_retryable_envelope(
+        self, mocker, exc: Exception
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            side_effect=exc,
+        )
+
+        payload = json.loads(
+            await search_memory(query="prefect", ctx=_make_ctx(), top_k=3)
+        )
+
+        assert payload["error_type"] == "search_unavailable"
+        assert payload["retryable"] is True
+        assert set(payload) == {"error_type", "retryable", "message"}
+
+    async def test_any_other_failure_is_a_non_retryable_internal_error(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("parent lookup blew up"),
+        )
+
+        payload = json.loads(
+            await search_memory(query="prefect", ctx=_make_ctx(), top_k=3)
+        )
+
+        assert payload["error_type"] == "internal_error"
+        assert payload["retryable"] is False
+
+    @pytest.mark.parametrize(
+        "exc",
+        [SearchUnavailableError("both legs down"), RuntimeError("boom")],
+        ids=["unavailable", "internal"],
+    )
+    async def test_both_envelopes_log_the_traceback_at_error(
+        self, mocker, caplog, exc: Exception
+    ) -> None:
+        # ``exc_info`` is what separates ``logger.exception`` from a bare
+        # ``logger.error``: without it, whoever is on call gets a one-line
+        # message and no stack for a failure the model silently retried past.
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            side_effect=exc,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="tree.mcp.tools"):
+            await search_memory(query="prefect", ctx=_make_ctx(), top_k=3)
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors, "the tool swallowed the failure without an ERROR log"
+        assert all(r.exc_info is not None for r in errors)
+
+
+class TestDispatchErrors:
+    """The dispatch boundary (ADR-008 §2): Prefect down vs never served.
+
+    Both are infrastructure, but only ONE is worth retrying — the model must
+    not loop on a deployment nobody registered.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.TimeoutException("timed out"),
+            PrefectHTTPStatusError(
+                "server error",
+                request=httpx.Request("POST", "http://localhost:4200/api"),
+                response=httpx.Response(
+                    502, request=httpx.Request("POST", "http://localhost:4200/api")
+                ),
+            ),
+        ],
+        ids=["connect-error", "timeout", "prefect-status"],
+    )
+    async def test_unreachable_prefect_is_pipeline_unavailable(
+        self, mocker, exc: Exception
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=exc,
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "pipeline_unavailable",
+            "retryable": True,
+            "message": "Prefect API unreachable — try again",
+        }
+
+    async def test_unregistered_deployment_is_a_configuration_error(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=ObjectNotFound("deployment not found"),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload["error_type"] == "configuration_error"
+        # Not retryable: the same call fails identically until an operator acts,
+        # so the message names the deployment AND the command that registers it.
+        assert payload["retryable"] is False
+        assert "online-pipeline/online-pipeline" in payload["message"]
+        assert "make memory-serve-workflows" in payload["message"]
+
+    async def test_mongo_down_on_preflight_is_storage_unavailable(self, mocker) -> None:
+        # The dispatcher's pre-flight ``Document.find_one`` runs BEFORE Prefect,
+        # so an unreachable memory store is neither ``pipeline_unavailable`` nor
+        # ``search_unavailable`` — nothing was searched and nothing dispatched.
+        mocker.patch(
+            "tree.online.Document.find_one",
+            new_callable=AsyncMock,
+            side_effect=ServerSelectionTimeoutError("no servers available"),
+        )
+        mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "storage_unavailable",
+            "retryable": True,
+            "message": "memory store unreachable — try again",
+        }
+        mock_run.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            (ingest_url, ("https://example.com/post",)),
+            (ingest_file, ("/tmp/notes.md", "body")),
+            (ingest_conversation, ("Alice likes Python.",)),
+        ],
+        ids=["ingest_url", "ingest_file", "ingest_conversation"],
+    )
+    async def test_every_ingest_tool_shares_the_dispatch_boundary(
+        self, mocker, tool, args: tuple
+    ) -> None:
+        # The catch lives in ``_ingest``, so all three answer identically — a
+        # per-tool copy is exactly what would drift.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("connection refused"),
+        )
+
+        payload = json.loads(await _tool_fn(tool)(*args, _make_ctx()))
+
+        assert payload["error_type"] == "pipeline_unavailable"
+        assert payload["retryable"] is True
 
 
 # ---------------------------------------------------------------------------

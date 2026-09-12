@@ -22,6 +22,7 @@ from typing import Any
 
 from bson import json_util
 from fastmcp import Context
+from pymongo.errors import PyMongoError
 from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
 
@@ -37,7 +38,14 @@ from tree.mcp import dashboard_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
 
 from tree.mcp.server import mcp
-from tree.mcp.tools import _set_retrieval_thread
+from tree.mcp.tools import (
+    BLANK_QUERY_MESSAGE,
+    _retrieval_error,
+    _set_retrieval_thread,
+    internal_error,
+    storage_error,
+    tool_error,
+)
 
 # viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
 # ``ui://`` and ``graphs://`` resources as a side effect and owns the one
@@ -124,7 +132,7 @@ async def visualize_memory_graph(
     top_k: int = 15,
     max_hops: int = 2,
     as_html_file: bool = False,
-) -> ToolResult:
+) -> str | ToolResult:
     """Visualize the knowledge graph as an interactive graph.
 
     With a ``query``, runs semantic + text search with graph expansion (same
@@ -148,27 +156,35 @@ async def visualize_memory_graph(
             with no query.
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
     """
 
     lc = ctx.lifespan_context
-    if query:
-        result = await structured_query_memory(
-            client=lc["client"],
-            database=lc["database"],
-            query=query,
-            embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
-            top_k=top_k,
-            max_hops=max_hops,
-        )
-        label = repr(query)
-    else:
-        result = await fetch_full_graph(
-            client=lc["client"],
-            database=lc["database"],
-            user_id=lc["user_id"],
-        )
-        label = "your full memory"
+    try:
+        if query:
+            result = await structured_query_memory(
+                client=lc["client"],
+                database=lc["database"],
+                query=query,
+                embedding_model=lc["embedding_model"],
+                user_id=lc["user_id"],
+                top_k=top_k,
+                max_hops=max_hops,
+            )
+            label = repr(query)
+        else:
+            # The full-graph read hits the SAME Mongo, so it is inside the same
+            # guard: "the database is down" must not differ by argument.
+            result = await fetch_full_graph(
+                client=lc["client"],
+                database=lc["database"],
+                user_id=lc["user_id"],
+            )
+            label = "your full memory"
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("visualize_memory_graph", exc)
 
     payload = to_graph_payload(result)
     n_nodes, n_edges = len(payload["nodes"]), len(payload["edges"])
@@ -204,19 +220,29 @@ async def query_memory(
         query: Natural language question about the knowledge graph.
         visualize: If true, also render an interactive HTML graph visualization.
         max_results: Maximum number of documents to return (default 10).
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. A blank query is ``invalid_input`` (not retryable):
+    it would otherwise reach the embedding provider as an empty string.
     """
+
+    if not query.strip():
+        return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
     _set_retrieval_thread(ctx, "query_memory")
     lc = ctx.lifespan_context
-    results = await execute_nl_query(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        llm=lc["llm"],
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        max_results=max_results,
-    )
+    try:
+        results = await execute_nl_query(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            llm=lc["llm"],
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            max_results=max_results,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("query_memory", exc)
     output = _serialize(results)
 
     if visualize and results:
@@ -253,19 +279,30 @@ async def search_memory(
         max_hops: Maximum hops for graph expansion.
         max_results: Maximum total documents (nodes + edges) to return (default 10).
         visualize: If true, also render an interactive HTML graph visualization.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. A blank query is ``invalid_input`` (not retryable) —
+    the SAME guard, message and code as the rag ``search_memory``, so a model
+    sees one behaviour across both **Memory mode**s.
     """
+
+    if not query.strip():
+        return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
     _set_retrieval_thread(ctx, "search_memory")
     lc = ctx.lifespan_context
-    result = await structured_query_memory(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        top_k=top_k,
-        max_hops=max_hops,
-    )
+    try:
+        result = await structured_query_memory(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            top_k=top_k,
+            max_hops=max_hops,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("search_memory", exc)
     docs = result.nodes + result.edges
     if len(docs) > max_results:
         docs = docs[:max_results]
@@ -302,19 +339,29 @@ async def deep_search_memory(
         top_k: Number of seed nodes to retrieve (default 50).
         max_hops: Maximum hops for graph expansion (default 3).
         session_id: Optional session identifier for the output directory.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true. An empty memory is NOT an error: it answers the
+    plain string "No results found."; a BLANK query is ``invalid_input``.
     """
+
+    if not query.strip():
+        return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
     _set_retrieval_thread(ctx, "deep_search_memory")
     lc = ctx.lifespan_context
-    result = await structured_query_memory(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        top_k=top_k,
-        max_hops=max_hops,
-    )
+    try:
+        result = await structured_query_memory(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            top_k=top_k,
+            max_hops=max_hops,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("deep_search_memory", exc)
 
     if not result.nodes and not result.edges:
         return "No results found."
@@ -379,21 +426,29 @@ async def review_list_pending(
             "preference"). ``None`` returns pairs of every
             type.
         limit: Maximum number of pairs to return (default 50).
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
     """
 
     try:
         type_filter = NodeType(entity_type) if entity_type else None
     except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+        return tool_error("invalid_input", str(exc), retryable=False)
 
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
-    pending = await _find_pending_duplicates(
-        database,
-        user_id=lc["user_id"],
-        entity_type=type_filter,
-        limit=limit,
-    )
+    try:
+        pending = await _find_pending_duplicates(
+            database,
+            user_id=lc["user_id"],
+            entity_type=type_filter,
+            limit=limit,
+        )
+    except PyMongoError as exc:
+        return storage_error("review_list_pending", exc)
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("review_list_pending", exc)
     return json.dumps([_serialize_pending_duplicate(p) for p in pending], indent=2)
 
 
@@ -422,12 +477,15 @@ async def review_confirm(
             persisted on the audit edge.
         merge_strategy: ``"keep_primary"`` (default),
             ``"merge_properties"``, or ``"keep_aliases"``.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
     """
 
     try:
         strategy = MergeStrategy(merge_strategy)
     except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
+        return tool_error("invalid_input", str(exc), retryable=False)
 
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
@@ -441,8 +499,12 @@ async def review_confirm(
             reviewed_by=reviewed_by,
             merge_strategy=strategy,
         )
+    except PyMongoError as exc:
+        return storage_error("review_confirm", exc)
     except ValueError as exc:
-        return json.dumps({"error": "invalid_state", "detail": str(exc)})
+        return tool_error("invalid_state", str(exc), retryable=False)
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("review_confirm", exc)
 
     return json.dumps(_serialize_review_result(result), indent=2)
 
@@ -465,6 +527,9 @@ async def review_reject(
         source_node_id: One endpoint of the SAME_AS edge.
         target_node_id: The other endpoint.
         reviewed_by: Reviewer identifier (email, agent handle, etc.).
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
     """
 
     lc = ctx.lifespan_context
@@ -479,7 +544,11 @@ async def review_reject(
             reviewed_by=reviewed_by,
             merge_strategy=MergeStrategy.KEEP_PRIMARY,
         )
+    except PyMongoError as exc:
+        return storage_error("review_reject", exc)
     except ValueError as exc:
-        return json.dumps({"error": "invalid_state", "detail": str(exc)})
+        return tool_error("invalid_state", str(exc), retryable=False)
+    except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
+        return internal_error("review_reject", exc)
 
     return json.dumps(_serialize_review_result(result), indent=2)
