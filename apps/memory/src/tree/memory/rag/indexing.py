@@ -40,6 +40,14 @@ _TEXT_INDEX_NAME = "text_index"
 _VECTOR_INDEX_NAME = "vector_index"
 _CANONICAL_NAME_INDEX = "user_canonical_name_index"
 
+# How long ``_ensure_vector_index`` waits for a freshly created index to answer
+# queries, and how long it sleeps between two catalogue reads. Constants, not
+# YAML knobs: a measured need would promote them (ADR-008 grooming). 300 s is
+# the fail-OPEN cap — past it the index is not "broken", just slow, and
+# retrieval already reports the degraded leg as ``text_only`` (task #124).
+_VECTOR_INDEX_READY_TIMEOUT_S = 300
+_VECTOR_INDEX_POLL_S = 5
+
 # Legacy compound index names that the ``user_*``-prefixed versions
 # replace. The reconcile loop in :func:`ensure_indexes` drops these on
 # first run so callers don't carry two parallel sets of indexes.
@@ -259,6 +267,10 @@ async def ensure_indexes(
 
     # --- Classic indexes ---
 
+    # No readiness poll here, unlike the vector index below.
+    # create_index is synchronous: the standard $text index is built by mongod
+    # itself and the await returns only once it can serve queries. Only the
+    # Atlas Search indexes mongot builds out-of-band need polling.
     await collection.create_index(
         _TEXT_INDEX_FIELDS,
         name=_TEXT_INDEX_NAME,
@@ -460,19 +472,125 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
         }
     )
 
-    # Wait for mongot to sync the index.
-    logger.info("Waiting for vector search index to be ready...")
-    for _ in range(30):
+    await _wait_for_vector_index_ready(collection)
+
+
+def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
+    """Can ONE ``$listSearchIndexes`` entry serve queries yet?
+
+    ``$listSearchIndexes`` reports readiness in two fields — ``status``
+    (``PENDING | BUILDING | READY | STALE | FAILED | DELETING |
+    DOES_NOT_EXIST``) and ``queryable`` (bool, "the index is ready to be
+    queried"):
+    https://www.mongodb.com/docs/manual/reference/operator/aggregation/listSearchIndexes/
+
+    Atlas sends both. The LOCAL mongot dev container sends NEITHER — verified
+    2026-09-12 with ``mongosh`` against ``docker/mongot``, whose entry is
+    exactly ``{id, name, type, latestDefinition}``. So "both absent" is its own
+    answer rather than "not ready": a literal wait-for-``queryable`` would burn
+    the full 300 s cap on every local indexing run.
+
+    Three-valued ON PURPOSE, and ``None`` is FALSY — callers MUST branch on
+    ``is None`` BEFORE any truthiness test:
+
+    * ``True`` — queryable now.
+    * ``False`` — present but not serving queries yet (keep polling / treat the
+      vector leg as unavailable).
+    * ``None`` — this deployment does not report readiness (local mongot);
+      read it as ready. Truthiness alone would read it as ``False`` and turn
+      every healthy local run into a 5-minute wait (here) or a permanent
+      ``text_only`` (``rag/search.py``).
+
+    Mirrors ``tree.memory.rag.search._vector_index_is_queryable`` case for case
+    so the two readers of the same catalogue cannot drift apart.
+    """
+
+    queryable = entry.get("queryable")
+    status = entry.get("status")
+
+    if queryable is None and status is None:
+        return None
+    if queryable is not None:
+        return queryable is True
+    return status == "READY"
+
+
+async def _wait_for_vector_index_ready(collection: Any) -> None:
+    """Poll the catalogue until the new vector index can actually serve queries.
+
+    mongot builds Atlas Search indexes out-of-band, so ``create_search_index``
+    returning says nothing about readiness — the previous version of this loop
+    waited for the entry to merely EXIST and then logged "ready", which is how
+    an indexing run could report success while ``$vectorSearch`` still answered
+    nothing (ADR-008: readiness is observed, not guessed).
+
+    Three exits:
+
+    * **ready** — :func:`index_entry_is_queryable` says ``True`` (Atlas) or
+      ``None`` (local mongot, which reports no readiness fields at all).
+    * **raise** — ``status == "FAILED"``: the build will never finish on its
+      own, so the indexing phase fails loudly instead of leaving a silent
+      "ready". Checked BEFORE ``queryable`` because the docs allow a FAILED
+      index to still report ``queryable: true`` — it is then serving the
+      PREVIOUS definition, i.e. exactly the stale-dimensions state
+      :func:`assert_settings_match_live_vector_index` exists to catch.
+    * **fail-open** — past the 300 s cap, WARN and return. A timeout is "not
+      yet", not "never": retrieval reports ``text_only`` until mongot catches
+      up, and the next indexing run finds the index up-to-date.
+    """
+
+    logger.info(
+        "Waiting for vector search index '%s' to be ready (up to %d s)...",
+        _VECTOR_INDEX_NAME,
+        _VECTOR_INDEX_READY_TIMEOUT_S,
+    )
+
+    last_status: str | None = None
+    for _ in range(_VECTOR_INDEX_READY_TIMEOUT_S // _VECTOR_INDEX_POLL_S):
         cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
-        results = await cursor.to_list()
-        if results:
-            await asyncio.sleep(3)
-            logger.info("Vector search index '%s' ready", _VECTOR_INDEX_NAME)
-            return
-        await asyncio.sleep(2)
+        entries = await cursor.to_list()
+
+        if entries:
+            entry = entries[0]
+            last_status = entry.get("status")
+
+            if last_status == "FAILED":
+                raise RuntimeError(
+                    f"Vector search index '{_VECTOR_INDEX_NAME}' build failed "
+                    f"(status=FAILED)"
+                )
+
+            queryable = index_entry_is_queryable(entry)
+            if queryable is None:
+                logger.info(
+                    "Vector search index '%s' reports neither 'status' nor "
+                    "'queryable' (local mongot); treating it as ready",
+                    _VECTOR_INDEX_NAME,
+                )
+                return
+            if queryable:
+                logger.info(
+                    "Vector search index '%s' ready (status=%s)",
+                    _VECTOR_INDEX_NAME,
+                    last_status,
+                )
+                return
+
+        logger.debug(
+            "Vector search index '%s' not queryable yet (status=%s); "
+            "polling again in %d s",
+            _VECTOR_INDEX_NAME,
+            last_status,
+            _VECTOR_INDEX_POLL_S,
+        )
+        await asyncio.sleep(_VECTOR_INDEX_POLL_S)
 
     logger.warning(
-        "Vector search index '%s' did not appear in time", _VECTOR_INDEX_NAME
+        "Vector search index '%s' not queryable after %d s (last status=%s); "
+        "retrieval runs text_only until it is",
+        _VECTOR_INDEX_NAME,
+        _VECTOR_INDEX_READY_TIMEOUT_S,
+        last_status,
     )
 
 
