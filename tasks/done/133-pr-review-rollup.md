@@ -19,7 +19,7 @@ The Blocker is small and mechanical (a ~6-line delegation the feature's own task
 - [x] Blocker 1: `apps/memory/src/tree/memory/rag/search.py::_vector_index_is_queryable` decides the per-entry verdict by calling `tree.memory.rag.indexing.index_entry_is_queryable` — `grep -n 'entry.get("queryable")\|entry.get("status")' apps/memory/src/tree/memory/rag/search.py` returns nothing; the "Mirrors … case for case" sentences in BOTH docstrings (`search.py` and `indexing.py::index_entry_is_queryable`) are gone; `tests/unit/memory/rag/test_search.py::TestSearchMode` (`test_missing_vector_index_reports_text_only`, `test_building_vector_index_reports_text_only`, `test_empty_but_queryable_index_stays_hybrid`, `test_index_entry_without_status_or_queryable_stays_hybrid`) still green unchanged — they are behavioural and must not need edits.
 - [x] Tester re-runs full QA suite (`make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests`, env `local`) and PASSES.
 - [x] PA re-runs acceptance review and ACCEPTS.
-- [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
+- [x] PR Reviewer re-runs and reports `NO BLOCKERS`.
 
 ## Blockers (detail)
 
@@ -263,3 +263,27 @@ so `nothing_found` could not be triggered live against the populated local memor
 regression of this rollup; noted for the owner.
 
 Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-09-12 20:30 — Re-review, round 2 (PR #43, HEAD 0311180)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed the rollup diff `6d6820b..0311180` (11 code/test files, +140/-146 outside `tasks/`) file by file, plus the full PR diff stat (`fcf697e...0311180`, 65 files) for `git add -A` artefacts. Blockers: 0; Nits: 4.
+
+- Blocker 1 — FIXED. `search.py:258` decides with `index_entry_is_queryable(entry) is False`; both "Mirrors … case for case" sentences are gone. The two `entry.get("status"/"queryable")` reads left at `search.py:263-264` sit inside the WARNING's argument list only — that is the "display, not a decision" carve-out in the Blocker's own Suggested fix, so AC-19 is honoured as written.
+- Nit 1 — the four dead `except` arms and the test pinning one are gone; `BrightData*Error` / `httpx.HTTPStatusError` / `_http_retryable` all still have live callers in `search_web` (`tools.py:597-608`); `_http_status_error` still has a consumer (`test_error_envelope.py:271`).
+- Nit 2 — stdin parsed once; `read_hook_input` owns the tolerance (`ValidationError` is a `ValueError`, so the purity allow-list is untouched); `HookInput.cwd` is read by `_repo_root`.
+- Nit 3 — `VECTOR_INDEX_NAME` public, no alias; the only `_VECTOR_INDEX_NAME` left in the tree is the pre-existing copy in `graph/dedup.py:65,349`, outside this PR's diff — not a Blocker, follow-up material (see Nit 4 below).
+- Nits 4, 6 — fixed as written.
+- Nit 5 — `ERROR_CONTRACT` kept verbatim and documented as frozen by design: my own second option, accepted.
+- Nit 7 — `result.content` / `result.is_error` are plain reads; `block.text` staying a `getattr` is correct (`CallToolResult.content` is a union and only `TextContent` carries `.text`).
+- Simplicity pass over the rollup diff: net code shrank; the additions are docstrings/comments (see Nit 1 below for the one that repeats itself).
+- Regression check: `make memory-format-check` (293 files), `make memory-lint-check` clean, `make memory-tests` 3105 passed in 45.8 s (env `local`). `test_search.py` unchanged since round 1.
+
+**Nits** (non-blocking; appended to the PR description):
+  1. [Simplicity] — `apps/memory/src/tree/mcp/hooks.py:249-251`, `apps/memory/scripts/hook_session_end.py:4-5`, `apps/memory/tests/unit/scripts/test_hook_session_end.py:145-146` — `shrink:` the "stdin is read once" rationale is now stated in four places (`read_hook_input` docstring, `run` docstring, script module docstring, test comment). Keep it in `read_hook_input`, where the read happens; `run`'s new paragraph restates its own signature.
+  2. [Clean code] — `apps/memory/src/tree/memory/rag/indexing.py:504-506` — "The ONE reader of this catalogue shape: `_wait_for_vector_index_ready` below and `…_vector_index_is_queryable` both decide here" names two readers after saying "ONE". Suggest: "Both readers of this catalogue — `_wait_for_vector_index_ready` below and `tree.memory.rag.search._vector_index_is_queryable` — decide here, so they cannot drift apart."
+  3. [Standards] — `apps/memory/src/tree/mcp/hooks.py:228` — `_answer_text(result: Any)` now reads `result.content` as a documented attribute; type it `CallToolResult` (`from fastmcp.client.client import CallToolResult`, fastmcp 3.2.0 — inside the purity allow-list). The test fake carries `content` / `is_error` and nothing does `isinstance`, so no test changes.
+  4. [Docs] — PR #43 description, "Review round 2" section — says "Follow-up filed, not in this PR: `graph/dedup.py:65` …" but no task in `tasks/` references `dedup.py` (`grep -rln dedup.py tasks/*.md` → nothing). Either PA files the follow-up (retarget `dedup.py:65,349` to `indexing.VECTOR_INDEX_NAME`) or the wording becomes "follow-up noted, not yet filed".
+
+Pipeline may advance to hand-off.
