@@ -21,10 +21,6 @@ class SourceType(StrEnum):
 class Document(BeanieDocument):
     source_type: SourceType
     source_uri: str
-    # No standalone single-key index on ``user_id``: the compound
-    # ``user_source_uri_unique`` index already leads with ``user_id`` so
-    # ``find({"user_id": X, ...})`` queries hit the index prefix without
-    # paying for a redundant single-key index per row.
     user_id: PydanticObjectId
     title: str | None = None
     summary: str | None = None
