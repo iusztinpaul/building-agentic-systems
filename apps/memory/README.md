@@ -456,7 +456,7 @@ cannot drift into pipeline internals):
 "hooks": {
   "SessionEnd": [{"hooks": [{
     "type": "command",
-    "command": "uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local",
+    "command": "uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local",
     "timeout": 60
   }]}]
 }
@@ -483,21 +483,29 @@ dies in its lifespan), or a **Tool error envelope** in the answer (the log names
 boots in seconds — `SessionEnd` hooks share a 1.5 s budget that the configured
 `timeout: 60` raises to 60 s.
 
-**Cloud server (opt-in).** Change the argument to `tree-memory` to send sessions
-to the Horizon deployment instead; the remote `.mcp.json` entry is used
-unchanged, so complete its OAuth flow once (any MCP client will prompt — e.g.
-`uv run fastmcp inspect https://tree-memory.fastmcp.app/mcp`) before relying on
-the hook, or every session end logs a skip.
+**Local server only, for now.** The hook targets `tree-memory-local`, and the
+remote `tree-memory` entry is passed through as written. Pointing the hook at
+`tree-memory` today therefore fails auth — the client sends no credentials, the
+server answers 401, and the session end logs one skip; persistent OAuth token
+storage is the prerequisite for the cloud route (follow-up), because `fastmcp`
+3.2.0 keeps OAuth tokens in memory only, so an `auth: "oauth"` entry would
+re-open a browser login at every session end instead. Nobody has walked the
+cloud path end-to-end; treat `tree-memory` as unsupported until then.
 
-**Disable it.** Drop the `hooks` block from `.claude/settings.json` (or set
-`"timeout": 0` for a single session). Nothing else reads it.
+**Disable it.** Set `"disableAllHooks": true` in `~/.claude/settings.json` or
+`.claude/settings.local.json`; for one run, start Claude Code with
+`claude --settings '{"disableAllHooks": true}'`. To remove it for good, drop the
+`hooks` block from `.claude/settings.json`. There is no per-hook switch — hook
+entries MERGE across settings levels, so a local settings file cannot unset the
+project's hook ([hooks
+reference](https://docs.claude.com/en/docs/claude-code/hooks)).
 
 Smoke-test it without ending a session — the fixture transcript doubles as the
 e2e payload:
 
 ```bash
 echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session_end_transcript.jsonl","cwd":"'"$PWD"'","hook_event_name":"SessionEnd","reason":"other"}' \
-  | uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local
+  | uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local
 ```
 
 ## Modal embedding deployment (optional)

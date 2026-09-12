@@ -73,7 +73,9 @@ Five related choices, one contract:
 5. **MCP is the only harness↔memory interface.** The Session-end hook (`tree.mcp.hooks`,
    glue `scripts/hook_session_end.py`, wired on Claude Code's `SessionEnd`) persists a session by
    calling `ingest_conversation` with `session_uri="claude-session://<id>"` through the repo-root
-   `.mcp.json` entry for one server. It imports stdlib + `fastmcp` + `pydantic` only — AST-enforced
+   `.mcp.json` entry for one server — the local stdio `tree-memory-local` today: the cloud entry needs
+   persistent OAuth token storage the pinned fastmcp (3.2.0, in-memory tokens) does not provide, so a
+   cloud-pointed hook is skipped on 401 until that lands. It imports stdlib + `fastmcp` + `pydantic` only — AST-enforced
    like `rag/cleaning.py`'s purity — and always exits 0. `SessionEnd` over `Stop` because
    first-write-wins on `session_uri` would keep only the first turn. The skill's "proactive
    background ingest" instruction is deleted; the vector-index poll waits for `queryable`

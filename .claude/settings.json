@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local",
+            "command": "uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local",
             "timeout": 60
           }
         ]

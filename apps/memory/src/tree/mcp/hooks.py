@@ -188,8 +188,17 @@ def load_server_config(
     A stdio entry gets ``cwd`` pinned (its ``args`` are repo-root relative) and
     ``MCP_SKIP_INDEX_BOOTSTRAP=1`` merged into its own ``env`` — the spawned
     local server must query indexes, never build them, or the session-end budget
-    is gone. Remote entries pass through unchanged (the cloud server
-    authenticates over OAuth).
+    is gone.
+
+    Remote entries pass through UNCHANGED, deliberately: ``fastmcp`` 3.2.0's
+    ``RemoteMCPServer.auth`` defaults to ``None``, so an OAuth-protected cloud
+    server answers 401 and the hook logs one skip. Merging ``auth: "oauth"``
+    would be worse, not better — fastmcp 3.2.0 defaults OAuth token storage to
+    ``MemoryStore`` (``fastmcp/client/auth/oauth.py``: ``self._token_storage or
+    MemoryStore()``), so no token survives the process and EVERY session end
+    would open a browser and then time out. Persistent token storage is the
+    prerequisite for the cloud route; until it lands the hook targets the local
+    server.
     """
 
     servers = json.loads(mcp_json.read_text(encoding="utf-8")).get("mcpServers", {})

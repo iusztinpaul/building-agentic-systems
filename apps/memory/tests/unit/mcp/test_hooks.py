@@ -318,7 +318,10 @@ class TestLoadServerConfig:
         assert entry["env"]["ENV_FILE_PATH"] == "../../.env"
 
     def test_remote_entry_passes_through_untouched(self, mcp_json: Path) -> None:
-        # The cloud server needs OAuth, not a working directory: nothing to inject.
+        # Nothing to inject: a remote entry needs no working directory, and NO
+        # `auth` either. fastmcp 3.2.0 keeps OAuth tokens in a MemoryStore, so
+        # injecting `auth: "oauth"` would open a browser at every session end
+        # instead of the one 401 → skip line the hook logs today.
         config = load_server_config(mcp_json, "tree-memory", cwd=mcp_json.parent)
 
         assert config["mcpServers"]["tree-memory"] == {

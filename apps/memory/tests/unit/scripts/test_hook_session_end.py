@@ -10,11 +10,18 @@ pinned here — whatever arrives on stdin, the process exits 0, because a
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
+
+# ``<repo>/apps/memory/tests/unit/scripts/…`` → ``<repo>/apps/memory``, ``<repo>``.
+_APP_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = _APP_ROOT.parent.parent
 
 
 @pytest.fixture
@@ -52,6 +59,48 @@ def test_empty_stdin_exits_zero(cli_module) -> None:
     result = CliRunner().invoke(cli_module.main, [], input="{}")
 
     assert result.exit_code == 0
+
+
+def test_runs_with_no_env_file_variables() -> None:
+    # The wired command carries no `--env-file`, because `uv run --env-file`
+    # exits 2 on a checkout without `.env` — before Python starts, so the
+    # "always exits 0" guarantee never gets a say. Proof it can: run the script
+    # in a subprocess whose environment holds NOTHING from `.env` (PATH + HOME
+    # only). `tree.logging` and `tree.mcp.hooks` are stdlib + fastmcp +
+    # pydantic; the spawned MCP server loads `.env` through its own `.mcp.json`
+    # args, not through this process.
+    completed = subprocess.run(
+        [sys.executable, "scripts/hook_session_end.py", "tree-memory-local"],
+        input="{}",
+        capture_output=True,
+        text=True,
+        cwd=_APP_ROOT,
+        env={"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")},
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_wired_hook_command_carries_no_env_file() -> None:
+    # The regression the test above guards is in the WIRING, so pin the wiring:
+    # `.claude/settings.json` is what Claude Code actually runs at session end.
+    settings = json.loads(
+        (_REPO_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+
+    commands = [
+        hook["command"]
+        for matcher in settings["hooks"]["SessionEnd"]
+        for hook in matcher["hooks"]
+    ]
+
+    # Assert the FLAG, not the whole string: that file is developer-edited
+    # (plugins, skill overrides, a second hook) and equality would fail on
+    # edits that have nothing to do with this guarantee.
+    assert any("hook_session_end.py" in command for command in commands)
+    assert not any("--env-file" in command for command in commands)
 
 
 def test_blank_stdin_exits_zero(cli_module) -> None:

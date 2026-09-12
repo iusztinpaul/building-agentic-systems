@@ -55,8 +55,10 @@ By default, use the "Paul Iusztin" user when testing.
      ```bash
      mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:$MONGO_PORT/?directConnection=true" \
        --quiet --eval 'db.getSiblingDB("tree").memory.dropSearchIndex("vector_index")'
-     make memory-run-indexing-pipeline   # rebuilds it; the log ends in `ready (status=…)`
+     make memory-run-indexing-pipeline   # rebuilds it
      ```
+
+     Readiness prints in the `make memory-serve-workflows` terminal, NOT in the streamed flow-run log (a module logger Prefect does not forward; `tasks/132` moves it there). Locally it reads `Vector search index 'vector_index' reports neither 'status' nor 'queryable' (local mongot); treating it as ready`; on Atlas it is `ready (status=READY)`.
 
    * **Tool error envelope.** A blank `search_memory` query answers `{"error_type": "invalid_input", "retryable": false, "message": …}` — never an MCP protocol error.
 
@@ -64,7 +66,7 @@ By default, use the "Paul Iusztin" user when testing.
 
    ```bash
    echo '{"session_id":"e2e-1","transcript_path":"tests/unit/mcp/fixtures/session_end_transcript.jsonl","cwd":"'"$PWD"'","hook_event_name":"SessionEnd","reason":"other"}' \
-     | uv --directory apps/memory run --env-file ../../.env python scripts/hook_session_end.py tree-memory-local
+     | uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local
    ```
 
    Expect: under 60 s (Claude Code's raised `SessionEnd` budget), one `Ingested session claude-session://e2e-1 duplicate=False flow_run_id=…` line, exit 0. Re-run it for `duplicate=True`. After the run indexes, a phrase from the transcript must come back through `search_memory` / `make memory-query-graph`. Every failure path is a skip + exit 0 by design, so read the LOG, not the exit code.
