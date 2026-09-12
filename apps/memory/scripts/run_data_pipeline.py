@@ -4,7 +4,8 @@ Run the DATA pipeline (sources → ``documents``; NO extraction/indexing).
 A light CLI shim (glue lives in :mod:`tree.cli`) with two modes:
 
 * ``--mode offline`` (default) — dispatch the ``offline-pipeline`` flow
-  (:mod:`tree.offline`) with extraction OFF over the selected config sources
+  (:mod:`tree.offline`) with the extraction AND indexing phases OFF over the
+  selected config sources
   (ADR-003): ``--source-file`` (repeatable, e.g. ``sources/listen.yaml``)
   and/or ``--uri`` (repeatable, optionally suffixed ``=TYPE``, e.g.
   ``…/feed=substack_rss``); neither → the default backfill+listen set (the
@@ -75,6 +76,7 @@ async def _run_offline(
         source_files=source_files or None,
         sources=inline_sources or None,
         run_extraction=False,
+        run_indexing=False,
     )
     await wait_for_dispatch(result)
     # The dispatcher's spans belong to this short-lived process — flush before exit.

@@ -32,8 +32,7 @@ from tree.data.online_pipeline import (
 )
 from tree.db import init_mongodb
 from tree.flow_runs import flow_run_status
-from tree.memory.extraction.pipeline import memory_extract_etl_worker
-from tree.memory.indexing.pipeline import memory_indexing
+from tree.memory.pipeline import memory_extract_etl_worker, memory_indexing
 from tree.config.constants import (
     TAGS_INDEXING,
     TAG_DATA_PIPELINE,

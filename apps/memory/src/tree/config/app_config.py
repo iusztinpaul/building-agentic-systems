@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class EmbeddingConfig(BaseModel):
     :attr:`ModelsConfig.search_embedding`. Only the **search** embedding's
     ``dimensions`` is dimension-coupled to the Atlas Vector Search index
     under ``docker/mongot/``;
-    :func:`tree.memory.indexing.core.assert_settings_match_live_vector_index`
+    :func:`tree.memory.rag.indexing.assert_settings_match_live_vector_index`
     asserts it matches the live ``vector_index`` at boot so a mismatch is a
     hard startup error rather than silent data loss. The **resolution**
     embedding is transient (computed on the entity name and never
@@ -120,7 +120,7 @@ class ResolutionConfig(BaseModel):
 
 class DedupConfig(BaseModel):
     """Read-only dedup-decision tuning. Mirrors
-    :class:`tree.memory.extraction.dedup.DeduplicationConfig` field-for-field
+    :class:`tree.memory.graph.dedup.DeduplicationConfig` field-for-field
     so the YAML can drive both.
 
     Post-#034 this is the *sole* source of truth for dedup behavior:
@@ -148,8 +148,10 @@ class DedupConfig(BaseModel):
 
 
 class ExtractionConfig(BaseModel):
-    chunk_size: int = 512
-    chunk_overlap: int = 64
+    # Chunking knobs live under ``memory.chunking`` (ADR-006 decision 6): the
+    # two-level splitter is mode-independent, so a chunk size under
+    # ``extraction`` would read as graph-only. The old
+    # ``chunk_size``/``chunk_overlap`` pair went out with their only consumer.
     llm_concurrency: int = 5
     # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
     # override hatch via :func:`_apply_env_overrides`.
@@ -348,7 +350,276 @@ class MCPConfig(BaseModel):
     max_results: int = 10
 
 
+class ChunkLevelConfig(BaseModel):
+    """Token budget for ONE chunking level — a parent or a child (ADR-006 §6).
+
+    ``size`` and ``overlap`` are counted in tiktoken ``cl100k_base`` tokens (the
+    encoder :mod:`tree.memory.rag.chunking` bounds every chunk with), never in
+    characters. ``overlap`` is the number of trailing tokens of a chunk that are
+    repeated at the head of the next chunk at the SAME level, so a sentence cut
+    by a boundary is still whole in one of the two chunks.
+
+    ``overlap < size`` is a hard invariant: at ``overlap >= size`` a chunk would
+    carry over everything it just emitted and the splitter would stop making
+    forward progress. Good: ``size=256, overlap=32`` (12% carry-over). Bad:
+    ``size=256, overlap=256``.
+    """
+
+    size: int = Field(gt=0, description="Chunk budget in cl100k_base tokens.")
+    overlap: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Tokens of the previous chunk repeated at the head of the next "
+            "chunk at the same level. Must be < size."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_overlap_below_size(self) -> "ChunkLevelConfig":
+        if self.overlap >= self.size:
+            raise ValueError(
+                "Misconfigured chunking level: overlap must be smaller than "
+                f"size. Found size={self.size}, overlap={self.overlap}."
+            )
+        return self
+
+
+class ChunkingConfig(BaseModel):
+    """Two-level (parent/child) chunking knobs for the memory pipeline (ADR-006 §6).
+
+    ``strategy`` picks the SAME splitting algorithm for both levels:
+
+    * ``fixed_tokens`` — the Chapter-4 sliding token window.
+    * ``recursive`` — markdown headings -> blank-line paragraphs -> sentences ->
+      raw tokens, greedily merged up to ``size`` (the default; it keeps a
+      section's prose together and gives every parent a ``heading_path``).
+
+    ``parent`` chunks are the retrieval + LLM-extraction unit (never embedded);
+    ``child`` chunks are the embedded search unit. ``child.size < parent.size``
+    is a hard invariant — a child at least as large as its parent would make the
+    parent level pure overhead (one child per parent, no fan-out) and defeat
+    parent-document retrieval.
+    """
+
+    strategy: Literal["fixed_tokens", "recursive"] = "recursive"
+    parent: ChunkLevelConfig = ChunkLevelConfig(size=4096, overlap=0)
+    child: ChunkLevelConfig = ChunkLevelConfig(size=256, overlap=32)
+
+    @model_validator(mode="after")
+    def _check_child_smaller_than_parent(self) -> "ChunkingConfig":
+        if self.child.size >= self.parent.size:
+            raise ValueError(
+                "Misconfigured chunking: memory.chunking.child.size must be "
+                "smaller than memory.chunking.parent.size. Found "
+                f"child.size={self.child.size}, "
+                f"parent.size={self.parent.size}."
+            )
+        return self
+
+
+class UmapConfig(BaseModel):
+    """UMAP knobs, shared by BOTH fits of a **Clustering run** (ADR-007 §1).
+
+    Fit A reduces the 1024-d embeddings to ``n_components`` dimensions and is
+    what HDBSCAN clusters on; fit B reduces the SAME raw embeddings to 2-D for
+    display only. One block drives both so the picture and the clustering can
+    never drift apart on ``metric`` or ``random_state``.
+    """
+
+    n_neighbors: int = Field(
+        default=15,
+        ge=2,
+        description=(
+            "Local neighbourhood size UMAP balances against global structure. "
+            "Clamped down to n-1 at fit time on corpora smaller than this."
+        ),
+    )
+    min_dist: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum distance between points in the embedded space. 0.0 packs "
+            "the tightest clumps, which is what a density clusterer wants "
+            "(the BERTopic default for the clustering fit)."
+        ),
+    )
+    metric: Literal["cosine", "euclidean"] = Field(
+        default="cosine",
+        description=(
+            "Distance metric on the input embeddings. Voyage embeddings are "
+            "cosine-normalised, so 'cosine' is the matching default."
+        ),
+    )
+    n_components: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Dimensionality of the intermediate space HDBSCAN clusters in. "
+            "A handful of dimensions restores the density contrast that 1024-d "
+            "cosine space loses; display is always a SEPARATE 2-D fit."
+        ),
+    )
+    random_state: int = Field(
+        default=42,
+        description=(
+            "One seed for both UMAP fits and the sampling RNG, so a re-run on "
+            "an unchanged corpus reproduces the same map and the same evidence."
+        ),
+    )
+
+
+class HdbscanConfig(BaseModel):
+    """``sklearn.cluster.HDBSCAN`` knobs (ADR-007 §1).
+
+    Runs on the ``n_components``-d UMAP intermediate, never on the 2-D display
+    projection: clusters read off a 2-D picture are artefacts of the projection
+    rather than of the data.
+    """
+
+    min_cluster_size: int = Field(
+        default=15,
+        ge=2,
+        description=(
+            "Fewest **Child chunk**s that may form a **Memory cluster**. "
+            "Everything smaller becomes noise (cluster_id -1). Lower it for a "
+            "small corpus, e.g. "
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5."
+        ),
+    )
+    min_samples: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "How conservative the density estimate is; higher declares more "
+            "points noise. null = min_cluster_size (the scikit-learn default)."
+        ),
+    )
+
+
+class ClusterSamplingConfig(BaseModel):
+    """How many member chunks the summariser shows the LLM (ADR-007 §4).
+
+    A cluster of 4,000 chunks is summarised from at most ``nearest + random``
+    of them, so one LLM call per cluster stays bounded regardless of size.
+    """
+
+    nearest: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Chunks nearest the cluster centroid by cosine distance in the "
+            "ORIGINAL 1024-d embedding space (the most typical members)."
+        ),
+    )
+    random: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Seeded random chunks drawn from the remaining members, so the "
+            "sample also shows the cluster's spread — not just its core."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_at_least_one_sample(self) -> "ClusterSamplingConfig":
+        """A summary needs evidence: ``nearest + random == 0`` would ask the LLM
+        to label a cluster from an empty sample."""
+
+        if self.nearest + self.random < 1:
+            raise ValueError(
+                "Misconfigured clustering: memory.clustering.sampling.nearest + "
+                "memory.clustering.sampling.random must be at least 1. Found "
+                f"nearest={self.nearest}, random={self.random}."
+            )
+        return self
+
+
+class ClusterSummariesConfig(BaseModel):
+    """Per-cluster LLM summarisation knobs (ADR-007 §4)."""
+
+    llm_concurrency: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Concurrent per-cluster LLM calls (one call per cluster), bounded "
+            "by its own semaphore. Separate from extraction.llm_concurrency: "
+            "clustering is mode-orthogonal, extraction is graph-only."
+        ),
+    )
+
+
+class ClusteringConfig(BaseModel):
+    """The BERTopic-shaped clustering recipe (ADR-007 §1).
+
+    UMAP to a low-dimensional intermediate -> HDBSCAN there -> a separate UMAP
+    to 2-D for display -> one LLM summary per cluster. Every number is a knob;
+    there is deliberately NO automatic parameter search.
+
+    ``extra="forbid"`` is load-bearing: the ON/OFF switch is the
+    ``run_clustering`` flow parameter of ``offline_pipeline`` (ADR-007 §5), so a
+    ``memory.clustering.enabled`` key must fail at boot rather than let the YAML
+    say "on" while the cron says "off".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    umap: UmapConfig = Field(
+        default_factory=UmapConfig,
+        description="UMAP knobs, shared by the clustering fit and the 2-D display fit.",
+    )
+    hdbscan: HdbscanConfig = Field(
+        default_factory=HdbscanConfig,
+        description="HDBSCAN knobs, applied on the UMAP intermediate space.",
+    )
+    sampling: ClusterSamplingConfig = Field(
+        default_factory=ClusterSamplingConfig,
+        description="How many member chunks each cluster summary is written from.",
+    )
+    summaries: ClusterSummariesConfig = Field(
+        default_factory=ClusterSummariesConfig,
+        description="Per-cluster LLM summarisation knobs.",
+    )
+
+
+class MemoryConfig(BaseModel):
+    """The ONE memory-mode switch (ADR-006 decision 5).
+
+    ``mode`` selects how much machinery the memory half of the system runs:
+
+    * ``rag`` — clean -> two-level chunk -> embed children -> load rows, plus
+      parent-document hybrid retrieval. Node rows only: no edges, no LLM
+      entity extraction. (The Chapter-4 system.)
+    * ``graphrag`` — the rag stages PLUS structural edges, LLM entity
+      extraction over parent chunks, resolution, dedup, ``mentions`` edges and
+      graph expansion at retrieval. (What Chapter 8 adds.)
+
+    Defaults to ``graphrag`` so an unchanged checkout behaves exactly as it did
+    before ADR-006. Read ONCE at flow entry / MCP-server boot / CLI start —
+    never per request. Operators flip it without editing YAML through the
+    existing override hatch (``TREE_MEMORY__MODE=rag``, see
+    :func:`_apply_env_overrides`); an unknown value is a hard
+    ``ValidationError`` at load time, never a silent fallback.
+
+    Both modes write the SAME ``memory`` collection
+    (:data:`tree.entities.memory.MEMORY_COLLECTION`) and both start from
+    scratch — there is no migration between them.
+
+    ``chunking`` is mode-independent: BOTH modes split documents into parent and
+    child chunks with the same knobs (ADR-006 §6), so chunk rows are
+    byte-identical across modes. So is ``clustering`` (ADR-007): a **Clustering
+    run** reads the same child chunk rows and writes the same
+    ``memory_clusters`` rows in both modes.
+    """
+
+    mode: Literal["rag", "graphrag"] = "graphrag"
+    chunking: ChunkingConfig = ChunkingConfig()
+    clustering: ClusteringConfig = ClusteringConfig()
+
+
 class AppConfig(BaseModel):
+    memory: MemoryConfig = MemoryConfig()
     models: ModelsConfig = ModelsConfig()
     extraction: ExtractionConfig = ExtractionConfig()
     query: QueryConfig = QueryConfig()

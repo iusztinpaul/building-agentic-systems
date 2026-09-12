@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, Field
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 from tree.entities.ontology import (
     EDGE_CONSTRAINTS,
     EDGE_REGISTRY,
@@ -40,6 +40,8 @@ from tree.entities.ontology import (
     EdgeTypeSpec,
     EmployedByProperties,
     MentionsProperties,
+    ChunkProperties,
+    DocumentProperties,
     NodeTypeSpec,
     PersonProperties,
     RelationSemanticSpec,
@@ -421,7 +423,7 @@ class TestEnumShim:
     def test_node_type_members_match_node_registry_plus_legacy_aliases(self):
         # Post-#028: the enum has the registry entries the LLM cares
         # about (+ DOCUMENT/CHUNK) PLUS one legacy alias — ``TASK`` —
-        # that the :class:`KnowledgeGraphEntry` mode=before validator
+        # that the :class:`MemoryEntry` mode=before validator
         # silently re-routes to the new (parent, subtype) shape. The
         # alias is intentionally NOT in :data:`NODE_REGISTRY`.
         # Post-#031: ``FACT`` joins the enum + registry as the POLE+O
@@ -1244,7 +1246,7 @@ class TestFactIslandRule:
         # envelope validator still blocks LLM-emitted attempts via the
         # ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` guard, but the registry
         # itself records ``(fact, fact)`` in superseded_by's allowed
-        # pairs so the :class:`KnowledgeGraphEntry` model validator
+        # pairs so the :class:`MemoryEntry` model validator
         # accepts the resolver's direct write.
         offenders = []
         for name, spec in EDGE_REGISTRY.items():
@@ -1305,8 +1307,8 @@ class TestFactSchemaInPrompt:
         assert required == {"subject", "predicate", "object"}
 
 
-class TestKnowledgeGraphEntryAcceptsFactNode:
-    """The Beanie ``KnowledgeGraphEntry`` model must accept a fact-typed
+class TestMemoryEntryAcceptsFactNode:
+    """The Beanie ``MemoryEntry`` model must accept a fact-typed
     node row constructed from the validator's surviving properties."""
 
     def test_construct_fact_node_entry(self):
@@ -1314,13 +1316,13 @@ class TestKnowledgeGraphEntryAcceptsFactNode:
 
         from beanie import PydanticObjectId
 
-        from tree.entities.knowledge_graph import KnowledgeGraphEntry
+        from tree.entities.memory import MemoryEntry
 
         user_id = PydanticObjectId()
         now = datetime.now(tz=UTC)
         # Wire-form ``"object"`` key — what the validator stores after
         # alias-aware ``validate_properties``.
-        entry = KnowledgeGraphEntry(
+        entry = MemoryEntry(
             id=f"{user_id}:fact:earth-orbits-sun",
             user_id=user_id,
             kind="node",
@@ -1501,7 +1503,7 @@ class TestSupersededByEdgeConstraints:
     cross-type / unsupported endpoints (#032)."""
 
     def test_preference_to_preference_accepted(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1520,7 +1522,7 @@ class TestSupersededByEdgeConstraints:
         # envelope validator (the resolver writes directly), but the
         # validator surface is the right place for this contract: any
         # LLM-emitted attempt is rejected.
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1533,7 +1535,7 @@ class TestSupersededByEdgeConstraints:
         assert result.reason == "fact_endpoint_disallowed"
 
     def test_cross_type_preference_to_fact_rejected(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1546,7 +1548,7 @@ class TestSupersededByEdgeConstraints:
         assert result.reason == "fact_endpoint_disallowed"
 
     def test_person_to_person_rejected(self):
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         # ``(person, person)`` is not in ``superseded_by`` allowed pairs.
         result = validate_envelope(
@@ -1563,7 +1565,7 @@ class TestSupersededByEdgeConstraints:
         # #029 carve-out: ``mentions`` never targets ``preference``.
         # Pinned here so #032's preference refactor doesn't accidentally
         # let it back in.
-        from tree.memory.extraction.validation import validate_envelope
+        from tree.memory.graph.validation import validate_envelope
 
         result = validate_envelope(
             kind="edge",
@@ -1574,3 +1576,69 @@ class TestSupersededByEdgeConstraints:
         )
         assert result.ok is False
         assert result.reason == "disallowed_pair"
+
+
+class TestChunkAndDocumentContextProperties:
+    """ADR-006 §4 / #107: the **Contextual header** inputs live ON the row.
+
+    ``title`` and ``heading_path`` are denormalised onto every chunk (exactly
+    like the existing ``source_type`` / ``source_uri`` / ``date``) so the
+    indexing backfill rebuilds the identical embedding text without a join.
+    """
+
+    def test_chunk_properties_accept_title_and_heading_path(self):
+        props = ChunkProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            content="body",
+            title="Memory for AI Agents",
+            heading_path=["Retrieval", "Parents"],
+        )
+
+        assert props.title == "Memory for AI Agents"
+        assert props.heading_path == ["Retrieval", "Parents"]
+
+    def test_chunk_context_fields_are_optional(self):
+        """A chunk from an untitled, heading-less document still validates."""
+
+        props = ChunkProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            content="body",
+        )
+
+        assert props.title is None
+        assert props.heading_path == []
+
+    def test_document_properties_accept_title(self):
+        props = DocumentProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+            title="Memory for AI Agents",
+        )
+
+        assert props.title == "Memory for AI Agents"
+
+    def test_document_title_is_optional(self):
+        props = DocumentProperties(
+            source_type="substack",
+            source_uri="https://example.com/post",
+        )
+
+        assert props.title is None
+
+    @pytest.mark.parametrize(
+        "model, field",
+        [
+            (ChunkProperties, "title"),
+            (ChunkProperties, "heading_path"),
+            (DocumentProperties, "title"),
+        ],
+    )
+    def test_new_fields_carry_a_description(self, model, field):
+        """ADR-001 §13 — the sweep in test_field_descriptions.py enforces this
+        for every registered model; pinned here per field for a named failure."""
+
+        description = model.model_fields[field].description
+
+        assert description is not None and description.strip()

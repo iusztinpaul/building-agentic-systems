@@ -8,12 +8,12 @@
 
 Two options for storing chat data in Tree:
 
-- **Option A** — add `CONVERSATION` and `MESSAGE` as new node types inside the existing `knowledge_graph` collection.
-- **Option B** — keep them in dedicated `conversations` and `messages` collections, mirroring how `documents` already sits alongside `knowledge_graph`.
+- **Option A** — add `CONVERSATION` and `MESSAGE` as new node types inside the existing `memory` collection.
+- **Option B** — keep them in dedicated `conversations` and `messages` collections, mirroring how `documents` already sits alongside `memory`.
 
 This doc lays out the tradeoffs.
 
-## Option A — Conversations + Messages inside `knowledge_graph`
+## Option A — Conversations + Messages inside `memory`
 
 ### Pros
 
@@ -48,7 +48,7 @@ This doc lays out the tradeoffs.
 
 ### Cons
 
-- **Cross-layer edges become heterogeneous.** If we want a `MENTIONS` edge from MESSAGE → PERSON as a real graph edge (not just a `sources` backref), the edge lives in `knowledge_graph` but its `source_node_id` references a `messages._id`. Two-collection edges work, but tooling/visualizers may assume single-collection.
+- **Cross-layer edges become heterogeneous.** If we want a `MENTIONS` edge from MESSAGE → PERSON as a real graph edge (not just a `sources` backref), the edge lives in `memory` but its `source_node_id` references a `messages._id`. Two-collection edges work, but tooling/visualizers may assume single-collection.
 - **Two pipelines to maintain.** A `messages` ingest path plus the KG extraction step that reads from messages. Vs. one combined pipeline.
 - **Lookup cost when joining.** "Entities mentioned in this message" is a `$lookup` or app-level join instead of a single-collection scan. Mongo's `$lookup` is fine but not free.
 - **Drift risk.** Two collections evolving independently can drift in conventions (id format, timestamp handling, user_id scoping) if we're not disciplined.

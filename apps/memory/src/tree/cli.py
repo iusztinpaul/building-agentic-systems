@@ -8,6 +8,8 @@ options + one dispatch call:
 
 * the common ``--mode`` / ``--user-id`` / ``--user-identifier`` Click options,
 * tenant resolution (Mongo init + :func:`tree.entities.sessions.resolve_user_id`),
+* warning about ``TREE_…`` config overrides set in the dispatching shell, which
+  the flow (running elsewhere) never sees,
 * streaming a flow run's logs while blocking until it is final (runs execute
   on a worker, so their logs live in Prefect — mirroring them here surfaces
   errors in the operator's terminal instead of only the Prefect UI),
@@ -19,6 +21,7 @@ raise, because every caller is a terminal entry point.
 
 import asyncio
 import logging
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -75,6 +78,31 @@ def user_options(fn: Callable[..., Any]) -> Callable[..., Any]:
             "current-session user; also reads the ``USER_ID`` env var."
         ),
     )(fn)
+
+
+def warn_ignored_config_overrides(prefix: str) -> None:
+    """Warn that ``prefix``-matching env overrides set HERE never reach the flow.
+
+    ``dispatch_*_pipeline`` forwards no environment: the flow reads YAML +
+    ``TREE_<SECTION>__<KEY>`` overrides through ``_live_app_config()`` inside
+    the process that RUNS it (``make memory-serve-workflows`` locally, the
+    deployment's environment on Prefect Managed). So
+    ``TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5 make
+    memory-run-clustering-pipeline`` is a silent no-op, and the operator's next
+    run behaves exactly like the last one with no hint why. A hint, never a
+    gate: the run still dispatches.
+    """
+
+    names = sorted(name for name in os.environ if name.startswith(prefix))
+    if not names:
+        return
+    logger.warning(
+        "%s set in THIS shell, but the flow reads its config where it RUNS — "
+        "the shell running `make memory-serve-workflows` locally, the "
+        "deployment's environment on Prefect Managed. Dispatch forwards no "
+        "environment, so the override is IGNORED for this run.",
+        ", ".join(names),
+    )
 
 
 async def connect_and_resolve_user(

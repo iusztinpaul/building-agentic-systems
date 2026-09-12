@@ -1,4 +1,27 @@
-"""MCP tool handlers — thin delegation to business logic."""
+"""MCP tool handlers registered in BOTH **Memory modes** — thin delegation.
+
+The seven tools here (``search_memory``, ``ingest_url``, ``ingest_file``,
+``ingest_conversation``, ``search_web``, ``scrape_web``,
+``visualize_memory_embeddings``) work with node rows alone, so
+:mod:`tree.mcp.server` imports this module unconditionally. The seven tools that
+presuppose edges live in :mod:`tree.mcp.graph_tools`, imported only in
+``graphrag`` (ADR-006 decision 5).
+
+The **Embedding map** tool is here rather than with the graph tools because
+clustering is mode-orthogonal (ADR-007 §8): the map draws points and their
+clusters, never edges, so it says exactly as much in ``rag`` as in ``graphrag``.
+It delivers through the SAME dual path as the graph tools, which is why this
+module imports the MODE-NEUTRAL :mod:`tree.mcp.viz_app` (whose ``ui://`` and
+``graphs://`` resources therefore exist in rag mode too) and never
+:mod:`tree.mcp.graph_tools`.
+
+``search_memory`` is the one tool whose SIGNATURE depends on the mode — the rag
+version below returns **Parent-document retrieval** results and takes ``top_k``
+only; the graphrag version in :mod:`tree.mcp.graph_tools` keeps its graph
+expansion knobs. Two functions, one registered name, never both: dead
+``max_hops`` / ``visualize`` parameters that a rag server would have to ignore
+are exactly what this split avoids.
+"""
 
 import asyncio
 import json
@@ -7,15 +30,22 @@ from typing import Any, Literal
 
 import httpx
 from beanie import PydanticObjectId
-from bson import json_util
 from fastmcp import Context
 from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
 
+from tree.config.constants import (
+    TAGS_INGESTION_MCP,
+    TAGS_MCP,
+    TAGS_RETRIEVAL_MCP,
+)
 from tree.data.online_pipeline import (
     ConversationSource,
     FileSource,
     UrlSource,
+)
+from tree.data.web.web_pipeline import (
+    trigger_url_batch_ingest as _trigger_url_batch_ingest,
 )
 from tree.data.web.web_scrape import (
     DEFAULT_MAX_CHARS as _SCRAPE_DEFAULT_MAX_CHARS,
@@ -26,47 +56,25 @@ from tree.data.web.web_scrape import (
 from tree.data.web.web_scrape import (
     scrape_one as _scrape_one,
 )
-from tree.data.web.web_pipeline import (
-    trigger_url_batch_ingest as _trigger_url_batch_ingest,
-)
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
-from tree.entities.knowledge_graph import NodeType
+from tree.mcp.server import MEMORY_MODE, mcp
 
-# dashboard_app: side-effect import — registers the custom-HTML dashboard
-# (memory_dashboard tool + ui:// resource).
-from tree.mcp import dashboard_app  # noqa: F401
-
-# graph_app: a REAL import (it also registers visualize_memory_graph + the
-# ui:// / graphs:// resources as a side effect). The dual-delivery helper and
-# the shared ui:// URI come from there; graph_app does NOT import this module,
-# so there is no cycle.
-from tree.mcp.graph_app import GRAPH_VIEW_URI, _graph_tool_result
-from tree.mcp.deep_search import write_deep_search_results
-from tree.mcp.server import mcp
+# viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
+# ``ui://`` and ``graphs://`` resources as a side effect and owns the one
+# dual-delivery helper. It imports neither this module nor the graph tools, so
+# there is no cycle and rag mode stays free of graph code.
+from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
+from tree.memory.clustering.store import load_embedding_map
+from tree.memory.rag.retrieval import retrieve_parents
+from tree.memory.visualize.embeddings import (
+    NO_CLUSTERING_RUN_MESSAGE,
+    to_embedding_map_payload,
+)
 from tree.online import dispatch_online_pipeline
-from tree.memory.query.core import query_memory as structured_query_memory
-from tree.memory.query.nl_query import execute_nl_query
-from tree.memory.query.visualize import to_graph_payload
-from tree.memory.review import (
-    MergeStrategy,
-    ReviewDecision,
-)
-from tree.memory.review import (
-    find_pending_duplicates as _find_pending_duplicates,
-)
-from tree.memory.review import (
-    review_duplicate as _review_duplicate,
-)
-from tree.memory.types import QueryResult
-from tree.config.constants import (
-    TAGS_INGESTION_MCP,
-    TAGS_MCP,
-    TAGS_RETRIEVAL_MCP,
-)
 from tree.observability import (
     track,
     update_current_trace,
@@ -94,203 +102,102 @@ def _set_retrieval_thread(ctx: Context, tool: str) -> None:
         logger.debug("Opik retrieval-thread tagging no-op: %s", exc)
 
 
-def _serialize(docs: list[dict[str, Any]]) -> str:
-    """Serialize MongoDB documents to JSON, stripping embedding fields."""
-
-    cleaned = [{k: v for k, v in doc.items() if k != "embedding"} for doc in docs]
-    return json_util.dumps(cleaned, indent=2)
-
-
-def _dual_graph_result(
-    ctx: Context,
-    docs: list[dict[str, Any]],
-    serialized: str,
-    query: str,
-) -> str | ToolResult:
-    """Answer with the serialized docs AND the graph, on whichever channel fits.
-
-    The ONE visualization seam shared by ``query_memory`` and ``search_memory``
-    — both have the same shape (serialized docs + optional graph), so neither
-    builds a **Graph payload** nor branches on client capability itself. That
-    branching lives once, in :func:`~tree.mcp.graph_app._graph_tool_result`,
-    which also serves ``visualize_memory_graph`` (ADR-005, decision 4): inline
-    MCP App iframe when the client renders App UIs, else a self-contained file
-    under ``.tree/graphs/`` + a ``graphs://`` resource link.
-
-    ``serialized`` is carried VERBATIM into the model-visible text of whatever
-    comes back: these tools' contract is answering the user's question, so the
-    model must never lose the data to the visualization. The full node/edge
-    dump rides ONLY in the ``audience=["user"]`` block the iframe reads.
-
-    Returns the plain ``str`` — never a ``ToolResult`` — when the rows carry no
-    ``kind`` field, i.e. an aggregation or a projection dropped it and there is
-    nothing to draw.
-    """
-
-    nodes = [d for d in docs if d.get("kind") == "node"]
-    edges = [d for d in docs if d.get("kind") == "edge"]
-
-    if not nodes and not edges:
-        logger.warning(
-            "Visualization skipped: no documents have a 'kind' field "
-            "(query may have projected it away)."
-        )
-        return (
-            f"{serialized}\n\nVisualization skipped: returned documents "
-            "lack 'kind' field."
-        )
-
-    payload = to_graph_payload(QueryResult(nodes=nodes, edges=edges))
-    summary = (
-        f"{serialized}\n\nGraph of these results: "
-        f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
-    )
-    return _graph_tool_result(ctx, payload, summary, query=query)
-
-
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
-@track(tags=TAGS_RETRIEVAL_MCP, name="query_memory", create_duplicate_root_span=False)
-async def query_memory(
-    query: str,
-    ctx: Context,
-    visualize: bool = False,
-    max_results: int = 10,
-) -> str | ToolResult:
-    """Query the knowledge graph using natural language.
-
-    Dynamically translates the query into a MongoDB aggregation pipeline.
-    Supports hybrid search (vector + text), graph traversals, filters,
-    and aggregations.
-
-    The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_graph`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
-    path exists locally just share it; if the server is remote (cloud), read
-    the linked resource and save its text as a local ``.html`` file.
-
-    Args:
-        query: Natural language question about the knowledge graph.
-        visualize: If true, also render an interactive HTML graph visualization.
-        max_results: Maximum number of documents to return (default 10).
-    """
-
-    _set_retrieval_thread(ctx, "query_memory")
-    lc = ctx.lifespan_context
-    results = await execute_nl_query(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        llm=lc["llm"],
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        max_results=max_results,
-    )
-    output = _serialize(results)
-
-    if visualize and results:
-        return _dual_graph_result(ctx, results, output, query)
-
-    return output
-
-
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+# ADR-006 decision 5: rag mode's ``search_memory``. Defined unconditionally (so
+# it stays importable and unit-testable in either mode) and REGISTERED just
+# below only when the server booted in rag mode — in graphrag the name is taken
+# by the five-parameter graph version in :mod:`tree.mcp.graph_tools`.
 @track(tags=TAGS_RETRIEVAL_MCP, name="search_memory", create_duplicate_root_span=False)
-async def search_memory(
-    query: str,
-    ctx: Context,
-    top_k: int = 10,
-    max_hops: int = 1,
-    max_results: int = 10,
-    visualize: bool = False,
-) -> str | ToolResult:
-    """Search the knowledge graph using semantic + text search with graph expansion.
+async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
+    """Hybrid (vector + text) search over child chunks, returning the distinct
+    parent chunks with their document metadata.
 
-    Uses vector similarity + text search with RRF fusion to find seed nodes,
-    then expands the graph around them. Reliable fallback for semantic similarity.
+    Children are the small embedded search units; parents are what you read.
+    The answer is one JSON object — ``{"parents": [...]}``, best match first —
+    where each parent carries its ``content``, its ``heading_path``, the
+    ``document`` it came from (title, source_uri, date) and the
+    ``matched_children`` that made it rank, so you can quote the passage that
+    actually matched. An empty memory answers ``{"parents": []}``.
 
-    The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_graph`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
-    path exists locally just share it; if the server is remote (cloud), read
-    the linked resource and save its text as a local ``.html`` file.
+    A blank query answers ``{"error": "invalid_input", ...}`` — the same
+    envelope every other tool uses — instead of forwarding the embedding
+    provider's raw ``400 Input cannot contain empty strings``.
 
     Args:
         query: Search query text.
-        top_k: Number of seed nodes to retrieve.
-        max_hops: Maximum hops for graph expansion.
-        max_results: Maximum total documents (nodes + edges) to return (default 10).
-        visualize: If true, also render an interactive HTML graph visualization.
+        top_k: Maximum number of parent chunks to return (default 10).
     """
+
+    if not query.strip():
+        return json.dumps(
+            {"error": "invalid_input", "detail": "query must not be empty"}
+        )
 
     _set_retrieval_thread(ctx, "search_memory")
     lc = ctx.lifespan_context
-    result = await structured_query_memory(
+    result = await retrieve_parents(
         client=lc["client"],
         database=lc["database"],
         query=query,
         embedding_model=lc["embedding_model"],
         user_id=lc["user_id"],
         top_k=top_k,
-        max_hops=max_hops,
     )
-    docs = result.nodes + result.edges
-    if len(docs) > max_results:
-        docs = docs[:max_results]
-    output = _serialize(docs)
-
-    if visualize and docs:
-        return _dual_graph_result(ctx, docs, output, query)
-
-    return output
+    return result.model_dump_json(indent=2)
 
 
-@mcp.tool
+if MEMORY_MODE == "rag":
+    mcp.tool(search_memory)
+
+
+# ---------------------------------------------------------------------------
+# Embedding map — READS the latest **Clustering run**, never computes it
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
 @track(
-    tags=TAGS_RETRIEVAL_MCP, name="deep_search_memory", create_duplicate_root_span=False
+    tags=TAGS_RETRIEVAL_MCP,
+    name="visualize_memory_embeddings",
+    create_duplicate_root_span=False,
 )
-async def deep_search_memory(
-    query: str,
-    ctx: Context,
-    top_k: int = 50,
-    max_hops: int = 3,
-    session_id: str | None = None,
-) -> str:
-    """Broad search across the knowledge graph with progressive disclosure.
-
-    Runs an expanded search (more seeds, deeper traversal) and saves full
-    results to disk as individual markdown files. Returns a YAML index with
-    one-line summaries for each node and edge found.
-
-    Use the file paths in the index to selectively read only the entries
-    you need — avoids flooding the context window with all results at once.
+async def visualize_memory_embeddings(
+    ctx: Context, hulls: bool = False, as_html_file: bool = False
+) -> str | ToolResult:
+    """Show the memory's embedding space as a 2D map: every child chunk is a
+    point, coloured by its cluster from the latest clustering run, with an
+    LLM-written label per cluster. Use when the user wants to *see* what topics
+    the memory holds or how it is organised. ``hulls=true`` outlines each
+    cluster. If no clustering run exists, this returns a message telling the
+    operator which command to run; if the map is stale, the answer starts with
+    a warning line.
 
     Args:
-        query: Search query text.
-        top_k: Number of seed nodes to retrieve (default 50).
-        max_hops: Maximum hops for graph expansion (default 3).
-        session_id: Optional session identifier for the output directory.
+        hulls: Draw a convex hull around each cluster (default off).
+        as_html_file: Set true when the user explicitly asks for a downloadable
+            / openable HTML file instead of the inline interactive view.
     """
 
-    _set_retrieval_thread(ctx, "deep_search_memory")
+    _set_retrieval_thread(ctx, "visualize_memory_embeddings")
     lc = ctx.lifespan_context
-    result = await structured_query_memory(
-        client=lc["client"],
-        database=lc["database"],
-        query=query,
-        embedding_model=lc["embedding_model"],
-        user_id=lc["user_id"],
-        top_k=top_k,
-        max_hops=max_hops,
+    embedding_map = await load_embedding_map(
+        lc["client"], lc["database"], lc["user_id"]
     )
+    # Never an empty canvas: a user nobody has clustered gets the command to run
+    # (ADR-007 §8). A plain ``str`` — there is no payload to deliver.
+    if embedding_map is None:
+        return NO_CLUSTERING_RUN_MESSAGE
 
-    if not result.nodes and not result.edges:
-        return "No results found."
+    payload = to_embedding_map_payload(embedding_map, hulls=hulls)
+    summary = payload["summary"]
+    warning = payload["warning"]
+    if warning:
+        # The warning goes FIRST so a model relaying only the opening line
+        # still tells the user the map under-reports the corpus.
+        summary = f"{warning}\n{summary}"
 
-    _, index_yaml = write_deep_search_results(query, result, session_id)
-
-    return index_yaml
+    return _graph_tool_result(
+        ctx, payload, summary, query="embedding-map", as_html_file=as_html_file
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +227,12 @@ async def _ingest(
 @mcp.tool
 @track(tags=TAGS_INGESTION_MCP, name="ingest_url", create_duplicate_root_span=False)
 async def ingest_url(url: str, ctx: Context) -> str:
-    """Fetch a web page and ingest its content into the knowledge graph.
+    """Fetch a web page and ingest its content into memory.
 
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (fetch +
-    extraction inline, indexing submitted after) and returns immediately —
+    memory pipeline inline, indexing submitted after) and returns immediately —
     ``{"status": "scheduled", "flow_run_id": ...}``, where ``status`` is the
-    new run's Prefect state. It does not wait for the graph to be built, so
+    new run's Prefect state. It does not wait for the memory to be written, so
     the page is NOT searchable yet when this returns.
 
     Args:
@@ -361,12 +268,12 @@ async def ingest_file(
     ctx: Context,
     title: str | None = None,
 ) -> str:
-    """Ingest a file's text content into the knowledge graph.
+    """Ingest a file's text content into memory.
 
     The server never opens ``file_path`` — it may not share a filesystem with
     you. Read the file YOURSELF and pass its text as ``content``. Async
-    ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + extraction
-    inline, indexing submitted after) and returns immediately —
+    ingestion: SUBMITS ONE ``online-pipeline`` flow run (document + memory
+    pipeline inline, indexing submitted after) and returns immediately —
     ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
     state — so the file is NOT searchable yet when this returns.
 
@@ -406,7 +313,7 @@ async def search_web(
     """Run an on-demand web search via Bright Data's SERP API.
 
     Returns SERP results (rank, title, URL, snippet) directly to the caller.
-    By default, does NOT ingest anything into the knowledge graph — call
+    By default, does NOT ingest anything into memory — call
     `ingest_url` afterwards on URLs you want to keep, or call `search_web`
     with `ingest=true` for ingestion.
 
@@ -618,13 +525,14 @@ async def ingest_conversation(
     session_uri: str | None = None,
     session_started_at: str | None = None,
 ) -> str:
-    """Extract knowledge from a conversation and add it to the knowledge graph.
+    """Extract knowledge from a conversation and add it to memory.
 
     Async ingestion: SUBMITS ONE ``online-pipeline`` flow run (document +
-    extraction inline, indexing submitted after) and returns immediately —
-    people, tasks, preferences, and relationships are built out-of-band by a
-    worker. Returns ``{"status": "scheduled", "flow_run_id": ...}``, the new
-    run's Prefect state; the conversation is NOT searchable yet at that point.
+    memory pipeline inline, indexing submitted after) and returns immediately —
+    the chunk rows (and, in ``graphrag``, the people / tasks / preferences and
+    their relationships) are written out-of-band by a worker. Returns
+    ``{"status": "scheduled", "flow_run_id": ...}``, the new run's Prefect
+    state; the conversation is NOT searchable yet at that point.
 
     Args:
         conversation_text: The full conversation text to process.
@@ -680,164 +588,3 @@ async def ingest_conversation(
         )
     except ValueError as exc:
         return json.dumps({"error": "invalid_input", "detail": str(exc)})
-
-
-# ---------------------------------------------------------------------------
-# Human-review tools (flagged SAME_AS pairs)
-# ---------------------------------------------------------------------------
-
-
-def _serialize_pending_duplicate(p: Any) -> dict[str, Any]:
-    return {
-        "source_node_id": p.source_node_id,
-        "target_node_id": p.target_node_id,
-        "source_name": p.source_name,
-        "target_name": p.target_name,
-        "entity_type": p.entity_type.value,
-        "similarity_score": p.similarity_score,
-        "match_type": p.match_type,
-        "flagged_at": p.flagged_at.isoformat(),
-        "edge_id": p.edge_id,
-    }
-
-
-def _serialize_review_result(r: Any) -> dict[str, Any]:
-    return {
-        "decision": r.decision.value,
-        "winner_node_id": r.winner_node_id,
-        "loser_node_id": r.loser_node_id,
-        "applied_strategy": (
-            r.applied_strategy.value if r.applied_strategy is not None else None
-        ),
-        "edges_transferred": r.edges_transferred,
-        "same_as_edge_id": r.same_as_edge_id,
-    }
-
-
-@mcp.tool(name="review_list_pending")
-# Review tools are human-in-the-loop curation of the dedup queue, not user-facing
-# retrieval. Per the four-tag family they carry only ``mcp`` (no ``retrieval`` /
-# ``ingestion``) even though list reads and confirm/reject mutate the graph — the
-# curation surface is its own thing, kept off the read/write spend dashboards.
-@track(tags=TAGS_MCP, name="review_list_pending", create_duplicate_root_span=False)
-async def review_list_pending(
-    ctx: Context,
-    entity_type: str | None = None,
-    limit: int = 50,
-) -> str:
-    """List pending SAME_AS pairs awaiting human review.
-
-    Returned in descending order of similarity score so the highest-
-    confidence candidates surface first. The optional ``entity_type``
-    filter restricts results to pairs whose source node has that type
-    (e.g. ``"person"``).
-
-    Args:
-        entity_type: Optional NodeType value (e.g. "person", "task",
-            "preference"). ``None`` returns pairs of every
-            type.
-        limit: Maximum number of pairs to return (default 50).
-    """
-
-    try:
-        type_filter = NodeType(entity_type) if entity_type else None
-    except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
-
-    lc = ctx.lifespan_context
-    database = lc["client"][lc["database"]]
-    pending = await _find_pending_duplicates(
-        database,
-        user_id=lc["user_id"],
-        entity_type=type_filter,
-        limit=limit,
-    )
-    return json.dumps([_serialize_pending_duplicate(p) for p in pending], indent=2)
-
-
-@mcp.tool(name="review_confirm")
-@track(tags=TAGS_MCP, name="review_confirm", create_duplicate_root_span=False)
-async def review_confirm(
-    source_node_id: str,
-    target_node_id: str,
-    reviewed_by: str,
-    ctx: Context,
-    merge_strategy: str = "keep_primary",
-) -> str:
-    """Confirm a pending SAME_AS pair as a true duplicate.
-
-    Merges the loser into the winner using the same algorithm the
-    auto-merge surface would have used. Older ``created_at`` wins; ties
-    broken by higher ``confidence``; final tie broken by lexicographic
-    ``_id``. All non-SAME_AS edges incident to the loser are re-keyed to
-    the winner; the loser is tombstoned (excluded from future dedup
-    searches) but retained as an audit trail.
-
-    Args:
-        source_node_id: One endpoint of the SAME_AS edge.
-        target_node_id: The other endpoint.
-        reviewed_by: Reviewer identifier (email, agent handle, etc.) —
-            persisted on the audit edge.
-        merge_strategy: ``"keep_primary"`` (default),
-            ``"merge_properties"``, or ``"keep_aliases"``.
-    """
-
-    try:
-        strategy = MergeStrategy(merge_strategy)
-    except ValueError as exc:
-        return json.dumps({"error": "invalid_input", "detail": str(exc)})
-
-    lc = ctx.lifespan_context
-    database = lc["client"][lc["database"]]
-    try:
-        result = await _review_duplicate(
-            database,
-            user_id=lc["user_id"],
-            source_node_id=source_node_id,
-            target_node_id=target_node_id,
-            decision=ReviewDecision.CONFIRM,
-            reviewed_by=reviewed_by,
-            merge_strategy=strategy,
-        )
-    except ValueError as exc:
-        return json.dumps({"error": "invalid_state", "detail": str(exc)})
-
-    return json.dumps(_serialize_review_result(result), indent=2)
-
-
-@mcp.tool(name="review_reject")
-@track(tags=TAGS_MCP, name="review_reject", create_duplicate_root_span=False)
-async def review_reject(
-    source_node_id: str,
-    target_node_id: str,
-    reviewed_by: str,
-    ctx: Context,
-) -> str:
-    """Reject a pending SAME_AS pair as a false positive.
-
-    Marks the audit edge ``status="rejected"`` without touching either
-    node. Future ``dedupe_entity`` runs filter out the rejected pair via
-    the reject-pair ``$lookup``, so the same pair is never re-flagged.
-
-    Args:
-        source_node_id: One endpoint of the SAME_AS edge.
-        target_node_id: The other endpoint.
-        reviewed_by: Reviewer identifier (email, agent handle, etc.).
-    """
-
-    lc = ctx.lifespan_context
-    database = lc["client"][lc["database"]]
-    try:
-        result = await _review_duplicate(
-            database,
-            user_id=lc["user_id"],
-            source_node_id=source_node_id,
-            target_node_id=target_node_id,
-            decision=ReviewDecision.REJECT,
-            reviewed_by=reviewed_by,
-            merge_strategy=MergeStrategy.KEEP_PRIMARY,
-        )
-    except ValueError as exc:
-        return json.dumps({"error": "invalid_state", "detail": str(exc)})
-
-    return json.dumps(_serialize_review_result(result), indent=2)

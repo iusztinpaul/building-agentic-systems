@@ -71,8 +71,7 @@ class TestPipelineIdentityTags:
         from tree.data.conversation.conversation_pipeline import _CONVERSATION_TAGS
         from tree.data.file.file_pipeline import _FILE_TAGS
         from tree.data.offline_pipeline import _DATA_TAGS
-        from tree.memory.extraction.pipeline import _EXTRACTION_TAGS
-        from tree.memory.indexing.pipeline import _INDEXING_TAGS
+        from tree.memory.pipeline import _EXTRACTION_TAGS, _INDEXING_TAGS
 
         assert _DATA_TAGS == consts.TAGS_DATA_OFFLINE
         assert _FILE_TAGS == consts.TAGS_DATA_ONLINE
@@ -102,10 +101,12 @@ class TestMcpToolTags:
     right combination per tool category."""
 
     def test_no_pipeline_name_tags_in_tools_source(self) -> None:
-        # Guard against re-introducing pipeline-name / legacy tags at the MCP layer.
+        # Guard against re-introducing pipeline-name / legacy tags at the MCP
+        # layer — both tool modules, since the graph tools moved out (#110).
+        import tree.mcp.graph_tools as graph_tools_mod
         import tree.mcp.tools as tools_mod
 
-        src = _module_source(tools_mod)
+        src = _module_source(tools_mod) + _module_source(graph_tools_mod)
         for legacy in (
             "memory-pipeline",
             "data-pipeline",
@@ -115,7 +116,7 @@ class TestMcpToolTags:
             "file-pipeline",
             "conversation-pipeline",
         ):
-            assert legacy not in src, f"legacy tag {legacy!r} still in tools.py"
+            assert legacy not in src, f"legacy tag {legacy!r} still in the MCP tools"
 
     def test_retrieval_tools_carry_retrieval_mcp(self) -> None:
         assert set(consts.TAGS_RETRIEVAL_MCP) == {"retrieval", "mcp"}

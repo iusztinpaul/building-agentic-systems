@@ -16,7 +16,7 @@ Import side-effects: importing this module mutates
 :class:`ProjectExtras` against ``("object", "project")``). The
 canonical ontology module imports this file at the bottom of its
 own module-level execution so the extensions land before any
-:class:`tree.entities.knowledge_graph.KnowledgeGraphEntry` row is
+:class:`tree.entities.memory.MemoryEntry` row is
 validated.
 """
 

@@ -1,10 +1,10 @@
 """User tenant-identity entity.
 
-Every ``Document`` and ``KnowledgeGraphEntry`` carries a top-level
+Every ``Document`` and ``MemoryEntry`` carries a top-level
 ``user_id`` that references a ``User._id`` (landed in #018). This module
 is intentionally small — it lands the Beanie model and the
 ``after_insert`` hook that auto-creates the user's ``person:self`` node
-in the ``knowledge_graph`` collection.
+in the ``memory`` collection.
 
 The hook contract (per ``plan.md`` Phase 1, decisions #1 and #3):
 
@@ -17,7 +17,7 @@ The hook contract (per ``plan.md`` Phase 1, decisions #1 and #3):
   Re-firing the hook on an existing user is a no-op.
 
 Since #018 the node id is built via the canonical
-:func:`tree.entities.knowledge_graph.build_node_id` (which embeds
+:func:`tree.entities.memory.build_node_id` (which embeds
 ``user_id``); the row also stamps the indexed ``user_id`` field for
 fast filtered reads.
 """
@@ -32,8 +32,9 @@ from beanie import Document as BeanieDocument
 from beanie import Indexed, Insert, PydanticObjectId, after_event
 from pydantic import Field
 
-from tree.entities.knowledge_graph import (
-    KnowledgeGraphEntry,
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    MemoryEntry,
     NodeType,
     build_node_id,
 )
@@ -43,9 +44,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The KG collection that carries the ``person:self`` active-user flag.
-_KG_COLLECTION = "knowledge_graph"
-
 
 # ---------------------------------------------------------------------------
 # User Beanie model
@@ -53,7 +51,7 @@ _KG_COLLECTION = "knowledge_graph"
 
 
 class User(BeanieDocument):
-    """Tenant identity. Every ``Document`` and ``KnowledgeGraphEntry``
+    """Tenant identity. Every ``Document`` and ``MemoryEntry``
     carries the referencing user's ``_id`` in its ``user_id`` field
     (landing in #018).
 
@@ -126,7 +124,7 @@ class User(BeanieDocument):
             "updated_at": now,
         }
 
-        collection = KnowledgeGraphEntry.get_pymongo_collection()
+        collection = MemoryEntry.get_pymongo_collection()
         await collection.update_one(
             {"_id": node_id},
             {"$setOnInsert": payload},
@@ -164,7 +162,7 @@ async def select_active_user_ids(
     which both fan out per active tenant.
     """
 
-    collection = database[_KG_COLLECTION]
+    collection = database[MEMORY_COLLECTION]
     cursor = collection.find(
         {
             "kind": "node",

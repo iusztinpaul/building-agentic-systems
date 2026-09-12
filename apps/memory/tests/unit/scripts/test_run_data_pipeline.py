@@ -11,7 +11,8 @@ through the CLI.
 
 ``TestRunDataPipelineOfflineDispatch`` goes one level deeper (#099): it exercises
 ``_run_offline`` itself with the dispatcher mocked, asserting the data step is a
-``dispatch_offline_pipeline`` call with ``run_extraction=False``.
+``dispatch_offline_pipeline`` call with ``run_extraction=False`` AND
+``run_indexing=False`` — a data-only run writes ``documents`` and nothing else.
 """
 
 from __future__ import annotations
@@ -224,7 +225,7 @@ class TestRunDataPipelineOnlineForwarding:
 class TestRunDataPipelineOfflineDispatch:
     """``_run_offline`` funnels through ``dispatch_offline_pipeline`` (#099)."""
 
-    async def test_offline_dispatches_offline_pipeline_with_extraction_off(
+    async def test_offline_dispatches_offline_pipeline_with_memory_phases_off(
         self,
         cli_module,
         mock_resolve_user,
@@ -238,12 +239,14 @@ class TestRunDataPipelineOfflineDispatch:
 
         await cli_module._run_offline(None, None, source_files, [])
 
-        # Assert — the data step is the offline flow with extraction disabled.
+        # Assert — the data step is the offline flow with BOTH memory phases
+        # disabled: a data-only run must not extract and must not index.
         mock_dispatch_offline.assert_awaited_once_with(
             user_id=resolved_user_id,
             source_files=source_files,
             sources=None,
             run_extraction=False,
+            run_indexing=False,
         )
         mock_wait_for_dispatch.assert_awaited_once_with(
             mock_dispatch_offline.return_value

@@ -2,8 +2,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
-from tree.memory.resolution.types import ResolvedEntity
+from tree.entities.memory import EdgeType, NodeType
+from tree.memory.rag.types import ParentChunk
+from tree.memory.graph.resolution.types import ResolvedEntity
 
 
 class ExtractedNode(BaseModel):
@@ -28,7 +29,7 @@ class ExtractedEdge(BaseModel):
     Phase-3 #029: ``semantic_type`` carries the discriminator for the
     new ``related_to`` umbrella edge. Required on every ``related_to``
     row, ``None`` on every other edge type — enforced again by the
-    :class:`KnowledgeGraphEntry` model validator at write time.
+    :class:`MemoryEntry` model validator at write time.
     """
 
     source_node_id: str
@@ -45,7 +46,7 @@ class RawRejection(BaseModel):
     """A raw LLM emission ``_parse_extraction`` chose to drop (#030).
 
     Carried forward through :class:`ExtractionResult` so the
-    validator-pipeline step in :mod:`tree.memory.extraction.pipeline`
+    validator-pipeline step in :mod:`tree.memory.pipeline`
     can turn it into an ``extraction_rejections`` row instead of
     losing the signal to a ``logger.warning`` line.
 
@@ -98,24 +99,32 @@ class QueryResult(BaseModel):
 
 
 class ChunkedDocument(BaseModel):
-    """Output of task ① — chunks + provenance-stamped structural entries.
+    """Output of ``clean-and-chunk`` — one cleaned document split into its hierarchy.
 
-    ``document_id``/``source_uri``/``source_type``/``date`` are carried so
-    later tasks do not have to re-load the source ``Document`` from MongoDB.
+    ``document_id``/``source_uri``/``source_type``/``title``/``date`` are carried
+    so later tasks do not have to re-load the source ``Document`` from MongoDB;
+    ``title`` and each parent's ``heading_path`` are the two **Contextual
+    header** inputs the child embeddings are built from (ADR-006 decision 4).
+
+    ``parents`` is the WHOLE payload of the split: every **Parent chunk** carries
+    its own **Child chunk**s, so the loader (rag) and the structural-edge builder
+    (graphrag) both read the hierarchy from this ONE field. Chunk ids are no
+    longer carried — they are derived deterministically from ``source_uri`` +
+    position (:func:`tree.memory.rag.load.parent_row_id`), which is what keeps
+    ``clean-and-chunk`` ``INPUTS``-cache-safe and the load stage idempotent.
     """
 
     document_id: str
     source_uri: str
     source_type: str
+    title: str | None = None
     date: str | None = None
     reference_uris: list[str] = Field(default_factory=list)
-    chunk_texts: list[str] = Field(default_factory=list)
-    chunk_ids: list[str] = Field(default_factory=list)
-    structural: ExtractionResult = Field(default_factory=ExtractionResult)
+    parents: list[ParentChunk] = Field(default_factory=list)
 
 
 class RawExtraction(BaseModel):
-    """Output of task ② — per-document LLM extraction (unresolved)."""
+    """Output of ``llm-extract-entities`` — per-document extraction (unresolved)."""
 
     document_id: str
     source_uri: str
@@ -127,7 +136,7 @@ class ResolvedEntityKey(BaseModel):
     """Stable identifier for one extracted entity across a flow run.
 
     Used as the dictionary key in :class:`DedupMap` and the look-up map in
-    task ⑥ to remap edge endpoints from raw extracted names to final ids.
+    ``apply-writes`` to remap edge endpoints from raw extracted names to final ids.
     """
 
     document_id: str
@@ -141,7 +150,7 @@ class ResolvedEntityKey(BaseModel):
 
 
 class ResolutionOutput(BaseModel):
-    """Output of task ③ — resolved entities + the look-up tables task ⑥ needs.
+    """Output of ``resolve-entities`` — plus the look-up tables ``apply-writes`` needs.
 
     ``resolved_by_key`` keeps the raw resolution result for every entity so
     downstream tasks can read ``canonical_name``/``match_type``/``confidence``.
@@ -154,15 +163,15 @@ class ResolutionOutput(BaseModel):
 
     ``candidates_seen_by_type`` records the number of candidate rows the
     resolver actually saw per type (capped at ``max_candidates_per_type``);
-    cap-hits are logged WARNING by task ③.
+    cap-hits are logged WARNING by ``resolve-entities``.
 
     ``embeddable_text_by_key`` maps each entity key to the text it is
     embedded on — the GENERIC node-text for most types, or
     ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
-    Task ④ embeds the unique set of these texts, task ⑤ deduplicates each
-    entity against its own text-vector, and task ⑥ persists the same vector
-    — so the dedup decision and the stored vector share the search corpus'
-    space.
+    ``embed-entities`` embeds the unique set of these texts, ``dedupe-entities``
+    deduplicates each entity against its own text-vector, and ``apply-writes``
+    persists the same vector — so the dedup decision and the stored vector share
+    the search corpus' space.
     """
 
     entities: list[tuple[str, NodeType]] = Field(default_factory=list)
@@ -173,11 +182,11 @@ class ResolutionOutput(BaseModel):
 
 
 class EmbeddingMap(BaseModel):
-    """Output of task ④ — embeddable-text → embedding vector.
+    """Output of ``embed-entities`` — embeddable-text → embedding vector.
 
     Modeled as a plain dict carrier (not a list of tuples) so callers can
     look up a vector in O(1) by its embeddable text. The key is the
-    **embeddable text** task ④ embeds — the GENERIC node-text
+    **embeddable text** ``embed-entities`` embeds — the GENERIC node-text
     (``node_to_embedding_text``) for most types, or
     ``properties.statement`` / ``properties.object`` for PREFERENCE / FACT.
     Keying on node-text (rather than the canonical name) is what puts the
@@ -189,7 +198,7 @@ class EmbeddingMap(BaseModel):
 
 
 class DedupDecision(BaseModel):
-    """Per-entity dedup decision, carried across the ⑤→⑥ boundary."""
+    """Per-entity dedup decision, carried to ``apply-writes``."""
 
     action: str = "none"  # "none" | "merged" | "flagged"
     matched_node_id: str | None = None
@@ -199,13 +208,13 @@ class DedupDecision(BaseModel):
 
 
 class DedupMap(BaseModel):
-    """Output of task ⑤ — keyed by ``"{doc_id}|{type}|{name}"``."""
+    """Output of ``dedupe-entities`` — keyed by ``"{doc_id}|{type}|{name}"``."""
 
     decisions: dict[str, DedupDecision] = Field(default_factory=dict)
 
 
 class WriteSummary(BaseModel):
-    """Output of task ⑥ — flow-level counters returned to the caller."""
+    """Output of ``apply-writes`` — flow-level counters returned to the caller."""
 
     nodes_written: int = 0
     edges_written: int = 0

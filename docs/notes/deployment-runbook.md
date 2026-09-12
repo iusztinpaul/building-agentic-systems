@@ -21,7 +21,7 @@ NOT create app data or indexes.
 * Collection (Beanie) indexes are self-healing: every `init_mongodb()` call
   (sign-up, pipelines, MCP boot) runs `init_beanie`, which ensures the declared
   indexes on all document models. No explicit step needed.
-* Atlas Search indexes (`text_index`, `vector_index` on `knowledge_graph`) are
+* Atlas Search indexes (`text_index`, `vector_index` on `memory`) are
   NOT created here — see step 3. Mind the M0 cap ("maximum number of FTS
   indexes... for this instance size"): don't point test suites at this cluster.
 
@@ -44,7 +44,7 @@ Must run BEFORE anything that resolves a user:
 ```
 make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 3 data deployments
 make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + dream when you need them
-make memory-run-indexing-pipeline USER_ID=<oid>   # first indexing run
+make memory-run-indexing-pipeline USER_ID=<oid>   # first indexing run (dispatches offline-pipeline)
 ```
 
 `GROUPS=data|memory` (comma-separated) scopes every verb — `up`, `update`,
@@ -60,7 +60,9 @@ every green push to `main` — flow code itself is branch-tracking (cloned from
 `main` at run time), so merges go live without a re-deploy.
 
 The first indexing run matters: it creates the Atlas Search indexes
-(`ensure_indexes`). The cloud MCP server (step 4) boots with
+(`ensure_indexes`). It dispatches the `offline-pipeline` deployment with only the
+indexing phase on, so it works right after `GROUPS=data` — that group already
+registers `offline-pipeline`. The cloud MCP server (step 4) boots with
 `MCP_SKIP_INDEX_BOOTSTRAP=true` and only QUERIES the indexes — query tools fail
 or return nothing until this run has happened.
 

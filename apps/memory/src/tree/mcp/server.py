@@ -13,6 +13,13 @@ fails to boot with a clear error.
 Future request-scoped sourcing (different ``user_id`` per call) is a
 small refactor to a ``ContextVar``; this module is the only place that
 needs to change.
+
+The **Memory mode** is pinned the same way (ADR-006 decision 5): read
+ONCE at import into :data:`MEMORY_MODE`, never per request. It decides
+BOTH which tool modules get imported at the bottom of this file (the
+seven graph tools live in ``tree.mcp.graph_tools`` and are never
+imported in ``rag`` mode) and which ``instructions`` the server
+advertises.
 """
 
 import logging
@@ -20,16 +27,17 @@ import os
 import sys
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Literal
 
 from beanie import PydanticObjectId
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
+from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.users import User
-from tree.memory.indexing.core import (
+from tree.memory.rag.indexing import (
     assert_settings_match_live_vector_index,
     ensure_indexes,
 )
@@ -37,6 +45,13 @@ from tree.models.get_model import get_embedding_model, get_llm
 from tree.observability import configure_opik, flush_opik
 
 logger = logging.getLogger(__name__)
+
+
+# The ONE read of the **Memory mode** on the server side (ADR-006 decision 5),
+# pinned at import exactly like ``_SERVER_USER_ID``: a running server serves one
+# mode. Flip it with ``TREE_MEMORY__MODE=rag`` and restart — there is no
+# per-request switch, so no tool ever has to ask which mode it is in.
+MEMORY_MODE: Literal["rag", "graphrag"] = app_config.memory.mode
 
 
 # Module-level pin set by :func:`set_server_user_id` (called from the
@@ -209,17 +224,40 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
         logger.info("MCP server shut down")
 
 
+# One instructions text per mode: the model must never be told about a tool this
+# server does not register. The rag text therefore names ONLY the seven tools
+# ``tree.mcp.tools`` registers (the **Embedding map** tool included — clustering
+# is mode-orthogonal) — no ``query_memory``, no ``deep_search_memory``, no graph
+# vocabulary at all.
+_GRAPHRAG_INSTRUCTIONS = (
+    "Query and build a personal knowledge graph of documents, people, tasks, "
+    "and preferences. Use 'query_memory' for flexible natural language "
+    "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
+    "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
+    "returns a lightweight index; read individual files for details. "
+    "Use 'search_web' for on-demand web searches that don't write to memory. "
+    "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
+    "and 'ingest_conversation' to extract knowledge from conversations. "
+    "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
+    "(clusters of chunk embeddings) when the user asks what the memory holds."
+)
+
+_RAG_INSTRUCTIONS = (
+    "Search and grow a personal memory of documents, files, and conversations. "
+    "Use 'search_memory' to retrieve the passages that answer a question — it "
+    "returns whole parent chunks with their document metadata, best match first. "
+    "Use 'search_web' for on-demand web searches and 'scrape_web' to read specific "
+    "pages inline; neither writes to memory. "
+    "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
+    "and 'ingest_conversation' to store what a conversation established. "
+    "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
+    "(clusters of chunk embeddings) when the user asks what the memory holds."
+)
+
 mcp = FastMCP(
     "Tree Memory",
     instructions=(
-        "Query and build a personal knowledge graph of documents, people, tasks, "
-        "and preferences. Use 'query_memory' for flexible natural language "
-        "queries. Use 'search_memory' as a reliable fallback for semantic similarity search. "
-        "Use 'deep_search_memory' for broad exploration — it saves results to disk and "
-        "returns a lightweight index; read individual files for details. "
-        "Use 'search_web' for on-demand web searches that don't write to memory. "
-        "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
-        "and 'ingest_conversation' to extract knowledge from conversations."
+        _GRAPHRAG_INSTRUCTIONS if MEMORY_MODE == "graphrag" else _RAG_INSTRUCTIONS
     ),
     lifespan=app_lifespan,
 )
@@ -229,7 +267,7 @@ mcp = FastMCP(
 # rather than the canonical package name ``tree.mcp.server``. The tool modules
 # imported just below register on ``mcp`` via ``from tree.mcp.server import mcp``;
 # without this alias that import would execute a SECOND, fresh copy of this file
-# as ``tree.mcp.server`` and register all 13 tools on a DIFFERENT ``FastMCP``
+# as ``tree.mcp.server`` and register all 14 tools on a DIFFERENT ``FastMCP``
 # instance than the one Horizon serves — the deployed server then advertises 0
 # tools (it always worked locally, where every caller already reaches this module
 # through the package import). Aliasing this module as ``tree.mcp.server`` makes
@@ -237,4 +275,12 @@ mcp = FastMCP(
 # normal package import path, where ``tree.mcp.server`` is already registered.
 sys.modules.setdefault("tree.mcp.server", sys.modules[__name__])
 
+# The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the seven tools
+# both modes serve; the seven graph tools live behind this ``if`` so that in rag
+# mode ``tree.mcp.graph_tools`` — and, through it, ``dashboard_app`` — never
+# even reach ``sys.modules``. A graph tool called against a rag server gets the
+# standard "unknown tool" error rather than a half-working path.
 import tree.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
+
+if MEMORY_MODE == "graphrag":
+    import tree.mcp.graph_tools  # noqa: E402, F401 — registers graph tools on `mcp`

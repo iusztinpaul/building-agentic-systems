@@ -72,7 +72,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from tree.entities.knowledge_graph import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ class NodeTypeSpec:
 
     Attributes:
         name: snake_case identifier, e.g. ``"person"``. Used as the
-            ``type`` string on every ``KnowledgeGraphEntry`` of this kind.
+            ``type`` string on every ``MemoryEntry`` of this kind.
         properties_schema: Pydantic model whose fields describe the
             type-specific ``properties`` payload. The model's JSON
             schema flows into the LLM-extraction prompt.
@@ -319,6 +319,14 @@ class DocumentProperties(BaseModel):
 
     source_type: str = Field(description="Source platform (e.g., substack, youtube)")
     source_uri: str = Field(description="URI of the source document")
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable document title. Prefixed onto every child chunk's "
+            "contextual header (ADR-006 decision 4); None when the source "
+            "exposes no title."
+        ),
+    )
     date: str | None = Field(
         default=None, description="Publication date (ISO 8601 format)"
     )
@@ -330,6 +338,23 @@ class ChunkProperties(BaseModel):
     source_type: str = Field(description="Source platform of the parent document")
     source_uri: str = Field(description="URI of the parent document")
     content: str = Field(description="Text content of the chunk")
+    title: str | None = Field(
+        default=None,
+        description=(
+            "Title of the parent document, denormalised onto the chunk (like "
+            "source_type / source_uri / date) so the indexing backfill rebuilds "
+            "the identical contextual-header embedding text without a join."
+        ),
+    )
+    heading_path: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Markdown heading stack in force at the parent chunk's first token, "
+            "outermost first (e.g. ['Memory', 'Parent retrieval']). A child "
+            "chunk inherits its parent's path; empty under the fixed_tokens "
+            "strategy or before the first heading."
+        ),
+    )
     date: str | None = Field(
         default=None, description="Publication date of the parent document"
     )
@@ -602,7 +627,7 @@ class SupersededByProperties(BaseModel):
     @classmethod
     def _require_tz_aware(cls, value: datetime) -> datetime:
         """Reject naive datetimes - mirrors the
-        :class:`KnowledgeGraphEntry` ``valid_from``/``valid_until`` rule."""
+        :class:`MemoryEntry` ``valid_from``/``valid_until`` rule."""
 
         if value.tzinfo is None:
             raise ValueError(
@@ -622,10 +647,10 @@ class FactProperties(BaseModel):
     validator rejects every edge with a ``fact`` endpoint, so a fact
     has zero edges to or from it. Retrieval is by ``name`` /
     ``subject`` / ``object`` string match or vector similarity only
-    (see :class:`tree.memory.query.kgquery.KGQuery`).
+    (see :class:`tree.memory.graph.kgquery.KGQuery`).
 
     Bi-temporal columns ``valid_from`` / ``valid_until`` live on
-    :class:`tree.entities.knowledge_graph.KnowledgeGraphEntry` and are
+    :class:`tree.entities.memory.MemoryEntry` and are
     populated at extraction time when the LLM emits them. Supersession
     of contradictory facts lands in #032; until then contradictory
     facts coexist and both surface in retrieval.
@@ -720,7 +745,7 @@ class SameAsStatus(StrEnum):
 
     ``PENDING`` rows surface in the human-review queue; ``CONFIRMED``
     rows have been merged; ``REJECTED`` rows are skipped on future
-    dedup passes (see ``tree.memory.extraction.dedup``'s reject-pair
+    dedup passes (see ``tree.memory.graph.dedup``'s reject-pair
     filter).
     """
 
@@ -944,7 +969,13 @@ register_node_type(
         name="chunk",
         properties_schema=ChunkProperties,
         description=ChunkProperties.__doc__ or "",
-        subtypes=None,
+        # ADR-006 decision 2: the chunk LEVEL is the existing ``subtype``
+        # column, closed to the two-level hierarchy — a ``parent`` chunk
+        # (4096 tokens, never embedded, the retrieval + LLM-extraction unit)
+        # and a ``child`` chunk (256 tokens, embedded, the search unit). No
+        # new ``level`` field: ``subtype`` is already indexed
+        # (``user_kind_type_subtype``) and already validated.
+        subtypes=frozenset({"parent", "child"}),
         llm_extractable=False,
     )
 )
@@ -1042,7 +1073,7 @@ register_node_type(
 # propositions that don't fit any registered relation semantic. Island
 # rule: the envelope validator rejects every edge whose source or
 # target is a ``fact`` row (see ``_FORBIDDEN_EDGE_ENDPOINT_TYPES`` in
-# :mod:`tree.memory.extraction.validation`). Subtypes are ``None``
+# :mod:`tree.memory.graph.validation`). Subtypes are ``None``
 # (freeform — facts are not categorized).
 register_node_type(
     NodeTypeSpec(
@@ -1298,9 +1329,12 @@ def _pole_o_llm_extractable_for_same_as() -> list[str]:
 register_edge_type(
     EdgeTypeSpec(
         name="part_of",
-        allowed_pairs=[("chunk", "document")],
+        # ADR-006 decision 3: the hierarchy is TWO levels deep, so ``part_of``
+        # carries both hops — a child chunk into its parent chunk, and a parent
+        # chunk into its document.
+        allowed_pairs=[("chunk", "document"), ("chunk", "chunk")],
         properties_schema=None,
-        description="Chunk belongs to a document",
+        description="Chunk belongs to a parent chunk or a document",
         llm_extractable=False,
     )
 )
@@ -1346,7 +1380,7 @@ register_edge_type(
 # allowed_pairs are the union of every RELATION_SEMANTICS spec's
 # allowed_pairs. The per-semantic constraint (``semantic_type`` ∈ registry
 # AND (source.type, target.type) ∈ spec.allowed_pairs) is enforced by
-# the ``KnowledgeGraphEntry`` model validator.
+# the ``MemoryEntry`` model validator.
 register_edge_type(
     EdgeTypeSpec(
         name="related_to",
@@ -1424,8 +1458,8 @@ register_edge_type(
 # Backward-compat views derived from the registry
 # ---------------------------------------------------------------------------
 #
-# Existing call sites in ``tree.memory.extraction.core``,
-# ``tree.memory.extraction.pipeline``, and ``tree.memory.query.nl_query``
+# Existing call sites in ``tree.memory.graph.extraction``,
+# ``tree.memory.pipeline``, and ``tree.memory.graph.nl_query``
 # read these constants directly. They MUST keep working unchanged after
 # this refactor — task #027 is behavior-neutral. Downstream tasks
 # (#028–#032) will migrate consumers to read the registry directly.

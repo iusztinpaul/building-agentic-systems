@@ -2,20 +2,21 @@
 
 Covers the generic ``node_to_embedding_text`` builder (including a
 byte-identical regression against the pre-refactor
-``indexing.core._node_to_text`` layout), the ``embed_node_texts`` batch
-helper, and the #044 real-time request batcher ``embed_in_batches``
-(chunking by input-count AND token-budget caps, order preservation across
-multiple requests).
+``indexing.core._node_to_text`` layout), the ``embed_texts`` seam the
+indexing backfill calls, and the #044 real-time request batcher
+``embed_in_batches`` (chunking by input-count AND token-budget caps, order
+preservation across multiple requests).
 """
 
 from typing import Any
 
 import pytest
 
+from tree.memory import embedding_text
 from tree.memory.embedding_text import (
     _embed_chunk_resilient,
     embed_in_batches,
-    embed_node_texts,
+    embed_texts,
     estimate_tokens,
     node_to_embedding_text,
 )
@@ -166,11 +167,19 @@ class TestNodeToEmbeddingText:
 
 
 # ---------------------------------------------------------------------------
-# embed_node_texts
+# embed_texts — the seam the indexing backfill calls
 # ---------------------------------------------------------------------------
 
 
-class TestEmbedNodeTexts:
+class TestEmbedTexts:
+    """``embed_texts`` is the whole embedding API next to the text builder.
+
+    The backfill builds its own texts (a **Child chunk** embeds its
+    **Contextual header**, an entity row its ``node_to_embedding_text``) and
+    hands them here, so these cases drive it with node-texts — the caps,
+    request count and positional alignment are what the backfill relies on.
+    """
+
     async def test_embeds_each_node_text_in_a_single_call(self) -> None:
         model = _RecordingEmbeddingModel(dimensions=3)
         nodes: list[dict[str, Any]] = [
@@ -182,29 +191,44 @@ class TestEmbedNodeTexts:
             },
         ]
 
-        vectors = await embed_node_texts(nodes, model)
+        vectors = await embed_texts([node_to_embedding_text(n) for n in nodes], model)
 
         # Assert: one embed() call carrying both node-texts, aligned output.
         assert model.calls == [["person: Alice", "chunk: Chunk 0\nbody"]]
         assert vectors == [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
 
+    async def test_control_chars_never_reach_the_model(self) -> None:
+        # The sanitizer runs in the text builder, so what the seam sends is
+        # already free of the C0/C1/surrogate shapes Voyage 400s on.
+        model = _RecordingEmbeddingModel(dimensions=3)
+        node: dict[str, Any] = {
+            "type": "chunk",
+            "name": "chunk\x00one",
+            "properties": {"content": "good\x07text\ud800junk"},
+        }
+
+        await embed_texts([node_to_embedding_text(node)], model)
+
+        assert model.calls == [["chunk: chunkone\ngoodtextjunk"]]
+
     async def test_empty_input_returns_empty_without_calling_model(self) -> None:
         model = _RecordingEmbeddingModel()
 
-        vectors = await embed_node_texts([], model)
+        vectors = await embed_texts([], model)
 
         assert vectors == []
         assert model.calls == []
 
-    async def test_batches_many_nodes_into_multiple_requests(self) -> None:
+    async def test_batches_many_texts_into_multiple_requests(self) -> None:
         # Arrange — 2,500 short node-texts, capped at 1000 inputs per request.
         model = _OrderEncodingEmbeddingModel()
-        nodes: list[dict[str, Any]] = [
-            {"type": "person", "name": f"p{i}", "properties": {}} for i in range(2500)
+        texts = [
+            node_to_embedding_text({"type": "person", "name": f"p{i}"})
+            for i in range(2500)
         ]
 
         # Act — override the caps explicitly so the test is independent of YAML.
-        vectors = await embed_node_texts(nodes, model, max_inputs=1000)
+        vectors = await embed_texts(texts, model, max_inputs=1000)
 
         # Assert — 3 requests (1000 + 1000 + 500), 2500 vectors, original order.
         assert [len(c) for c in model.calls] == [1000, 1000, 500]
@@ -598,33 +622,29 @@ class TestDispatchConcurrencyDefault:
         assert vectors == [[float(i)] for i in range(7)]
 
 
-class TestSanitizeForEmbedding:
-    """Adversarial: sanitization strips only the chars Voyage 400s on."""
+class TestSanitizationIsDelegatedToTheCleaningModule:
+    """ONE definition: the sanitizer lives in ``tree.memory.rag.cleaning``."""
 
-    def test_preserves_legitimate_unicode_tab_and_newline(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
+    def test_module_no_longer_defines_a_private_sanitizer(self) -> None:
+        # A second copy of the regex is how train/serve drift starts.
+        assert not hasattr(embedding_text, "_sanitize_for_embedding")
+        assert not hasattr(embedding_text, "_INVALID_EMBED_CHARS_RE")
 
-        # Arrange: smart quotes, emoji, accented letters, tab, newline, CR — all
-        # legitimate and must survive sanitization untouched.
-        text = "café “smart” \U0001f600\taccenté\nline\rret"
-
-        # Act / Assert: no-op on clean-but-rich Unicode.
-        assert _sanitize_for_embedding(text) == text
-
-    def test_strips_each_invalid_class(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
-
+    def test_node_text_strips_control_chars_and_surrogates(self) -> None:
         # Arrange: one char from each stripped class — C0 (NUL, BEL, VT, FF),
         # DEL, C1 (0x80, 0x9f), and an unpaired surrogate (0xd800).
-        text = "x\x00\x07\x0b\x0c\x1f\x7f\x80\x9f\ud800y"
+        node = {
+            "type": "person",
+            "name": "Bo\x00b",
+            "properties": {"content": "x\x07\x0b\x0c\x1f\x7f\x80\x9f\ud800y"},
+        }
 
-        # Act / Assert: everything between the bookends is removed.
-        assert _sanitize_for_embedding(text) == "xy"
+        text = node_to_embedding_text(node)
 
-    def test_no_op_on_plain_ascii(self) -> None:
-        from tree.memory.embedding_text import _sanitize_for_embedding
+        assert text == "person: Bob\nxy"
 
-        # Arrange / Act / Assert: ordinary text is untouched (cheap fast path).
-        assert _sanitize_for_embedding("person: Bob\nrole: engineer") == (
-            "person: Bob\nrole: engineer"
-        )
+    def test_node_text_preserves_legitimate_unicode(self) -> None:
+        # Smart quotes, emoji and accents are legitimate and must survive.
+        node = {"type": "person", "name": "café “smart” \U0001f600 accenté"}
+
+        assert node_to_embedding_text(node) == "person: café “smart” \U0001f600 accenté"

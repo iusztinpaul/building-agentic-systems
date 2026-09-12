@@ -6,12 +6,13 @@ controlled there, this script only picks the dispatcher:
 
 * ``--mode offline`` (default) → :func:`tree.offline.dispatch_offline_pipeline`:
   ONE ``offline-pipeline`` flow run over the selected config sources
-  (``--source-file``/``--uri``; neither → the default backfill+listen set),
-  with ``--num-shards`` extraction fan-out per user.
+  (``--source-file``/``--uri``; neither → the default backfill+listen set), with
+  ``--num-shards`` extraction fan-out per user, followed by the indexing phase
+  (every phase flag left at its default).
 * ``--mode online`` → :func:`tree.online.dispatch_online_pipeline`: ONE
   ``online-pipeline`` flow run for ONE ``--source`` (URL or local file, read here
-  at the edge) that ingests AND runs extraction inline, then submits the
-  trailing indexing run. A duplicate source skips extraction.
+  at the edge) that ingests AND runs extraction inline, then indexes that one
+  document inline. A duplicate source skips extraction.
 
 Both dispatchers submit their (always-registered) core deployment
 fire-and-forget; this CLI then blocks streaming the run's logs (exit non-zero

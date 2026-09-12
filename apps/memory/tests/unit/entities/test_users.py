@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import (
-    KnowledgeGraphEntry,
+from tree.entities.memory import (
+    MemoryEntry,
     NodeType,
     build_node_id,
 )
@@ -62,7 +62,7 @@ class TestUserModel:
 class TestBuildSelfPersonId:
     """The transitional ``_build_self_person_id`` helper from #017 was
     retired in #018 in favour of the canonical
-    :func:`tree.entities.knowledge_graph.build_node_id`. These tests
+    :func:`tree.entities.memory.build_node_id`. These tests
     now exercise the canonical builder for the ``person:self`` shape."""
 
     def test_id_shape_is_user_id_colon_person_colon_self(self):
@@ -82,10 +82,10 @@ class TestBuildSelfPersonId:
 
 
 class TestAfterInsertHook:
-    """Verify the payload the hook upserts into ``knowledge_graph``.
+    """Verify the payload the hook upserts into ``memory``.
 
     We bypass Beanie's real pymongo collection by patching
-    ``KnowledgeGraphEntry.get_pymongo_collection`` to return an ``AsyncMock``
+    ``MemoryEntry.get_pymongo_collection`` to return an ``AsyncMock``
     and inspect the ``update_one`` call's arguments.
     """
 
@@ -102,7 +102,7 @@ class TestAfterInsertHook:
 
         fake_collection = AsyncMock()
         mocker.patch.object(
-            KnowledgeGraphEntry,
+            MemoryEntry,
             "get_pymongo_collection",
             return_value=fake_collection,
         )

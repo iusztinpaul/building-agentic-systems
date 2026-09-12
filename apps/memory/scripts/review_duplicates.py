@@ -43,8 +43,8 @@ init_logger()
 
 from tree.config.settings import settings  # noqa: E402
 from tree.db import init_mongodb  # noqa: E402
-from tree.entities.knowledge_graph import NodeType  # noqa: E402
-from tree.memory.review import (  # noqa: E402
+from tree.entities.memory import NodeType  # noqa: E402
+from tree.memory.graph.review import (  # noqa: E402
     MergeStrategy,
     PendingDuplicate,
     ReviewDecision,

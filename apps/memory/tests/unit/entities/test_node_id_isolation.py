@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from beanie import PydanticObjectId
 
-from tree.entities.knowledge_graph import (
+from tree.entities.memory import (
     EdgeType,
     NodeType,
     build_edge_id,

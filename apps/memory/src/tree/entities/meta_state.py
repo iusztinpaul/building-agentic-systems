@@ -10,7 +10,7 @@ Key design points:
 * ``_id`` is a deterministic string ``f"{user_id}:{job}"`` (e.g.
   ``"65f...:dream"``), mirroring the project's string-``_id`` convention
   for KG docs (see ``build_node_id`` / ``build_edge_id`` in
-  :mod:`tree.entities.knowledge_graph`). Because ``_id`` already encodes
+  :mod:`tree.entities.memory`). Because ``_id`` already encodes
   both ``user_id`` and ``job``, upserts are idempotent and cross-tenant
   collisions are impossible by construction.
 * ``last_run_at`` is the **START** timestamp of the last successful run,

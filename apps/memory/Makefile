@@ -164,17 +164,20 @@ USER_FLAGS = $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--
 OFFLINE_SOURCE_FLAGS = $(foreach f,$(SOURCE_FILE),--source-file "$(f)") $(foreach u,$(URI),--uri "$(u)")
 ONLINE_SOURCE_FLAGS = $(if $(SOURCE),--source "$(SOURCE)",) $(if $(TITLE),--title "$(TITLE)",)
 
-run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> index; graph queryable after). MODE=offline (default): ONE offline-pipeline run over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen), NUM_SHARDS=<n> extraction fan-out. MODE=online: ONE online-pipeline run for SOURCE="<url|path>" [TITLE="..."] with extraction inline + trailing index submit. Forwards USER_ID/USER_IDENTIFIER.
+run-pipeline: # FULL pipeline end-to-end (data ingest -> extraction -> indexing; memory queryable after). MODE=offline (default): ONE offline-pipeline run with all three phases on, over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen), NUM_SHARDS=<n> extraction fan-out. MODE=online: ONE online-pipeline run for SOURCE="<url|path>" [TITLE="..."] with extraction + indexing inline. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
 run-data-pipeline: # DATA pipeline only (sources -> `documents`; NO extraction/indexing). MODE=offline (default): ONE offline-pipeline run with the extraction phase OFF over SOURCE_FILE="..." and/or URI="..." (default: backfill+listen set). MODE=online: ingest ONE source realtime; SOURCE="<url|path>" [TITLE="..."]. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_data_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(OFFLINE_SOURCE_FLAGS) $(ONLINE_SOURCE_FLAGS)
 
-run-memory-pipeline: # MEMORY pipeline (`documents` -> knowledge graph, + ONE trailing index run) as ONE offline-pipeline run with the data phase OFF. MODE=offline (default): all PENDING docs (optionally narrowed with DOC_IDS="id1,id2"; NUM_SHARDS=<n> fan-out). MODE=online: exactly DOC_IDS="<id>[,<id2>]" (required; the id printed by run-data-pipeline MODE=online). Forwards USER_ID/USER_IDENTIFIER.
+run-memory-pipeline: # MEMORY pipeline (`documents` -> the `memory` collection: document/parent/child rows, plus entities and edges in `graphrag`; + the indexing phase) as ONE offline-pipeline run with the data phase OFF. MODE=offline (default): all PENDING docs (optionally narrowed with DOC_IDS="id1,id2"; NUM_SHARDS=<n> fan-out). MODE=online: exactly DOC_IDS="<id>[,<id2>]" (required; the id printed by run-data-pipeline MODE=online). Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_memory_pipeline.py $(PIPELINE_MODE) $(USER_FLAGS) $(if $(DOC_IDS),--doc-ids "$(DOC_IDS)",) $(if $(NUM_SHARDS),--num-shards "$(NUM_SHARDS)",)
 
-run-indexing-pipeline: # INDEXING pipeline (reverse edges, embeddings, search indexes) — the single standalone step that works after either offline or online extraction; no modes. Forwards USER_ID/USER_IDENTIFIER.
+run-indexing-pipeline: # INDEXING phase only (embeddings backfill, search indexes), as ONE offline-pipeline run with the data + extraction phases OFF (needs served workflows). Works after either offline or online extraction; no modes. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_indexing_pipeline.py $(USER_FLAGS)
+
+run-clustering-pipeline: # CLUSTERING phase only (UMAP + HDBSCAN over child-chunk embeddings, one LLM summary per cluster -> `memory_clusters` + each chunk's cluster_id/viz), as ONE offline-pipeline run with the data + extraction + indexing phases OFF (needs served workflows). Off everywhere else, including the nightly cron. Forwards USER_ID/USER_IDENTIFIER.
+	uv run python scripts/run_clustering_pipeline.py $(USER_FLAGS)
 
 
 # --- Dream Consolidation ---
@@ -184,8 +187,11 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-query-graph: # Query and visualize the knowledge graph for one user. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search, omit for full graph.
+query-graph: # Query memory for one user: an HTML graph in `graphrag`, ranked parent chunks as text in `rag`. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search; omit QUERY for the full graph (graphrag only).
 	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
+
+visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+	uv run python scripts/visualize_embeddings.py $(USER_FLAGS) $(if $(filter true,$(HULLS)),--hulls,) $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi

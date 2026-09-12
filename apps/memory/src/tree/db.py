@@ -1,19 +1,21 @@
 from beanie import init_beanie
 from pymongo import AsyncMongoClient
 
+from tree.entities.clusters import MemoryCluster
 from tree.entities.documents import Document
 from tree.entities.extraction_audit import (
     ExtractionDroppedField,
     ExtractionRejection,
 )
-from tree.entities.knowledge_graph import KnowledgeGraphEntry
+from tree.entities.memory import MemoryEntry
 from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.sessions import Session
 from tree.entities.users import User
 
 ALL_DOCUMENT_MODELS = [
     Document,
-    KnowledgeGraphEntry,
+    MemoryEntry,
+    MemoryCluster,
     KnowledgeGraphMetaState,
     Session,
     User,

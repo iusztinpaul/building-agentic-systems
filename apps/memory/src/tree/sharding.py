@@ -5,7 +5,7 @@ partitioning math — and for the shard-OUTCOME rule (#095) — shared by BOTH
 coordinators:
 
 * the memory-extraction coordinator, which shards a ``list[str]`` of pending
-  document ids (``tree.memory.extraction``), and
+  document ids (``tree.memory.graph``), and
 * the data coordinator (#068), which shards the configured ``sources:`` list.
 
 The partitioning pair depends only on ``len()`` and slicing, so it is generic

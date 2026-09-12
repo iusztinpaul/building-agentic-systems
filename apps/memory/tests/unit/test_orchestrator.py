@@ -14,7 +14,8 @@ flows now run as inline subflows of ``offline-pipeline`` — and the end-to-end
 ``online-pipeline`` / ``offline-pipeline`` are promoted out of ``optional=True``.
 The nightly cron moves onto ``offline-pipeline`` so scheduled ingests also extract
 + index. ``memory-indexing-etl`` then left the set too (same feature):
-``memory_indexing`` is an inline subflow of extraction / ``online-pipeline``, and
+``memory_indexing`` is an inline subflow — since ADR-007 the third **Offline
+phase** of ``offline-pipeline``, plus ``online-pipeline``'s single-doc index — and
 ``dream-consolidation-all-users`` took the slot it freed — promoted out of
 ``optional=True`` so its cron actually fires. So the CORE set is 5, EXACTLY the
 Prefect free-tier cap, with NO spare slot and NO optional spec left; the
@@ -26,13 +27,31 @@ admission-control guards (``limit`` not ``global_limit``; binding to the real
 
 from __future__ import annotations
 
+import importlib
 import inspect
+from pathlib import Path
 
 import prefect
 import pytest
 
+import tree
 from tree import orchestrator
 from tree.config.app_config import app_config
+
+# Entrypoints are REPO-relative (``apps/memory/src/tree/…``) because Prefect
+# resolves them inside a fresh clone: .../apps/memory/src/tree/__init__.py → up
+# four levels is the repo root.
+_REPO_ROOT = Path(tree.__file__).parents[4]
+_SRC_PREFIX = "apps/memory/src/"
+
+
+def _module_name(entrypoint_path: str) -> str:
+    """``apps/memory/src/tree/x/y.py`` → ``tree.x.y``."""
+
+    assert entrypoint_path.startswith(_SRC_PREFIX)
+    return (
+        entrypoint_path.removeprefix(_SRC_PREFIX).removesuffix(".py").replace("/", ".")
+    )
 
 
 def test_serve_deployments_passes_limit_not_global_limit(mocker):
@@ -100,7 +119,8 @@ def test_serve_deployments_registers_all_deployments(mocker):
     }
     # #100: the coordinators run as inline subflows of ``offline-pipeline`` and are
     # no longer deployments of their own. Indexing followed them: ``memory_indexing``
-    # runs inline at both its call sites, freeing a free-tier slot.
+    # runs inline at both its call sites (the offline indexing PHASE and
+    # ``online-pipeline``), freeing a free-tier slot.
     assert "data-etl-coordinator" not in deployment_names
     assert "memory-extract-etl-coordinator" not in deployment_names
     assert "memory-indexing-etl" not in deployment_names
@@ -109,6 +129,92 @@ def test_serve_deployments_registers_all_deployments(mocker):
     assert "data-pipeline-etl" not in deployment_names
     # The pre-#066 fan-out deployment is also gone.
     assert "memory-extraction-fanout-etl" not in deployment_names
+
+
+def test_memory_worker_entrypoint_points_at_the_one_pipeline_module():
+    """ADR-006 decision 8 moved the flows into ``tree/memory/pipeline.py``.
+
+    The entrypoint is a FILE PATH Prefect resolves at run time, so a stale one
+    fails only when the deployment next runs — pin it here instead.
+    """
+
+    entrypoints = {
+        spec.name: spec.entrypoint for spec in orchestrator._DEPLOYMENT_SPECS
+    }
+
+    assert entrypoints["memory-extract-etl-worker"] == (
+        "apps/memory/src/tree/memory/pipeline.py:memory_extract_etl_worker"
+    )
+    assert entrypoints["dream-consolidation-all-users"] == (
+        "apps/memory/src/tree/memory/graph/consolidation/dream.py"
+        ":dream_consolidation_all_users"
+    )
+    assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
+def test_clustering_did_not_take_a_deployment_slot():
+    """ADR-007 §5: phase 4 is an INLINE subflow of ``offline-pipeline``.
+
+    The five free-tier slots are all spent (see the module docstring), so the
+    new clustering phase had to be free. A sixth spec would break the serve —
+    hours later, in Cloud — so the absence is asserted here.
+    """
+
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+
+    assert "memory_clustering" not in source
+    assert "memory-clustering" not in source
+    assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
+class TestEveryEntrypointResolves:
+    """Each spec's ``path:function`` must resolve — file AND flow (#111).
+
+    Prefect resolves the entrypoint at RUN time, inside a fresh clone on the
+    managed worker, so a path left stale by a package move (ADR-006 §8 moved
+    ``dream.py`` under ``graph/``) fails hours later in Cloud rather than in
+    CI. These walk every spec and resolve its entrypoint against the tree.
+    """
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_file_exists(self, spec) -> None:
+        path = _REPO_ROOT / spec.entrypoint.split(":")[0]
+
+        assert path.is_file(), f"{spec.name}: no file at {spec.entrypoint}"
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_names_a_flow_in_that_module(self, spec) -> None:
+        file_path, _, function_name = spec.entrypoint.partition(":")
+        module = importlib.import_module(_module_name(file_path))
+
+        attribute = getattr(module, function_name, None)
+        assert attribute is not None, (
+            f"{spec.name}: {_module_name(file_path)} has no {function_name!r}"
+        )
+        assert isinstance(attribute, prefect.Flow)
+
+    @pytest.mark.parametrize(
+        "spec", orchestrator._DEPLOYMENT_SPECS, ids=lambda spec: spec.name
+    )
+    def test_the_entrypoint_names_the_same_flow_the_spec_holds(self, spec) -> None:
+        """The two halves of a spec must not drift apart.
+
+        ``spec.flow`` drives the local-serve path and ``spec.entrypoint`` the
+        Cloud one; an import fixed in only one of them would leave the two
+        execution models running different code.
+        """
+
+        file_path, _, function_name = spec.entrypoint.partition(":")
+        module = importlib.import_module(_module_name(file_path))
+
+        assert getattr(module, function_name) is spec.flow
+
+    def test_the_topology_is_exactly_the_free_tier_five(self) -> None:
+        assert len(orchestrator._DEPLOYMENT_SPECS) == 5
 
 
 def test_every_spec_registers_with_deploy_optional_off(mocker):

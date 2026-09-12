@@ -1,8 +1,11 @@
 """Shared node-text embedding for dedup and indexing.
 
-Turns a knowledge-graph node ``dict`` into the text we embed and embeds a
-batch of such nodes with the search model. Lives at the ``memory/`` layer
-because both ``indexing/`` and ``extraction/`` depend on it.
+Two functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
+into the text we embed, and ``embed_texts`` embeds already-built texts with the
+search model in as few requests as the provider caps allow. They are separate
+because the indexing backfill embeds **Child chunk**s by their **Contextual
+header** rather than by a node-text. Lives at the ``memory/`` layer because both
+``rag/`` and ``graph/`` depend on it.
 
 PREFERENCE and FACT nodes must NOT be routed through this generic path:
 ``extraction.pipeline._dispatch_entity_write`` embeds
@@ -12,26 +15,13 @@ object-to-object). Unifying them would silently break supersession.
 """
 
 import logging
-import re
 from typing import Any
 
+from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ExtractionError
 
 logger = logging.getLogger(__name__)
-
-# Voyage's embeddings endpoint 400s on control characters and unpaired
-# surrogates (common in HTML->markdown-scraped chunk content). Strip the C0
-# controls (except tab/newline/carriage-return), DEL + C1 range, and the
-# surrogate range before embedding so one bad chunk can't fail the whole batch.
-_INVALID_EMBED_CHARS_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]"
-)
-
-
-def _sanitize_for_embedding(text: str) -> str:
-    return _INVALID_EMBED_CHARS_RE.sub("", text)
-
 
 # Batching packs many texts into fewer synchronous /v1/multimodalembeddings
 # requests, bounded by the per-request caps below (Voyage voyage-multimodal-3:
@@ -206,28 +196,30 @@ def node_to_embedding_text(node: dict[str, Any]) -> str:
             parts.append(f"{key}: {value}")
     if props.get("content"):
         parts.append(str(props["content"]))
-    return _sanitize_for_embedding("\n".join(parts))
+    return strip_invalid_chars("\n".join(parts))
 
 
-async def embed_node_texts(
-    nodes: list[dict[str, Any]],
+async def embed_texts(
+    texts: list[str],
     embedding_model: BaseEmbeddingModel,
     *,
     max_inputs: int | None = None,
     max_total_tokens: int | None = None,
     max_input_tokens: int | None = None,
 ) -> list[list[float]]:
-    """Embed a list of node documents via their generic node-text.
+    """Embed already-built texts under the configured per-request caps.
 
-    Vectors are aligned positionally with ``nodes``. Caps default to
-    ``app_config.models.embedding_batch``; pass explicit caps to override.
+    The seam the indexing backfill uses, because its texts are NOT all generic
+    node-texts: a **Child chunk** embeds its **Contextual header**
+    (:func:`tree.memory.rag.embedding.child_embedding_text`) while an entity row
+    embeds ``node_to_embedding_text``. Vectors are aligned positionally with
+    ``texts``. Caps default to ``app_config.models.embedding_batch``.
     """
 
-    if not nodes:
+    if not texts:
         return []
 
     caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
-    texts = [node_to_embedding_text(node) for node in nodes]
     return await embed_in_batches(texts, embedding_model, **caps)
 
 
