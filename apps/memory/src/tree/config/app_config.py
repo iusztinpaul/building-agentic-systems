@@ -292,10 +292,22 @@ class YouTubeConfig(BaseModel):
 
 
 class QueryConfig(BaseModel):
+    """Retrieval knobs shared by both **Memory mode**s.
+
+    ``min_vector_score`` is the bar the VECTOR leg of the hybrid search must
+    clear before fusion (ADR-008 §3): Atlas normalises cosine similarity to
+    ``(1 + cos) / 2``, so it is an absolute score, unlike the rank-based RRF
+    one. ``0.75`` is PROVISIONAL — ADR-008 §4 proposed 0.65, and the live pin in
+    ``tasks/125``'s log moved it up one step: a nonsense query still scored
+    0.728 against the local corpus, an on-topic one 0.882. Owned by Chapter 7's
+    evals; override per shell with ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
+    """
+
     top_k: int = 10
     max_hops: int = 1
     rrf_k: int = 60
     embedding_batch_size: int = 64
+    min_vector_score: float = Field(0.75, ge=0.0, le=1.0)
 
 
 class ObservabilityConfig(BaseModel):

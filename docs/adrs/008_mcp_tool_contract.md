@@ -63,7 +63,7 @@ Five related choices, one contract:
    runs on an unavailable leg (degraded ≠ filtered). graphrag consumes `.hits` and keeps
    `QueryResult` unchanged — Chapter 8's contract is Chapter 8's decision.
 
-4. **`min_vector_score = 0.65` is provisional and evals-owned.** It is a YAML knob
+4. **`min_vector_score = 0.75` is provisional and evals-owned.** It is a YAML knob
    (`TREE_QUERY__MIN_VECTOR_SCORE`), pinned by two live queries (nonsense → `nothing_found`,
    on-topic → `found`) whose observed top scores are recorded in `tasks/125`'s log. Chapter 7's
    evaluation harness tunes it; nothing else does.
@@ -75,7 +75,8 @@ Five related choices, one contract:
    like `rag/cleaning.py`'s purity — and always exits 0. `SessionEnd` over `Stop` because
    first-write-wins on `session_uri` would keep only the first turn. The skill's "proactive
    background ingest" instruction is deleted; the vector-index poll waits for `queryable`
-   (fail-loud on `FAILED`, fail-open at 5 min) so a not-yet-ready index shows up as `text_only`,
+   (fail-loud on `FAILED`, fail-open at 5 min; a catalogue entry that reports neither `status` nor
+   `queryable` — the local mongot container — is read as ready) so a not-yet-ready index shows up as `text_only`,
    not as an empty memory.
 
 Bias-to-least notes: natural key over a new id; one helper over per-tool error handling; a

@@ -143,6 +143,8 @@ async def _vector_search(
     No parent exclusion here: parents are written with ``embedding: []`` and so
     are absent from the vector index — adding a filter clause for them would
     cost a pre-filter on every query to exclude rows that cannot be returned.
+
+    Candidates that ran clear :func:`_gate_vector_candidates` before fusion.
     """
 
     query_vector = (await embedding_model.embed([query]))[0]
@@ -172,9 +174,42 @@ async def _vector_search(
         )
         return None
 
-    if results:
-        return results
-    return [] if await _vector_index_is_queryable(collection) else None
+    if not results:
+        return [] if await _vector_index_is_queryable(collection) else None
+
+    return _gate_vector_candidates(results)
+
+
+def _gate_vector_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop ANN candidates scoring below ``query.min_vector_score`` (ADR-008 §3).
+
+    Runs only on a leg that ANSWERED with candidates, and only after
+    :func:`_vector_index_is_queryable` has settled availability — a leg gated
+    down to nothing returns ``[]`` (a real "no matches", mode stays ``hybrid``),
+    never ``None`` (degraded). Degraded and filtered must not be the same answer.
+
+    The bar sits on ``vectorSearchScore`` (Atlas normalises cosine to
+    ``(1 + cos) / 2``, an absolute similarity) and NEVER on the fused RRF score,
+    which is a rank statistic comparable only within one query. ``$text`` hits
+    are ungated in :func:`_text_search`: a lexical match is a match, and
+    ``textScore`` is not normalisable.
+
+    ``top`` in the log line is the best CANDIDATE score, before the gate — it is
+    what tells an operator whether the knob is set too high.
+    """
+
+    threshold = app_config.query.min_vector_score
+    kept = [doc for doc in candidates if doc["_search_score"] >= threshold]
+    logger.info(
+        "vector leg: %d candidate(s), %d kept at min_vector_score=%.2f (top=%.3f)",
+        len(candidates),
+        len(kept),
+        threshold,
+        max(doc["_search_score"] for doc in candidates),
+    )
+    return kept
 
 
 async def _vector_index_is_queryable(collection: Any) -> bool:

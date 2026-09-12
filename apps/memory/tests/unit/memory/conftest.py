@@ -5,7 +5,8 @@ the EXACT aggregate pipelines that hit Mongo (so filter shapes are pinned) and
 rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
 evaluates the handful of operators our pipelines use — equality, ``$in``,
-``$nor``, ``$text`` (substring), ``$limit`` — and records every call.
+``$nor``, ``$text`` (substring), ``$limit`` — stamps the ``_search_score`` both
+legs read off ``$meta``, and records every call.
 
 It is deliberately NOT a Mongo emulator: anything beyond those operators raises,
 so a future pipeline that grows a new stage fails loudly here instead of being
@@ -69,6 +70,12 @@ _QUERYABLE_VECTOR_INDEX: dict[str, Any] = {
     "status": "READY",
     "queryable": True,
 }
+
+
+# What a row scores when it does not say otherwise: a clear match, well above
+# ``query.min_vector_score`` (0.75 today), so only a test that CARES about the
+# gate has to spell a score out.
+_DEFAULT_SEARCH_SCORE = 0.9
 
 
 class FakeMemoryCollection:
@@ -140,12 +147,31 @@ class FakeMemoryCollection:
                 for row in self.rows
                 if row.get("embedding") and matches(row, stage["filter"])
             ]
-            return rows[: stage["limit"]]
-        rows = [row for row in self.rows if matches(row, head["$match"])]
-        for stage in pipeline:
-            if "$limit" in stage:
-                rows = rows[: stage["$limit"]]
-        return rows
+            rows = rows[: stage["limit"]]
+        else:
+            rows = [row for row in self.rows if matches(row, head["$match"])]
+            for stage in pipeline:
+                if "$limit" in stage:
+                    rows = rows[: stage["$limit"]]
+        return [self._score(row) for row in rows]
+
+    @staticmethod
+    def _score(row: dict[str, Any]) -> dict[str, Any]:
+        """Emulate ``$addFields: {_search_score: {$meta: ...}}``.
+
+        Both legs stamp that field in Mongo, and the vector-leg gate
+        (``query.min_vector_score``) READS it — a double that dropped the stage
+        would make every gated test pass for the wrong reason. A row may declare
+        its own ``_search_score`` to stand for a specific similarity; anything
+        else scores ``_DEFAULT_SEARCH_SCORE`` (a clear match). The copy matters:
+        stamping in place would leak the vector leg's score into ``self.rows``
+        and into the text leg of the SAME query.
+        """
+
+        return {
+            "_search_score": row.get("_search_score", _DEFAULT_SEARCH_SCORE),
+            **row,
+        }
 
 
 @pytest.fixture

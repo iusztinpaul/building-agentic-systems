@@ -181,16 +181,22 @@ class TestRagSearchMemory:
 
         assert "embedding" not in result
 
-    async def test_no_hits_returns_an_empty_parents_array(self, mocker) -> None:
+    async def test_no_hits_answers_nothing_found_with_the_mode(self, mocker) -> None:
+        # ADR-008 §3: the model reads the WORD, not the empty list — an off-topic
+        # query and a half-dead index must not look the same.
         mocker.patch(
             "tree.mcp.tools.retrieve_parents",
             new_callable=AsyncMock,
-            return_value=RetrievalResult(),
+            return_value=RetrievalResult(outcome="nothing_found"),
         )
 
         result = await search_memory(query="nothing here", ctx=_make_ctx(), top_k=3)
 
-        assert json.loads(result) == {"parents": [], "search_mode": "hybrid"}
+        assert json.loads(result) == {
+            "parents": [],
+            "outcome": "nothing_found",
+            "search_mode": "hybrid",
+        }
 
     async def test_top_k_is_the_result_cap_passed_to_retrieval(self, mocker) -> None:
         # ``top_k`` IS the cap in rag mode — there is no second ``max_results``.

@@ -172,11 +172,30 @@ class RetrievedParent(BaseModel):
     )
 
 
+RetrievalOutcome = Literal["found", "nothing_found"]
+"""**Retrieval outcome** — did the search find anything at all (ADR-008 §3)?
+
+``nothing_found`` iff ZERO hits survived the seed search, where the vector leg
+was gated on ``query.min_vector_score`` before fusion. It is computed on the
+hits, BEFORE parent grouping: a hit whose parent row is missing is a data
+problem (logged, dropped), not "nothing found". NOT a **Search mode**: that says
+which legs answered, this says whether the answer is empty.
+"""
+
+
 class RetrievalResult(BaseModel):
     """What ``rag`` mode returns instead of a graph: ranked parents, no edges."""
 
     parents: list[RetrievedParent] = Field(
         default_factory=list, description="Best-scoring parent first."
+    )
+    outcome: RetrievalOutcome = Field(
+        default="found",
+        description=(
+            "``nothing_found`` iff the seed search kept no hits (the vector leg "
+            "gated on ``query.min_vector_score``, the text leg ungated); "
+            "``found`` otherwise."
+        ),
     )
     search_mode: SearchMode = Field(
         default="hybrid",

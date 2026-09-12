@@ -4,6 +4,10 @@ The hybrid search itself is covered in ``test_search.py``; here it is stubbed
 with hand-scored hits so the grouping, the parent/document fetches and the
 ranking are asserted on their own. The one end-to-end case (empty collection)
 runs the real search against the fake collection.
+
+``TestOutcome`` pins the **Retrieval outcome** (ADR-008 §3): the gate that makes
+``nothing_found`` possible lives in the vector leg (``test_search.py``), what is
+asserted here is that zero HITS — not zero parents — is what the word reports.
 """
 
 from __future__ import annotations
@@ -384,6 +388,120 @@ class TestNonPositiveTopK:
         search.assert_not_called()
         assert "unavailable" not in caplog.text
         assert "top_k" in caplog.text
+
+
+class TestOutcome:
+    """The **Retrieval outcome** (ADR-008 §3): is the answer honestly empty?
+
+    Computed on the seed search's HITS, before grouping — an RRF score cannot
+    carry a relevance bar, so "nothing relevant" is decided by the vector leg's
+    gate upstream and reported here as a word the model can read.
+    """
+
+    async def test_nothing_found_when_no_hits(
+        self, mocker, make_collection, embedding_model
+    ) -> None:
+        # Both legs ran and kept nothing: an off-topic query against a memory
+        # that holds only Prefect posts.
+        mocker.patch(
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=[]),
+            autospec=True,
+        )
+
+        result = await retrieve_parents(
+            _client(make_collection()),
+            _DATABASE,
+            "best sourdough hydration",
+            embedding_model,
+            _USER,
+        )
+
+        assert result.outcome == "nothing_found"
+        assert result.parents == []
+
+    async def test_found_with_hits(
+        self,
+        mocker,
+        make_collection,
+        make_parent_row,
+        make_document_row,
+        hits,
+        embedding_model,
+    ) -> None:
+        collection = make_collection(
+            [
+                make_document_row(_USER, "doc1"),
+                make_parent_row(_USER, "p1"),
+                make_parent_row(_USER, "p2", chunk_index=1),
+            ]
+        )
+        mocker.patch(
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
+        )
+
+        result = await retrieve_parents(
+            _client(collection), _DATABASE, "q", embedding_model, _USER
+        )
+
+        assert result.outcome == "found"
+        assert result.parents
+
+    async def test_degraded_and_empty_reports_both(
+        self, mocker, make_collection, embedding_model
+    ) -> None:
+        # The vector leg is gone AND the surviving text leg matched nothing.
+        # The mode is the caveat ("half the index is missing"), the outcome is
+        # still honest ("nothing came back") — a caller needs both.
+        mocker.patch(
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=[], search_mode="text_only"),
+            autospec=True,
+        )
+
+        result = await retrieve_parents(
+            _client(make_collection()), _DATABASE, "q", embedding_model, _USER
+        )
+
+        assert result.outcome == "nothing_found"
+        assert result.search_mode == "text_only"
+
+    async def test_hits_whose_parents_are_missing_stay_found(
+        self, mocker, make_collection, hits, embedding_model, caplog
+    ) -> None:
+        # Every parent row is gone, so the result has no parents — but children
+        # DID match. That is a data problem (the WARNING), not "nothing in
+        # memory is about this"; reporting ``nothing_found`` would send the
+        # model off to the web.
+        mocker.patch(
+            "tree.memory.rag.retrieval.hybrid_search",
+            return_value=HybridSearchResult(hits=hits),
+            autospec=True,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = await retrieve_parents(
+                _client(make_collection()), _DATABASE, "q", embedding_model, _USER
+            )
+
+        assert result.outcome == "found"
+        assert result.parents == []
+        assert "is missing" in caplog.text
+
+    async def test_top_k_zero_keeps_the_found_default(
+        self, mocker, embedding_model
+    ) -> None:
+        # The early return never searched, so it claims nothing either way.
+        search = mocker.patch("tree.memory.rag.retrieval.hybrid_search", autospec=True)
+
+        result = await retrieve_parents(
+            _client(object()), _DATABASE, "q", embedding_model, _USER, top_k=0
+        )
+
+        assert result.outcome == "found"
+        search.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
