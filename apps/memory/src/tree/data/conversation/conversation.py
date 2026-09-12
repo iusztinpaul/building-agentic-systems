@@ -22,6 +22,31 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def conversation_source_uri(text: str, session_uri: str | None) -> str:
+    """Derive a conversation Document's ``source_uri`` — pure, the ONE derivation.
+
+    Called by BOTH :func:`load_conversation_document` (which inserts the row)
+    and :func:`tree.data.online_pipeline.source_uri_for` (which the dispatcher's
+    pre-flight duplicate lookup keys on), so the two can never disagree about
+    the natural key (ADR-008 §1).
+
+    ``session_uri`` is used verbatim when supplied; otherwise the URI falls back
+    to ``conversation://<16-hex content hash>``.
+
+    Raises:
+        ValueError: If ``session_uri`` is supplied but empty / whitespace-only.
+    """
+
+    if session_uri is None:
+        return f"conversation://{_content_hash(text)}"
+    if not session_uri.strip():
+        raise ValueError(
+            "session_uri must not be empty when supplied; pass None to fall "
+            "back to the content-hash source_uri."
+        )
+    return session_uri
+
+
 def _normalize_session_started_at(value: datetime) -> datetime:
     """Validate that *value* is a tz-aware ``datetime`` in UTC.
 
@@ -50,18 +75,11 @@ async def load_conversation_document(
 ) -> Document | None:
     """Persist conversation text as a Document for ``user_id``.
 
-    ``source_uri`` rule:
-
-    * If ``session_uri`` is provided (non-empty), it is used verbatim as
-      the Document's ``source_uri``. The caller is responsible for it
-      being a stable, opaque, schemed string — e.g.
-      ``"claude-session://abc123"``, ``"mcp-session://..."``,
-      ``"openai-thread://thread_..."``. No validation is performed
-      beyond rejecting empty / whitespace-only values.
-    * Otherwise, ``source_uri`` falls back to
-      ``f"conversation://{_content_hash(text)}"`` — the Phase-1
-      content-hash behavior, preserved for callers that have not been
-      updated to propagate a session id.
+    ``source_uri`` comes from :func:`conversation_source_uri` — the same
+    helper the dispatcher's pre-flight duplicate lookup uses: ``session_uri``
+    verbatim when provided (the caller owns making it a stable, opaque,
+    schemed string — e.g. ``"claude-session://abc123"``,
+    ``"openai-thread://thread_..."``), else a ``conversation://`` content hash.
 
     Dedup is scoped to ``user_id`` via the
     ``(user_id, source_type, source_uri)`` compound unique index, so two
@@ -85,16 +103,7 @@ async def load_conversation_document(
     if not conversation_text.strip():
         raise ValueError("Conversation text must not be empty.")
 
-    if session_uri is not None and not session_uri.strip():
-        raise ValueError(
-            "session_uri must not be empty when supplied; pass None to fall "
-            "back to the content-hash source_uri."
-        )
-
-    if session_uri is not None:
-        source_uri = session_uri
-    else:
-        source_uri = f"conversation://{_content_hash(conversation_text)}"
+    source_uri = conversation_source_uri(conversation_text, session_uri)
 
     metadata: dict[str, Any] = {}
     if session_started_at is not None:

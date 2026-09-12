@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, call, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
@@ -9,12 +9,17 @@ from tree.memory.rag.indexing import (
     _backfill_filter,
     _build_vector_index_definition,
     _CANONICAL_NAME_INDEX,
+    _ensure_vector_index,
     _TEXT_INDEX_FIELDS,
     _TEXT_INDEX_NAME,
     _VECTOR_INDEX_FILTER_PATHS,
-    _VECTOR_INDEX_NAME,
+    VECTOR_INDEX_NAME,
+    _VECTOR_INDEX_POLL_S,
+    _VECTOR_INDEX_READY_TIMEOUT_S,
+    _wait_for_vector_index_ready,
     embed_nodes,
     ensure_indexes,
+    index_entry_is_queryable,
     node_embedding_text,
 )
 from tree.memory.embedding_text import node_to_embedding_text
@@ -39,12 +44,17 @@ def _no_mongot_sync_sleeps(mocker):
     duration — any live pymongo periodic executor on the loop then hot-spins
     its zero-interval heartbeat into an AsyncMock (unbounded call history +
     GC churn), intermittently wedging the whole suite for minutes.
+
+    Returns the stub so the readiness tests can assert HOW LONG the poll slept
+    without ever waiting that long.
     """
 
+    sleep = AsyncMock()
     mocker.patch(
         "tree.memory.rag.indexing.asyncio",
-        new=SimpleNamespace(sleep=AsyncMock()),
+        new=SimpleNamespace(sleep=sleep),
     )
+    return sleep
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +128,7 @@ def _make_collection(
         call_count += 1
         if call_count == 1:
             return _AsyncCursorFromList(initial)
-        return _AsyncCursorWithItem({"name": _VECTOR_INDEX_NAME})
+        return _AsyncCursorWithItem({"name": VECTOR_INDEX_NAME})
 
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock()
@@ -274,7 +284,7 @@ class TestEnsureIndexes:
         be dropped + recreated, with a WARNING that names both numbers."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -300,7 +310,7 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
 
         warning_text = " ".join(
@@ -320,7 +330,7 @@ class TestEnsureIndexes:
         re-asserted because ``create_index`` is itself idempotent)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -359,7 +369,7 @@ class TestEnsureIndexes:
         and recreate it (no WARNING; only a dimension mismatch warns)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -386,7 +396,7 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
         assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
@@ -400,7 +410,7 @@ class TestEnsureIndexes:
         but with no WARNING (only dimension mismatch warns)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -425,10 +435,157 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert warnings == []
+
+
+# ---------------------------------------------------------------------------
+# _ensure_vector_index — readiness poll (#127)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedCatalogue:
+    """Collection double whose ``$listSearchIndexes`` answers a script.
+
+    Each poll consumes the next catalogue state; the LAST state repeats
+    forever, so "never becomes queryable" is a one-state script and
+    "BUILDING then READY" is a two-state one. Every probe is recorded, which
+    is how the tests count polls.
+    """
+
+    def __init__(self, states: list[list[dict]]) -> None:
+        self._states = list(states)
+        self.probes: list[str | None] = []
+
+    async def list_search_indexes(self, name: str | None = None):
+        self.probes.append(name)
+        state = self._states[0] if len(self._states) == 1 else self._states.pop(0)
+        return _AsyncCursorFromList(state)
+
+
+def _entry(**fields) -> dict:
+    return {"name": VECTOR_INDEX_NAME, **fields}
+
+
+class TestVectorIndexReadiness:
+    """ADR-008: readiness is OBSERVED (``queryable`` / ``status``), not guessed
+    from the entry merely existing."""
+
+    async def test_returns_when_queryable(self, caplog) -> None:
+        collection = _ScriptedCatalogue([[_entry(status="READY", queryable=True)]])
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await _wait_for_vector_index_ready(collection)
+
+        assert len(collection.probes) == 1
+        assert f"Vector search index '{VECTOR_INDEX_NAME}' ready (status=READY)" in (
+            caplog.text
+        )
+
+    async def test_polls_until_queryable(self, _no_mongot_sync_sleeps) -> None:
+        collection = _ScriptedCatalogue(
+            [
+                [_entry(status="BUILDING", queryable=False)],
+                [_entry(status="READY", queryable=True)],
+            ]
+        )
+
+        await _wait_for_vector_index_ready(collection)
+
+        assert len(collection.probes) == 2
+        # Exactly ONE wait, of the declared poll interval — a mid-build index
+        # must not be polled in a hot loop.
+        assert _no_mongot_sync_sleeps.await_args_list == [call(_VECTOR_INDEX_POLL_S)]
+        assert _VECTOR_INDEX_POLL_S == 5
+
+    async def test_absent_entry_keeps_polling(self) -> None:
+        # mongot has not published the freshly created index yet: "not there"
+        # is "not yet", so the poll waits rather than declaring it ready.
+        collection = _ScriptedCatalogue([[], [_entry(status="READY", queryable=True)]])
+
+        await _wait_for_vector_index_ready(collection)
+
+        assert len(collection.probes) == 2
+
+    async def test_raises_on_failed(self) -> None:
+        collection = _ScriptedCatalogue([[_entry(status="FAILED", queryable=False)]])
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await _wait_for_vector_index_ready(collection)
+
+        assert VECTOR_INDEX_NAME in str(excinfo.value)
+        assert "status=FAILED" in str(excinfo.value)
+
+    async def test_raises_on_failed_even_when_queryable(self) -> None:
+        """FAILED is checked BEFORE ``queryable``.
+
+        The docs allow a FAILED index to report ``queryable: true`` — it is
+        then serving the PREVIOUS definition, which right after a recreate is
+        the stale-dimensions state, not a success.
+        """
+
+        collection = _ScriptedCatalogue([[_entry(status="FAILED", queryable=True)]])
+
+        with pytest.raises(RuntimeError, match="status=FAILED"):
+            await _wait_for_vector_index_ready(collection)
+
+    async def test_times_out_fail_open(self, caplog, _no_mongot_sync_sleeps) -> None:
+        collection = _ScriptedCatalogue([[_entry(status="BUILDING", queryable=False)]])
+
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
+            await _wait_for_vector_index_ready(collection)  # fail-open: no raise
+
+        expected_polls = _VECTOR_INDEX_READY_TIMEOUT_S // _VECTOR_INDEX_POLL_S
+        assert expected_polls == 60
+        assert len(collection.probes) == expected_polls
+        assert _no_mongot_sync_sleeps.await_count == expected_polls
+        warning = caplog.text
+        assert "text_only" in warning
+        assert "not queryable after 300 s" in warning
+        assert "last status=BUILDING" in warning
+
+    async def test_entry_without_readiness_fields_is_ready(
+        self, caplog, _no_mongot_sync_sleeps
+    ) -> None:
+        """The LOCAL mongot reports NEITHER ``status`` NOR ``queryable``.
+
+        Verified 2026-09-12 with ``mongosh`` against ``docker/mongot``: the
+        entry is ``{id, name, type, latestDefinition}``. Waiting for
+        ``queryable is True`` would burn the full 300 s cap on every local
+        indexing run, so the absence of both fields reads as ready — through
+        ``_ensure_vector_index``, to pin the real call site.
+        """
+
+        collection = _make_collection()  # its poll answers {"name": ...} only
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await _ensure_vector_index(collection, 8)
+
+        assert "treating it as ready" in caplog.text
+        _no_mongot_sync_sleeps.assert_not_awaited()
+
+
+class TestIndexEntryIsQueryable:
+    """The shared readiness rule — three-valued, with ``None`` meaning "this
+    deployment does not report readiness" (NOT "not ready")."""
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ({"status": "READY", "queryable": True}, True),
+            ({"status": "STALE", "queryable": True}, True),
+            ({"status": "BUILDING", "queryable": False}, False),
+            ({"status": "PENDING"}, False),
+            ({"status": "READY"}, True),
+            ({"queryable": True}, True),
+            # Local mongot: neither field — undetermined, not "not ready".
+            ({"id": "1", "name": VECTOR_INDEX_NAME, "type": "vectorSearch"}, None),
+        ],
+    )
+    def test_truth_table(self, entry: dict, expected: bool | None) -> None:
+        assert index_entry_is_queryable(entry) is expected
 
 
 # ---------------------------------------------------------------------------

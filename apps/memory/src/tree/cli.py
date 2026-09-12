@@ -25,7 +25,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import click
@@ -38,6 +38,9 @@ from tree.data.file.file import read_file
 from tree.data.online_pipeline import FileSource, OnlineSource, UrlSource
 from tree.db import init_mongodb
 from tree.entities.sessions import resolve_user_id
+
+if TYPE_CHECKING:  # Type-only: keeps this CLI glue free of the pipeline imports.
+    from tree.online import IngestReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -169,17 +172,31 @@ async def wait_for_flow_run(flow_run_id: str) -> None:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
-async def wait_for_dispatch(result: dict[str, Any]) -> None:
+async def wait_for_dispatch(result: "dict[str, Any] | IngestReceipt") -> None:
     """Block on a ``dispatch_*_pipeline`` result — waiting stays a CLI concern.
 
-    Dispatch always creates a worker-side flow run (there is no in-process
-    path), so there is nothing to branch on: log the submitted run and stream
-    it to completion.
+    Every dispatcher but the online one answers a plain
+    ``{"status", "flow_run_id"}`` dict; ``dispatch_online_pipeline`` answers an
+    :class:`~tree.online.IngestReceipt`, whose ``flow_run_id`` is ``None`` when
+    the source was ALREADY ingested (a submit-time duplicate dispatches
+    nothing). That is the one branch: print which Document already holds it and
+    return, since there is no run to poll. Otherwise log the submitted run and
+    stream it to completion.
     """
+
+    payload = result if isinstance(result, dict) else result.model_dump()
+
+    if payload.get("flow_run_id") is None:
+        logger.info(
+            "Already ingested: %s (document %s)",
+            payload["source_uri"],
+            payload["document_id"],
+        )
+        return
 
     logger.info(
         "Submitted flow run %s (%s); waiting for it...",
-        result["flow_run_id"],
-        result["status"],
+        payload["flow_run_id"],
+        payload["status"],
     )
-    await wait_for_flow_run(result["flow_run_id"])
+    await wait_for_flow_run(payload["flow_run_id"])

@@ -14,6 +14,7 @@ import pytest
 from beanie import PydanticObjectId
 from click.testing import CliRunner
 
+from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.rag.types import (
     DocumentMeta,
     MatchedChild,
@@ -140,6 +141,55 @@ class TestRagMode:
         assert result.exit_code == 0
         assert "No results." in result.output
 
+    def test_a_degraded_search_prints_the_caveat_as_the_first_line(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        # The vector index is mid-rebuild: the operator must read the short list
+        # as "half the index answered", not as "the memory has nothing".
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent()], search_mode="text_only"),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "voyage rate limit"])
+
+        assert result.output.splitlines()[0] == (
+            "Search ran text_only — the other leg was unavailable; "
+            "results may miss matches."
+        )
+        assert "[0.032] Memory for AI Agents" in result.output
+
+    def test_a_degraded_empty_search_still_prints_the_caveat(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(search_mode="vector_only"),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "q"])
+
+        assert result.output.splitlines()[0].startswith("Search ran vector_only —")
+        assert "No results." in result.output
+
+    def test_a_hybrid_search_prints_no_caveat(
+        self, mocker, cli_module, rag_mode, mocked_boundaries
+    ) -> None:
+        mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent()]),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "q"])
+
+        assert "Search ran" not in result.output
+
     def test_without_a_query_it_refuses_and_exits_one(
         self, cli_module, rag_mode, mocked_boundaries
     ) -> None:
@@ -204,3 +254,44 @@ class TestGraphragModeUnchanged:
 
         assert result.exit_code == 1
         mocked_boundaries.assert_not_called()
+
+
+class TestSearchUnavailable:
+    """Both search legs down is an operator outcome, not a traceback (#126).
+
+    ``retrieve_parents`` / ``query_memory`` raise ``SearchUnavailableError``
+    since #124; before this, the CLI ended in a raw stack trace in BOTH modes,
+    which reads like a code bug rather than "Mongo is down, run it again".
+    """
+
+    @pytest.mark.parametrize(
+        "mode_fixture,retrieval_attr",
+        [("rag_mode", "retrieve_parents"), ("graphrag_mode", "query_memory")],
+        ids=["rag", "graphrag"],
+    )
+    def test_one_retryable_line_and_exit_one(
+        self,
+        request,
+        mocker,
+        cli_module,
+        mocked_boundaries,
+        mode_fixture: str,
+        retrieval_attr: str,
+    ) -> None:
+        request.getfixturevalue(mode_fixture)
+        mocker.patch.object(
+            cli_module,
+            retrieval_attr,
+            new_callable=AsyncMock,
+            side_effect=SearchUnavailableError(
+                "vector and text search are both unavailable"
+            ),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--query", "prefect"])
+
+        assert result.exit_code == 1
+        assert result.output.splitlines() == [
+            "Search unavailable: vector and text search are both unavailable "
+            "— retryable"
+        ]

@@ -308,6 +308,10 @@ shared Voyage budget.
      registered, `ingest_url`/`ingest_file`/`ingest_conversation` return
      `{"status": <the new run's Prefect state, normally `scheduled`>, "flow_run_id": …}`
      instead of blocking in-process for a `document_id`. Intended, not a bug.
+     *Amended by [ADR-008](008_mcp_tool_contract.md) §1 (2026-09-12): the answer is now the
+     **Ingest receipt** `{source_uri, duplicate, document_id, flow_run_id, status}` — `status`
+     may be `"duplicate"` and `flow_run_id` null when nothing was dispatched. The async
+     dispatch itself is unchanged.*
    - **The in-process fallbacks are DELETED, not merely bypassed.** Both dispatchers
      previously wrapped `run_deployment` in a bare `except Exception` and re-ran the
      SAME flow inline. That branch existed only because the pipelines were optional, and

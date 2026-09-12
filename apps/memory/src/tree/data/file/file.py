@@ -59,6 +59,21 @@ def read_file(file_path: str) -> str:
     return raw
 
 
+def file_source_uri(file_path: str) -> str:
+    """Derive a file Document's ``source_uri`` — pure, the ONE derivation.
+
+    Called by BOTH :func:`load_file_document` (which inserts the row) and
+    :func:`tree.data.online_pipeline.source_uri_for` (which the dispatcher's
+    pre-flight duplicate lookup keys on), so the two can never disagree about
+    the natural key (ADR-008 §1).
+
+    ``file_path`` is NOT resolved or canonicalized — the file lives on the
+    CALLER's machine — so callers should pass absolute paths for stable keys.
+    """
+
+    return f"file://{Path(file_path)}"
+
+
 async def load_file_document(
     file_path: str,
     content: str,
@@ -85,7 +100,7 @@ async def load_file_document(
         raise ValueError("File content must not be empty.")
 
     path = Path(file_path)
-    source_uri = f"file://{path}"
+    source_uri = file_source_uri(file_path)
 
     existing = await Document.find_one({"user_id": user_id, "source_uri": source_uri})
     if existing is not None:

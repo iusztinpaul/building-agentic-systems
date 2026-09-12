@@ -24,7 +24,7 @@ ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), 
 | **Writes to `memory`** | node rows only: one `document` row, its `chunk`/`parent` rows and its embedded `chunk`/`child` rows | the same rows **plus** `part_of` / `next` / `mentions` / `referenced` edges and entity nodes |
 | **Embedded** | child chunks | child chunks + entity nodes |
 | **Retrieval** | `retrieve_parents` — hybrid search (vector + text, RRF) over children, grouped by `parent_id`, returning whole parents with their document metadata | the same parent resolution, then `expand_graph` from the parent ids ∪ entity seeds |
-| **MCP tools** | 6 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`) | those 6 + 7 graph tools (see [MCP server](#mcp-server)) |
+| **MCP tools** | 7 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`, `visualize_memory_embeddings`) | those 7 + 7 graph tools (see [MCP server](#mcp-server)) |
 | **`make memory-query-graph`** | prints the retrieved parents as text | writes + opens `.tree/graphs/<slug>-<stamp>.html` |
 
 Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes means dropping the collection and re-ingesting from scratch.
@@ -70,7 +70,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
-- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`.
+- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
 
 ### Environment variables
@@ -160,7 +160,7 @@ Two stages — **data** (sources → `documents`) then **memory** (documents →
 | stage | offline | online |
 |---|---|---|
 | **data** → `documents` | `run-data-pipeline` (phase: `data`) | `run-data-pipeline MODE=online SOURCE=…` |
-| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` or `SOURCE_URIS=…` |
 | **index** (shared, standalone) | `run-indexing-pipeline` (phase: `index`) | `run-indexing-pipeline` |
 | **clustering** → `memory_clusters` | `run-clustering-pipeline` (phase: `clustering`) | — (maintenance phase; no online form) |
 
@@ -210,7 +210,7 @@ make memory-run-data-pipeline MODE=online SOURCE="https://www.decodingai.com/p/a
 make memory-run-data-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` to write it into the `memory` collection. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
+Dispatches the `online-pipeline` flow with extraction OFF: ingests a single URL or local file in realtime into `documents` **only** — it does NOT extract or index. It prints the new document id; feed that to `make memory-run-memory-pipeline MODE=online DOC_IDS=<id>` (or `SOURCE_URIS=<uri>`, the `source_uri` an ingest receipt carries) to write it into the `memory` collection. `SOURCE` is auto-detected: an `http(s)` URL routes to the web/Substack/YouTube dispatcher; anything else is treated as a local file (`.txt` / `.md` / `.html`). Defaults to the current user; override with `USER_ID` / `USER_IDENTIFIER`. (The MCP `ingest_url` / `ingest_file` tools fire extraction automatically as a realtime convenience; this CLI keeps the two pipelines decoupled. Conversation ingestion is MCP-only.)
 
 ### Memory pipeline
 
@@ -231,12 +231,18 @@ the pending documents across `memory-extract-etl-worker` runs, and the indexing 
 once for the user as a sibling subflow:
 
 ```bash
-# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
+# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>),
+# optionally narrowed with DOC_IDS="<id>[,<id2>]" or SOURCE_URIS="<uri>[,<uri2>]"
 make memory-run-memory-pipeline
 make memory-run-memory-pipeline DOC_IDS="507f1f77bcf86cd799439011,507f1f77bcf86cd799439012"
 
 # Online — ONE document (e.g. the one just produced by run-data-pipeline MODE=online)
 make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
+
+# Online — retry from an ingest receipt's source_uri (resolved to ids at flow
+# entry; an unknown URI fails the run instead of extracting nothing). Mixable
+# with DOC_IDS.
+make memory-run-memory-pipeline MODE=online SOURCE_URIS="https://www.youtube.com/watch?v=abc"
 ```
 
 ### Memory indexing
@@ -347,6 +353,8 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 *Both modes (7 tools):*
 
+Every tool answers failures as data, never as an MCP protocol error: `{"error_type": …, "retryable": true|false, "message": …}` (ADR-008 §2). Retry the same call only when `retryable` is true; otherwise change the input or stop.
+
 | Tool | Description |
 |---|---|
 | `search_memory` | Hybrid (vector + text) search. **Signature differs per mode** — see below. |
@@ -371,7 +379,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 | Mode | Signature | Returns |
 |---|---|---|
-| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …]}`, best match first. `top_k` IS the result cap; empty memory answers `{"parents": []}`. |
+| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …], "outcome": "found" \| "nothing_found", "search_mode": "hybrid" \| "text_only" \| "vector_only"}`, best match first. `top_k` IS the result cap; nothing above `min_vector_score` (or an empty memory) answers `"outcome": "nothing_found"` with `"parents": []`; a dead search leg shows as a non-`hybrid` `search_mode` (ADR-008 §3). |
 | `graphrag` | `search_memory(query: str, top_k: int = 10, max_hops: int = 1, max_results: int = 10, visualize: bool = False)` | Serialized nodes + edges after graph expansion, plus the interactive graph when `visualize=true`. |
 
 In `graphrag`, `query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
@@ -437,6 +445,70 @@ does not kill the batch; order of results matches input order.
 
 Required env vars: `BRIGHTDATA_API_KEY` + `BRIGHTDATA_UNLOCKER_ZONE` (the
 *Unlocker* zone, distinct from the SERP zone used by `search_web`).
+
+#### SessionEnd hook
+
+Claude Code sessions persist themselves through the same MCP surface — there is
+no second path into memory (ADR-008 §5). The repo-root `.claude/settings.json`
+wires `SessionEnd` to `scripts/hook_session_end.py`, which is glue around
+`tree.mcp.hooks` (stdlib + `fastmcp` + `pydantic` only, AST-enforced — the hook
+cannot drift into pipeline internals):
+
+```json
+"hooks": {
+  "SessionEnd": [{"hooks": [{
+    "type": "command",
+    "command": "uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local",
+    "timeout": 60
+  }]}]
+}
+```
+
+**What it stores.** The `user` / `assistant` turns of the transcript, text
+blocks only — `thinking`, `tool_use` and `tool_result` blocks never reach
+memory — as one `ingest_conversation` call with
+`session_uri="claude-session://<session_id>"`,
+`title="Claude Code session <id[:8]> — <YYYY-MM-DD>"` and `session_started_at`
+from the first turn. `session_uri` is the natural key, and the first write
+wins: ending the same session twice answers `duplicate: true` and re-ingests
+nothing. The receipt is logged as one line (`source_uri`, `duplicate`,
+`flow_run_id`, `status`); ingestion itself runs out-of-band, so the session is
+searchable only after the `online-pipeline` run finishes.
+
+**Guards — the hook always exits 0.** A session ending must never fail on
+memory, so each of these is one log line and a skip: a transcript under **200
+words** (`Transcript 30 words < 200 — skipped.` — a two-line session is noise),
+a missing transcript, an unreachable server (Mongo down → the spawned server
+dies in its lifespan), or a **Tool error envelope** in the answer (the log names
+`error_type` and `retryable`). The spawned local server is started with
+`MCP_SKIP_INDEX_BOOTSTRAP=1`, so it queries indexes instead of building them and
+boots in seconds — `SessionEnd` hooks share a 1.5 s budget that the configured
+`timeout: 60` raises to 60 s.
+
+**Local server only, for now.** The hook targets `tree-memory-local`, and the
+remote `tree-memory` entry is passed through as written. Pointing the hook at
+`tree-memory` today therefore fails auth — the client sends no credentials, the
+server answers 401, and the session end logs one skip; persistent OAuth token
+storage is the prerequisite for the cloud route (follow-up), because `fastmcp`
+3.2.0 keeps OAuth tokens in memory only, so an `auth: "oauth"` entry would
+re-open a browser login at every session end instead. Nobody has walked the
+cloud path end-to-end; treat `tree-memory` as unsupported until then.
+
+**Disable it.** Set `"disableAllHooks": true` in `~/.claude/settings.json` or
+`.claude/settings.local.json`; for one run, start Claude Code with
+`claude --settings '{"disableAllHooks": true}'`. To remove it for good, drop the
+`hooks` block from `.claude/settings.json`. There is no per-hook switch — hook
+entries MERGE across settings levels, so a local settings file cannot unset the
+project's hook ([hooks
+reference](https://docs.claude.com/en/docs/claude-code/hooks)).
+
+Smoke-test it without ending a session — the fixture transcript doubles as the
+e2e payload:
+
+```bash
+echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session_end_transcript.jsonl","cwd":"'"$PWD"'","hook_event_name":"SessionEnd","reason":"other"}' \
+  | uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local
+```
 
 ## Modal embedding deployment (optional)
 

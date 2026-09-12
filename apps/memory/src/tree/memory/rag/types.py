@@ -19,7 +19,7 @@ Two families live here:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +83,38 @@ class ScoredHit(BaseModel):
     score: float = Field(description="Fused RRF score; higher is better.")
 
 
+SearchMode = Literal["hybrid", "text_only", "vector_only"]
+"""**Search mode** — which legs of the hybrid search answered (ADR-008 §3).
+
+A leg that RAN and matched nothing is still ``hybrid``: "empty" is a result,
+"raised" is a mode. Both legs raising is
+:class:`tree.memory.rag.search.SearchUnavailableError`, not a mode. NOT the
+**Memory mode** (``rag`` / ``graphrag``): that is what the server IS, this is
+how ONE query went.
+"""
+
+
+class HybridSearchResult(BaseModel):
+    """What :func:`tree.memory.rag.search.hybrid_search` returns.
+
+    The mode travels WITH the hits so a caller cannot read a degraded result as
+    a complete one — pre-ADR-008 a dead leg was swallowed into ``[]`` and
+    "Mongo is down" read exactly like "nothing matches".
+    """
+
+    hits: list[ScoredHit] = Field(
+        default_factory=list, description="Fused hits, best score first."
+    )
+    search_mode: SearchMode = Field(
+        default="hybrid",
+        description=(
+            "Which legs answered: ``hybrid`` = both ran, ``text_only`` = the "
+            "vector leg was unavailable, ``vector_only`` = the text leg was "
+            "unavailable."
+        ),
+    )
+
+
 class DocumentMeta(BaseModel):
     """The ``document`` row's metadata, attached to every retrieved parent.
 
@@ -140,9 +172,36 @@ class RetrievedParent(BaseModel):
     )
 
 
+RetrievalOutcome = Literal["found", "nothing_found"]
+"""**Retrieval outcome** — did the search find anything at all (ADR-008 §3)?
+
+``nothing_found`` iff ZERO hits survived the seed search, where the vector leg
+was gated on ``query.min_vector_score`` before fusion. It is computed on the
+hits, BEFORE parent grouping: a hit whose parent row is missing is a data
+problem (logged, dropped), not "nothing found". NOT a **Search mode**: that says
+which legs answered, this says whether the answer is empty.
+"""
+
+
 class RetrievalResult(BaseModel):
     """What ``rag`` mode returns instead of a graph: ranked parents, no edges."""
 
     parents: list[RetrievedParent] = Field(
         default_factory=list, description="Best-scoring parent first."
+    )
+    outcome: RetrievalOutcome = Field(
+        default="found",
+        description=(
+            "``nothing_found`` iff the seed search kept no hits (the vector leg "
+            "gated on ``query.min_vector_score``, the text leg ungated); "
+            "``found`` otherwise."
+        ),
+    )
+    search_mode: SearchMode = Field(
+        default="hybrid",
+        description=(
+            "The **Search mode** the seed search ran in, copied off "
+            "``HybridSearchResult``: ``text_only`` / ``vector_only`` means one "
+            "leg was unavailable, so these parents may miss matches."
+        ),
     )

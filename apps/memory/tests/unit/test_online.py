@@ -8,6 +8,7 @@ DATA-step router itself (``online_ingest``) is covered in
 ``tests/unit/data/test_online_pipeline.py``.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,8 +17,10 @@ from beanie import PydanticObjectId
 from prefect.client.schemas.objects import State, StateType
 
 from tree.data.online_pipeline import FileSource, UrlSource
+from tree.entities.documents import SourceType
 from tree.online import (
     MAX_SOURCE_PAYLOAD_BYTES,
+    IngestReceipt,
     online_pipeline,
     dispatch_online_pipeline,
     validate_online_source,
@@ -166,15 +169,39 @@ class TestValidateOnlineSource:
             validate_online_source(big)
 
 
+def _existing_document(
+    source_type: SourceType = SourceType.WEB, doc_id: str = "507f1f77bcf86cd799439012"
+) -> SimpleNamespace:
+    """A Document row as the pre-flight ``find_one`` hands it back."""
+
+    return SimpleNamespace(id=PydanticObjectId(doc_id), source_type=source_type)
+
+
 class TestDispatchOnlineIngest:
-    """The caller-edge dispatcher: ONE path — submit the core deployment.
+    """The caller-edge dispatcher: one pre-flight lookup, then ONE submit path.
 
     ``online-pipeline`` is always registered, so dispatch simply requires a
     reachable Prefect API: no in-process fallback, and submission failures
-    reach the caller instead of turning into a silent blocking local run.
+    reach the caller instead of turning into a silent blocking local run. The
+    **Ingest receipt** it answers carries the Document's natural key plus the
+    duplicate verdict known at submit time (ADR-008 §1).
     """
 
-    async def test_submits_the_deployment_fire_and_forget(self, mocker) -> None:
+    @pytest.fixture
+    def mock_find_one(self, mocker) -> AsyncMock:
+        """Pre-flight duplicate lookup — a MISS by default (nothing ingested yet)."""
+
+        return mocker.patch(
+            "tree.online.Document.find_one", new_callable=AsyncMock, return_value=None
+        )
+
+    @pytest.fixture(autouse=True)
+    def _no_existing_document(self, mock_find_one) -> None:
+        """Every test in this class needs the lookup stubbed, hit or miss."""
+
+    async def test_submits_the_deployment_fire_and_forget(
+        self, mocker, mock_find_one
+    ) -> None:
         mock_run = mocker.patch(
             "tree.online.run_deployment",
             new_callable=AsyncMock,
@@ -188,7 +215,16 @@ class TestDispatchOnlineIngest:
 
         # Fire-and-forget: timeout=0, JSON-serialized source, stringified
         # user_id, and the extraction chain delegated to the worker-side flow.
-        assert result == {"status": "scheduled", "flow_run_id": "run-1"}
+        assert result == IngestReceipt(
+            source_uri="https://example.com",
+            duplicate=False,
+            document_id=None,
+            flow_run_id="run-1",
+            status="scheduled",
+        )
+        mock_find_one.assert_awaited_once_with(
+            {"user_id": _USER_ID, "source_uri": "https://example.com"}
+        )
         mock_run.assert_awaited_once()
         assert mock_run.await_args.args == ("online-pipeline/online-pipeline",)
         assert mock_run.await_args.kwargs["timeout"] == 0
@@ -217,9 +253,10 @@ class TestDispatchOnlineIngest:
             UrlSource(uri="https://example.com"), _USER_ID
         )
 
-        # The status is Prefect's, not ours — and never an ingest outcome:
-        # new-vs-duplicate is decided later, on the worker.
-        assert result["status"] == expected
+        # The status is Prefect's own state for a dispatched run; the ingest
+        # outcome lives in ``duplicate``.
+        assert result.status == expected
+        assert result.duplicate is False
 
     async def test_submission_failure_propagates(self, mocker) -> None:
         mocker.patch(
@@ -245,3 +282,60 @@ class TestDispatchOnlineIngest:
             await dispatch_online_pipeline(UrlSource(uri="notaurl"), _USER_ID)
 
         mock_run.assert_not_awaited()
+
+    async def test_duplicate_short_circuits_without_dispatch(
+        self, mocker, mock_find_one
+    ) -> None:
+        mock_find_one.return_value = _existing_document()
+        mock_run = mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
+
+        result = await dispatch_online_pipeline(
+            UrlSource(uri="https://example.com/post"), _USER_ID
+        )
+
+        # A submit-time duplicate answers with the id it already has and
+        # dispatches NOTHING — no flow run, no worker time.
+        assert result == IngestReceipt(
+            source_uri="https://example.com/post",
+            duplicate=True,
+            document_id="507f1f77bcf86cd799439012",
+            flow_run_id=None,
+            status="duplicate",
+        )
+        mock_run.assert_not_awaited()
+
+    async def test_latent_row_is_not_a_duplicate(self, mocker, mock_find_one) -> None:
+        # A LATENT row is a placeholder the leaf UPGRADES in place, so the
+        # source is still new: dispatch it and keep ``document_id`` unset.
+        mock_find_one.return_value = _existing_document(SourceType.LATENT)
+        mock_run = mocker.patch(
+            "tree.online.run_deployment",
+            new_callable=AsyncMock,
+            return_value=_flow_run(),
+        )
+
+        result = await dispatch_online_pipeline(
+            FileSource(path="/tmp/notes.md", content="body"), _USER_ID
+        )
+
+        assert result == IngestReceipt(
+            source_uri="file:///tmp/notes.md",
+            duplicate=False,
+            document_id=None,
+            flow_run_id="run-1",
+            status="scheduled",
+        )
+        mock_run.assert_awaited_once()
+
+    async def test_duplicate_is_logged_with_its_source_uri(
+        self, mocker, mock_find_one, caplog
+    ) -> None:
+        mock_find_one.return_value = _existing_document()
+        mocker.patch("tree.online.run_deployment", new_callable=AsyncMock)
+
+        with caplog.at_level(logging.INFO, logger="tree.online"):
+            await dispatch_online_pipeline(
+                UrlSource(uri="https://example.com/post"), _USER_ID
+            )
+
+        assert "https://example.com/post" in caplog.text

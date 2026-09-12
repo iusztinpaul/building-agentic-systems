@@ -9,6 +9,7 @@ from beanie import PydanticObjectId
 from tree.config.app_config import app_config
 from tree.data.conversation.conversation import (
     _content_hash,
+    conversation_source_uri,
     load_conversation_document,
 )
 from tree.memory.rag.chunking import _ENCODER, split_document
@@ -361,3 +362,53 @@ class TestLongTranscriptChunker:
             assert token_count <= chunking.child.size, (
                 f"child exceeds bound: {token_count} > {chunking.child.size}"
             )
+
+
+class TestConversationSourceUri:
+    """``conversation_source_uri`` is the ONE derivation; the leaf calls it.
+
+    Shared with the dispatcher's pre-flight duplicate lookup
+    (``source_uri_for``), so the two can never disagree (ADR-008 §1).
+    """
+
+    def test_session_uri_is_used_verbatim(self) -> None:
+        assert (
+            conversation_source_uri("text", "claude-session://abc")
+            == "claude-session://abc"
+        )
+
+    def test_no_session_uri_falls_back_to_the_content_hash(self) -> None:
+        assert (
+            conversation_source_uri("text", None)
+            == f"conversation://{_content_hash('text')}"
+        )
+
+    @pytest.mark.parametrize("session_uri", ["", "   "], ids=["empty", "whitespace"])
+    def test_blank_session_uri_raises(self, session_uri: str) -> None:
+        with pytest.raises(ValueError, match="session_uri must not be empty"):
+            conversation_source_uri("text", session_uri)
+
+    @pytest.mark.parametrize(
+        "session_uri", [None, "claude-session://abc"], ids=["hash", "session"]
+    )
+    async def test_leaf_derives_the_same_source_uri(
+        self, mocker, session_uri: str | None
+    ) -> None:
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.find_one",
+            new_callable=AsyncMock,
+            return_value=None,
+        )
+        mocker.patch(
+            "tree.data.conversation.conversation.Document.insert",
+            new_callable=AsyncMock,
+        )
+
+        doc = await load_conversation_document(
+            "Alice likes Python.", _USER_ID, session_uri=session_uri
+        )
+
+        assert doc is not None
+        assert doc.source_uri == conversation_source_uri(
+            "Alice likes Python.", session_uri
+        )

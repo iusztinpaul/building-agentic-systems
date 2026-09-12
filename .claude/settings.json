@@ -23,5 +23,18 @@
     "bright-data-best-practices": "off",
     "scrape": "off",
     "search": "off"
+  },
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
   }
 }

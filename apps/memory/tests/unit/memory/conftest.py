@@ -5,7 +5,8 @@ the EXACT aggregate pipelines that hit Mongo (so filter shapes are pinned) and
 rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
 evaluates the handful of operators our pipelines use — equality, ``$in``,
-``$nor``, ``$text`` (substring), ``$limit`` — and records every call.
+``$nor``, ``$text`` (substring), ``$limit`` — stamps the ``_search_score`` both
+legs read off ``$meta``, and records every call.
 
 It is deliberately NOT a Mongo emulator: anything beyond those operators raises,
 so a future pipeline that grows a new stage fails loudly here instead of being
@@ -28,6 +29,11 @@ class FakeCursor:
     async def __aiter__(self):  # pragma: no cover - trivial
         for row in self._rows:
             yield row
+
+    async def to_list(self, length: int | None = None) -> list[dict[str, Any]]:
+        """What ``listSearchIndexes`` callers use instead of iterating."""
+
+        return list(self._rows) if length is None else list(self._rows[:length])
 
 
 def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
@@ -56,17 +62,58 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
     return True
 
 
+# The ``listSearchIndexes`` entry a collection has AFTER the indexing pipeline
+# ran: mongot serves queries from it. The default, because every pipeline-shape
+# test stands for a properly indexed collection.
+_QUERYABLE_VECTOR_INDEX: dict[str, Any] = {
+    "name": "vector_index",
+    "status": "READY",
+    "queryable": True,
+}
+
+
+# What a row scores when it does not say otherwise: a clear match, well above
+# ``query.min_vector_score`` (0.75 today), so only a test that CARES about the
+# gate has to spell a score out.
+_DEFAULT_SEARCH_SCORE = 0.9
+
+
 class FakeMemoryCollection:
     """Records aggregate pipelines / find filters and applies them to ``rows``."""
 
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        search_indexes: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.rows = list(rows or [])
         self.pipelines: list[list[dict[str, Any]]] = []
         self.find_filters: list[dict[str, Any]] = []
+        # ``search_indexes=[]`` is the never-indexed / dropped-index state;
+        # ``[{"status": "BUILDING", "queryable": False}]`` the mid-build one.
+        self.search_indexes = (
+            [_QUERYABLE_VECTOR_INDEX]
+            if search_indexes is None
+            else list(search_indexes)
+        )
+        self.search_index_probes: list[str | None] = []
 
     async def aggregate(self, pipeline: list[dict[str, Any]]) -> FakeCursor:
         self.pipelines.append(pipeline)
         return FakeCursor(self._apply(pipeline))
+
+    async def list_search_indexes(self, name: str | None = None) -> FakeCursor:
+        """The Atlas-Search index catalogue, recorded so a test can assert the
+        probe did NOT run on a leg that returned hits."""
+
+        self.search_index_probes.append(name)
+        return FakeCursor(
+            [
+                index
+                for index in self.search_indexes
+                if name is None or index.get("name") == name
+            ]
+        )
 
     def find(self, query: dict[str, Any]) -> FakeCursor:
         self.find_filters.append(query)
@@ -100,12 +147,31 @@ class FakeMemoryCollection:
                 for row in self.rows
                 if row.get("embedding") and matches(row, stage["filter"])
             ]
-            return rows[: stage["limit"]]
-        rows = [row for row in self.rows if matches(row, head["$match"])]
-        for stage in pipeline:
-            if "$limit" in stage:
-                rows = rows[: stage["$limit"]]
-        return rows
+            rows = rows[: stage["limit"]]
+        else:
+            rows = [row for row in self.rows if matches(row, head["$match"])]
+            for stage in pipeline:
+                if "$limit" in stage:
+                    rows = rows[: stage["$limit"]]
+        return [self._score(row) for row in rows]
+
+    @staticmethod
+    def _score(row: dict[str, Any]) -> dict[str, Any]:
+        """Emulate ``$addFields: {_search_score: {$meta: ...}}``.
+
+        Both legs stamp that field in Mongo, and the vector-leg gate
+        (``query.min_vector_score``) READS it — a double that dropped the stage
+        would make every gated test pass for the wrong reason. A row may declare
+        its own ``_search_score`` to stand for a specific similarity; anything
+        else scores ``_DEFAULT_SEARCH_SCORE`` (a clear match). The copy matters:
+        stamping in place would leak the vector leg's score into ``self.rows``
+        and into the text leg of the SAME query.
+        """
+
+        return {
+            "_search_score": row.get("_search_score", _DEFAULT_SEARCH_SCORE),
+            **row,
+        }
 
 
 @pytest.fixture

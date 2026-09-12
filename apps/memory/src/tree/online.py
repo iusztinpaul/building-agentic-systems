@@ -7,12 +7,13 @@ memory step (``memory_extract_etl_worker``). Neither pipeline package may
 import the other; this module imports both.
 
 Async-first: callers (MCP ingest tools + the CLI) funnel through
-:func:`dispatch_online_pipeline`, which validates at the edge and fires the
-``online-pipeline`` core deployment fire-and-forget — ONE flow run on a Prefect
-worker ingests the source into ``documents``, runs the extraction worker inline
-AND runs the trailing indexing inline. Dispatch REQUIRES a reachable Prefect API
-with that deployment registered; there is no in-process fallback, so submission
-failures propagate to the caller.
+:func:`dispatch_online_pipeline`, which validates at the edge and answers an
+:class:`IngestReceipt` — the Document's natural key plus a submit-time duplicate
+verdict. A new source fires the ``online-pipeline`` core deployment
+fire-and-forget: ONE flow run on a Prefect worker ingests it into ``documents``,
+runs the extraction worker inline AND runs the trailing indexing inline. Dispatch
+REQUIRES a reachable Prefect API with that deployment registered; there is no
+in-process fallback, so submission failures propagate to the caller.
 """
 
 import logging
@@ -21,16 +22,18 @@ from typing import Any
 from beanie import PydanticObjectId
 from prefect import flow, tags
 from prefect.deployments import run_deployment
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from tree.config.settings import settings
 from tree.data.online_pipeline import (
     OnlineSource,
     UrlSource,
     online_ingest,
+    source_uri_for,
     validate_url,
 )
 from tree.db import init_mongodb
+from tree.entities.documents import Document, SourceType
 from tree.flow_runs import flow_run_status
 from tree.memory.pipeline import memory_extract_etl_worker, memory_indexing
 from tree.config.constants import (
@@ -94,7 +97,8 @@ async def online_pipeline(
     Returns the ingested document id (a caller polling the run to completion can
     recover it from the flow-run result), or ``None`` for a duplicate. A
     failed extraction fails THIS run (visible, retryable via
-    ``make memory-run-memory-pipeline MODE=online DOC_IDS=<id>`` — a
+    ``make memory-run-memory-pipeline MODE=online DOC_IDS=<id>`` or
+    ``SOURCE_URIS=<uri>`` — the key the **Ingest receipt** carries; a
     plain re-run would dedupe on the data step and skip the memory step).
     """
 
@@ -194,30 +198,77 @@ def validate_online_source(source: OnlineSource) -> None:
         )
 
 
+class IngestReceipt(BaseModel):
+    """What an ingest submit answers: the Document's natural key + the verdict.
+
+    The **Ingest receipt** of ADR-008 §1, returned by
+    :func:`dispatch_online_pipeline` and serialized by the three MCP ingest
+    tools. ``Document._id`` stays a random ObjectId, so identity is
+    ``(user_id, source_uri)`` — the same key every leaf dedupes on and the
+    operator retries with (``SOURCE_URIS=<uri>``).
+    """
+
+    source_uri: str = Field(
+        description=(
+            "The Document's natural key for this source, derived by "
+            "``source_uri_for`` — the SAME string the leaf pipeline stores."
+        )
+    )
+    duplicate: bool = Field(
+        description=(
+            "True when a non-LATENT Document for (user_id, source_uri) already "
+            "existed at submit time; nothing was dispatched. A LATENT row is "
+            "NOT a duplicate — the leaf upgrades it in place."
+        )
+    )
+    document_id: str | None = Field(
+        default=None,
+        description=(
+            "Set IFF ``duplicate``: the id is only known on the duplicate path "
+            "(a dispatched run mints its Document later, on the worker)."
+        ),
+    )
+    flow_run_id: str | None = Field(
+        default=None,
+        description="Set IFF a flow run was dispatched (never on a duplicate).",
+    )
+    status: str = Field(
+        description=(
+            "``duplicate``, or the new flow run's own Prefect state "
+            "(``scheduled`` normally)."
+        )
+    )
+
+
 async def dispatch_online_pipeline(
     source: OnlineSource,
     user_id: PydanticObjectId,
     *,
     run_extraction: bool = True,
-) -> dict[str, Any]:
+) -> IngestReceipt:
     """Submit ``source`` to the online pipeline; the ONE entry point for callers.
 
-    Async-first: validates at the edge, then fires the ``online-pipeline`` core
-    deployment fire-and-forget (``timeout=0``) — ONE worker-side flow run does
-    the data step AND the extraction, so the caller returns in the time it
-    takes to create a flow run, with::
+    Async-first: validates at the edge, derives the Document's natural key
+    (:func:`tree.data.online_pipeline.source_uri_for`), then does ONE indexed
+    pre-flight ``Document.find_one`` on ``(user_id, source_uri)``:
 
-        {"status": <flow-run state, lowercased>, "flow_run_id": ...}
+    * a non-LATENT hit answers ``duplicate=True`` with the existing
+      ``document_id`` and dispatches NOTHING (a LATENT row is a placeholder the
+      leaf upgrades in place, so it is not a duplicate);
+    * a miss or LATENT hit fires the ``online-pipeline`` core deployment
+      fire-and-forget (``timeout=0``) — ONE worker-side flow run does the data
+      step AND the extraction, so the caller returns in the time it takes to
+      create a flow run.
 
-    ``status`` is Prefect's own state name for the freshly created run
-    (:func:`tree.flow_runs.flow_run_status` — ``scheduled`` normally), NOT an
-    ingest outcome: whether the source was new or a duplicate is decided later,
-    on the worker, and lives in the flow run's result.
+    ``duplicate`` is the verdict KNOWN AT SUBMIT TIME: two concurrent submits of
+    the same ``source_uri`` can both read ``False``, and the worker still dedupes
+    them on its ``DuplicateKeyError`` path (one Document either way).
 
-    There is exactly ONE path: dispatch requires a reachable Prefect API with
-    the deployment registered. Submission failures (unreachable API, missing
-    deployment, parameter validation, auth) PROPAGATE — a caller must see them
-    rather than have them silently swapped for a long blocking in-process run.
+    Callers must have Beanie initialised (``mcp/server.py``, ``cli.py`` both do).
+    Dispatch requires a reachable Prefect API with the deployment registered;
+    submission failures (unreachable API, missing deployment, parameter
+    validation, auth) PROPAGATE — a caller must see them rather than have them
+    silently swapped for a long blocking in-process run.
 
     Raises:
         ValueError: from :func:`validate_online_source` (bad URL / oversized
@@ -226,6 +277,18 @@ async def dispatch_online_pipeline(
     """
 
     validate_online_source(source)
+
+    source_uri = source_uri_for(source)
+    existing = await Document.find_one({"user_id": user_id, "source_uri": source_uri})
+    if existing is not None and existing.source_type != SourceType.LATENT:
+        logger.info("Duplicate at submit time: %s", source_uri)
+        return IngestReceipt(
+            source_uri=source_uri,
+            duplicate=True,
+            document_id=str(existing.id),
+            flow_run_id=None,
+            status="duplicate",
+        )
 
     flow_run = await run_deployment(
         "online-pipeline/online-pipeline",
@@ -237,4 +300,10 @@ async def dispatch_online_pipeline(
         },
         timeout=0,
     )
-    return {"status": flow_run_status(flow_run), "flow_run_id": str(flow_run.id)}
+    return IngestReceipt(
+        source_uri=source_uri,
+        duplicate=False,
+        document_id=None,
+        flow_run_id=str(flow_run.id),
+        status=flow_run_status(flow_run),
+    )

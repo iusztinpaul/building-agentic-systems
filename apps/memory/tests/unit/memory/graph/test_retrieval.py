@@ -15,7 +15,7 @@ from beanie import PydanticObjectId
 
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.memory.graph.retrieval import expand_graph, fetch_full_graph, query_memory
-from tree.memory.rag.types import ScoredHit
+from tree.memory.rag.types import HybridSearchResult, ScoredHit
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -41,6 +41,31 @@ def seed_hits(make_child_row, make_entity_row) -> list[ScoredHit]:
     ]
 
 
+async def test_reads_hits_from_hybrid_search_result(
+    mocker, make_collection, seed_hits, embedding_model
+) -> None:
+    """graphrag consumes ``.hits`` and ignores the **Search mode** (ADR-008 §3).
+
+    ``QueryResult`` is Chapter 8's contract and gains no mode field, so a
+    degraded seed search must still expand from the hits it did return.
+    """
+
+    mocker.patch(
+        "tree.memory.graph.retrieval.hybrid_search",
+        return_value=HybridSearchResult(hits=seed_hits, search_mode="text_only"),
+        autospec=True,
+    )
+    expand = mocker.patch(
+        "tree.memory.graph.retrieval.expand_graph", new_callable=AsyncMock
+    )
+
+    await query_memory(
+        _client(make_collection()), _DATABASE, "q", embedding_model, _USER
+    )
+
+    assert set(expand.await_args.args[2]) == {"p1", "e1"}
+
+
 class TestQueryMemoryComposition:
     async def test_child_seeds_are_returned_as_their_parents(
         self,
@@ -61,7 +86,7 @@ class TestQueryMemoryComposition:
         )
         mocker.patch(
             "tree.memory.graph.retrieval.hybrid_search",
-            return_value=seed_hits,
+            return_value=HybridSearchResult(hits=seed_hits),
             autospec=True,
         )
 
@@ -83,7 +108,7 @@ class TestQueryMemoryComposition:
     ) -> None:
         mocker.patch(
             "tree.memory.graph.retrieval.hybrid_search",
-            return_value=seed_hits,
+            return_value=HybridSearchResult(hits=seed_hits),
             autospec=True,
         )
         expand = mocker.patch(
@@ -108,7 +133,7 @@ class TestQueryMemoryComposition:
     ) -> None:
         search = mocker.patch(
             "tree.memory.graph.retrieval.hybrid_search",
-            return_value=[],
+            return_value=HybridSearchResult(),
             autospec=True,
         )
 
@@ -124,7 +149,7 @@ class TestQueryMemoryComposition:
     ) -> None:
         mocker.patch(
             "tree.memory.graph.retrieval.hybrid_search",
-            return_value=[],
+            return_value=HybridSearchResult(),
             autospec=True,
         )
         expand = mocker.patch(
