@@ -310,3 +310,65 @@ $ jq '.hooks.SessionEnd[0].hooks[0]' .claude/settings.json
 - No functional issues found in `hooks.py`, `hook_session_end.py`, `.claude/settings.json`, README, or SKILL.md changes.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-12 18:20 — Acceptance Review (feature mcp-tool-contracts, PR #43, HEAD 1b25a22)
+
+**VERDICT: REJECT**
+
+Scope of this entry: the whole Tasks Plan (122–129), ADR-008, the five glossary rows, and the
+three personas. This is the feature's terminal task, so the entry lives here; the rollup lists
+every task it refs.
+
+**What holds — verified by the PA, not inherited from the logs.** Read-only stdio MCP sessions
+through the hook's own `load_server_config` path (`MCP_SKIP_INDEX_BOOTSTRAP=1`, user
+`paul.iusztin@example.com`, local stack):
+- `rag`: 7 tools; `search_memory("   ")` → `invalid_input`/false; nonsense → `{outcome:
+  nothing_found, search_mode: hybrid, parents: []}`; on-topic → `found`/`hybrid`, 2 parents,
+  first title `Knowledge graph`, parent keys exactly `chunk_index, content, document,
+  heading_path, matched_children, parent_id, score` (matches the skill's Returns row);
+  `ingest_url("ftp://…")` → `unsupported_url`/false; `ingest_url(<already-ingested URL>)` →
+  `duplicate: true`, `document_id` set, `flow_run_id: null`, `status: "duplicate"` + `url`
+  echo, no dispatch; blank `session_uri` → `invalid_input`; `scrape_web([])` → `invalid_input`.
+- `graphrag` (shipped default): 14 tools; blank query → the same envelope; nonsense → `[]`
+  (no `outcome`, per ADR-008 §3); on-topic → 2 rows.
+- Skill ↔ code: every contract string in `.agents/skills/tree-memory/SKILL.md` matches the
+  tools' answers above; the ingest docstrings are the receipt the model reads.
+- Operator retry: `SOURCE_URIS=` is documented in README, Makefile help and the script's
+  `UsageError`, and a typo fails the run loud (`No document for source_uri …`) — task 123's
+  live log; consistent with `_resolve_source_uris`.
+- Deviations judged: `min_vector_score` 0.65 → 0.75 (ADR-008 §4 + glossary synced) —
+  accepted; note the nonsense query on THIS corpus scored `top=0.744`, 0.006 under the bar
+  (task 125 pinned 0.728) — Chapter 7's evals own it, recorded here as the headroom warning.
+  Local mongot reports neither `status` nor `queryable` (ADR-008 §5 caveat present) —
+  accepted. `network_error` exercised on `search_web` — accepted, the clause on `ingest_url`
+  is unreachable since 122. `tree/mcp/__init__.py` emptied — accepted, it is what makes
+  "pure client" true at runtime.
+
+**What fails — the user-perspective issues, all on persona 3 and the two skills:**
+1. README "Disable it": `"timeout": 0` does not disable a hook (Claude Code docs: no way to
+   disable an individual hook; `disableAllHooks` is the switch).
+2. Cloud opt-in cannot authenticate: `load_server_config` passes the remote entry unchanged
+   and fastmcp 3.2.0 `RemoteMCPServer.auth` defaults to `None` → 401 → every session end
+   skips. Never tested (Story 5 should have been `[HUMAN]` — PA grooming miss).
+3. The wired command is not "always exit 0": `uv run --env-file ../../.env` exits 2 when
+   `.env` is absent (verified with a nonexistent file), before Python runs; nothing in the
+   hook needs `.env` (`tree.logging` is stdlib-only; the spawned server loads it itself).
+4. `run-pipelines-e2e` skill says the run log "ends in `ready (status=…)`" — on local the
+   line is the `treating it as ready` variant and it prints only in the serve terminal (no
+   `PREFECT_LOGGING_EXTRA_LOGGERS` anywhere).
+5. tree-memory skill rules 2 and 4 key on `outcome`/`search_mode`, which the default
+   (graphrag) mode never emits — `[]` has no rule, so the stop rule has no trigger there.
+
+Found 5 issues. Filed rollup task: `tasks/130-pa-rejection-mcp-tool-contracts.md`.
+Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on the
+feature (this task).
+
+**Docs handled by the PA in this review (committed as `docs:` on the branch):**
+- `docs/adrs/002_…md` consequence bullet: amend note pointing at ADR-008 §1 (Status stays
+  Accepted — one consequence line is amended, the decision is not superseded).
+- `docs/glossary.md` **Search mode**: `text_only` now also names the absent / not-queryable
+  index case task 124's scope extension added.
+- Follow-ups filed, NOT part of the rollup: `tasks/131-session-end-hook-transcript-cap.md`,
+  `tasks/132-prefect-run-log-for-memory-module-loggers.md` (feature
+  `mcp-tool-contracts-followups`).
+- Commit `1b25a22`'s lost `§` glyph: cosmetic, ignored.
