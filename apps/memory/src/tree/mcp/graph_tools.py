@@ -22,9 +22,9 @@ from typing import Any
 
 from bson import json_util
 from fastmcp import Context
-from pymongo.errors import PyMongoError
 from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
+from pymongo.errors import PyMongoError
 
 from tree.config.constants import (
     TAGS_MCP,

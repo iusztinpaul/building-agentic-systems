@@ -254,3 +254,21 @@ line names its own cause and the receipt follows). Folded as one doc AC into
 
 Hand off to the PR Reviewer.
 
+
+### [PR Reviewer] 2026-09-12 19:12 — Review (PR #43, HEAD 6d6820b)
+
+**VERDICT: BLOCKERS**
+
+Reviewed 63 files, +8292/-489 lines (`git diff fcf697e...6d6820b`, every file read in full). Blockers: 1; Nits: 7.
+
+- BLOCKERS: filed rollup task `tasks/133-pr-review-rollup.md`. Pipeline re-runs from inner loop on rollup; re-invoke me after PA ACCEPT + re-push.
+- The one Blocker: `rag/search.py::_vector_index_is_queryable` (L258-260) re-implements `rag/indexing.py::index_entry_is_queryable` instead of calling it — the delegation task 127's own log scheduled as a follow-up (`:200`) and nobody filed. Mechanical fix, ~6 lines.
+- Evidence the rest is sound (so the re-review can spot-check rather than re-read):
+  - `make memory-lint-check` / `make memory-format-check` clean; `make memory-tests` 3106 passed in 50 s (env `local`).
+  - Envelope (dim. B/D): `tool_error` / `storage_error` / `internal_error` / `_retrieval_error` are one mapping with five call sites; `_ingest`'s `PyMongoError` → `ObjectNotFound` → httpx/Prefect ladder is ordered correctly (unrelated classes, pre-flight before dispatch); `PrefectHTTPStatusError` IS an `httpx.HTTPStatusError`, which is why `ingest_url`'s outer `HTTPStatusError` / `ConnectError` arms are unreachable (Nit 1, pre-existing). The AST guard `test_no_legacy_error_keys` is sound (allowlist by function name + pinned count); the catch-all sweep `test_no_tool_raises_through_fastmcp` covers all 13 envelope tools and is cross-checked against the docstring list.
+  - Search (dim. A/B): the `None` vs `[]` two-state leg is correct — the gate runs only on a non-empty leg, a fully-gated leg returns `[]` (mode stays `hybrid`, no probe), and the probe is paid only on an empty vector leg; `embed()` sits outside the `try`, so a `ModelError` reaches the tool boundary as `search_unavailable` (pinned in `test_tools.py::TestSearchMemoryErrors`). No hot-path regression: one indexed `find_one` per ingest submit, one `$in` read per `SOURCE_URIS=` run.
+  - Hook (dim. D/F): purity is enforced twice (AST allow-list + fresh-interpreter import probe), `tree/mcp/__init__.py` has no remaining `from tree.mcp import mcp` importer (`test_server_startup.py` imports `server` explicitly), transcript parsing skips malformed lines and non-text blocks (fixture carries thinking/tool_use/tool_result sentinels), PEP 758 `except A, B:` is valid on the pinned `>=3.14`. `.claude/settings.json` hook command has no `--env-file` (pinned by test).
+  - Receipt (dim. C): `IngestReceipt` "document_id iff duplicate / flow_run_id iff dispatched" is pinned by `test_online.py` (miss, LATENT, hit) and serialised verbatim by all three tools (`TestIngestReceipt`); `wait_for_dispatch` branches on `flow_run_id is None`.
+  - Docs (dim. E): ADR-008 present and Accepted; 5 glossary rows match the code identifiers (`Ingest receipt`, `Tool error envelope`, `Search mode`, `Retrieval outcome`, `Session-end hook`); ADR-002 amended in place; no new domain noun without a row.
+  - Tests: fake collection growth in `tests/unit/memory/conftest.py` (`search_indexes`, `_score`) is one double reused by `test_search.py` + `test_retrieval.py`; `test_indexing.py::_ScriptedCatalogue` is a different double (scripted state sequence) — not a duplicate. Two subprocess tests (`test_importing_hooks_never_loads_the_mcp_server`, `test_runs_with_no_env_file_variables`) guard round-1 regressions and are worth their seconds.
+- Nits (all in the rollup; appended to the PR description once the pipeline advances): dead `ingest_url` except arms + the test that pins one; unused `HookInput.cwd` + double stdin parse; private `_VECTOR_INDEX_NAME` cross-import; `hooks.py:65` docstring backtick; verbatim-sentence docstring anchor (`ERROR_CONTRACT`) brittleness; `graph_tools.py:25` import placement; `getattr` reads on a typed `CallToolResult`.

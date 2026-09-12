@@ -96,9 +96,15 @@ logger = logging.getLogger(__name__)
 #: lives on :class:`ToolErrorEnvelope`), this sentence describes the shape. It
 #: is a TEST ANCHOR, not the source of the prose — every envelope-answering
 #: tool's docstring must CONTAIN it verbatim (modulo line wrapping), asserted in
-#: ``test_error_envelope.py``. It cannot be interpolated: FastMCP reads
-#: ``__doc__`` at import time, so editing this string does not edit the
-#: docstrings — it turns the test red instead.
+#: ``test_error_envelope.py``.
+#:
+#: The wording is FROZEN BY DESIGN, and the verbatim assertion is the freeze:
+#: the model reads 13 docstrings from one server, and 13 paraphrases of "how to
+#: read an error" is exactly the drift the envelope exists to prevent. So a
+#: reworded tool paragraph SHOULD turn the test red — rewording is a decision
+#: about all 13, taken here first. (Interpolation cannot do the job instead:
+#: FastMCP reads ``__doc__`` at import time, so editing this string does not
+#: edit the docstrings.)
 ERROR_CONTRACT = (
     "Errors answer ``{error_type, retryable, message}`` — retry only when "
     "``retryable`` is true."
@@ -459,23 +465,12 @@ async def ingest_url(url: str, ctx: Context) -> str:
         return await _ingest(
             UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
         )
+    # No fetch happens here — `_ingest` only DISPATCHES the flow run (the page
+    # is fetched worker-side), and it already answers `pipeline_unavailable`
+    # for every transport failure against the Prefect API. So the only local
+    # failure left is a link this server cannot accept.
     except ValueError as exc:
         return tool_error("unsupported_url", str(exc), retryable=False)
-    except BrightDataConfigurationError as exc:
-        return tool_error("configuration_error", str(exc), retryable=False)
-    except BrightDataRequestError as exc:
-        return tool_error("fetch_failed", str(exc), retryable=True)
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code
-        return tool_error(
-            "http_error",
-            f"HTTP {status_code}: {url}",
-            retryable=_http_retryable(status_code),
-        )
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        return tool_error(
-            "network_error", f"Could not reach {url}: {exc}", retryable=True
-        )
     except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
         return internal_error("ingest_url", exc)
 

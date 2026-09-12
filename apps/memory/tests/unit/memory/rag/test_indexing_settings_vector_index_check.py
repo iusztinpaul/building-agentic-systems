@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tree.memory.rag.indexing import (
-    _VECTOR_INDEX_NAME,
+    VECTOR_INDEX_NAME,
     assert_settings_match_live_vector_index,
 )
 
@@ -67,7 +67,7 @@ def _wire_client(collection: MagicMock) -> MagicMock:
 
 def _vector_index_doc(num_dimensions: int) -> dict[str, Any]:
     return {
-        "name": _VECTOR_INDEX_NAME,
+        "name": VECTOR_INDEX_NAME,
         "latestDefinition": {
             "fields": [
                 {

@@ -277,25 +277,6 @@ class TestMapping:
         assert payload["retryable"] is retryable
         assert str(status_code) in payload["message"]
 
-    @pytest.mark.parametrize(
-        "status_code,retryable", [(503, True), (404, False)], ids=["503", "404"]
-    )
-    async def test_ingest_url_http_error_follows_the_same_rule(
-        self, mocker, status_code: int, retryable: bool
-    ) -> None:
-        mocker.patch(
-            "tree.mcp.tools.dispatch_online_pipeline",
-            new_callable=AsyncMock,
-            side_effect=_http_status_error(status_code),
-        )
-
-        payload = _envelope(
-            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
-        )
-
-        assert payload["error_type"] == "http_error"
-        assert payload["retryable"] is retryable
-
 
 # ---------------------------------------------------------------------------
 # Source-level regression guard

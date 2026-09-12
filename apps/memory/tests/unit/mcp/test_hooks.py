@@ -124,6 +124,13 @@ def hook_stdin(mcp_json: Path) -> TextIO:
     )
 
 
+@pytest.fixture
+def hook_input(hook_stdin: TextIO) -> HookInput:
+    """The same payload, parsed — what `run` now takes."""
+
+    return read_hook_input(hook_stdin)
+
+
 class TestModulePurity:
     """MCP is the only harness↔memory boundary — the hook stays a client."""
 
@@ -182,6 +189,17 @@ class TestReadHookInput:
         hook_input = read_hook_input(io.StringIO(""))
 
         assert hook_input == HookInput()
+
+    def test_malformed_stdin_warns_and_yields_empty_fields(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Untrusted input must never raise out of the hook: the parse failure is
+        # one WARNING, and the empty `session_id` makes `run` skip.
+        with caplog.at_level(logging.WARNING, logger=hooks.__name__):
+            hook_input = read_hook_input(io.StringIO("not json at all"))
+
+        assert hook_input == HookInput()
+        assert "Unreadable SessionEnd input" in caplog.text
 
 
 class TestParseTranscript:
@@ -354,7 +372,7 @@ class TestRun:
     async def test_logs_receipt(
         self,
         mcp_json: Path,
-        hook_stdin: TextIO,
+        hook_input: HookInput,
         mocker,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -371,7 +389,7 @@ class TestRun:
         mocker.patch("tree.mcp.hooks.Client", fake)
 
         with caplog.at_level(logging.INFO, logger=hooks.__name__):
-            exit_code = await run(hook_stdin, mcp_json, "tree-memory-local")
+            exit_code = await run(hook_input, mcp_json, "tree-memory-local")
 
         assert exit_code == 0
         assert fake.calls[0][0] == "ingest_conversation"
@@ -383,7 +401,7 @@ class TestRun:
     async def test_duplicate_receipt_is_logged(
         self,
         mcp_json: Path,
-        hook_stdin: TextIO,
+        hook_input: HookInput,
         mocker,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -399,7 +417,7 @@ class TestRun:
         mocker.patch("tree.mcp.hooks.Client", _FakeClient(receipt))
 
         with caplog.at_level(logging.INFO, logger=hooks.__name__):
-            exit_code = await run(hook_stdin, mcp_json, "tree-memory-local")
+            exit_code = await run(hook_input, mcp_json, "tree-memory-local")
 
         assert exit_code == 0
         logged = "\n".join(record.getMessage() for record in caplog.records)
@@ -422,12 +440,10 @@ class TestRun:
         )
         fake = _FakeClient("{}")
         mocker.patch("tree.mcp.hooks.Client", fake)
-        stdin = io.StringIO(
-            json.dumps({"session_id": _SESSION_ID, "transcript_path": str(path)})
-        )
+        hook_input = HookInput(session_id=_SESSION_ID, transcript_path=str(path))
 
         with caplog.at_level(logging.INFO, logger=hooks.__name__):
-            exit_code = await run(stdin, mcp_json, "tree-memory-local")
+            exit_code = await run(hook_input, mcp_json, "tree-memory-local")
 
         assert exit_code == 0
         assert fake.calls == []
@@ -438,29 +454,24 @@ class TestRun:
     ) -> None:
         fake = _FakeClient("{}")
         mocker.patch("tree.mcp.hooks.Client", fake)
-        stdin = io.StringIO(
-            json.dumps(
-                {
-                    "session_id": _SESSION_ID,
-                    "transcript_path": str(tmp_path / "gone.jsonl"),
-                }
-            )
+        hook_input = HookInput(
+            session_id=_SESSION_ID, transcript_path=str(tmp_path / "gone.jsonl")
         )
 
-        assert await run(stdin, mcp_json, "tree-memory-local") == 0
+        assert await run(hook_input, mcp_json, "tree-memory-local") == 0
         assert fake.calls == []
 
     async def test_empty_stdin_exits_zero(self, mcp_json: Path, mocker) -> None:
         fake = _FakeClient("{}")
         mocker.patch("tree.mcp.hooks.Client", fake)
 
-        assert await run(io.StringIO("{}"), mcp_json, "tree-memory-local") == 0
+        assert await run(HookInput(), mcp_json, "tree-memory-local") == 0
         assert fake.calls == []
 
     async def test_unreachable_server_exits_zero(
         self,
         mcp_json: Path,
-        hook_stdin: TextIO,
+        hook_input: HookInput,
         mocker,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -472,7 +483,7 @@ class TestRun:
         mocker.patch("tree.mcp.hooks.Client", _boom)
 
         with caplog.at_level(logging.WARNING, logger=hooks.__name__):
-            exit_code = await run(hook_stdin, mcp_json, "tree-memory-local")
+            exit_code = await run(hook_input, mcp_json, "tree-memory-local")
 
         assert exit_code == 0
         assert "ConnectionError" in "\n".join(
@@ -482,7 +493,7 @@ class TestRun:
     async def test_error_envelope_skips(
         self,
         mcp_json: Path,
-        hook_stdin: TextIO,
+        hook_input: HookInput,
         mocker,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -496,7 +507,7 @@ class TestRun:
         mocker.patch("tree.mcp.hooks.Client", _FakeClient(envelope))
 
         with caplog.at_level(logging.WARNING, logger=hooks.__name__):
-            exit_code = await run(hook_stdin, mcp_json, "tree-memory-local")
+            exit_code = await run(hook_input, mcp_json, "tree-memory-local")
 
         assert exit_code == 0
         logged = "\n".join(record.getMessage() for record in caplog.records)
@@ -504,12 +515,12 @@ class TestRun:
         assert "Prefect API unreachable" in logged
 
     async def test_unknown_server_name_exits_zero(
-        self, mcp_json: Path, hook_stdin: TextIO, mocker
+        self, mcp_json: Path, hook_input: HookInput, mocker
     ) -> None:
         # A typo in the hook argument is a config error, not a reason to fail
         # the session exit.
         fake = _FakeClient("{}")
         mocker.patch("tree.mcp.hooks.Client", fake)
 
-        assert await run(hook_stdin, mcp_json, "tree-memory-typo") == 0
+        assert await run(hook_input, mcp_json, "tree-memory-typo") == 0
         assert fake.calls == []

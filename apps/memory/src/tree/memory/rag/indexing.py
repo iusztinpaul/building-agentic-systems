@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 # Index names (shared with query module).
 _TEXT_INDEX_NAME = "text_index"
-_VECTOR_INDEX_NAME = "vector_index"
+VECTOR_INDEX_NAME = "vector_index"
 _CANONICAL_NAME_INDEX = "user_canonical_name_index"
 
 # How long ``_ensure_vector_index`` waits for a freshly created index to answer
@@ -421,8 +421,8 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
     cursor = await collection.list_search_indexes()
     existing_indexes = {idx["name"]: idx async for idx in cursor}
 
-    if _VECTOR_INDEX_NAME in existing_indexes:
-        existing = existing_indexes[_VECTOR_INDEX_NAME]
+    if VECTOR_INDEX_NAME in existing_indexes:
+        existing = existing_indexes[VECTOR_INDEX_NAME]
         existing_dimensions = _extract_existing_vector_index_dimensions(existing)
         existing_filter_paths = _extract_existing_vector_index_filter_paths(existing)
 
@@ -437,7 +437,7 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
             logger.info(
                 "Vector search index '%s' already up-to-date "
                 "(dimensions=%s, filters=%s)",
-                _VECTOR_INDEX_NAME,
+                VECTOR_INDEX_NAME,
                 existing_dimensions,
                 sorted(existing_filter_paths),
             )
@@ -447,7 +447,7 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
             logger.warning(
                 "Vector search index '%s' dimension mismatch: "
                 "existing=%d, target=%d. Dropping and recreating.",
-                _VECTOR_INDEX_NAME,
+                VECTOR_INDEX_NAME,
                 existing_dimensions,
                 target_dimensions,
             )
@@ -455,18 +455,18 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
             logger.info(
                 "Vector search index '%s' missing filter paths "
                 "(have=%s, want=%s) — recreating",
-                _VECTOR_INDEX_NAME,
+                VECTOR_INDEX_NAME,
                 sorted(existing_filter_paths),
                 sorted(_VECTOR_INDEX_FILTER_PATHS),
             )
 
-        await collection.drop_search_index(_VECTOR_INDEX_NAME)
+        await collection.drop_search_index(VECTOR_INDEX_NAME)
         # Allow mongot to process the drop before recreating.
         await asyncio.sleep(2)
 
     await collection.create_search_index(
         model={
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "type": "vectorSearch",
             "definition": required_definition,
         }
@@ -501,8 +501,9 @@ def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
       every healthy local run into a 5-minute wait (here) or a permanent
       ``text_only`` (``rag/search.py``).
 
-    Mirrors ``tree.memory.rag.search._vector_index_is_queryable`` case for case
-    so the two readers of the same catalogue cannot drift apart.
+    The ONE reader of this catalogue shape: ``_wait_for_vector_index_ready``
+    below and ``tree.memory.rag.search._vector_index_is_queryable`` both decide
+    here, so the two cannot drift apart.
     """
 
     queryable = entry.get("queryable")
@@ -541,13 +542,13 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
 
     logger.info(
         "Waiting for vector search index '%s' to be ready (up to %d s)...",
-        _VECTOR_INDEX_NAME,
+        VECTOR_INDEX_NAME,
         _VECTOR_INDEX_READY_TIMEOUT_S,
     )
 
     last_status: str | None = None
     for _ in range(_VECTOR_INDEX_READY_TIMEOUT_S // _VECTOR_INDEX_POLL_S):
-        cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
+        cursor = await collection.list_search_indexes(VECTOR_INDEX_NAME)
         entries = await cursor.to_list()
 
         if entries:
@@ -556,7 +557,7 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
 
             if last_status == "FAILED":
                 raise RuntimeError(
-                    f"Vector search index '{_VECTOR_INDEX_NAME}' build failed "
+                    f"Vector search index '{VECTOR_INDEX_NAME}' build failed "
                     f"(status=FAILED)"
                 )
 
@@ -565,13 +566,13 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
                 logger.info(
                     "Vector search index '%s' reports neither 'status' nor "
                     "'queryable' (local mongot); treating it as ready",
-                    _VECTOR_INDEX_NAME,
+                    VECTOR_INDEX_NAME,
                 )
                 return
             if queryable:
                 logger.info(
                     "Vector search index '%s' ready (status=%s)",
-                    _VECTOR_INDEX_NAME,
+                    VECTOR_INDEX_NAME,
                     last_status,
                 )
                 return
@@ -579,7 +580,7 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
         logger.debug(
             "Vector search index '%s' not queryable yet (status=%s); "
             "polling again in %d s",
-            _VECTOR_INDEX_NAME,
+            VECTOR_INDEX_NAME,
             last_status,
             _VECTOR_INDEX_POLL_S,
         )
@@ -588,7 +589,7 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
     logger.warning(
         "Vector search index '%s' not queryable after %d s (last status=%s); "
         "retrieval runs text_only until it is",
-        _VECTOR_INDEX_NAME,
+        VECTOR_INDEX_NAME,
         _VECTOR_INDEX_READY_TIMEOUT_S,
         last_status,
     )
@@ -635,13 +636,13 @@ async def assert_settings_match_live_vector_index(
     indexes: list[dict[str, Any]] = [idx async for idx in cursor]
 
     live: dict[str, Any] | None = next(
-        (idx for idx in indexes if idx.get("name") == _VECTOR_INDEX_NAME),
+        (idx for idx in indexes if idx.get("name") == VECTOR_INDEX_NAME),
         None,
     )
     if live is None:
         raise RuntimeError(
             f"vector_index not found in database '{database}'; expected an "
-            f"Atlas Vector Search index named '{_VECTOR_INDEX_NAME}' with "
+            f"Atlas Vector Search index named '{VECTOR_INDEX_NAME}' with "
             f"numDimensions={expected_dim}. Run the indexing "
             f"pipeline to bootstrap it."
         )
@@ -649,7 +650,7 @@ async def assert_settings_match_live_vector_index(
     live_dimensions = _extract_existing_vector_index_dimensions(live)
     if live_dimensions is None:
         raise RuntimeError(
-            f"vector_index '{_VECTOR_INDEX_NAME}' in database '{database}' has "
+            f"vector_index '{VECTOR_INDEX_NAME}' in database '{database}' has "
             f"no parseable numDimensions; expected "
             f"app_config.models.search_embedding.dimensions={expected_dim}."
         )

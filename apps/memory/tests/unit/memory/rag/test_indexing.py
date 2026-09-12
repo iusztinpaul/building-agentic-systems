@@ -13,7 +13,7 @@ from tree.memory.rag.indexing import (
     _TEXT_INDEX_FIELDS,
     _TEXT_INDEX_NAME,
     _VECTOR_INDEX_FILTER_PATHS,
-    _VECTOR_INDEX_NAME,
+    VECTOR_INDEX_NAME,
     _VECTOR_INDEX_POLL_S,
     _VECTOR_INDEX_READY_TIMEOUT_S,
     _wait_for_vector_index_ready,
@@ -128,7 +128,7 @@ def _make_collection(
         call_count += 1
         if call_count == 1:
             return _AsyncCursorFromList(initial)
-        return _AsyncCursorWithItem({"name": _VECTOR_INDEX_NAME})
+        return _AsyncCursorWithItem({"name": VECTOR_INDEX_NAME})
 
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock()
@@ -284,7 +284,7 @@ class TestEnsureIndexes:
         be dropped + recreated, with a WARNING that names both numbers."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -310,7 +310,7 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
 
         warning_text = " ".join(
@@ -330,7 +330,7 @@ class TestEnsureIndexes:
         re-asserted because ``create_index`` is itself idempotent)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -369,7 +369,7 @@ class TestEnsureIndexes:
         and recreate it (no WARNING; only a dimension mismatch warns)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -396,7 +396,7 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
         assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
@@ -410,7 +410,7 @@ class TestEnsureIndexes:
         but with no WARNING (only dimension mismatch warns)."""
 
         existing = {
-            "name": _VECTOR_INDEX_NAME,
+            "name": VECTOR_INDEX_NAME,
             "latestDefinition": {
                 "fields": [
                     {
@@ -435,7 +435,7 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(_VECTOR_INDEX_NAME)
+        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
         collection.create_search_index.assert_awaited_once()
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert warnings == []
@@ -466,7 +466,7 @@ class _ScriptedCatalogue:
 
 
 def _entry(**fields) -> dict:
-    return {"name": _VECTOR_INDEX_NAME, **fields}
+    return {"name": VECTOR_INDEX_NAME, **fields}
 
 
 class TestVectorIndexReadiness:
@@ -480,7 +480,7 @@ class TestVectorIndexReadiness:
             await _wait_for_vector_index_ready(collection)
 
         assert len(collection.probes) == 1
-        assert f"Vector search index '{_VECTOR_INDEX_NAME}' ready (status=READY)" in (
+        assert f"Vector search index '{VECTOR_INDEX_NAME}' ready (status=READY)" in (
             caplog.text
         )
 
@@ -515,7 +515,7 @@ class TestVectorIndexReadiness:
         with pytest.raises(RuntimeError) as excinfo:
             await _wait_for_vector_index_ready(collection)
 
-        assert _VECTOR_INDEX_NAME in str(excinfo.value)
+        assert VECTOR_INDEX_NAME in str(excinfo.value)
         assert "status=FAILED" in str(excinfo.value)
 
     async def test_raises_on_failed_even_when_queryable(self) -> None:
@@ -581,7 +581,7 @@ class TestIndexEntryIsQueryable:
             ({"status": "READY"}, True),
             ({"queryable": True}, True),
             # Local mongot: neither field — undetermined, not "not ready".
-            ({"id": "1", "name": _VECTOR_INDEX_NAME, "type": "vectorSearch"}, None),
+            ({"id": "1", "name": VECTOR_INDEX_NAME, "type": "vectorSearch"}, None),
         ],
     )
     def test_truth_table(self, entry: dict, expected: bool | None) -> None:

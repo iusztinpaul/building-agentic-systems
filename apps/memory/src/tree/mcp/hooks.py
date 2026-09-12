@@ -62,7 +62,7 @@ class HookInput(BaseModel):
 
 
 class TranscriptTurn(BaseModel):
-    """One ``user`` / ``assistant` turn, reduced to its plain text."""
+    """One ``user`` / ``assistant`` turn, reduced to its plain text."""
 
     role: str
     text: str
@@ -70,9 +70,19 @@ class TranscriptTurn(BaseModel):
 
 
 def read_hook_input(stream: TextIO) -> HookInput:
-    """Parse the ``SessionEnd`` JSON on ``stream``; empty input → empty fields."""
+    """Parse the ``SessionEnd`` JSON on ``stream`` — ONE read of stdin.
 
-    return HookInput.model_validate_json(stream.read().strip() or "{}")
+    Empty or unreadable input answers empty fields rather than raising: stdin is
+    untrusted and the hook must never stand between the developer and their
+    exit, so :func:`run` turns the empty ``session_id`` into a logged skip.
+    """
+
+    try:
+        return HookInput.model_validate_json(stream.read().strip() or "{}")
+    # ValidationError subclasses ValueError; OSError covers a broken stdin pipe.
+    except (ValueError, OSError) as exc:
+        logger.warning("Unreadable SessionEnd input (%s) — read as empty.", exc)
+        return HookInput()
 
 
 def _block_text(content: Any) -> str:
@@ -215,9 +225,14 @@ def load_server_config(
 
 
 def _answer_text(result: Any) -> str:
-    """The first text content block of a ``CallToolResult`` (tools answer JSON)."""
+    """The first text content block of a ``CallToolResult`` (tools answer JSON).
 
-    for block in getattr(result, "content", []) or []:
+    ``result.content`` is documented and always there; ``block.text`` is NOT —
+    only a ``TextContent`` block carries it (the union also holds image, audio,
+    resource-link and embedded-resource blocks), so that read stays a ``getattr``.
+    """
+
+    for block in result.content:
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
             return text
@@ -225,20 +240,18 @@ def _answer_text(result: Any) -> str:
 
 
 async def run(
-    stdin: TextIO, mcp_json: Path, server_name: str, *, min_words: int = 200
+    hook_input: HookInput, mcp_json: Path, server_name: str, *, min_words: int = 200
 ) -> int:
     """Ingest the finished session through MCP. ALWAYS returns 0.
+
+    Takes the ALREADY-parsed stdin (:func:`read_hook_input`), so the one
+    ``SessionEnd`` payload is read once and the glue script reads ``cwd`` off
+    the same model.
 
     Every guard logs exactly one line and returns: no session id or transcript,
     a transcript below ``min_words`` (a two-line session is noise, not memory),
     an unreachable server, or a **Tool error envelope** in the answer.
     """
-
-    try:
-        hook_input = read_hook_input(stdin)
-    except Exception as exc:  # noqa: BLE001 — stdin is untrusted; never fail here.
-        logger.warning("Unreadable SessionEnd input (%s) — skipped.", exc)
-        return 0
 
     if not hook_input.session_id or not hook_input.transcript_path:
         logger.info("SessionEnd input has no session_id / transcript_path — skipped.")
@@ -295,7 +308,7 @@ async def run(
     except json.JSONDecodeError:
         receipt = None
 
-    if getattr(result, "is_error", False) or not isinstance(receipt, dict):
+    if result.is_error or not isinstance(receipt, dict):
         logger.warning("%s answered %s — session not persisted.", INGEST_TOOL, answer)
         return 0
 

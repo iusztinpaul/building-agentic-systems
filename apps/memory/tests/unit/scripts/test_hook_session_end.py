@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock
 import pytest
 from click.testing import CliRunner
 
+from tree.mcp.hooks import HookInput
+
 # ``<repo>/apps/memory/tests/unit/scripts/…`` → ``<repo>/apps/memory``, ``<repo>``.
 _APP_ROOT = Path(__file__).resolve().parents[3]
 _REPO_ROOT = _APP_ROOT.parent.parent
@@ -125,7 +127,7 @@ def test_calls_run_with_the_repo_root_mcp_json(
     result = CliRunner().invoke(cli_module.main, ["tree-memory"], input=payload)
 
     assert result.exit_code == 0
-    _stdin, mcp_json, server_name = mock_run.await_args.args
+    _hook_input, mcp_json, server_name = mock_run.await_args.args
     assert mcp_json == repo / ".mcp.json"
     assert server_name == "tree-memory"
 
@@ -139,14 +141,14 @@ def test_defaults_to_the_local_server(cli_module, mock_run, repo: Path) -> None:
     assert mock_run.await_args.args[2] == "tree-memory-local"
 
 
-def test_stdin_is_passed_on_to_run(cli_module, mock_run, repo: Path) -> None:
-    # The script consumes stdin, so `run` must receive a replayable stream —
-    # not an exhausted `sys.stdin`.
+def test_parsed_stdin_is_passed_on_to_run(cli_module, mock_run, repo: Path) -> None:
+    # stdin is read ONCE: `run` receives the parsed model, and `cwd` below comes
+    # off that same model rather than a second `json.loads`.
     payload = json.dumps({"session_id": "abc", "cwd": str(repo)})
 
     CliRunner().invoke(cli_module.main, [], input=payload)
 
-    assert json.loads(mock_run.await_args.args[0].read()) == json.loads(payload)
+    assert mock_run.await_args.args[0] == HookInput(session_id="abc", cwd=str(repo))
 
 
 def test_unknown_cwd_falls_back_to_this_checkout(

@@ -39,7 +39,7 @@ from typing import Any
 from beanie import PydanticObjectId
 
 from tree.config.app_config import app_config
-from tree.memory.rag.indexing import _VECTOR_INDEX_NAME
+from tree.memory.rag.indexing import VECTOR_INDEX_NAME, index_entry_is_queryable
 from tree.memory.rag.types import HybridSearchResult, ScoredHit, SearchMode
 from tree.models.base import BaseEmbeddingModel
 from tree.observability import track
@@ -152,7 +152,7 @@ async def _vector_search(
     pipeline = [
         {
             "$vectorSearch": {
-                "index": _VECTOR_INDEX_NAME,
+                "index": VECTOR_INDEX_NAME,
                 "path": "embedding",
                 "queryVector": query_vector,
                 "numCandidates": limit * 10,
@@ -224,24 +224,24 @@ async def _vector_index_is_queryable(collection: Any) -> bool:
     * the probe raising — an undeterminable state must not turn every empty
       vector leg into a degraded query (an unreachable mongot already fails the
       aggregate above, which is the loud path);
-    * an entry that reports NEITHER ``queryable`` NOR ``status``. Atlas sends
-      both; the local mongot sends neither (verified 2026-09-12: the entry is
-      ``{id, name, type, latestDefinition}``), so requiring ``queryable is
-      True`` would report ``text_only`` for every empty vector leg on a healthy
-      local stack.
+    * an entry the shared helper cannot judge. ``index_entry_is_queryable``
+      (:mod:`tree.memory.rag.indexing`) answers ``None`` when the deployment
+      reports neither ``queryable`` nor ``status`` — the local mongot — and
+      ``None`` is FALSY, so the verdict below is tested with ``is False`` and
+      NEVER for truthiness.
 
-    So: no entry → unavailable; ``queryable: false`` or a ``status`` other than
-    ``READY`` → unavailable; anything else → available.
+    So: no entry → unavailable; the shared helper says ``False`` → unavailable;
+    anything else → available.
     """
 
     try:
-        cursor = await collection.list_search_indexes(_VECTOR_INDEX_NAME)
+        cursor = await collection.list_search_indexes(VECTOR_INDEX_NAME)
         entries = await cursor.to_list()
     except Exception:
         logger.warning(
             "Could not probe search index '%s'; reading the empty vector leg as "
             "a real empty result",
-            _VECTOR_INDEX_NAME,
+            VECTOR_INDEX_NAME,
             exc_info=True,
         )
         return True
@@ -250,20 +250,18 @@ async def _vector_index_is_queryable(collection: Any) -> bool:
         logger.warning(
             "Vector search leg unavailable: search index '%s' absent; the query "
             "runs text-only",
-            _VECTOR_INDEX_NAME,
+            VECTOR_INDEX_NAME,
         )
         return False
 
     entry = entries[0]
-    queryable = entry.get("queryable")
-    status = entry.get("status")
-    if queryable is False or (queryable is None and status not in (None, "READY")):
+    if index_entry_is_queryable(entry) is False:
         logger.warning(
             "Vector search leg unavailable: search index '%s' is not queryable "
             "(status=%s, queryable=%s); the query runs text-only",
-            _VECTOR_INDEX_NAME,
-            status,
-            queryable,
+            VECTOR_INDEX_NAME,
+            entry.get("status"),
+            entry.get("queryable"),
         )
         return False
 
