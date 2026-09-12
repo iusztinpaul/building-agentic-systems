@@ -2,12 +2,14 @@ from datetime import UTC, datetime, timezone
 
 import pytest
 from beanie import PydanticObjectId
+from pydantic import ValidationError
 from pymongo import IndexModel
 
 from tree.db import ALL_DOCUMENT_MODELS
 from tree.entities.memory import (
     MEMORY_COLLECTION,
     RAG_NODE_TYPES,
+    ChunkViz,
     EdgeType,
     ExtractorInfo,
     MemoryEntry,
@@ -1289,3 +1291,160 @@ class TestChunkHierarchyFields:
 
     def test_chunk_registry_subtypes_are_closed_to_parent_and_child(self) -> None:
         assert NODE_REGISTRY["chunk"].subtypes == frozenset({"parent", "child"})
+
+
+class TestChunkClusterFields:
+    """ADR-007 §3 / #115: ``cluster_id`` + ``viz`` on the CHILD chunk row.
+
+    Two top-level graph-modeling meta fields (ADR-001 §11) written by a
+    **Clustering run**, both defaulting to ``None`` so every pre-#115 row
+    validates unchanged. A validator keeps them off every non-child row: a
+    ``document`` or ``parent`` row carrying map coordinates would be drawn by a
+    surface that only ever plots children.
+    """
+
+    def _child_kwargs(self, **overrides: object) -> dict[str, object]:
+        now = datetime.now(UTC)
+        kwargs: dict[str, object] = {
+            "id": "u:chunk:x#parent-0#child-3",
+            "user_id": _user_id(),
+            "kind": "node",
+            "type": "chunk",
+            "subtype": "child",
+            "name": "x#parent-0#child-3",
+            "parent_id": "u:chunk:x#parent-0",
+            "chunk_index": 3,
+            "created_at": now,
+            "updated_at": now,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_child_chunk_carries_cluster_id_and_viz(self) -> None:
+        entry = MemoryEntry(
+            **self._child_kwargs(
+                cluster_id=2,
+                viz={"x": 0.1, "y": -3.2, "run_id": "r1"},
+            )
+        )
+
+        assert entry.cluster_id == 2
+        assert entry.viz == ChunkViz(x=0.1, y=-3.2, run_id="r1")
+
+    def test_noise_is_stored_on_the_chunk_as_minus_one(self) -> None:
+        """Noise gets coordinates and ``-1`` on the chunk (but no cluster row)."""
+
+        entry = MemoryEntry(
+            **self._child_kwargs(
+                cluster_id=-1,
+                viz={"x": 9.0, "y": 9.0, "run_id": "r1"},
+            )
+        )
+
+        assert entry.cluster_id == -1
+
+    def test_fields_default_to_none_on_an_unclustered_child(self) -> None:
+        """Every existing row round-trips unchanged — there is no migration."""
+
+        entry = MemoryEntry(**self._child_kwargs())
+        rehydrated = MemoryEntry.model_validate(entry.model_dump())
+
+        assert entry.cluster_id is None and entry.viz is None
+        assert rehydrated.cluster_id is None and rehydrated.viz is None
+
+    def test_round_trip_preserves_the_coordinates(self) -> None:
+        entry = MemoryEntry(
+            **self._child_kwargs(
+                cluster_id=7,
+                viz={"x": 0.1, "y": -3.2, "run_id": "r1"},
+            )
+        )
+
+        rehydrated = MemoryEntry.model_validate(entry.model_dump())
+
+        assert rehydrated.cluster_id == 7
+        assert rehydrated.viz is not None
+        assert (rehydrated.viz.x, rehydrated.viz.y) == (0.1, -3.2)
+        assert rehydrated.viz.run_id == "r1"
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"cluster_id": 2},
+            {"viz": {"x": 0.1, "y": -3.2, "run_id": "r1"}},
+        ],
+        ids=["cluster_id", "viz"],
+    )
+    def test_parent_chunk_row_rejects_the_cluster_fields(
+        self, overrides: dict[str, object]
+    ) -> None:
+        with pytest.raises(ValueError, match="child"):
+            MemoryEntry(
+                **self._child_kwargs(
+                    id="u:chunk:x#parent-0",
+                    subtype="parent",
+                    parent_id="u:document:x",
+                    chunk_index=0,
+                    **overrides,
+                )
+            )
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"cluster_id": 2},
+            {"viz": {"x": 0.1, "y": -3.2, "run_id": "r1"}},
+        ],
+        ids=["cluster_id", "viz"],
+    )
+    def test_document_row_rejects_the_cluster_fields(
+        self, overrides: dict[str, object]
+    ) -> None:
+        now = datetime.now(UTC)
+        with pytest.raises(ValueError, match="child"):
+            MemoryEntry(
+                id="u:document:x",
+                user_id=_user_id(),
+                kind="node",
+                type="document",
+                name="x",
+                created_at=now,
+                updated_at=now,
+                **overrides,
+            )
+
+    def test_entity_node_rejects_the_cluster_fields(self) -> None:
+        now = datetime.now(UTC)
+        with pytest.raises(ValueError, match="child"):
+            MemoryEntry(
+                id="u:person:alice",
+                user_id=_user_id(),
+                kind="node",
+                type="person",
+                name="alice",
+                cluster_id=0,
+                created_at=now,
+                updated_at=now,
+            )
+
+    def test_chunk_viz_requires_all_three_coordinates(self) -> None:
+        with pytest.raises(ValidationError):
+            ChunkViz(x=0.1, y=-3.2)  # type: ignore[call-arg]
+
+    @pytest.mark.parametrize("model", [ChunkViz], ids=["ChunkViz"])
+    def test_new_models_document_every_field(self, model) -> None:
+        properties = model.model_json_schema()["properties"]
+
+        for name in model.model_fields:
+            description = properties[name].get("description")
+            assert description and description.strip(), (
+                f"{model.__name__}.{name} is missing Field(description=...)"
+            )
+
+    @pytest.mark.parametrize("name", ["cluster_id", "viz"])
+    def test_memory_entry_documents_the_new_fields(self, name: str) -> None:
+        description = MemoryEntry.model_json_schema()["properties"][name].get(
+            "description"
+        )
+
+        assert description and description.strip()

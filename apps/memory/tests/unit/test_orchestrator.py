@@ -14,7 +14,8 @@ flows now run as inline subflows of ``offline-pipeline`` — and the end-to-end
 ``online-pipeline`` / ``offline-pipeline`` are promoted out of ``optional=True``.
 The nightly cron moves onto ``offline-pipeline`` so scheduled ingests also extract
 + index. ``memory-indexing-etl`` then left the set too (same feature):
-``memory_indexing`` is an inline subflow of extraction / ``online-pipeline``, and
+``memory_indexing`` is an inline subflow — since ADR-007 the third **Offline
+phase** of ``offline-pipeline``, plus ``online-pipeline``'s single-doc index — and
 ``dream-consolidation-all-users`` took the slot it freed — promoted out of
 ``optional=True`` so its cron actually fires. So the CORE set is 5, EXACTLY the
 Prefect free-tier cap, with NO spare slot and NO optional spec left; the
@@ -118,7 +119,8 @@ def test_serve_deployments_registers_all_deployments(mocker):
     }
     # #100: the coordinators run as inline subflows of ``offline-pipeline`` and are
     # no longer deployments of their own. Indexing followed them: ``memory_indexing``
-    # runs inline at both its call sites, freeing a free-tier slot.
+    # runs inline at both its call sites (the offline indexing PHASE and
+    # ``online-pipeline``), freeing a free-tier slot.
     assert "data-etl-coordinator" not in deployment_names
     assert "memory-extract-etl-coordinator" not in deployment_names
     assert "memory-indexing-etl" not in deployment_names
@@ -147,6 +149,21 @@ def test_memory_worker_entrypoint_points_at_the_one_pipeline_module():
         "apps/memory/src/tree/memory/graph/consolidation/dream.py"
         ":dream_consolidation_all_users"
     )
+    assert len(orchestrator._DEPLOYMENT_SPECS) == 5
+
+
+def test_clustering_did_not_take_a_deployment_slot():
+    """ADR-007 §5: phase 4 is an INLINE subflow of ``offline-pipeline``.
+
+    The five free-tier slots are all spent (see the module docstring), so the
+    new clustering phase had to be free. A sixth spec would break the serve —
+    hours later, in Cloud — so the absence is asserted here.
+    """
+
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+
+    assert "memory_clustering" not in source
+    assert "memory-clustering" not in source
     assert len(orchestrator._DEPLOYMENT_SPECS) == 5
 
 

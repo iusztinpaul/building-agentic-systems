@@ -1,9 +1,9 @@
 """MCP tool handlers that only make sense with a knowledge graph.
 
 Imported by :mod:`tree.mcp.server` ONLY when ``app_config.memory.mode ==
-"graphrag"`` (ADR-006 decision 5), so every tool registered here — plus the two
-side-effect app modules it pulls in (:mod:`tree.mcp.graph_app`,
-:mod:`tree.mcp.dashboard_app`) — is absent from a rag-mode server. That gating
+"graphrag"`` (ADR-006 decision 5), so every tool registered here — including
+``visualize_memory_graph`` — plus the side-effect app module it pulls in
+(:mod:`tree.mcp.dashboard_app`) is absent from a rag-mode server. That gating
 is the reason this module exists at all: in rag mode the collection holds node
 rows only, so ``max_hops``, edge expansion and the dedup review queue have
 nothing to operate on, and a registered-but-degraded tool would be worse than no
@@ -36,16 +36,17 @@ from tree.entities.memory import NodeType
 from tree.mcp import dashboard_app  # noqa: F401
 from tree.mcp.deep_search import write_deep_search_results
 
-# graph_app: a REAL import (it also registers visualize_memory_graph + the
-# ui:// / graphs:// resources as a side effect). The dual-delivery helper and
-# the shared ui:// URI come from there; graph_app does NOT import this module,
-# so there is no cycle.
-from tree.mcp.graph_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.mcp.server import mcp
 from tree.mcp.tools import _set_retrieval_thread
-from tree.memory.graph.retrieval import query_memory as structured_query_memory
+
+# viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
+# ``ui://`` and ``graphs://`` resources as a side effect and owns the one
+# dual-delivery helper. It does NOT import this module, so there is no cycle.
+from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.memory.graph.nl_query import execute_nl_query
-from tree.memory.graph.visualize import to_graph_payload
+from tree.memory.graph.retrieval import fetch_full_graph
+from tree.memory.graph.retrieval import query_memory as structured_query_memory
+from tree.memory.visualize.graph import to_graph_payload
 from tree.memory.graph.review import (
     MergeStrategy,
     ReviewDecision,
@@ -80,7 +81,7 @@ def _dual_graph_result(
     The ONE visualization seam shared by ``query_memory`` and ``search_memory``
     — both have the same shape (serialized docs + optional graph), so neither
     builds a **Graph payload** nor branches on client capability itself. That
-    branching lives once, in :func:`~tree.mcp.graph_app._graph_tool_result`,
+    branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
     which also serves ``visualize_memory_graph`` (ADR-005, decision 4): inline
     MCP App iframe when the client renders App UIs, else a self-contained file
     under ``.tree/graphs/`` + a ``graphs://`` resource link.
@@ -114,6 +115,68 @@ def _dual_graph_result(
         f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
     return _graph_tool_result(ctx, payload, summary, query=query)
+
+
+@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+async def visualize_memory_graph(
+    ctx: Context,
+    query: str = "",
+    top_k: int = 15,
+    max_hops: int = 2,
+    as_html_file: bool = False,
+) -> ToolResult:
+    """Visualize the knowledge graph as an interactive graph.
+
+    With a ``query``, runs semantic + text search with graph expansion (same
+    engine as ``search_memory``) and visualizes that subgraph. With NO query
+    (the default), visualizes the user's ENTIRE memory graph. Renders read-only
+    in an interactive Sigma.js force-directed view — use this when the user wants
+    to *see* the graph rather than read node/edge JSON.
+
+    When the client renders MCP App UIs, the graph appears inline. Otherwise
+    (or when ``as_html_file`` is set) the same graph is written to a
+    self-contained HTML file; the result carries the server-side path AND a
+    ``graphs://`` resource link — do NOT re-author the HTML yourself. If the
+    path exists locally just share it; if the server is remote (cloud), read
+    the linked resource and save its text as a local ``.html`` file.
+
+    Args:
+        query: Search query text — seeds the subgraph to visualize. Omit (empty)
+            to visualize the whole memory graph.
+        top_k: Number of seed nodes to retrieve (default 15). Ignored with no query.
+        max_hops: Hops of graph expansion around the seeds (default 2). Ignored
+            with no query.
+        as_html_file: Set true when the user explicitly asks for a downloadable
+            / openable HTML file instead of the inline interactive view.
+    """
+
+    lc = ctx.lifespan_context
+    if query:
+        result = await structured_query_memory(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=lc["user_id"],
+            top_k=top_k,
+            max_hops=max_hops,
+        )
+        label = repr(query)
+    else:
+        result = await fetch_full_graph(
+            client=lc["client"],
+            database=lc["database"],
+            user_id=lc["user_id"],
+        )
+        label = "your full memory"
+
+    payload = to_graph_payload(result)
+    n_nodes, n_edges = len(payload["nodes"]), len(payload["edges"])
+    summary = f"Knowledge graph for {label}: {n_nodes} nodes, {n_edges} edges"
+
+    return _graph_tool_result(
+        ctx, payload, summary, query=query, as_html_file=as_html_file
+    )
 
 
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))

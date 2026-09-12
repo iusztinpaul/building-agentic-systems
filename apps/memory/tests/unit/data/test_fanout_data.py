@@ -2,7 +2,7 @@
 
 #068 split data ingestion into an coordinator flow (``data-etl-coordinator``) that
 dispatches a DISTINCT worker deployment (``data-etl-worker``) per shard — there is NO
-recursion and NO trailing index. These exercise the PURE fan-out core with no Prefect
+recursion and NO indexing. These exercise the PURE fan-out core with no Prefect
 server and ``run_deployment`` mocked:
 
 * ``_partition_into_shards`` / ``_resolve_num_shards`` are re-exported from the neutral

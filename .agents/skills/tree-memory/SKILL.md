@@ -2,7 +2,7 @@
 name: tree-memory
 description: "Query, explore, and write to Tree's memory. Use when the user asks to recall, search, visualize, or ingest information (people, tasks, episodes, preferences, documents, URLs, files, conversations). PROACTIVE USE: Also use this skill to extract the current conversation whenever something meaningful was discussed (technical decisions, debugging sessions, architecture changes, new learnings) or when the user switches to a different topic. When extracting conversations proactively, always run the ingestion in a background agent to avoid blocking the user."
 argument-hint: <natural language query or instruction>
-allowed-tools: mcp__tree-memory__query_memory, mcp__tree-memory__search_memory, mcp__tree-memory__deep_search_memory, mcp__tree-memory__ingest_url, mcp__tree-memory__ingest_file, mcp__tree-memory__ingest_conversation, Read
+allowed-tools: mcp__tree-memory__query_memory, mcp__tree-memory__search_memory, mcp__tree-memory__deep_search_memory, mcp__tree-memory__visualize_memory_embeddings, mcp__tree-memory__ingest_url, mcp__tree-memory__ingest_file, mcp__tree-memory__ingest_conversation, Read
 disable-model-invocation: true
 ---
 
@@ -30,13 +30,14 @@ The server registers its tools ONCE at boot from `memory.mode` (ADR-006), so the
 | `ingest_conversation` | ✅ | ✅ | Ingest conversation text. |
 | `search_web` | ✅ | ✅ | Live web search (Bright Data SERP). |
 | `scrape_web` | ✅ | ✅ | Scrape URLs to markdown. |
+| `visualize_memory_embeddings` | ✅ | ✅ | 2-D map of the memory's topics (clusters of chunk embeddings). |
 | `query_memory` | — | ✅ | NL → MongoDB aggregation for exact/structured answers. |
 | `deep_search_memory` | — | ✅ | Wide search, results written to disk + a YAML index. |
 | `visualize_memory_graph` | — | ✅ | Render the graph as interactive HTML. |
 | `memory_dashboard` | — | ✅ | Graph dashboard app. |
 | `review_list_pending` / `review_confirm` / `review_reject` | — | ✅ | Human review of flagged duplicate entities. |
 
-**Do not work around a missing tool.** In `rag` there are no edges, so the seven graph tools are not registered at all and calling one returns the standard unknown-tool error. If `query_memory` is absent, the answer is `search_memory` — not a retry.
+**Do not work around a missing tool.** In `rag` there are no edges, so the seven graph tools are not registered at all and calling one returns the standard unknown-tool error. If `query_memory` is absent, the answer is `search_memory` — not a retry. `visualize_memory_embeddings` is the exception that proves the rule: the map has no edges, so it is registered in BOTH modes.
 
 ---
 
@@ -73,8 +74,16 @@ Pick the right tool based on what the user needs:
 3. Use `Read` on individual file paths (from the `file` field, under the `directory` path) to get full details only for entries you need
 4. Summarize findings for the user
 
-### Visualization (graphrag only)
-Use `visualize=true` on `search_memory` or `query_memory` when the user asks to visualize, render, show a graph, or map out connections. This generates an interactive HTML file and opens it in the browser. In `rag` there is nothing to draw — present the retrieved parents as text instead.
+### Visualization
+
+**`visualize_memory_embeddings` — both modes.** Use it for "what topics are in my memory", "show me a map", "how is my memory organised". It draws the **embedding map**: every child chunk as a point at its stored coordinates, coloured by its cluster, each cluster carrying an LLM-written label. Pass `hulls=true` when the user asks to outline the clusters. Two answers you must relay verbatim rather than paper over:
+
+- `No clustering run found for this user — run make memory-run-clustering-pipeline to build the embedding map.` — say exactly that and offer to run the command. Do NOT fall back to `search_memory` and summarize topics yourself; the user asked for the map.
+- A first line reading `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat that line, then the rest of the answer: the map is real but under-reports the corpus, and `make memory-run-clustering-pipeline` is the fix.
+
+When the answer carries a file path plus a `graphs://` resource link, the client could not render the map inline: share the path if it is on the user's machine, otherwise read the linked resource and save its text as a local `.html` file. Never re-author the HTML.
+
+**Graph visualization — `graphrag` only.** Use `visualize=true` on `search_memory` or `query_memory` when the user asks to see a graph or map out connections between entities. In `rag` there is no graph to draw — present the retrieved parents as text, or draw the embedding map instead.
 
 ---
 

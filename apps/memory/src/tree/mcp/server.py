@@ -225,9 +225,10 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
 
 
 # One instructions text per mode: the model must never be told about a tool this
-# server does not register. The rag text therefore names ONLY the six tools
-# ``tree.mcp.tools`` registers — no ``query_memory``, no ``deep_search_memory``,
-# no graph vocabulary at all.
+# server does not register. The rag text therefore names ONLY the seven tools
+# ``tree.mcp.tools`` registers (the **Embedding map** tool included — clustering
+# is mode-orthogonal) — no ``query_memory``, no ``deep_search_memory``, no graph
+# vocabulary at all.
 _GRAPHRAG_INSTRUCTIONS = (
     "Query and build a personal knowledge graph of documents, people, tasks, "
     "and preferences. Use 'query_memory' for flexible natural language "
@@ -236,7 +237,9 @@ _GRAPHRAG_INSTRUCTIONS = (
     "returns a lightweight index; read individual files for details. "
     "Use 'search_web' for on-demand web searches that don't write to memory. "
     "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
-    "and 'ingest_conversation' to extract knowledge from conversations."
+    "and 'ingest_conversation' to extract knowledge from conversations. "
+    "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
+    "(clusters of chunk embeddings) when the user asks what the memory holds."
 )
 
 _RAG_INSTRUCTIONS = (
@@ -246,7 +249,9 @@ _RAG_INSTRUCTIONS = (
     "Use 'search_web' for on-demand web searches and 'scrape_web' to read specific "
     "pages inline; neither writes to memory. "
     "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
-    "and 'ingest_conversation' to store what a conversation established."
+    "and 'ingest_conversation' to store what a conversation established. "
+    "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
+    "(clusters of chunk embeddings) when the user asks what the memory holds."
 )
 
 mcp = FastMCP(
@@ -262,7 +267,7 @@ mcp = FastMCP(
 # rather than the canonical package name ``tree.mcp.server``. The tool modules
 # imported just below register on ``mcp`` via ``from tree.mcp.server import mcp``;
 # without this alias that import would execute a SECOND, fresh copy of this file
-# as ``tree.mcp.server`` and register all 13 tools on a DIFFERENT ``FastMCP``
+# as ``tree.mcp.server`` and register all 14 tools on a DIFFERENT ``FastMCP``
 # instance than the one Horizon serves — the deployed server then advertises 0
 # tools (it always worked locally, where every caller already reaches this module
 # through the package import). Aliasing this module as ``tree.mcp.server`` makes
@@ -270,12 +275,11 @@ mcp = FastMCP(
 # normal package import path, where ``tree.mcp.server`` is already registered.
 sys.modules.setdefault("tree.mcp.server", sys.modules[__name__])
 
-# The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the six tools
+# The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the seven tools
 # both modes serve; the seven graph tools live behind this ``if`` so that in rag
-# mode ``tree.mcp.graph_tools`` — and, through it, ``graph_app`` /
-# ``dashboard_app`` — never even reach ``sys.modules``. A graph tool called
-# against a rag server gets the standard "unknown tool" error rather than a
-# half-working path.
+# mode ``tree.mcp.graph_tools`` — and, through it, ``dashboard_app`` — never
+# even reach ``sys.modules``. A graph tool called against a rag server gets the
+# standard "unknown tool" error rather than a half-working path.
 import tree.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
 
 if MEMORY_MODE == "graphrag":

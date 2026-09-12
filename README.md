@@ -166,7 +166,9 @@ make memory-serve-workflows &   # in-process worker; (re)serve to load local cod
 make memory-run-data-pipeline              # ingests the default sources (sources/backfill.yaml + sources/listen.yaml) → documents
 make memory-run-memory-pipeline     # documents → clean → chunk → embed → memory collection (+ LLM nodes + edges in graphrag)
 make memory-run-indexing-pipeline   # embedding backfill, text + vector search indexes
+make memory-run-clustering-pipeline # (optional) cluster child embeddings → embedding map
 make memory-query-graph QUERY="AI agents"  # interactive HTML graph (graphrag) or ranked parents as text (rag)
+make memory-visualize-embeddings           # the embedding map of the latest clustering run (both modes)
 
 make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user
 

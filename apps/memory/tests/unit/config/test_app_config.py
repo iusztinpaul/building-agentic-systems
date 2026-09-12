@@ -8,9 +8,14 @@ from tree.config.app_config import (
     AppConfig,
     ChunkingConfig,
     ChunkLevelConfig,
+    ClusteringConfig,
+    ClusterSamplingConfig,
+    ClusterSummariesConfig,
     ConcurrencyConfig,
     DreamConfig,
+    HdbscanConfig,
     MemoryConfig,
+    UmapConfig,
     YouTubeConfig,
     _DEFAULT_CONFIG_PATH,
     load_app_config,
@@ -736,3 +741,206 @@ class TestChunkingConfig:
         assert not hasattr(config.extraction, "chunk_overlap")
         assert config.memory.chunking.parent.size == 4096
         assert config.memory.chunking.child.size == 256
+
+
+class TestClusteringConfig:
+    """ADR-007 §1 / #115: the ``memory.clustering`` knobs.
+
+    Nothing computes yet (#116) — these tests pin that the BERTopic-shaped
+    recipe is READABLE from both YAML files with the numbers the ADR states,
+    that every bound fails loudly, and that the section can never grow a silent
+    ``enabled`` switch (the ON/OFF switch is the ``run_clustering`` flow
+    parameter, ADR-007 §5).
+    """
+
+    def test_clustering_block_loaded_from_frozen_config(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
+        clustering = config.memory.clustering
+
+        assert clustering.umap.n_neighbors == 15
+        assert clustering.umap.min_dist == 0.0
+        assert clustering.umap.metric == "cosine"
+        assert clustering.umap.n_components == 5
+        assert clustering.umap.random_state == 42
+        assert clustering.hdbscan.min_cluster_size == 15
+        assert clustering.hdbscan.min_samples is None
+        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
+        assert clustering.summaries.llm_concurrency == 5
+
+    def test_clustering_block_loaded_from_default_yaml(self):
+        """The real, human-tuned ``configs/default.yaml`` ships the same recipe,
+        so an unchanged checkout clusters the way ADR-007 §1 describes."""
+
+        clustering = load_app_config(_DEFAULT_CONFIG_PATH).memory.clustering
+
+        assert clustering.umap.n_components == 5
+        assert clustering.umap.metric == "cosine"
+        assert clustering.hdbscan.min_cluster_size == 15
+        assert clustering.hdbscan.min_samples is None
+        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
+        assert clustering.summaries.llm_concurrency == 5
+
+    def test_default_yaml_comment_block_explains_the_switch_and_the_2d_rule(self):
+        """The two decisions an operator MUST not have to read the ADR for: the
+        switch is the ``run_clustering`` flow parameter, and clustering happens
+        in the 5-d intermediate — never on the 2D projection."""
+
+        yaml_text = _DEFAULT_CONFIG_PATH.read_text()
+
+        assert "run_clustering" in yaml_text
+        assert "never on the 2D" in yaml_text
+
+    def test_clustering_defaults_when_section_absent(self, tmp_path):
+        custom = tmp_path / "no_clustering.yaml"
+        custom.write_text("memory:\n  mode: rag\n")
+
+        clustering = load_app_config(custom).memory.clustering
+
+        assert clustering == ClusteringConfig()
+        assert clustering.umap.n_components == 5
+        assert clustering.hdbscan.min_cluster_size == 15
+
+    def test_typed_defaults_match_the_yaml(self):
+        clustering = ClusteringConfig()
+
+        assert (clustering.umap.n_neighbors, clustering.umap.min_dist) == (15, 0.0)
+        assert clustering.umap.metric == "cosine"
+        assert (clustering.umap.n_components, clustering.umap.random_state) == (5, 42)
+        assert clustering.hdbscan.min_cluster_size == 15
+        assert clustering.hdbscan.min_samples is None
+        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
+        assert clustering.summaries.llm_concurrency == 5
+
+    def test_min_cluster_size_env_override(self, tmp_path, monkeypatch):
+        """Story 1: an operator loosens clustering for a small corpus with
+        ``TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5``, no YAML edit."""
+
+        custom = tmp_path / "clustering.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", "5")
+
+        config = load_app_config(custom)
+
+        assert config.memory.clustering.hdbscan.min_cluster_size == 5
+        # Untouched siblings keep their defaults.
+        assert config.memory.clustering.umap.n_components == 5
+        assert config.memory.clustering.sampling.nearest == 10
+
+    def test_unknown_umap_metric_raises_naming_both_allowed_values(
+        self, tmp_path, monkeypatch
+    ):
+        custom = tmp_path / "clustering.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__UMAP__METRIC", "manhattan")
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        message = str(excinfo.value)
+        assert "'cosine'" in message
+        assert "'euclidean'" in message
+
+    def test_an_enabled_key_is_a_hard_validation_error(self, tmp_path):
+        """Story 2: ``memory.clustering.enabled`` must never become a second,
+        contradicting switch — ``extra='forbid'`` rejects it at boot."""
+
+        custom = tmp_path / "clustering.yaml"
+        custom.write_text("memory:\n  clustering:\n    enabled: false\n")
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        assert "enabled" in str(excinfo.value)
+
+    def test_an_enabled_env_override_is_a_hard_validation_error(
+        self, tmp_path, monkeypatch
+    ):
+        custom = tmp_path / "clustering.yaml"
+        custom.write_text("memory:\n  mode: graphrag\n")
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__ENABLED", "true")
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        assert "enabled" in str(excinfo.value)
+
+    @pytest.mark.parametrize("n_neighbors", [1, 0, -1])
+    def test_umap_n_neighbors_below_two_raises(self, n_neighbors):
+        with pytest.raises(ValidationError):
+            UmapConfig(n_neighbors=n_neighbors)
+
+    @pytest.mark.parametrize("min_dist", [-0.1, 1.1])
+    def test_umap_min_dist_outside_the_unit_interval_raises(self, min_dist):
+        with pytest.raises(ValidationError):
+            UmapConfig(min_dist=min_dist)
+
+    def test_umap_n_components_below_two_raises(self):
+        with pytest.raises(ValidationError):
+            UmapConfig(n_components=1)
+
+    def test_hdbscan_min_cluster_size_below_two_raises(self):
+        with pytest.raises(ValidationError):
+            HdbscanConfig(min_cluster_size=1)
+
+    def test_hdbscan_min_samples_below_one_raises(self):
+        with pytest.raises(ValidationError):
+            HdbscanConfig(min_samples=0)
+
+    def test_hdbscan_min_samples_none_is_allowed(self):
+        """``null`` means "= min_cluster_size" (the sklearn default), which is
+        what the shipped YAML says."""
+
+        assert HdbscanConfig(min_samples=None).min_samples is None
+
+    def test_sampling_with_no_chunks_at_all_raises(self):
+        """A cluster summary needs at least one sampled chunk — ``0 + 0`` would
+        send the LLM an empty evidence set."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ClusterSamplingConfig(nearest=0, random=0)
+
+        message = str(excinfo.value)
+        assert "nearest" in message
+        assert "random" in message
+
+    @pytest.mark.parametrize(
+        "nearest,random_",
+        [(0, 1), (1, 0), (20, 0)],
+        ids=["random-only", "nearest-only", "nearest-only-20"],
+    )
+    def test_sampling_allows_one_empty_side(self, nearest, random_):
+        sampling = ClusterSamplingConfig(nearest=nearest, random=random_)
+
+        assert sampling.nearest + sampling.random >= 1
+
+    @pytest.mark.parametrize("field", ["nearest", "random"])
+    def test_negative_sampling_counts_raise(self, field):
+        with pytest.raises(ValidationError):
+            ClusterSamplingConfig(**{field: -1})
+
+    def test_summaries_llm_concurrency_below_one_raises(self):
+        with pytest.raises(ValidationError):
+            ClusterSummariesConfig(llm_concurrency=0)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            ClusteringConfig,
+            UmapConfig,
+            HdbscanConfig,
+            ClusterSamplingConfig,
+            ClusterSummariesConfig,
+        ],
+        ids=lambda model: model.__name__,
+    )
+    def test_every_clustering_field_documents_itself(self, model):
+        """Each knob is read by an operator in the YAML, so each carries a
+        ``Field(description=...)`` (the ``test_field_descriptions.py`` rule)."""
+
+        properties = model.model_json_schema()["properties"]
+
+        for name in model.model_fields:
+            description = properties[name].get("description")
+            assert description and description.strip(), (
+                f"{model.__name__}.{name} is missing Field(description=...)"
+            )

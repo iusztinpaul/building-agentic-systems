@@ -1,6 +1,6 @@
 # ADR-002: Pipeline Concurrency and Cross-Flow Voyage Rate-Limiting
 
-- **Status:** Accepted
+- **Status:** Accepted — §3's single-trailing-index rule (and its #066 restatement) superseded by [007](007_embedding_clusters_and_explicit_offline_phases.md): indexing is an explicit phase of `offline-pipeline`, no longer triggered by the extraction coordinator; every other decision stands
 - **Date:** 2026-05-21
 - **Deciders:** Paul (project owner)
 - **Context references:**

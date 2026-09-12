@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +418,171 @@ class ChunkingConfig(BaseModel):
         return self
 
 
+class UmapConfig(BaseModel):
+    """UMAP knobs, shared by BOTH fits of a **Clustering run** (ADR-007 §1).
+
+    Fit A reduces the 1024-d embeddings to ``n_components`` dimensions and is
+    what HDBSCAN clusters on; fit B reduces the SAME raw embeddings to 2-D for
+    display only. One block drives both so the picture and the clustering can
+    never drift apart on ``metric`` or ``random_state``.
+    """
+
+    n_neighbors: int = Field(
+        default=15,
+        ge=2,
+        description=(
+            "Local neighbourhood size UMAP balances against global structure. "
+            "Clamped down to n-1 at fit time on corpora smaller than this."
+        ),
+    )
+    min_dist: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum distance between points in the embedded space. 0.0 packs "
+            "the tightest clumps, which is what a density clusterer wants "
+            "(the BERTopic default for the clustering fit)."
+        ),
+    )
+    metric: Literal["cosine", "euclidean"] = Field(
+        default="cosine",
+        description=(
+            "Distance metric on the input embeddings. Voyage embeddings are "
+            "cosine-normalised, so 'cosine' is the matching default."
+        ),
+    )
+    n_components: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Dimensionality of the intermediate space HDBSCAN clusters in. "
+            "A handful of dimensions restores the density contrast that 1024-d "
+            "cosine space loses; display is always a SEPARATE 2-D fit."
+        ),
+    )
+    random_state: int = Field(
+        default=42,
+        description=(
+            "One seed for both UMAP fits and the sampling RNG, so a re-run on "
+            "an unchanged corpus reproduces the same map and the same evidence."
+        ),
+    )
+
+
+class HdbscanConfig(BaseModel):
+    """``sklearn.cluster.HDBSCAN`` knobs (ADR-007 §1).
+
+    Runs on the ``n_components``-d UMAP intermediate, never on the 2-D display
+    projection: clusters read off a 2-D picture are artefacts of the projection
+    rather than of the data.
+    """
+
+    min_cluster_size: int = Field(
+        default=15,
+        ge=2,
+        description=(
+            "Fewest **Child chunk**s that may form a **Memory cluster**. "
+            "Everything smaller becomes noise (cluster_id -1). Lower it for a "
+            "small corpus, e.g. "
+            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5."
+        ),
+    )
+    min_samples: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "How conservative the density estimate is; higher declares more "
+            "points noise. null = min_cluster_size (the scikit-learn default)."
+        ),
+    )
+
+
+class ClusterSamplingConfig(BaseModel):
+    """How many member chunks the summariser shows the LLM (ADR-007 §4).
+
+    A cluster of 4,000 chunks is summarised from at most ``nearest + random``
+    of them, so one LLM call per cluster stays bounded regardless of size.
+    """
+
+    nearest: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Chunks nearest the cluster centroid by cosine distance in the "
+            "ORIGINAL 1024-d embedding space (the most typical members)."
+        ),
+    )
+    random: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "Seeded random chunks drawn from the remaining members, so the "
+            "sample also shows the cluster's spread — not just its core."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_at_least_one_sample(self) -> "ClusterSamplingConfig":
+        """A summary needs evidence: ``nearest + random == 0`` would ask the LLM
+        to label a cluster from an empty sample."""
+
+        if self.nearest + self.random < 1:
+            raise ValueError(
+                "Misconfigured clustering: memory.clustering.sampling.nearest + "
+                "memory.clustering.sampling.random must be at least 1. Found "
+                f"nearest={self.nearest}, random={self.random}."
+            )
+        return self
+
+
+class ClusterSummariesConfig(BaseModel):
+    """Per-cluster LLM summarisation knobs (ADR-007 §4)."""
+
+    llm_concurrency: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Concurrent per-cluster LLM calls (one call per cluster), bounded "
+            "by its own semaphore. Separate from extraction.llm_concurrency: "
+            "clustering is mode-orthogonal, extraction is graph-only."
+        ),
+    )
+
+
+class ClusteringConfig(BaseModel):
+    """The BERTopic-shaped clustering recipe (ADR-007 §1).
+
+    UMAP to a low-dimensional intermediate -> HDBSCAN there -> a separate UMAP
+    to 2-D for display -> one LLM summary per cluster. Every number is a knob;
+    there is deliberately NO automatic parameter search.
+
+    ``extra="forbid"`` is load-bearing: the ON/OFF switch is the
+    ``run_clustering`` flow parameter of ``offline_pipeline`` (ADR-007 §5), so a
+    ``memory.clustering.enabled`` key must fail at boot rather than let the YAML
+    say "on" while the cron says "off".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    umap: UmapConfig = Field(
+        default_factory=UmapConfig,
+        description="UMAP knobs, shared by the clustering fit and the 2-D display fit.",
+    )
+    hdbscan: HdbscanConfig = Field(
+        default_factory=HdbscanConfig,
+        description="HDBSCAN knobs, applied on the UMAP intermediate space.",
+    )
+    sampling: ClusterSamplingConfig = Field(
+        default_factory=ClusterSamplingConfig,
+        description="How many member chunks each cluster summary is written from.",
+    )
+    summaries: ClusterSummariesConfig = Field(
+        default_factory=ClusterSummariesConfig,
+        description="Per-cluster LLM summarisation knobs.",
+    )
+
+
 class MemoryConfig(BaseModel):
     """The ONE memory-mode switch (ADR-006 decision 5).
 
@@ -443,11 +608,14 @@ class MemoryConfig(BaseModel):
 
     ``chunking`` is mode-independent: BOTH modes split documents into parent and
     child chunks with the same knobs (ADR-006 §6), so chunk rows are
-    byte-identical across modes.
+    byte-identical across modes. So is ``clustering`` (ADR-007): a **Clustering
+    run** reads the same child chunk rows and writes the same
+    ``memory_clusters`` rows in both modes.
     """
 
     mode: Literal["rag", "graphrag"] = "graphrag"
     chunking: ChunkingConfig = ChunkingConfig()
+    clustering: ClusteringConfig = ClusteringConfig()
 
 
 class AppConfig(BaseModel):

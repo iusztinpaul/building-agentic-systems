@@ -7,10 +7,11 @@ What lands there depends on ``memory.mode``: document / **Parent chunk** /
 
 A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
 ``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA phase OFF, so the
-run is the extraction step alone. Inside it, the extraction coordinator (#067)
-resolves the doc set, partitions it into ``min(num_shards, N)`` shards,
-dispatches one ``memory-extract-etl-worker`` run per shard, then runs ONE
-trailing ``memory_indexing`` subflow inline. Two modes select the doc set:
+run is the extraction phase plus the indexing phase. Inside it, the extraction
+coordinator (#067) resolves the doc set, partitions it into
+``min(num_shards, N)`` shards and dispatches one ``memory-extract-etl-worker``
+run per shard; then the indexing phase runs once for the user. Two modes select
+the doc set:
 
 * ``--mode offline`` (default) — batch: every PENDING document for the
   resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``
@@ -95,8 +96,8 @@ async def _run(
     type=int,
     help=(
         "[offline] Document-shard fan-out width (#067, ``>= 1``): the coordinator "
-        "dispatches one worker run per shard, then indexes once. Omit or 1 → "
-        "1 worker run + 1 index run."
+        "dispatches one worker run per shard; the indexing phase then runs once "
+        "for the user. Omit or 1 → 1 worker run + 1 indexing subflow."
     ),
 )
 def main(

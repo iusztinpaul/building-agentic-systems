@@ -68,7 +68,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.llm` — provider + model (default: `gemini` / `gemini-2.5-flash-lite`).
 - `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-multimodal-3` / 1024.
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-multimodal-3` / 1024.
-- `memory` — `mode` (`rag` | `graphrag`) and `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`).
+- `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`.
 - `mcp` — `max_retries`, `max_results`.
@@ -134,14 +134,15 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, 
   user, on its own cron — `dream.cron`, `0 4 * * *` UTC)
 
 The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) and the
-indexing step (`memory_indexing` — reverse edges, embeddings, search indexes) are still FLOWS, but
+indexing step (`memory_indexing` — embeddings backfill, search indexes) are still FLOWS, but
 they are no longer Deployments: each runs as an **inline subflow**. The Coordinators run inside an
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
-`memory_indexing` runs inside whichever flow just extracted (the extraction Coordinator, or
-`online-pipeline`). Standalone indexing
-(`make memory-run-indexing-pipeline`) now executes in the operator's own process. Manual
-single-step runs go through `make memory-run-data-pipeline` / `make memory-run-memory-pipeline`,
-which dispatch `offline-pipeline` with the other phase off.
+`memory_indexing` runs as that same run's third **Offline phase** — once per target user, after
+every user's extraction (ADR-007) — or inline inside `online-pipeline` for a single document.
+`memory_clustering` is the fourth phase, OFF by default. Every manual single-step run is the same
+`offline-pipeline` deployment with the other phases off (`make memory-run-data-pipeline` /
+`make memory-run-memory-pipeline` / `make memory-run-indexing-pipeline` /
+`make memory-run-clustering-pipeline`); no script runs a flow in the operator's own process.
 
 Both end-to-end pipelines carry BOTH identity tags, so they belong to BOTH the `data` and `memory`
 deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-down GROUPS=data`)
@@ -154,15 +155,16 @@ when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — s
 
 ### Pipelines at a glance
 
-Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand):
+Two stages — **data** (sources → `documents`) then **memory** (documents → rows of the `memory` collection, then indexing) — each runnable **offline** (config-driven batch) or **online** (one source on demand). Offline, each row below is ONE `offline-pipeline` run with a different set of **Offline phase**s on (`run_data` / `run_extraction` / `run_indexing` / `run_clustering`):
 
 | stage | offline | online |
 |---|---|---|
-| **data** → `documents` | `run-data-pipeline` | `run-data-pipeline MODE=online SOURCE=…` |
-| **memory** → `memory` rows (+ trailing index) | `run-memory-pipeline` | `run-memory-pipeline MODE=online DOC_IDS=…` |
-| **index** (shared, standalone) | `run-indexing-pipeline` | `run-indexing-pipeline` |
+| **data** → `documents` | `run-data-pipeline` (phase: `data`) | `run-data-pipeline MODE=online SOURCE=…` |
+| **memory** → `memory` rows | `run-memory-pipeline` (phases: `extraction` + `index`) | `run-memory-pipeline MODE=online DOC_IDS=…` |
+| **index** (shared, standalone) | `run-indexing-pipeline` (phase: `index`) | `run-indexing-pipeline` |
+| **clustering** → `memory_clusters` | `run-clustering-pipeline` (phase: `clustering`) | — (maintenance phase; no online form) |
 
-**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; the memory pipeline fires the trailing index, so memory is queryable when it returns:
+**Run it all in one shot** — `run-pipeline` dispatches ONE end-to-end flow run (`offline-pipeline` / `online-pipeline`, the glue flows in `tree/offline.py` / `tree/online.py`) and blocks until it finishes; offline that is all three phases in a row, so memory is queryable when it returns:
 
 ```bash
 # Offline: every configured source -> documents -> memory collection (+ index)
@@ -174,7 +176,7 @@ make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agenti
 make memory-run-pipeline MODE=online SOURCE="/path/to/notes.md" TITLE="My notes"
 ```
 
-`run-pipeline MODE=online` ingests the source and runs extraction inline in the SAME flow run, then submits the trailing indexing run (a duplicate source skips extraction). The sections below break each step out for running them individually.
+`run-pipeline MODE=online` ingests the source and runs extraction inline in the SAME flow run, then indexes that document inline (a duplicate source skips extraction). The sections below break each step out for running them individually.
 
 ### Data pipelines
 
@@ -190,7 +192,7 @@ make memory-run-data-pipeline URI="https://blog.com/feed=substack_rss https://ne
 make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
 ```
 
-Dispatches ONE `offline-pipeline` run with `run_extraction=False` (data phase only). Inside it, the data **Coordinator** runs as an inline subflow: it resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No trailing index. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
+Dispatches ONE `offline-pipeline` run with `run_extraction=False, run_indexing=False` (data phase only). Inside it, the data **Coordinator** runs as an inline subflow: it resolves its source set, groups it by platform, and dispatches one `data-etl-worker` per non-HuggingFace platform (`substack` / `youtube` / `custom`) plus `num_workers` HuggingFace offset-window workers (each worker dispatches its shard's entries to the right sub-flow — Substack RSS / article batches, YouTube RSS / video batches, HuggingFace arXiv, web URLs). No extraction, no indexing — those phases are off. Fan-out is per-source — platform bucketing is automatic and the HuggingFace fan-out width is that source's `num_workers` in `sources/backfill.yaml`, not a global flag.
 
 Source selection is freely combinable (ADR-003):
 
@@ -223,9 +225,10 @@ on [`memory.mode`](#memory-modes):
    → first-person + supersession → `resolve-entities` → `embed-entities` → `dedupe-entities` →
    `apply-writes`.
 
-Both run modes below are dispatched as ONE `offline-pipeline` run with `run_data=False` (memory
-phase only); inside it the extraction **Coordinator** runs as an inline subflow that shards the
-pending documents across `memory-extract-etl-worker` runs and fires one trailing index run:
+Both run modes below are dispatched as ONE `offline-pipeline` run with `run_data=False` (the two
+memory phases only); inside it the extraction **Coordinator** runs as an inline subflow that shards
+the pending documents across `memory-extract-etl-worker` runs, and the indexing phase then runs
+once for the user as a sibling subflow:
 
 ```bash
 # Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>)
@@ -238,14 +241,54 @@ make memory-run-memory-pipeline MODE=online DOC_IDS="507f1f77bcf86cd799439011"
 
 ### Memory indexing
 
-The single indexing step (`memory-indexing-etl`) — works in both memory modes. `embed-kg-nodes`
-backfills the vectors that are missing on the rows that are supposed to carry one (child chunks
-always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index and the vector
-index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on `memory`:
+The indexing **Offline phase** (`memory-indexing-etl`) — works in both memory modes.
+`embed-kg-nodes` backfills the vectors that are missing on the rows that are supposed to carry one
+(child chunks always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index
+and the vector index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on
+`memory`. Running it alone dispatches ONE `offline-pipeline` run with `run_data=False,
+run_extraction=False` — so it needs served workflows, like every other pipeline command:
 
 ```bash
 make memory-run-indexing-pipeline
 ```
+
+### Memory clustering
+
+The clustering **Offline phase** (`memory-clustering-etl`) — the data behind the **Embedding
+map**. Works in both memory modes and writes no graph rows and no edges (ADR-007). Four tasks:
+`load-child-embeddings` (every embedded **child chunk** of the user, in `_id` order) →
+`reduce-and-cluster` (UMAP to 5-d, `sklearn` HDBSCAN there, then a SEPARATE 2-D UMAP fit on the raw
+embeddings for display) → `summarise-cluster` (one Gemini call per cluster over ≤ 20 sampled
+members: a ≤ 6-word label, a ≤ 100-word summary, 3–5 keywords) → `write-clustering-run`.
+
+Where it lands: one row per cluster in the **`memory_clusters`** collection (`label`, `summary`,
+`keywords`, `size`, `sample_chunk_ids`, `centroid`, `run_id`), plus `cluster_id` and
+`viz {x, y, run_id}` on every child chunk. Noise gets `cluster_id: -1` and coordinates but no
+row. A run REPLACES the previous one wholesale — there is no run history — so chunks ingested
+after the last run show up as "unclustered / stale" on the map until you re-run the phase.
+
+```bash
+make memory-run-clustering-pipeline
+```
+
+It is OFF in every other entry point, the nightly cron included: this is the only command that
+clusters. What READS the result is the [Embedding map](#embedding-map) (`make
+memory-visualize-embeddings` and the `visualize_memory_embeddings` MCP tool) — surfaces draw the
+stored coordinates, they never cluster. Two notes:
+
+- **Cold start.** The first `import umap` on a machine compiles numba's kernels (~40 s; ~3 s
+  afterwards from the on-disk cache), and Prefect Managed runs are fresh containers, so every
+  cloud run pays it. Nothing else imports the stack — that is why the phase is a flag, not a
+  YAML switch.
+- **Small corpora.** Below `memory.clustering.hdbscan.min_cluster_size` (default 15) embedded
+  children the run is skipped and nothing is written (the previous run stays readable); if every
+  chunk comes back as noise the run IS written and warns. Both log the knob to turn,
+  `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE` — but set it where the FLOW runs, not where
+  you type `make`: the command only dispatches and forwards no environment, so a variable in your
+  shell is a silent no-op (the command warns when it sees one). Locally, `export
+  TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5` in the shell that runs `make
+  memory-serve-workflows` and restart it; on Prefect Managed put it in the deployment's
+  environment. Then re-run `make memory-run-clustering-pipeline` as usual.
 
 ### Query CLI
 
@@ -263,6 +306,32 @@ make memory-query-graph QUERY="Paul Iusztin"
 TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 ```
 
+#### Embedding map
+
+The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its
+stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
+legend and the document title / heading path / snippet in the tooltip. Same renderer as the graph
+(fixed coordinates, ForceAtlas2 skipped) — and identical in both memory modes, because the map has
+no edges to miss.
+
+```bash
+make memory-visualize-embeddings                        # open the latest map
+make memory-visualize-embeddings HULLS=true             # outline each cluster
+make memory-visualize-embeddings OUTPUT=/tmp/map.html USER_IDENTIFIER=paul
+```
+
+It READS; it never clusters (ADR-007 Decision 8), so two outcomes are contracts rather than bugs:
+
+- **No clustering run for this user** — it prints `No clustering run found for this user — run make
+  memory-run-clustering-pipeline to build the embedding map.` and exits 1. No empty canvas.
+- **A stale map** — chunks ingested since the last run have no coordinates, so the FIRST line of
+  output is `N of M chunks have no cluster assignment (or a stale one) — run make
+  memory-run-clustering-pipeline`; those points are left off the map and counted in the legend as
+  "unclustered / stale (not shown)". Re-run the clustering phase to clear it.
+
+The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
+and the same message — one behaviour, two surfaces.
+
 ### MCP server
 
 Expose the memory to any MCP-aware client (Claude Code, Claude Desktop, Cursor, the bundled harness):
@@ -276,7 +345,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 **Tools exposed.** The tool set IS the memory mode (`memory.mode`, ADR-006): the server reads it once at boot and registers only what that mode can honour. A graph tool called against a `rag` server returns the standard unknown-tool error — it was never registered.
 
-*Both modes (6 tools):*
+*Both modes (7 tools):*
 
 | Tool | Description |
 |---|---|
@@ -286,8 +355,9 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: chunks as points coloured by cluster, `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
 
-*`graphrag` only (7 more, 13 total):*
+*`graphrag` only (7 more, 14 total):*
 
 | Tool | Description |
 |---|---|
@@ -420,13 +490,18 @@ apps/memory/
       graph/            # Chapter 8: extraction, add_entity, dedup, validation,
                         #   judge, first_person_resolver, preference_supersession,
                         #   sharding, resolution/, review/, consolidation/,
-                        #   retrieval, kgquery, nl_query, visualize
-    mcp/                # FastMCP server + tools
+                        #   retrieval, kgquery, nl_query
+      clustering/       # neutral: the Clustering run (core, summaries, store)
+      visualize/        # neutral: the Graph renderer (graph.py) + the
+                        #   Embedding map payload (embeddings.py)
+    mcp/                # FastMCP server + tools; viz_app.py = the neutral
+                        #   MCP App layer (ui:// + graphs:// + dual delivery)
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
   configs/default.yaml  # app tuning
   deploy/               # Modal deployments (vLLM embedding)
-  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph, signup, check_db)
+  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph,
+                        #   visualize_embeddings, signup, check_db)
   tests/unit
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)

@@ -22,6 +22,25 @@ memory:
     child:
       size: 256
       overlap: 32
+  # Embedding clustering (ADR-007 §1): UMAP -> HDBSCAN in the 5-d
+  # intermediate -> a separate 2-D UMAP for display -> one LLM summary per
+  # cluster. No `enabled` key — the switch is the `run_clustering` flow
+  # parameter. The prose lives in configs/default.yaml.
+  clustering:
+    umap:
+      n_neighbors: 15 # local neighbourhood size; clamped to n-1 on small corpora
+      min_dist: 0.0 # 0 = tightest clumps (BERTopic default for clustering)
+      metric: cosine # embeddings are cosine-normalised
+      n_components: 5 # the intermediate space HDBSCAN clusters in (display is always 2D)
+      random_state: 42 # one seed for both UMAP fits + the sampling RNG
+    hdbscan:
+      min_cluster_size: 15
+      min_samples: null # null = min_cluster_size (sklearn default)
+    sampling:
+      nearest: 10 # chunks nearest the centroid (cosine, original 1024-d space)
+      random: 10 # seeded random chunks from the remainder
+    summaries:
+      llm_concurrency: 5 # concurrent Gemini calls (one call per cluster)
 
 models:
   llm:
