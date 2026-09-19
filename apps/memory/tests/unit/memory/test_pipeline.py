@@ -361,6 +361,7 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int = 4) -> None:
         self._dimensions = dimensions
         self.texts: list[str] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -370,6 +371,7 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
         self, texts: list[str], input_type: EmbeddingRole | None = None
     ) -> list[list[float]]:
         self.texts.extend(texts)
+        self.roles.append(input_type)
         return [[0.5] * self._dimensions for _ in texts]
 
 
@@ -726,8 +728,9 @@ class TestEmbedEntitiesTask:
             texts[0]: [0.1, 0.2, 0.3],
             texts[1]: [0.4, 0.5, 0.6],
         }
-        # ONE embed() call carrying BOTH node-texts (not one call per text).
-        model.embed.assert_awaited_once_with(texts)
+        # ONE embed() call carrying BOTH node-texts (not one call per text),
+        # under the persisted **Embedding role** (ADR-009 §5).
+        model.embed.assert_awaited_once_with(texts, input_type="document")
         search_factory.assert_called_once()
 
     async def test_empty_input_returns_empty_without_calling_model(
@@ -1486,6 +1489,40 @@ class TestCachedSingleEmbedding:
 
 
 # ---------------------------------------------------------------------------
+# Embedding roles on the two persisting embed tasks (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRoles:
+    """Both embed tasks write vectors that are PERSISTED, so both embed as
+    ``document`` — forced by the "dedup vector == persisted vector, computed
+    once" invariant, not chosen per task (ADR-009 §5).
+    """
+
+    async def test_embed_children_embeds_as_document(self, mocker) -> None:
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        await _embed_children(["a", "b"], embedding_identity="voyage:voyage-4:1024")
+
+        assert model.roles == ["document"]
+
+    async def test_embed_entities_embeds_as_document(self, mocker) -> None:
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        await _embed_entities(
+            ["person: Alice"], embedding_identity="voyage:voyage-4:1024"
+        )
+
+        assert model.roles == ["document"]
+
+
+# ---------------------------------------------------------------------------
 # Embed-task cache identity (ADR-009 decision 6)
 # ---------------------------------------------------------------------------
 
@@ -1501,8 +1538,18 @@ class TestEmbedTaskCacheIdentity:
     _KEY_INPUTS = {"texts": ["a", "b"]}
 
     def test_helper_returns_the_configured_embedding_identity(self) -> None:
-        # ``provider:model:dimensions`` of ``models.search_embedding``.
-        assert search_embedding_identity() == "voyage:voyage-4:1024"
+        # ``provider:model:dimensions:role`` of ``models.search_embedding``.
+        assert search_embedding_identity() == "voyage:voyage-4:1024:document"
+
+    def test_identity_includes_role(self) -> None:
+        """The identity carries the **Embedding role** the cached tasks embed
+        under, so a vector cached BEFORE roles existed (role-less, 3-part key)
+        can never be replayed into a ``document`` corpus (ADR-009 §6)."""
+
+        identity = search_embedding_identity()
+
+        assert identity.endswith(":document")
+        assert identity.count(":") == 3
 
     @pytest.mark.parametrize(
         "cached_task", [embed_children_task, embed_entities_task], ids=lambda t: t.name

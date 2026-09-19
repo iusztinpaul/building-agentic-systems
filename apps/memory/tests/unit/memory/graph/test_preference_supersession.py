@@ -156,6 +156,7 @@ class _FakeEmbedding(BaseEmbeddingModel):
 
     def __init__(self, vector: list[float]) -> None:
         self._vector = vector
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -164,6 +165,7 @@ class _FakeEmbedding(BaseEmbeddingModel):
     async def embed(
         self, texts: list[str], input_type: EmbeddingRole | None = None
     ) -> list[list[float]]:
+        self.roles.append(input_type)
         return [list(self._vector) for _ in texts]
 
 
@@ -890,3 +892,49 @@ class TestResolverNameSlugConsistency:
         id_a = build_node_id(_USER_ID, NodeType.PREFERENCE, n_run_1.name)
         id_b = build_node_id(_USER_ID, NodeType.PREFERENCE, n_run_2.name)
         assert id_a == id_b
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the new statement (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRole:
+    """The new statement's vector is WRITTEN on the superseding row, so it is
+    a persisted vector and embeds as ``document`` (ADR-009 §5).
+
+    It is also compared against the OLD row's persisted statement vector —
+    statement-vs-statement inside document space, symmetric by construction.
+    """
+
+    async def test_new_statement_embeds_as_document(self) -> None:
+        existing = _seed_preference_row(
+            name="prefers-dark-mode",
+            category="ui",
+            statement="prefers dark mode",
+            embedding=[1.0, 0.0, 0.0],
+        )
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        raw = _make_raw(
+            ExtractedNode(
+                name="prefers-light-mode",
+                type=NodeType.PREFERENCE,
+                properties={"statement": "prefers light mode", "category": "ui"},
+            )
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.91, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.95, 0.05, 0.0])
+
+        await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[raw],
+            now=datetime.now(tz=UTC),
+        )
+
+        assert embedding_model.roles == ["document"]

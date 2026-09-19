@@ -1,4 +1,5 @@
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -211,6 +212,23 @@ class TestTaskType:
         """User story 3: a caller that passes no role sends today's config."""
 
         config = await self._config_for(mock_genai_client, model="gemini-embedding-001")
+
+        assert "task_type" not in config
+        assert config["output_dimensionality"] == 256
+
+    async def test_unknown_role_is_ignored(self, mock_genai_client) -> None:
+        """A role outside ``{"query", "document", None}`` must be IGNORED, not
+        raised on (ADR-009 §5: "a provider that cannot honour a role ignores
+        it — it never raises"). Reachable from an operator override or a role
+        this provider has no mapping for yet; a bare ``KeyError`` there would
+        fail an ingestion run over a retrieval HINT.
+        """
+
+        unknown: Any = "clustering"
+
+        config = await self._config_for(
+            mock_genai_client, model="gemini-embedding-001", input_type=unknown
+        )
 
         assert "task_type" not in config
         assert config["output_dimensionality"] == 256

@@ -18,7 +18,7 @@ import logging
 from typing import Any
 
 from tree.memory.rag.cleaning import strip_invalid_chars
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ async def embed_in_batches(
     texts: list[str],
     embedding_model: BaseEmbeddingModel,
     *,
+    input_type: EmbeddingRole | None = None,
     max_inputs: int = 1000,
     max_total_tokens: int = 320_000,
     max_input_tokens: int = 32_000,
@@ -99,6 +100,11 @@ async def embed_in_batches(
     contiguous and the endpoint preserves order within a request). The 429
     backoff lives inside ``.embed()``; this batcher is strictly upstream of it.
     Defaults sit at the Voyage per-request caps for ``voyage-multimodal-3``.
+
+    ``input_type`` is the **Embedding role** (ADR-009 §5) and is forwarded
+    UNCHANGED to every request this call fans out to — one batch of texts is
+    one role. The default ``None`` is the symmetric case (resolution); callers
+    that persist their vectors pass ``"document"``.
     """
 
     if not texts:
@@ -130,12 +136,18 @@ async def embed_in_batches(
 
     vectors: list[list[float]] = []
     for start, end in chunks:
-        vectors.extend(await _embed_chunk_resilient(embedding_model, texts[start:end]))
+        vectors.extend(
+            await _embed_chunk_resilient(
+                embedding_model, texts[start:end], input_type=input_type
+            )
+        )
     return vectors
 
 
 async def _embed_chunk_resilient(
-    embedding_model: BaseEmbeddingModel, chunk: list[str]
+    embedding_model: BaseEmbeddingModel,
+    chunk: list[str],
+    input_type: EmbeddingRole | None = None,
 ) -> list[list[float]]:
     """Embed one request's chunk, skipping inputs Voyage rejects as content.
 
@@ -151,6 +163,11 @@ async def _embed_chunk_resilient(
     body verbatim into 429/5xx messages, so a transient error whose body merely
     contains the digit-run "400" (a token count, a ``Retry-After``, a request
     id) must never be misread as a content rejection and silently skipped.
+
+    ``input_type`` (the **Embedding role**, ADR-009 §5) rides through the
+    bisect recursion unchanged: both halves of a split chunk keep the role the
+    caller asked for, so a 400 can never downgrade part of a batch to a
+    different embedding space.
     """
 
     try:
@@ -160,7 +177,7 @@ async def _embed_chunk_resilient(
         # bisect-and-skip resilience, but a ``_CachedSingleEmbedding`` cache hit
         # (extraction hot path) never reaches a Voyage client, so it acquires no
         # slot — that was the timeout this relocation fixes.
-        return await embedding_model.embed(chunk)
+        return await embedding_model.embed(chunk, input_type=input_type)
     except ExtractionError as exc:
         # Only a structured HTTP 400 is a content rejection we skip; everything
         # else (429, 5xx, or a status-less ExtractionError) is transient/unknown
@@ -173,8 +190,12 @@ async def _embed_chunk_resilient(
             )
             return [[]]
         mid = len(chunk) // 2
-        left = await _embed_chunk_resilient(embedding_model, chunk[:mid])
-        right = await _embed_chunk_resilient(embedding_model, chunk[mid:])
+        left = await _embed_chunk_resilient(
+            embedding_model, chunk[:mid], input_type=input_type
+        )
+        right = await _embed_chunk_resilient(
+            embedding_model, chunk[mid:], input_type=input_type
+        )
         return left + right
 
 
@@ -203,6 +224,7 @@ async def embed_texts(
     texts: list[str],
     embedding_model: BaseEmbeddingModel,
     *,
+    input_type: EmbeddingRole | None = None,
     max_inputs: int | None = None,
     max_total_tokens: int | None = None,
     max_input_tokens: int | None = None,
@@ -213,14 +235,15 @@ async def embed_texts(
     node-texts: a **Child chunk** embeds its **Contextual header**
     (:func:`tree.memory.rag.embedding.child_embedding_text`) while an entity row
     embeds ``node_to_embedding_text``. Vectors are aligned positionally with
-    ``texts``. Caps default to ``app_config.models.embedding_batch``.
+    ``texts``. Caps default to ``app_config.models.embedding_batch``;
+    ``input_type`` is the **Embedding role** (ADR-009 §5), forwarded as-is.
     """
 
     if not texts:
         return []
 
     caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
-    return await embed_in_batches(texts, embedding_model, **caps)
+    return await embed_in_batches(texts, embedding_model, input_type=input_type, **caps)
 
 
 def _resolve_batch_caps(

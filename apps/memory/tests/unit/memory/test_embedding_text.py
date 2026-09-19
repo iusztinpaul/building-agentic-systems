@@ -61,6 +61,9 @@ class _OrderEncodingEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int = 1) -> None:
         self._dimensions = dimensions
         self.calls: list[list[str]] = []
+        # One entry per request, so a role that reaches only the FIRST chunk
+        # is visible as a shorter/mixed list rather than a passing test.
+        self.roles: list[EmbeddingRole | None] = []
         self._global_offset = 0
 
     @property
@@ -71,6 +74,7 @@ class _OrderEncodingEmbeddingModel(BaseEmbeddingModel):
         self, texts: list[str], input_type: EmbeddingRole | None = None
     ) -> list[list[float]]:
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         out = [
             [float(self._global_offset + i)] * self._dimensions
             for i, _ in enumerate(texts)
@@ -465,6 +469,9 @@ class _IdentityEncodingPoisonModel(BaseEmbeddingModel):
     def __init__(self, poison: set[str]) -> None:
         self._poison = poison
         self.calls: list[list[str]] = []
+        # One entry per request, INCLUDING the bisected halves — that is where
+        # a role would get dropped if the recursion forgot to pass it on.
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -476,6 +483,7 @@ class _IdentityEncodingPoisonModel(BaseEmbeddingModel):
         from tree.models.exceptions import ExtractionError
 
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         if any(t in self._poison for t in texts):
             raise ExtractionError(
                 "Voyage multimodal API error 400: inputs contain invalid elements",
@@ -566,6 +574,70 @@ class TestEmbedInBatchesAlignmentAdversarial:
             await embed_in_batches(
                 ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
             )
+
+
+class TestInputTypeThreading:
+    """The **Embedding role** must survive every hop of the batcher (ADR-009 §5).
+
+    Between the caller and ``.embed(...)`` sit two loops that can silently drop
+    it: the per-chunk dispatch in ``embed_in_batches`` and the bisect recursion
+    in ``_embed_chunk_resilient``. A role that reaches only the first request
+    would mix ``document`` and role-less vectors inside ONE persisted batch —
+    invisible in the vector shape, fatal to retrieval.
+    """
+
+    async def test_every_chunk_carries_the_role(self) -> None:
+        # Arrange: 5 texts under a 2-input cap -> 3 requests.
+        model = _OrderEncodingEmbeddingModel()
+        texts = [f"t{i}" for i in range(5)]
+
+        vectors = await embed_in_batches(
+            texts, model, input_type="document", max_inputs=2
+        )
+
+        # Assert: three requests, EACH carrying the role; vectors still aligned.
+        assert [len(c) for c in model.calls] == [2, 2, 1]
+        assert model.roles == ["document", "document", "document"]
+        assert vectors == [[float(i)] for i in range(5)]
+
+    async def test_bisect_preserves_the_role(self) -> None:
+        # Arrange: one poison input inside a single request, so the 400 handler
+        # bisects — the halves are separate ``.embed`` calls.
+        model = _IdentityEncodingPoisonModel(poison={"P1"})
+        texts = ["a", "P1", "c", "d"]
+
+        vectors = await embed_in_batches(
+            texts, model, input_type="document", max_inputs=1000
+        )
+
+        # Assert: the poison slot keeps its aligned ``[]`` placeholder ...
+        assert vectors == [
+            [float(ord("a"))],
+            [],
+            [float(ord("c"))],
+            [float(ord("d"))],
+        ]
+        # ... and every request of the recursion carried the role.
+        assert len(model.calls) > 1
+        assert model.roles == ["document"] * len(model.calls)
+
+    async def test_default_is_role_less(self) -> None:
+        # Symmetric callers (resolution) pass nothing and must stay role-less —
+        # the default may never quietly become ``document``.
+        model = _OrderEncodingEmbeddingModel()
+
+        await embed_in_batches(["a", "b"], model, max_inputs=1)
+
+        assert model.roles == [None, None]
+
+    async def test_embed_texts_forwards_the_role(self) -> None:
+        # ``embed_texts`` is the seam the indexing backfill calls; it resolves
+        # the caps from YAML and must not swallow the role on the way.
+        model = _OrderEncodingEmbeddingModel()
+
+        await embed_texts(["a", "b"], model, input_type="document", max_inputs=1)
+
+        assert model.roles == ["document", "document"]
 
 
 class TestEmbedChunkResilientDoesNotRateLimit:

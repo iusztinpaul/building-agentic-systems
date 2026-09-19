@@ -316,12 +316,12 @@ class TestVoyageModelIdRouting:
 
 
 class TestSearchEmbeddingIdentity:
-    """ADR-009 decision 6: ONE helper renders the identity every embed cache
-    key carries, so a model / dimension swap can never replay vectors from the
-    old embedding space.
+    """ADR-009 decisions 5 + 6: ONE helper renders the identity every embed
+    cache key carries, so a model / dimension / **Embedding role** swap can
+    never replay vectors from the old embedding space.
     """
 
-    def test_renders_provider_model_dimensions(self, mocker) -> None:
+    def test_renders_provider_model_dimensions_and_role(self, mocker) -> None:
         _set_embedding_blocks(
             mocker,
             resolution=EmbeddingConfig(provider="mock", dimensions=128),
@@ -330,7 +330,9 @@ class TestSearchEmbeddingIdentity:
             ),
         )
 
-        assert search_embedding_identity() == "voyage:voyage-4:1024"
+        # The role is the PERSISTED one: both cached embed tasks write vectors
+        # that are stored, and a persisted vector is always ``document``.
+        assert search_embedding_identity() == "voyage:voyage-4:1024:document"
 
     def test_reads_the_config_at_call_time(self, mocker) -> None:
         """An operator pinning a legacy model through the
@@ -346,7 +348,7 @@ class TestSearchEmbeddingIdentity:
             ),
         )
 
-        assert search_embedding_identity() == "voyage:voyage-3.5:1024"
+        assert search_embedding_identity() == "voyage:voyage-3.5:1024:document"
 
     def test_tracks_the_dimension_too(self, mocker) -> None:
         _set_embedding_blocks(
@@ -355,4 +357,4 @@ class TestSearchEmbeddingIdentity:
             search=EmbeddingConfig(provider="voyage", model="voyage-4", dimensions=512),
         )
 
-        assert search_embedding_identity() == "voyage:voyage-4:512"
+        assert search_embedding_identity() == "voyage:voyage-4:512:document"

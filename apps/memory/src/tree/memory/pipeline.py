@@ -493,7 +493,11 @@ async def _embed_children(
     rebuilds per child, so a missing vector degrades to ``embedding=[]`` (the
     indexing backfill picks it up) instead of misaligning rows.
 
-    ``embedding_identity`` (``provider:model:dimensions``, from
+    Embeds under the ``document`` **Embedding role**: these vectors are
+    PERSISTED on the child rows and later retrieved by a ``query`` vector
+    (ADR-009 decision 5).
+
+    ``embedding_identity`` (``provider:model:dimensions:role``, from
     :func:`tree.models.get_model.search_embedding_identity`) is NOT used by the
     body — it rides in the ``INPUTS`` cache key so this task's 90-day cache can
     never replay vectors from a previous embedding space (ADR-009 decision 6).
@@ -508,7 +512,9 @@ async def _embed_children(
         if not texts:
             return {}
 
-        vectors = await embed_in_batches(texts, get_search_embedding_model())
+        vectors = await embed_in_batches(
+            texts, get_search_embedding_model(), input_type="document"
+        )
         log.info(
             "embed_children: identity=%s n_texts=%d dim=%d",
             embedding_identity,
@@ -1176,14 +1182,17 @@ async def _embed_entities(
     Caches on ``INPUTS`` (the whole text list PLUS ``embedding_identity``), so
     an identical re-run of the same document set against the SAME embedding
     space is a cache hit; partial-overlap re-runs and model swaps re-embed.
-    ``embedding_identity`` (``provider:model:dimensions``, from
+    ``embedding_identity`` (``provider:model:dimensions:role``, from
     :func:`tree.models.get_model.search_embedding_identity`) is unused by the
     body and exists only to keep the 90-day cache from replaying vectors from
     a previous embedding space (ADR-009 decision 6). Per-run dedup of identical
     texts happens upstream (the flow embeds ``sorted(set(...))``).
 
-    Uses the **search** model — the persisted, index-coupled vector. The 429
-    backoff is untouched: it lives inside ``.embed()``, called once per chunk.
+    Uses the **search** model — the persisted, index-coupled vector — under the
+    ``document`` **Embedding role**: the vector this task computes is BOTH the
+    dedup query vector and the vector ``add_entity`` persists (ADR-009
+    decision 5). The 429 backoff is untouched: it lives inside ``.embed()``,
+    called once per chunk.
 
     ``opik_trace_headers`` attaches this task's span to the flow's trace; the
     nested Voyage/Modal embed spans (usage + cost) nest under it via contextvars.
@@ -1200,7 +1209,7 @@ async def _embed_entities(
             return {}
 
         embedding_model = get_search_embedding_model()
-        vectors = await embed_in_batches(texts, embedding_model)
+        vectors = await embed_in_batches(texts, embedding_model, input_type="document")
         log.info(
             "embed_entities: identity=%s n_texts=%d dim=%d",
             embedding_identity,
@@ -1590,6 +1599,14 @@ async def _dispatch_entity_write(
     # ``add_entity`` rebuilds the identical text via its own
     # ``_embeddable_text`` and persists this same vector on the non-merged
     # path — dedup vector == persisted vector, computed once.
+    #
+    # THIS INVARIANT FORCES THE **EMBEDDING ROLE** (ADR-009 decision 5): the
+    # vector dedup searches with is the vector we store, so it must be a
+    # ``document`` vector — hence every persisted vector is ``document``, and
+    # task ④ embeds under that role. Giving dedup a ``query`` vector would
+    # either persist a query vector or cost a second embed call; both break
+    # the invariant. Entity-vs-entity stays symmetric: both sides are
+    # ``document`` vectors.
     key = make_entity_key(source_document_id, node.type, node.name)
     canonical = (
         resolved_entity.canonical_name if resolved_entity is not None else node.name
@@ -1652,6 +1669,11 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     Used inside ``apply_writes`` so ``add_entity``'s internal
     ``embedding_model.embed([name])`` reuses the vector task ④ already
     computed instead of paying for it twice.
+
+    The cached vector IS a ``document`` vector — task ④ embeds every persisted
+    text under that **Embedding role** (ADR-009 §5) — so replaying it for a
+    caller that asks for ``"document"`` returns exactly what a fresh call
+    would.
     """
 
     def __init__(self, vector: list[float]) -> None:
@@ -1666,8 +1688,9 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     ) -> list[list[float]]:
         """Replay the seeded vector. The **Embedding role** is ignored.
 
-        The vector was already computed under its own role by task ④; this
-        wrapper never calls a provider, so a role here has nothing to act on.
+        The vector was already computed as a ``document`` vector by task ④;
+        this wrapper never calls a provider, so a role here has nothing to act
+        on.
         """
 
         return [self._vector for _ in texts]

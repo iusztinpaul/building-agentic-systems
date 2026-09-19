@@ -409,9 +409,12 @@ async def _maybe_supersede(
     """
 
     # Embed the new statement once (used both for the candidate-row
-    # write and for the OLD comparison-vector debug log).
+    # write and for the OLD comparison-vector debug log). The **Embedding
+    # role** is ``document`` (ADR-009 §5): this vector is WRITTEN on the
+    # superseding row and compared against the old row's persisted statement
+    # vector — statement-vs-statement inside document space.
     try:
-        embedded = await embedding_model.embed([new_statement])
+        embedded = await embedding_model.embed([new_statement], input_type="document")
     except Exception:  # noqa: BLE001
         logger.warning(
             "preference_supersession: failed to embed statement %r; "

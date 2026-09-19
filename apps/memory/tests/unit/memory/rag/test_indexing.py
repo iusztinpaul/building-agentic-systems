@@ -627,6 +627,7 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int = 4) -> None:
         self._dimensions = dimensions
         self.calls: list[list[str]] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -636,6 +637,7 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
         self, texts: list[str], input_type: EmbeddingRole | None = None
     ) -> list[list[float]]:
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         return [[0.1] * self._dimensions for _ in texts]
 
 
@@ -854,3 +856,38 @@ class TestEmbedNodesIsBackfillOnly:
             r.getMessage() for r in caplog.records if "Embedded" in r.getMessage()
         )
         assert "(1 skipped, will retry)" in summary
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the backfill (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRoles:
+    """The backfill refills exactly the vectors the inline path writes, so it
+    embeds under the SAME **Embedding role**: ``document`` (ADR-009 §5).
+
+    A role-less backfill would leave re-embedded rows in a different corner of
+    the embedding space than the inline-written rows — same 1024 dimensions,
+    same index, silently worse retrieval.
+    """
+
+    async def test_backfill_embeds_as_document(self) -> None:
+        person = {
+            "_id": "u:person:alice",
+            "kind": "node",
+            "type": "person",
+            "embedding": [],
+            "properties": {},
+            "name": "alice",
+        }
+        collection = AsyncMock()
+        collection.find = MagicMock(
+            return_value=AsyncMock(to_list=AsyncMock(return_value=[person]))
+        )
+        client = _wire_client(collection)
+        spy_model = _SpyEmbeddingModel(dimensions=4)
+
+        await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
+
+        assert spy_model.roles == ["document"]

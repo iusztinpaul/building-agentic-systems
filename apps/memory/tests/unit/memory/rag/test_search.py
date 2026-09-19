@@ -26,6 +26,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.memory.rag.search import SearchUnavailableError, _rrf_fuse, hybrid_search
+from tree.models.base import EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -593,3 +594,44 @@ class TestRRFFuse:
         # Both appear in both lists at different ranks.
         # "a": 1/(k+1) + 1/(k+2), "b": 1/(k+2) + 1/(k+1) → equal.
         assert abs(fused["a"]["score"] - fused["b"]["score"]) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the query vector (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class _RoleRecordingEmbeddingModel(FakeEmbeddingModel):
+    """A :class:`FakeEmbeddingModel` that records the role of every call."""
+
+    def __init__(self, dimensions: int = 4) -> None:
+        super().__init__(dimensions=dimensions)
+        self.roles: list[EmbeddingRole | None] = []
+
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        self.roles.append(input_type)
+        return await super().embed(texts, input_type)
+
+
+class TestEmbeddingRole:
+    """A user's question is the QUERY side of retrieval, so it embeds as
+    ``query`` (ADR-009 §5) — against a corpus of ``document`` vectors. This is
+    the one place asymmetry pays off, and the only role the search path may use.
+    """
+
+    async def test_query_vector_uses_query_role(self, make_collection) -> None:
+        collection = make_collection()
+        embedding_model = _RoleRecordingEmbeddingModel(dimensions=4)
+
+        await hybrid_search(
+            collection,
+            "how does the coordinator shard documents?",
+            embedding_model,
+            _USER,
+            limit=8,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert embedding_model.roles == ["query"]

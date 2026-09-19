@@ -111,8 +111,12 @@ class GeminiEmbeddingModel(BaseEmbeddingModel):
         """
 
         config: dict[str, Any] = {"output_dimensionality": self._dimensions}
-        if input_type is not None:
-            config["task_type"] = _ROLE_TO_TASK_TYPE[input_type]
+        # ``.get`` (not ``[]``): a role this provider has no mapping for is
+        # IGNORED, never raised on — ADR-009 §5 makes the role a hint, so an
+        # unmapped value must not fail an ingestion run with a ``KeyError``.
+        task_type = _ROLE_TO_TASK_TYPE.get(input_type) if input_type else None
+        if task_type:
+            config["task_type"] = task_type
 
         try:
             response = await self._client.aio.models.embed_content(

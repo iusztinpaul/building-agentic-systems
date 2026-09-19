@@ -247,7 +247,14 @@ async def add_entity(
         # input comes back as the empty placeholder ``[]``, which degrades to
         # ``embedding = []`` exactly as the previous
         # ``embedded[0] if embedded else []`` did.
-        embedded = await _embed_chunk_resilient(embedding_model, [embeddable_text])
+        #
+        # The **Embedding role** is ``document`` (ADR-009 §5) and is forced by
+        # the invariant above: this ONE vector is both the dedup query vector
+        # and the vector the non-merged path persists, and a persisted vector
+        # is a document vector.
+        embedded = await _embed_chunk_resilient(
+            embedding_model, [embeddable_text], input_type="document"
+        )
         embedding = embedded[0] if embedded else []
         raw_result = await dedupe_entity(
             database=database,

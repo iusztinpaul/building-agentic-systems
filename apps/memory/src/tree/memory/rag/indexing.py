@@ -160,10 +160,17 @@ async def _embed_batch(
     per-request caps allow (1000 inputs / 320K tokens). The returned vectors are
     positionally aligned with ``docs`` (across multiple requests), so the zip
     below is safe.
+
+    Embeds as ``document`` (ADR-009 §5): the backfill refills exactly the
+    vectors the inline path persists, so it must use the same **Embedding
+    role** — otherwise re-embedded rows land in a different corner of the
+    space than inline-written rows, at the same dimension.
     """
 
     vectors = await embed_texts(
-        [node_embedding_text(doc) for doc in docs], embedding_model
+        [node_embedding_text(doc) for doc in docs],
+        embedding_model,
+        input_type="document",
     )
 
     # Skip inputs the batcher could not embed (empty placeholder from a Voyage

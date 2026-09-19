@@ -117,24 +117,32 @@ def get_search_embedding_model() -> BaseEmbeddingModel:
 
 
 def search_embedding_identity() -> str:
-    """Identity of the persisted (search) embedding space: ``provider:model:dims``.
+    """Identity of the persisted embedding space: ``provider:model:dims:role``.
 
     ADR-009 decision 6: the 90-day Prefect ``INPUTS`` cache on
     ``embed-children`` / ``embed-entities`` was keyed on the text list alone,
     so re-extracting an already-seen document after a model swap replayed
     vectors from the OLD embedding space. Both tasks take this string as an
-    input, which puts it in the cache key — a model or dimension change is a
-    cache MISS instead of a silent replay.
+    input, which puts it in the cache key — a model, dimension or **Embedding
+    role** change is a cache MISS instead of a silent replay.
+
+    The role is the literal ``document`` rather than an argument: BOTH cached
+    tasks embed vectors that are PERSISTED, and a persisted vector is always
+    ``document`` (ADR-009 decision 5, forced by "dedup vector == persisted
+    vector"). Nothing role-less or ``query``-shaped is cached, so there is no
+    second identity to render. Pinning it here is also what retires the
+    role-less 3-part keys: a vector cached before roles existed can never be
+    replayed into a ``document`` corpus.
 
     Read from ``app_config`` at CALL time (never a module constant): Prefect
     re-imports this module inside flow-run subprocesses, and a
     ``TREE_MODELS__SEARCH_EMBEDDING__MODEL=voyage-3.5`` override must move the
     identity with it. With the shipped defaults the value is
-    ``"voyage:voyage-4:1024"``.
+    ``"voyage:voyage-4:1024:document"``.
     """
 
     cfg = app_config.models.search_embedding
-    return f"{cfg.provider}:{cfg.model}:{cfg.dimensions}"
+    return f"{cfg.provider}:{cfg.model}:{cfg.dimensions}:document"
 
 
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:

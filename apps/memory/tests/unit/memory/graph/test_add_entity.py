@@ -28,6 +28,7 @@ from tree.memory.graph.dedup import (
     MergeStrategy,
 )
 from tree.memory.graph.resolution.types import ResolvedEntity
+from tree.memory.pipeline import _CachedSingleEmbedding
 from tree.models.base import EmbeddingRole
 
 
@@ -516,6 +517,7 @@ class _RecordingEmbeddingModel:
 
     def __init__(self) -> None:
         self.embedded_texts: list[str] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -530,6 +532,7 @@ class _RecordingEmbeddingModel:
         self, texts: list[str], input_type: EmbeddingRole | None = None
     ) -> list[list[float]]:
         self.embedded_texts.extend(texts)
+        self.roles.append(input_type)
         return [self._vec(t) for t in texts]
 
 
@@ -854,3 +857,65 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         text_rate_limit.assert_awaited_once_with(
             "voyage-embeddings", occupy=1, strict=False
         )
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the dedup / persisted vector (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRole:
+    """``add_entity`` embeds as ``document`` — forced, not chosen (ADR-009 §5).
+
+    The vector it computes is BOTH the dedup query vector and the vector the
+    non-merged path persists ("dedup vector == persisted vector, computed
+    once"). A persisted vector is a ``document`` vector, so a ``query`` role
+    here would either store a query vector or force a second embed call.
+    """
+
+    async def test_dedup_embed_uses_the_document_role(self, mocker) -> None:
+        database, _collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Andrej Karpathy"),
+            user_id=_USER_ID,
+            name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        assert model.roles == ["document"]
+
+    async def test_cached_vector_is_persisted_unchanged(self, mocker) -> None:
+        """The extraction hot path injects ``_CachedSingleEmbedding`` (task ④'s
+        already-computed ``document`` vector). Passing a role must not make
+        ``add_entity`` recompute or alter it — the invariant is unchanged."""
+
+        database, collection = _make_database(mocker)
+        cached_vector = [0.25] * 8
+        model = _CachedSingleEmbedding(cached_vector)
+        dedupe = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Prefect Technologies"),
+            user_id=_USER_ID,
+            name="Prefect Technologies",
+            entity_type=NodeType.ORGANIZATION,
+            properties={},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # The dedup lookup and the persisted row hold the SAME cached vector.
+        assert dedupe.await_args.kwargs["embedding"] == cached_vector
+        node_call = collection.update_one.call_args_list[0]
+        set_stage = node_call.args[1][0]["$set"]
+        assert set_stage["embedding"]["$ifNull"][1] == cached_vector
