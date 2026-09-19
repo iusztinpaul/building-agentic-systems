@@ -850,7 +850,7 @@ class ModalEmbeddingModelConfig(BaseModel):
         if not self.endpoint_name:
             raise ValueError(
                 f"repo_id {self.repo_id!r} derives an empty endpoint name: the "
-                "part after '/' must contain at least one letter or digit "
+                "part after '/' must contain at least one ASCII letter or digit "
                 "(everything else is collapsed away)."
             )
         return self

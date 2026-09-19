@@ -12,6 +12,7 @@ module stays importable without the ``local-models`` extra
 (``tests/unit/models/test_modal_catalog.py::test_catalog_does_not_import_modal``).
 """
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ from tree.config.app_config import (
     ServingPath,
     app_config,
 )
+from tree.config.settings import settings
 from tree.models.base import EmbeddingRole
 from tree.models.exceptions import ModelError
 
@@ -40,6 +42,35 @@ DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
 FallbackEngine = Literal["sglang", "vllm"]
 
 _SERVING_PATHS: tuple[ServingPath, ...] = ("endpoint", "sglang", "vllm")
+
+# Where a Dedicated endpoint's requests ENTER Modal (`--routing-region`;
+# Modal's own default is `us-west`). One region for the whole catalog: the
+# memory's callers are European, and compute placement stays Modal's choice —
+# `--compute-region` costs a region-selection price multiplier.
+MODAL_ROUTING_REGION = "eu-west"
+
+# The CLI flag that carries the Hugging Face token. Verified on the PINNED
+# client (modal 1.5.5, `modal endpoint create --help`, 2026-09-19): the flag
+# takes a TEXT value and lists NO `[env var: ...]` form, so the token travels
+# as argv and every logged copy must pass through `redact_argv` (ADR-009 §9).
+_HF_TOKEN_FLAG = "--custom-hf-token"
+
+# What the driver says when a deploy or a smoke test fails with NO token set.
+# The gated-repo download fails inside the engine at container start, so this
+# is a hint, not a diagnosis — there is no pre-flight Hub call (ADR-009 §9).
+HF_TOKEN_HINT = (
+    "If {repo_id} is a private or gated Hugging Face repo, set HF_TOKEN in "
+    ".env (read-scope token: https://huggingface.co/settings/tokens) and "
+    "deploy again."
+)
+
+# The fallback deploy script per engine, relative to `apps/memory` (the cwd of
+# every `make memory-*` target). They arrive in #142; until then an
+# `sglang`/`vllm` deploy exits 2 on the missing file.
+_FALLBACK_SCRIPTS: dict[FallbackEngine, str] = {
+    "sglang": "deploy/modal_sglang_embedding.py",
+    "vllm": "deploy/modal_vllm_embedding.py",
+}
 
 
 class EmbeddingDeploySpec(BaseModel):
@@ -200,3 +231,146 @@ def prompt_for(
     if input_type == "document":
         return entry.document_prompt
     return ""
+
+
+def modal_proxy_bearer() -> str:
+    """The ``Authorization: Bearer`` value for every catalog app.
+
+    Modal joins a **Proxy token**'s two halves with a ``.`` — the same scheme
+    OpenAI clients use, so the value doubles as the ``api_key`` of an
+    OpenAI-compatible client (ADR-009 §4).
+
+    Raises:
+        ModelError: either half is empty. A half token is no token: Modal's
+            edge would answer 401 before any container wakes.
+    """
+
+    token_id = settings.modal_proxy_token_id.get_secret_value()
+    token_secret = settings.modal_proxy_token_secret.get_secret_value()
+    if not token_id or not token_secret:
+        raise ModelError(
+            "Modal proxy token is required. Set MODAL_PROXY_TOKEN_ID and "
+            "MODAL_PROXY_TOKEN_SECRET."
+        )
+    return f"{token_id}.{token_secret}"
+
+
+def modal_cli_command(
+    action: Literal["deploy", "stop"],
+    entry: ModalEmbeddingModelConfig,
+    serving: ServingPath,
+) -> list[str]:
+    """The ``modal`` argv that deploys or stops ``entry`` on ``serving``.
+
+    ALWAYS token-free, so the driver can log it verbatim and a test can assert
+    on it (ADR-009 §9). The Hugging Face token is appended separately by
+    :func:`hf_token_args`, at the ``subprocess.run`` boundary.
+
+    ``--unauthenticated`` is never passed: **Proxy token** auth is the only
+    auth (ADR-009 §4), and Modal requires it by default.
+
+    Verified on modal 1.5.5 (2026-09-19): ``modal endpoint create --name
+    --model --routing-region --custom-hf-repo --custom-hf-revision``;
+    ``modal endpoint stop [-y] ENDPOINT_IDENTIFIER`` and ``modal app stop
+    [-y] APP_IDENTIFIER`` both resolve a NAME and both prompt without ``-y``.
+    """
+
+    if serving == "endpoint":
+        if action == "stop":
+            return ["modal", "endpoint", "stop", "-y", entry.endpoint_name]
+
+        argv = [
+            "modal",
+            "endpoint",
+            "create",
+            "--name",
+            entry.endpoint_name,
+            "--model",
+            entry.base_model,
+        ]
+        # Custom weights: Modal serves `repo_id` on `base_model`'s recipe.
+        if entry.repo_id != entry.base_model:
+            argv += [
+                "--custom-hf-repo",
+                entry.repo_id,
+                "--custom-hf-revision",
+                entry.revision,
+            ]
+        return argv + ["--routing-region", MODAL_ROUTING_REGION]
+
+    if action == "stop":
+        return ["modal", "app", "stop", "-y", entry.app_name]
+    return ["modal", "deploy", _FALLBACK_SCRIPTS[serving]]
+
+
+def fallback_script(serving: ServingPath) -> str | None:
+    """The deploy script ``serving`` needs, or ``None`` for ``endpoint``.
+
+    A Dedicated endpoint has no script of ours — which is exactly why the
+    driver must not look for one before running the command.
+    """
+
+    return _FALLBACK_SCRIPTS.get(serving)
+
+
+def hf_token_args(
+    entry: ModalEmbeddingModelConfig, serving: ServingPath, token: str
+) -> list[str]:
+    """The ``--custom-hf-token`` pair, or ``[]`` (ADR-009 §9).
+
+    Appended ONLY for custom weights on a Dedicated endpoint: Modal documents
+    the flag as the token "for private --custom-hf-repo" (re-verified in
+    ``modal endpoint create --help`` on modal 1.5.5). The fallback scripts get
+    the token as an ephemeral ``modal.Secret`` instead (#142), and an empty
+    token changes no argv at all.
+    """
+
+    if not token or serving != "endpoint" or entry.repo_id == entry.base_model:
+        return []
+    return [_HF_TOKEN_FLAG, token]
+
+
+def redact_argv(argv: list[str]) -> list[str]:
+    """A COPY of ``argv`` with every token value replaced by ``***``.
+
+    The single door every logged argv passes through. It copies rather than
+    redacts in place because the caller runs the original argv right after
+    logging this one.
+    """
+
+    redacted = list(argv)
+    # Scan the ORIGINAL, write into the copy: scanning the copy would read a
+    # `***` it just wrote and let a second token slip through.
+    for index, item in enumerate(argv[:-1]):
+        if item == _HF_TOKEN_FLAG:
+            redacted[index + 1] = "***"
+    return redacted
+
+
+def truncate_embedding(vector: list[float], dimensions: int) -> list[float]:
+    """The first ``dimensions`` components of ``vector``, L2-renormalised.
+
+    Matryoshka truncation done CLIENT-side (ADR-009 §3), because no request of
+    ours ever carries an OpenAI ``dimensions`` parameter: vLLM answers 400 to
+    it unless the model's HF config is flagged Matryoshka (voyage-4-nano's is
+    not) and a managed recipe exposes no flag to change that. Slice-then-
+    normalise is what a server-side truncation does, and it behaves
+    identically on all three Serving paths.
+
+    A zero vector is returned sliced (no division by zero) — a degenerate
+    vector is a server problem, caught by the length and sanity assertions
+    around this call, not here.
+
+    Raises:
+        ModelError: ``dimensions`` is wider than ``vector`` — truncation
+            cannot invent components.
+    """
+
+    if dimensions > len(vector):
+        raise ModelError(f"cannot truncate a {len(vector)}-d vector to {dimensions}-d")
+
+    head = vector[:dimensions]
+    norm = math.sqrt(sum(value * value for value in head))
+    if norm == 0.0:
+        return head
+    return [value / norm for value in head]

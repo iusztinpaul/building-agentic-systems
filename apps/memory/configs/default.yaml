@@ -205,8 +205,9 @@ modal:
       serving: endpoint
       base_model: Qwen/Qwen3-Embedding-0.6B # == repo_id -> no custom weights
       native_dimensions: 1024
-      # The card says MRL 32-1024, but nothing proves the recipe Modal picks
-      # honours an OpenAI `dimensions` argument — empty until #141 shows it live.
+      # The card says MRL 32-1024; empty because the 1024-d vector_index needs
+      # nothing smaller. The client truncates client-side (ADR-009 §3) — list a
+      # size only when a config asks for it.
       matryoshka_dimensions: []
       # Byte-exact from the model card's helper:
       #   f'Instruct: {task_description}\nQuery:{query}'  (no space after Query:)

@@ -6,22 +6,32 @@ and the client (#140) read, so a test against a hand-rolled fixture would
 prove nothing about what an operator boots.
 """
 
+import math
 import subprocess
 import sys
 
 import pytest
+from pydantic import SecretStr
 
 from tree.config.app_config import ModalEmbeddingModelConfig
+from tree.models import modal_catalog
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import (
     DEPLOY_SPEC_ENV,
     EMBEDDING_SERVER_NAME,
+    HF_TOKEN_HINT,
+    MODAL_ROUTING_REGION,
     EmbeddingDeploySpec,
     build_deploy_spec,
     build_server_args,
     get_catalog_entry,
+    hf_token_args,
+    modal_cli_command,
+    modal_proxy_bearer,
     prompt_for,
+    redact_argv,
     resolve_serving,
+    truncate_embedding,
 )
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
@@ -247,6 +257,272 @@ class TestPrompts:
 
         assert prompt_for(qwen_entry, "document") == ""
         assert prompt_for(qwen_entry, "query").startswith("Instruct: ")
+
+
+class TestProxyBearer:
+    """**Proxy token** auth (ADR-009 §4): the ONE credential every Serving
+    path is reached through, joined exactly the way Modal documents it."""
+
+    def test_joins_the_id_and_the_secret_with_a_dot(self, mocker) -> None:
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_id", SecretStr("wk-1")
+        )
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_secret", SecretStr("ws-2")
+        )
+
+        assert modal_proxy_bearer() == "wk-1.ws-2"
+
+    @pytest.mark.parametrize(
+        "token_id,token_secret",
+        [("", "ws-2"), ("wk-1", ""), ("", "")],
+        ids=["no-id", "no-secret", "neither"],
+    )
+    def test_a_missing_half_names_both_env_vars(
+        self, mocker, token_id: str, token_secret: str
+    ) -> None:
+        """Half a proxy token is no proxy token: the operator is told the two
+        names to put in ``.env``, not handed a 401 from Modal's edge."""
+
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_id", SecretStr(token_id)
+        )
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_secret", SecretStr(token_secret)
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            modal_proxy_bearer()
+
+        message = str(excinfo.value)
+        assert "MODAL_PROXY_TOKEN_ID" in message
+        assert "MODAL_PROXY_TOKEN_SECRET" in message
+
+
+class TestModalCliCommand:
+    """The argv the driver runs. Token-free BY CONSTRUCTION (ADR-009 §9), so
+    it is safe to log and to assert on."""
+
+    def test_endpoint_without_custom_weights(self, qwen_entry) -> None:
+        """Story 1: ``repo_id == base_model``, so Modal serves its own catalog
+        model — no ``--custom-hf-*`` may appear."""
+
+        assert modal_cli_command("deploy", qwen_entry, "endpoint") == [
+            "modal",
+            "endpoint",
+            "create",
+            "--name",
+            "qwen3-embedding-0-6b",
+            "--model",
+            _QWEN,
+            "--routing-region",
+            "eu-west",
+        ]
+
+    def test_endpoint_with_custom_weights(self, voyage_entry) -> None:
+        """Story 2: a repo_id that differs from base_model is served as CUSTOM
+        weights on the base model's recipe."""
+
+        assert modal_cli_command("deploy", voyage_entry, "endpoint") == [
+            "modal",
+            "endpoint",
+            "create",
+            "--name",
+            "voyage-4-nano",
+            "--model",
+            _QWEN,
+            "--custom-hf-repo",
+            _VOYAGE,
+            "--custom-hf-revision",
+            _VOYAGE_SHA,
+            "--routing-region",
+            "eu-west",
+        ]
+
+    def test_never_public_never_token(self, qwen_entry, voyage_entry, mocker) -> None:
+        """Two invariants in one: proxy auth is never waived
+        (``--unauthenticated``), and the token joins the argv at the
+        ``subprocess.run`` boundary ONLY — even with one set."""
+
+        mocker.patch.object(
+            modal_catalog.settings, "hf_token", SecretStr("hf_secret123")
+        )
+
+        for action in ("deploy", "stop"):
+            for entry in (qwen_entry, voyage_entry):
+                for serving in ("endpoint", "sglang", "vllm"):
+                    argv = modal_cli_command(action, entry, serving)
+
+                    assert "--unauthenticated" not in argv
+                    assert "--custom-hf-token" not in argv
+                    assert "hf_secret123" not in argv
+
+    def test_script_and_stop_commands(self, qwen_entry, voyage_entry) -> None:
+        """The two fallback paths deploy a script FILE, and every path is
+        stopped by the name it was created with."""
+
+        assert modal_cli_command("deploy", voyage_entry, "vllm") == [
+            "modal",
+            "deploy",
+            "deploy/modal_vllm_embedding.py",
+        ]
+        assert modal_cli_command("deploy", qwen_entry, "sglang") == [
+            "modal",
+            "deploy",
+            "deploy/modal_sglang_embedding.py",
+        ]
+        assert modal_cli_command("stop", qwen_entry, "endpoint") == [
+            "modal",
+            "endpoint",
+            "stop",
+            "-y",
+            "qwen3-embedding-0-6b",
+        ]
+        # `-y` verified NECESSARY on the pinned client (modal 1.5.5,
+        # modal/cli/app.py:573 `if not yes: ... confirm_or_suggest_yes`):
+        # without it `modal app stop` pauses for a confirmation no driver can
+        # answer.
+        assert modal_cli_command("stop", qwen_entry, "sglang") == [
+            "modal",
+            "app",
+            "stop",
+            "-y",
+            "ep-qwen3-embedding-0-6b",
+        ]
+
+    def test_the_routing_region_is_pinned(self) -> None:
+        assert MODAL_ROUTING_REGION == "eu-west"
+
+
+class TestHfTokenArgs:
+    """The ONE place the Hugging Face token joins an argv (ADR-009 §9)."""
+
+    def test_custom_weights_on_an_endpoint_get_the_token(self, voyage_entry) -> None:
+        assert hf_token_args(voyage_entry, "endpoint", "hf_secret123") == [
+            "--custom-hf-token",
+            "hf_secret123",
+        ]
+
+    @pytest.mark.parametrize(
+        "entry_name,serving,token",
+        [
+            ("qwen_entry", "endpoint", "hf_secret123"),
+            ("voyage_entry", "vllm", "hf_secret123"),
+            ("voyage_entry", "sglang", "hf_secret123"),
+            ("voyage_entry", "endpoint", ""),
+        ],
+        ids=["no-custom-weights", "vllm-path", "sglang-path", "no-token"],
+    )
+    def test_every_other_case_adds_nothing(
+        self, request, entry_name: str, serving: str, token: str
+    ) -> None:
+        """Modal documents ``--custom-hf-token`` as the token "for private
+        --custom-hf-repo", the fallback scripts receive it as a Secret (#142),
+        and an empty token must change no argv at all."""
+
+        entry = request.getfixturevalue(entry_name)
+
+        assert hf_token_args(entry, serving, token) == []
+
+
+class TestRedactArgv:
+    """Every argv the driver logs passes through here."""
+
+    def test_the_value_after_the_flag_becomes_stars(self) -> None:
+        assert redact_argv(
+            ["modal", "endpoint", "create", "--custom-hf-token", "hf_secret123"]
+        ) == ["modal", "endpoint", "create", "--custom-hf-token", "***"]
+
+    def test_a_repeated_flag_redacts_every_value(self) -> None:
+        """Redaction is a discipline, not a type (ADR-009 §9): it must not
+        depend on the argv carrying exactly one token pair."""
+
+        assert redact_argv(
+            [
+                "modal",
+                "--custom-hf-token",
+                "hf_secret123",
+                "--custom-hf-token",
+                "hf_other456",
+            ]
+        ) == ["modal", "--custom-hf-token", "***", "--custom-hf-token", "***"]
+
+    def test_an_argv_without_the_flag_is_unchanged(self) -> None:
+        argv = ["modal", "endpoint", "create", "--name", "voyage-4-nano"]
+
+        assert redact_argv(argv) == argv
+
+    def test_the_input_is_not_mutated(self) -> None:
+        """The caller runs the ORIGINAL argv after logging the redacted copy —
+        redacting in place would send ``***`` to Modal as the token."""
+
+        argv = ["modal", "--custom-hf-token", "hf_secret123"]
+
+        redact_argv(argv)
+
+        assert argv == ["modal", "--custom-hf-token", "hf_secret123"]
+
+    def test_a_trailing_flag_does_not_raise(self) -> None:
+        """A malformed argv must not crash the logging path."""
+
+        assert redact_argv(["modal", "--custom-hf-token"]) == [
+            "modal",
+            "--custom-hf-token",
+        ]
+
+
+class TestHfTokenHint:
+    def test_the_hint_names_the_repo_and_the_env_var(self) -> None:
+        hint = HF_TOKEN_HINT.format(repo_id=_VOYAGE)
+
+        assert hint.startswith(f"If {_VOYAGE} is a private or gated")
+        assert "HF_TOKEN" in hint
+        assert "https://huggingface.co/settings/tokens" in hint
+
+
+class TestTruncateEmbedding:
+    """Client-side Matryoshka truncation (ADR-009 §3) — the ONE helper the
+    smoke test and the client share, so what the smoke test proves is exactly
+    what reaches the 1024-d mongot index."""
+
+    def test_slices_then_renormalises(self) -> None:
+        result = truncate_embedding([3.0, 4.0, 12.0], 2)
+
+        assert result == pytest.approx([0.6, 0.8], abs=1e-9)
+
+    def test_a_native_width_vector_comes_back_unit_length(self) -> None:
+        """voyage-4-nano's 2048 -> 1024: the width the memory stores."""
+
+        vector = [1.0 / math.sqrt(2048)] * 2048
+
+        result = truncate_embedding(vector, 1024)
+
+        assert len(result) == 1024
+        assert math.sqrt(sum(v * v for v in result)) == pytest.approx(1.0, abs=1e-6)
+
+    def test_truncating_to_the_full_width_renormalises(self) -> None:
+        vector = [3.0, 4.0]
+
+        assert truncate_embedding(vector, len(vector)) == pytest.approx([0.6, 0.8])
+
+    def test_a_zero_vector_is_returned_sliced(self) -> None:
+        """No division by zero: a degenerate vector is a server problem, and
+        the length assertion above it is what catches it."""
+
+        assert truncate_embedding([0.0, 0.0, 0.0], 2) == [0.0, 0.0]
+
+    def test_widening_is_refused(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            truncate_embedding([1.0] * 1024, 2048)
+
+        assert "cannot truncate a 1024-d vector to 2048-d" in str(excinfo.value)
+
+    def test_the_input_is_not_mutated(self) -> None:
+        vector = [3.0, 4.0, 12.0]
+
+        truncate_embedding(vector, 2)
+
+        assert vector == [3.0, 4.0, 12.0]
 
 
 def test_catalog_does_not_import_modal() -> None:

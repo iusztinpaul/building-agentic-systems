@@ -89,6 +89,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 | `GOOGLE_API_KEY` | **yes** | — | Gemini (LLM extraction + NL query) |
 | `VOYAGE_API_KEY` | no | — | Voyage AI embeddings (alternative embedder) |
 | `MODAL_EMBEDDING_API_KEY` | no | — | Auth for the Modal-hosted vLLM embedding server |
+| `HF_TOKEN` | no | — | Hugging Face token — only to serve a private or gated repo on Modal |
 | `BRIGHTDATA_API_KEY` | no | — | Bright Data API key (Web Unlocker fallback + SERP API) |
 | `BRIGHTDATA_UNLOCKER_ZONE` | no | — | Bright Data Web Unlocker zone (used by the web fallback ingest pipeline) |
 | `BRIGHTDATA_SERP_ZONE` | no | — | Bright Data SERP zone (used by `search_web`) |

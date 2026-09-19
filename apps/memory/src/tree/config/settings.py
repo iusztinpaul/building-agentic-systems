@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     google_api_key: SecretStr = SecretStr("")
     voyage_api_key: SecretStr = SecretStr("")
     modal_embedding_api_key: SecretStr = SecretStr("")
+    # Modal **Proxy token** — the ONLY auth in front of every Embedding
+    # catalog app, on all three Serving paths (ADR-009 §4). Minted in Modal ->
+    # Settings -> Proxy Auth Tokens; the two halves are sent joined by a `.`
+    # as `Authorization: Bearer <id>.<secret>`.
+    modal_proxy_token_id: SecretStr = SecretStr("")
+    modal_proxy_token_secret: SecretStr = SecretStr("")
+    # OPTIONAL Hugging Face token (ADR-009 §9), the variable name
+    # `huggingface_hub`, vLLM and SGLang read natively. A weight-DOWNLOAD
+    # credential for private or gated repos, never serving auth; empty (the
+    # default) is exactly today's behaviour for public repos, and nothing ever
+    # requires it. One workspace credential, so it is not a catalog field.
+    hf_token: SecretStr = SecretStr("")
     brightdata_api_key: SecretStr = SecretStr("")
     brightdata_unlocker_zone: str = ""
     brightdata_serp_zone: str = ""

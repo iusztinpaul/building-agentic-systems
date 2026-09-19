@@ -86,16 +86,17 @@ lint-check: # Check code for linting issues without fixing them using ruff linte
 #
 ### --- Modal ---
 
-deploy-embedding-model: # Deploy vLLM embedding server (voyage-4-nano) to Modal. Creates the API key secret if missing.
-	@uv run modal secret list 2>/dev/null | grep -q "vllm-embedding-api" || \
-		uv run modal secret create vllm-embedding-api-key MODAL_EMBEDDING_API_KEY="$(MODAL_EMBEDDING_API_KEY)"
-	uv run modal deploy deploy/modal_vllm_embedding.py
+deploy-embedding-model: # Serve ONE Embedding catalog model on Modal as its own app (ep-<model>) via the entry's Serving path — endpoint (Modal Dedicated Endpoint, default) | sglang | vllm (our fallback scripts). Requires MODEL=<repo_id>, e.g. MODEL=Qwen/Qwen3-Embedding-0.6B. Optional SERVING=endpoint|sglang|vllm overrides the YAML for this command only (the client still reads the YAML).
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model MODEL=<repo_id> [SERVING=endpoint|sglang|vllm]'; exit 1; fi
+	uv run python scripts/modal_embedding_model.py deploy --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",)
 
-deploy-embedding-model-test: # Test the deployed vLLM embedding server on Modal.
-	uv run modal run deploy/modal_vllm_embedding.py
+deploy-embedding-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token). Requires MODEL=<repo_id>.
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model-test MODEL=<repo_id>'; exit 1; fi
+	uv run python scripts/modal_embedding_model.py test --model "$(MODEL)"
 
-deploy-embedding-model-stop: # Stop the deployed vLLM embedding server on Modal.
-	uv run modal app stop vllm-embedding-models
+deploy-embedding-model-stop: # Stop one catalog model on Modal. Requires MODEL=<repo_id>; pass the same SERVING= you deployed with.
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model-stop MODEL=<repo_id> [SERVING=endpoint|sglang|vllm]'; exit 1; fi
+	uv run python scripts/modal_embedding_model.py stop --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",)
 
 ### --- MongoDB ---
 

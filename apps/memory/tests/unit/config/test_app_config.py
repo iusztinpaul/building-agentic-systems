@@ -1178,7 +1178,14 @@ class TestModalCatalog:
                 # Not in the AC: found by QA. `-` passes _REPO_ID_PATTERN but
                 # the derivation collapses it away, so the app would be `ep-`.
                 [{**_VALID_ENTRY, "repo_id": "acme/---"}],
-                ["'acme/---'", "derives an empty endpoint name"],
+                [
+                    "'acme/---'",
+                    "derives an empty endpoint name",
+                    # The derivation is ASCII-only (`[^a-z0-9]+` -> `-`), so
+                    # the message must not promise that a non-ASCII letter
+                    # survives it.
+                    "at least one ASCII letter or digit",
+                ],
                 id="repo-id-deriving-an-empty-endpoint-name",
             ),
             pytest.param(
