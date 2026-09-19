@@ -4,12 +4,12 @@ status: pending
 feature: voyage-4-and-modal-embedding-catalog
 ---
 
-# `ModalEmbeddingModel`: resolve from the Embedding catalog, proxy-token auth, Matryoshka guard, client-side prompts; retire `MODAL_EMBEDDING_API_KEY`
+# `ModalEmbeddingModel`: resolve from the Embedding catalog on any Serving path, proxy-token auth, Matryoshka guard, client-side prompts; retire `MODAL_EMBEDDING_API_KEY`
 
 Tags: `models`, `modal`, `config`, `ci`
 Depends on: #135, #138, #139
 Blocks: #141
-Implements: ADR-009 — Decision 3 (catalog lookup), Decision 4 (Proxy token auth, client side), Decision 5 (Modal role mapping)
+Implements: ADR-009 — Decision 3 (catalog lookup, one URL lookup for all Serving paths), Decision 4 (Proxy token auth, client side), Decision 5 (Modal role mapping)
 
 ## Scope
 
@@ -18,62 +18,81 @@ Implements: ADR-009 — Decision 3 (catalog lookup), Decision 4 (Proxy token aut
   Delete `_DEFAULT_APP_NAME`, `_DEFAULT_FUNCTION_NAME`, the `app_name` / `function_name` params and
   the `_MODEL_NATIVE_DIMENSIONS` table (it cites a `deploy/embedding_models.py` that never existed).
   `entry = get_catalog_entry(model)` at construction — an unknown model fails THERE with the catalog error.
-- Empty `proxy_token` → `ModelError("Modal proxy token is required. Set MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET.")`.
-- Matryoshka guard at construction: `dimensions in (None, entry.native_dimensions)` → native, and
-  `dimensions=` is NOT sent on the wire; `dimensions in entry.matryoshka_dimensions` → sent as
-  `dimensions=`; anything else → `ModelError("Qwen/Qwen3-Embedding-0.6B cannot produce 512-d vectors: native 1024, matryoshka_dimensions []. Set models.<block>.dimensions to 1024 or extend the Embedding catalog entry.")`.
+- Empty `proxy_token` -> `ModelError("Modal proxy token is required. Set MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET.")`.
+- Matryoshka guard at construction: `dimensions in (None, entry.native_dimensions)` -> native, and
+  `dimensions=` is NOT sent on the wire; `dimensions in entry.matryoshka_dimensions` -> sent as
+  `dimensions=`; anything else -> `ModelError("Qwen/Qwen3-Embedding-0.6B cannot produce 512-d vectors: native 1024, matryoshka_dimensions []. Set models.<block>.dimensions to 1024 or extend the Embedding catalog entry.")`.
   The `dimensions` property returns the effective size.
-- URL: `modal.Server.from_name(entry.app_name, EMBEDDING_SERVER_NAME)` + `get_url()` (verified to
-  exist on Modal "latest"; SWE must verify the ASYNC form — e.g. `.get_url.aio()` — with the
-  `tech-docs` skill / context7 against Modal 1.5.x: modal.com/docs/sdk/py/latest/Server.md,
-  /docs/guide/servers.md; never block the event loop). `/v1` suffix logic unchanged. Lookup failure →
-  `ModelError("… Is the app deployed? Run: make memory-deploy-embedding-model MODEL=<repo_id>")`.
-- Auth: `AsyncOpenAI(base_url=…, api_key=proxy_token)` (sends `Authorization: Bearer <id>.<secret>`);
-  the aiohttp `GET /health` warm-up sends the SAME header. A 401 from `/health` raises
-  `ModelError` (not retryable `ExtractionError`) naming the two env vars.
+- URL, health and served model id come from #139's `tree.models.modal_server` — DELETE the client's
+  own `_resolve_web_url` / `_health_check`: first `embed()` awaits `resolve_server_url(entry)`
+  (append `/v1` once for `AsyncOpenAI`), `wait_until_healthy(url, proxy_token, health_timeout)` and
+  `served_model_id(url, proxy_token, default=entry.repo_id)`. The client NEVER branches on
+  `entry.serving`: a Dedicated endpoint and both fallback scripts expose the same app name
+  (`ep-<endpoint_name>`), the same class (`Server`) and the same Proxy token auth (Modal docs,
+  endpoints guide: proxy tokens are required by default on Dedicated Endpoints, same
+  `Authorization: Bearer wk-….ws-…` header). That is also why a `SERVING=` override at deploy time
+  needs no client change.
+- Auth: `AsyncOpenAI(base_url=…, api_key=proxy_token)` (sends `Authorization: Bearer <id>.<secret>`).
+  A 401 from `/health` surfaces as the `ModelError` raised by `wait_until_healthy` (not a retryable
+  `ExtractionError`).
+- Request `model=` is the DISCOVERED served id (a managed recipe chooses it; our scripts set it to
+  `repo_id`); Opik usage recording keeps `entry.repo_id` and `total_cost=0`.
 - Role: `embed(texts, input_type)` prepends `prompt_for(entry, input_type)` to each text client-side
-  (OpenAI-compatible `/v1/embeddings` has no role parameter); `None` or an empty prompt → texts
-  unchanged. Usage recording unchanged (`total_cost=0`).
+  (OpenAI-compatible `/v1/embeddings` has no role parameter); `None` or an empty prompt -> texts unchanged.
 **2. Factory** — `get_model.py` modal branch: `ModalEmbeddingModel(proxy_token=modal_proxy_bearer(), model=cfg.model, dimensions=cfg.dimensions)`
   (today `cfg.dimensions` is silently dropped). KEEP the lazy import and the cold-boot note.
 **3. Retire `MODAL_EMBEDDING_API_KEY`** everywhere: `settings.py` field; `.env.example` line;
-  `.github/workflows/ci.yml:34` and `cd.yml:64` mocks → replaced by `MODAL_PROXY_TOKEN_ID: mock-modal-proxy-token-id` /
+  `.github/workflows/ci.yml:34` and `cd.yml:64` mocks -> replaced by `MODAL_PROXY_TOKEN_ID: mock-modal-proxy-token-id` /
   `MODAL_PROXY_TOKEN_SECRET: mock-modal-proxy-token-secret`; `tests/unit/config/test_settings_credentials_only.py`;
-  `tests/unit/models/test_get_model.py`; root `Makefile:39` comment (`generate-secret-key` example →
-  `e.g. MCP_AUTH_SECRET`-style neutral wording, no Modal mention); README env table row → the two
-  new vars; README "Modal embedding deployment" section rewritten: catalog → `MODEL=` targets →
-  proxy tokens → flipping `models.search_embedding` to `provider: modal, model: voyageai/voyage-4-nano`
-  (and the stale "default embedding model is local sentence-transformers" sentence removed).
-  `deploy/prefect_pipelines_setup.py` needs no change (it never forwarded the key — grep clean).
+  `tests/unit/models/test_get_model.py`; root `Makefile:39` comment (`generate-secret-key` example ->
+  neutral wording, no Modal mention); root `README.md:43` prerequisite line (-> "Modal account + a
+  Proxy token — only if you want to serve an embedding model on Modal"); README env table row -> the
+  two new vars; README "Modal embedding deployment" section rewritten as ONE story: the Embedding
+  catalog -> the three Serving paths and their ladder (Dedicated endpoint first; if
+  `modal endpoint create` has no compatible base model, the recipe fails or the smoke test fails ->
+  `SERVING=sglang` if SGLang supports the architecture -> else `SERVING=vllm`; then write the path
+  that worked into the YAML, because the client reads the YAML) -> the three `MODEL=` commands ->
+  proxy tokens -> flipping `models.search_embedding` to `provider: modal, model: Qwen/Qwen3-Embedding-0.6B`
+  -> "min/max containers of a Dedicated endpoint are dashboard-only; to redeploy, stop first".
+  The stale "default embedding model is local sentence-transformers" sentence and the "on an A10G"
+  claim are removed. `deploy/prefect_pipelines_setup.py` needs no change (it never forwarded the key — grep clean).
 
-Write tests with `/squid-testing-python`; `modal.Server`, `AsyncOpenAI` and aiohttp all mocked.
+Write tests with `/squid-testing-python`; `tree.models.modal_server` functions and `AsyncOpenAI` mocked.
 
 ## Out of scope
 - A pipeline run with `provider: modal` (feature non-goal). Switching the default provider.
+- A second URL mechanism (`modal endpoint list --json`, a `url:` catalog field): only if #141 proves
+  H1 false, and then inside `resolve_server_url`, not here.
+- The README paragraph naming the two fallback script files and the `deploy/` tree comment (#142).
 - Removing `MODAL_EMBEDDING_API_KEY` from the human's `.env` / `.env.prod` files (agents do not edit
   them; `extra="ignore"` makes the leftover line harmless) — noted in `## Log` for the human.
 - Deleting the old `vllm-embedding-api-key` Modal secret in the workspace (#141 notes it).
 
 ## Acceptance Criteria
 
-- [ ] `grep -rIn "MODAL_EMBEDDING_API_KEY\|modal_embedding_api_key\|vllm-embedding-api-key" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules --exclude-dir=done --exclude=".env*"` → 0 matches outside `tasks/` and `docs/adrs/009_*`.
+- [ ] `grep -rIn "MODAL_EMBEDDING_API_KEY\|modal_embedding_api_key\|vllm-embedding-api-key" . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules --exclude-dir=done --exclude=".env*"` -> 0 matches outside `tasks/` and `docs/adrs/009_*`.
 - [ ] `ModalEmbeddingModel(proxy_token="", model="voyageai/voyage-4-nano")` raises `ModelError` naming both env vars; `model="BAAI/bge-m3"` raises the catalog error listing both ids — `tests/unit/models/test_modal_embedding.py::TestInit`.
-- [ ] URL resolution calls `modal.Server.from_name("ep-voyage-4-nano", "EmbeddingServer")`; `/v1` is appended once; a failed lookup raises `ModelError` containing `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano` — `::TestUrlResolution`.
-- [ ] `AsyncOpenAI` is built with `api_key="wk-1.ws-2"`; the `/health` GET carries `Authorization: Bearer wk-1.ws-2`; a 401 health answer raises `ModelError` naming both env vars; a 503 raises `ExtractionError` — `::TestProxyAuth`.
-- [ ] Dimensions: voyage-4-nano with `dimensions=1024` or `None` → `.dimensions == 1024` and NO `dimensions` kwarg in `embeddings.create`; `dimensions=512` → kwarg `dimensions=512`, `.dimensions == 512`; Qwen3 with `dimensions=512` → `ModelError` containing `cannot produce 512-d` and `native 1024` — `::TestMatryoshkaGuard`.
-- [ ] Role: voyage-4-nano `embed(["cats"], input_type="query")` sends input `["Represent the query for retrieving supporting documents: cats"]`; `"document"` → `["Represent the document for retrieval: cats"]`; `None` → `["cats"]`; Qwen3 `"document"` → `["cats"]`, `"query"` → the text prefixed with the catalog `query_prompt` — `::TestRolePrompts`.
+- [ ] First `embed()` awaits `resolve_server_url` once with the catalog entry, builds `AsyncOpenAI` with `base_url` ending in exactly one `/v1`, and a second `embed()` resolves nothing again; a `ModelError` from `resolve_server_url` propagates unchanged (message contains `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano`) — `::TestUrlResolution`.
+- [ ] The SAME assertions hold for the `endpoint` seed and the `vllm` seed — `::TestUrlResolution::test_serving_path_is_invisible_to_the_client` (parametrised over both `repo_id`s; `grep -c "\.serving" apps/memory/src/tree/models/modal_embedding.py` -> 0).
+- [ ] `AsyncOpenAI` is built with `api_key="wk-1.ws-2"`; `wait_until_healthy` is awaited with bearer `wk-1.ws-2` and `health_timeout`; its `ModelError` (401) and `ExtractionError` (503) propagate unchanged — `::TestProxyAuth`.
+- [ ] With `served_model_id` answering `"served/other-name"`, `embeddings.create` is called with `model="served/other-name"` while Opik usage is recorded under `voyageai/voyage-4-nano` — `::TestServedModel`.
+- [ ] Dimensions: voyage-4-nano with `dimensions=1024` or `None` -> `.dimensions == 1024` and NO `dimensions` kwarg in `embeddings.create`; `dimensions=512` -> kwarg `dimensions=512`, `.dimensions == 512`; Qwen3 with `dimensions=512` -> `ModelError` containing `cannot produce 512-d` and `native 1024` — `::TestMatryoshkaGuard`.
+- [ ] Role: voyage-4-nano `embed(["cats"], input_type="query")` sends input `["Represent the query for retrieving supporting documents: cats"]`; `"document"` -> `["Represent the document for retrieval: cats"]`; `None` -> `["cats"]`; Qwen3 `"document"` -> `["cats"]`, `"query"` -> the text prefixed with the catalog `query_prompt` — `::TestRolePrompts`.
 - [ ] `_build_embedding_model(EmbeddingConfig(provider="modal", model="voyageai/voyage-4-nano", dimensions=512))` constructs the client with `dimensions=512` and the bearer from settings; importing `tree.models.get_model` does not import `modal` (`'modal' not in sys.modules`, subprocess) — `tests/unit/models/test_get_model.py::TestModalBranch`.
 - [ ] `Settings` field set has no `modal_embedding_api_key` — `tests/unit/config/test_settings_credentials_only.py`.
 - [ ] `ci.yml` and `cd.yml` each mock the two proxy-token vars and neither mentions the old key.
-- [ ] README env table lists `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`; the Modal section shows the three `MODEL=` commands and no `generate-secret-key` step.
+- [ ] README env table lists `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`; the Modal section shows the three `MODEL=` commands, names `SERVING=endpoint|sglang|vllm` and the ladder order endpoint -> sglang -> vllm, and contains no `generate-secret-key` step.
 - [ ] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green.
 
 ## User Stories
 
-### Story: Operator points search at the Modal-hosted voyage-4-nano
-1. After #139's deploy, sets `models.search_embedding: {provider: modal, model: voyageai/voyage-4-nano, dimensions: 1024}`.
-2. First `embed()` logs `ModalEmbeddingModel ready: app=ep-voyage-4-nano server=EmbeddingServer url=https://…/v1`, warms `/health` with the bearer, and returns 1024-d vectors.
-3. Because voyage-4-nano shares the 4-series space, the vectors are comparable to `voyage-4` API vectors.
+### Story: Operator points search at the Dedicated endpoint
+1. After `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B`, sets `models.search_embedding: {provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`.
+2. First `embed()` logs `ModalEmbeddingModel ready: app=ep-qwen3-embedding-0-6b server=Server served_model=Qwen/Qwen3-Embedding-0.6B url=https://…/v1`, warms `/health` with the bearer, and returns 1024-d vectors.
+
+### Story: Operator moved a model down the ladder and the client did not notice
+1. Stops the Qwen3 endpoint, runs `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=sglang`, writes `serving: sglang` into the YAML.
+2. The next process start resolves the same `ep-qwen3-embedding-0-6b` / `Server` and embeds — no client setting changed.
 
 ### Story: Operator forgot the proxy token
 1. `.env` lacks `MODAL_PROXY_TOKEN_SECRET`.
@@ -83,12 +102,12 @@ Write tests with `/squid-testing-python`; `modal.Server`, `AsyncOpenAI` and aioh
 1. `models.search_embedding: {provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 512}`.
 2. Boot fails: `Qwen/Qwen3-Embedding-0.6B cannot produce 512-d vectors: native 1024, matryoshka_dimensions []. …`.
 
-### Story: The app was stopped
+### Story: The model was stopped
 1. `make memory-deploy-embedding-model-stop MODEL=voyageai/voyage-4-nano`, then a query runs.
-2. `ModelError: Failed to resolve Modal server ep-voyage-4-nano/EmbeddingServer. Is the app deployed? Run: make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano`.
+2. `ModelError: Failed to resolve Modal server ep-voyage-4-nano/Server. Is the model deployed (…)? Run: make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano`.
 
 ### Story: A question is embedded with the right prompt
-1. `search_memory("how does sharding work?")` with `provider: modal`.
+1. `search_memory("how does sharding work?")` with `provider: modal, model: voyageai/voyage-4-nano`.
 2. The request input is `"Represent the query for retrieving supporting documents: how does sharding work?"`; chunks were indexed with the document prompt.
 
 ---
@@ -113,5 +132,22 @@ The Modal client becomes catalog-driven and proxy-token-authenticated, finally h
 
 **User stories**
 - 5 stories: happy path, missing token, impossible dimension, stopped app, query prompt.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 18:23 — Re-grooming (plan edit: Dedicated endpoints first)
+
+**What changed and why**
+- The client must work against a Modal Dedicated endpoint as well as our two fallback scripts. Design goal: the Serving path is INVISIBLE to the client — same app name (`ep-<endpoint_name>`), same class (`Server`, was `EmbeddingServer`), same Proxy token header (verified in Modal's endpoints guide: identical to ADR-009 §4). A test pins that the client never reads `entry.serving`.
+- URL lookup, authenticated health and served-model discovery moved to #139's `tree.models.modal_server` (the shared smoke test needs the same three things); the client deletes its own copies and keeps only catalog lookup, the Matryoshka guard, prompts and the OpenAI call.
+- NEW: `model=` on the wire is the id discovered from `/v1/models` — a managed recipe, not us, names the served model.
+- README section now tells the three-path story and the ladder; the default example model is the endpoint seed (Qwen3). Auth, Matryoshka guard and client-side prompts are unchanged.
+- If #141 proves H1 false, the fix lands in `resolve_server_url` (#139's module), not in this client.
+
+**Dependencies**
+- #135 — `input_type`. #138 — catalog helpers, `EMBEDDING_SERVER_NAME = "Server"`. #139 — token settings, `modal_proxy_bearer`, `modal>=1.5.5`, `modal_server` helpers.
+
+**User stories**
+- 6 stories: endpoint happy path, ladder move invisible to the client, missing token, impossible dimension, stopped model, query prompt.
 
 Ready for implementation.

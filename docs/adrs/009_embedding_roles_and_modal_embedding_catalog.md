@@ -1,35 +1,47 @@
 # ADR-009: Voyage 4, Embedding Roles, and a Catalog of Modal-Hosted Embedding Models
 
 - **Status:** Accepted
-- **Date:** 2026-09-19
+- **Date:** 2026-09-19 (revised the same day, before tasks 138+ started: Dedicated endpoints added as the first Serving path — Decisions 2 and 3 rewritten)
 - **Deciders:** Paul (project owner)
 - **Context references:**
-  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/141-voyage-4-and-modal-e2e-threshold-repin.md` (this feature's task plan)
+  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/142-modal-fallback-deploy-scripts-vllm-and-sglang.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 141)
   - `ADR-001` (embedding model + dimension pinned in config; its `voyage-3` example is superseded IN PRACTICE by the pin below — the ADR text is unchanged)
   - `ADR-002` §1 (the `voyage-embeddings` rate limit at the real POST; `_CachedSingleEmbedding` never reaches a client) — unchanged
   - `ADR-006` §4 (only Child chunks are embedded; backfill by empty `embedding`) and its `rag/` ↛ `graph/` import rule — unchanged, relied on
   - `ADR-007` (Clustering run, stale-map warning contract) — unchanged, relied on
   - `ADR-008` §4 (`min_vector_score` provisional, evals-owned) — AMENDED here on one point: what happens to the pin when the embedding model changes
-  - `docs/glossary.md` — **Embedding catalog**, **Embedding role**, **Embedding reset**, **Proxy token** (added in this feature's grooming commit)
+  - `docs/glossary.md` — **Embedding catalog**, **Serving path**, **Dedicated endpoint**, **Embedding role**, **Embedding reset**, **Proxy token** (added in this feature's grooming commits)
+  - Modal docs, read 2026-09-19: `modal.com/docs/guide/dedicated-endpoints.md`, `modal.com/docs/cli/latest/endpoint.md`, `modal.com/docs/guide/endpoints.md`
 
 ## Context
 
-Three things were true at once. (1) The Voyage API moved to the 4 series (`voyage-4-large` $0.12,
+Four things were true at once. (1) The Voyage API moved to the 4 series (`voyage-4-large` $0.12,
 `voyage-4` $0.06, `voyage-4-lite` $0.02, `voyage-code-4` $0.12 per 1M tokens; 32K context; 1024-d
 default with 256/512/2048 Matryoshka; ONE shared embedding space that also contains the open-weight
 `voyageai/voyage-4-nano`), while we still embedded with legacy `voyage-3.5`. (2) Every vector — a
 stored chunk and a user's question alike — was embedded the same way, although Voyage, Gemini,
 Qwen3 and most modern retrievers are asymmetric. (3) The "Modal provider" was one hard-coded script
 for one model behind an engine-level API key held in a Modal secret, with a client that hard-coded
-the app name, ignored `dimensions`, and cited a manifest file that never existed.
+the app name, ignored `dimensions`, and cited a manifest file that never existed. (4) Modal now
+offers **Dedicated Endpoints**: `modal endpoint create --model <base model> [--custom-hf-repo …
+--custom-hf-revision …]` — "Modal resolves the model, selects a compatible serving recipe, and
+starts provisioning"; scale to zero by default, billed by GPU-second, proxy tokens required by
+default, embedding models served through the OpenAI-compatible Embeddings API, and a Source view
+whose generated `serve.py` "you can copy and adapt … into your own Modal App when you need full
+control". The `serve.py` Modal generates for `Qwen/Qwen3-Embedding-0.6B` (app
+`ep-qwen3-embedding-0-6b`, `class Server`, `VLLMEndpoint` from `autoinference-utils`,
+`--runner pooling`) is exactly the template our own scripts were written from.
 
 Constraints: `memory` rows carry no embedding-model stamp and the backfill only fills EMPTY
 vectors; dedup compares the same vector it then persists (`pipeline.py`, "dedup vector == persisted
 vector, computed once"); the vector index stays 1024-d; Modal re-imports a deploy script inside the
 container, where the `tree` package is not installed; entry-point scripts hold no business logic;
-SGLang 0.5.20 cannot serve `voyageai/voyage-4-nano` (custom `VoyageQwen3BidirectionalEmbedModel`;
-onboarding PR sgl-project/sglang#18436 open since April 2026) while vLLM serves it natively, and
-SGLang is the better-trodden path for Qwen3-Embedding, BGE, E5, GTE-Qwen2 and EmbeddingGemma.
+a managed recipe exposes no engine flags, while `voyageai/voyage-4-nano` needs a custom
+architecture (`VoyageQwen3BidirectionalEmbedModel` via `--hf-overrides`), MEAN pooling and
+`--trust-remote-code`; SGLang 0.5.20 cannot serve it (onboarding PR sgl-project/sglang#18436 open
+since April 2026) while vLLM serves it natively, and SGLang is the better-trodden path for
+Qwen3-Embedding, BGE, E5, GTE-Qwen2 and EmbeddingGemma; the glossary already owns the word
+**Deployment** (a registered Prefect flow).
 
 ## Decision
 
@@ -40,33 +52,68 @@ Eight related choices, one design:
    Dimension and price tables GAIN the 4 series and KEEP every legacy id (`voyage-3.x` is still
    served and the `TREE_MODELS__…` escape hatch must keep resolving).
 
-2. **Two inference engines, chosen per model.** `deploy/modal_vllm_embedding.py` and
-   `deploy/modal_sglang_embedding.py`, same shape (`@app.server` class, `@modal.enter` starts
-   `VLLMEndpoint` / `SGLangEndpoint` from `autoinference-utils` then
-   `validate_embeddings_endpoint`, `@modal.exit` stops it, a proxy-authenticated local smoke
-   entrypoint). Each catalog entry names its `engine`. Two scripts rather than one abstraction:
-   the engines differ in image, launcher and flags, and a second copy of ~80 glue lines is cheaper
-   than an interface with two implementations. We do NOT vendor the unmerged SGLang PR; when it
-   ships, moving voyage-4-nano is a one-word YAML edit.
+2. **Three Serving paths per model, Dedicated endpoint first.** Every catalog entry names
+   `serving: endpoint | sglang | vllm` (default `endpoint`).
+   - `endpoint` — a Modal **Dedicated endpoint**, created by
+     `modal endpoint create --name <endpoint_name> --model <base_model> --routing-region eu-west`,
+     plus `--custom-hf-repo <repo_id> --custom-hf-revision <revision>` ONLY when the entry's
+     `repo_id` differs from its `base_model` (custom weights). Zero code of ours: Modal picks the
+     recipe, GPU, engine and flags.
+   - `sglang` / `vllm` — our two FALLBACK scripts, `deploy/modal_sglang_embedding.py` and
+     `deploy/modal_vllm_embedding.py`, same shape (`@app.server` on `class Server`, `@modal.enter`
+     starts `SGLangEndpoint` / `VLLMEndpoint` from `autoinference-utils` then
+     `validate_embeddings_endpoint`, `@modal.exit` stops it). They are Modal's own eject path — the
+     Source-view `serve.py`, parameterised by the catalog — for what a managed recipe cannot take:
+     an architecture override, a pooler config, `--trust-remote-code`, a pinned engine version.
+   - **The ladder.** Try `endpoint`. If Modal has no compatible base model, the recipe fails to
+     start, or the smoke test fails (wrong dimensions, relevant-vs-unrelated sanity, 401 check) →
+     `sglang` if SGLang supports the architecture → else `vllm`. Record the path that worked in the
+     YAML. `SERVING=<path>` on the Make targets walks the ladder for one command without editing
+     YAML; the YAML stays the value the client reads.
+   - Seeds: `Qwen/Qwen3-Embedding-0.6B` → `endpoint` (it IS in Modal's catalog). `voyageai/voyage-4-nano`
+     → `vllm`, with `base_model: Qwen/Qwen3-Embedding-0.6B` so the e2e task can FIRST try it as custom
+     weights on an endpoint; it flips to `endpoint` only if the endpoint's vectors match the vLLM
+     script's (cosine ≥ 0.99 on three texts) — a wrong architecture returns well-shaped garbage.
+   - The path is called `serving`, not `deployment`: a **Deployment** is a Prefect flow.
+   - Two scripts rather than one abstraction: the engines differ in image, launcher and flags, and
+     a second copy of ~60 glue lines is cheaper than an interface with two implementations. Both are
+     kept by the owner's decision although no seed uses SGLang; the e2e task proves SGLang live via
+     `SERVING=sglang` so it is not dead code. We do NOT vendor the unmerged SGLang PR.
 
-3. **A YAML Embedding catalog, one Modal app per model.** `modal.embedding_models` in
-   `configs/default.yaml`, validated by Pydantic, read through `tree.models.modal_catalog` by BOTH
-   the deploy scripts and the `ModalEmbeddingModel` client — app name (`ep-<model>`), native and
-   Matryoshka dimensions, server args and prompts have one source. Adding a model = one entry +
+3. **A YAML Embedding catalog, one Modal app per model, one way to find it.**
+   `modal.embedding_models` in `configs/default.yaml`, validated by Pydantic, read through
+   `tree.models.modal_catalog` by BOTH the deploy driver and the `ModalEmbeddingModel` client —
+   names, native and Matryoshka dimensions and prompts have one source. Adding a model = one entry +
    `make memory-deploy-embedding-model MODEL=<repo_id>`; an unknown id fails loudly listing the
-   catalog ids. One app per model so a model is deployed, stopped and billed alone. The resolved
-   entry crosses into the container as ONE JSON env var baked into the image
-   (`EMBEDDING_DEPLOY_SPEC`), read under `not modal.is_local()` — the only way to honour both
-   "catalog logic lives in `src/tree/`" and "`tree` is not importable in the container". Weights
-   come from a shared `huggingface-cache` Volume by `repo_id` + `revision`; no pre-baked snapshot.
+   catalog ids. `base_model` is required for `endpoint` (load-time error, and an override-time error
+   for `SERVING=endpoint` without it). The fallback-only fields (`gpu`, `cpu`, `memory_mb`,
+   `max_model_len`, `extra_server_args`) are OPTIONAL with defaults on every entry rather than
+   forbidden on `endpoint` entries — the ladder needs them the moment an endpoint fails — and the
+   driver logs that a Dedicated endpoint does not use them. The engine's embedding-mode flag
+   (`--runner pooling` / `--is-embedding`) is builder-owned, so one entry can run under either script.
+   One app per model (`ep-<endpoint_name>`), served by exactly ONE Serving path at a time, so a
+   model is deployed, stopped and billed alone. **All three paths expose the same app name, the same
+   server class (`Server`) and the same auth**, so the client resolves every model with
+   `modal.Server.from_name(app_name, "Server")` and never reads `serving`. The served model id is
+   discovered from `GET /v1/models`, because a managed recipe — not us — names it.
+   *Assumed, not documented by Modal; proven in `tasks/141`'s log:* a Dedicated endpoint named `N`
+   is the Modal app `ep-N` with class `Server`. If false: correct the name derivation; only if the
+   app name is not derivable, resolve endpoint URLs from `modal endpoint list --json`. A `url:` field
+   in the catalog is rejected (a workspace-specific URL in committed YAML).
+   For the fallback scripts the resolved entry crosses into the container as ONE JSON env var baked
+   into the image (`EMBEDDING_DEPLOY_SPEC`), read under `not modal.is_local()` — the only way to
+   honour both "catalog logic lives in `src/tree/`" and "`tree` is not importable in the container".
+   Weights come from a shared `huggingface-cache` Volume by `repo_id` + `revision`.
+   ONE smoke test (`tree.models.modal_server.smoke_test`), run by the driver, covers every path.
 
-4. **Modal Proxy tokens are the only auth.** Servers deploy with `unauthenticated=False`; clients
-   send `Authorization: Bearer <MODAL_PROXY_TOKEN_ID>.<MODAL_PROXY_TOKEN_SECRET>`, which is exactly
-   what `AsyncOpenAI(api_key=…)` emits, and the `/health` warm-up sends the same header. The
+4. **Modal Proxy tokens are the only auth.** Dedicated endpoints require them by default; the
+   fallback servers deploy with `unauthenticated=False`; the driver never passes `--unauthenticated`.
+   Clients send `Authorization: Bearer <MODAL_PROXY_TOKEN_ID>.<MODAL_PROXY_TOKEN_SECRET>`, which is
+   exactly what `AsyncOpenAI(api_key=…)` emits, and the `/health` warm-up sends the same header. The
    engine-level `--api-key`, `MODAL_EMBEDDING_API_KEY` and the `vllm-embedding-api-key` Modal
    secret are retired. Why: the edge rejects unauthenticated traffic BEFORE a GPU container wakes
    (an engine key is only checked after a billed cold start), one workspace credential covers every
-   catalog app, and there is no per-app secret to bootstrap.
+   catalog app on every Serving path, and there is no per-app secret to bootstrap.
 
 5. **The Embedding role is part of the embedding contract, and the role of every vector is forced.**
    `BaseEmbeddingModel.embed(texts, input_type: "query" | "document" | None = None)`.
@@ -78,7 +125,8 @@ Eight related choices, one design:
    invariant. Providers map the role natively (Voyage `input_type`; Gemini `task_type`
    `RETRIEVAL_QUERY`/`RETRIEVAL_DOCUMENT`; sentence-transformers `prompt_name` when the model
    defines it; Modal prepends the catalog's `query_prompt`/`document_prompt` client-side because
-   OpenAI-compatible `/v1/embeddings` has no role field) and IGNORE a role they cannot honour.
+   OpenAI-compatible `/v1/embeddings` has no role field — on all three Serving paths) and IGNORE a
+   role they cannot honour.
 
 6. **Caches carry the embedding identity.** The 90-day Prefect `INPUTS` cache on
    `embed-children` / `embed-entities` was keyed on texts alone; both tasks now take
@@ -104,10 +152,13 @@ Eight related choices, one design:
    recorded counter-example, and the evidence lives in the e2e task's log. The knobs remain
    provisional and owned by Chapter 7's evals.
 
-Bias-to-least notes: a YAML list over a model registry service; two scripts over an engine
-interface; Modal's built-in proxy auth over our own key + secret; a task input over a custom cache
-key function; a reset command + two existing phases over row stamping; client-side prompt strings
-over a prompt-template engine; per-engine versions over per-model versions.
+Bias-to-least notes: a managed Dedicated endpoint over our own serving code, and our scripts only
+where the managed recipe cannot go; one URL lookup for three Serving paths over a per-path
+resolver; a YAML list over a model registry service; two scripts over an engine interface; Modal's
+built-in proxy auth over our own key + secret; no Hugging Face token plumbing until a gated model
+exists; a task input over a custom cache key function; a reset command + two existing phases over
+row stamping; client-side prompt strings over a prompt-template engine; per-engine versions over
+per-model versions.
 
 ## Diagram
 
@@ -116,7 +167,7 @@ flowchart LR
     subgraph cfg["configs/default.yaml"]
         direction TB
         MODELS["models.search_embedding / resolution_embedding<br/>voyage · voyage-4 · 1024"]
-        CAT["modal.embedding_models — Embedding catalog<br/>repo_id · revision · engine · gpu · native/matryoshka dims<br/>extra_server_args · query_prompt · document_prompt → app_name ep-*"]
+        CAT["modal.embedding_models — Embedding catalog<br/>repo_id · revision · serving endpoint/sglang/vllm · base_model<br/>native/matryoshka dims · query_prompt · document_prompt<br/>fallback-only: gpu · cpu · memory_mb · max_model_len · extra_server_args<br/>derived: endpoint_name → app_name ep-*"]
     end
 
     subgraph callers["tree.memory — Embedding role is forced by the dedup==persisted invariant"]
@@ -132,13 +183,14 @@ flowchart LR
         VOY["Voyage text / multimodal<br/>API input_type"]
         GEM["Gemini<br/>task_type RETRIEVAL_*"]
         ST["sentence-transformers<br/>prompt_name if defined"]
-        MOD["ModalEmbeddingModel<br/>catalog lookup · prompt prepended client-side<br/>dimensions only if != native · Bearer id.secret"]
+        MOD["ModalEmbeddingModel<br/>catalog lookup · never reads serving<br/>Server.from_name(ep-*, Server) · served id from /v1/models<br/>prompt prepended client-side · dimensions only if != native · Bearer id.secret"]
     end
 
-    subgraph modal["Modal workspace — one app per model, unauthenticated=False"]
+    subgraph modal["Modal workspace — one app per model, one Serving path at a time, proxy auth on all"]
         direction TB
-        VLLM["ep-voyage-4-nano<br/>deploy/modal_vllm_embedding.py · VLLMEndpoint"]
-        SGL["ep-qwen3-embedding-0-6b<br/>deploy/modal_sglang_embedding.py · SGLangEndpoint"]
+        EP["1 · endpoint (default) — Dedicated endpoint<br/>ep-qwen3-embedding-0-6b · class Server<br/>Modal-generated serve.py · Modal picks GPU, engine, flags"]
+        SGL["2 · sglang fallback<br/>deploy/modal_sglang_embedding.py · SGLangEndpoint · class Server"]
+        VLLM["3 · vllm fallback<br/>ep-voyage-4-nano · deploy/modal_vllm_embedding.py<br/>VLLMEndpoint · class Server · hf-overrides, MEAN pooling"]
         EDGE["Modal edge — Proxy token check<br/>401 before any GPU wakes"]
     end
 
@@ -147,7 +199,8 @@ flowchart LR
         RESET["make memory-reset-embeddings CONFIRM=yes<br/>embedding=[] · children cluster_id/viz cleared"]
         IDX["make memory-run-indexing-pipeline<br/>backfill re-embeds (document)"]
         CLU["make memory-run-clustering-pipeline"]
-        DEP["make memory-deploy-embedding-model MODEL=repo_id<br/>-test · -stop"]
+        DEP["make memory-deploy-embedding-model MODEL=repo_id [SERVING=path]<br/>-stop · driver scripts/modal_embedding_model.py"]
+        SMOKE["make memory-deploy-embedding-model-test<br/>ONE smoke test: health · dims · relevant vs unrelated · 401 without token"]
     end
 
     MEM[("memory<br/>vector_index 1024-d (unchanged)")]
@@ -156,12 +209,16 @@ flowchart LR
     MODELS --> VOY
     CAT --> MOD
     CAT --> DEP
-    DEP -- "EMBEDDING_DEPLOY_SPEC baked into image env" --> VLLM & SGL
+    DEP -- "modal endpoint create --model base_model<br/>(+ --custom-hf-repo/-revision if repo_id != base_model)" --> EP
+    DEP -- "modal deploy · EMBEDDING_DEPLOY_SPEC baked into image env" --> SGL & VLLM
+    EP -. "fails? walk the ladder<br/>Source-view serve.py = the eject path" .-> SGL
+    SGL -. "architecture unsupported" .-> VLLM
+    SMOKE --> EDGE
     DOC & QRY & RES --> VOY
     DOC & QRY & RES -.-> GEM & ST & MOD
     DOC --- CACHE
     VOY --> VAPI
-    MOD --> EDGE --> VLLM & SGL
+    MOD --> EDGE --> EP & SGL & VLLM
     RESET --> MEM
     RESET --> IDX --> CLU
     IDX --> DOC
@@ -172,10 +229,11 @@ flowchart LR
     classDef r fill:#d3f9d8,stroke:#2f9e44,color:#000;
     classDef m fill:#d0ebff,stroke:#1c7ed6,color:#000;
     classDef x fill:#e5dbff,stroke:#7048e8,color:#000;
+    classDef p fill:#c3fae8,stroke:#0ca678,color:#000;
     classDef o fill:#f1f3f5,stroke:#868e96,color:#000;
     classDef e fill:#ffe3e3,stroke:#e03131,color:#000;
     class MODELS,CAT c; class DOC,QRY,RES,CACHE r; class VOY,GEM,ST,MOD m;
-    class VLLM,SGL x; class EDGE e; class RESET,IDX,CLU,DEP o; class MEM,VAPI c;
+    class EP p; class VLLM,SGL x; class EDGE e; class RESET,IDX,CLU,DEP,SMOKE o; class MEM,VAPI c;
 ```
 
 ## Consequences
@@ -195,22 +253,43 @@ flowchart LR
 - **Thresholds are re-pinned with evidence, not re-tuned.** If voyage-4's score distribution
   differs, up to four YAML defaults move by 0.05 steps with their scores in `tasks/141`'s log; the
   evals chapter still owns them.
-- **Any Hugging Face embedding model an engine supports is one YAML entry away**, and the client
-  can no longer disagree with the deployment about app name, dimensions or prompts. The catalog
-  can be wrong about a model (a bad prompt, a wrong `native_dimensions`) — the smoke entrypoint
-  asserts the vector length, nothing asserts the prompt.
+- **The common case costs no code and no image build.** A model in Modal's endpoint catalog is one
+  6-line YAML entry and one command. The price of the managed recipe: Modal picks the engine, its
+  version and its flags (we cannot pin or reproduce them from the repo), hardware and
+  min/max/buffer containers are dashboard-only (not in YAML, not reviewable), the served model id
+  is Modal's choice (hence discovery), and an endpoint's behaviour can change when Modal updates a
+  recipe — the smoke test is the only guard.
+- **Custom weights are a bet, checked by vectors, not by shape.** "Closest supported base model"
+  loads the weights under the base model's architecture; when that differs (voyage-4-nano's
+  bidirectional attention) the endpoint answers 1024 well-formed floats that mean nothing. The
+  smoke test's relevant-vs-unrelated assertion catches gross failures; promoting a custom-weights
+  model to `endpoint` additionally needs the vector-equivalence evidence recorded in `tasks/141`.
+- **The fallback scripts are the eject path, not a parallel product.** They exist for what a recipe
+  cannot express and are where full control lives (GPU, engine pin, flags in YAML). They will drift
+  unless kept boring: glue over shared helpers, pinned by one static test file, proven live through
+  `SERVING=`; if a third engine arrives, that is the moment to extract the common skeleton — not before.
+- **One app name per model across paths** keeps the client path-blind, and means an endpoint and a
+  fallback of the SAME model cannot be live together — stop one before deploying the other. It also
+  rests on an undocumented Modal naming rule (endpoint `N` → app `ep-N`, class `Server`); if Modal
+  changes it, `resolve_server_url` is the single place that breaks and the single place to fix.
+- **`SERVING=` can make the YAML lie for a while.** The override changes one command, not the
+  catalog; harmless to the client (path-blind), but `-stop` needs the same `SERVING=`, and the YAML
+  should be updated to the path that actually worked.
+- **The catalog can still be wrong about a model** (a bad prompt, a wrong `native_dimensions`) —
+  the smoke test asserts the vector length and a coarse sanity ordering, nothing asserts the prompt.
 - **Whitespace-free server-arg values** are a constraint imported from `autoinference-utils`
   (it splits values into argv tokens); the config validator turns it into a load-time error instead
-  of a container that dies on a mangled `--pooler-config`.
+  of a container that dies on a mangled `--pooler-config`. It applies to the fallback paths only.
 - **Auth moves from "a secret we mint" to "a credential Modal mints".** Unauthenticated requests
   never wake a GPU. Rotating the proxy token rotates access to every catalog app at once; there is
-  no per-model credential. The CLI token that authorises `modal deploy` is separate and unchanged.
-- **Two scripts will drift unless kept boring.** They are glue over shared helpers and are pinned
-  by one static test file; if a third engine arrives, that is the moment to extract the common
-  skeleton — not before.
-- **What would justify upgrading.** A second embedding model live at the same time, or a partial
-  migration that must be resumable across days → an `embedding_model` stamp on rows plus
-  filter-by-stamp reads; the SGLang voyage PR merging → flip the entry's `engine`; two models
+  no per-model credential. The CLI token that authorises `modal deploy` / `modal endpoint create`
+  is separate and unchanged.
+- **What would justify upgrading.** A gated Hugging Face model → an optional `HF_TOKEN` setting
+  forwarded as `--custom-hf-token` (with argv redaction in logs) and a Modal Secret for the
+  scripts; Modal exposing recipe flags or the SGLang voyage PR merging → move voyage-4-nano up the
+  ladder by editing one YAML word; endpoint scaling knobs appearing in the CLI → catalog fields for
+  them; a second embedding model live at the same time, or a partial migration that must be
+  resumable across days → an `embedding_model` stamp on rows plus filter-by-stamp reads; two models
   needing different engine versions → a per-entry `engine_version` override; measured cold-start
-  pain → weight snapshots / `min_containers > 0` per entry; measured retrieval regressions from a
-  catalog prompt → per-task prompt variants owned by evals.
+  pain → weight snapshots / `min_containers > 0`; measured retrieval regressions from a catalog
+  prompt → per-task prompt variants owned by evals.
