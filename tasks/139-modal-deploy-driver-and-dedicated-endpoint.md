@@ -77,6 +77,16 @@ The Hugging Face token joins the argv in ONE place and leaves every log in ONE p
   the child `env=` instead, delete `hf_token_args` / `redact_argv` and their tests, and write
   `PA: ADR-009 §9 needs argv -> env var <NAME>` in `## Log`. If it does not (the docs today): keep the argv form.
 
+**3b. Client-side Matryoshka truncation — ONE pure helper** in `tree/models/modal_catalog.py`, used by the
+smoke test below AND by the `ModalEmbeddingModel` client (#140), so the smoke test proves the exact path
+the memory uses: `truncate_embedding(vector: list[float], dimensions: int) -> list[float]` — the first
+`dimensions` components divided by their L2 norm (a zero vector is returned as sliced); `dimensions > len(vector)`
+-> `ModelError("cannot truncate a 1024-d vector to 2048-d")`; the input is not mutated. Why client-side
+(ADR-009 §3): NO request of ours ever carries an OpenAI `dimensions` parameter — vLLM answers 400 to it
+unless the model's HF config is flagged Matryoshka (voyage-4-nano's is not) and a managed recipe exposes
+no flag to change that, so client-side truncation is the one mechanism that behaves identically on all
+three Serving paths.
+
 **4. Shared server helpers + the ONE smoke test** — new `src/tree/models/modal_server.py`
 (imports `modal`; never imported by `modal_catalog` or at MCP boot). Used by the driver now and by
 the `ModalEmbeddingModel` client in #140 — one implementation of URL lookup and authenticated health:
@@ -97,18 +107,28 @@ the `ModalEmbeddingModel` client in #140 — one implementation of URL lookup an
   not control the name a managed recipe serves under (custom weights especially), and vLLM rejects an
   unknown `model`.
 - `async smoke_test(model: str, health_timeout: float = 1200.0) -> SmokeTestReport` (Pydantic:
-  `url, served_model, dimensions, cold_start_seconds, cos_relevant, cos_unrelated, unauthenticated_status`):
+  `url, served_model, dimensions, truncated_dimensions: int | None, cold_start_seconds, cos_relevant, cos_unrelated, unauthenticated_status`):
   resolve -> `wait_until_healthy` -> `served_model_id` -> `POST /v1/embeddings`
-  (`encoding_format: "float"`) with 3 inputs — the query `"how do I reset my password?"` prefixed by
+  (`encoding_format: "float"`, NO `dimensions` key in the body) with 3 inputs — the query `"how do I reset my password?"` prefixed by
   `prompt_for(entry, "query")`, and the documents `"To reset your password, open Settings and choose Reset password."`
   and `"The Eiffel Tower is 330 metres tall."` prefixed by `prompt_for(entry, "document")` — then assert:
-  HTTP 200; 3 items; every `len(embedding) == entry.native_dimensions`;
+  HTTP 200; 3 items; every `len(embedding) == entry.native_dimensions` — the NATIVE width, i.e.
+  **2048 for `voyageai/voyage-4-nano`** (its 1024->2048 linear head) and 1024 for `Qwen/Qwen3-Embedding-0.6B`;
   `cos(query, relevant) > cos(query, unrelated)`; and `GET /health` WITHOUT the header answers 401.
+  THEN, only when the entry lists a Matryoshka size below native
+  (`target = max(d for d in entry.matryoshka_dimensions if d < entry.native_dimensions)` -> 1024 for
+  voyage-4-nano; none for Qwen3, whose list is empty -> the step is skipped and `truncated_dimensions is None`):
+  `truncate_embedding` each of the 3 vectors to `target` (no second request) and assert every length
+  `== target`, every L2 norm within `1.0 ± 1e-3`, and the SAME ordering `cos(query, relevant) > cos(query, unrelated)`
+  at the truncated width — this is the vector the memory writes to the 1024-d mongot index, proven per Serving path.
   Each failed assertion raises `ModelError` with the numbers, e.g.
-  `expected 1024 dims, got 2048`, `sanity check failed: cos(query, relevant)=0.31 <= cos(query, unrelated)=0.35 — the served architecture or pooling is probably wrong`,
+  `expected 2048 dims, got 1024 — the Embedding catalog's native_dimensions is wrong for this Serving path, or the served architecture dropped the model's projection head`,
+  `truncated norm=0.412, expected 1.0 ± 0.001`, `sanity check failed: cos(query, relevant)=0.31 <= cos(query, unrelated)=0.35 — the served architecture or pooling is probably wrong`,
   `unauthenticated /health answered 200, expected 401 — the server is public`.
   Log lines (INFO, via `logger`): `health 200 after 143.2s`, `served model id: <id>`,
-  `3 embeddings, 1024 dims`, `sanity: cos(query, relevant)=0.71 > cos(query, unrelated)=0.22`,
+  `3 embeddings, 2048 dims` (voyage-4-nano; `1024 dims` for Qwen3), `sanity: cos(query, relevant)=0.71 > cos(query, unrelated)=0.22`,
+  then for voyage-4-nano only `truncated 2048 -> 1024 dims client-side, norm=1.000` and
+  `sanity@1024: cos(query, relevant)=0.70 > cos(query, unrelated)=0.21`,
   `unauthenticated health -> 401`, `Smoke test passed`.
 
 **5. Driver glue + Make** — `scripts/modal_embedding_model.py` (`init_logger()` at module level,
@@ -138,7 +158,7 @@ exit 2) and `resolve_serving(entry, serving)` (bad value / missing `base_model` 
 `apps/memory/Makefile` replaces the three old targets (and deletes the
 `modal secret create vllm-embedding-api-key …` bootstrap):
 - `deploy-embedding-model: # Serve ONE Embedding catalog model on Modal as its own app (ep-<model>) via the entry's Serving path — endpoint (Modal Dedicated Endpoint, default) | sglang | vllm (our fallback scripts). Requires MODEL=<repo_id>, e.g. MODEL=Qwen/Qwen3-Embedding-0.6B. Optional SERVING=endpoint|sglang|vllm overrides the YAML for this command only (the client still reads the YAML).`
-- `deploy-embedding-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, relevant-vs-unrelated sanity, 401 without a token). Requires MODEL=<repo_id>.`
+- `deploy-embedding-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token). Requires MODEL=<repo_id>.`
 - `deploy-embedding-model-stop: # Stop one catalog model on Modal. Requires MODEL=<repo_id>; pass the same SERVING= you deployed with.`
   Each prints a `USAGE:` line and exits 1 when `MODEL` is empty (same `@if [ -z … ]` guard as `search-web`).
   `HF_TOKEN` is NOT a Make variable: it reaches the driver through `Settings`, never through a recipe line (Make echoes recipes).
@@ -174,7 +194,8 @@ token tests PATCH `settings.hf_token` (never rely on the developer's real `HF_TO
 - [ ] `("deploy", voyage_entry, "vllm")` -> `["modal", "deploy", "deploy/modal_vllm_embedding.py"]`; `("deploy", qwen_entry, "sglang")` -> `["modal", "deploy", "deploy/modal_sglang_embedding.py"]`; `("stop", qwen_entry, "endpoint")` -> `["modal", "endpoint", "stop", "-y", "qwen3-embedding-0-6b"]`; `("stop", qwen_entry, "sglang")` -> `["modal", "app", "stop", "ep-qwen3-embedding-0-6b"]` (plus `-y` only if verified necessary) — `::test_script_and_stop_commands`.
 - [ ] `resolve_server_url(qwen_entry)` calls `modal.Server.from_name("ep-qwen3-embedding-0-6b", "Server")` and returns the URL without a trailing `/` or `/v1`; a raising lookup or an empty URL -> `ModelError` containing `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B` and `modal endpoint list` — `tests/unit/models/test_modal_server.py::TestResolveServerUrl`.
 - [ ] `wait_until_healthy` sends `Authorization: Bearer wk-1.ws-2`; 200 -> a float >= 0; 401 -> `ModelError` naming both env vars; 503 -> `ExtractionError` — `::TestWaitUntilHealthy`. `served_model_id` returns `"Qwen/Qwen3-Embedding-0.6B"` for `{"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}` and the `default` (with one WARNING record) for `{"data": []}` and for a 500 — `::TestServedModelId`.
-- [ ] `smoke_test("voyageai/voyage-4-nano")` with mocked HTTP: posts exactly 3 inputs, the first starting with `Represent the query for retrieving supporting documents: `, the other two with `Represent the document for retrieval: `, under the DISCOVERED model id; returns a report with `dimensions == 1024`, `unauthenticated_status == 401`. It raises `ModelError` containing `expected 1024 dims, got 2048` for 2048-d vectors; containing `sanity check failed` when the unrelated document scores >= the relevant one; containing `expected 401` when the header-less `/health` answers 200 — `::TestSmokeTest` (4 tests).
+- [ ] `smoke_test("voyageai/voyage-4-nano")` with mocked HTTP: posts exactly 3 inputs, the first starting with `Represent the query for retrieving supporting documents: `, the other two with `Represent the document for retrieval: `, under the DISCOVERED model id; the POST body has NO `dimensions` key; with 2048-d mocked vectors it returns a report with `dimensions == 2048`, `truncated_dimensions == 1024`, `unauthenticated_status == 401` and logs `3 embeddings, 2048 dims` and `truncated 2048 -> 1024 dims client-side`. It raises `ModelError` containing `expected 2048 dims, got 1024` for 1024-d vectors (the catalog-was-wrong / head-dropped case); containing `sanity check failed` when the unrelated document scores >= the relevant one at native width, and containing `sanity@1024` when the ordering holds at 2048-d but flips in the first 1024 components; containing `expected 401` when the header-less `/health` answers 200. `smoke_test("Qwen/Qwen3-Embedding-0.6B")` with 1024-d vectors returns `dimensions == 1024`, `truncated_dimensions is None` and logs no `truncated` line — `::TestSmokeTest` (6 tests).
+- [ ] `truncate_embedding([3.0, 4.0, 12.0], 2) == [0.6, 0.8]` (± 1e-9); a 2048-d unit vector truncated to 1024 has length 1024 and L2 norm `1.0 ± 1e-6`; `truncate_embedding(v, len(v))` returns `v` renormalised; `truncate_embedding([1.0] * 1024, 2048)` raises `ModelError` containing `cannot truncate a 1024-d vector to 2048-d`; the input list is not mutated — `tests/unit/models/test_modal_catalog.py::TestTruncateEmbedding`.
 - [ ] Driver — `tests/unit/scripts/test_modal_embedding_model_script.py` (`subprocess.run` and `smoke_test` patched): `deploy --model Qwen/Qwen3-Embedding-0.6B` runs the endpoint argv with `EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B` in the child env and logs the `Dedicated endpoint: Modal picks the GPU` line; `deploy --model voyageai/voyage-4-nano --serving endpoint` runs the custom-weights argv and logs the `overrides the catalog's serving: vllm` line; `deploy --model voyageai/voyage-4-nano` (script absent in a tmp cwd) exits 2, runs nothing and logs `does not exist`; `--model BAAI/bge-m3` exits 2, runs nothing, logs both catalog ids; `--serving tgi` exits 2; `test --model …` awaits `smoke_test` once and exits 1 when it raises `ModelError`.
 - [ ] Driver, token set (`settings.hf_token` patched to `hf_secret123`) — `::TestHfToken`: `deploy --model voyageai/voyage-4-nano --serving endpoint` calls `subprocess.run` with an argv whose last two items are `--custom-hf-token`, `hf_secret123`; the combined `caplog` text + click output contains `--custom-hf-token ***` and does NOT contain `hf_secret123`; `deploy --model Qwen/Qwen3-Embedding-0.6B` runs an argv WITHOUT `--custom-hf-token`; with `subprocess.run` returning `returncode=1` the command exits 1, logs `modal command failed (exit 1)`, no `CalledProcessError` is raised, `hf_secret123` occurs nowhere in the captured output, and the hint is NOT logged.
 - [ ] Driver, token empty — `::TestHfTokenHint`: the custom-weights argv equals `modal_cli_command(...)` exactly; a `deploy` with `returncode=1` and a `test` whose `smoke_test` raises `ExtractionError` each log, as the last record, `If voyageai/voyage-4-nano is a private or gated Hugging Face repo, set HF_TOKEN in .env` (WARNING); a successful deploy logs no hint.
@@ -196,7 +217,7 @@ token tests PATCH `settings.hf_token` (never rely on the developer's real `HF_TO
 ### Story: Operator tries custom weights before falling back
 1. `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano SERVING=endpoint`
 2. The log shows `… --model Qwen/Qwen3-Embedding-0.6B --custom-hf-repo voyageai/voyage-4-nano --custom-hf-revision main …` and `SERVING=endpoint overrides the catalog's serving: vllm for THIS command only — …`.
-3. The `-test` target fails with `sanity check failed: …` (or Modal refuses the weights) -> the operator stops it with `SERVING=endpoint` and moves down the ladder.
+3. The `-test` target fails with `expected 2048 dims, got 1024 — …` (the base model's recipe has no 1024->2048 head), with `sanity check failed: …`, or Modal refuses the weights -> the operator stops it with `SERVING=endpoint` and moves down the ladder.
 
 ### Story: Operator serves a PRIVATE fine-tune as a Dedicated endpoint
 1. Adds `HF_TOKEN=hf_…` (read scope) to `.env` and the entry `{repo_id: acme/my-embedder, revision: <sha>, base_model: Qwen/Qwen3-Embedding-0.6B, native_dimensions: 1024}` to the Embedding catalog.
@@ -210,6 +231,11 @@ token tests PATCH `settings.hf_token` (never rely on the developer's real `HF_TO
 ### Story: Operator walks down the ladder before the fallback scripts exist
 1. `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=sglang` (before #142).
 2. `Serving path 'sglang' needs deploy/modal_sglang_embedding.py, which does not exist.`; exit 2; nothing is deployed.
+
+### Story: The smoke test proves the 1024-d vector the memory will store
+1. voyage-4-nano is live through any Serving path; `make memory-deploy-embedding-model-test MODEL=voyageai/voyage-4-nano`.
+2. The log shows `3 embeddings, 2048 dims`, `sanity: …`, `truncated 2048 -> 1024 dims client-side, norm=1.000`, `sanity@1024: cos(query, relevant)=… > cos(query, unrelated)=…`, `unauthenticated health -> 401`, `Smoke test passed`.
+3. Had the Embedding catalog still said `native_dimensions: 1024`, the run would end with `expected 1024 dims, got 2048 — …`; exit 1.
 
 ### Story: Operator mistypes MODEL or SERVING
 1. `make memory-deploy-embedding-model MODEL=qwen3` -> `Unknown Modal embedding model 'qwen3'. Embedding catalog ids: Qwen/Qwen3-Embedding-0.6B, voyageai/voyage-4-nano. …`; exit 2.
@@ -282,5 +308,21 @@ Ready for implementation.
 
 **User stories**
 - 8 stories: the previous 6 + private fine-tune with a redacted log + forgotten token hint.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 22:11 — Re-grooming (voyage-4-nano is natively 2048-d)
+
+**What changed and why**
+- FACT CORRECTION (Tester, #138 QA, primary sources): `voyageai/voyage-4-nano` serves 2048-d natively — a learned 1024->2048 linear head (`num_labels: 2048`, `linear.weight [2048, 1024]`) in the custom modeling code, reimplemented untruncated by vLLM. 1024 is a Matryoshka truncation. `Qwen/Qwen3-Embedding-0.6B` IS natively 1024. #138's catalog now says `native_dimensions: 2048` for voyage-4-nano.
+- The smoke test's native-length assertion therefore expects 2048 for voyage-4-nano (1024 for Qwen3); the unit criterion flipped from `expected 1024 dims, got 2048` to `expected 2048 dims, got 1024`, and the log line is `3 embeddings, 2048 dims` for voyage.
+- NEW `truncate_embedding` (pure, in `modal_catalog`) + a second smoke step for entries listing a Matryoshka size below native: truncate the SAME three vectors to 1024, assert length, L2 norm `1.0 ± 1e-3` and the sanity ordering at 1024-d. No second request and no `dimensions` parameter on the wire: ADR-009 §3 now makes truncation client-side on every Serving path (vLLM 400s on `dimensions` for a model not flagged Matryoshka; a managed recipe has no flag for it), so this step exercises exactly what #140's client does before a vector reaches the 1024-d mongot index.
+- The custom-weights story gained the most likely failure: a Dedicated endpoint over base Qwen3 has no projection head, so it answers 1024-d where the catalog says 2048.
+
+**Dependencies**
+- #138 — unchanged (now with `native_dimensions: 2048` for voyage-4-nano).
+
+**User stories**
+- 9 stories: the previous 8 + the smoke test proving the truncated 1024-d vector.
 
 Ready for implementation.

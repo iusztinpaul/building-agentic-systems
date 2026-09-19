@@ -1,7 +1,7 @@
 # ADR-009: Voyage 4, Embedding Roles, and a Catalog of Modal-Hosted Embedding Models
 
 - **Status:** Accepted
-- **Date:** 2026-09-19 (revised twice the same day, before tasks 138+ started: Dedicated endpoints added as the first Serving path — Decisions 2 and 3 rewritten; then the optional Hugging Face token brought into scope — Decision 9 added)
+- **Date:** 2026-09-19 (revised twice the same day, before tasks 138+ started: Dedicated endpoints added as the first Serving path — Decisions 2 and 3 rewritten; then the optional Hugging Face token brought into scope — Decision 9 added; revised a third time during task 138's QA: `voyageai/voyage-4-nano` is natively 2048-d, not 1024-d — Decision 3 gained client-side truncation and the response-length assertion)
 - **Deciders:** Paul (project owner)
 - **Context references:**
   - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/142-modal-fallback-deploy-scripts-vllm-and-sglang.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 141)
@@ -18,7 +18,9 @@
 Four things were true at once. (1) The Voyage API moved to the 4 series (`voyage-4-large` $0.12,
 `voyage-4` $0.06, `voyage-4-lite` $0.02, `voyage-code-4` $0.12 per 1M tokens; 32K context; 1024-d
 default with 256/512/2048 Matryoshka; ONE shared embedding space that also contains the open-weight
-`voyageai/voyage-4-nano`), while we still embedded with legacy `voyage-3.5`. (2) Every vector — a
+`voyageai/voyage-4-nano` — whose NATIVE served width is 2048, through a learned 1024->2048 linear
+head; the API's "1024-d default" is an API default, and for nano 1024 is a Matryoshka truncation),
+while we still embedded with legacy `voyage-3.5`. (2) Every vector — a
 stored chunk and a user's question alike — was embedded the same way, although Voyage, Gemini,
 Qwen3 and most modern retrievers are asymmetric. (3) The "Modal provider" was one hard-coded script
 for one model behind an engine-level API key held in a Modal secret, with a client that hard-coded
@@ -38,7 +40,9 @@ vector, computed once"); the vector index stays 1024-d; Modal re-imports a deplo
 container, where the `tree` package is not installed; entry-point scripts hold no business logic;
 a managed recipe exposes no engine flags, while `voyageai/voyage-4-nano` needs a custom
 architecture (`VoyageQwen3BidirectionalEmbedModel` via `--hf-overrides`), MEAN pooling and
-`--trust-remote-code`; SGLang 0.5.20 cannot serve it (onboarding PR sgl-project/sglang#18436 open
+`--trust-remote-code`; vLLM answers 400 to an OpenAI `dimensions` parameter unless the model's HF
+config is flagged Matryoshka (voyage-4-nano's is not), and a managed recipe exposes no flag to change
+that; SGLang 0.5.20 cannot serve it (onboarding PR sgl-project/sglang#18436 open
 since April 2026) while vLLM serves it natively, and SGLang is the better-trodden path for
 Qwen3-Embedding, BGE, E5, GTE-Qwen2 and EmbeddingGemma; the glossary already owns the word
 **Deployment** (a registered Prefect flow); credentials live in `.env` / `Settings`, never in YAML;
@@ -75,7 +79,8 @@ Nine related choices, one design:
    - Seeds: `Qwen/Qwen3-Embedding-0.6B` → `endpoint` (it IS in Modal's catalog). `voyageai/voyage-4-nano`
      → `vllm`, with `base_model: Qwen/Qwen3-Embedding-0.6B` so the e2e task can FIRST try it as custom
      weights on an endpoint; it flips to `endpoint` only if the endpoint's vectors match the vLLM
-     script's (cosine ≥ 0.99 on three texts) — a wrong architecture returns well-shaped garbage.
+     script's (cosine ≥ 0.99 on three texts, both sides 1024-d) — a wrong architecture returns
+     well-shaped garbage, or drops the projection head and answers 1024-d where the model is 2048-d.
    - The path is called `serving`, not `deployment`: a **Deployment** is a Prefect flow.
    - Two scripts rather than one abstraction: the engines differ in image, launcher and flags, and
      a second copy of ~60 glue lines is cheaper than an interface with two implementations. Both are
@@ -108,6 +113,16 @@ Nine related choices, one design:
    That spec holds configuration only; a credential never enters the image env (§9).
    Weights come from a shared `huggingface-cache` Volume by `repo_id` + `revision`.
    ONE smoke test (`tree.models.modal_server.smoke_test`), run by the driver, covers every path.
+   **Dimensions: the client never sends `dimensions`.** `native_dimensions` is the width the server
+   returns when NO `dimensions` parameter is sent — a measured fact, not `hidden_size`
+   (`voyageai/voyage-4-nano`: `hidden_size` 1024, served 2048; `Qwen/Qwen3-Embedding-0.6B`: 1024).
+   `ModalEmbeddingModel` always requests the native width, ASSERTS every response is
+   `native_dimensions` wide (`ExtractionError` otherwise), truncates + L2-renormalises client-side to a
+   size listed in `matryoshka_dimensions` (`truncate_embedding`, one pure function shared with the smoke
+   test), and asserts the width it returns. *Why not the OpenAI `dimensions` parameter:* vLLM needs an
+   `is_matryoshka` hf-override for this model, a Dedicated endpoint cannot be given one, SGLang is
+   unproven — three per-path behaviours against one function that is identical everywhere and keeps the
+   client path-blind. Slice-then-normalise is what a server-side Matryoshka truncation does.
 
 4. **Modal Proxy tokens are the only auth.** Dedicated endpoints require them by default; the
    fallback servers deploy with `unauthenticated=False`; the driver never passes `--unauthenticated`.
@@ -219,14 +234,14 @@ flowchart LR
         VOY["Voyage text / multimodal<br/>API input_type"]
         GEM["Gemini<br/>task_type RETRIEVAL_*"]
         ST["sentence-transformers<br/>prompt_name if defined"]
-        MOD["ModalEmbeddingModel<br/>catalog lookup · never reads serving<br/>Server.from_name(ep-*, Server) · served id from /v1/models<br/>prompt prepended client-side · dimensions only if != native · Bearer id.secret"]
+        MOD["ModalEmbeddingModel<br/>catalog lookup · never reads serving<br/>Server.from_name(ep-*, Server) · served id from /v1/models<br/>prompt prepended client-side · never sends dimensions · asserts len == native<br/>truncates + renormalises client-side · Bearer id.secret"]
     end
 
     subgraph modal["Modal workspace — one app per model, one Serving path at a time, proxy auth on all"]
         direction TB
         EP["1 · endpoint (default) — Dedicated endpoint<br/>ep-qwen3-embedding-0-6b · class Server<br/>Modal-generated serve.py · Modal picks GPU, engine, flags"]
         SGL["2 · sglang fallback<br/>deploy/modal_sglang_embedding.py · SGLangEndpoint · class Server"]
-        VLLM["3 · vllm fallback<br/>ep-voyage-4-nano · deploy/modal_vllm_embedding.py<br/>VLLMEndpoint · class Server · hf-overrides, MEAN pooling"]
+        VLLM["3 · vllm fallback<br/>ep-voyage-4-nano · deploy/modal_vllm_embedding.py<br/>VLLMEndpoint · class Server · hf-overrides, MEAN pooling · serves 2048-d"]
         EDGE["Modal edge — Proxy token check<br/>401 before any GPU wakes"]
     end
 
@@ -236,7 +251,7 @@ flowchart LR
         IDX["make memory-run-indexing-pipeline<br/>backfill re-embeds (document)"]
         CLU["make memory-run-clustering-pipeline"]
         DEP["make memory-deploy-embedding-model MODEL=repo_id [SERVING=path]<br/>-stop · driver scripts/modal_embedding_model.py<br/>logs only redacted argv · hint if a deploy fails without HF_TOKEN"]
-        SMOKE["make memory-deploy-embedding-model-test<br/>ONE smoke test: health · dims · relevant vs unrelated · 401 without token"]
+        SMOKE["make memory-deploy-embedding-model-test<br/>ONE smoke test: health · native dims · client-side truncation · relevant vs unrelated · 401 without token"]
     end
 
     MEM[("memory<br/>vector_index 1024-d (unchanged)")]
@@ -299,7 +314,9 @@ flowchart LR
   recipe — the smoke test is the only guard.
 - **Custom weights are a bet, checked by vectors, not by shape.** "Closest supported base model"
   loads the weights under the base model's architecture; when that differs (voyage-4-nano's
-  bidirectional attention) the endpoint answers 1024 well-formed floats that mean nothing. The
+  bidirectional attention AND a 1024->2048 projection head the base recipe does not have) the
+  endpoint most likely answers the 1024-d hidden state — caught by the length assertion — and in the
+  general case well-formed floats of the right width that mean nothing. The
   smoke test's relevant-vs-unrelated assertion catches gross failures; promoting a custom-weights
   model to `endpoint` additionally needs the vector-equivalence evidence recorded in `tasks/141`.
 - **The fallback scripts are the eject path, not a parallel product.** They exist for what a recipe
@@ -313,8 +330,16 @@ flowchart LR
 - **`SERVING=` can make the YAML lie for a while.** The override changes one command, not the
   catalog; harmless to the client (path-blind), but `-stop` needs the same `SERVING=`, and the YAML
   should be updated to the path that actually worked.
-- **The catalog can still be wrong about a model** (a bad prompt, a wrong `native_dimensions`) —
-  the smoke test asserts the vector length and a coarse sanity ordering, nothing asserts the prompt.
+- **The catalog can be wrong about a model — it already was.** voyage-4-nano's `native_dimensions`
+  was first written as 1024 from `config.json` `hidden_size`; it missed a projection head that lives in
+  the custom modeling code (`num_labels: 2048`, `linear.weight [2048, 1024]`) and is invisible in
+  `modules.json`. With the old "send `dimensions` only if != native" rule the client would have
+  accepted 2048-d vectors for a 1024-d index. The client's response-length assertion is the guard (a
+  wrong entry raises before any vector is returned), the smoke test asserts the same per Serving
+  path, and `tasks/141` measures the wire width live. Nothing asserts the prompt.
+- **Client-side truncation costs wire bytes, not correctness.** voyage-4-nano at 1024 moves 2048
+  floats per text; in exchange all three Serving paths behave identically and the seed needs no
+  Matryoshka override.
 - **Whitespace-free server-arg values** are a constraint imported from `autoinference-utils`
   (it splits values into argv tokens); the config validator turns it into a load-time error instead
   of a container that dies on a mangled `--pooler-config`. It applies to the fallback paths only.
@@ -337,7 +362,10 @@ flowchart LR
   the argv form and its redaction; a second Hub identity, or a team workspace where the token should
   not live on laptops → a named Modal Secret (`Secret.from_name`) created once, optionally named per
   catalog entry; repeated late failures on gated repos → a pre-flight `huggingface_hub` access check
-  in the driver; Modal exposing recipe flags or the SGLang voyage PR merging → move voyage-4-nano up
+  in the driver; measured payload or latency pain from full-width responses → server-side truncation
+  (one merged `--hf-overrides` value, `{"architectures":[…],"is_matryoshka":true}`, plus proof per
+  Serving path from `tasks/141`'s `wire:` lines — not available on a managed recipe today);
+  Modal exposing recipe flags or the SGLang voyage PR merging → move voyage-4-nano up
   the ladder by editing one YAML word; endpoint scaling knobs appearing in the CLI → catalog fields
   for them; a second embedding model live at the same time, or a partial migration that must be
   resumable across days → an `embedding_model` stamp on rows plus filter-by-stamp reads; two models

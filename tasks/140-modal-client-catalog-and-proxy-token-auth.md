@@ -4,7 +4,7 @@ status: pending
 feature: voyage-4-and-modal-embedding-catalog
 ---
 
-# `ModalEmbeddingModel`: resolve from the Embedding catalog on any Serving path, proxy-token auth, Matryoshka guard, client-side prompts; retire `MODAL_EMBEDDING_API_KEY`
+# `ModalEmbeddingModel`: resolve from the Embedding catalog on any Serving path, proxy-token auth, Matryoshka guard + client-side truncation + response-length assertion, client-side prompts; retire `MODAL_EMBEDDING_API_KEY`
 
 Tags: `models`, `modal`, `config`, `ci`
 Depends on: #135, #138, #139
@@ -19,10 +19,24 @@ Implements: ADR-009 — Decision 3 (catalog lookup, one URL lookup for all Servi
   the `_MODEL_NATIVE_DIMENSIONS` table (it cites a `deploy/embedding_models.py` that never existed).
   `entry = get_catalog_entry(model)` at construction — an unknown model fails THERE with the catalog error.
 - Empty `proxy_token` -> `ModelError("Modal proxy token is required. Set MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET.")`.
-- Matryoshka guard at construction: `dimensions in (None, entry.native_dimensions)` -> native, and
-  `dimensions=` is NOT sent on the wire; `dimensions in entry.matryoshka_dimensions` -> sent as
-  `dimensions=`; anything else -> `ModelError("Qwen/Qwen3-Embedding-0.6B cannot produce 512-d vectors: native 1024, matryoshka_dimensions []. Set models.<block>.dimensions to 1024 or extend the Embedding catalog entry.")`.
-  The `dimensions` property returns the effective size.
+- Matryoshka guard at construction: `dimensions in (None, entry.native_dimensions)` -> effective = native;
+  `dimensions in entry.matryoshka_dimensions` -> effective = `dimensions`; anything else ->
+  `ModelError("Qwen/Qwen3-Embedding-0.6B cannot produce 512-d vectors: native 1024, matryoshka_dimensions []. Set models.<block>.dimensions to 1024 or extend the Embedding catalog entry.")`.
+  The `dimensions` property returns the effective size. NOTE the seeds: `voyageai/voyage-4-nano` is natively
+  **2048**-d (#138), so the memory's default `dimensions: 1024` is a TRUNCATION for it; Qwen3 is natively 1024.
+- Dimensions on the wire — DECISION (ADR-009 §3): the client NEVER sends an OpenAI `dimensions` parameter.
+  It always requests the native width, then on EVERY response:
+  (1) asserts every `len(embedding) == entry.native_dimensions`, else
+  `ExtractionError("voyageai/voyage-4-nano returned 1024-d vectors but its Embedding catalog entry says native_dimensions 2048 — fix modal.embedding_models (or the Serving path dropped the model's projection head). No vector was returned.")`;
+  (2) when effective != native, maps #139's `truncate_embedding(vector, effective)` over the batch (slice + L2-renormalise);
+  (3) asserts every returned `len(vector) == self.dimensions` (same `ExtractionError` family) as the last line before returning.
+  A wrong-width vector can therefore never reach the 1024-d mongot index — not with a wrong catalog, not with a
+  listed size above native. Why not server-side `dimensions=` (even as the primary path with this as a fallback):
+  vLLM answers 400 unless the model's HF config is flagged Matryoshka (voyage-4-nano's `config.json` is not;
+  it would need `is_matryoshka` merged into the seed's single `--hf-overrides` JSON), a managed Dedicated-endpoint
+  recipe exposes no such flag, and SGLang's behaviour is unproven — three per-path behaviours plus a detect-and-fall-back
+  branch, against one 4-line pure function that is identical everywhere and already proven by #139's smoke test.
+  Cost: 2048 floats per text on the wire for voyage-4-nano at 1024 (ADR-009 Consequences names the upgrade trigger).
 - URL, health and served model id come from #139's `tree.models.modal_server` — DELETE the client's
   own `_resolve_web_url` / `_health_check`: first `embed()` awaits `resolve_server_url(entry)`
   (append `/v1` once for `AsyncOpenAI`), `wait_until_healthy(url, proxy_token, health_timeout)` and
@@ -76,7 +90,9 @@ Write tests with `/squid-testing-python`; `tree.models.modal_server` functions a
 - [ ] The SAME assertions hold for the `endpoint` seed and the `vllm` seed — `::TestUrlResolution::test_serving_path_is_invisible_to_the_client` (parametrised over both `repo_id`s; `grep -c "\.serving" apps/memory/src/tree/models/modal_embedding.py` -> 0).
 - [ ] `AsyncOpenAI` is built with `api_key="wk-1.ws-2"`; `wait_until_healthy` is awaited with bearer `wk-1.ws-2` and `health_timeout`; its `ModelError` (401) and `ExtractionError` (503) propagate unchanged — `::TestProxyAuth`.
 - [ ] With `served_model_id` answering `"served/other-name"`, `embeddings.create` is called with `model="served/other-name"` while Opik usage is recorded under `voyageai/voyage-4-nano` — `::TestServedModel`.
-- [ ] Dimensions: voyage-4-nano with `dimensions=1024` or `None` -> `.dimensions == 1024` and NO `dimensions` kwarg in `embeddings.create`; `dimensions=512` -> kwarg `dimensions=512`, `.dimensions == 512`; Qwen3 with `dimensions=512` -> `ModelError` containing `cannot produce 512-d` and `native 1024` — `::TestMatryoshkaGuard`.
+- [ ] Guard: voyage-4-nano with `dimensions=None` or `2048` -> `.dimensions == 2048`; `dimensions=1024` -> `.dimensions == 1024`; `dimensions=512` -> `.dimensions == 512`; `dimensions=768` -> `ModelError` containing `cannot produce 768-d`, `native 2048` and `[256, 512, 1024, 2048]`; Qwen3 with `dimensions=512` -> `ModelError` containing `cannot produce 512-d` and `native 1024`; Qwen3 with `1024` or `None` -> `.dimensions == 1024` — `::TestMatryoshkaGuard`.
+- [ ] Wire + truncation (mocked `embeddings.create` answering 2048-d vectors for voyage-4-nano): in ALL of the cases above `embeddings.create` is called WITHOUT a `dimensions` kwarg (today's `kwargs["dimensions"] = self._dimensions` line is deleted: `grep -c 'kwargs\["dimensions"\]' apps/memory/src/tree/models/modal_embedding.py` -> 0); with `dimensions=1024` every returned vector has length 1024, L2 norm `1.0 ± 1e-6` and equals `truncate_embedding(raw, 1024)`; with `dimensions=None` the 2048-d vectors are returned unchanged — `::TestClientSideTruncation`.
+- [ ] Response-length assertion: voyage-4-nano (`dimensions=1024`) with a mocked response of 1024-d vectors raises `ExtractionError` containing `returned 1024-d vectors` and `native_dimensions 2048`, and returns nothing; Qwen3 with a mocked 2048-d response raises `ExtractionError` containing `returned 2048-d vectors` and `native_dimensions 1024`; a batch where only the LAST item has the wrong length also raises — `::TestResponseLength` (3 tests).
 - [ ] Role: voyage-4-nano `embed(["cats"], input_type="query")` sends input `["Represent the query for retrieving supporting documents: cats"]`; `"document"` -> `["Represent the document for retrieval: cats"]`; `None` -> `["cats"]`; Qwen3 `"document"` -> `["cats"]`, `"query"` -> the text prefixed with the catalog `query_prompt` — `::TestRolePrompts`.
 - [ ] `_build_embedding_model(EmbeddingConfig(provider="modal", model="voyageai/voyage-4-nano", dimensions=512))` constructs the client with `dimensions=512` and the bearer from settings; importing `tree.models.get_model` does not import `modal` (`'modal' not in sys.modules`, subprocess) — `tests/unit/models/test_get_model.py::TestModalBranch`.
 - [ ] `Settings` field set has no `modal_embedding_api_key` — `tests/unit/config/test_settings_credentials_only.py`.
@@ -88,7 +104,17 @@ Write tests with `/squid-testing-python`; `tree.models.modal_server` functions a
 
 ### Story: Operator points search at the Dedicated endpoint
 1. After `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B`, sets `models.search_embedding: {provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`.
-2. First `embed()` logs `ModalEmbeddingModel ready: app=ep-qwen3-embedding-0-6b server=Server served_model=Qwen/Qwen3-Embedding-0.6B url=https://…/v1`, warms `/health` with the bearer, and returns 1024-d vectors.
+2. First `embed()` logs `ModalEmbeddingModel ready: app=ep-qwen3-embedding-0-6b server=Server served_model=Qwen/Qwen3-Embedding-0.6B native=1024 dimensions=1024 url=https://…/v1`, warms `/health` with the bearer, and returns 1024-d vectors.
+
+### Story: Operator points search at voyage-4-nano and the 1024-d index stays safe
+1. After `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano`, sets `models.search_embedding: {provider: modal, model: voyageai/voyage-4-nano, dimensions: 1024}`.
+2. First `embed()` logs `ModalEmbeddingModel ready: app=ep-voyage-4-nano server=Server served_model=voyageai/voyage-4-nano native=2048 dimensions=1024 (truncated client-side) url=https://…/v1`.
+3. The server answers 2048 floats per text; the caller receives 1024-d unit vectors — the same ones `make memory-deploy-embedding-model-test` checked under `sanity@1024`.
+
+### Story: The Embedding catalog is wrong about a model and nothing gets written
+1. Someone edits the voyage-4-nano entry back to `native_dimensions: 1024` (it was derived from `hidden_size` once already).
+2. The first `embed()` raises `ExtractionError: voyageai/voyage-4-nano returned 2048-d vectors but its Embedding catalog entry says native_dimensions 1024 — fix modal.embedding_models (…). No vector was returned.`
+3. No row in `memory` carries a 2048-d vector.
 
 ### Story: Operator moved a model down the ladder and the client did not notice
 1. Stops the Qwen3 endpoint, runs `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=sglang`, writes `serving: sglang` into the YAML.
@@ -149,5 +175,21 @@ Ready for implementation.
 
 **User stories**
 - 6 stories: endpoint happy path, ladder move invisible to the client, missing token, impossible dimension, stopped model, query prompt.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 22:11 — Re-grooming (voyage-4-nano is natively 2048-d)
+
+**What changed and why**
+- FACT CORRECTION (Tester, #138 QA): voyage-4-nano's native served width is 2048 (1024->2048 linear head), not 1024; #138's catalog now says so. The approved criterion "voyage with `dimensions=1024` sends NO kwarg and is native" was therefore false: 1024 is a truncation for this model, and it is the size the memory uses by default (`EmbeddingConfig.dimensions = 1024`, the mongot index width).
+- DECISION — supersedes the first entry's "`dimensions=` is sent only when it differs from native": the client NEVER sends `dimensions`; it requests native width and truncates + L2-renormalises client-side with #139's `truncate_embedding`. Chosen over "server-side, client-side as fallback" because it is the least mechanism that cannot go wrong per path: vLLM 400s on `dimensions` unless the HF config is flagged Matryoshka (voyage-4-nano's is not — that would mean merging `is_matryoshka` into #138's seed `--hf-overrides`), a managed recipe has no such flag, SGLang is unproven. One pure function, identical on all three Serving paths, keeps the client path-blind and needs no change to #138's seed. Mathematically identical to server-side MRL truncation (slice, then L2-normalise).
+- NEW guard, the lesson of #138: the client asserts on every response that the wire length equals `native_dimensions` and that what it returns equals the effective `dimensions`, raising `ExtractionError`. The catalog was wrong about a model once (`hidden_size` read instead of the projection head's `num_labels`); with this assertion a wrong entry fails loudly instead of writing 2048-d vectors against a 1024-d index.
+- The `ready` log line now shows `native=` and `dimensions=`. #141 records the wire length with and without `dimensions` on every path — evidence for a future server-side upgrade, not a gate for this task.
+
+**Dependencies**
+- #139 additionally provides `truncate_embedding`.
+
+**User stories**
+- 8 stories: the previous 6 + voyage-4-nano truncated to the 1024-d index + a wrong catalog entry caught before any write.
 
 Ready for implementation.

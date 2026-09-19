@@ -69,6 +69,15 @@ is #139's shared `smoke_test`, run by the driver):
   `validate_embeddings_endpoint(port=8000, payload={"model": SPEC["repo_id"], "input": [<two probe strings>], "encoding_format": "float"}, request_timeout=60.0)`.
   `@modal.exit()` -> `.stop()`. No engine `--api-key`; no `Secret.from_name` (nothing to bootstrap in
   the workspace); the ONLY Modal Secret is `HF_SECRET`, whose only possible key is `HF_TOKEN`.
+- The scripts serve the model's NATIVE width and know nothing about Matryoshka: `voyageai/voyage-4-nano`
+  answers 2048-d (its 1024->2048 linear head), and the `ModalEmbeddingModel` client truncates to 1024
+  client-side (ADR-009 §3, #140). DECISION: the voyage-4-nano seed's `--hf-overrides` is NOT extended with
+  `is_matryoshka` / `matryoshka_dimensions` — no request of ours carries `dimensions`, so the flag would buy
+  nothing and would make this path behave differently from a Dedicated endpoint. #138's seed
+  `extra_server_args` stay exactly as they are. (If a server-side upgrade is ever justified — ADR-009
+  "What would justify upgrading" — `--hf-overrides` is ONE flag, so both overrides merge into ONE compact,
+  whitespace-free JSON value: `'{"architectures":["VoyageQwen3BidirectionalEmbedModel"],"is_matryoshka":true}'`,
+  to be verified against the pinned vLLM's docs at that time.)
 - All output through `logger`; every function typed, including `-> None`.
 
 README "Modal embedding deployment": ONE paragraph "Fallback scripts" naming both files, when to use
@@ -90,6 +99,8 @@ under a real Modal client.
   and already log the hint when a deploy or test fails without a token). The real deployment (#141).
 - A named, persistent Modal Secret (`Secret.from_name`) and any bootstrap target for it; a
   pre-flight Hub call; a per-model token.
+- Server-side Matryoshka truncation (an `is_matryoshka` hf-override, honouring an OpenAI `dimensions`
+  parameter): truncation is client-side on every Serving path (#140).
 - Snapshot / pre-baked weight volumes. GPU autoscaling knobs in YAML. Vendoring SGLang PR #18436.
 - A shared base module for the two scripts (ADR-009: two boring copies until a third engine arrives).
 
@@ -111,7 +122,7 @@ under a real Modal client.
 ### Story: Operator serves a model the managed recipe cannot
 1. `voyageai/voyage-4-nano` needs `--hf-overrides` for `VoyageQwen3BidirectionalEmbedModel`; its entry says `serving: vllm`.
 2. `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano` -> the log shows `modal deploy deploy/modal_vllm_embedding.py`; Modal reports the app `ep-voyage-4-nano` with one server `Server`.
-3. `make memory-deploy-embedding-model-test MODEL=voyageai/voyage-4-nano` -> `3 embeddings, 1024 dims`, `unauthenticated health -> 401`, `Smoke test passed`.
+3. `make memory-deploy-embedding-model-test MODEL=voyageai/voyage-4-nano` -> `3 embeddings, 2048 dims`, `truncated 2048 -> 1024 dims client-side, norm=1.000`, `sanity@1024: …`, `unauthenticated health -> 401`, `Smoke test passed`.
 
 ### Story: Operator serves a GATED model through a fallback script
 1. Accepts the licence of `google/embeddinggemma-300m` on its Hub page, adds `HF_TOKEN=hf_…` to `.env` and an entry with `serving: sglang` to the Embedding catalog.
@@ -176,5 +187,20 @@ Ready for implementation.
 
 **User stories**
 - 6 stories: the previous 4 + gated model with a token + gated model without one.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 22:11 — Re-grooming (voyage-4-nano is natively 2048-d)
+
+**What changed and why**
+- FACT CORRECTION (Tester, #138 QA): the vLLM script serves voyage-4-nano at its native 2048-d (a 1024->2048 linear head vLLM reimplements untruncated), not 1024. The first story's smoke output now reads `3 embeddings, 2048 dims` followed by the client-side truncation lines from #139's smoke test.
+- DECISION: no Matryoshka `--hf-overrides` on the seed. ADR-009 §3 makes truncation client-side on every Serving path, so the scripts stay width-agnostic and #138's seed `extra_server_args` do not change. The merged single-flag JSON value is written down once, here, for the day a server-side upgrade is justified — `--hf-overrides` is one flag, so a second override must be merged into the same compact JSON, never added as a second key.
+- No acceptance criterion changed: the scripts never asserted a width (`validate_embeddings_endpoint` checks shape, not size).
+
+**Dependencies**
+- Unchanged.
+
+**User stories**
+- 6 stories, unchanged in number.
 
 Ready for implementation.
