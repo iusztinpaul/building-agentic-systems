@@ -11,11 +11,12 @@ Resolution order:
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -642,6 +643,275 @@ class MemoryConfig(BaseModel):
     clustering: ClusteringConfig = ClusteringConfig()
 
 
+ServingPath = Literal["endpoint", "sglang", "vllm"]
+"""The **Serving path** of one catalog entry (ADR-009 §2), best first:
+
+* ``endpoint`` — a Modal **Dedicated endpoint**. Modal picks the recipe, the
+  GPU, the engine and its flags; we write no serving code.
+* ``sglang`` / ``vllm`` — our two FALLBACK deploy scripts, for what a managed
+  recipe cannot express (an architecture override, a pooler config,
+  ``--trust-remote-code``, a pinned engine version).
+
+It is ``serving``, not ``deployment``: the glossary's **Deployment** is a
+registered Prefect flow.
+"""
+
+# `<org>/<name>` — the Hugging Face repo id shape. Also applied to
+# ``base_model`` (a model id from Modal's endpoint catalog).
+_REPO_ID_PATTERN = r"^[\w.-]+/[\w.-]+$"
+
+# Server args the deploy builder owns on every model, so ONE entry can run
+# under either fallback script: the launcher's own identity/networking flags
+# plus the per-engine embedding-mode flag (ADR-009 §3).
+_BUILDER_OWNED_SERVER_ARGS = frozenset(
+    {
+        "--model",
+        "--model-path",
+        "--host",
+        "--port",
+        "--revision",
+        "--served-model-name",
+        "--max-model-len",
+        "--context-length",
+        "--runner",
+        "--is-embedding",
+    }
+)
+
+
+class ModalEngineConfig(BaseModel):
+    """The pinned version of ONE serving engine, used by the fallback scripts.
+
+    Per ENGINE, not per model (ADR-009 §3): promote to a per-entry override
+    only when two catalog models need different engine versions.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+
+
+class ModalEmbeddingModelConfig(BaseModel):
+    """One entry of the **Embedding catalog** (ADR-009 §3).
+
+    The single source of truth for a Modal-hosted embedding model: how it is
+    served, what it is called, how wide its vectors are and what prompt each
+    **Embedding role** prepends. Read by BOTH the deploy driver and the
+    client, so names and dimensions can never drift apart.
+
+    Only ``repo_id``, ``base_model`` and ``native_dimensions`` are needed for
+    the common case — a 6-line ``endpoint`` entry. The remaining fields
+    (``gpu``, ``cpu``, ``memory_mb``, ``max_model_len``, ``extra_server_args``)
+    are used by the FALLBACK scripts only, and are optional-with-defaults on
+    every entry rather than forbidden on ``endpoint`` ones: the ladder needs
+    them the moment an endpoint fails, and ``SERVING=sglang|vllm`` must work
+    on an entry nobody edited.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_id: str = Field(
+        pattern=_REPO_ID_PATTERN,
+        description="Hugging Face repo id of the weights, e.g. voyageai/voyage-4-nano.",
+    )
+    revision: str = Field(
+        default="main",
+        description=(
+            "Commit sha (preferred) or branch of the weights. Pinning a sha is "
+            "what makes a re-deploy reproducible."
+        ),
+    )
+    serving: ServingPath = Field(
+        default="endpoint",
+        description="Serving path; the default is the managed Dedicated endpoint.",
+    )
+    base_model: str | None = Field(
+        default=None,
+        pattern=_REPO_ID_PATTERN,
+        description=(
+            "Model id from Modal's endpoint catalog, passed as `--model`. "
+            "REQUIRED for `serving: endpoint`; allowed on any entry so an "
+            "operator can try SERVING=endpoint without editing YAML. When it "
+            "differs from `repo_id`, the endpoint is created with custom "
+            "weights (`--custom-hf-repo`)."
+        ),
+    )
+    native_dimensions: int = Field(
+        gt=0,
+        description="Vector width the server returns when no truncation is asked for.",
+    )
+    matryoshka_dimensions: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Output widths the model can be truncated to (MRL). Empty means "
+            "'this model cannot truncate' — the client then refuses a "
+            "`dimensions` that differs from `native_dimensions`."
+        ),
+    )
+    query_prompt: str = Field(
+        default="",
+        description=(
+            "Prefix prepended client-side to a USER-QUESTION text. Its BYTES "
+            "are the contract (trailing space or not) — copy the model card."
+        ),
+    )
+    document_prompt: str = Field(
+        default="",
+        description="Prefix prepended client-side to a PERSISTED text.",
+    )
+    gpu: str = Field(
+        default="A10",
+        description="Fallback scripts only. A Modal GPU string, e.g. A10, L40S, H100.",
+    )
+    cpu: float = Field(default=4, gt=0, description="Fallback scripts only.")
+    memory_mb: int = Field(default=16384, gt=0, description="Fallback scripts only.")
+    max_model_len: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Fallback scripts only. Context window to serve; null leaves the "
+            "engine's own default in place."
+        ),
+    )
+    extra_server_args: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Fallback scripts only: model-specific engine flags, `--flag` -> "
+            'value (`""` for a bare flag). A Dedicated endpoint never sees '
+            "them. Values may not contain whitespace — autoinference-utils "
+            "splits them into argv tokens."
+        ),
+    )
+
+    @property
+    def endpoint_name(self) -> str:
+        """The Dedicated endpoint's name: the part of ``repo_id`` after ``/``,
+        lower-cased, every run of non-``[a-z0-9]`` characters collapsed to a
+        single ``-``.
+
+        ``voyageai/voyage-4-nano`` -> ``voyage-4-nano``;
+        ``Qwen/Qwen3-Embedding-0.6B`` -> ``qwen3-embedding-0-6b``.
+        """
+
+        suffix = self.repo_id.split("/")[-1].lower()
+        return re.sub(r"[^a-z0-9]+", "-", suffix).strip("-")
+
+    @property
+    def app_name(self) -> str:
+        """The Modal app serving this model, on ALL three Serving paths.
+
+        ASSUMPTION H1, proven live in ``tasks/141``: ``modal endpoint create
+        --name N`` yields the Modal app ``ep-N``. The derivation lives in this
+        ONE place so a wrong assumption costs a one-line change.
+        """
+
+        return f"ep-{self.endpoint_name}"
+
+    @field_validator("extra_server_args")
+    @classmethod
+    def _check_server_args(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, arg in value.items():
+            if not key.startswith("--"):
+                raise ValueError(
+                    f"extra_server_args key {key!r} must start with '--' "
+                    f"(e.g. --{key.lstrip('-')})"
+                )
+            if key in _BUILDER_OWNED_SERVER_ARGS:
+                raise ValueError(
+                    f"extra_server_args key {key!r} is owned by the deploy "
+                    "builder — remove it. Builder-owned keys: "
+                    f"{', '.join(sorted(_BUILDER_OWNED_SERVER_ARGS))}."
+                )
+            if arg != arg.strip() or any(char.isspace() for char in arg):
+                raise ValueError(
+                    f"value for {key} contains whitespace — use compact JSON, "
+                    'e.g. {"pooling_type":"MEAN"}'
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _check_endpoint_has_a_base_model(self) -> "ModalEmbeddingModelConfig":
+        """A Dedicated endpoint is created with ``--model <base_model>``, so an
+        ``endpoint`` entry without one has nothing to deploy."""
+
+        if self.serving == "endpoint" and not self.base_model:
+            raise ValueError(
+                "serving: endpoint requires base_model (a model id from "
+                "Modal's endpoint catalog, e.g. Qwen/Qwen3-Embedding-0.6B)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_the_derived_names_are_not_empty(self) -> "ModalEmbeddingModelConfig":
+        """``repo_id`` may legally end in punctuation (``a/---`` matches the
+        pattern), but every such character is dropped by the name derivation —
+        leaving the endpoint nameless and the Modal app a bare ``ep-``."""
+
+        if not self.endpoint_name:
+            raise ValueError(
+                f"repo_id {self.repo_id!r} derives an empty endpoint name: the "
+                "part after '/' must contain at least one letter or digit "
+                "(everything else is collapsed away)."
+            )
+        return self
+
+
+class ModalConfig(BaseModel):
+    """The **Embedding catalog** plus the pins the fallback scripts build with.
+
+    The code default is an EMPTY catalog: the YAML seeds it, so a checkout
+    without a ``modal:`` section boots (and every non-Modal provider keeps
+    working) with no catalog at all.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    autoinference_utils_version: str = Field(
+        default="0.2.6",
+        description="Fallback scripts only: the pinned `autoinference-utils` version.",
+    )
+    engines: dict[Literal["sglang", "vllm"], ModalEngineConfig] = Field(
+        default_factory=lambda: {
+            "vllm": ModalEngineConfig(version="0.17.1"),
+            "sglang": ModalEngineConfig(version="0.5.20"),
+        },
+        description="Fallback scripts only: the pinned version of each engine.",
+    )
+    embedding_models: list[ModalEmbeddingModelConfig] = Field(
+        default_factory=list,
+        description="The Embedding catalog — one entry per Modal-hosted model.",
+    )
+
+    @model_validator(mode="after")
+    def _check_entries_are_unique(self) -> "ModalConfig":
+        """One model, one entry, one Modal app.
+
+        A duplicate ``repo_id`` makes the lookup order-dependent; two entries
+        deriving the SAME ``app_name`` would silently share one Modal app, so
+        deploying one would stop the other.
+        """
+
+        seen_repo_ids: set[str] = set()
+        seen_app_names: dict[str, str] = {}
+        for entry in self.embedding_models:
+            if entry.repo_id in seen_repo_ids:
+                raise ValueError(
+                    f"duplicate repo_id {entry.repo_id!r} in "
+                    "modal.embedding_models — one entry per model."
+                )
+            seen_repo_ids.add(entry.repo_id)
+
+            owner = seen_app_names.get(entry.app_name)
+            if owner is not None:
+                raise ValueError(
+                    f"{owner!r} and {entry.repo_id!r} both derive the Modal "
+                    f"app name {entry.app_name!r} in modal.embedding_models — "
+                    "one app per model, so rename one of them."
+                )
+            seen_app_names[entry.app_name] = entry.repo_id
+        return self
+
+
 class AppConfig(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     models: ModelsConfig = ModelsConfig()
@@ -653,6 +923,7 @@ class AppConfig(BaseModel):
     prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
     youtube: YouTubeConfig = YouTubeConfig()
+    modal: ModalConfig = ModalConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}

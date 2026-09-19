@@ -167,6 +167,86 @@ youtube:
   brightdata_timeout_seconds: 600
   brightdata_poll_interval_seconds: 10
 
+# The Embedding catalog (ADR-009 §3): one entry per Modal-hosted embedding
+# model, read by BOTH the deploy driver and the client so names, dimensions and
+# prompts have ONE source. Adding a model = one entry here + one
+# `make memory-deploy-embedding-model MODEL=<repo_id>`; an unknown id fails
+# loudly listing these ids.
+#
+# `serving` is the Serving path ladder, best first:
+#   endpoint  a Modal Dedicated endpoint — Modal picks the recipe, GPU, engine
+#             and flags; zero serving code of ours. Needs `base_model` (the id
+#             from Modal's endpoint catalog passed as --model); when `repo_id`
+#             differs from it, the endpoint is created with CUSTOM weights.
+#   sglang    our fallback script deploy/modal_sglang_embedding.py
+#   vllm      our fallback script deploy/modal_vllm_embedding.py
+# One command may walk the ladder without editing YAML: SERVING=<path>.
+#
+# `gpu`, `cpu`, `memory_mb`, `max_model_len` and `extra_server_args` are used by
+# the FALLBACK scripts only — a Dedicated endpoint never sees them — but they
+# stay allowed (with defaults) on every entry so SERVING=sglang|vllm works on an
+# entry nobody edited. `extra_server_args` values may NOT contain whitespace:
+# autoinference-utils splits them into argv tokens, so use compact JSON.
+# NOTE: the TREE_<SECTION>__<KEY> escape hatch does NOT reach list items — edit
+# this file to change a catalog entry.
+modal:
+  autoinference_utils_version: "0.2.6" # fallback scripts only
+  engines: # fallback scripts only; per ENGINE, not per model
+    vllm:
+      version: "0.17.1" # the pin the repo's vLLM script has been serving
+      # voyage-4-nano's own card pins vllm==0.16.0 for this architecture;
+      # PyPI's latest is 0.29.0, unverified for it — #141 owns the live bump.
+    sglang:
+      version: "0.5.20" # latest on PyPI, 2026-09-19
+  embedding_models:
+    # Qwen3-Embedding-0.6B IS in Modal's endpoint catalog, so it needs no code.
+    - repo_id: Qwen/Qwen3-Embedding-0.6B
+      revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3 # HF sha of `main`, 2026-09-19
+      serving: endpoint
+      base_model: Qwen/Qwen3-Embedding-0.6B # == repo_id -> no custom weights
+      native_dimensions: 1024
+      # The card says MRL 32-1024, but nothing proves the recipe Modal picks
+      # honours an OpenAI `dimensions` argument — empty until #141 shows it live.
+      matryoshka_dimensions: []
+      # Byte-exact from the model card's helper:
+      #   f'Instruct: {task_description}\nQuery:{query}'  (no space after Query:)
+      # MUST stay double-quoted: single quotes would make \n a literal backslash-n.
+      query_prompt: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+      document_prompt: "" # Qwen3 instructs the query side only
+    # voyage-4-nano needs an architecture override + MEAN pooling, which a
+    # managed recipe cannot express — hence the vLLM fallback. `base_model` is
+    # the closest model in Modal's endpoint catalog, so #141 can FIRST try it as
+    # custom weights on an endpoint and flip `serving` only on recorded evidence
+    # (the endpoint's vectors matching the script's).
+    - repo_id: voyageai/voyage-4-nano
+      revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f # HF sha of `main`, 2026-09-19
+      serving: vllm
+      base_model: Qwen/Qwen3-Embedding-0.6B
+      gpu: A10 # Modal's GPU string (docs/guide/gpu, 2026-09-19); there is no "A10G"
+      cpu: 4
+      memory_mb: 16384
+      # config.json `num_labels: 2048`, NOT `hidden_size: 1024`: the custom
+      # modeling_qwen3_bidirectional.py AutoModel applies a learned
+      # nn.Linear(1024, 2048) head to last_hidden_state (safetensors
+      # `linear.weight` is [2048, 1024]), and vLLM's own
+      # VoyageQwen3BidirectionalEmbedModel returns it untruncated. The head is
+      # NOT a sentence-transformers Dense module, so modules.json never shows
+      # it — 1_Pooling/config.json's `word_embedding_dimension: 2048` does.
+      # 1024 is a Matryoshka TRUNCATION of this, which is exactly what
+      # models.search_embedding.dimensions: 1024 asks the server for.
+      native_dimensions: 2048
+      matryoshka_dimensions: [256, 512, 1024, 2048]
+      max_model_len: 32768
+      query_prompt: "Represent the query for retrieving supporting documents: "
+      document_prompt: "Represent the document for retrieval: "
+      extra_server_args: # model-specific extras for the FALLBACK scripts only
+        "--convert": embed
+        "--pooler-config": '{"pooling_type":"MEAN"}'
+        "--hf-overrides": '{"architectures":["VoyageQwen3BidirectionalEmbedModel"]}'
+        "--dtype": bfloat16
+        "--enforce-eager": ""
+        "--trust-remote-code": ""
+
 observability:
   enabled: true
   # Per-model USD price per 1,000,000 tokens. Used to compute the manual

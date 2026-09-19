@@ -118,3 +118,37 @@ observability:
   enabled: true
   embedding_price_per_1m_tokens:
     voyage-3.5: 0.06
+
+# The Embedding catalog (ADR-009 §3). Mirrors the SHAPE of the shipped
+# configs/default.yaml — the seed VALUES (revisions, prompts, engine pins) are
+# asserted against the real file, not against this fixture.
+modal:
+  autoinference_utils_version: "0.2.6"
+  engines:
+    vllm:
+      version: "0.17.1"
+    sglang:
+      version: "0.5.20"
+  embedding_models:
+    # A minimal Dedicated-endpoint entry: no serving line (endpoint is the
+    # default), no script-only fields.
+    - repo_id: Qwen/Qwen3-Embedding-0.6B
+      revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      base_model: Qwen/Qwen3-Embedding-0.6B
+      native_dimensions: 1024
+    # A fallback-script entry, with the fields only the scripts read.
+    - repo_id: voyageai/voyage-4-nano
+      revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f
+      serving: vllm
+      base_model: Qwen/Qwen3-Embedding-0.6B
+      gpu: A10
+      cpu: 4
+      memory_mb: 16384
+      native_dimensions: 2048
+      matryoshka_dimensions: [256, 512, 1024, 2048]
+      max_model_len: 32768
+      query_prompt: "Represent the query for retrieving supporting documents: "
+      document_prompt: "Represent the document for retrieval: "
+      extra_server_args:
+        "--convert": embed
+        "--pooler-config": '{"pooling_type":"MEAN"}'

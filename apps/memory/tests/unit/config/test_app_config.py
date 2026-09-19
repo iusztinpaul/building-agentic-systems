@@ -17,6 +17,7 @@ from tree.config.app_config import (
     EmbeddingConfig,
     HdbscanConfig,
     MemoryConfig,
+    ModalEmbeddingModelConfig,
     ObservabilityConfig,
     QueryConfig,
     UmapConfig,
@@ -28,6 +29,16 @@ from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
 )
+
+# A minimal VALID Embedding catalog entry. Each rejection case below mutates
+# exactly one key of it, so the test names the mistake, not the boilerplate.
+_VALID_ENTRY = {
+    "repo_id": "voyageai/voyage-4-nano",
+    "base_model": "Qwen/Qwen3-Embedding-0.6B",
+    # 2048 = the real native width of this repo_id (see ::test_seed_entries),
+    # so the fixture never contradicts the shipped catalog it borrows its id from.
+    "native_dimensions": 2048,
+}
 
 
 class TestLoadAppConfig:
@@ -1017,6 +1028,246 @@ class TestEmbeddingDefaults:
         assert EmbeddingConfig().provider == "voyage"
         assert EmbeddingConfig().model == "voyage-4"
         assert EmbeddingConfig().dimensions == 1024
+
+
+class TestModalCatalog:
+    """The **Embedding catalog** — ``modal.embedding_models`` (ADR-009 §2/§3).
+
+    One YAML entry per Modal-hosted embedding model, each naming its
+    **Serving path** (``endpoint`` | ``sglang`` | ``vllm``). The seeds are
+    asserted against the REAL shipped ``configs/default.yaml`` (what an
+    operator boots), not the frozen fixture.
+    """
+
+    def test_seed_entries(self) -> None:
+        """The shipped catalog holds exactly the two seed models, with the
+        Serving path ladder of ADR-009 §2: Qwen3 on a Dedicated endpoint,
+        voyage-4-nano on the known-good vLLM fallback script."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        entries = config.modal.embedding_models
+        assert [e.repo_id for e in entries] == [
+            "Qwen/Qwen3-Embedding-0.6B",
+            "voyageai/voyage-4-nano",
+        ]
+
+        qwen, voyage = entries
+        assert qwen.serving == "endpoint"
+        assert qwen.base_model == "Qwen/Qwen3-Embedding-0.6B"
+        # HF API sha for `main`, read 2026-09-19.
+        assert qwen.revision == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+        # Script-only fields are OPTIONAL on an endpoint entry: these come
+        # from the typed defaults, so SERVING=sglang|vllm still works on it.
+        assert qwen.gpu == "A10"
+        assert qwen.cpu == 4
+        assert qwen.memory_mb == 16384
+        assert qwen.max_model_len is None
+        # MRL is on the card (32-1024), but nothing offline proves the
+        # Modal-picked recipe honours `dimensions` — stays empty until #141.
+        assert qwen.matryoshka_dimensions == []
+
+        assert voyage.serving == "vllm"
+        # Closest base model in Modal's endpoint catalog, so #141 can try the
+        # endpoint path with custom weights before flipping `serving`.
+        assert voyage.base_model == "Qwen/Qwen3-Embedding-0.6B"
+        assert voyage.revision == "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
+        assert voyage.max_model_len == 32768
+        assert voyage.matryoshka_dimensions == [256, 512, 1024, 2048]
+
+        # `native_dimensions` is what the server returns with NO `dimensions`
+        # asked for, so only Qwen3 lands in the 1024-d mongot vector_index
+        # untruncated. voyage-4-nano is natively 2048-d — its custom
+        # modeling_qwen3_bidirectional.py AutoModel applies a learned
+        # nn.Linear(1024, 2048) head (config.json `num_labels`, safetensors
+        # `linear.weight` [2048, 1024]) that modules.json cannot show — so the
+        # client MUST ask it to truncate to the index's 1024. Getting this
+        # wrong is silent: the rule "send `dimensions=` only when it differs
+        # from native" would send nothing and write 2048-d vectors.
+        assert qwen.native_dimensions == 1024
+        assert voyage.native_dimensions == 2048
+
+    def test_qwen_query_prompt_is_byte_exact(self) -> None:
+        """The Qwen3 instruction prompt is prepended client-side, so its BYTES
+        are the contract: a real newline, and NO space after ``Query:`` (the
+        model card's ``f'Instruct: {task}\\nQuery:{query}'`` helper)."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        qwen = config.modal.embedding_models[0]
+        assert qwen.query_prompt == (
+            "Instruct: Given a web search query, retrieve relevant passages "
+            "that answer the query\nQuery:"
+        )
+        assert qwen.document_prompt == ""
+
+    def test_engine_versions_and_utils_pin(self) -> None:
+        """Engine versions are per ENGINE, not per model (ADR-009 §3), and the
+        ``autoinference-utils`` pin is shared by both fallback scripts."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.modal.autoinference_utils_version == "0.2.6"
+        assert config.modal.engines["vllm"].version == "0.17.1"
+        assert config.modal.engines["sglang"].version == "0.5.20"
+
+    def test_serving_defaults_to_endpoint(self) -> None:
+        """Story 1: a minimal entry (repo_id + base_model + dimensions) is a
+        Dedicated endpoint — no ``serving:`` line, no script-only fields."""
+
+        entry = ModalEmbeddingModelConfig(
+            repo_id="BAAI/bge-m3",
+            base_model="BAAI/bge-m3",
+            native_dimensions=1024,
+        )
+
+        assert entry.serving == "endpoint"
+        assert entry.revision == "main"
+        assert entry.endpoint_name == "bge-m3"
+        assert entry.app_name == "ep-bge-m3"
+        assert entry.extra_server_args == {}
+
+    @pytest.mark.parametrize(
+        "repo_id,endpoint_name",
+        [
+            ("voyageai/voyage-4-nano", "voyage-4-nano"),
+            ("Qwen/Qwen3-Embedding-0.6B", "qwen3-embedding-0-6b"),
+            ("Org/My_Model..v2", "my-model-v2"),
+        ],
+    )
+    def test_name_derivation(self, repo_id: str, endpoint_name: str) -> None:
+        """ASSUMPTION H1 (proven in #141): the Dedicated endpoint named ``N``
+        is the Modal app ``ep-N``. ONE derivation, so a correction is one line."""
+
+        entry = ModalEmbeddingModelConfig(
+            repo_id=repo_id, base_model=repo_id, native_dimensions=1024
+        )
+
+        assert entry.endpoint_name == endpoint_name
+        assert entry.app_name == f"ep-{endpoint_name}"
+
+    @pytest.mark.parametrize(
+        "entries,expected_fragments",
+        [
+            pytest.param(
+                [{**_VALID_ENTRY, "serving": "tgi"}],
+                ["serving", "Input should be 'endpoint', 'sglang' or 'vllm'"],
+                id="unknown-serving-path",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "url": "https://acme--x.modal.run"}],
+                ["url", "Extra inputs are not permitted"],
+                id="unknown-field",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "repo_id": "no-slash"}],
+                ["repo_id", "should match pattern"],
+                id="repo-id-without-org",
+            ),
+            pytest.param(
+                [{k: v for k, v in _VALID_ENTRY.items() if k != "base_model"}],
+                ["serving: endpoint requires base_model"],
+                id="endpoint-without-base-model",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "base_model": "no-slash"}],
+                ["base_model", "should match pattern"],
+                id="base-model-without-org",
+            ),
+            pytest.param(
+                # Not in the AC: found by QA. `-` passes _REPO_ID_PATTERN but
+                # the derivation collapses it away, so the app would be `ep-`.
+                [{**_VALID_ENTRY, "repo_id": "acme/---"}],
+                ["'acme/---'", "derives an empty endpoint name"],
+                id="repo-id-deriving-an-empty-endpoint-name",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"runner": "pooling"}}],
+                ["'runner'", "must start with '--'"],
+                id="server-arg-key-without-dashes",
+            ),
+            pytest.param(
+                [
+                    {
+                        **_VALID_ENTRY,
+                        "extra_server_args": {
+                            "--pooler-config": '{"pooling_type": "MEAN"}'
+                        },
+                    }
+                ],
+                ["value for --pooler-config contains whitespace", "compact JSON"],
+                id="server-arg-value-with-whitespace",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"--port": "8000"}}],
+                ["'--port'", "owned by the deploy builder"],
+                id="reserved-server-arg-key",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"--is-embedding": ""}}],
+                ["'--is-embedding'", "owned by the deploy builder"],
+                id="builder-owned-server-arg-key",
+            ),
+            pytest.param(
+                [_VALID_ENTRY, _VALID_ENTRY],
+                [
+                    "duplicate repo_id 'voyageai/voyage-4-nano'",
+                    "one entry per model",
+                ],
+                id="duplicate-repo-id",
+            ),
+            pytest.param(
+                [_VALID_ENTRY, {**_VALID_ENTRY, "repo_id": "acme/voyage-4-nano"}],
+                [
+                    "'voyageai/voyage-4-nano' and 'acme/voyage-4-nano' both derive",
+                    "'ep-voyage-4-nano'",
+                    "one app per model",
+                ],
+                id="duplicate-app-name",
+            ),
+        ],
+    )
+    def test_rejects_invalid_entries(
+        self,
+        tmp_path,
+        entries: list[dict],
+        expected_fragments: list[str],
+    ) -> None:
+        """Every catalog mistake is a LOAD-TIME error naming the offending key,
+        never a container that dies minutes later on a mangled flag."""
+
+        custom = tmp_path / "modal.yaml"
+        custom.write_text(yaml.safe_dump({"modal": {"embedding_models": entries}}))
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        message = str(excinfo.value)
+        for fragment in expected_fragments:
+            assert fragment in message
+
+    def test_modal_section_is_optional(self, tmp_path) -> None:
+        """A YAML with no ``modal:`` block boots with an EMPTY catalog: the
+        code default adds no model, the YAML seeds it."""
+
+        custom = tmp_path / "no_modal.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.modal.embedding_models == []
+        assert AppConfig().modal.embedding_models == []
+
+    def test_frozen_config_carries_the_catalog(self, frozen_config_path) -> None:
+        """The frozen fixture gains the block too, so the loader assertions
+        cover a catalog without depending on operator edits to default.yaml."""
+
+        config = load_app_config(frozen_config_path)
+
+        assert [e.repo_id for e in config.modal.embedding_models] == [
+            "Qwen/Qwen3-Embedding-0.6B",
+            "voyageai/voyage-4-nano",
+        ]
 
 
 def test_yaml_price_map_matches_code_default() -> None:

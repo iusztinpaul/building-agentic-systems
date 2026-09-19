@@ -72,6 +72,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
+- `modal` — the **Embedding catalog** (`embedding_models`) plus the fallback pins (`autoinference_utils_version`, `engines.vllm/sglang.version`). One entry per Modal-hosted embedding model, each naming its **Serving path** in `serving`: `endpoint` (a Modal **Dedicated endpoint** — Modal picks the recipe, GPU, engine and flags; requires `base_model`), `sglang` or `vllm` (our two fallback deploy scripts, for what a managed recipe cannot express). `gpu`, `cpu`, `memory_mb`, `max_model_len` and `extra_server_args` are read by the fallback scripts only — a Dedicated endpoint never sees them — but stay allowed on every entry so `SERVING=sglang|vllm` works without editing the YAML. See ADR-009 §2/§3.
 
 ### Environment variables
 
