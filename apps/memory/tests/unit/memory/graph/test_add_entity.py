@@ -28,6 +28,7 @@ from tree.memory.graph.dedup import (
     MergeStrategy,
 )
 from tree.memory.graph.resolution.types import ResolvedEntity
+from tree.models.base import EmbeddingRole
 
 
 # A stable user_id used across the suite. Real ``PydanticObjectId`` so
@@ -525,7 +526,9 @@ class _RecordingEmbeddingModel:
         h = abs(hash(text))
         return [((h >> (i * 4)) & 0xF) / 15.0 for i in range(8)]
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.embedded_texts.extend(texts)
         return [self._vec(t) for t in texts]
 

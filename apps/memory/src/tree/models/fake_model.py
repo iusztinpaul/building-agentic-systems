@@ -2,7 +2,7 @@ import random
 from typing import Any
 
 from tree.config.app_config import app_config
-from tree.models.base import BaseLLM, BaseEmbeddingModel
+from tree.models.base import BaseLLM, BaseEmbeddingModel, EmbeddingRole
 
 
 class FakeLLM(BaseLLM):
@@ -38,7 +38,11 @@ class FakeEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Zero vectors. The **Embedding role** is accepted and ignored."""
+
         return [[0.0] * self._dimensions for _ in texts]
 
 
@@ -53,5 +57,9 @@ class MockEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Random vectors. The **Embedding role** is accepted and ignored."""
+
         return [[random.random() for _ in range(self._dimensions)] for _ in texts]

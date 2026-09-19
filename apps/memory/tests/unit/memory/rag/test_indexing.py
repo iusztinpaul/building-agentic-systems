@@ -23,7 +23,7 @@ from tree.memory.rag.indexing import (
     node_embedding_text,
 )
 from tree.memory.embedding_text import node_to_embedding_text
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel
 
 
@@ -632,7 +632,9 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
         return [[0.1] * self._dimensions for _ in texts]
 

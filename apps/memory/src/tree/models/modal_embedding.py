@@ -10,7 +10,7 @@ import logging
 import modal
 from openai import AsyncOpenAI
 
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.observability import record_embedding_usage, track
 
@@ -186,8 +186,15 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         logger.info("Modal embedding endpoint is healthy")
 
     @track(type="llm", name="modal-embed")
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         """Embed texts via the Modal-hosted vLLM server.
+
+        ``input_type`` — the **Embedding role** — is accepted and IGNORED for
+        now: OpenAI-compatible ``/v1/embeddings`` has no role parameter. #140
+        honours it by prepending the **Embedding catalog**'s
+        ``query_prompt`` / ``document_prompt`` client-side.
 
         Wrapped in an Opik ``llm``-type span; on success the vLLM ``usage``
         token counts are recorded with ``total_cost=0`` (self-hosted). Recording

@@ -45,13 +45,12 @@ API ref: https://docs.voyageai.com/reference/embeddings-api
 
 import asyncio
 import logging
-from typing import Literal
 
 import aiohttp
 from prefect.concurrency.asyncio import rate_limit
 
 from tree.config.app_config import app_config
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.observability import record_embedding_usage, track
 
@@ -147,9 +146,10 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
     sending the multimodal shape to ``/v1/embeddings`` (or a text model to the
     multimodal endpoint) 400s.
 
-    Supports optional ``input_type`` (``"query"`` / ``"document"``) for
-    retrieval-optimised embeddings, and ``output_dimension`` for Matryoshka
-    truncation when the model supports it (e.g. ``voyage-4``).
+    Supports the per-call **Embedding role** (``embed(..., input_type=...)``
+    → the API's ``input_type`` field) for retrieval-optimised embeddings, and
+    ``output_dimension`` for Matryoshka truncation when the model supports it
+    (e.g. ``voyage-4``).
 
     Calls to :meth:`embed` are wrapped in an exponential-backoff loop that
     retries transient HTTP 429 (rate-limit) responses and fails fast on every
@@ -164,7 +164,6 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
         self,
         api_key: str,
         model: str = "voyage-4",
-        input_type: Literal["query", "document"] | None = None,
         output_dimension: int | None = None,
         truncation: bool = True,
         timeout: float = 120.0,
@@ -179,7 +178,6 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
             )
         self._api_key = api_key
         self._model = model
-        self._input_type = input_type
         self._output_dimension = output_dimension
         self._truncation = truncation
         self._timeout = timeout
@@ -208,8 +206,15 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
         return native
 
     @track(type="llm", name="voyage-text-embed")
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         """Embed text strings via the Voyage **text** embeddings API.
+
+        ``input_type`` — the **Embedding role** — is sent verbatim as the
+        API's ``input_type`` field (Voyage's own name for the same concept);
+        ``None`` leaves the key out of the payload, which is Voyage's
+        symmetric default.
 
         Retries transparently on HTTP 429 per
         ``self._rate_limit_backoff_seconds``; fails fast on every other
@@ -230,8 +235,8 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
             "input": texts,
             "truncation": self._truncation,
         }
-        if self._input_type is not None:
-            payload["input_type"] = self._input_type
+        if input_type is not None:
+            payload["input_type"] = input_type
         if self._output_dimension is not None:
             payload["output_dimension"] = self._output_dimension
 

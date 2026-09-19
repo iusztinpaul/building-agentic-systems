@@ -167,7 +167,7 @@ from tree.memory.types import (
     make_entity_key,
     make_type_name_key,
 )
-from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
 from tree.models.get_model import (
     get_embedding_model,
     get_llm,
@@ -1661,7 +1661,15 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return len(self._vector)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Replay the seeded vector. The **Embedding role** is ignored.
+
+        The vector was already computed under its own role by task ④; this
+        wrapper never calls a provider, so a role here has nothing to act on.
+        """
+
         return [self._vector for _ in texts]
 
 

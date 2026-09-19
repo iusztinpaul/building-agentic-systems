@@ -7,7 +7,7 @@ from pytest_mock import MockerFixture
 
 from tree.entities.memory import NodeType
 from tree.memory.graph.resolution import CompositeResolver
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
 
 class _ScriptedEmbeddingModel(BaseEmbeddingModel):
@@ -22,7 +22,9 @@ class _ScriptedEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return next(iter(self._scripted.values())).__len__() if self._scripted else 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.embed_call_count += 1
         out: list[list[float]] = []
         for text in texts:
@@ -246,7 +248,9 @@ class _BatchCountingEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
         return [[float(len(t)), float(sum(ord(c) for c in t))] for t in texts]
 

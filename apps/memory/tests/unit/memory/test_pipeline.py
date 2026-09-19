@@ -90,7 +90,7 @@ from tree.memory.rag.load import (
 from tree.memory.rag.types import ChildChunk, ParentChunk
 from tree.memory.graph.resolution.composite import CompositeResolver
 from tree.memory.graph.resolution.types import ResolvedEntity
-from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
 from tree.models.get_model import search_embedding_identity
 from tree.memory.types import (
@@ -366,7 +366,9 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.texts.extend(texts)
         return [[0.5] * self._dimensions for _ in texts]
 
@@ -1469,6 +1471,18 @@ class TestCachedSingleEmbedding:
         assert out == [[0.1, 0.2]]
         out2 = await wrapper.embed(["another name"])
         assert out2 == [[0.1, 0.2]]
+
+    @pytest.mark.parametrize("role", [None, "query", "document"])
+    async def test_ignores_input_type(self, role) -> None:
+        """The wrapper replays a vector already computed with its own
+        **Embedding role**, so a role passed here can only be ignored
+        (ADR-009 §5)."""
+
+        wrapper = _CachedSingleEmbedding([0.1, 0.2])
+
+        out = await wrapper.embed(["any name"], input_type=role)
+
+        assert out == [[0.1, 0.2]]
 
 
 # ---------------------------------------------------------------------------

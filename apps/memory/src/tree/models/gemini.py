@@ -6,11 +6,22 @@ from google import genai
 from google.genai.types import GenerateContentConfig
 
 from tree.config.app_config import app_config
-from tree.models.base import BaseLLM, BaseEmbeddingModel
+from tree.models.base import BaseLLM, BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError
 from tree.observability import track_genai_client
 
 logger = logging.getLogger(__name__)
+
+# The **Embedding role** → Gemini's ``task_type`` (ADR-009 §5). Gemini has a
+# richer taxonomy (CLASSIFICATION, CLUSTERING, QUESTION_ANSWERING, …); the two
+# retrieval ones are the only ones the role expresses.
+# Verified on the pinned ``google-genai`` 1.65.0, where
+# ``EmbedContentConfig.task_type`` is a free-form ``Optional[str]``, and
+# against https://ai.google.dev/gemini-api/docs/embeddings (read 2026-09-19).
+_ROLE_TO_TASK_TYPE: dict[EmbeddingRole, str] = {
+    "query": "RETRIEVAL_QUERY",
+    "document": "RETRIEVAL_DOCUMENT",
+}
 
 
 class GeminiLLM(BaseLLM):
@@ -79,14 +90,35 @@ class GeminiEmbeddingModel(BaseEmbeddingModel):
 
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Embed texts, optionally under an **Embedding role**.
+
+        ``"query"`` → ``task_type="RETRIEVAL_QUERY"``, ``"document"`` →
+        ``"RETRIEVAL_DOCUMENT"``; ``None`` leaves the key out of the config.
+
+        Sent unconditionally, for every model id. The docs say the field is
+        unusable on ``gemini-embedding-2`` ("include the task as an
+        instruction in your prompt" instead), but the API ACCEPTS and IGNORES
+        it there rather than erroring — verified live 2026-09-19: the
+        ``RETRIEVAL_QUERY`` and role-less vectors are identical (cosine
+        1.000000). So the server already implements ADR-009 §5's "a provider
+        that cannot honour a role ignores it, never raises", and a client-side
+        list of supporting model ids would only add a thing to forget to
+        update — it would silently drop the role on the next model id Google
+        ships (``gemini-embedding-2-preview`` is already live).
+        """
+
+        config: dict[str, Any] = {"output_dimensionality": self._dimensions}
+        if input_type is not None:
+            config["task_type"] = _ROLE_TO_TASK_TYPE[input_type]
+
         try:
             response = await self._client.aio.models.embed_content(
                 model=self._model,
                 contents=texts,
-                config={
-                    "output_dimensionality": self._dimensions,
-                },
+                config=config,
             )
         except Exception as exc:
             raise ExtractionError(f"Gemini embedding call failed: {exc}") from exc

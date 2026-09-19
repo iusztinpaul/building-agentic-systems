@@ -1,22 +1,33 @@
-"""Unit tests for the ``BaseEmbeddingModel.dimensions`` property surface.
+"""Unit tests for the ``BaseEmbeddingModel`` contract surface.
 
-Every concrete embedding model must report a positive integer dimensionality
-so ``ensure_indexes`` can drive the Atlas vector index's ``numDimensions``
-from the live model instance (see ``tree.memory.rag.indexing``). These
-tests pin the property down per subclass without touching any external
+Two contracts live here because both are cross-provider:
+
+1. ``dimensions`` — every concrete embedding model must report a positive
+   integer dimensionality so ``ensure_indexes`` can drive the Atlas vector
+   index's ``numDimensions`` from the live model instance (see
+   ``tree.memory.rag.indexing``).
+2. The **Embedding role** (``input_type``, ADR-009 decision 5) — every
+   concrete model must ACCEPT the optional role argument with the same name
+   and the same ``None`` default, so a caller can pass it blind and a
+   provider that cannot honour it just ignores it.
+
+These tests pin both down per subclass without touching any external
 network/process.
 """
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
 
+from tree.memory.pipeline import _CachedSingleEmbedding
 from tree.models.base import BaseEmbeddingModel
 from tree.models.exceptions import ModelError
 from tree.models.fake_model import FakeEmbeddingModel, MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
+from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 
@@ -39,6 +50,44 @@ class TestBaseDeclaresDimensions:
 
         with pytest.raises(TypeError):
             _NoDimensions()  # type: ignore[abstract]
+
+
+class TestEmbedSignature:
+    """ADR-009 decision 5: ``embed`` takes an optional **Embedding role**.
+
+    The argument is inspected rather than called because a caller (#136) picks
+    the role once and passes it to whatever provider is configured — a
+    provider missing the parameter would be a ``TypeError`` at runtime, on the
+    indexing path, in production.
+    """
+
+    def test_base_declares_input_type_defaulting_to_none(self) -> None:
+        params = inspect.signature(BaseEmbeddingModel.embed).parameters
+
+        assert "input_type" in params
+        assert params["input_type"].default is None
+
+    @pytest.mark.parametrize(
+        "model_cls",
+        [
+            VoyageTextEmbeddingModel,
+            VoyageMultimodalEmbeddingModel,
+            GeminiEmbeddingModel,
+            SentenceTransformerEmbeddingModel,
+            ModalEmbeddingModel,
+            FakeEmbeddingModel,
+            MockEmbeddingModel,
+            _CachedSingleEmbedding,
+        ],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_every_provider_accepts_input_type(
+        self, model_cls: type[BaseEmbeddingModel]
+    ) -> None:
+        params = inspect.signature(model_cls.embed).parameters
+
+        assert "input_type" in params
+        assert params["input_type"].default is None
 
 
 class TestFakeEmbeddingModelDimensions:

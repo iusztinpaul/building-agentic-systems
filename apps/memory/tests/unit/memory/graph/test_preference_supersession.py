@@ -30,7 +30,7 @@ from tree.memory.types import (
     RawExtraction,
     ChunkedDocument,
 )
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -161,7 +161,9 @@ class _FakeEmbedding(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return len(self._vector)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         return [list(self._vector) for _ in texts]
 
 

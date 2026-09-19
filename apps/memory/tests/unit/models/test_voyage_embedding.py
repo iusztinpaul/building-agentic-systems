@@ -60,12 +60,10 @@ class TestVoyageTextInit:
         m = VoyageTextEmbeddingModel(
             api_key="key",
             model="voyage-3",
-            input_type="document",
             output_dimension=512,
         )
 
         assert m._model == "voyage-3"
-        assert m._input_type == "document"
         assert m._output_dimension == 512
 
 
@@ -169,7 +167,6 @@ class TestVoyageTextEmbed:
         m = VoyageTextEmbeddingModel(
             api_key="key",
             model="voyage-4",
-            input_type="query",
             output_dimension=256,
         )
         response_data = {"data": [{"embedding": [0.1]}]}
@@ -178,7 +175,7 @@ class TestVoyageTextEmbed:
 
         with patch("aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = mock_session
-            await m.embed(["test"])
+            await m.embed(["test"], input_type="query")
 
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get(
             "json"
@@ -186,6 +183,53 @@ class TestVoyageTextEmbed:
 
         assert payload["input_type"] == "query"
         assert payload["output_dimension"] == 256
+
+
+class TestInputType:
+    """The **Embedding role** is per CALL, never per instance (ADR-009 §5).
+
+    One model instance serves both the indexing path (``document``) and the
+    query path (``query``), so the role cannot live on the constructor — the
+    old constructor argument is DELETED, not deprecated.
+    """
+
+    async def _payload_for(self, model: VoyageTextEmbeddingModel, **kwargs) -> dict:
+        response_data = {"data": [{"embedding": [0.1]}]}
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, mock_post = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            await model.embed(["q"], **kwargs)
+
+        return mock_post.call_args.kwargs["json"]
+
+    @pytest.mark.parametrize("role", ["query", "document"])
+    async def test_role_is_sent_as_the_api_input_type(
+        self, model: VoyageTextEmbeddingModel, role: str
+    ) -> None:
+        payload = await self._payload_for(model, input_type=role)
+
+        assert payload["input_type"] == role
+
+    async def test_no_role_omits_the_key(self, model: VoyageTextEmbeddingModel) -> None:
+        payload = await self._payload_for(model, input_type=None)
+
+        assert "input_type" not in payload
+
+    async def test_default_call_omits_the_key(
+        self, model: VoyageTextEmbeddingModel
+    ) -> None:
+        """User story 3: an existing caller that passes no role sends exactly
+        today's body."""
+
+        payload = await self._payload_for(model)
+
+        assert "input_type" not in payload
+
+    def test_constructor_rejects_input_type(self) -> None:
+        with pytest.raises(TypeError):
+            VoyageTextEmbeddingModel(api_key="k", input_type="query")  # type: ignore[call-arg]
 
     async def test_embed_sends_auth_header(
         self, model: VoyageTextEmbeddingModel

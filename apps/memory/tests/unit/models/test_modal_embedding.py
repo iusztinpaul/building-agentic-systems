@@ -256,3 +256,28 @@ class TestModalEmbeddingModelEmbed:
                 pass
 
         assert m._client is not None
+
+
+class TestInputTypeAccepted:
+    """The client ACCEPTS the **Embedding role** and ignores it for now.
+
+    OpenAI-compatible ``/v1/embeddings`` has no role field; #140 maps the role
+    to the **Embedding catalog**'s ``query_prompt`` / ``document_prompt``,
+    prepended client-side.
+    """
+
+    @pytest.mark.parametrize("role", [None, "query", "document"])
+    async def test_role_does_not_change_the_request_or_the_result(
+        self, initialised_model, role
+    ):
+        m, mock_create = initialised_model
+        expected = [[0.1, 0.2, 0.3]]
+        mock_create.return_value = _make_embedding_response(expected)
+
+        result = await m.embed(["hello"], input_type=role)
+
+        assert result == expected
+        mock_create.assert_awaited_once_with(
+            input=["hello"],
+            model="voyageai/voyage-4-nano",
+        )

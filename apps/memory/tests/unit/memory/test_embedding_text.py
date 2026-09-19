@@ -20,7 +20,7 @@ from tree.memory.embedding_text import (
     estimate_tokens,
     node_to_embedding_text,
 )
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,9 @@ class _RecordingEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
         # One distinct vector per input, aligned positionally.
         return [[float(i)] * self._dimensions for i, _ in enumerate(texts)]
@@ -65,7 +67,9 @@ class _OrderEncodingEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
         out = [
             [float(self._global_offset + i)] * self._dimensions
@@ -394,7 +398,9 @@ class _PoisonEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         self.calls.append(list(texts))
@@ -413,7 +419,9 @@ class _RateLimitedEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         raise ExtractionError(
@@ -462,7 +470,9 @@ class _IdentityEncodingPoisonModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 1
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         self.calls.append(list(texts))
@@ -520,7 +530,9 @@ class TestEmbedInBatchesAlignmentAdversarial:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 raise ExtractionError(
                     "Voyage API error 429: rate-limit exhausted after 400 retries",
                     status_code=429,
@@ -545,7 +557,9 @@ class TestEmbedInBatchesAlignmentAdversarial:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 raise ExtractionError("some failure mentioning 400 in passing")
 
         with pytest.raises(ExtractionError, match="400"):
@@ -583,7 +597,9 @@ class TestEmbedChunkResilientDoesNotRateLimit:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 return [[9.0, 9.0] for _ in texts]
 
         model = _CachedModel()

@@ -1,4 +1,6 @@
-from tree.models.fake_model import FakeEmbeddingModel, FakeLLM
+import pytest
+
+from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
 
 
 class TestFakeLLM:
@@ -51,3 +53,25 @@ class TestFakeEmbeddingModel:
         vectors = await model.embed([])
 
         assert vectors == []
+
+
+class TestInputTypeIgnored:
+    """The test doubles accept the **Embedding role** and ignore it — a role
+    is a retrieval hint, never a correctness input (ADR-009 §5)."""
+
+    @pytest.mark.parametrize("role", [None, "query", "document"])
+    async def test_fake_returns_identical_vectors_for_every_role(self, role):
+        model = FakeEmbeddingModel(dimensions=4)
+
+        vectors = await model.embed(["hello"], input_type=role)
+
+        assert vectors == [[0.0, 0.0, 0.0, 0.0]]
+
+    @pytest.mark.parametrize("role", [None, "query", "document"])
+    async def test_mock_returns_identically_shaped_vectors_for_every_role(self, role):
+        # Random values by design — compare on shape only.
+        model = MockEmbeddingModel(dimensions=4)
+
+        vectors = await model.embed(["hello", "world"], input_type=role)
+
+        assert [len(v) for v in vectors] == [4, 4]
