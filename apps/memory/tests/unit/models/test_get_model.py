@@ -12,6 +12,7 @@ from tree.models.get_model import (
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    search_embedding_identity,
 )
 from tree.models.modal_embedding import ModalEmbeddingModel
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
@@ -274,7 +275,16 @@ class TestVoyageModelIdRouting:
 
     @pytest.mark.parametrize(
         "model_id",
-        ["voyage-3", "voyage-3.5", "voyage-3-lite", "voyage-code-3"],
+        [
+            "voyage-4",
+            "voyage-4-large",
+            "voyage-4-lite",
+            "voyage-code-4",
+            "voyage-3",
+            "voyage-3.5",
+            "voyage-3-lite",
+            "voyage-code-3",
+        ],
     )
     def test_text_models_route_to_text_client(self, mocker, model_id: str) -> None:
         _set_embedding_blocks(
@@ -303,3 +313,46 @@ class TestVoyageModelIdRouting:
         result = get_search_embedding_model()
 
         assert isinstance(result, VoyageMultimodalEmbeddingModel)
+
+
+class TestSearchEmbeddingIdentity:
+    """ADR-009 decision 6: ONE helper renders the identity every embed cache
+    key carries, so a model / dimension swap can never replay vectors from the
+    old embedding space.
+    """
+
+    def test_renders_provider_model_dimensions(self, mocker) -> None:
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(
+                provider="voyage", model="voyage-4", dimensions=1024
+            ),
+        )
+
+        assert search_embedding_identity() == "voyage:voyage-4:1024"
+
+    def test_reads_the_config_at_call_time(self, mocker) -> None:
+        """An operator pinning a legacy model through the
+        ``TREE_MODELS__SEARCH_EMBEDDING__MODEL`` escape hatch must move the
+        identity — otherwise the override silently reuses voyage-4 cache
+        entries."""
+
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(
+                provider="voyage", model="voyage-3.5", dimensions=1024
+            ),
+        )
+
+        assert search_embedding_identity() == "voyage:voyage-3.5:1024"
+
+    def test_tracks_the_dimension_too(self, mocker) -> None:
+        _set_embedding_blocks(
+            mocker,
+            resolution=EmbeddingConfig(provider="mock", dimensions=128),
+            search=EmbeddingConfig(provider="voyage", model="voyage-4", dimensions=512),
+        )
+
+        assert search_embedding_identity() == "voyage:voyage-4:512"

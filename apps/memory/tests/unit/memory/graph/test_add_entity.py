@@ -831,7 +831,7 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         )
         database, _collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
-        real_model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        real_model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         sess = _make_mock_voyage_session()
         mocker.patch("aiohttp.ClientSession", return_value=sess)
 

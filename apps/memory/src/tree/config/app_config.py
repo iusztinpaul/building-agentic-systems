@@ -46,7 +46,12 @@ class EmbeddingConfig(BaseModel):
     """
 
     provider: str = Field(default="voyage")
-    model: str = Field(default="voyage-3.5")
+    # ADR-009 decision 1: the 4 series is Voyage's current text family.
+    # ``voyage-4`` is 1024-d and $0.06/1M — the same dimension and price as the
+    # legacy ``voyage-3.5`` it replaces, so the mongot ``vector_index`` is
+    # untouched by the swap. Legacy ids still resolve (see the dimension table
+    # in :mod:`tree.models.voyage_embedding`).
+    model: str = Field(default="voyage-4")
     dimensions: int = Field(default=1024)
 
 
@@ -320,17 +325,24 @@ class ObservabilityConfig(BaseModel):
     * ``embedding_price_per_1m_tokens`` — per-model USD price per 1,000,000
       tokens, used to compute the manual ``total_cost`` on Voyage embedding
       spans (Opik does not natively cost Voyage). Prices verified against
-      https://docs.voyageai.com/docs/pricing (June 2026): voyage-3.5 $0.06,
-      voyage-3 $0.06, voyage-3.5-lite $0.02, voyage-3-large $0.18,
-      voyage-3-lite $0.02, voyage-code-3 $0.18, voyage-multimodal-3 $0.12,
-      voyage-finance-2 $0.12, voyage-law-2 $0.12. A model absent from the map
-      yields ``total_cost=0`` (token usage is still recorded) rather than an
-      error — telemetry is fail-open.
+      https://docs.voyageai.com/docs/pricing (September 2026): voyage-4-large
+      $0.12, voyage-4 $0.06, voyage-4-lite $0.02, voyage-code-4 $0.12, and the
+      LEGACY but still-served voyage-3.5 $0.06, voyage-3 $0.06,
+      voyage-3.5-lite $0.02, voyage-3-large $0.18, voyage-3-lite $0.02,
+      voyage-code-3 $0.18, voyage-multimodal-3 $0.12, voyage-finance-2 $0.12,
+      voyage-law-2 $0.12. A model absent from the map yields ``total_cost=0``
+      (token usage is still recorded) rather than an error — telemetry is
+      fail-open. Keep this map in lockstep with the YAML one
+      (``test_yaml_price_map_matches_code_default`` pins them identical).
     """
 
     enabled: bool = True
     embedding_price_per_1m_tokens: dict[str, float] = Field(
         default_factory=lambda: {
+            "voyage-4-large": 0.12,
+            "voyage-4": 0.06,
+            "voyage-4-lite": 0.02,
+            "voyage-code-4": 0.12,
             "voyage-3.5": 0.06,
             "voyage-3": 0.06,
             "voyage-3.5-lite": 0.02,

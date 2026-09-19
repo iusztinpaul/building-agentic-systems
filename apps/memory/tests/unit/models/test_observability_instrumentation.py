@@ -44,9 +44,9 @@ def _mock_aiohttp_session(mock_resp: AsyncMock):
 
 class TestVoyageTextCostRecording:
     async def test_records_usage_and_nonzero_cost(self, mocker) -> None:
-        # Arrange — 1,000,000 tokens of voyage-3.5 at $0.06/1M → $0.06.
+        # Arrange — 1,000,000 tokens of voyage-4 at $0.06/1M → $0.06.
         rec = mocker.patch("tree.models.voyage_embedding.record_embedding_usage")
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {
             "data": [{"embedding": [0.1]}],
             "usage": {"total_tokens": 1_000_000},
@@ -60,14 +60,14 @@ class TestVoyageTextCostRecording:
         rec.assert_called_once()
         kwargs = rec.call_args.kwargs
         assert kwargs["provider"] == "voyage"
-        assert kwargs["model"] == "voyage-3.5"
+        assert kwargs["model"] == "voyage-4"
         assert kwargs["total_tokens"] == 1_000_000
         assert kwargs["total_cost"] == pytest.approx(0.06)
 
     async def test_missing_usage_records_zero_cost(self, mocker) -> None:
         # Arrange — response without a usage block (defensive).
         rec = mocker.patch("tree.models.voyage_embedding.record_embedding_usage")
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {"data": [{"embedding": [0.1]}]}
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
@@ -86,7 +86,7 @@ class TestVoyageTextCostRecording:
             "tree.models.voyage_embedding.record_embedding_usage",
             side_effect=RuntimeError("opik down"),
         )
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {
             "data": [{"embedding": [0.1, 0.2]}],
             "usage": {"total_tokens": 10},

@@ -2,6 +2,7 @@ import json
 import textwrap
 
 import pytest
+import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from tree.config.app_config import (
@@ -13,8 +14,10 @@ from tree.config.app_config import (
     ClusterSummariesConfig,
     ConcurrencyConfig,
     DreamConfig,
+    EmbeddingConfig,
     HdbscanConfig,
     MemoryConfig,
+    ObservabilityConfig,
     QueryConfig,
     UmapConfig,
     YouTubeConfig,
@@ -33,16 +36,17 @@ class TestLoadAppConfig:
 
         assert config.models.llm.provider == "gemini"
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # #048 flipped the default from the multimodal ``voyage-multimodal-3`` to
-        # the TEXT model ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5``
-        # is also 1024-d, so the dim stays put. #039 split the single
-        # ``embedding`` block into a transient ``resolution_embedding`` and a
-        # persisted ``search_embedding``; both point at the same model/dim.
+        # #048 flipped the default from the multimodal ``voyage-multimodal-3``
+        # to a TEXT model (routed to /v1/embeddings); ADR-009 then pinned the
+        # current ``voyage-4``, still 1024-d, so the dim never moved. #039
+        # split the single ``embedding`` block into a transient
+        # ``resolution_embedding`` and a persisted ``search_embedding``; both
+        # point at the same model/dim.
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-3.5"
+        assert config.models.resolution_embedding.model == "voyage-4"
         assert config.models.resolution_embedding.dimensions == 1024
         assert config.models.search_embedding.provider == "voyage"
-        assert config.models.search_embedding.model == "voyage-3.5"
+        assert config.models.search_embedding.model == "voyage-4"
         assert config.models.search_embedding.dimensions == 1024
         # #044: real-time request-batching caps. #054/ADR-002 dropped
         # max_total_tokens 320_000 → 10_000 (the shared free-tier Voyage TPM
@@ -306,9 +310,9 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.model == "voyage-multimodal-3"
         assert config.models.search_embedding.dimensions == 1024
         # resolution_embedding falls back to the EmbeddingConfig defaults
-        # (#048 flipped the code-level default model to the text ``voyage-3.5``).
+        # (ADR-009 pinned the code-level default to the text ``voyage-4``).
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-3.5"
+        assert config.models.resolution_embedding.model == "voyage-4"
         assert config.models.resolution_embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):
@@ -991,3 +995,40 @@ class TestClusteringConfig:
             assert description and description.strip(), (
                 f"{model.__name__}.{name} is missing Field(description=...)"
             )
+
+
+class TestEmbeddingDefaults:
+    """ADR-009 decision 1: both embedding blocks are pinned to ``voyage-4`` at
+    1024-d — the SAME dimension as legacy ``voyage-3.5``, so the live mongot
+    ``vector_index`` is untouched by the swap."""
+
+    def test_both_blocks_default_to_voyage_4_1024(self) -> None:
+        # Arrange / Act — the REAL shipped config, not the frozen fixture: this
+        # is what an operator boots.
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.models.resolution_embedding.provider == "voyage"
+        assert config.models.resolution_embedding.model == "voyage-4"
+        assert config.models.resolution_embedding.dimensions == 1024
+        assert config.models.search_embedding.provider == "voyage"
+        assert config.models.search_embedding.model == "voyage-4"
+        assert config.models.search_embedding.dimensions == 1024
+        # A YAML that omits the blocks entirely must land on the same pin.
+        assert EmbeddingConfig().provider == "voyage"
+        assert EmbeddingConfig().model == "voyage-4"
+        assert EmbeddingConfig().dimensions == 1024
+
+
+def test_yaml_price_map_matches_code_default() -> None:
+    """The YAML price map and the Pydantic default price map are ONE table.
+
+    A model id present in only one of them costs $0 in half the deployments
+    (YAML-less boot vs shipped config) — a silent telemetry gap, so the two are
+    pinned identical here.
+    """
+
+    yaml_map = yaml.safe_load(_DEFAULT_CONFIG_PATH.read_text())["observability"][
+        "embedding_price_per_1m_tokens"
+    ]
+
+    assert yaml_map == ObservabilityConfig().embedding_price_per_1m_tokens

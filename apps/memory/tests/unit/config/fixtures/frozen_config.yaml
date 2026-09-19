@@ -48,11 +48,11 @@ models:
     model: gemini-3.1-flash-lite
   resolution_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   search_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   embedding_batch:
     max_inputs: 1000

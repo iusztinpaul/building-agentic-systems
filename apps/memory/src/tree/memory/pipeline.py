@@ -173,6 +173,7 @@ from tree.models.get_model import (
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    search_embedding_identity,
 )
 from tree.config.constants import TAGS_CLUSTERING, TAGS_EXTRACTION, TAGS_INDEXING
 from tree.observability import (
@@ -474,7 +475,10 @@ def child_embedding_texts(chunked_docs: list[ChunkedDocument]) -> list[str]:
 
 
 async def _embed_children(
-    texts: list[str], opik_trace_headers: dict[str, str] | None = None
+    texts: list[str],
+    *,
+    embedding_identity: str,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> dict[str, list[float]]:
     """Embed every **Child chunk** text of the run in as few requests as possible.
 
@@ -488,6 +492,11 @@ async def _embed_children(
     Returns a ``text -> vector`` map the loader indexes by the same text it
     rebuilds per child, so a missing vector degrades to ``embedding=[]`` (the
     indexing backfill picks it up) instead of misaligning rows.
+
+    ``embedding_identity`` (``provider:model:dimensions``, from
+    :func:`tree.models.get_model.search_embedding_identity`) is NOT used by the
+    body — it rides in the ``INPUTS`` cache key so this task's 90-day cache can
+    never replay vectors from a previous embedding space (ADR-009 decision 6).
     """
 
     log = _get_run_logger()
@@ -501,7 +510,8 @@ async def _embed_children(
 
         vectors = await embed_in_batches(texts, get_search_embedding_model())
         log.info(
-            "embed_children: n_texts=%d dim=%d",
+            "embed_children: identity=%s n_texts=%d dim=%d",
+            embedding_identity,
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
@@ -1149,7 +1159,10 @@ resolve_entities_task = task(
 
 
 async def _embed_entities(
-    texts: list[str], opik_trace_headers: dict[str, str] | None = None
+    texts: list[str],
+    *,
+    embedding_identity: str,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> dict[str, list[float]]:
     """Embed every embeddable text for the run in one batched call.
 
@@ -1160,10 +1173,14 @@ async def _embed_entities(
     positionally aligned, so we zip them to their texts and return a
     ``text -> vector`` map that task ⑤/⑥ index by embeddable text.
 
-    Caches on ``INPUTS`` (the whole text list), so an identical re-run of the
-    same document set is a cache hit; partial-overlap re-runs re-embed.
-    Per-run dedup of identical texts happens upstream (the flow embeds
-    ``sorted(set(...))``).
+    Caches on ``INPUTS`` (the whole text list PLUS ``embedding_identity``), so
+    an identical re-run of the same document set against the SAME embedding
+    space is a cache hit; partial-overlap re-runs and model swaps re-embed.
+    ``embedding_identity`` (``provider:model:dimensions``, from
+    :func:`tree.models.get_model.search_embedding_identity`) is unused by the
+    body and exists only to keep the 90-day cache from replaying vectors from
+    a previous embedding space (ADR-009 decision 6). Per-run dedup of identical
+    texts happens upstream (the flow embeds ``sorted(set(...))``).
 
     Uses the **search** model — the persisted, index-coupled vector. The 429
     backoff is untouched: it lives inside ``.embed()``, called once per chunk.
@@ -1185,7 +1202,8 @@ async def _embed_entities(
         embedding_model = get_search_embedding_model()
         vectors = await embed_in_batches(texts, embedding_model)
         log.info(
-            "embed_entities: n_texts=%d dim=%d",
+            "embed_entities: identity=%s n_texts=%d dim=%d",
+            embedding_identity,
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
@@ -1982,8 +2000,15 @@ async def _run_extraction_worker_body(
     )
 
     # ----- Task ② — embed every child's contextual-header text --------------
+    # The identity of the persisted embedding space rides into BOTH embed tasks
+    # as a cache-key input (ADR-009 decision 6), so their 90-day cache cannot
+    # serve vectors embedded by a previous model. Resolved once per run, at run
+    # time, so an env-override of the model moves it too.
+    embedding_identity = search_embedding_identity()
     child_vectors = await embed_children_task(
-        child_embedding_texts(chunked_docs), opik_trace_headers=headers
+        child_embedding_texts(chunked_docs),
+        embedding_identity=embedding_identity,
+        opik_trace_headers=headers,
     )
 
     # ----- Task ③ — load the document / parent / child rows -----------------
@@ -2099,7 +2124,11 @@ async def _run_extraction_worker_body(
     # ``embed_entities_task`` packs them into as few synchronous requests as
     # the 1000-input / 320K-token caps allow.
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
-    vectors = await embed_entities_task(embeddable_texts, opik_trace_headers=headers)
+    vectors = await embed_entities_task(
+        embeddable_texts,
+        embedding_identity=embedding_identity,
+        opik_trace_headers=headers,
+    )
     embeddings = EmbeddingMap(vectors=vectors)
 
     # ----- Task ⑦ — dedup --------------------------------------------------

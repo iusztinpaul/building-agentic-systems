@@ -11,6 +11,7 @@ edges" is a claim about what landed in Mongo, not about which mock was called.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import timedelta
 from pathlib import Path
@@ -91,6 +92,7 @@ from tree.memory.graph.resolution.composite import CompositeResolver
 from tree.memory.graph.resolution.types import ResolvedEntity
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
+from tree.models.get_model import search_embedding_identity
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -436,7 +438,9 @@ class TestEmbedChildrenTask:
             "tree.memory.pipeline.get_search_embedding_model", return_value=model
         )
 
-        vectors = await _embed_children(["a", "b"])
+        vectors = await _embed_children(
+            ["a", "b"], embedding_identity="voyage:voyage-4:1024"
+        )
 
         assert model.texts == ["a", "b"]
         assert vectors == {"a": [0.5] * 4, "b": [0.5] * 4}
@@ -446,7 +450,9 @@ class TestEmbedChildrenTask:
     ) -> None:
         factory = mocker.patch("tree.memory.pipeline.get_search_embedding_model")
 
-        assert await _embed_children([]) == {}
+        assert (
+            await _embed_children([], embedding_identity="voyage:voyage-4:1024") == {}
+        )
 
         factory.assert_not_called()
 
@@ -712,7 +718,7 @@ class TestEmbedEntitiesTask:
             "person: Andrej Karpathy\nrole: researcher",
             "person: Yann LeCun\nrole: researcher",
         ]
-        result = await _embed_entities(texts)
+        result = await _embed_entities(texts, embedding_identity="voyage:voyage-4:1024")
 
         assert result == {
             texts[0]: [0.1, 0.2, 0.3],
@@ -732,7 +738,7 @@ class TestEmbedEntitiesTask:
             return_value=model,
         )
 
-        result = await _embed_entities([])
+        result = await _embed_entities([], embedding_identity="voyage:voyage-4:1024")
 
         assert result == {}
         model.embed.assert_not_awaited()
@@ -1466,6 +1472,92 @@ class TestCachedSingleEmbedding:
 
 
 # ---------------------------------------------------------------------------
+# Embed-task cache identity (ADR-009 decision 6)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedTaskCacheIdentity:
+    """The 90-day ``INPUTS`` cache on ``embed-children`` / ``embed-entities``
+    was keyed on the text list alone, so re-extracting an already-seen document
+    after a model swap replayed vectors from the OLD embedding space. Both
+    tasks now take an ``embedding_identity`` input — unused in the body, but
+    part of the cache key, so a model change is a cache MISS.
+    """
+
+    _KEY_INPUTS = {"texts": ["a", "b"]}
+
+    def test_helper_returns_the_configured_embedding_identity(self) -> None:
+        # ``provider:model:dimensions`` of ``models.search_embedding``.
+        assert search_embedding_identity() == "voyage:voyage-4:1024"
+
+    @pytest.mark.parametrize(
+        "cached_task", [embed_children_task, embed_entities_task], ids=lambda t: t.name
+    )
+    def test_cache_key_differs_between_embedding_identities(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+
+        legacy_key = policy.compute_key(
+            task_ctx=None,
+            inputs={**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-3.5:1024"},
+            flow_parameters={},
+        )
+        new_key = policy.compute_key(
+            task_ctx=None,
+            inputs={**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-4:1024"},
+            flow_parameters={},
+        )
+
+        assert legacy_key != new_key
+
+    @pytest.mark.parametrize(
+        "cached_task", [embed_children_task, embed_entities_task], ids=lambda t: t.name
+    )
+    def test_cache_key_ignores_trace_headers(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+        inputs = {**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-4:1024"}
+
+        first = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-1"}},
+            flow_parameters={},
+        )
+        second = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-2"}},
+            flow_parameters={},
+        )
+
+        assert first == second
+
+    @pytest.mark.parametrize(
+        "task_fn", [_embed_children, _embed_entities], ids=["children", "entities"]
+    )
+    def test_task_body_requires_embedding_identity(self, task_fn) -> None:
+        params = inspect.signature(task_fn).parameters
+
+        assert "embedding_identity" in params
+        # Required (no default) so a call site can NEVER silently fall back to
+        # an identity-less — i.e. model-blind — cache key.
+        assert params["embedding_identity"].default is inspect.Parameter.empty
+
+    async def test_embed_children_ignores_the_identity_when_embedding(
+        self, mocker
+    ) -> None:
+        # The identity is cache-key material only: it must not reach the model.
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        vectors = await _embed_children(
+            ["a"], embedding_identity="voyage:voyage-4:1024"
+        )
+
+        assert model.texts == ["a"]
+        assert vectors == {"a": [0.5] * 4}
+
+
+# ---------------------------------------------------------------------------
 # Flow registration
 # ---------------------------------------------------------------------------
 
@@ -1826,7 +1918,7 @@ class TestFlowEmbeddingModelSplit:
             "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(return_value=chunked),
         )
-        mocker.patch(
+        embed_children = mocker.patch(
             "tree.memory.pipeline.embed_children_task", new=AsyncMock(return_value={})
         )
         mocker.patch(
@@ -1852,7 +1944,7 @@ class TestFlowEmbeddingModelSplit:
             "tree.memory.pipeline.resolve_entities_task",
             new=AsyncMock(return_value=ResolutionOutput()),
         )
-        mocker.patch(
+        embed_entities = mocker.patch(
             "tree.memory.pipeline.embed_entities_task", new=AsyncMock(return_value={})
         )
         mocker.patch(
@@ -1869,6 +1961,8 @@ class TestFlowEmbeddingModelSplit:
             "build_resolver": build_resolver,
             "supersession": supersession,
             "apply_writes": apply_writes,
+            "embed_children": embed_children,
+            "embed_entities": embed_entities,
         }
 
     async def test_builds_the_resolver_from_the_resolution_model(
@@ -1904,6 +1998,21 @@ class TestFlowEmbeddingModelSplit:
         assert (
             stubbed_graph_stages["resolution_model"] not in apply_writes.await_args.args
         )
+
+    async def test_both_embed_tasks_receive_the_embedding_identity(
+        self, stubbed_graph_stages
+    ) -> None:
+        """ADR-009 decision 6: EVERY call site passes the identity, otherwise
+        the cached-vector guard is only half-installed."""
+
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        identity = search_embedding_identity()
+        for task_name in ("embed_children", "embed_entities"):
+            kwargs = stubbed_graph_stages[task_name].await_args.kwargs
+            assert kwargs["embedding_identity"] == identity
 
     async def test_rag_mode_never_builds_the_graph_model_handles(
         self, mocker, monkeypatch, stubbed_graph_stages

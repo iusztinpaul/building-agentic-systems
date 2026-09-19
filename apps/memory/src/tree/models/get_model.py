@@ -71,12 +71,13 @@ def _build_embedding_model(
         )
     if provider == "voyage":
         # Voyage exposes two endpoints behind the same API: a **text** endpoint
-        # at ``/v1/embeddings`` (the ``voyage-3`` family) and a **multimodal**
-        # endpoint at ``/v1/multimodalembeddings`` (the ``voyage-multimodal-*``
-        # family). They are NOT interchangeable — routing ``voyage-3`` to the
-        # multimodal endpoint returns ``HTTP 400: Model voyage-3 is not
-        # supported``. Pick the right client by model id; both coexist (#048,
-        # a partial revert of #038's multimodal-only consolidation).
+        # at ``/v1/embeddings`` (the ``voyage-4`` / legacy ``voyage-3``
+        # families) and a **multimodal** endpoint at
+        # ``/v1/multimodalembeddings`` (the ``voyage-multimodal-*`` family).
+        # They are NOT interchangeable — routing ``voyage-4`` to the multimodal
+        # endpoint returns ``HTTP 400: Model voyage-4 is not supported``. Pick
+        # the right client by model id; both coexist (#048, a partial revert of
+        # #038's multimodal-only consolidation).
         if cfg.model.startswith("voyage-multimodal"):
             return VoyageMultimodalEmbeddingModel(
                 api_key=settings.voyage_api_key.get_secret_value(),
@@ -113,6 +114,27 @@ def get_search_embedding_model() -> BaseEmbeddingModel:
     """
 
     return _build_embedding_model(app_config.models.search_embedding)
+
+
+def search_embedding_identity() -> str:
+    """Identity of the persisted (search) embedding space: ``provider:model:dims``.
+
+    ADR-009 decision 6: the 90-day Prefect ``INPUTS`` cache on
+    ``embed-children`` / ``embed-entities`` was keyed on the text list alone,
+    so re-extracting an already-seen document after a model swap replayed
+    vectors from the OLD embedding space. Both tasks take this string as an
+    input, which puts it in the cache key — a model or dimension change is a
+    cache MISS instead of a silent replay.
+
+    Read from ``app_config`` at CALL time (never a module constant): Prefect
+    re-imports this module inside flow-run subprocesses, and a
+    ``TREE_MODELS__SEARCH_EMBEDDING__MODEL=voyage-3.5`` override must move the
+    identity with it. With the shipped defaults the value is
+    ``"voyage:voyage-4:1024"``.
+    """
+
+    cfg = app_config.models.search_embedding
+    return f"{cfg.provider}:{cfg.model}:{cfg.dimensions}"
 
 
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:

@@ -3,14 +3,16 @@
 Uses ``aiohttp`` to call ``POST https://ai.mongodb.com/v1/embeddings`` (the
 Atlas-hosted Voyage Embedding API — Atlas-issued ``al-`` model keys ONLY
 authenticate against ``ai.mongodb.com``, not the legacy
-``api.voyageai.com``) for text-only embedding models such as ``voyage-3``,
-``voyage-3.5``, ``voyage-3-lite``, ``voyage-code-3``, etc.
+``api.voyageai.com``) for text-only embedding models: the current 4 series
+(``voyage-4-large``, ``voyage-4``, ``voyage-4-lite``, ``voyage-code-4`` — all
+32K context, 1024-d by default, one shared embedding space) and the legacy but
+still-served ``voyage-3`` family (``voyage-3.5``, ``voyage-3-lite``, …).
 
 Distinct from
 :class:`tree.models.voyage_multimodal_embedding.VoyageMultimodalEmbeddingModel`,
 which targets ``/v1/multimodalembeddings`` and only accepts the
 ``voyage-multimodal-*`` model family. Routing a text model id such as
-``voyage-3`` to the multimodal endpoint returns ``HTTP 400: Model voyage-3 is
+``voyage-4`` to the multimodal endpoint returns ``HTTP 400: Model voyage-4 is
 not supported.`` — the headline regression this client guards against. The two
 clients coexist; :func:`tree.models.get_model._build_embedding_model` routes by
 model id (``voyage-multimodal-*`` → multimodal, everything else → this client).
@@ -112,9 +114,16 @@ _DEFAULT_RATE_LIMIT_BACKOFF_SECONDS: tuple[float, ...] = (
 
 # Known native output dimensions per Voyage **text** model id. Used when the
 # caller does not request Matryoshka truncation via ``output_dimension``.
-# Source: https://docs.voyageai.com/docs/embeddings — keep in lockstep with
-# the API docs.
+# Source: https://docs.voyageai.com/docs/embeddings (September 2026) — keep in
+# lockstep with the API docs. The 4 series is current (all 1024-d by default,
+# Matryoshka 256/512/1024/2048); the ``voyage-3.x`` rows are LEGACY but kept,
+# because those models are still served and the
+# ``TREE_MODELS__SEARCH_EMBEDDING__MODEL`` escape hatch must keep resolving.
 _MODEL_NATIVE_DIMENSIONS: dict[str, int] = {
+    "voyage-4-large": 1024,
+    "voyage-4": 1024,
+    "voyage-4-lite": 1024,
+    "voyage-code-4": 1024,
     "voyage-3": 1024,
     "voyage-3.5": 1024,
     "voyage-3.5-lite": 1024,
@@ -131,7 +140,7 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
 
     Each text string is passed flat in the ``input`` list::
 
-        {"input": ["..."], "model": "voyage-3.5", ...}
+        {"input": ["..."], "model": "voyage-4", ...}
 
     This is DIFFERENT from the multimodal client's nested
     ``{"inputs": [{"content": [{"type": "text", "text": "..."}]}]}`` shape;
@@ -140,7 +149,7 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
 
     Supports optional ``input_type`` (``"query"`` / ``"document"``) for
     retrieval-optimised embeddings, and ``output_dimension`` for Matryoshka
-    truncation when the model supports it (e.g. ``voyage-3.5``).
+    truncation when the model supports it (e.g. ``voyage-4``).
 
     Calls to :meth:`embed` are wrapped in an exponential-backoff loop that
     retries transient HTTP 429 (rate-limit) responses and fails fast on every
@@ -154,7 +163,7 @@ class VoyageTextEmbeddingModel(BaseEmbeddingModel):
     def __init__(
         self,
         api_key: str,
-        model: str = "voyage-3.5",
+        model: str = "voyage-4",
         input_type: Literal["query", "document"] | None = None,
         output_dimension: int | None = None,
         truncation: bool = True,
