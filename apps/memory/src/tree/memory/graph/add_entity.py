@@ -40,7 +40,7 @@ from tree.entities.memory import (
     build_edge_id,
     build_node_id,
 )
-from tree.memory.embedding_text import _embed_chunk_resilient, node_to_embedding_text
+from tree.memory.embedding_text import _embed_chunk_resilient, entity_embedding_text
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -338,28 +338,19 @@ def _embeddable_text(
 ) -> str:
     """Pick the text the prospective entity is embedded on for dedup + persist.
 
-    GENERIC node types embed their **node-text** (the shared
-    :func:`node_to_embedding_text` builder), so the dedup query vector lives
-    in the SAME space as the persisted corpus (indexing's backfill embeds
-    the identical text) and the vector is reused verbatim as the new node's
-    ``embedding``.
+    GENERIC node types embed their **node-text**, PREFERENCE its
+    ``properties.statement`` and FACT its ``properties.object`` — but that
+    per-type choice is NOT made here. It lives in
+    :func:`tree.memory.embedding_text.entity_embedding_text`, which the indexing
+    backfill calls too, so an **Embedding reset** (ADR-009 §7) re-embeds a
+    preference on its statement instead of on the generic node-text and
+    supersession keeps comparing statement to statement.
 
-    PREFERENCE embeds ``properties.statement`` and FACT embeds
-    ``properties.object`` so supersession's statement<->statement (resp.
-    object<->object) comparison stays apples-to-apples. The statement text
-    wins only when present and non-empty; otherwise the type falls back to
-    the generic node-text builder so a malformed preference/fact is still
-    embeddable rather than blank.
+    What this function owns is the SHAPE: build the row exactly as it will be
+    persisted, then delegate. That is what puts the dedup query vector in the
+    SAME space as the persisted corpus and lets the vector be reused verbatim
+    as the new node's ``embedding``.
     """
-
-    if entity_type == NodeType.PREFERENCE:
-        statement = (properties or {}).get("statement")
-        if isinstance(statement, str) and statement.strip():
-            return statement.strip()
-    elif entity_type == NodeType.FACT:
-        obj = (properties or {}).get("object") or (properties or {}).get("object_")
-        if isinstance(obj, str) and obj.strip():
-            return obj.strip()
 
     # Mirror the persisted-node shape: ``aliases`` and ``confidence`` are
     # promoted to top-level columns by ``_upsert_node`` and never live under
@@ -376,7 +367,7 @@ def _embeddable_text(
             if k not in {"aliases", "confidence"}
         },
     }
-    return node_to_embedding_text(node)
+    return entity_embedding_text(node)
 
 
 # ---------------------------------------------------------------------------

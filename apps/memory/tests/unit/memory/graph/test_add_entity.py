@@ -21,14 +21,16 @@ from beanie import PydanticObjectId
 
 from tree.entities.memory import NodeType
 from tree.memory.embedding_text import node_to_embedding_text
-from tree.memory.graph.add_entity import add_entity
+from tree.memory.graph.add_entity import _embeddable_text, add_entity
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
     MergeStrategy,
 )
 from tree.memory.graph.resolution.types import ResolvedEntity
-from tree.memory.pipeline import _CachedSingleEmbedding
+from tree.memory.pipeline import _CachedSingleEmbedding, _entity_embeddable_text
+from tree.memory.rag.cleaning import strip_invalid_chars
+from tree.memory.rag.indexing import node_embedding_text
 from tree.models.base import EmbeddingRole
 
 
@@ -919,3 +921,147 @@ class TestEmbeddingRole:
         node_call = collection.update_one.call_args_list[0]
         set_stage = node_call.args[1][0]["$set"]
         assert set_stage["embedding"]["$ifNull"][1] == cached_vector
+
+
+@pytest.mark.parametrize(
+    "entity_type,properties,expected",
+    [
+        (
+            NodeType.PREFERENCE,
+            {"statement": "prefers dark mode", "polarity": "like"},
+            "prefers dark mode",
+        ),
+        (NodeType.FACT, {"subject": "paul", "object": "Bucharest"}, "Bucharest"),
+        # Legacy column name, still read.
+        (NodeType.FACT, {"subject": "paul", "object_": "Bucharest"}, "Bucharest"),
+    ],
+)
+def test_inline_and_backfill_text_agree_for_preference_and_fact(
+    entity_type: NodeType, properties: dict[str, Any], expected: str
+) -> None:
+    """The inline writer and the indexing backfill must build the SAME text.
+
+    They are two different functions reached from two different layers, and
+    after an **Embedding reset** (ADR-009 §7) the backfill re-embeds EVERY
+    preference and fact. If it used the generic node-text there, supersession
+    would compare a statement vector against a node-text vector and silently
+    stop matching — the reset would corrupt exactly what it was meant to
+    migrate. Both now route through ``embedding_text.entity_embedding_text``.
+    """
+
+    inline = _embeddable_text(
+        entity_type=entity_type,
+        name="prefers dark mode",
+        canonical_name="prefers dark mode",
+        properties=properties,
+    )
+    stored_row = {
+        "type": entity_type.value,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+
+    assert inline == node_embedding_text(stored_row)
+    assert inline == expected
+
+
+def test_inline_and_backfill_agree_on_the_generic_fallback() -> None:
+    """A malformed preference falls back to the node-text — on BOTH sides."""
+
+    properties = {"statement": "   "}
+
+    inline = _embeddable_text(
+        entity_type=NodeType.PREFERENCE,
+        name="malformed",
+        canonical_name="malformed",
+        properties=properties,
+    )
+    stored_row = {
+        "type": "preference",
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+
+    assert inline == node_embedding_text(stored_row)
+    assert inline == node_to_embedding_text(stored_row)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # C0 control character.
+        "prefers\x00 dark mode",
+        # Lone (unpaired) surrogate.
+        "prefers\ud800 dark mode",
+    ],
+    ids=["control-char", "lone-surrogate"],
+)
+def test_preference_text_is_sanitized_identically_on_all_three_paths(
+    statement: str,
+) -> None:
+    """Invalid characters are stripped from the statement — on ALL three paths.
+
+    Voyage 400s on control characters and lone surrogates. The generic node-text
+    has always been run through ``strip_invalid_chars``; the PREFERENCE / FACT
+    branch must be too, otherwise a single bad statement is sent raw by the two
+    inline writers AND by the backfill after an **Embedding reset** (ADR-009 §7).
+    Sanitizing inside ``entity_embedding_text`` moves all three together, so the
+    ``_CachedSingleEmbedding`` key and the persisted vector's text stay identical
+    to each other — just clean.
+    """
+
+    properties = {"statement": statement, "polarity": "like"}
+    kwargs: dict[str, Any] = {
+        "entity_type": NodeType.PREFERENCE,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+    stored_row = {
+        "type": NodeType.PREFERENCE.value,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+
+    inline_add_entity = _embeddable_text(**kwargs)
+    inline_pipeline = _entity_embeddable_text(**kwargs)
+    backfill = node_embedding_text(stored_row)
+
+    assert inline_add_entity == inline_pipeline == backfill
+    # Clean, and identical to the same statement without the bad character.
+    assert inline_add_entity == "prefers dark mode"
+    assert strip_invalid_chars(inline_add_entity) == inline_add_entity
+
+
+def test_all_invalid_chars_statement_falls_back_to_the_generic_text() -> None:
+    """A statement that sanitizes to blank falls back like a blank one does.
+
+    Sanitize-then-strip, not strip-then-sanitize: ``"\\x00 \\x00"`` survives
+    ``.strip()`` intact, so checking emptiness before sanitizing would embed a
+    single space. The row must never be embedded on a blank string.
+    """
+
+    properties = {"statement": "\x00 \ud800"}
+    kwargs: dict[str, Any] = {
+        "entity_type": NodeType.PREFERENCE,
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+    stored_row = {
+        "type": NodeType.PREFERENCE.value,
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+
+    inline_add_entity = _embeddable_text(**kwargs)
+    inline_pipeline = _entity_embeddable_text(**kwargs)
+    backfill = node_embedding_text(stored_row)
+
+    assert inline_add_entity == inline_pipeline == backfill
+    assert inline_add_entity == node_to_embedding_text(stored_row)
+    assert strip_invalid_chars(inline_add_entity) == inline_add_entity

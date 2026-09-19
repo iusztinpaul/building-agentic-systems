@@ -1,9 +1,19 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
 
+from tests.unit.conftest import TEST_DATABASE
+from tree.config.settings import settings
+from tree.db import init_mongodb
+from tree.entities.clusters import (
+    ClusterCentroid,
+    MEMORY_CLUSTERS_COLLECTION,
+    MemoryCluster,
+)
+from tree.entities.memory import ChunkViz, MEMORY_COLLECTION, MemoryEntry, NodeType
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
     _backfill_filter,
@@ -21,6 +31,7 @@ from tree.memory.rag.indexing import (
     ensure_indexes,
     index_entry_is_queryable,
     node_embedding_text,
+    reset_embeddings,
 )
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
@@ -695,6 +706,40 @@ class TestNodeEmbeddingText:
 
         assert node_embedding_text(row) == node_to_embedding_text(row)
 
+    def test_preference_and_fact_use_statement_and_object(self) -> None:
+        """The backfill must embed a stored preference on its STATEMENT.
+
+        After an **Embedding reset** the backfill re-embeds every preference and
+        fact; on the generic node-text ("preference: …\\nstatement: …") the
+        supersession resolver would compare a statement against a node-text and
+        silently stop matching (ADR-009 §7).
+        """
+
+        preference = {
+            "type": "preference",
+            "name": "prefers dark mode",
+            "properties": {"statement": "prefers dark mode", "polarity": "like"},
+        }
+        fact = {
+            "type": "fact",
+            "name": "lives in Bucharest",
+            "properties": {"subject": "paul", "object": "Bucharest"},
+        }
+        person = {"type": "person", "name": "alice", "properties": {"email": "a@b.c"}}
+        blank_preference = {
+            "type": "preference",
+            "name": "malformed",
+            "properties": {"statement": "   "},
+        }
+
+        assert node_embedding_text(preference) == "prefers dark mode"
+        assert node_embedding_text(fact) == "Bucharest"
+        assert node_embedding_text(person) == node_to_embedding_text(person)
+        # A blank statement is not embeddable — fall back rather than embed "".
+        assert node_embedding_text(blank_preference) == node_to_embedding_text(
+            blank_preference
+        )
+
 
 class TestEmbedNodesIsBackfillOnly:
     async def test_skips_nodes_with_non_empty_embedding(self, mocker) -> None:
@@ -891,3 +936,259 @@ class TestEmbeddingRoles:
         await embed_nodes(client, "test_db", spy_model, _TEST_USER_ID)
 
         assert spy_model.roles == ["document"]
+
+
+# ---------------------------------------------------------------------------
+# The Embedding reset (ADR-009 §7)
+# ---------------------------------------------------------------------------
+#
+# Deliberately NOT mock tests. Every claim here is about what Mongo holds
+# afterwards — "the vector is gone", "the map coordinates are gone", "the OTHER
+# tenant's row is byte-identical", "a second call writes nothing" — and an
+# ``update_many`` double can answer none of them. Rows go in through the
+# ``MemoryEntry`` ODM (so the fixtures obey the validators production rows do)
+# and come back out through raw pymongo.
+
+_RESET_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+_VECTOR = [0.1, 0.2, 0.3, 0.4]
+
+
+@pytest.fixture
+async def reset_client():
+    """A client on the unit-test database; both collections cleared afterwards."""
+
+    client = await init_mongodb(
+        settings.mongo.mongo_uri.get_secret_value(), TEST_DATABASE
+    )
+    yield client
+    database = client[TEST_DATABASE]
+    await database[MEMORY_COLLECTION].delete_many({})
+    await database[MEMORY_CLUSTERS_COLLECTION].delete_many({})
+
+
+@pytest.fixture
+def tenant() -> PydanticObjectId:
+    """A fresh tenant per test — every clause of the reset filter is user-scoped."""
+
+    return PydanticObjectId()
+
+
+async def _seed_embedded_child(
+    user_id: PydanticObjectId, row_id: str, *, clustered: bool = True
+) -> None:
+    """An embedded **Child chunk**, by default carrying map coordinates."""
+
+    await MemoryEntry(
+        id=row_id,
+        user_id=user_id,
+        kind="node",
+        type=NodeType.CHUNK,
+        subtype="child",
+        name=row_id,
+        properties={"content": "a passage", "title": "Memory", "heading_path": ["R"]},
+        embedding=list(_VECTOR),
+        cluster_id=2 if clustered else None,
+        viz=ChunkViz(x=1.0, y=2.0, run_id="run-1") if clustered else None,
+        created_at=_RESET_NOW,
+        updated_at=_RESET_NOW,
+    ).insert()
+
+
+async def _seed_vectorless_row(
+    user_id: PydanticObjectId,
+    row_id: str,
+    *,
+    node_type: NodeType,
+    subtype: str | None = None,
+) -> None:
+    """A row that is vector-less BY DESIGN: a parent chunk or a document."""
+
+    await MemoryEntry(
+        id=row_id,
+        user_id=user_id,
+        kind="node",
+        type=node_type,
+        subtype=subtype,
+        name=row_id,
+        properties={"content": "not embedded"},
+        embedding=[],
+        created_at=_RESET_NOW,
+        updated_at=_RESET_NOW,
+    ).insert()
+
+
+async def _seed_embedded_entity(
+    user_id: PydanticObjectId,
+    row_id: str,
+    *,
+    node_type: NodeType,
+    properties: dict | None = None,
+) -> None:
+    """An embedded LLM-extractable entity node (person, preference, ...)."""
+
+    await MemoryEntry(
+        id=row_id,
+        user_id=user_id,
+        kind="node",
+        type=node_type,
+        name=row_id,
+        properties=properties or {},
+        embedding=list(_VECTOR),
+        created_at=_RESET_NOW,
+        updated_at=_RESET_NOW,
+    ).insert()
+
+
+async def _seed_user_with_six_embedded_rows(user_id: PydanticObjectId) -> None:
+    """3 embedded children + 2 people + 1 preference = 6 resettable rows.
+
+    Plus a parent chunk and a document row, which carry no vector by design and
+    must therefore stay invisible to the reset.
+    """
+
+    for index in range(3):
+        await _seed_embedded_child(user_id, f"{user_id}:chunk:child-{index}")
+    await _seed_vectorless_row(
+        user_id, f"{user_id}:chunk:parent-0", node_type=NodeType.CHUNK, subtype="parent"
+    )
+    await _seed_vectorless_row(
+        user_id, f"{user_id}:document:doc-0", node_type=NodeType.DOCUMENT
+    )
+    await _seed_embedded_entity(
+        user_id, f"{user_id}:person:alice", node_type=NodeType.PERSON
+    )
+    await _seed_embedded_entity(
+        user_id, f"{user_id}:person:bob", node_type=NodeType.PERSON
+    )
+    await _seed_embedded_entity(
+        user_id,
+        f"{user_id}:preference:dark-mode",
+        node_type=NodeType.PREFERENCE,
+        properties={"statement": "prefers dark mode"},
+    )
+
+
+class TestResetEmbeddings:
+    async def test_resets_only_this_users_embedded_rows(
+        self, reset_client, tenant
+    ) -> None:
+        other_tenant = PydanticObjectId()
+        await _seed_user_with_six_embedded_rows(tenant)
+        await _seed_embedded_child(other_tenant, f"{other_tenant}:chunk:child-0")
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+        before_other = await collection.find_one({"user_id": other_tenant})
+
+        count = await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+
+        assert count == 6
+        rows = await collection.find({"user_id": tenant}).to_list()
+        emptied = [row for row in rows if row["_id"] in _resettable_ids(tenant)]
+        assert len(emptied) == 6
+        assert all(row["embedding"] == [] for row in emptied)
+        # The children lose their map coordinates too, so the Embedding map
+        # warns instead of drawing points from the old embedding space.
+        children = [row for row in emptied if row.get("subtype") == "child"]
+        assert len(children) == 3
+        assert all(row["cluster_id"] is None for row in children)
+        assert all(row["viz"] is None for row in children)
+        # Another tenant's row is untouched, byte for byte.
+        assert await collection.find_one({"user_id": other_tenant}) == before_other
+
+    async def test_leaves_vectorless_rows_alone(self, reset_client, tenant) -> None:
+        """A parent chunk and a document row are vector-less BY DESIGN.
+
+        They fail the eligibility ``$or``, so the reset can never touch them —
+        and the backfill would never refill them if it did.
+        """
+
+        await _seed_user_with_six_embedded_rows(tenant)
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+        structural = {"$in": [f"{tenant}:chunk:parent-0", f"{tenant}:document:doc-0"]}
+        before = await collection.find({"_id": structural}).to_list()
+
+        await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+
+        assert await collection.find({"_id": structural}).to_list() == before
+
+    async def test_is_idempotent(self, reset_client, tenant) -> None:
+        await _seed_user_with_six_embedded_rows(tenant)
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+        await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+        after_first = await collection.find({"user_id": tenant}).to_list()
+
+        count = await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+
+        assert count == 0
+        # No write at all, not "a write that changed nothing": ``updated_at``
+        # would have moved if the second call had issued its update_many.
+        assert await collection.find({"user_id": tenant}).to_list() == after_first
+
+    async def test_dry_run_counts_without_writing(self, reset_client, tenant) -> None:
+        await _seed_user_with_six_embedded_rows(tenant)
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+        before = await collection.find({"user_id": tenant}).sort("_id").to_list()
+
+        count = await reset_embeddings(
+            reset_client, TEST_DATABASE, tenant, dry_run=True
+        )
+
+        assert count == 6
+        assert (
+            await collection.find({"user_id": tenant}).sort("_id").to_list() == before
+        )
+
+    async def test_reset_rows_are_backfill_eligible(self, reset_client, tenant) -> None:
+        """Reset ⊆ backfill: every vector emptied is one the backfill rebuilds.
+
+        The two filters share :func:`_embeddable_row_clause`, so this is a
+        by-construction property — asserted live because the cost of being wrong
+        is a vector nothing ever refills.
+        """
+
+        await _seed_user_with_six_embedded_rows(tenant)
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+
+        count = await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+
+        backfill_ids = {
+            row["_id"]
+            for row in await collection.find(_backfill_filter(tenant)).to_list()
+        }
+        assert _resettable_ids(tenant) <= backfill_ids
+        assert count == len(_resettable_ids(tenant))
+
+    async def test_cluster_rows_are_left_alone(self, reset_client, tenant) -> None:
+        """``memory_clusters`` is the next **Clustering run**'s to replace."""
+
+        await _seed_user_with_six_embedded_rows(tenant)
+        await MemoryCluster(
+            id=f"{tenant}:cluster:2",
+            user_id=tenant,
+            run_id="run-1",
+            cluster_id=2,
+            label="Agent memory design",
+            summary="How agents remember.",
+            keywords=["memory", "agents", "rag"],
+            size=3,
+            sample_chunk_ids=[f"{tenant}:chunk:child-0"],
+            centroid=ClusterCentroid(x=0.0, y=0.0),
+            created_at=_RESET_NOW,
+        ).insert()
+        clusters = reset_client[TEST_DATABASE][MEMORY_CLUSTERS_COLLECTION]
+        before = await clusters.find({"user_id": tenant}).to_list()
+
+        await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+
+        assert await clusters.find({"user_id": tenant}).to_list() == before
+        assert len(before) == 1
+
+
+def _resettable_ids(user_id: PydanticObjectId) -> set[str]:
+    """The 6 ids ``_seed_user_with_six_embedded_rows`` gives a vector."""
+
+    return {
+        *(f"{user_id}:chunk:child-{index}" for index in range(3)),
+        f"{user_id}:person:alice",
+        f"{user_id}:person:bob",
+        f"{user_id}:preference:dark-mode",
+    }

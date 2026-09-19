@@ -10,6 +10,12 @@ modes (ADR-006 decision 4):
 2. Ensure the text and vector search indexes exist; reconcile the vector index's
    ``numDimensions`` against the live embedding model on every call.
 
+Plus one operator-triggered inverse of (1): :func:`reset_embeddings`, the
+**Embedding reset** (ADR-009 §7), which empties exactly the vectors the backfill
+refills so a model or **Embedding role** change can be re-embedded — the two
+share their eligibility clause (:func:`_embeddable_row_clause`) so they cannot
+disagree about which rows are supposed to carry a vector.
+
 The vector-search index declares ``merged_into`` as a filter path so
 ``$vectorSearch`` queries can exclude tombstoned nodes natively. Existing
 callers (e.g. ``tree.memory.graph.dedup.dedupe_entity``) still do a
@@ -20,6 +26,7 @@ now that the path is indexed.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -28,7 +35,7 @@ from pymongo import AsyncMongoClient, UpdateOne
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.config.app_config import app_config
-from tree.memory.embedding_text import embed_texts, node_to_embedding_text
+from tree.memory.embedding_text import embed_texts, entity_embedding_text
 from tree.memory.rag.embedding import child_embedding_text
 from tree.models.base import BaseEmbeddingModel
 
@@ -81,7 +88,12 @@ async def embed_nodes(
       document, so the text is byte-identical to the one the worker's
       ``embed_children`` task produced; or
     * an LLM-extractable entity node (``person``, ``organization``, ...),
-      embedded on its generic node-text exactly as before.
+      embedded on its generic node-text — EXCEPT ``preference`` and ``fact``,
+      which embed their ``properties.statement`` / ``properties.object``, the
+      same text the inline writer uses, so supersession keeps comparing
+      statement to statement after an **Embedding reset**. The choice is
+      :func:`tree.memory.embedding_text.entity_embedding_text`'s, not this
+      function's.
 
     ``document`` rows and PARENT chunks are excluded BY QUERY: they carry no
     vector by design (parent-document retrieval searches children only), so a
@@ -114,6 +126,20 @@ async def embed_nodes(
     return embedded_count
 
 
+def _embeddable_row_clause() -> list[dict[str, Any]]:
+    """The ``$or`` naming the rows that are SUPPOSED to carry a vector.
+
+    Shared verbatim by :func:`_backfill_filter` and :func:`_reset_filter`, so a
+    row the **Embedding reset** empties is BY CONSTRUCTION a row the backfill
+    refills — the reset can never strip a vector nothing rebuilds.
+    """
+
+    return [
+        {"type": "chunk", "subtype": "child"},
+        {"type": {"$in": sorted(t.value for t in LLM_EXTRACTABLE_NODE_TYPES)}},
+    ]
+
+
 def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
     """The ONE query that decides what the backfill embeds (see ``embed_nodes``)."""
 
@@ -121,10 +147,7 @@ def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
         "user_id": user_id,
         "kind": "node",
         "embedding": {"$in": [[], None]},
-        "$or": [
-            {"type": "chunk", "subtype": "child"},
-            {"type": {"$in": sorted(t.value for t in LLM_EXTRACTABLE_NODE_TYPES)}},
-        ],
+        "$or": _embeddable_row_clause(),
     }
 
 
@@ -132,10 +155,14 @@ def node_embedding_text(node: dict[str, Any]) -> str:
     """The text ONE fetched row is embedded on.
 
     Child chunks embed their **Contextual header** (title + heading path +
-    content); every other eligible row embeds the generic node-text. Keeping the
-    two in ONE function is what stops the backfill and the inline
-    ``embed_children`` task from drifting into two different vectors for the
-    same row.
+    content); every other eligible row goes through
+    :func:`tree.memory.embedding_text.entity_embedding_text` — generic node-text
+    except for ``preference`` / ``fact``, which embed their
+    ``properties.statement`` / ``properties.object``. Both delegations exist so
+    the backfill cannot drift from the inline writers (``embed_children`` for
+    chunks, ``add_entity`` for entities) into a second vector for the same row.
+    That parity is what makes an **Embedding reset** safe: the backfill rebuilds
+    the exact text the reset threw away.
     """
 
     properties = node.get("properties") or {}
@@ -145,7 +172,7 @@ def node_embedding_text(node: dict[str, Any]) -> str:
             heading_path=properties.get("heading_path") or [],
             content=properties.get("content") or "",
         )
-    return node_to_embedding_text(node)
+    return entity_embedding_text(node)
 
 
 async def _embed_batch(
@@ -184,6 +211,106 @@ async def _embed_batch(
         await collection.bulk_write(ops)
 
     return len(ops)
+
+
+# ---------------------------------------------------------------------------
+# 2. Embedding reset
+# ---------------------------------------------------------------------------
+
+
+def _reset_filter(user_id: PydanticObjectId) -> dict[str, Any]:
+    """The mirror image of :func:`_backfill_filter`: rows that HAVE a vector.
+
+    Same tenant, same ``kind``, same eligibility ``$or`` — only the
+    ``embedding`` clause is inverted. ``$exists`` plus ``$nin: [[], None]``
+    because an already-reset row stores ``[]``, which is what makes a second
+    reset match nothing.
+    """
+
+    return {
+        "user_id": user_id,
+        "kind": "node",
+        "embedding": {"$exists": True, "$nin": [[], None]},
+        "$or": _embeddable_row_clause(),
+    }
+
+
+async def reset_embeddings(
+    client: AsyncMongoClient,
+    database: str,
+    user_id: PydanticObjectId,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """**Embedding reset** for ONE user: empty every persisted vector it can rebuild.
+
+    The migration for any change that makes stored vectors incomparable with new
+    ones — a different embedding model (voyage-3.5 → voyage-4) or a different
+    **Embedding role** rule — because rows carry NO model stamp (ADR-009 §7).
+    Measured on live voyage-4, a legacy role-less vector scores cos=0.983 against
+    the same text embedded as ``query`` but only 0.774 against it as
+    ``document``: the old vectors are not merely older, they sit in a different
+    corner of the space. Emptying them is load-bearing, not cosmetic.
+
+    Two writes, both keyed on ids captured BEFORE either runs (the first write
+    makes the rows stop matching :func:`_reset_filter`, so a filter-keyed second
+    write would silently match zero rows):
+
+    1. every matched row → ``embedding: []`` + a fresh ``updated_at``;
+    2. the **Child chunk** subset → also ``cluster_id: None``, ``viz: None``.
+
+    (2) exists because ``load_embedding_map`` reads a child as CURRENT when
+    ``viz.run_id`` equals the latest run id, and re-embedding never touches
+    ``viz`` — without it the **Embedding map** would keep drawing old-space
+    coordinates in silence. Cleared, the existing surfaces warn instead ("N of M
+    chunks have no cluster assignment (or a stale one)"). ``memory_clusters``
+    rows are deliberately left alone: the next **Clustering run** replaces them
+    wholesale.
+
+    ``dry_run=True`` counts and writes nothing. Idempotent either way — a second
+    call matches 0 rows and issues no write at all.
+
+    Returns the number of rows reset (matched, in a dry run).
+    """
+
+    collection = client[database][MEMORY_COLLECTION]
+
+    reset_filter = _reset_filter(user_id)
+    # Projected id reads rather than ``distinct``, whose result must fit in one
+    # 16 MB BSON document (~300k ids) — a cap a large tenant could reach.
+    ids = [
+        row["_id"] for row in await collection.find(reset_filter, {"_id": 1}).to_list()
+    ]
+    child_ids = [
+        row["_id"]
+        for row in await collection.find(
+            {**reset_filter, "type": "chunk", "subtype": "child"}, {"_id": 1}
+        ).to_list()
+    ]
+
+    logger.info(
+        "Embedding reset: user=%s database=%s rows=%d (children=%d) dry_run=%s",
+        user_id,
+        database,
+        len(ids),
+        len(child_ids),
+        dry_run,
+    )
+
+    if dry_run or not ids:
+        return len(ids)
+
+    await collection.update_many(
+        {"_id": {"$in": ids}},
+        {"$set": {"embedding": [], "updated_at": datetime.now(UTC)}},
+    )
+    if child_ids:
+        await collection.update_many(
+            {"_id": {"$in": child_ids}},
+            {"$set": {"cluster_id": None, "viz": None}},
+        )
+
+    return len(ids)
 
 
 # ---------------------------------------------------------------------------

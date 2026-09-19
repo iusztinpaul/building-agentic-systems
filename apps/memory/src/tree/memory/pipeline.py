@@ -82,7 +82,7 @@ from tree.entities.memory import (
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
-from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
+from tree.memory.embedding_text import embed_in_batches, entity_embedding_text
 from tree.memory.graph.add_entity import add_entity
 from tree.memory.graph.extraction import build_structural_entries, extract_entities
 from tree.memory.graph.dedup import (
@@ -297,20 +297,13 @@ def _entity_embeddable_text(
     Mirrors :func:`tree.memory.graph.add_entity._embeddable_text` so
     the vector task ④ pre-computes (that ⑤ deduplicates against and ⑥
     persists) is byte-for-byte the text ``add_entity`` would build for the
-    same node — GENERIC types embed their node-text, PREFERENCE / FACT embed
-    ``properties.statement`` / ``properties.object``. Keeping the two
-    builders in lock-step is what lets ``_CachedSingleEmbedding`` reuse the
+    same node. Both build the persisted row shape and hand it to the ONE
+    per-type chooser, :func:`tree.memory.embedding_text.entity_embedding_text`
+    (GENERIC types → node-text, PREFERENCE / FACT → ``properties.statement`` /
+    ``properties.object``), which the indexing backfill calls as well. Keeping
+    the three in lock-step is what lets ``_CachedSingleEmbedding`` reuse the
     vector and makes the indexing backfill a no-op for dedup-created nodes.
     """
-
-    if entity_type == NodeType.PREFERENCE:
-        statement = (properties or {}).get("statement")
-        if isinstance(statement, str) and statement.strip():
-            return statement.strip()
-    elif entity_type == NodeType.FACT:
-        obj = (properties or {}).get("object") or (properties or {}).get("object_")
-        if isinstance(obj, str) and obj.strip():
-            return obj.strip()
 
     # ``aliases`` / ``confidence`` are top-level columns on the persisted
     # row, never under ``properties`` — strip them so this text matches
@@ -325,7 +318,7 @@ def _entity_embeddable_text(
             if k not in {"aliases", "confidence"}
         },
     }
-    return node_to_embedding_text(node)
+    return entity_embedding_text(node)
 
 
 def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:

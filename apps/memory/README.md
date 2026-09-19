@@ -258,6 +258,39 @@ run_extraction=False` — so it needs served workflows, like every other pipelin
 make memory-run-indexing-pipeline
 ```
 
+#### Changing the embedding model
+
+`memory` rows carry **no embedding-model stamp**, and the backfill only fills vectors that are
+EMPTY — so switching `models.search_embedding` (or changing the **Embedding role** rule) leaves
+every old vector in place, in a space the new ones don't share. Measured on live voyage-4, the same
+text embedded role-less (the legacy way) scores cos=0.983 against its `query` embedding but only
+0.774 against its `document` one: old vectors aren't merely older, they're incomparable, and hybrid
+search quietly degrades instead of failing. The migration is an **Embedding reset** — empty the
+vectors, then let the existing phases refill them (ADR-009 §7):
+
+```bash
+make memory-reset-embeddings                  # DRY RUN: counts, writes nothing, exits 1
+make memory-reset-embeddings CONFIRM=yes      # empties them
+make memory-run-indexing-pipeline             # re-embeds with the CURRENT model
+make memory-run-clustering-pipeline           # only if you use the Embedding map
+```
+
+Three things to know:
+
+- **It is per user.** The reset resolves ONE tenant (`USER_ID` / `USER_IDENTIFIER`, like every other
+  command here); on a multi-user environment, loop over your users — there is no `--all-users`.
+- **Between step 1 and step 2, search runs on the text leg.** The emptied rows carry no vector, so
+  `$vectorSearch` returns nothing for them and retrieval reports `text_only` / fewer hits. Run the
+  indexing pipeline right after, and re-run it if it fails: both the reset and the backfill are
+  idempotent (a second reset matches 0 rows and writes nothing).
+- **The map goes stale on purpose.** The reset clears the child chunks' `cluster_id` / `viz`, so
+  `make memory-visualize-embeddings` warns "N of M chunks have no cluster assignment (or a stale
+  one)" instead of silently drawing coordinates from the old space. `memory_clusters` rows are left
+  alone — the next clustering run replaces them wholesale.
+
+`CONFIRM=yes` is the only guard: the command is destructive on whichever environment is active
+(`make env-status`), production included.
+
 ### Memory clustering
 
 The clustering **Offline phase** (`memory-clustering-etl`) — the data behind the **Embedding

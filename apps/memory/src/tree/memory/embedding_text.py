@@ -1,22 +1,30 @@
 """Shared node-text embedding for dedup and indexing.
 
-Two functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
-into the text we embed, and ``embed_texts`` embeds already-built texts with the
-search model in as few requests as the provider caps allow. They are separate
-because the indexing backfill embeds **Child chunk**s by their **Contextual
-header** rather than by a node-text. Lives at the ``memory/`` layer because both
-``rag/`` and ``graph/`` depend on it.
+Three functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
+into the GENERIC text we embed, ``entity_embedding_text`` picks the per-type text
+for ONE entity row (the PREFERENCE / FACT exception below, generic otherwise), and
+``embed_texts`` embeds already-built texts with the search model in as few requests
+as the provider caps allow. They are separate because the indexing backfill embeds
+**Child chunk**s by their **Contextual header** rather than by a node-text. Lives at
+the ``memory/`` layer because both ``rag/`` and ``graph/`` depend on it (``rag/`` may
+not import ``graph/`` — ADR-006).
 
-PREFERENCE and FACT nodes must NOT be routed through this generic path:
-``extraction.pipeline._dispatch_entity_write`` embeds
-``properties.statement`` / ``properties.object`` instead, so the
-supersession resolver compares statement-to-statement (resp.
-object-to-object). Unifying them would silently break supersession.
+PREFERENCE and FACT nodes must NOT be routed through the GENERIC path: they
+embed ``properties.statement`` / ``properties.object`` so the supersession
+resolver compares statement-to-statement (resp. object-to-object). That choice
+lives in ``entity_embedding_text`` here — NOT in each caller — so the inline
+write path (``graph/add_entity._embeddable_text``,
+``memory/pipeline._entity_embeddable_text``) and the indexing backfill
+(``rag/indexing.node_embedding_text``) cannot drift into two different vectors
+for the same row. Drift matters most after an **Embedding reset** (ADR-009 §7):
+the backfill re-embeds EVERY preference, and on the generic text supersession
+would silently stop matching.
 """
 
 import logging
 from typing import Any
 
+from tree.entities.memory import NodeType
 from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError
@@ -218,6 +226,48 @@ def node_to_embedding_text(node: dict[str, Any]) -> str:
     if props.get("content"):
         parts.append(str(props["content"]))
     return strip_invalid_chars("\n".join(parts))
+
+
+def entity_embedding_text(node: dict[str, Any]) -> str:
+    """The text ONE entity row is embedded on — the per-type choice, in ONE place.
+
+    ``preference`` embeds ``properties.statement`` and ``fact`` embeds
+    ``properties.object`` (``object_`` on rows written before the rename), so
+    supersession's statement<->statement (resp. object<->object) comparison stays
+    apples-to-apples. The special text is sanitized with
+    :func:`~tree.memory.rag.cleaning.strip_invalid_chars` exactly like the generic
+    path — Voyage 400s on control characters and lone surrogates, and sanitizing
+    HERE (not in each caller) keeps all three call sites on the same bytes, so the
+    ``_CachedSingleEmbedding`` key and the embedded text stay identical. Order is
+    sanitize-then-``strip()``: a statement made only of invalid characters (or of
+    invalid characters and whitespace) sanitizes to blank and therefore falls back
+    to :func:`node_to_embedding_text`, as a blank or missing statement does — a row
+    is never embedded on a blank string. Only the embedding INPUT is cleaned; the
+    persisted ``properties.statement`` / ``properties.object`` are untouched.
+
+    Takes the PERSISTED row shape (``type`` / ``name`` / ``canonical_name`` /
+    ``properties``) because both sides must agree on it: the inline path builds
+    that shape for an entity that does not exist yet, the backfill reads it
+    straight out of Mongo. Chunk rows never reach here — they embed their
+    **Contextual header** (``rag.indexing.node_embedding_text``).
+    """
+
+    properties = node.get("properties") or {}
+    node_type = node.get("type")
+
+    if node_type == NodeType.PREFERENCE:
+        special = properties.get("statement")
+    elif node_type == NodeType.FACT:
+        special = properties.get("object") or properties.get("object_")
+    else:
+        special = None
+
+    if isinstance(special, str):
+        cleaned = strip_invalid_chars(special).strip()
+        if cleaned:
+            return cleaned
+
+    return node_to_embedding_text(node)
 
 
 async def embed_texts(
