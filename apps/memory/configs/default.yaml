@@ -1,9 +1,7 @@
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 #
 # This file holds ONLY static memory config (models, extraction, query, dream,
-# concurrency, prefect, mcp, observability). Data-ingestion sources are operator
-# DATA and live under the repo-root `sources/` directory (`sources/backfill.yaml`
-# + `sources/listen.yaml`), loaded by `tree.config.sources` — see ADR-003.
+# concurrency, prefect, mcp, observability).
 
 # Memory modes (ADR-006). ONE switch decides how much of the memory half runs:
 #   rag      — clean -> two-level chunk (parent/child) -> embed children ->
@@ -14,10 +12,7 @@
 #              LLM entity extraction over parent chunks, entity resolution,
 #              dedup, `mentions` edges, and graph expansion at retrieval.
 #              (What Chapter 8 adds.)
-# Read once at flow entry / MCP-server boot / CLI start, never per request.
-# Default `graphrag` keeps an unchanged checkout behaving as before.
-# Env override: TREE_MEMORY__MODE=rag. Both modes write the same `memory`
-# collection and both start from scratch — there is NO migration between them.
+
 memory:
   mode: graphrag
   # Two-level chunking (ADR-006 §6). Sizes are tiktoken `cl100k_base` TOKENS.
