@@ -1,7 +1,7 @@
 # ADR-009: Voyage 4, Embedding Roles, and a Catalog of Modal-Hosted Embedding Models
 
 - **Status:** Accepted
-- **Date:** 2026-09-19 (revised the same day, before tasks 138+ started: Dedicated endpoints added as the first Serving path — Decisions 2 and 3 rewritten)
+- **Date:** 2026-09-19 (revised twice the same day, before tasks 138+ started: Dedicated endpoints added as the first Serving path — Decisions 2 and 3 rewritten; then the optional Hugging Face token brought into scope — Decision 9 added)
 - **Deciders:** Paul (project owner)
 - **Context references:**
   - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/142-modal-fallback-deploy-scripts-vllm-and-sglang.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 141)
@@ -11,7 +11,7 @@
   - `ADR-007` (Clustering run, stale-map warning contract) — unchanged, relied on
   - `ADR-008` §4 (`min_vector_score` provisional, evals-owned) — AMENDED here on one point: what happens to the pin when the embedding model changes
   - `docs/glossary.md` — **Embedding catalog**, **Serving path**, **Dedicated endpoint**, **Embedding role**, **Embedding reset**, **Proxy token** (added in this feature's grooming commits)
-  - Modal docs, read 2026-09-19: `modal.com/docs/guide/dedicated-endpoints.md`, `modal.com/docs/cli/latest/endpoint.md`, `modal.com/docs/guide/endpoints.md`
+  - Modal docs, read 2026-09-19: `modal.com/docs/guide/dedicated-endpoints.md`, `modal.com/docs/cli/latest/endpoint.md`, `modal.com/docs/guide/endpoints.md`, `modal.com/docs/guide/secrets.md`
 
 ## Context
 
@@ -24,11 +24,11 @@ Qwen3 and most modern retrievers are asymmetric. (3) The "Modal provider" was on
 for one model behind an engine-level API key held in a Modal secret, with a client that hard-coded
 the app name, ignored `dimensions`, and cited a manifest file that never existed. (4) Modal now
 offers **Dedicated Endpoints**: `modal endpoint create --model <base model> [--custom-hf-repo …
---custom-hf-revision …]` — "Modal resolves the model, selects a compatible serving recipe, and
-starts provisioning"; scale to zero by default, billed by GPU-second, proxy tokens required by
-default, embedding models served through the OpenAI-compatible Embeddings API, and a Source view
-whose generated `serve.py` "you can copy and adapt … into your own Modal App when you need full
-control". The `serve.py` Modal generates for `Qwen/Qwen3-Embedding-0.6B` (app
+--custom-hf-revision … --custom-hf-token …]` — "Modal resolves the model, selects a compatible
+serving recipe, and starts provisioning"; scale to zero by default, billed by GPU-second, proxy
+tokens required by default, embedding models served through the OpenAI-compatible Embeddings API,
+and a Source view whose generated `serve.py` "you can copy and adapt … into your own Modal App when
+you need full control". The `serve.py` Modal generates for `Qwen/Qwen3-Embedding-0.6B` (app
 `ep-qwen3-embedding-0-6b`, `class Server`, `VLLMEndpoint` from `autoinference-utils`,
 `--runner pooling`) is exactly the template our own scripts were written from.
 
@@ -41,11 +41,13 @@ architecture (`VoyageQwen3BidirectionalEmbedModel` via `--hf-overrides`), MEAN p
 `--trust-remote-code`; SGLang 0.5.20 cannot serve it (onboarding PR sgl-project/sglang#18436 open
 since April 2026) while vLLM serves it natively, and SGLang is the better-trodden path for
 Qwen3-Embedding, BGE, E5, GTE-Qwen2 and EmbeddingGemma; the glossary already owns the word
-**Deployment** (a registered Prefect flow).
+**Deployment** (a registered Prefect flow); credentials live in `.env` / `Settings`, never in YAML;
+the deploy driver logs the command it runs, Modal image layers are cached and inspectable, and some
+embedding models worth serving are private or gated on the Hugging Face Hub (both seeds are public).
 
 ## Decision
 
-Eight related choices, one design:
+Nine related choices, one design:
 
 1. **`voyage-4` at 1024-d for BOTH `models.search_embedding` and `models.resolution_embedding`.**
    Same price as `voyage-3.5` ($0.06), same dimension, so the mongot `vector_index` is untouched.
@@ -103,6 +105,7 @@ Eight related choices, one design:
    For the fallback scripts the resolved entry crosses into the container as ONE JSON env var baked
    into the image (`EMBEDDING_DEPLOY_SPEC`), read under `not modal.is_local()` — the only way to
    honour both "catalog logic lives in `src/tree/`" and "`tree` is not importable in the container".
+   That spec holds configuration only; a credential never enters the image env (§9).
    Weights come from a shared `huggingface-cache` Volume by `repo_id` + `revision`.
    ONE smoke test (`tree.models.modal_server.smoke_test`), run by the driver, covers every path.
 
@@ -152,11 +155,42 @@ Eight related choices, one design:
    recorded counter-example, and the evidence lives in the e2e task's log. The knobs remain
    provisional and owned by Chapter 7's evals.
 
+9. **An optional Hugging Face token: one workspace credential — never in YAML, never in an image,
+   never in a log.** `HF_TOKEN` (the variable `huggingface_hub`, vLLM and SGLang read natively) is an
+   OPTIONAL `SecretStr` in `Settings` / `.env`, default empty = exactly the behaviour without this
+   decision; nothing ever requires it. It is a weight-DOWNLOAD credential, not serving auth (§4 is
+   unchanged), and it belongs to the workspace, not to a model — so it is not an Embedding catalog field.
+   - `endpoint`: forwarded as `--custom-hf-token <token>` ONLY when the token is set AND the entry
+     has custom weights — Modal documents the flag as the token "for private --custom-hf-repo".
+     `modal_cli_command` stays token-free; `hf_token_args` appends the pair at the `subprocess.run`
+     boundary; EVERY logged argv passes through `redact_argv` (`--custom-hf-token ***`); the driver
+     runs the CLI with `check=False`, because `CalledProcessError` prints its argv. The token value
+     never reaches a log line, an exception message, a Make recipe or a task `## Log`.
+   - `sglang` / `vllm`: the container downloads the weights, so it must see `HF_TOKEN`. It arrives
+     as `secrets=[modal.Secret.from_dict(hf_token_env())]`, built under `modal.is_local()`, with
+     `Secret.from_dict({})` on the in-container re-import — the shape Modal's secrets guide documents
+     for sending a local secret to an app. NOT in the image `.env(...)` beside
+     `EMBEDDING_DEPLOY_SPEC`: image layers are cached and inspectable. NOT `Secret.from_name`: a
+     named secret is a bootstrap step, which §4 just removed. The container logs only the boolean
+     `HF_TOKEN set in container: True|False`.
+   - A gated BASE model on a Dedicated endpoint is not covered by the flag → serve it through a
+     fallback script.
+   - **Missing token:** no pre-flight Hub call. A gated download fails inside the engine at
+     container start; when the token is EMPTY and a deploy or the smoke test fails, the driver's last
+     line says to set `HF_TOKEN`, and the README names the Hub's `401` / `403` / `GatedRepoError`.
+   - **Residual risk, accepted:** while `modal endpoint create` runs, the token is in the local
+     process list (`ps`) of the operator's own machine, and either path hands the token to Modal
+     (that is the feature). Modal documents no env-var form of the flag (its own example is
+     `--custom-hf-token $HF_TOKEN`); if the pinned client's `--help` shows one, the driver uses it
+     and the argv form — with `hf_token_args` / `redact_argv` — is deleted.
+
 Bias-to-least notes: a managed Dedicated endpoint over our own serving code, and our scripts only
 where the managed recipe cannot go; one URL lookup for three Serving paths over a per-path
 resolver; a YAML list over a model registry service; two scripts over an engine interface; Modal's
-built-in proxy auth over our own key + secret; no Hugging Face token plumbing until a gated model
-exists; a task input over a custom cache key function; a reset command + two existing phases over
+built-in proxy auth over our own key + secret; one optional `HF_TOKEN` setting, two 3-line pure
+functions and an ephemeral `Secret.from_dict` over a per-model token field, a command/secret
+structure or a named Modal Secret to bootstrap; one hint line over a pre-flight Hub check;
+a task input over a custom cache key function; a reset command + two existing phases over
 row stamping; client-side prompt strings over a prompt-template engine; per-engine versions over
 per-model versions.
 
@@ -169,6 +203,8 @@ flowchart LR
         MODELS["models.search_embedding / resolution_embedding<br/>voyage · voyage-4 · 1024"]
         CAT["modal.embedding_models — Embedding catalog<br/>repo_id · revision · serving endpoint/sglang/vllm · base_model<br/>native/matryoshka dims · query_prompt · document_prompt<br/>fallback-only: gpu · cpu · memory_mb · max_model_len · extra_server_args<br/>derived: endpoint_name → app_name ep-*"]
     end
+
+    ENVF[".env → Settings — credentials only<br/>MODAL_PROXY_TOKEN_ID / _SECRET<br/>HF_TOKEN (optional · private or gated repos)"]
 
     subgraph callers["tree.memory — Embedding role is forced by the dedup==persisted invariant"]
         direction TB
@@ -199,7 +235,7 @@ flowchart LR
         RESET["make memory-reset-embeddings CONFIRM=yes<br/>embedding=[] · children cluster_id/viz cleared"]
         IDX["make memory-run-indexing-pipeline<br/>backfill re-embeds (document)"]
         CLU["make memory-run-clustering-pipeline"]
-        DEP["make memory-deploy-embedding-model MODEL=repo_id [SERVING=path]<br/>-stop · driver scripts/modal_embedding_model.py"]
+        DEP["make memory-deploy-embedding-model MODEL=repo_id [SERVING=path]<br/>-stop · driver scripts/modal_embedding_model.py<br/>logs only redacted argv · hint if a deploy fails without HF_TOKEN"]
         SMOKE["make memory-deploy-embedding-model-test<br/>ONE smoke test: health · dims · relevant vs unrelated · 401 without token"]
     end
 
@@ -209,8 +245,10 @@ flowchart LR
     MODELS --> VOY
     CAT --> MOD
     CAT --> DEP
-    DEP -- "modal endpoint create --model base_model<br/>(+ --custom-hf-repo/-revision if repo_id != base_model)" --> EP
-    DEP -- "modal deploy · EMBEDDING_DEPLOY_SPEC baked into image env" --> SGL & VLLM
+    ENVF --> DEP
+    ENVF --> MOD
+    DEP -- "modal endpoint create --model base_model<br/>(+ --custom-hf-repo/-revision if repo_id != base_model<br/>+ --custom-hf-token if HF_TOKEN set, redacted in logs)" --> EP
+    DEP -- "modal deploy · EMBEDDING_DEPLOY_SPEC baked into image env<br/>HF_TOKEN as Secret.from_dict, never in the image" --> SGL & VLLM
     EP -. "fails? walk the ladder<br/>Source-view serve.py = the eject path" .-> SGL
     SGL -. "architecture unsupported" .-> VLLM
     SMOKE --> EDGE
@@ -233,7 +271,7 @@ flowchart LR
     classDef o fill:#f1f3f5,stroke:#868e96,color:#000;
     classDef e fill:#ffe3e3,stroke:#e03131,color:#000;
     class MODELS,CAT c; class DOC,QRY,RES,CACHE r; class VOY,GEM,ST,MOD m;
-    class EP p; class VLLM,SGL x; class EDGE e; class RESET,IDX,CLU,DEP,SMOKE o; class MEM,VAPI c;
+    class EP p; class VLLM,SGL x; class EDGE,ENVF e; class RESET,IDX,CLU,DEP,SMOKE o; class MEM,VAPI c;
 ```
 
 ## Consequences
@@ -284,11 +322,24 @@ flowchart LR
   never wake a GPU. Rotating the proxy token rotates access to every catalog app at once; there is
   no per-model credential. The CLI token that authorises `modal deploy` / `modal endpoint create`
   is separate and unchanged.
-- **What would justify upgrading.** A gated Hugging Face model → an optional `HF_TOKEN` setting
-  forwarded as `--custom-hf-token` (with argv redaction in logs) and a Modal Secret for the
-  scripts; Modal exposing recipe flags or the SGLang voyage PR merging → move voyage-4-nano up the
-  ladder by editing one YAML word; endpoint scaling knobs appearing in the CLI → catalog fields for
-  them; a second embedding model live at the same time, or a partial migration that must be
+- **Private and gated repos work with one `.env` line, and cost nothing when unused.** An empty
+  `HF_TOKEN` changes no argv and attaches an empty Secret. What we pay: redaction is a discipline,
+  not a type — any NEW code that logs or raises the run argv re-opens the leak, which is why
+  `modal_cli_command` stays token-free, `check=True` is banned in the driver and two unit tests
+  assert the secret is absent from captured output (including the failure path). The token is
+  exposed in the local process list for the seconds a create runs. A token rotated in `.env` reaches
+  a fallback app only on its next deploy, and a Dedicated endpoint only on re-create. One token
+  serves every model — two Hub identities are not supported. The path is proven live on PUBLIC
+  weights only (`tasks/141`: redacted argv, leak check, `HF_TOKEN set in container: True`); that a
+  token unlocks a gated download is Hugging Face's and Modal's contract. A missing token surfaces
+  late (at container start) and is explained by a hint, not prevented.
+- **What would justify upgrading.** Modal shipping an env-var form of `--custom-hf-token` → drop
+  the argv form and its redaction; a second Hub identity, or a team workspace where the token should
+  not live on laptops → a named Modal Secret (`Secret.from_name`) created once, optionally named per
+  catalog entry; repeated late failures on gated repos → a pre-flight `huggingface_hub` access check
+  in the driver; Modal exposing recipe flags or the SGLang voyage PR merging → move voyage-4-nano up
+  the ladder by editing one YAML word; endpoint scaling knobs appearing in the CLI → catalog fields
+  for them; a second embedding model live at the same time, or a partial migration that must be
   resumable across days → an `embedding_model` stamp on rows plus filter-by-stamp reads; two models
   needing different engine versions → a per-entry `engine_version` override; measured cold-start
   pain → weight snapshots / `min_containers > 0`; measured retrieval regressions from a catalog

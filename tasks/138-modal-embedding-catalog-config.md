@@ -112,7 +112,7 @@ Write tests with `/squid-testing-python`.
 
 ## Out of scope
 - Any `import modal`, the CLI argv / driver / Make targets (#139), the fallback scripts (#142), the client (#140).
-- `--custom-hf-token` / an `HF_TOKEN` setting: both seeds are public. Add it with the first gated model.
+- An `HF_TOKEN` / token catalog field: the Hugging Face token is ONE optional workspace credential (`Settings.hf_token`, #139), never YAML — ADR-009 §9.
 - Forbidding the script-only fields on `endpoint` entries: `SERVING=sglang|vllm` needs them (defaults
   or explicit); #139's driver LOGS that a Dedicated endpoint does not use them.
 - A `PoolingStrategy`/engine plugin interface; per-model engine versions; env-var overrides for
@@ -194,5 +194,12 @@ Ready for implementation.
 
 **User stories**
 - 5 stories: endpoint entry with defaults, missing base model, malformed JSON arg, unknown id, app-name collision.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 18:44 — Re-grooming (HF token)
+
+**What changed and why**
+- Scope, AC and stories are UNCHANGED. One out-of-scope sentence was rewritten: the human brought the optional `HF_TOKEN` into the feature, and it is a per-workspace credential in `Settings` (#139), not a catalog field — so this task still adds no token field to `ModalEmbeddingModelConfig`. The "`HF_TOKEN` stays out" line in the entry above is superseded by ADR-009 §9.
 
 Ready for implementation.

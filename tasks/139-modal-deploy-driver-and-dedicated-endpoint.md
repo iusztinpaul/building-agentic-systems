@@ -9,7 +9,7 @@ feature: voyage-4-and-modal-embedding-catalog
 Tags: `modal`, `deploy`, `scripts`, `infra`
 Depends on: #138
 Blocks: #140, #142, #141
-Implements: ADR-009 — Decision 2 (Serving path ladder; the `endpoint` path), Decision 3 (one app per model, one URL lookup) and Decision 4 (Proxy token auth, operator side)
+Implements: ADR-009 — Decision 2 (Serving path ladder; the `endpoint` path), Decision 3 (one app per model, one URL lookup), Decision 4 (Proxy token auth, operator side) and Decision 9 (optional `HF_TOKEN`: the setting, the endpoint side, argv redaction)
 
 ## Scope
 
@@ -19,7 +19,8 @@ built here too; their script FILES arrive in #142.
 
 Verified on 2026-09-19 (modal.com/docs/cli/latest/endpoint.md, /docs/guide/dedicated-endpoints.md,
 /docs/guide/endpoints.md): `modal endpoint create --model TEXT [--name TEXT] [--routing-region TEXT]
-[--custom-hf-repo TEXT] [--custom-hf-revision TEXT] [--custom-hf-token TEXT] …`;
+[--custom-hf-repo TEXT] [--custom-hf-revision TEXT] [--custom-hf-token TEXT] …`
+(`--custom-hf-token`: "Hugging Face token for private --custom-hf-repo"; no env-var form is documented);
 `modal endpoint list [--json]`; `modal endpoint stop [-y] ENDPOINT_IDENTIFIER`; scale to zero by
 default; proxy tokens required by default (`Authorization: Bearer wk-<id>.ws-<secret>`); embedding
 models answer the OpenAI-compatible Embeddings API.
@@ -30,18 +31,28 @@ client — SWE must verify the minimum version that ships `modal endpoint` and r
 is higher); `uv lock`.
 
 **2. Settings (add only)** — `src/tree/config/settings.py`: `modal_proxy_token_id: SecretStr = SecretStr("")`,
-`modal_proxy_token_secret: SecretStr = SecretStr("")`; `.env.example` gains
+`modal_proxy_token_secret: SecretStr = SecretStr("")` and the OPTIONAL `hf_token: SecretStr = SecretStr("")`
+(env `HF_TOKEN` — the name `huggingface_hub`, vLLM and SGLang read natively; empty = today's
+behaviour for public repos; nothing ever requires it). `.env.example` gains
 `MODAL_PROXY_TOKEN_ID=wk-your-proxy-token-id` / `MODAL_PROXY_TOKEN_SECRET=ws-your-proxy-token-secret`
 under the Modal heading (heading text -> `# Modal (hosted embedding models)`) with a one-line pointer
-to Modal -> Settings -> Proxy Auth Tokens; `tests/unit/config/test_settings_credentials_only.py` field
-set gains both. (`MODAL_EMBEDDING_API_KEY` is retired in #140, with the client that still reads it.)
+to Modal -> Settings -> Proxy Auth Tokens, then the two lines
+`# Optional — only for private or gated Hugging Face repos (read-scope token: https://huggingface.co/settings/tokens).`
+and `# HF_TOKEN=hf_your-read-token` (commented out, like `# OPIK_WORKSPACE=`).
+`apps/memory/README.md` env table gains ONE row after the Modal row: `HF_TOKEN`, required `no`,
+default `—`, description `Hugging Face token — only to serve a private or gated repo on Modal`.
+`tests/unit/config/test_settings_credentials_only.py` field set gains all three names.
+`HF_TOKEN` is NOT added to the `ci.yml` / `cd.yml` mock env: optional secrets are not mocked there
+today (`OPIK_API_KEY`, `BRIGHTDATA_API_KEY` are absent) and the field-set test compares names only.
+(`MODAL_EMBEDDING_API_KEY` is retired in #140, with the client that still reads it.)
 Helper `modal_proxy_bearer() -> str` in `tree/models/modal_catalog.py`: `f"{id}.{secret}"`, raising
 `ModelError("Modal proxy token is required. Set MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET.")`
 when either is empty.
 
-**3. CLI argv — ONE pure function** in `tree/models/modal_catalog.py`:
+**3. CLI argv — pure functions** in `tree/models/modal_catalog.py`:
 `modal_cli_command(action: Literal["deploy", "stop"], entry, serving: ServingPath) -> list[str]`
-(`MODAL_ROUTING_REGION = "eu-west"`; script paths are relative to `apps/memory`):
+(`MODAL_ROUTING_REGION = "eu-west"`; script paths are relative to `apps/memory`) — ALWAYS token-free,
+so it is safe to log and to assert on:
 - `deploy` + `endpoint` -> `["modal", "endpoint", "create", "--name", entry.endpoint_name, "--model", entry.base_model, "--routing-region", "eu-west"]`,
   with `"--custom-hf-repo", entry.repo_id, "--custom-hf-revision", entry.revision` inserted before
   `--routing-region` ONLY when `entry.repo_id != entry.base_model` (custom weights).
@@ -50,6 +61,21 @@ when either is empty.
   `stop` + `vllm`/`sglang` -> `["modal", "app", "stop", entry.app_name]`.
   SWE must verify with `modal endpoint stop --help` / `modal app stop --help` on the locked client:
   that `ENDPOINT_IDENTIFIER` accepts the NAME, and whether `modal app stop` needs a `-y`.
+
+The Hugging Face token joins the argv in ONE place and leaves every log in ONE place:
+- `hf_token_args(entry, serving: ServingPath, token: str) -> list[str]` -> `["--custom-hf-token", token]`
+  ONLY when `token` is non-empty AND `serving == "endpoint"` AND `entry.repo_id != entry.base_model`;
+  otherwise `[]`. Base-model-only endpoints never get it: Modal documents the flag as the token
+  "for private --custom-hf-repo" (SWE must verify in `modal endpoint create --help` that the wording
+  still says so; if a gated BASE model turns out to need it, record the source in `## Log` and drop
+  the custom-weights condition). The fallback scripts receive the token differently (#142).
+- `redact_argv(argv: list[str]) -> list[str]` -> a copy where the element AFTER every
+  `--custom-hf-token` is `"***"`. EVERY argv the driver logs goes through it.
+- `HF_TOKEN_HINT = "If {repo_id} is a private or gated Hugging Face repo, set HF_TOKEN in .env (read-scope token: https://huggingface.co/settings/tokens) and deploy again."`
+- SWE must verify in `modal endpoint create --help` on the pinned client whether `--custom-hf-token`
+  lists an environment variable (`[env var: …]`). If it does: pass the token through THAT variable in
+  the child `env=` instead, delete `hf_token_args` / `redact_argv` and their tests, and write
+  `PA: ADR-009 §9 needs argv -> env var <NAME>` in `## Log`. If it does not (the docs today): keep the argv form.
 
 **4. Shared server helpers + the ONE smoke test** — new `src/tree/models/modal_server.py`
 (imports `modal`; never imported by `modal_catalog` or at MCP boot). Used by the driver now and by
@@ -91,13 +117,23 @@ the `ModalEmbeddingModel` client in #140 — one implementation of URL lookup an
 exit 2) and `resolve_serving(entry, serving)` (bad value / missing `base_model` -> exit 2);
 - `deploy` / `stop`: builds the argv with `modal_cli_command`; if the argv names a `deploy/*.py` that
   does not exist -> logs `Serving path 'vllm' needs deploy/modal_vllm_embedding.py, which does not exist.`
-  and exits 2; otherwise `subprocess.run(argv, check=True, env={**os.environ, "EMBEDDING_MODEL": repo_id})`.
+  and exits 2. Otherwise `run_argv = argv + hf_token_args(entry, serving, settings.hf_token.get_secret_value())`
+  for `deploy` (`run_argv = argv` for `stop`); logs `Running: <shlex.join(redact_argv(run_argv))>`;
+  `result = subprocess.run(run_argv, check=False, env={**os.environ, "EMBEDDING_MODEL": repo_id})`.
+  A non-zero `result.returncode` -> logs `modal command failed (exit <n>): <the same redacted argv>`
+  and exits `<n>`. `check=True` is FORBIDDEN in this script: `CalledProcessError` prints its full
+  argv — the token. `run_argv` itself is never logged, formatted into a message or raised.
   When an override differs from the entry it logs
   `SERVING=sglang overrides the catalog's serving: endpoint for THIS command only — the ModalEmbeddingModel client keeps reading configs/default.yaml.`
   On an `endpoint` deploy it logs
   `Dedicated endpoint: Modal picks the GPU, engine and flags — this entry's gpu/cpu/memory_mb/max_model_len/extra_server_args are used only by SERVING=sglang|vllm.`
 - `test`: `asyncio.run(smoke_test(model))`; a `ModelError` / `ExtractionError` is logged and exits 1.
   It takes no `--serving`: under H1 the lookup is identical on every path.
+- Missing-token hint (the ONLY gated-repo handling — no pre-flight Hub call): when `settings.hf_token`
+  is EMPTY and a `deploy` exits non-zero or `test` fails, the driver logs `HF_TOKEN_HINT` (WARNING,
+  formatted with the `repo_id`) as its last line. Why both sites: a gated download fails inside the
+  engine at container start, which surfaces as a failed create OR as a smoke test that never gets
+  `health 200`. With a token set the hint is never logged.
 
 `apps/memory/Makefile` replaces the three old targets (and deletes the
 `modal secret create vllm-embedding-api-key …` bootstrap):
@@ -105,46 +141,55 @@ exit 2) and `resolve_serving(entry, serving)` (bad value / missing `base_model` 
 - `deploy-embedding-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, relevant-vs-unrelated sanity, 401 without a token). Requires MODEL=<repo_id>.`
 - `deploy-embedding-model-stop: # Stop one catalog model on Modal. Requires MODEL=<repo_id>; pass the same SERVING= you deployed with.`
   Each prints a `USAGE:` line and exits 1 when `MODEL` is empty (same `@if [ -z … ]` guard as `search-web`).
+  `HF_TOKEN` is NOT a Make variable: it reaches the driver through `Settings`, never through a recipe line (Make echoes recipes).
 
 **6. Delete** `apps/memory/deploy/modal_vllm_embedding.py` — the single-model script with the
 engine-level `--api-key`. Its replacement arrives in #142 as a fallback script.
 
-Write tests with `/squid-testing-python`; NO test touches the network; `modal.Server` and aiohttp are mocked.
+Write tests with `/squid-testing-python`; NO test touches the network; `modal.Server` and aiohttp are mocked;
+token tests PATCH `settings.hf_token` (never rely on the developer's real `HF_TOKEN`, which Make exports from `.env`).
 
 ## Out of scope
-- The fallback script files and their static tests (#142). Until then `serving: vllm|sglang` deploys
-  exit 2 with the "does not exist" message — expected inside this feature branch.
+- The fallback script files, their `HF_TOKEN` Modal Secret and their static tests (#142). Until then
+  `serving: vllm|sglang` deploys exit 2 with the "does not exist" message — expected inside this feature branch.
 - The `ModalEmbeddingModel` client and retiring `MODAL_EMBEDDING_API_KEY` (#140): until #140 lands the
   old client points at a deleted app — expected inside this feature branch; `provider: modal` is not the default.
-- Any live `modal` call (#141 — including the proof of H1, `--name` semantics, the stop identifier
-  and `modal endpoint list --json` fields).
-- `--custom-hf-token`, `--custom-volume-*`, `--compute-region`, `--colocate-compute`; min/max/buffer
+- Any live `modal` call (#141 — including the proof of H1, `--name` semantics, the stop identifier,
+  `modal endpoint list --json` fields and the live redaction check).
+- A pre-flight Hugging Face Hub call to detect a gated repo; a per-model token or a token field in the
+  Embedding catalog (the token is one workspace credential — ADR-009 §9); a README Modal-section
+  sentence about the token (#142, after #140 rewrites that section).
+- `--custom-volume-*`, `--compute-region`, `--colocate-compute`; min/max/buffer
   containers (dashboard-only on a Dedicated endpoint). Re-deploying an existing endpoint name
   (the CLI's own error surfaces; README says "stop first").
 
 ## Acceptance Criteria
 
-- [ ] `uv.lock` resolves `modal` >= `1.5.5`; `uv --directory apps/memory run python -c "import modal; modal.Server"` exits 0; `uv --directory apps/memory run modal endpoint create --help` exits 0 and its output contains `--custom-hf-repo`, `--custom-hf-revision`, `--routing-region` and `--name` (output pasted in `## Log`).
-- [ ] `Settings` exposes `modal_proxy_token_id` / `modal_proxy_token_secret` (both `SecretStr`, default empty); the locked-down field-set test lists them — `tests/unit/config/test_settings_credentials_only.py`. `.env.example` contains `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`.
+- [ ] `uv.lock` resolves `modal` >= `1.5.5`; `uv --directory apps/memory run python -c "import modal; modal.Server"` exits 0; `uv --directory apps/memory run modal endpoint create --help` exits 0 and its output contains `--custom-hf-repo`, `--custom-hf-revision`, `--custom-hf-token`, `--routing-region` and `--name` (output pasted in `## Log`, with one line stating whether `--custom-hf-token` lists an env var).
+- [ ] `Settings` exposes `modal_proxy_token_id` / `modal_proxy_token_secret` / `hf_token` (all `SecretStr`, default empty); `Settings()` validates with none of them set; the locked-down field-set test lists all three — `tests/unit/config/test_settings_credentials_only.py`. `.env.example` contains `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET`, `HF_TOKEN` and `https://huggingface.co/settings/tokens`; `grep -c "HF_TOKEN" apps/memory/README.md` >= 1; `grep -c "HF_TOKEN" .github/workflows/ci.yml .github/workflows/cd.yml` -> 0 in both.
 - [ ] `modal_proxy_bearer()` -> `"wk-1.ws-2"` for id `wk-1` / secret `ws-2`; raises `ModelError` naming BOTH env vars when either is empty — `tests/unit/models/test_modal_catalog.py::TestProxyBearer`.
 - [ ] `modal_cli_command("deploy", qwen_entry, "endpoint") == ["modal", "endpoint", "create", "--name", "qwen3-embedding-0-6b", "--model", "Qwen/Qwen3-Embedding-0.6B", "--routing-region", "eu-west"]` (no `--custom-hf-*`: `repo_id == base_model`) — `::TestModalCliCommand::test_endpoint_without_custom_weights`.
-- [ ] `modal_cli_command("deploy", voyage_entry, "endpoint") == ["modal", "endpoint", "create", "--name", "voyage-4-nano", "--model", "Qwen/Qwen3-Embedding-0.6B", "--custom-hf-repo", "voyageai/voyage-4-nano", "--custom-hf-revision", "main", "--routing-region", "eu-west"]` — `::test_endpoint_with_custom_weights`; no argv ever contains `--custom-hf-token` or `--unauthenticated` — `::test_never_public_never_token`.
+- [ ] `modal_cli_command("deploy", voyage_entry, "endpoint") == ["modal", "endpoint", "create", "--name", "voyage-4-nano", "--model", "Qwen/Qwen3-Embedding-0.6B", "--custom-hf-repo", "voyageai/voyage-4-nano", "--custom-hf-revision", "main", "--routing-region", "eu-west"]` — `::test_endpoint_with_custom_weights`; no argv returned by `modal_cli_command` ever contains `--custom-hf-token` or `--unauthenticated`, even with `settings.hf_token` patched to `hf_secret123` — `::test_never_public_never_token`.
+- [ ] `hf_token_args(voyage_entry, "endpoint", "hf_secret123") == ["--custom-hf-token", "hf_secret123"]`; it returns `[]` for `(qwen_entry, "endpoint", "hf_secret123")` (no custom weights), `(voyage_entry, "vllm", "hf_secret123")`, `(voyage_entry, "sglang", "hf_secret123")` and `(voyage_entry, "endpoint", "")` — `::TestHfTokenArgs` (5 cases). `redact_argv(["modal", "endpoint", "create", "--custom-hf-token", "hf_secret123"]) == ["modal", "endpoint", "create", "--custom-hf-token", "***"]`, leaves an argv without the flag unchanged, and does not mutate its input — `::TestRedactArgv`.
 - [ ] `("deploy", voyage_entry, "vllm")` -> `["modal", "deploy", "deploy/modal_vllm_embedding.py"]`; `("deploy", qwen_entry, "sglang")` -> `["modal", "deploy", "deploy/modal_sglang_embedding.py"]`; `("stop", qwen_entry, "endpoint")` -> `["modal", "endpoint", "stop", "-y", "qwen3-embedding-0-6b"]`; `("stop", qwen_entry, "sglang")` -> `["modal", "app", "stop", "ep-qwen3-embedding-0-6b"]` (plus `-y` only if verified necessary) — `::test_script_and_stop_commands`.
 - [ ] `resolve_server_url(qwen_entry)` calls `modal.Server.from_name("ep-qwen3-embedding-0-6b", "Server")` and returns the URL without a trailing `/` or `/v1`; a raising lookup or an empty URL -> `ModelError` containing `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B` and `modal endpoint list` — `tests/unit/models/test_modal_server.py::TestResolveServerUrl`.
 - [ ] `wait_until_healthy` sends `Authorization: Bearer wk-1.ws-2`; 200 -> a float >= 0; 401 -> `ModelError` naming both env vars; 503 -> `ExtractionError` — `::TestWaitUntilHealthy`. `served_model_id` returns `"Qwen/Qwen3-Embedding-0.6B"` for `{"data": [{"id": "Qwen/Qwen3-Embedding-0.6B"}]}` and the `default` (with one WARNING record) for `{"data": []}` and for a 500 — `::TestServedModelId`.
 - [ ] `smoke_test("voyageai/voyage-4-nano")` with mocked HTTP: posts exactly 3 inputs, the first starting with `Represent the query for retrieving supporting documents: `, the other two with `Represent the document for retrieval: `, under the DISCOVERED model id; returns a report with `dimensions == 1024`, `unauthenticated_status == 401`. It raises `ModelError` containing `expected 1024 dims, got 2048` for 2048-d vectors; containing `sanity check failed` when the unrelated document scores >= the relevant one; containing `expected 401` when the header-less `/health` answers 200 — `::TestSmokeTest` (4 tests).
 - [ ] Driver — `tests/unit/scripts/test_modal_embedding_model_script.py` (`subprocess.run` and `smoke_test` patched): `deploy --model Qwen/Qwen3-Embedding-0.6B` runs the endpoint argv with `EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B` in the child env and logs the `Dedicated endpoint: Modal picks the GPU` line; `deploy --model voyageai/voyage-4-nano --serving endpoint` runs the custom-weights argv and logs the `overrides the catalog's serving: vllm` line; `deploy --model voyageai/voyage-4-nano` (script absent in a tmp cwd) exits 2, runs nothing and logs `does not exist`; `--model BAAI/bge-m3` exits 2, runs nothing, logs both catalog ids; `--serving tgi` exits 2; `test --model …` awaits `smoke_test` once and exits 1 when it raises `ModelError`.
-- [ ] `make memory-deploy-embedding-model` (no MODEL, run WITHOUT `-n`) prints `USAGE: make memory-deploy-embedding-model MODEL=<repo_id> [SERVING=endpoint|sglang|vllm]`, exits non-zero and runs no `modal` command; same for `-stop`; `-test` prints `USAGE: make memory-deploy-embedding-model-test MODEL=<repo_id>`. `grep -c "vllm-embedding-api-key\|MODAL_EMBEDDING_API_KEY" apps/memory/Makefile` -> 0.
+- [ ] Driver, token set (`settings.hf_token` patched to `hf_secret123`) — `::TestHfToken`: `deploy --model voyageai/voyage-4-nano --serving endpoint` calls `subprocess.run` with an argv whose last two items are `--custom-hf-token`, `hf_secret123`; the combined `caplog` text + click output contains `--custom-hf-token ***` and does NOT contain `hf_secret123`; `deploy --model Qwen/Qwen3-Embedding-0.6B` runs an argv WITHOUT `--custom-hf-token`; with `subprocess.run` returning `returncode=1` the command exits 1, logs `modal command failed (exit 1)`, no `CalledProcessError` is raised, `hf_secret123` occurs nowhere in the captured output, and the hint is NOT logged.
+- [ ] Driver, token empty — `::TestHfTokenHint`: the custom-weights argv equals `modal_cli_command(...)` exactly; a `deploy` with `returncode=1` and a `test` whose `smoke_test` raises `ExtractionError` each log, as the last record, `If voyageai/voyage-4-nano is a private or gated Hugging Face repo, set HF_TOKEN in .env` (WARNING); a successful deploy logs no hint.
+- [ ] `grep -c "check=True" apps/memory/scripts/modal_embedding_model.py` -> 0.
+- [ ] `make memory-deploy-embedding-model` (no MODEL, run WITHOUT `-n`) prints `USAGE: make memory-deploy-embedding-model MODEL=<repo_id> [SERVING=endpoint|sglang|vllm]`, exits non-zero and runs no `modal` command; same for `-stop`; `-test` prints `USAGE: make memory-deploy-embedding-model-test MODEL=<repo_id>`. `grep -c "vllm-embedding-api-key\|MODAL_EMBEDDING_API_KEY\|HF_TOKEN" apps/memory/Makefile` -> 0.
 - [ ] `apps/memory/deploy/modal_vllm_embedding.py` no longer exists; `grep -rn "print(" apps/memory/scripts/modal_embedding_model.py apps/memory/src/tree/models/modal_server.py` -> 0 matches; every new function has parameter and return annotations.
-- [ ] `python -c "import sys, tree.models.modal_catalog; assert 'modal' not in sys.modules"` still exits 0 (the argv builder and the bearer live there; `modal` is imported only by `modal_server`).
+- [ ] `python -c "import sys, tree.models.modal_catalog; assert 'modal' not in sys.modules"` still exits 0 (the argv builders and the bearer live there; `modal` is imported only by `modal_server`).
 - [ ] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green.
-- [ ] [HUMAN] none here — every live `modal` call is #141.
+- [ ] [HUMAN] none here — every live `modal` call is #141. The task `## Log` must never contain a token value: paste logged (redacted) lines only.
 
 ## User Stories
 
 ### Story: Operator serves Qwen3-Embedding as a Dedicated endpoint
 1. `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B`
-2. The log shows `modal endpoint create --name qwen3-embedding-0-6b --model Qwen/Qwen3-Embedding-0.6B --routing-region eu-west` and the line `Dedicated endpoint: Modal picks the GPU, engine and flags — …`.
+2. The log shows `Running: modal endpoint create --name qwen3-embedding-0-6b --model Qwen/Qwen3-Embedding-0.6B --routing-region eu-west` and the line `Dedicated endpoint: Modal picks the GPU, engine and flags — …`.
 3. `make memory-deploy-embedding-model-test MODEL=Qwen/Qwen3-Embedding-0.6B` logs `health 200 after …s`, `served model id: …`, `3 embeddings, 1024 dims`, `sanity: cos(query, relevant)=… > cos(query, unrelated)=…`, `unauthenticated health -> 401`, `Smoke test passed`.
 4. `make memory-deploy-embedding-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B` runs `modal endpoint stop -y qwen3-embedding-0-6b`.
 
@@ -152,6 +197,15 @@ Write tests with `/squid-testing-python`; NO test touches the network; `modal.Se
 1. `make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano SERVING=endpoint`
 2. The log shows `… --model Qwen/Qwen3-Embedding-0.6B --custom-hf-repo voyageai/voyage-4-nano --custom-hf-revision main …` and `SERVING=endpoint overrides the catalog's serving: vllm for THIS command only — …`.
 3. The `-test` target fails with `sanity check failed: …` (or Modal refuses the weights) -> the operator stops it with `SERVING=endpoint` and moves down the ladder.
+
+### Story: Operator serves a PRIVATE fine-tune as a Dedicated endpoint
+1. Adds `HF_TOKEN=hf_…` (read scope) to `.env` and the entry `{repo_id: acme/my-embedder, revision: <sha>, base_model: Qwen/Qwen3-Embedding-0.6B, native_dimensions: 1024}` to the Embedding catalog.
+2. `make memory-deploy-embedding-model MODEL=acme/my-embedder`
+3. The log shows `Running: modal endpoint create --name my-embedder --model Qwen/Qwen3-Embedding-0.6B --custom-hf-repo acme/my-embedder --custom-hf-revision <sha> --routing-region eu-west --custom-hf-token ***` — the token value appears nowhere, including when the command fails.
+
+### Story: Operator forgot the token for a gated repo
+1. `HF_TOKEN` is not in `.env`; `make memory-deploy-embedding-model MODEL=acme/my-embedder`, then `…-test`.
+2. The create fails (or the smoke test never gets `health 200`); the LAST log line is `If acme/my-embedder is a private or gated Hugging Face repo, set HF_TOKEN in .env (read-scope token: https://huggingface.co/settings/tokens) and deploy again.`
 
 ### Story: Operator walks down the ladder before the fallback scripts exist
 1. `make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=sglang` (before #142).
@@ -210,5 +264,23 @@ Ready for implementation.
 
 **User stories**
 - 6 stories: endpoint deploy/test/stop, custom-weights attempt, ladder before #142, bad MODEL/SERVING, missing MODEL, public server caught.
+
+Ready for implementation.
+
+### [PA] 2026-09-19 18:44 — Re-grooming (HF token)
+
+**What changed and why**
+- The human brought the Hugging Face token INTO scope as an optional credential ("if the deployment needs it"); the last bullet of the entry above is superseded. It is `Settings.hf_token` / `HF_TOKEN` (no HF variable existed in the repo; this is the name `huggingface_hub`, vLLM and SGLang read), default empty, never required, never YAML — one workspace credential, not a per-model field. Not mocked in CI: optional secrets are not mocked there today.
+- Endpoint side: two 3-line pure functions instead of a structure. `modal_cli_command` stays token-free (the approved `test_never_public_never_token` criterion survives unchanged); `hf_token_args` adds `--custom-hf-token <token>` only for custom weights — Modal documents the flag as the token "for private --custom-hf-repo"; `redact_argv` is the single door every logged argv passes through.
+- `subprocess.run(..., check=True)` became `check=False` + return-code handling: `CalledProcessError` embeds the argv in its message, which would print the token on the first failed create.
+- Missing token is handled by ONE hint line at the two places a gated download can surface (failed deploy, failed smoke test), only when the token is empty. No pre-flight Hub call.
+- Residual risk accepted in ADR-009 §9: the token is in the local process list while `modal endpoint create` runs. Modal documents no env-var form; the SWE checks `--help` on the pinned client and switches to it if one exists.
+- The README env-table row lands here (with the setting); the README Modal-section sentence is #142's, because #140 rewrites that section in between.
+
+**Dependencies**
+- #138 — unchanged.
+
+**User stories**
+- 8 stories: the previous 6 + private fine-tune with a redacted log + forgotten token hint.
 
 Ready for implementation.
