@@ -62,12 +62,16 @@ def _build_embedding_model(
             dimensions=cfg.dimensions,
         )
     if provider == "modal":
-        # Lazy import: keeps the Modal client off the common boot path.
+        # Lazy import: keeps the Modal SDK off the common boot path. See the
+        # module note — the client pulls `modal`, which the MCP cold boot must
+        # not pay for.
+        from tree.models.modal_catalog import modal_proxy_bearer
         from tree.models.modal_embedding import ModalEmbeddingModel
 
         return ModalEmbeddingModel(
-            api_key=settings.modal_embedding_api_key.get_secret_value(),
+            proxy_token=modal_proxy_bearer(),
             model=cfg.model,
+            dimensions=cfg.dimensions,
         )
     if provider == "voyage":
         # Voyage exposes two endpoints behind the same API: a **text** endpoint

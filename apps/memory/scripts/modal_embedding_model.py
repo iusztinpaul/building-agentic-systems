@@ -119,11 +119,22 @@ def _run_modal(action: Literal["deploy", "stop"], model: str, serving: str) -> N
     redacted = " ".join(redact_argv(run_argv))
     logger.info("Running: %s", redacted)
 
-    result = subprocess.run(  # noqa: S603 — argv is built from the catalog, never a shell
-        run_argv,
-        check=False,
-        env={**os.environ, "EMBEDDING_MODEL": entry.repo_id},
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 — argv is built from the catalog, never a shell
+            run_argv,
+            check=False,
+            env={**os.environ, "EMBEDDING_MODEL": entry.repo_id},
+        )
+    except FileNotFoundError as exc:
+        # ONE line, and deliberately WITHOUT the argv: on a custom-weights
+        # deploy the argv holds the Hugging Face token (ADR-009 §9), and the
+        # raw traceback printed it verbatim.
+        logger.error(
+            "The `modal` CLI is not installed. Install the local-models "
+            "extra: uv --directory apps/memory sync --extra local-models"
+        )
+        raise SystemExit(2) from exc
+
     if result.returncode != 0:
         logger.error("modal command failed (exit %d): %s", result.returncode, redacted)
         _hint_if_no_token(entry.repo_id, token)

@@ -342,6 +342,31 @@ class TestHfToken:
         assert "--custom-hf-token ***" in output
         assert _FAKE_TOKEN not in output
 
+    def test_a_missing_modal_cli_says_how_to_install_it_without_the_argv(
+        self, cli_module, run, caplog
+    ) -> None:
+        """Not in the AC: found by QA on #139. Without the extra installed,
+        ``subprocess.run`` raised a bare ``FileNotFoundError`` whose traceback
+        printed the full argv — which on a custom-weights deploy is the
+        Hugging Face token."""
+
+        run.side_effect = FileNotFoundError(2, "No such file or directory: 'modal'")
+
+        result = _invoke(
+            cli_module,
+            ["deploy", "--model", _VOYAGE, "--serving", "endpoint"],
+            caplog,
+        )
+
+        assert result.exit_code == 2
+        output = _output(result, caplog)
+        assert "The `modal` CLI is not installed" in output
+        assert "uv --directory apps/memory sync --extra local-models" in output
+        # The only argv in the output is the REDACTED one logged before the
+        # call; the failure itself adds no second, unredacted copy.
+        assert _FAKE_TOKEN not in output
+        assert output.count("--custom-hf-token ***") == 1
+
     def test_a_failure_with_a_token_set_logs_no_hint(
         self, cli_module, run, caplog
     ) -> None:

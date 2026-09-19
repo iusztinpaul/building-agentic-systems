@@ -128,22 +128,26 @@ class TestVoyageMultimodalCostRecording:
 
 
 class TestModalUsageRecording:
+    """The FAKE proxy token ``wk-1.ws-2`` and a response of the entry's NATIVE
+    width (voyage-4-nano: 2048), because the client asserts that width before
+    it returns anything."""
+
     def _model(self) -> ModalEmbeddingModel:
-        m = ModalEmbeddingModel(api_key="key", model="voyageai/voyage-4-nano")
-        # Bypass lazy Modal URL resolution + health check.
+        m = ModalEmbeddingModel(proxy_token="wk-1.ws-2", model="voyageai/voyage-4-nano")
+        # Bypass lazy URL resolution, the health warm-up and model discovery.
         m._client = MagicMock()
         m._ensure_initialised = AsyncMock()  # type: ignore[method-assign]
         return m
 
     async def test_records_token_usage_with_zero_cost(self, mocker) -> None:
-        # Arrange — vLLM returns a usage object; self-hosted → cost 0.
+        # Arrange — the server returns a usage object; self-hosted → cost 0.
         rec = mocker.patch("tree.models.modal_embedding.record_embedding_usage")
         model = self._model()
         usage = MagicMock()
         usage.total_tokens = 42
         response = MagicMock()
         response.usage = usage
-        response.data = [MagicMock(embedding=[0.1, 0.2])]
+        response.data = [MagicMock(embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -160,7 +164,7 @@ class TestModalUsageRecording:
         model = self._model()
         response = MagicMock()
         response.usage = None
-        response.data = [MagicMock(embedding=[0.1])]
+        response.data = [MagicMock(embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -176,11 +180,12 @@ class TestModalUsageRecording:
             side_effect=RuntimeError("opik down"),
         )
         model = self._model()
+        vector = [0.9] * 2048
         response = MagicMock()
         response.usage = MagicMock(total_tokens=5)
-        response.data = [MagicMock(embedding=[0.9])]
+        response.data = [MagicMock(embedding=vector)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         result = await model.embed(["hello"])
 
-        assert result == [[0.9]]
+        assert result == [vector]

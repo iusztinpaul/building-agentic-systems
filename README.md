@@ -40,7 +40,7 @@ This is a monorepo. Each app owns its own build files; cross-app concerns stay a
 - [MongoDB Compass](https://www.mongodb.com/products/tools/compass) — GUI for inspecting collections.
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep) — enables the harness's `grep` tool.
 - [Voyage AI](https://www.voyageai.com/) key — only if you want Voyage embeddings.
-- [Modal](https://modal.com/) account + API key — only if you want to swap the local embedding model for a Modal-hosted vLLM server.
+- [Modal](https://modal.com/) account + a [Proxy token](https://modal.com/docs/guide/webhook-proxy-auth) — only if you want to serve an embedding model on Modal.
 
 ## Installation
 

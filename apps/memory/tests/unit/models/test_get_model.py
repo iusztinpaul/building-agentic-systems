@@ -3,11 +3,15 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import SecretStr
 
 from tree.config.app_config import EmbeddingConfig
+from tree.models import modal_catalog
 from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
+from tree.models.exceptions import ModelError
 from tree.models.get_model import (
+    _build_embedding_model,
     get_embedding_model,
     get_llm,
     get_resolution_embedding_model,
@@ -19,16 +23,27 @@ from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
 from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
+# An **Embedding catalog** id: the Modal provider resolves its entry at
+# construction, so the Modal tests cannot use an arbitrary model name.
+_CATALOG_MODEL = "voyageai/voyage-4-nano"
+
 
 @pytest.fixture(autouse=True)
 def _mock_settings(mocker) -> None:
     mock_settings = MagicMock()
     mock_settings.google_api_key.get_secret_value.return_value = "fake-google-key"
-    mock_settings.modal_embedding_api_key.get_secret_value.return_value = (
-        "fake-modal-key"
-    )
     mock_settings.voyage_api_key.get_secret_value.return_value = "fake-voyage-key"
     mocker.patch("tree.models.get_model.settings", mock_settings)
+    # The Modal branch reads the **Proxy token** through
+    # ``modal_catalog.modal_proxy_bearer()``, which holds its OWN ``settings``
+    # binding — patching only ``get_model.settings`` would let the factory read
+    # the developer's real token out of the ``make``-exported ``.env``.
+    mocker.patch.object(
+        modal_catalog.settings, "modal_proxy_token_id", SecretStr("wk-1")
+    )
+    mocker.patch.object(
+        modal_catalog.settings, "modal_proxy_token_secret", SecretStr("ws-2")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -112,7 +127,18 @@ class TestGetEmbeddingModel:
 
         assert isinstance(result, SentenceTransformerEmbeddingModel)
 
-    def test_returns_modal_embedding(self) -> None:
+    def test_returns_modal_embedding(self, mocker) -> None:
+        """The Modal provider needs an **Embedding catalog** id — the factory
+        resolves the entry at construction, so a non-catalog model fails."""
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.search_embedding.model",
+            _CATALOG_MODEL,
+        )
+        mocker.patch(
+            "tree.models.get_model.app_config.models.search_embedding.dimensions", 1024
+        )
+
         result = get_embedding_model(provider="modal")
 
         assert isinstance(result, ModalEmbeddingModel)
@@ -358,3 +384,51 @@ class TestSearchEmbeddingIdentity:
         )
 
         assert search_embedding_identity() == "voyage:voyage-4:512:document"
+
+
+class TestModalBranch:
+    """ADR-009 §3/§4: the Modal client is built from the catalog entry, the
+    YAML ``dimensions`` and the **Proxy token** — and the branch stays lazy."""
+
+    def test_the_client_gets_the_yaml_dimensions_and_the_bearer(self) -> None:
+        """``cfg.dimensions`` used to be dropped, so a YAML asking for 512-d
+        vectors silently got the model's native width."""
+
+        cfg = EmbeddingConfig(provider="modal", model=_CATALOG_MODEL, dimensions=512)
+
+        result = _build_embedding_model(cfg)
+
+        assert isinstance(result, ModalEmbeddingModel)
+        assert result.dimensions == 512
+        # The joined Proxy token halves — what Modal's edge checks.
+        assert result._proxy_token == "wk-1.ws-2"
+
+    def test_a_half_proxy_token_fails_before_a_client_exists(self, mocker) -> None:
+        """Story 5: a half token is no token — Modal would answer 401 before
+        any container wakes, so the factory refuses to build the model."""
+
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_secret", SecretStr("")
+        )
+        cfg = EmbeddingConfig(provider="modal", model=_CATALOG_MODEL)
+
+        with pytest.raises(ModelError, match="Modal proxy token is required"):
+            _build_embedding_model(cfg)
+
+    def test_importing_the_factory_does_not_import_modal(self) -> None:
+        """MCP cold-boot budget: the Modal SDK is imported inside the branch,
+        never at module level. Run in a fresh interpreter so another test's
+        import of the client cannot mask a regression."""
+
+        probe = (
+            "import sys, tree.models.get_model; "
+            "assert 'modal' not in sys.modules, 'modal'"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True
+        )
+
+        assert result.returncode == 0, (
+            f"get_model import eagerly loaded the Modal SDK: {result.stderr}"
+        )

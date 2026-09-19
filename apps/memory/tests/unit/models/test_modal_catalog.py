@@ -511,6 +511,17 @@ class TestTruncateEmbedding:
 
         assert truncate_embedding([0.0, 0.0, 0.0], 2) == [0.0, 0.0]
 
+    @pytest.mark.parametrize("dimensions", [0, -1, -1024])
+    def test_a_non_positive_width_is_refused(self, dimensions: int) -> None:
+        """The width comes from a CALLER (the client's effective
+        ``dimensions``), and Python's negative-slice semantics would turn
+        ``-1024`` into a silently shorter vector instead of an error."""
+
+        with pytest.raises(ModelError) as excinfo:
+            truncate_embedding([1.0] * 2048, dimensions)
+
+        assert f"cannot truncate to {dimensions}-d" in str(excinfo.value)
+
     def test_widening_is_refused(self) -> None:
         with pytest.raises(ModelError) as excinfo:
             truncate_embedding([1.0] * 1024, 2048)

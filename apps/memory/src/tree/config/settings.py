@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     mongo: MongoSettings = MongoSettings()
     google_api_key: SecretStr = SecretStr("")
     voyage_api_key: SecretStr = SecretStr("")
-    modal_embedding_api_key: SecretStr = SecretStr("")
     # Modal **Proxy token** — the ONLY auth in front of every Embedding
     # catalog app, on all three Serving paths (ADR-009 §4). Minted in Modal ->
     # Settings -> Proxy Auth Tokens; the two halves are sent joined by a `.`

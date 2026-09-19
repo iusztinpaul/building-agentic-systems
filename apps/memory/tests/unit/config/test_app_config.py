@@ -1128,6 +1128,23 @@ class TestModalCatalog:
         assert entry.extra_server_args == {}
 
     @pytest.mark.parametrize(
+        "revision",
+        ["main", "refs/pr/3", "v1.2.0", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"],
+    )
+    def test_accepts_every_shape_a_hub_revision_takes(self, revision: str) -> None:
+        """A sha, a branch, a tag and a PR ref — the charset excludes only
+        whitespace and shell punctuation, not legal Hub revisions."""
+
+        entry = ModalEmbeddingModelConfig(
+            repo_id="BAAI/bge-m3",
+            base_model="BAAI/bge-m3",
+            native_dimensions=1024,
+            revision=revision,
+        )
+
+        assert entry.revision == revision
+
+    @pytest.mark.parametrize(
         "repo_id,endpoint_name",
         [
             ("voyageai/voyage-4-nano", "voyage-4-nano"),
@@ -1187,6 +1204,20 @@ class TestModalCatalog:
                     "at least one ASCII letter or digit",
                 ],
                 id="repo-id-deriving-an-empty-endpoint-name",
+            ),
+            pytest.param(
+                # Not in the AC: found by QA on #139. The revision travels as
+                # ONE element of the argv the driver logs with a plain
+                # `" ".join(...)`, so a value carrying whitespace would split
+                # into two tokens in a log line meant to be re-runnable.
+                [{**_VALID_ENTRY, "revision": "main branch"}],
+                ["revision", "should match pattern"],
+                id="revision-with-whitespace",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "revision": "main;rm -rf /"}],
+                ["revision", "should match pattern"],
+                id="revision-with-shell-punctuation",
             ),
             pytest.param(
                 [{**_VALID_ENTRY, "extra_server_args": {"runner": "pooling"}}],

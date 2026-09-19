@@ -1,283 +1,787 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Unit tests for ``tree.models.modal_embedding`` — the **Embedding catalog**
+client (ADR-009 §3/§4/§5).
 
-import aiohttp
+Nothing here touches Modal or the network: the three
+:mod:`tree.models.modal_server` helpers and ``AsyncOpenAI`` are replaced by
+fakes, and the **Proxy token** is always the FAKE pair ``wk-1`` / ``ws-2`` —
+``make`` exports the developer's real ``.env`` into the test process, so a test
+that read the real token would both leak it and pass for the wrong reason.
+
+What is pinned is the contract that keeps a wrong-width vector out of the
+1024-d mongot index: no ``dimensions`` on the wire, the wire width asserted
+against the catalog entry, client-side truncation, and the returned width
+asserted again.
+
+Two layers of doubles, on purpose. Most tests replace ``client.embeddings``
+with a recorder, which is enough to read back the call kwargs. The wire
+contract and the initialisation race are tested against the REAL
+``AsyncOpenAI`` over an in-process ``httpx.MockTransport`` (``wire``) instead:
+an empty batch and the request encoding are decided INSIDE the SDK, so a
+recorder that stands in for it cannot see either.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import httpx
 import pytest
 from openai import AsyncOpenAI
 
+from tree.models import modal_embedding
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.models.modal_catalog import get_catalog_entry, truncate_embedding
 from tree.models.modal_embedding import ModalEmbeddingModel
 
-
-def _make_embedding_response(embeddings: list[list[float]]):
-    """Build a mock OpenAI embeddings response."""
-
-    class EmbeddingItem:
-        def __init__(self, embedding):
-            self.embedding = embedding
-
-    class Response:
-        def __init__(self, data):
-            self.data = data
-
-    return Response([EmbeddingItem(e) for e in embeddings])
+_QWEN = "Qwen/Qwen3-Embedding-0.6B"
+_VOYAGE = "voyageai/voyage-4-nano"
+_URL = "https://acme--ep-voyage-4-nano-server.modal.run"
+_BEARER = "wk-1.ws-2"
 
 
-def _mock_aiohttp_session(*, status: int = 200):
-    """Return a patched aiohttp.ClientSession context manager."""
+# --- doubles ----------------------------------------------------------------
 
-    mock_resp = AsyncMock()
-    mock_resp.status = status
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
 
-    mock_get = MagicMock(return_value=mock_resp)
-    mock_session = AsyncMock()
-    mock_session.get = mock_get
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
+def _vector(width: int, seed: int = 0) -> list[float]:
+    """A deterministic, non-degenerate vector of ``width`` components."""
 
-    return mock_session, mock_get
+    return [((index + seed) % 97 + 1) / 97 for index in range(width)]
+
+
+def _response(vectors: list[list[float]], total_tokens: int | None = 7) -> Any:
+    """An OpenAI-shaped embeddings response over ``vectors``."""
+
+    return SimpleNamespace(
+        data=[SimpleNamespace(embedding=vector) for vector in vectors],
+        usage=SimpleNamespace(total_tokens=total_tokens),
+    )
+
+
+class _Embeddings:
+    """``client.embeddings`` — records every call, answers the recorder."""
+
+    def __init__(self, recorder: "_OpenAI") -> None:
+        self._recorder = recorder
+
+    async def create(self, **kwargs: Any) -> Any:
+        self._recorder.calls.append(kwargs)
+        answer = self._recorder.answer
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class _OpenAI:
+    """Stands in for ``AsyncOpenAI``: records how it was built and called."""
+
+    def __init__(self) -> None:
+        self.built: list[dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
+        self.answer: Any = _response([])
+
+    def build(self, **kwargs: Any) -> SimpleNamespace:
+        self.built.append(kwargs)
+        return SimpleNamespace(embeddings=_Embeddings(self))
 
 
 @pytest.fixture
-def mock_modal_function():
-    """Mock modal.Function.from_name to return a function with a known web URL."""
+def openai(mocker) -> _OpenAI:
+    """Patch ``AsyncOpenAI`` in the module under test."""
 
-    mock_fn = MagicMock()
-    mock_fn.get_web_url.aio = AsyncMock(
-        return_value="https://test--vllm-embedding-serve.modal.run"
-    )
-    with patch("tree.models.modal_embedding.modal.Function") as mock_cls:
-        mock_cls.from_name.return_value = mock_fn
-        yield mock_cls, mock_fn
+    recorder = _OpenAI()
+    mocker.patch.object(modal_embedding, "AsyncOpenAI", recorder.build)
+    return recorder
 
 
 @pytest.fixture
-def initialised_model(mock_modal_function, mocker):
-    """A ModalEmbeddingModel with client pre-set (skips lazy init)."""
+def server(mocker) -> SimpleNamespace:
+    """Patch the three ``modal_server`` helpers the client awaits.
 
-    m = ModalEmbeddingModel(
-        api_key="test-key",
-        model="voyageai/voyage-4-nano",
-        app_name="test-app",
-        function_name="voyageai-voyage-4-nano",
-    )
-    # Pre-create the client so embed() skips _ensure_initialised.
-    m._client = AsyncOpenAI(
-        base_url="https://test--vllm-embedding-serve.modal.run/v1",
-        api_key="test-key",
-    )
-    mock_create = AsyncMock()
-    mocker.patch.object(m._client.embeddings, "create", mock_create)
-    return m, mock_create
-
-
-class TestModalEmbeddingModelInit:
-    def test_raises_on_empty_api_key(self):
-        with pytest.raises(ModelError, match="Modal embedding API key is required"):
-            ModalEmbeddingModel(api_key="")
-
-    async def test_resolves_web_url_from_modal(self, mock_modal_function):
-        mock_cls, mock_fn = mock_modal_function
-
-        m = ModalEmbeddingModel(
-            api_key="test-key", app_name="my-app", function_name="my-func"
-        )
-
-        # Init is lazy — client is not created yet.
-        assert m._client is None
-
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-            await m._ensure_initialised()
-
-        mock_cls.from_name.assert_called_once_with("my-app", "my-func")
-        mock_fn.get_web_url.aio.assert_awaited_once()
-        assert m._client is not None
-
-    async def test_appends_v1_suffix_to_url(self, mock_modal_function):
-        _, mock_fn = mock_modal_function
-        mock_fn.get_web_url.aio = AsyncMock(return_value="https://example.modal.run")
-
-        m = ModalEmbeddingModel(api_key="test-key")
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-            await m._ensure_initialised()
-
-        base_url = str(m._client.base_url)
-        assert base_url.rstrip("/").endswith("/v1")
-
-    async def test_does_not_double_v1_suffix(self, mock_modal_function):
-        _, mock_fn = mock_modal_function
-        mock_fn.get_web_url.aio = AsyncMock(return_value="https://example.modal.run/v1")
-
-        m = ModalEmbeddingModel(api_key="test-key")
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-            await m._ensure_initialised()
-
-        base_url = str(m._client.base_url)
-        assert not base_url.rstrip("/").endswith("/v1/v1")
-
-    async def test_raises_model_error_when_modal_lookup_fails(self):
-        with patch("tree.models.modal_embedding.modal.Function") as mock_cls:
-            mock_cls.from_name.side_effect = RuntimeError("not deployed")
-
-            m = ModalEmbeddingModel(api_key="test-key")
-            with pytest.raises(ModelError, match="Failed to resolve Modal web URL"):
-                await m._ensure_initialised()
-
-    async def test_raises_model_error_when_url_is_empty(self, mock_modal_function):
-        _, mock_fn = mock_modal_function
-        mock_fn.get_web_url.aio = AsyncMock(return_value="")
-
-        m = ModalEmbeddingModel(api_key="test-key")
-        with pytest.raises(ModelError, match="returned an empty web URL"):
-            await m._ensure_initialised()
-
-    async def test_raises_model_error_when_url_is_none(self, mock_modal_function):
-        _, mock_fn = mock_modal_function
-        mock_fn.get_web_url.aio = AsyncMock(return_value=None)
-
-        m = ModalEmbeddingModel(api_key="test-key")
-        with pytest.raises(ModelError, match="returned an empty web URL"):
-            await m._ensure_initialised()
-
-    async def test_initialisation_is_idempotent(self, mock_modal_function):
-        _, mock_fn = mock_modal_function
-
-        m = ModalEmbeddingModel(api_key="test-key")
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-            await m._ensure_initialised()
-            await m._ensure_initialised()
-
-        mock_fn.get_web_url.aio.assert_awaited_once()
-
-
-class TestModalEmbeddingModelHealthCheck:
-    async def test_health_check_called_during_init(self, mock_modal_function):
-        m = ModalEmbeddingModel(api_key="test-key")
-
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, mock_get = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-            await m._ensure_initialised()
-
-            mock_get.assert_called_once()
-            call_url = mock_get.call_args[0][0]
-            assert "/health" in call_url
-
-    async def test_health_check_raises_on_non_200(self, mock_modal_function):
-        m = ModalEmbeddingModel(api_key="test-key")
-
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session(status=503)
-            mock_session_cls.return_value = mock_session
-
-            with pytest.raises(
-                ExtractionError, match="health check returned status 503"
-            ):
-                await m._ensure_initialised()
-
-    async def test_health_check_raises_on_connection_error(self, mock_modal_function):
-        m = ModalEmbeddingModel(api_key="test-key")
-
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session = AsyncMock()
-            mock_session.get = MagicMock(
-                side_effect=aiohttp.ClientError("connection refused")
-            )
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session_cls.return_value = mock_session
-
-            with pytest.raises(ExtractionError, match="Modal health check failed"):
-                await m._ensure_initialised()
-
-
-class TestModalEmbeddingModelEmbed:
-    async def test_embed_returns_vectors(self, initialised_model):
-        m, mock_create = initialised_model
-        expected = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
-        mock_create.return_value = _make_embedding_response(expected)
-
-        result = await m.embed(["hello", "world"])
-
-        assert result == expected
-        mock_create.assert_awaited_once_with(
-            input=["hello", "world"],
-            model="voyageai/voyage-4-nano",
-        )
-
-    async def test_embed_empty_input(self, initialised_model):
-        m, mock_create = initialised_model
-        mock_create.return_value = _make_embedding_response([])
-
-        result = await m.embed([])
-
-        assert result == []
-
-    async def test_embed_delegates_to_openai_client(self, initialised_model):
-        m, mock_create = initialised_model
-        expected = [[0.1, 0.2]]
-        mock_create.return_value = _make_embedding_response(expected)
-
-        result = await m.embed(["single"])
-
-        assert result == expected
-        mock_create.assert_awaited_once()
-
-    async def test_embed_propagates_extraction_error(self, initialised_model):
-        m, mock_create = initialised_model
-        mock_create.side_effect = RuntimeError("timeout")
-
-        with pytest.raises(ExtractionError, match="Embedding call failed"):
-            await m.embed(["test"])
-
-    async def test_embed_triggers_lazy_init(self, mock_modal_function):
-        m = ModalEmbeddingModel(api_key="test-key")
-        assert m._client is None
-
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session, _ = _mock_aiohttp_session()
-            mock_session_cls.return_value = mock_session
-
-            # embed() triggers _ensure_initialised which creates the client.
-            # The actual embedding call will fail because the client
-            # points at a fake URL, but we just verify init happened.
-            try:
-                await m.embed(["test"])
-            except Exception:
-                pass
-
-        assert m._client is not None
-
-
-class TestInputTypeAccepted:
-    """The client ACCEPTS the **Embedding role** and ignores it for now.
-
-    OpenAI-compatible ``/v1/embeddings`` has no role field; #140 maps the role
-    to the **Embedding catalog**'s ``query_prompt`` / ``document_prompt``,
-    prepended client-side.
+    Patched on the CLIENT's bindings, so the real module (and the ``modal``
+    SDK it imports) is never exercised.
     """
 
-    @pytest.mark.parametrize("role", [None, "query", "document"])
-    async def test_role_does_not_change_the_request_or_the_result(
-        self, initialised_model, role
-    ):
-        m, mock_create = initialised_model
-        expected = [[0.1, 0.2, 0.3]]
-        mock_create.return_value = _make_embedding_response(expected)
+    return SimpleNamespace(
+        resolve=mocker.patch.object(
+            modal_embedding,
+            "resolve_server_url",
+            new_callable=mocker.AsyncMock,
+            return_value=_URL,
+        ),
+        healthy=mocker.patch.object(
+            modal_embedding,
+            "wait_until_healthy",
+            new_callable=mocker.AsyncMock,
+            return_value=1.5,
+        ),
+        served=mocker.patch.object(
+            modal_embedding,
+            "served_model_id",
+            new_callable=mocker.AsyncMock,
+            return_value=_VOYAGE,
+        ),
+    )
 
-        result = await m.embed(["hello"], input_type=role)
 
-        assert result == expected
-        mock_create.assert_awaited_once_with(
-            input=["hello"],
-            model="voyageai/voyage-4-nano",
+class _WireStub:
+    """An OpenAI-compatible server the REAL ``AsyncOpenAI`` talks to.
+
+    ``_OpenAI`` above replaces ``client.embeddings`` and therefore skips every
+    decision the SDK makes for us — the default ``encoding_format``, the
+    response post-parser, the JSON body. Both defects this file now regresses
+    lived exactly there, so the wire tests keep the SDK and replace only its
+    transport.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.vectors: list[list[float]] = [_vector(2048)]
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "object": "list",
+                "model": "served/stub",
+                "data": [
+                    {"object": "embedding", "index": index, "embedding": vector}
+                    for index, vector in enumerate(self.vectors)
+                ],
+                "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            },
         )
+
+    @property
+    def bodies(self) -> list[dict[str, Any]]:
+        """The JSON body of every request, as the server would parse it."""
+
+        return [json.loads(request.content) for request in self.requests]
+
+
+@pytest.fixture
+async def wire(mocker) -> AsyncIterator[_WireStub]:
+    """Build REAL ``AsyncOpenAI`` clients against an in-process transport."""
+
+    stub = _WireStub()
+    clients: list[AsyncOpenAI] = []
+
+    def build(**kwargs: Any) -> AsyncOpenAI:
+        # max_retries=0: a retried request would inflate the request count the
+        # wire tests assert on.
+        client = AsyncOpenAI(
+            **kwargs,
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(stub.handle)),
+        )
+        clients.append(client)
+        return client
+
+    mocker.patch.object(modal_embedding, "AsyncOpenAI", build)
+    yield stub
+    for client in clients:
+        await client.close()
+
+
+class _SuspendingServer:
+    """The three ``modal_server`` helpers — counting, and yielding to the loop.
+
+    An ``AsyncMock`` completes without ever suspending, so a ``gather`` over it
+    runs each coroutine to completion in turn and a check-then-act race cannot
+    even appear. The real helpers hold a network round trip; these hold the
+    smallest thing that reschedules, ``asyncio.sleep(0)``.
+    """
+
+    def __init__(self) -> None:
+        self.resolve_calls = 0
+        self.health_calls = 0
+        self.models_calls = 0
+        self.health_error: Exception | None = None
+
+    async def resolve(self, entry: Any) -> str:
+        self.resolve_calls += 1
+        await asyncio.sleep(0)
+        return _URL
+
+    async def healthy(self, url: str, bearer: str, timeout: float) -> float:
+        self.health_calls += 1
+        await asyncio.sleep(0)
+        if self.health_error is not None:
+            raise self.health_error
+        return 1.5
+
+    async def served(self, url: str, bearer: str, default: str) -> str:
+        self.models_calls += 1
+        await asyncio.sleep(0)
+        return default
+
+
+@pytest.fixture
+def suspending_server(mocker) -> _SuspendingServer:
+    """Patch the three ``modal_server`` helpers with suspending doubles."""
+
+    helpers = _SuspendingServer()
+    mocker.patch.object(modal_embedding, "resolve_server_url", helpers.resolve)
+    mocker.patch.object(modal_embedding, "wait_until_healthy", helpers.healthy)
+    mocker.patch.object(modal_embedding, "served_model_id", helpers.served)
+    return helpers
+
+
+def _model(model: str = _VOYAGE, **kwargs: Any) -> ModalEmbeddingModel:
+    """A client on the FAKE proxy token."""
+
+    return ModalEmbeddingModel(proxy_token=_BEARER, model=model, **kwargs)
+
+
+# --- tests ------------------------------------------------------------------
+
+
+class TestInit:
+    """Everything that can be known offline fails offline (stories 5 and 8)."""
+
+    def test_an_empty_proxy_token_names_both_env_vars(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            ModalEmbeddingModel(proxy_token="", model=_VOYAGE)
+
+        message = str(excinfo.value)
+        assert "Modal proxy token is required" in message
+        assert "MODAL_PROXY_TOKEN_ID" in message
+        assert "MODAL_PROXY_TOKEN_SECRET" in message
+
+    def test_an_unknown_model_fails_with_the_catalog_error(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            _model("BAAI/bge-m3")
+
+        message = str(excinfo.value)
+        assert "Unknown Modal embedding model 'BAAI/bge-m3'" in message
+        assert _QWEN in message
+        assert _VOYAGE in message
+
+    async def test_construction_makes_no_call(self, server, openai) -> None:
+        """Story 5: a missing token (or a wrong id) must cost nothing — the
+        first network call happens in ``embed()``, not here."""
+
+        _model()
+
+        server.resolve.assert_not_awaited()
+        server.healthy.assert_not_awaited()
+        assert openai.built == []
+
+
+class TestUrlResolution:
+    async def test_the_first_embed_resolves_the_entry_and_builds_one_v1_url(
+        self, server, openai
+    ) -> None:
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        server.resolve.assert_awaited_once_with(get_catalog_entry(_VOYAGE))
+        base_url = openai.built[0]["base_url"]
+        assert base_url == f"{_URL}/v1"
+        assert base_url.count("/v1") == 1
+
+    async def test_a_second_embed_resolves_nothing_again(self, server, openai) -> None:
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+        await model.embed(["dogs"])
+
+        assert server.resolve.await_count == 1
+        assert server.healthy.await_count == 1
+        assert server.served.await_count == 1
+        assert len(openai.built) == 1
+        assert len(openai.calls) == 2
+
+    async def test_a_model_error_from_resolve_propagates_unchanged(
+        self, server, openai
+    ) -> None:
+        """Story 7: the model was stopped — the operator gets the deploy
+        command, not a wrapped transport error."""
+
+        failure = (
+            "Failed to resolve Modal server ep-voyage-4-nano/Server. Is the "
+            "model deployed (...)? Run: make memory-deploy-embedding-model "
+            f"MODEL={_VOYAGE}"
+        )
+        server.resolve.side_effect = ModelError(failure)
+        model = _model()
+
+        with pytest.raises(ModelError) as excinfo:
+            await model.embed(["cats"])
+
+        # Unchanged means both: the same message AND the same type — a
+        # stopped model is not a transient failure to retry.
+        assert type(excinfo.value) is ModelError
+        assert str(excinfo.value) == failure
+        assert openai.calls == []
+
+    @pytest.mark.parametrize("repo_id", [_QWEN, _VOYAGE])
+    async def test_serving_path_is_invisible_to_the_client(
+        self, server, openai, repo_id: str
+    ) -> None:
+        """Story 6: the endpoint seed and the vllm seed resolve identically —
+        moving a model down the ladder changes YAML, never the client."""
+
+        entry = get_catalog_entry(repo_id)
+        server.served.return_value = repo_id
+        model = _model(repo_id)
+        openai.answer = _response([_vector(entry.native_dimensions)])
+
+        await model.embed(["cats"])
+
+        server.resolve.assert_awaited_once_with(entry)
+        assert openai.built[0]["base_url"] == f"{_URL}/v1"
+        assert openai.calls[0]["model"] == repo_id
+
+    def test_the_client_never_reads_the_entrys_serving_field(self) -> None:
+        """The same source assertion as the task's grep: a branch on how the
+        model is served would make the ladder a code change."""
+
+        source = Path(modal_embedding.__file__).read_text()
+
+        assert ".serving" not in source
+
+
+class TestProxyAuth:
+    async def test_the_openai_client_gets_the_bearer_as_its_api_key(
+        self, server, openai
+    ) -> None:
+        """Modal joins the Proxy token halves with a '.' — the same scheme the
+        OpenAI API uses, so the joined value IS the api_key."""
+
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert openai.built[0]["api_key"] == _BEARER
+
+    async def test_health_is_awaited_with_the_bearer_and_the_timeout(
+        self, server, openai
+    ) -> None:
+        model = _model(health_timeout=42.0)
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        server.healthy.assert_awaited_once_with(_URL, _BEARER, 42.0)
+
+    async def test_a_401_model_error_propagates_and_embeds_nothing(
+        self, server, openai
+    ) -> None:
+        """A wrong token is a configuration error: no retry can fix it, so the
+        401 must NOT be re-typed into a retryable ``ExtractionError``."""
+
+        server.healthy.side_effect = ModelError(
+            "Modal answered 401 for .../health — the Proxy token is wrong"
+        )
+        model = _model()
+
+        with pytest.raises(ModelError) as excinfo:
+            await model.embed(["cats"])
+
+        # `ExtractionError` IS a `ModelError`, so the type must be exact —
+        # matching the base class alone would accept the retryable wrapping.
+        assert type(excinfo.value) is ModelError
+        assert "401" in str(excinfo.value)
+        assert openai.calls == []
+
+    async def test_a_503_extraction_error_propagates_unchanged(
+        self, server, openai
+    ) -> None:
+        """A provisioning endpoint IS retryable — it stays an ExtractionError."""
+
+        server.healthy.side_effect = ExtractionError(
+            "Health check on .../health answered 503."
+        )
+        model = _model()
+
+        with pytest.raises(ExtractionError, match="answered 503"):
+            await model.embed(["cats"])
+
+
+class TestServedModel:
+    async def test_the_request_uses_the_discovered_id(
+        self, server, openai, mocker
+    ) -> None:
+        """A managed recipe — not us — names the served model, so the id comes
+        from /v1/models; Opik keeps recording the catalog repo id."""
+
+        record = mocker.patch.object(modal_embedding, "record_embedding_usage")
+        server.served.return_value = "served/other-name"
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert openai.calls[0]["model"] == "served/other-name"
+        server.served.assert_awaited_once_with(_URL, _BEARER, default=_VOYAGE)
+        assert record.call_args.kwargs["model"] == _VOYAGE
+        assert record.call_args.kwargs["provider"] == "modal"
+        assert record.call_args.kwargs["total_cost"] == 0.0
+
+
+class TestMatryoshkaGuard:
+    """Story 8: a width the model cannot produce fails at construction."""
+
+    @pytest.mark.parametrize(
+        "repo_id,requested,expected",
+        [
+            (_VOYAGE, None, 2048),
+            (_VOYAGE, 2048, 2048),
+            (_VOYAGE, 1024, 1024),
+            (_VOYAGE, 512, 512),
+            (_QWEN, None, 1024),
+            (_QWEN, 1024, 1024),
+        ],
+    )
+    def test_an_allowed_width_becomes_the_effective_dimensions(
+        self, repo_id: str, requested: int | None, expected: int
+    ) -> None:
+        model = _model(repo_id, dimensions=requested)
+
+        assert model.dimensions == expected
+
+    def test_a_width_no_matryoshka_size_covers_is_refused(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            _model(_VOYAGE, dimensions=768)
+
+        message = str(excinfo.value)
+        assert "cannot produce 768-d" in message
+        assert "native 2048" in message
+        assert "[256, 512, 1024, 2048]" in message
+
+    def test_a_model_that_lists_no_matryoshka_size_refuses_every_other_width(
+        self,
+    ) -> None:
+        """Story 8's exact case: Qwen3 at 512."""
+
+        with pytest.raises(ModelError) as excinfo:
+            _model(_QWEN, dimensions=512)
+
+        message = str(excinfo.value)
+        assert "cannot produce 512-d" in message
+        assert "native 1024" in message
+        assert "matryoshka_dimensions []" in message
+
+
+class TestClientSideTruncation:
+    """ADR-009 §3: the wire always carries the native width; the memory stores
+    the truncated one."""
+
+    @pytest.mark.parametrize("requested", [None, 2048, 1024, 512])
+    async def test_no_dimensions_parameter_is_ever_sent(
+        self, server, openai, requested: int | None
+    ) -> None:
+        """vLLM 400s on `dimensions` unless the HF config is flagged
+        Matryoshka, and a managed recipe cannot be given that flag."""
+
+        model = _model(dimensions=requested)
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert "dimensions" not in openai.calls[0]
+        assert openai.calls[0]["encoding_format"] == "float"
+
+    async def test_a_truncated_vector_is_unit_length_and_matches_the_helper(
+        self, server, openai
+    ) -> None:
+        """Story 3: the caller receives exactly what the smoke test checked
+        under `sanity@1024`."""
+
+        raw = [_vector(2048, seed=1), _vector(2048, seed=2)]
+        model = _model(dimensions=1024)
+        openai.answer = _response(raw)
+
+        vectors = await model.embed(["cats", "dogs"])
+
+        assert [len(vector) for vector in vectors] == [1024, 1024]
+        for vector, source in zip(vectors, raw, strict=True):
+            assert math.sqrt(sum(v * v for v in vector)) == pytest.approx(1.0, abs=1e-6)
+            assert vector == pytest.approx(truncate_embedding(source, 1024))
+
+    async def test_the_native_width_is_returned_unchanged(self, server, openai) -> None:
+        raw = [_vector(2048, seed=3)]
+        model = _model(dimensions=None)
+        openai.answer = _response(raw)
+
+        vectors = await model.embed(["cats"])
+
+        assert vectors == raw
+
+
+class TestResponseLength:
+    """Story 4: the catalog was wrong about a model once — never again
+    silently."""
+
+    async def test_a_narrower_response_than_the_entry_claims_raises(
+        self, server, openai
+    ) -> None:
+        model = _model(dimensions=1024)
+        openai.answer = _response([_vector(1024)])
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.embed(["cats"])
+
+        message = str(excinfo.value)
+        assert "returned 1024-d vectors" in message
+        assert "native_dimensions 2048" in message
+        assert "No vector was returned." in message
+
+    async def test_a_wider_response_than_the_entry_claims_raises(
+        self, server, openai
+    ) -> None:
+        server.served.return_value = _QWEN
+        model = _model(_QWEN)
+        openai.answer = _response([_vector(2048)])
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.embed(["cats"])
+
+        message = str(excinfo.value)
+        assert "returned 2048-d vectors" in message
+        assert "native_dimensions 1024" in message
+
+    async def test_one_wrong_item_at_the_end_of_a_batch_raises(
+        self, server, openai
+    ) -> None:
+        """Every vector is checked, not a sample: one bad row in a batch is
+        one bad row in the index."""
+
+        model = _model(dimensions=1024)
+        openai.answer = _response([_vector(2048), _vector(2048), _vector(1024)])
+
+        with pytest.raises(ExtractionError, match="returned 1024-d vectors"):
+            await model.embed(["a", "b", "c"])
+
+
+class TestRolePrompts:
+    """ADR-009 §5: the **Embedding role** is a client-side prefix, because
+    OpenAI-compatible /v1/embeddings has no role field on any Serving path."""
+
+    @pytest.mark.parametrize(
+        "role,expected",
+        [
+            (
+                "query",
+                "Represent the query for retrieving supporting documents: cats",
+            ),
+            ("document", "Represent the document for retrieval: cats"),
+            (None, "cats"),
+        ],
+    )
+    async def test_the_voyage_prompts_are_prepended(
+        self, server, openai, role, expected: str
+    ) -> None:
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"], input_type=role)
+
+        assert openai.calls[0]["input"] == [expected]
+
+    async def test_a_model_with_no_document_prompt_sends_the_text_untouched(
+        self, server, openai
+    ) -> None:
+        """Qwen3 instructs the query side only — an empty prompt is not an
+        error, it is the model's contract."""
+
+        server.served.return_value = _QWEN
+        model = _model(_QWEN)
+        openai.answer = _response([_vector(1024)])
+
+        await model.embed(["cats"], input_type="document")
+
+        assert openai.calls[0]["input"] == ["cats"]
+
+    async def test_the_qwen_query_prompt_comes_from_the_catalog(
+        self, server, openai
+    ) -> None:
+        """Story 9: the bytes of the prompt are the contract — read them from
+        the entry rather than re-typing them here."""
+
+        server.served.return_value = _QWEN
+        model = _model(_QWEN)
+        openai.answer = _response([_vector(1024)])
+
+        await model.embed(["cats"], input_type="query")
+
+        prompt = get_catalog_entry(_QWEN).query_prompt
+        assert prompt
+        assert openai.calls[0]["input"] == [f"{prompt}cats"]
+
+
+class TestReadyLog:
+    async def test_the_ready_line_carries_both_widths(
+        self, server, openai, caplog
+    ) -> None:
+        """Stories 1-3: one line tells the operator which app answered, under
+        which model id, and whether the vectors are truncated."""
+
+        model = _model(dimensions=1024)
+        openai.answer = _response([_vector(2048)])
+
+        with caplog.at_level(logging.INFO):
+            await model.embed(["cats"])
+
+        line = next(
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("ModalEmbeddingModel ready")
+        )
+        assert "app=ep-voyage-4-nano" in line
+        assert "server=Server" in line
+        assert f"served_model={_VOYAGE}" in line
+        assert "native=2048" in line
+        assert "dimensions=1024 (truncated client-side)" in line
+        assert line.endswith(f"url={_URL}/v1")
+
+
+class TestEmbedFailure:
+    async def test_a_failing_request_becomes_a_retryable_extraction_error(
+        self, server, openai
+    ) -> None:
+        openai.answer = RuntimeError("timeout")
+        model = _model()
+
+        with pytest.raises(ExtractionError, match="Embedding call failed"):
+            await model.embed(["cats"])
+
+
+class TestWireContract:
+    """What the REAL ``AsyncOpenAI`` puts on the wire, read off the transport.
+
+    Everything here would pass against a recorder standing in for the SDK
+    while failing against the SDK itself — which is how an empty batch came to
+    raise and how the body came to carry base64.
+    """
+
+    async def test_the_body_carries_exactly_model_input_and_float_encoding(
+        self, server, wire
+    ) -> None:
+        """``encoding_format`` is explicit because the SDK otherwise defaults
+        to base64, while the shared smoke test (``modal_server._embed``) sends
+        ``float`` — one wire contract on all three Serving paths, and no
+        engine or recipe has to implement base64 for us."""
+
+        model = _model(dimensions=1024)
+
+        vectors = await model.embed(["cats"], input_type="query")
+
+        body = wire.bodies[0]
+        assert set(body) == {"model", "input", "encoding_format"}
+        assert body["encoding_format"] == "float"
+        assert "dimensions" not in body
+        assert body["input"] == [
+            "Represent the query for retrieving supporting documents: cats"
+        ]
+        assert len(vectors[0]) == 1024
+
+    async def test_the_proxy_token_reaches_the_wire_as_a_bearer(
+        self, server, wire
+    ) -> None:
+        """Stronger than the constructor kwarg: Modal's edge checks the
+        header, not what we passed to ``AsyncOpenAI``."""
+
+        model = _model()
+
+        await model.embed(["cats"])
+
+        assert wire.requests[0].headers["authorization"] == f"Bearer {_BEARER}"
+
+    async def test_an_empty_batch_returns_early_without_waking_the_endpoint(
+        self, server, wire
+    ) -> None:
+        """``input=[]`` makes the server answer ``{"data": []}``, which the
+        SDK's own post-parser rejects — and waking a scaled-to-zero GPU to ask
+        for nothing bills the operator. Same guard as
+        ``VoyageTextEmbeddingModel.embed``, above the initialisation."""
+
+        model = _model()
+
+        assert await model.embed([]) == []
+
+        server.resolve.assert_not_awaited()
+        server.healthy.assert_not_awaited()
+        server.served.assert_not_awaited()
+        assert wire.requests == []
+
+
+class TestConcurrentInitialisation:
+    """One shared model instance, several callers embedding at once.
+
+    ``wait_until_healthy`` holds ONE long request (up to ``health_timeout``,
+    300s by default) while a scaled-to-zero GPU container wakes. N racing
+    first ``embed()`` calls would mean N such wake-holding requests against a
+    billed endpoint plus N orphaned HTTP clients.
+    """
+
+    async def test_three_concurrent_first_embeds_initialise_exactly_once(
+        self, suspending_server, wire
+    ) -> None:
+        model = _model()
+
+        results = await asyncio.gather(
+            model.embed(["a"]), model.embed(["b"]), model.embed(["c"])
+        )
+
+        assert suspending_server.resolve_calls == 1
+        assert suspending_server.health_calls == 1
+        assert suspending_server.models_calls == 1
+        assert [len(vectors[0]) for vectors in results] == [2048, 2048, 2048]
+        assert len(wire.requests) == 3
+
+    async def test_a_failed_initialisation_is_retried_in_full(
+        self, suspending_server, wire
+    ) -> None:
+        """A 503 while the endpoint provisions must leave NOTHING half-built:
+        the next call re-runs resolve -> health -> /v1/models before it embeds."""
+
+        suspending_server.health_error = ExtractionError("answered 503.")
+        model = _model()
+
+        with pytest.raises(ExtractionError, match="answered 503"):
+            await model.embed(["cats"])
+        assert wire.requests == []
+
+        suspending_server.health_error = None
+        vectors = await model.embed(["cats"])
+
+        assert suspending_server.resolve_calls == 2
+        assert suspending_server.health_calls == 2
+        # 1, not 2: the failed attempt never got past the health check, so the
+        # retry is the first time the served id is discovered at all.
+        assert suspending_server.models_calls == 1
+        assert len(vectors[0]) == 2048
+
+    async def test_every_concurrent_waiter_sees_the_initialisation_failure(
+        self, suspending_server, wire
+    ) -> None:
+        """No waiter may fall through to the embeddings call with an unbuilt
+        client — and each keeps the unwrapped health error."""
+
+        suspending_server.health_error = ExtractionError("answered 503.")
+        model = _model()
+
+        results = await asyncio.gather(
+            model.embed(["a"]),
+            model.embed(["b"]),
+            model.embed(["c"]),
+            return_exceptions=True,
+        )
+
+        assert [type(result) for result in results] == [ExtractionError] * 3
+        assert all("answered 503" in str(result) for result in results)
+        assert wire.requests == []

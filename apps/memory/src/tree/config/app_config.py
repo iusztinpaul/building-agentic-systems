@@ -660,6 +660,13 @@ registered Prefect flow.
 # ``base_model`` (a model id from Modal's endpoint catalog).
 _REPO_ID_PATTERN = r"^[\w.-]+/[\w.-]+$"
 
+# A commit sha, a tag or a branch (`refs/pr/3` is legal on the Hub). Word
+# characters, `.`, `-` and `/` only — deliberately NO whitespace: the revision
+# travels as one element of the `modal` argv the deploy driver logs with a
+# plain `" ".join(...)`, and a value carrying a space would split into two
+# tokens in the log an operator is meant to be able to re-run.
+_REVISION_PATTERN = r"^[\w.\-/]+$"
+
 # Server args the deploy builder owns on every model, so ONE entry can run
 # under either fallback script: the launcher's own identity/networking flags
 # plus the per-engine embedding-mode flag (ADR-009 §3).
@@ -716,9 +723,11 @@ class ModalEmbeddingModelConfig(BaseModel):
     )
     revision: str = Field(
         default="main",
+        pattern=_REVISION_PATTERN,
         description=(
             "Commit sha (preferred) or branch of the weights. Pinning a sha is "
-            "what makes a re-deploy reproducible."
+            "what makes a re-deploy reproducible. Word characters, `.`, `-` "
+            "and `/` only: it travels as ONE argv element."
         ),
     )
     serving: ServingPath = Field(

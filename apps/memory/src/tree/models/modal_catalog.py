@@ -362,10 +362,15 @@ def truncate_embedding(vector: list[float], dimensions: int) -> list[float]:
     around this call, not here.
 
     Raises:
-        ModelError: ``dimensions`` is wider than ``vector`` — truncation
-            cannot invent components.
+        ModelError: ``dimensions`` is not positive, or is wider than
+            ``vector`` — truncation cannot invent components. The lower bound
+            is explicit because the widths come from a CALLER (the client's
+            effective ``dimensions``), and Python's negative-slice semantics
+            would otherwise turn ``-64`` into a silent success.
     """
 
+    if dimensions <= 0:
+        raise ModelError(f"cannot truncate to {dimensions}-d: a width must be positive")
     if dimensions > len(vector):
         raise ModelError(f"cannot truncate a {len(vector)}-d vector to {dimensions}-d")
 

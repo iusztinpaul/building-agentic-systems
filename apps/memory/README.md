@@ -88,7 +88,8 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 | `PREFECT_API_URL` | yes | `http://127.0.0.1:4200/api` | Prefect API URL |
 | `GOOGLE_API_KEY` | **yes** | — | Gemini (LLM extraction + NL query) |
 | `VOYAGE_API_KEY` | no | — | Voyage AI embeddings (alternative embedder) |
-| `MODAL_EMBEDDING_API_KEY` | no | — | Auth for the Modal-hosted vLLM embedding server |
+| `MODAL_PROXY_TOKEN_ID` | no | — | Modal Proxy token id (`wk-…`) — the only auth in front of a Modal-hosted embedding model |
+| `MODAL_PROXY_TOKEN_SECRET` | no | — | Modal Proxy token secret (`ws-…`), sent joined as `Bearer <id>.<secret>` |
 | `HF_TOKEN` | no | — | Hugging Face token — only to serve a private or gated repo on Modal |
 | `BRIGHTDATA_API_KEY` | no | — | Bright Data API key (Web Unlocker fallback + SERP API) |
 | `BRIGHTDATA_UNLOCKER_ZONE` | no | — | Bright Data Web Unlocker zone (used by the web fallback ingest pipeline) |
@@ -547,16 +548,55 @@ echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session
 
 ## Modal embedding deployment (optional)
 
-The default embedding model is local sentence-transformers (`all-MiniLM-L6-v2`). For heavier workloads, swap in a Modal-hosted vLLM server running `voyageai/voyage-4-nano` on an A10G.
+Serve an embedding model yourself, on your own GPU, instead of calling a hosted
+API. One model = one entry in the **Embedding catalog** (`modal.embedding_models`
+in `configs/default.yaml`) + one command; the entry is the single source of truth
+that both the deploy driver and the `ModalEmbeddingModel` client read, so a
+model's app name, vector width and prompts cannot drift apart.
+
+**1. The catalog entry names the Serving path.** Each entry's `serving:` is one
+of three, and they form a ladder — take the first that works:
+
+1. `endpoint` — a Modal **Dedicated endpoint** (`modal endpoint create`): Modal
+   picks the recipe, GPU, engine and flags, and we write no serving code. Start
+   here.
+2. `sglang` — our own fallback deploy script, when `modal endpoint create` has
+   no compatible base model (the create fails, or the smoke test does) but
+   SGLang supports the architecture.
+3. `vllm` — our own fallback deploy script, for what neither of the above can
+   express (an architecture override, a pooler config, `--trust-remote-code`,
+   a pinned engine version).
+
+`SERVING=endpoint|sglang|vllm` walks that ladder for ONE command without editing
+YAML. Once a path works, **write it into the entry's `serving:`** — the client
+reads the YAML, not your shell history.
+
+**2. Mint a Proxy token** in Modal → Settings → Proxy Auth Tokens and put both
+halves in `.env` as `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`. It is
+the only auth in front of every model, on all three paths: Modal's edge rejects
+unauthenticated traffic *before* a GPU container wakes. (`HF_TOKEN` is separate
+and optional — it downloads private or gated weights, it never authenticates a
+request.)
+
+**3. Deploy, smoke-test, stop** — always with `MODEL=<repo_id>`:
 
 ```bash
-make generate-secret-key                  # generate MODAL_EMBEDDING_API_KEY, put it in .env
-make memory-deploy-embedding-model        # deploys to Modal (creates the vllm-embedding-api-key secret)
-make memory-deploy-embedding-model-test   # smoke-test the deployment
-make memory-deploy-embedding-model-stop   # tear it down
+make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B        # serve it
+make memory-deploy-embedding-model-test MODEL=Qwen/Qwen3-Embedding-0.6B   # health, dims, ranking, 401-without-token
+make memory-deploy-embedding-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B   # stop paying for it
 ```
 
-Then flip `models.search_embedding` (and, if desired, `models.resolution_embedding`) in `configs/default.yaml` to the Modal provider.
+**4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
+`models.resolution_embedding`) in `configs/default.yaml` to
+`{provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`. The
+client asks the server for the model's native width, then truncates +
+L2-renormalises client-side to `dimensions` — so a model whose native width is
+wider (e.g. `voyageai/voyage-4-nano` at 2048) still fits the 1024-d vector
+index, and a mismatch between the catalog and the server fails loudly instead of
+writing a wrong-width vector.
+
+A Dedicated endpoint's min/max containers are dashboard-only settings; to change
+what was created, stop the endpoint first and deploy again.
 
 ## Testing
 

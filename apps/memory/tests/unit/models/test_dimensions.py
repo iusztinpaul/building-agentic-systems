@@ -136,31 +136,34 @@ class TestSentenceTransformerDimensions:
 
 
 class TestModalEmbeddingDimensions:
-    def test_returns_explicit_dimensions(self) -> None:
+    """The width comes from the **Embedding catalog** entry (ADR-009 §3), so
+    ``dimensions`` is settled at construction — never at first use."""
+
+    def test_returns_a_listed_matryoshka_width(self) -> None:
         model = ModalEmbeddingModel(
-            api_key="fake",
+            proxy_token="wk-1.ws-2",
             model="voyageai/voyage-4-nano",
             dimensions=512,
         )
         assert model.dimensions == 512
 
-    def test_falls_back_to_known_native_dimensions(self) -> None:
+    def test_falls_back_to_the_entrys_native_width(self) -> None:
         model = ModalEmbeddingModel(
-            api_key="fake",
+            proxy_token="wk-1.ws-2",
             model="voyageai/voyage-4-nano",
             dimensions=None,
         )
-        # Documented in modal_embedding._MODEL_NATIVE_DIMENSIONS.
-        assert model.dimensions == 1024
+        # The catalog's native_dimensions: a 2048-d projection head, not the
+        # model's 1024 hidden_size.
+        assert model.dimensions == 2048
 
-    def test_raises_for_unknown_model_without_dimensions(self) -> None:
-        model = ModalEmbeddingModel(
-            api_key="fake",
-            model="some/unknown-model",
-            dimensions=None,
-        )
-        with pytest.raises(ModelError, match="native dimension"):
-            _ = model.dimensions
+    def test_raises_for_a_model_outside_the_catalog(self) -> None:
+        with pytest.raises(ModelError, match="Unknown Modal embedding model"):
+            ModalEmbeddingModel(
+                proxy_token="wk-1.ws-2",
+                model="some/unknown-model",
+                dimensions=None,
+            )
 
 
 class TestVoyageMultimodalDimensions:

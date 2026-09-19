@@ -31,7 +31,8 @@ env:
   # Mock API keys (not called in unit tests)
   GOOGLE_API_KEY: mock-google-api-key
   VOYAGE_API_KEY: mock-voyage-api-key
-  MODAL_EMBEDDING_API_KEY: mock-modal-embedding-api-key
+  MODAL_PROXY_TOKEN_ID: mock-modal-proxy-token-id
+  MODAL_PROXY_TOKEN_SECRET: mock-modal-proxy-token-secret
 
 jobs:
   memory:
