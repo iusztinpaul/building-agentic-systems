@@ -7,13 +7,25 @@ feature: voyage-4-and-modal-embedding-catalog
 # Live e2e: reset -> index -> query on `voyage-4` with a threshold re-pin (in a separate local database); then four auto-routed Modal cycles — embedding -> endpoint, embedding -> vLLM App, LLM -> SGLang App, LLM -> endpoint — under our own `tree-` names, touching nothing that existed before
 
 Tags: `e2e`, `config`, `modal`, `llm`, `docs`
-Depends on: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150
+Depends on: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150, #151, #152
 Blocks: —
 Implements: ADR-009 — Decision 2 (auto-routing, proven live on four cycles), Decision 3 (the `tree-` namespace, the guard and H1, proven live), Decision 7 (migration run), Decision 8 (threshold re-pin protocol; amends ADR-008 §4), Decision 9 (the `HF_TOKEN` path on the Apps, checked live on public weights), Decision 10 (`ModalLLM` returns valid JSON from both routes) and Decision 11 (cold start waited out; one cold-again re-warm)
 
 ## Scope
 
-**ORDER: this is the LAST task of the feature. Execution order of the rework: 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 141.**
+**ORDER: this is the LAST task of the feature. Execution order of the rework: 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 151 -> 152 -> 141.**
+
+**LLM CACHE CAVEAT (added 2026-09-20 19:30).** Until #151 has landed, the 30-day `INPUTS` cache of
+`llm-extract-entities` (and the 90-day one of `summarise-cluster`) carries no LLM identity, so a document
+already extracted under Gemini REPLAYS Gemini's JSON after `models.llm` is flipped to `modal` — a green run
+in which the Modal LLM was never asked. #151 fixes this by construction (`llm_identity` in the cache key) and
+is a hard dependency of this task: do not start before it is merged into this branch. Even so, every live LLM
+cycle (4c, 4d — and any step you run THROUGH the pipeline with `TREE_MODELS__LLM__PROVIDER=modal`) must PROVE
+the completion came from the Modal server and not from a cache hit: the run's own `ModalLLM ready: app=… served_model=…`
+line, plus the Opik `modal` usage span of that call (`provider: modal`, `total_cost=0`, non-zero tokens). For a
+pipeline-routed step additionally show that `llm-extract-entities` finished `Completed`, not `Cached`. The
+direct `ModalLLM(...).generate_json(...)` client calls of 4c/4d bypass Prefect, so no cache sits in their path —
+say so next to the proof rather than omitting it.
 
 **HARD SAFETY RULE:** No agent may run `make memory-deploy-*`, `scripts/modal_*.py` as a process, or any `modal …` command outside task 141; a PATH shim does NOT intercept under `make`/`uv run` because `.venv/bin` wins — use the mocked unit tests and `DRY_RUN=yes`.
 THIS is task 141: the ONLY place those commands run for real — and only the ones written below, only on
@@ -249,6 +261,7 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
 - [ ] Cold start: FOUR `Warm: … answered HTTP 200 after <N>s` lines (one per cycle, from the `-test` runs), each preceded by >= 1 `Still cold (HTTP 5xx)` line unless the server was already warm (say so).
 - [ ] Cold again: either the sequence `Cold again: ep-tree-voyage-4-nano answered HTTP 503 — re-warming once` -> `Warm: …` -> `Warm again: …` with a 1024-d vector returned and exactly ONE `Cold again` line, or `cold-again: not reproduced — container still warm after 420 s`.
 - [ ] 4c + 4d: for EACH LLM cycle the six chat smoke lines (incl. `strict JSON schema honoured: city=… population=…` and `unauthenticated health -> 401`), the dict returned by `ModalLLM.generate_json(…, schema=…)` with exactly the keys `city` / `population`, the JSON-mode result or its `ExtractionError` text (recorded, not gated), the `ModalLLM ready: app=ep-tree-… served_model=…` line, and for 4c the SGLang image tag that actually ran; for 4d the GPU Modal picked.
+- [ ] Modal LLM really called (not a cache replay): for EACH of 4c and 4d, `## Log` pastes the `ModalLLM ready: app=ep-tree-… served_model=…` line of the run AND the Opik usage span of the same call showing `provider: modal`, `total_cost=0` and non-zero token counts, with one sentence stating whether the call went through Prefect (then also the `llm-extract-entities` task state `Completed`, never `Cached`) or was the direct client call (no cache in the path). `git log --oneline` of the branch shows #151's commit BEFORE any 4c/4d evidence.
 - [ ] HF token: exactly one of `HF token path (App): PROVEN (HF_TOKEN set in container: True, leak-check exit=0)` or `HF token path (App): NOT PROVEN LIVE — HF_TOKEN not set (container says False); unit evidence only`, plus the sentence that the endpoint `--custom-hf-token` half is unit-tested only. `grep -c "hf_[A-Za-z0-9]\{20,\}" tasks/141-voyage-4-and-modal-e2e-threshold-repin.md` -> 0.
 - [ ] 4e: `modal endpoint list --json` AND `modal app list --json` pasted in `## Log` show no `tree-*` endpoint and no live `ep-tree-*` app, and the line `baseline: <n> apps, <m> endpoints — all unchanged` (same ids, same states, no new version in any baseline `ep-*` app's history). Every `modal … stop` argv in this Log names a `tree-` / `ep-tree-` name.
 - [ ] Cost: per cycle the GPU and deploy-to-stop minutes; no cycle above 30 minutes (or the reason).
@@ -310,7 +323,7 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
 
 ---
 
-Blocked by: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150
+Blocked by: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150, #151, #152
 
 ## Log
 
@@ -419,3 +432,7 @@ Ready for implementation.
 - 10 stories: migration + pin, embedding without picking a path, Modal refuses voyage, custom LLM returns JSON on both routes, the test waits out a cold start, cold again mid-session, wire widths, token never leaks, the owner's things survive, auditable threshold change.
 
 Ready for implementation.
+
+### [PA] 2026-09-20 19:30 — Re-grooming (two tasks inserted before this one; LLM cache caveat)
+
+- `Depends on` / `Blocked by` gain **#151** (LLM identity in the `llm-extract-entities` / `summarise-cluster` cache key — found by #148, commit 22734df) and **#152** (pre-warm leak + provider-gated seams, two deploy-script static guards, `MODAL_SERVER_NAME` — from #147's and #149's QA, commit d3a9fe2); those follow-ups had been "routed to #150", which stays its three embedding-text items. New order: … 150 -> 151 -> 152 -> 141. Added one Scope paragraph (LLM cache caveat) and one AC ("Modal LLM really called"): with #151 the replay is impossible by construction, and this task still proves from the `ModalLLM ready:` line + the `modal` usage span (`total_cost=0`) that the Modal server answered. Nothing else in this task changed.

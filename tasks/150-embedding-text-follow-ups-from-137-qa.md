@@ -8,13 +8,21 @@ feature: voyage-4-and-modal-embedding-catalog
 
 Tags: `memory`, `embedding`, `bug`, `refactor`
 Depends on: None (independent of #143-#149; runs here only to keep ONE branch, ONE PR in NNN order)
-Blocks: #141
+Blocks: #141 (runs before #151 and #152 only by NNN order — neither needs anything from this task)
 Implements: ADR-009 — Decision 7 ("the backfill embeds PREFERENCE/FACT on the same text as the inline path": one helper, the same BYTES on every path)
 
 ## Scope
 
-**EXECUTION ORDER of the rework: 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 141.** No Modal code
-is touched; no process other than the test suite is started.
+**EXECUTION ORDER of the rework: 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 151 -> 152 -> 141.**
+No Modal code is touched; no process other than the test suite is started.
+
+**This task is ONLY the three #137-QA embedding-text items below.** Commits 22734df (#148) and d3a9fe2 (#149)
+and #147's QA notes say their follow-ups are "routed to #150": they were re-homed at the 2026-09-20
+re-grooming so each task stays atomic — the LLM cache identity is **#151**, the two pre-warm fixes, the two
+deploy-script static guards and the cosmetics are **#152**. Do NOT implement any of them here.
+
+Run test commands one at a time — two concurrent pytest runs contend for the local MongoDB/Prefect and stall.
+Do not run the real memory pipelines against the local database (shared with the human's `main` checkout).
 
 Three pre-existing defects the Tester logged during #137's QA. They matter before #141 because #141's re-pin
 reads dedup / supersession similarities: a statement embedded on different bytes inline vs in the backfill
@@ -54,6 +62,8 @@ new import edge is created.
 - Any other change to what is embedded (roles, chunk text, node-text format). Re-embedding existing rows: the
   human's post-merge Embedding reset (#141's [HUMAN] line) picks the fixes up.
 - A data migration for rows carrying both `object` and `object_`.
+- The LLM cache identity (#151); the pre-warm fixes, the deploy-script static guards and the `MODAL_SERVER_NAME`
+  rename (#152).
 
 ## Acceptance Criteria
 
@@ -105,5 +115,17 @@ Three embedding-text defects logged by #137's QA: an unsanitised statement in su
 
 **User stories**
 - 4 stories: control character in a statement, reset stability, the renamed FACT property, one place to change.
+
+Ready for implementation.
+
+### [PA] 2026-09-20 19:30 — Re-grooming (the "routed to #150" follow-ups are re-homed to #151 / #152)
+
+**What changed and why**
+- Three sources pointed their follow-ups here: commit 22734df (#148 — the LLM cache-identity gap), commit d3a9fe2 (#149 — the two pre-warm findings) and #147's Tester log (the two deploy-script static-guard gaps). This body never carried them, so the tracker did not hold the work.
+- Embedding text, Prefect cache keys, the Pre-warm and the deploy-script guards are four unrelated concerns; one commit for all of them is not atomic. This task therefore stays EXACTLY its three #137-QA items (scope, AC and stories untouched — the file is not renamed, its slug is still accurate) and the rest moved: **#151** = the LLM identity in the two LLM tasks' `INPUTS` cache key; **#152** = the two pre-warm fixes + the two static guards + the cosmetics.
+- Added: the new execution order (… 150 -> 151 -> 152 -> 141), the "do not implement them here" pointer, the two run-hygiene lines, one Out-of-scope bullet.
+
+**Dependencies**
+- None. #151 and #152 do not depend on this task; the order is NNN order only.
 
 Ready for implementation.
