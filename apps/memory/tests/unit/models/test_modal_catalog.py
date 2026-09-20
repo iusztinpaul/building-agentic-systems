@@ -26,6 +26,7 @@ from tree.models.modal_catalog import (
     build_server_args,
     get_catalog_entry,
     hf_token_args,
+    hf_token_env,
     modal_cli_command,
     modal_proxy_bearer,
     prompt_for,
@@ -423,6 +424,31 @@ class TestHfTokenArgs:
         entry = request.getfixturevalue(entry_name)
 
         assert hf_token_args(entry, serving, token) == []
+
+
+class TestHfTokenEnv:
+    """What the fallback scripts' ephemeral ``modal.Secret`` carries (§9).
+
+    Every token here is FAKE and ``settings`` is patched on the binding THIS
+    module holds: ``make`` exports the developer's real ``.env`` into the test
+    process, and a test that read it would leak it and pass for the wrong
+    reason.
+    """
+
+    def test_a_configured_token_becomes_the_one_env_var(self, mocker) -> None:
+        mocker.patch.object(
+            modal_catalog.settings, "hf_token", SecretStr("hf_secret123")
+        )
+
+        assert hf_token_env() == {"HF_TOKEN": "hf_secret123"}
+
+    def test_no_token_is_an_empty_dict(self, mocker) -> None:
+        """``Secret.from_dict({})`` — the list still has exactly one element,
+        so the local and container sides of a script have the same shape."""
+
+        mocker.patch.object(modal_catalog.settings, "hf_token", SecretStr(""))
+
+        assert hf_token_env() == {}
 
 
 class TestRedactArgv:

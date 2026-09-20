@@ -571,6 +571,25 @@ of three, and they form a ladder — take the first that works:
 YAML. Once a path works, **write it into the entry's `serving:`** — the client
 reads the YAML, not your shell history.
 
+**Fallback scripts.** Rungs 2 and 3 are `deploy/modal_sglang_embedding.py` and
+`deploy/modal_vllm_embedding.py`: Modal's own eject path — the `serve.py` its
+**Source view** generates for a Dedicated endpoint, copied and parameterised by
+the catalog entry, which crosses into the container as one JSON env var. Reach
+for them only when a managed recipe cannot express what the model needs (an
+architecture override, a pooler config, `--trust-remote-code`, a pinned engine
+version) — they serve the same app name, the same `Server` class and the same
+proxy auth, so nothing else in the memory changes. Engine flags live in the
+entry's `extra_server_args`, never in the scripts.
+
+`HF_TOKEN` in `.env` is optional and only for private or **gated** repos: a
+Dedicated endpoint receives it as `--custom-hf-token` (custom weights only, and
+logged as `***`), a fallback script as a Modal Secret built at deploy time — so
+a gated *base* model is served through a fallback script, not an endpoint.
+
+*Troubleshooting:* `401` / `403` / `GatedRepoError` from `huggingface.co` in
+`modal app logs ep-<endpoint_name>` → accept the model's licence on its Hub
+page, set `HF_TOKEN` in `.env`, deploy again.
+
 **2. Mint a Proxy token** in Modal → Settings → Proxy Auth Tokens and put both
 halves in `.env` as `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`. It is
 the only auth in front of every model, on all three paths: Modal's edge rejects
@@ -646,7 +665,7 @@ apps/memory/
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
   configs/default.yaml  # app tuning
-  deploy/               # Modal deployments (vLLM embedding)
+  deploy/               # Modal fallback deploy scripts (vLLM, SGLang), Prefect, Atlas
   scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph,
                         #   visualize_embeddings, signup, check_db)
   tests/unit

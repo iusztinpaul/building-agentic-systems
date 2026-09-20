@@ -164,8 +164,8 @@ class TestDeploy:
     def test_a_missing_fallback_script_exits_two_and_runs_nothing(
         self, cli_module, run, caplog, tmp_path, monkeypatch
     ) -> None:
-        """Story 5: before #142 the fallback paths have no script — the driver
-        says which file is missing instead of letting Modal fail."""
+        """Story 5: run from a directory without the fallback scripts, the
+        driver says which file is missing instead of letting Modal fail."""
 
         monkeypatch.chdir(tmp_path)
 
@@ -432,6 +432,85 @@ class TestHfTokenHint:
         result = _invoke(cli_module, ["deploy", "--model", _QWEN], caplog)
 
         assert "private or gated Hugging Face repo" not in _output(result, caplog)
+
+
+@pytest.mark.usefixtures("no_token")
+class TestFallbackScripts:
+    """Stories 1 and 4 of #142: the two fallback **Serving paths** end in a
+    ``modal deploy`` of a script that EXISTS, told which model to resolve
+    through ``EMBEDDING_MODEL`` — the only thing that crosses from the driver
+    into the deploy script (the spec itself is resolved there, ADR-009 §3)."""
+
+    @pytest.fixture(autouse=True)
+    def _in_app_root(self, monkeypatch) -> None:
+        """Run from ``apps/memory``: the driver checks the script path the way
+        a ``make memory-*`` target would, relative to the app root."""
+
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
+
+    def test_the_catalog_path_deploys_the_vllm_script(
+        self, cli_module, run, caplog
+    ) -> None:
+        """Story 1: ``serving: vllm`` in the YAML needs no flag at all."""
+
+        result = _invoke(cli_module, ["deploy", "--model", _VOYAGE], caplog)
+
+        assert result.exit_code == 0
+        assert run.call_args.args[0] == [
+            "modal",
+            "deploy",
+            "deploy/modal_vllm_embedding.py",
+        ]
+        assert run.call_args.kwargs["env"]["EMBEDDING_MODEL"] == _VOYAGE
+
+    def test_an_override_deploys_the_sglang_script(
+        self, cli_module, run, caplog
+    ) -> None:
+        """Story 4: the ladder is walked with ``SERVING=sglang`` on an
+        ``endpoint`` entry — the script, not the entry, picks the engine."""
+
+        result = _invoke(
+            cli_module, ["deploy", "--model", _QWEN, "--serving", "sglang"], caplog
+        )
+
+        assert result.exit_code == 0
+        assert run.call_args.args[0] == [
+            "modal",
+            "deploy",
+            "deploy/modal_sglang_embedding.py",
+        ]
+        assert run.call_args.kwargs["env"]["EMBEDDING_MODEL"] == _QWEN
+
+    @pytest.mark.parametrize(
+        "args,script",
+        [
+            (["deploy", "--model", _VOYAGE], "deploy/modal_vllm_embedding.py"),
+            (
+                ["deploy", "--model", _QWEN, "--serving", "sglang"],
+                "deploy/modal_sglang_embedding.py",
+            ),
+        ],
+        ids=["vllm", "sglang"],
+    )
+    def test_a_token_changes_no_fallback_argv_and_reaches_no_log(
+        self, cli_module, run, caplog, mocker, args: list[str], script: str
+    ) -> None:
+        """On a fallback path the token travels as a Modal Secret built inside
+        the deploy script, never as ``--custom-hf-token`` — so a set token
+        leaves the argv byte-identical and appears in no log line."""
+
+        # Patched HERE rather than through the ``with_token`` fixture: the
+        # class already applies ``no_token``, and this test is only meaningful
+        # with a token actually set.
+        mocker.patch.object(cli_module.settings, "hf_token", SecretStr(_FAKE_TOKEN))
+
+        result = _invoke(cli_module, args, caplog)
+
+        assert cli_module.settings.hf_token.get_secret_value() == _FAKE_TOKEN
+
+        assert run.call_args.args[0] == ["modal", "deploy", script]
+        assert _FAKE_TOKEN not in str(run.call_args.args[0])
+        assert _FAKE_TOKEN not in _output(result, caplog)
 
 
 def test_the_driver_never_uses_check_true(cli_module) -> None:

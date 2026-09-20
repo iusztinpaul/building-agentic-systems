@@ -330,6 +330,25 @@ def hf_token_args(
     return [_HF_TOKEN_FLAG, token]
 
 
+def hf_token_env() -> dict[str, str]:
+    """The env dict a fallback script's ephemeral ``modal.Secret`` carries.
+
+    ``{"HF_TOKEN": <token>}`` when the setting is non-empty, ``{}`` otherwise
+    (ADR-009 §9) — so ``modal.Secret.from_dict(hf_token_env())`` is built the
+    same way with or without a token and the ``secrets=`` list always has
+    exactly one element. ``HF_TOKEN`` is the variable ``huggingface_hub``,
+    vLLM and SGLang read natively, and the engine subprocess inherits the
+    container env (``autoinference-utils`` 0.2.6 calls ``subprocess.Popen(cmd)``
+    with no ``env=``), so nothing forwards it by hand.
+
+    A credential, so it never joins ``EmbeddingDeploySpec``: the spec is baked
+    into a cached, inspectable image layer and this is not.
+    """
+
+    token = settings.hf_token.get_secret_value()
+    return {"HF_TOKEN": token} if token else {}
+
+
 def redact_argv(argv: list[str]) -> list[str]:
     """A COPY of ``argv`` with every token value replaced by ``***``.
 
