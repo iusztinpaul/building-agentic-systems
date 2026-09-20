@@ -1156,15 +1156,27 @@ class TestModalCatalog:
         )
         assert qwen.document_prompt == ""
 
-    def test_engine_versions_and_utils_pin(self) -> None:
+    def test_engine_pins(self, frozen_config_path) -> None:
         """Engine versions are per ENGINE, not per model (ADR-009 §3), and the
-        ``autoinference-utils`` pin is shared by both App scripts."""
+        ``autoinference-utils`` pin is shared by both App scripts.
+
+        vLLM is pinned to Modal's own embedding recipe (``vllm==0.26.0``, the
+        ``serve.py`` it generates for its embedding endpoints, read
+        2026-09-20) in the YAML, in the code default AND in the frozen
+        fixture: a bump that moves only one of the three would build the image
+        with a version no test describes.
+        """
 
         config = load_app_config(_DEFAULT_CONFIG_PATH)
 
         assert config.modal.autoinference_utils_version == "0.2.6"
-        assert config.modal.engines["vllm"].version == "0.17.1"
+        assert config.modal.engines["vllm"].version == "0.26.0"
         assert config.modal.engines["sglang"].version == "0.5.20"
+        assert ModalConfig().engines["vllm"].version == "0.26.0"
+        assert (
+            load_app_config(frozen_config_path).modal.engines["vllm"].version
+            == "0.26.0"
+        )
 
     def test_modal_warmup_deadline_default_and_override(
         self, tmp_path, monkeypatch, frozen_config_path

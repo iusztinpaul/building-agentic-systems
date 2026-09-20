@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from tree.config.app_config import (
     ModalEmbeddingModelConfig,
     ModalLLMModelConfig,
+    app_config,
 )
 from tree.models import modal_catalog
 from tree.models.exceptions import ModelError
@@ -170,6 +171,18 @@ class TestServerArgs:
             "--max-model-len": "32768",
         }
 
+    def test_no_entry_flags_matryoshka_server_side(self) -> None:
+        """ADR-009 §3: the client truncates client-side on EVERY path.
+
+        Modal's own 8B embedding recipe passes ``--hf-overrides
+        {"is_matryoshka":true}`` while its 0.6B recipe does not — server-side
+        ``dimensions`` support therefore differs between two managed recipes
+        of the same family, which is exactly why no entry of ours asks for it.
+        """
+
+        for entry in app_config.modal.embedding_models:
+            assert "is_matryoshka" not in str(build_server_args(entry, "vllm"))
+
     def test_sglang_args_omit_context_length_without_max_model_len(
         self, qwen_entry
     ) -> None:
@@ -192,6 +205,27 @@ class TestServerArgs:
             "--served-model-name": _QWEN,
         }
 
+    def test_a_new_entry_with_no_extras_gets_modals_baseline(self) -> None:
+        """Story 1: an operator adds five YAML lines for a model Modal's
+        catalog does not have, and the engine starts with exactly the
+        baseline Modal's own embedding ``serve.py`` uses — plus the pinned
+        revision and the context window the entry asks for."""
+
+        entry = ModalEmbeddingModelConfig(
+            repo_id="BAAI/bge-m3",
+            revision="5617a9f61b028005a4858fdac845db406aefb181",
+            native_dimensions=1024,
+            gpu="A10",
+            max_model_len=8192,
+        )
+
+        assert build_server_args(entry, "vllm") == {
+            "--served-model-name": "BAAI/bge-m3",
+            "--runner": "pooling",
+            "--revision": "5617a9f61b028005a4858fdac845db406aefb181",
+            "--max-model-len": "8192",
+        }
+
     def test_default_revision_is_main(self) -> None:
         """An entry that pins no commit sha serves the branch tip."""
 
@@ -211,7 +245,7 @@ class TestServerArgs:
 class TestDeploySpec:
     @pytest.mark.parametrize(
         "model,engine,engine_version",
-        [(_VOYAGE, "vllm", "0.17.1"), (_QWEN, "sglang", "0.5.20")],
+        [(_VOYAGE, "vllm", "0.26.0"), (_QWEN, "sglang", "0.5.20")],
     )
     def test_json_round_trip(
         self, model: str, engine: str, engine_version: str

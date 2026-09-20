@@ -1,8 +1,8 @@
-"""Static guards on the two FALLBACK Modal deploy scripts (ADR-009 §2/§3/§9).
+"""Static guards on the two App deploy scripts (ADR-009 §2/§3/§9).
 
 ``deploy/modal_vllm_embedding.py`` and ``deploy/modal_sglang_embedding.py`` are
 two boring copies of Modal's generated ``serve.py``, parameterised by the
-**Embedding catalog**. Nothing here imports them: Modal re-imports a deploy
+**Modal catalog**. Nothing here imports them: Modal re-imports a deploy
 script INSIDE its container (where ``tree`` is not installed and the engine
 is), and a unit suite must never reach Modal. Every assertion is made on the
 SOURCE — ``ast.parse`` for structure, plain text for the handful of literals
@@ -13,12 +13,20 @@ logic, no ``print``), the container re-import cannot break on a ``tree`` import,
 **Proxy tokens** stay the only auth (no engine key, no named Modal Secret), and
 the optional Hugging Face token travels as an ephemeral Secret — never baked
 into a cached, inspectable image layer, never logged as a value.
+
+Two guards are written AGAINST A MUTANT, not only against the shipped file:
+mutation testing during #142's QA showed that ``unauthenticated=not True``
+survived a literal-substring check (the docstring carries the literal too) and
+that ``sys.stdout.write(SPEC)`` survived a ``print(``-only check. Both now read
+the AST, and ``TestTheGuardsCatchTheirMutants`` proves each one on a mutated
+COPY in ``tmp_path`` — the shipped scripts are never edited and never executed.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -43,6 +51,27 @@ _ENGINES = pytest.mark.parametrize("engine", sorted(_SCRIPTS))
 # variable's name may appear (as the key it looks up).
 _TOKEN_LOG_MESSAGE = "HF_TOKEN set in container: %s"
 _TOKEN_VAR = "HF_TOKEN"
+
+# The names that put bytes on the container's stdout/stderr directly, instead
+# of through the logger: `print` (bare or via `builtins`), `pprint`, and any
+# `...stdout.write*` / `...stderr.write*` attribute chain.
+_PRINTERS = frozenset({"print", "pprint"})
+_CONSOLE_STREAMS = frozenset({"stdout", "stderr"})
+
+# The two anchors the mutants are grafted onto — one per guard. Each must
+# occur EXACTLY once in every script (`_mutate` asserts it), so a mutation
+# cannot silently land in a second place or nowhere at all.
+_AUTH_KEYWORD = "unauthenticated=False,"
+_STOP_CALL = "        self.endpoint.stop()"
+
+# The words the vLLM script may no longer contain (ADR-009 §2): it is not a
+# fallback on a ladder, and it serves no LLM. `(?<!v)llm` keeps `vLLM` /
+# `VLLMEndpoint`, which are what the file IS.
+_RETIRED_VOCABULARY = re.compile(
+    r"fallback|eject|ladder|serving path|SERVING=|(?<!v)llm|chat", re.IGNORECASE
+)
+
+_CONFIGS = _APP_ROOT / "configs" / "default.yaml"
 
 
 def _source(engine: str) -> str:
@@ -78,7 +107,7 @@ def _calls(node: ast.AST, name: str) -> list[ast.Call]:
 def _is_local_branch(module: ast.Module) -> ast.If:
     """The module-level ``if modal.is_local():`` statement.
 
-    It is the ONLY place a fallback script may touch ``tree``: the same file is
+    It is the ONLY place an App script may touch ``tree``: the same file is
     re-imported in a container that has no ``tree`` installed.
     """
 
@@ -123,14 +152,122 @@ def _image_env_dict(module: ast.Module) -> ast.Dict:
     raise AssertionError("the image has no `.env({...})` layer")
 
 
+def _keyword(call: ast.Call, name: str) -> ast.expr:
+    """The value of ``name=`` on ``call``, as written."""
+
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    raise AssertionError(f"the call passes no `{name}=`")
+
+
+def _one_call(module: ast.Module, name: str) -> ast.Call:
+    """The ONE call to ``name`` — a second one would make the assertions
+    ambiguous about which call they pinned."""
+
+    calls = _calls(module, name)
+    assert len(calls) == 1, f"expected one `{name}(...)`, found {len(calls)}"
+    return calls[0]
+
+
+def _module_constant(module: ast.Module, name: str) -> object:
+    """The value of a module-level ``NAME = <literal>`` assignment."""
+
+    for statement in module.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
+        ):
+            assert isinstance(statement.value, ast.Constant), name
+            return statement.value.value
+    raise AssertionError(f"the script has no module-level `{name} = ...`")
+
+
+def _mutate(
+    engine: str, tmp_path: pathlib.Path, anchor: str, replacement: str
+) -> ast.Module:
+    """A COPY of the script in ``tmp_path``, with ``anchor`` replaced.
+
+    The shipped file is only ever READ: a mutation test that edited it in
+    place would leave a public server behind on any failure.
+    """
+
+    source = _source(engine)
+    assert source.count(anchor) == 1, f"{anchor!r} is not a unique anchor in {engine}"
+
+    mutant = tmp_path / _SCRIPTS[engine].name
+    mutant.write_text(source.replace(anchor, replacement), encoding="utf-8")
+    return ast.parse(mutant.read_text(encoding="utf-8"))
+
+
+def _console_writes(module: ast.Module) -> list[str]:
+    """Every call in ``module`` that writes to the console itself.
+
+    Dotted names, as written, so the failure message can NAME the call: a
+    ``print``/``pprint`` under any prefix (``builtins.print``,
+    ``pprint.pprint``) and any attribute chain whose last two parts are
+    ``stdout``/``stderr`` + ``write``/``writelines``.
+    """
+
+    offenders: list[str] = []
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = _dotted(node.func)
+        parts = dotted.split(".")
+        if parts[-1] in _PRINTERS:
+            offenders.append(dotted)
+        elif (
+            len(parts) > 1
+            and parts[-1].startswith("write")
+            and parts[-2] in _CONSOLE_STREAMS
+        ):
+            offenders.append(dotted)
+    return offenders
+
+
+def _assert_proxy_auth_is_pinned(module: ast.Module) -> None:
+    """``unauthenticated`` is the LITERAL ``False`` — never an expression.
+
+    The keyword's AST node must be ``ast.Constant(value=False)``: ``not True``
+    evaluates to the same thing but a one-character edit (``not False``) makes
+    the server PUBLIC, and a name or a call moves the decision out of the file
+    this test reads.
+    """
+
+    keywords = [
+        keyword
+        for keyword in _server_decorator(module).keywords
+        if keyword.arg == "unauthenticated"
+    ]
+    assert len(keywords) == 1, "`@app.server` must pass `unauthenticated` exactly once"
+
+    value = keywords[0].value
+    assert isinstance(value, ast.Constant) and value.value is False, (
+        "`unauthenticated` must be the literal `False` (Proxy tokens, "
+        f"ADR-009 §4), not `{ast.unparse(value)}`"
+    )
+
+
 @_ENGINES
 class TestGlueContract:
     """The scripts are entry points: glue over ``tree.models.modal_catalog``."""
 
     def test_nothing_is_printed(self, engine: str) -> None:
-        """Logging is the native logger everywhere (AGENTS.md)."""
+        """Logging is the native logger everywhere (AGENTS.md).
 
-        assert not _calls(_module(engine), "print")
+        ``print`` is not the only way to reach ``modal app logs``: a
+        ``sys.stdout.write(str(SPEC))`` left behind after a debugging session
+        puts the whole deploy spec there just as well, which is why the guard
+        walks the calls instead of grepping for ``print(``.
+        """
+
+        writes = _console_writes(_module(engine))
+
+        assert not writes, (
+            "the script writes to the console instead of the logger: "
+            f"{', '.join(writes)}"
+        )
 
     def test_the_logger_is_configured_locally(self, engine: str) -> None:
         """``init_logger()`` runs on the deploying machine only — the container
@@ -186,12 +323,16 @@ class TestGlueContract:
 
     def test_the_decorator_pins_the_serving_contract(self, engine: str) -> None:
         """The knobs an operator must not silently lose: proxy auth, the EU
-        routing region, scale-to-zero and the concurrency target."""
+        routing region, scale-to-zero and the concurrency target.
+
+        ``unauthenticated`` is checked on the AST, not as a substring: the
+        docstring quotes ``unauthenticated=False`` too, so a decorator mutated
+        to ``not True`` used to pass on the docstring's copy alone.
+        """
 
         source = _source(engine)
 
         for literal in (
-            "unauthenticated=False",
             f'routing_region="{MODAL_ROUTING_REGION}"',
             "scaledown_window=5 * MINUTES",
             "target_concurrency=16",
@@ -199,6 +340,8 @@ class TestGlueContract:
             "exit_grace_period=25",
         ):
             assert literal in source
+
+        _assert_proxy_auth_is_pinned(_module(engine))
 
     def test_the_retired_auth_never_comes_back(self, engine: str) -> None:
         """ADR-009 §4 retired the engine-level key and every named Modal
@@ -359,6 +502,164 @@ def test_only_the_hf_token_secret(engine: str) -> None:
         and [arg.value for arg in call.args[0].args] == [_TOKEN_VAR]
     ]
     assert len(lookups) == 1
+
+
+@_ENGINES
+class TestTheGuardsCatchTheirMutants:
+    """The two guards, proven on a MUTATED COPY in ``tmp_path``.
+
+    Both blind spots were found by mutation during #142's QA: a guard that
+    only greps for ``unauthenticated=False`` / ``print(`` passes a script that
+    is public, or that dumps the deploy spec into ``modal app logs``. The
+    shipped scripts are read-only here — the mutant is a copy, and it is never
+    imported or executed.
+    """
+
+    def test_the_shipped_script_passes_both_guards(self, engine: str) -> None:
+        """The control row: without a mutation, both guards are silent."""
+
+        module = _module(engine)
+
+        _assert_proxy_auth_is_pinned(module)
+        assert not _console_writes(module)
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            # Evaluates to False, so the server stays private — but one
+            # deleted character (`not False`) makes it PUBLIC.
+            "unauthenticated=not True,",
+            "unauthenticated=not False,",
+            # A name moves the decision out of this file entirely.
+            "unauthenticated=AUTH,",
+        ],
+    )
+    def test_a_non_literal_unauthenticated_fails(
+        self, engine: str, mutation: str, tmp_path: pathlib.Path
+    ) -> None:
+        mutant = _mutate(engine, tmp_path, _AUTH_KEYWORD, mutation)
+
+        with pytest.raises(AssertionError, match="literal `False`"):
+            _assert_proxy_auth_is_pinned(mutant)
+
+    @pytest.mark.parametrize(
+        "statement,call",
+        [
+            # The case the OLD `print(`-only guard caught: the widened guard
+            # must still be a superset of it.
+            ("print(SPEC)", "print"),
+            ('sys.stdout.write("x")', "sys.stdout.write"),
+            ('sys.stderr.write("x")', "sys.stderr.write"),
+            ("sys.stdout.writelines([SPEC])", "sys.stdout.writelines"),
+            ("pprint(SPEC)", "pprint"),
+            ("builtins.print(SPEC)", "builtins.print"),
+        ],
+    )
+    def test_a_console_write_fails_and_is_named(
+        self, engine: str, statement: str, call: str, tmp_path: pathlib.Path
+    ) -> None:
+        mutant = _mutate(
+            engine, tmp_path, _STOP_CALL, f"        {statement}\n{_STOP_CALL}"
+        )
+
+        assert _console_writes(mutant) == [call]
+
+
+def test_the_vllm_script_follows_modals_embedding_template() -> None:
+    """Value by value, the ``serve.py`` Modal generates for ITS embedding
+    endpoints (``Qwen/Qwen3-Embedding-0.6B`` and ``-8B``, read 2026-09-20).
+
+    One behaviour — "this file is Modal's embedding recipe, parameterised by
+    the catalog" — so the template's values are asserted together: the CUDA
+    base and its four wheels, the engine object, the embedding probe, and the
+    ``@app.server`` knobs Modal's own recipe sets.
+    """
+
+    module = _module("vllm")
+
+    # Image: Modal's CUDA base, its own entrypoint dropped (the vLLM process
+    # is the entrypoint), the engine pinned from the catalog.
+    registry = _one_call(module, "modal.Image.from_registry")
+    assert [argument.value for argument in registry.args] == [
+        "nvidia/cuda:13.0.2-devel-ubuntu22.04"
+    ]
+    assert _keyword(registry, "add_python").value == "3.12"
+
+    entrypoint = _one_call(module, "entrypoint")
+    assert len(entrypoint.args) == 1
+    assert isinstance(entrypoint.args[0], ast.List)
+    assert entrypoint.args[0].elts == []
+
+    wheels = _one_call(module, "uv_pip_install")
+    assert isinstance(wheels.args[0], ast.JoinedStr), "the vLLM pin is not the YAML's"
+    assert "engine_version" in ast.unparse(wheels.args[0])
+    assert {
+        argument.value for argument in wheels.args if isinstance(argument, ast.Constant)
+    } >= {"httpx", "huggingface-hub"}
+    assert "HF_XET_HIGH_PERFORMANCE" in [
+        key.value
+        for key in _image_env_dict(module).keys
+        if isinstance(key, ast.Constant)
+    ]
+
+    # The engine and the ONE request that proves it embeds before the
+    # container serves traffic.
+    endpoint = _one_call(module, "VLLMEndpoint")
+    assert _keyword(endpoint, "worker_port").id == "PORT"
+    assert _keyword(endpoint, "health_poll_interval").value == 5.0
+
+    probe = _one_call(module, "validate_embeddings_endpoint")
+    assert _keyword(probe, "port").id == "PORT"
+    assert _keyword(probe, "request_timeout").value == 60.0
+    payload = _keyword(probe, "payload")
+    assert isinstance(payload, ast.Dict)
+    payload_items = {
+        key.value: value
+        for key, value in zip(payload.keys, payload.values, strict=True)
+        if isinstance(key, ast.Constant)
+    }
+    assert payload_items["encoding_format"].value == "float"
+    assert payload_items["input"].id == "PROBES"
+    assert _module_constant(module, "PORT") == 8000
+
+    # The decorator's own knobs, Modal's values (its 0.6B recipe's
+    # TARGET_INPUTS is 16; scale-to-zero after 5 minutes).
+    decorator = _server_decorator(module)
+    assert _keyword(decorator, "port").id == "PORT"
+    assert _keyword(decorator, "min_containers").value == 0
+    assert _keyword(decorator, "exit_grace_period").value == 25
+    assert _keyword(decorator, "routing_region").value == MODAL_ROUTING_REGION
+    assert ast.unparse(_keyword(decorator, "scaledown_window")) == "5 * MINUTES"
+
+
+def test_the_vllm_script_is_about_embedding_models_only() -> None:
+    """ADR-009 §2: the vLLM App serves embedding models from Hugging Face,
+    nothing else — no ladder, no fallback, no LLM, no chat warm-up.
+
+    ``llm`` is matched only where it is NOT preceded by a ``v``: the file is
+    the vLLM script, so ``vLLM`` and ``VLLMEndpoint`` are the subject, not a
+    leftover. (The task's acceptance criterion greps a bare ``LLM``, which
+    every mention of vLLM would hit — and the pre-existing
+    ``VLLMEndpoint(model=`` guard requires those mentions.)
+    """
+
+    hits = sorted(
+        {match.group(0) for match in _RETIRED_VOCABULARY.finditer(_source("vllm"))}
+    )
+
+    assert not hits, f"the vLLM script still talks about: {', '.join(hits)}"
+
+
+def test_no_seed_asks_the_server_for_matryoshka() -> None:
+    """ADR-009 §3: the client truncates client-side on EVERY path, so no entry
+    flags ``is_matryoshka`` server-side — Modal's own 8B recipe does and its
+    0.6B recipe does not, which is exactly why we never rely on it.
+
+    The script's docstring carries the reason; the catalog carries no override.
+    """
+
+    assert "is_matryoshka" in _source("vllm")
+    assert "is_matryoshka" not in _CONFIGS.read_text(encoding="utf-8")
 
 
 def test_script_paths_match_cli_command() -> None:

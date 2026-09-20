@@ -192,9 +192,7 @@ modal:
   autoinference_utils_version: "0.2.6" # App scripts only
   engines: # App scripts only; per ENGINE, not per model
     vllm:
-      version: "0.17.1" # the pin the repo's vLLM script has been serving
-      # voyage-4-nano's own card pins vllm==0.16.0 for this architecture;
-      # PyPI's latest is 0.29.0, unverified for it — #141 owns the live bump.
+      version: "0.26.0" # Modal's own embedding recipe pin (serve.py, 2026-09-20)
     sglang:
       version: "0.5.20" # latest on PyPI, 2026-09-19
   # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
@@ -236,7 +234,10 @@ modal:
       max_model_len: 32768
       query_prompt: "Represent the query for retrieving supporting documents: "
       document_prompt: "Represent the document for retrieval: "
-      extra_server_args: # model-specific extras for the APP scripts only
+      # Model-specific extras for the APP scripts only. `--max-num-seqs` is
+      # accepted here too (Modal's own 8B embedding recipe sets it to 32 to
+      # bound the KV cache); no seed needs it — vLLM's default holds.
+      extra_server_args:
         "--convert": embed
         "--pooler-config": '{"pooling_type":"MEAN"}'
         "--hf-overrides": '{"architectures":["VoyageQwen3BidirectionalEmbedModel"]}'

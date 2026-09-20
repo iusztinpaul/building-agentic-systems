@@ -965,7 +965,7 @@ class ModalConfig(BaseModel):
     )
     engines: dict[Literal["sglang", "vllm"], ModalEngineConfig] = Field(
         default_factory=lambda: {
-            "vllm": ModalEngineConfig(version="0.17.1"),
+            "vllm": ModalEngineConfig(version="0.26.0"),
             "sglang": ModalEngineConfig(version="0.5.20"),
         },
         description="App scripts only: the pinned version of each engine.",

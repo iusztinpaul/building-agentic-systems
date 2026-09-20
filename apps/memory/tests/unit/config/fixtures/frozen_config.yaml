@@ -120,13 +120,16 @@ observability:
     voyage-3.5: 0.06
 
 # The Modal catalog (ADR-009 §2/§3). Mirrors the SHAPE of the shipped
-# configs/default.yaml — the seed VALUES (revisions, prompts, engine pins) are
-# asserted against the real file, not against this fixture.
+# configs/default.yaml — the seed VALUES (revisions, prompts) are asserted
+# against the real file, not against this fixture. The ENGINE PINS are the one
+# exception (`test_engine_pins`): a bump that moves the YAML and the code
+# default but forgets this file would leave the fixture describing an image
+# nobody builds.
 modal:
   autoinference_utils_version: "0.2.6"
   engines:
     vllm:
-      version: "0.17.1"
+      version: "0.26.0"
     sglang:
       version: "0.5.20"
   warmup_deadline_s: 600

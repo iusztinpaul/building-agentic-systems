@@ -1,10 +1,15 @@
-"""Serve ONE **Modal catalog** embedding model with vLLM — the `app` path.
+"""Serve ONE **Modal catalog** embedding model with vLLM — the `app` route.
 
-The EJECT PATH (ADR-009 §2): Modal's own generated `serve.py` for a
-**Dedicated endpoint**, copied and parameterised by the catalog, for what a
-managed recipe cannot express — an architecture override, a pooler config,
-`--trust-remote-code`, a pinned engine version. The driver reaches for it when
-Modal refuses the model (`Routing ... → vLLM App`), never by a config field.
+EMBEDDING models from Hugging Face, nothing else (ADR-009 §2): vLLM in pooling
+mode (`--runner pooling`), shaped after the `serve.py` Modal generates for its
+own embedding endpoints (`Qwen/Qwen3-Embedding-0.6B` and `-8B`, read
+2026-09-20) — the same CUDA base, the same `autoinference-utils` helpers, the
+same one-request probe before the container serves traffic. The server always
+returns its NATIVE vector width and the client truncates + renormalises
+(ADR-009 §3): Modal's 8B recipe flags `is_matryoshka` server-side while its
+0.6B recipe does not, so server-side `dimensions` support differs between two
+managed recipes of one model family — which is why no entry of ours asks a
+server for a width, here or anywhere.
 
 Glue only: every decision — GPU, engine pin, revision, server flags — is
 resolved by `tree.models.modal_catalog` on the operator's machine and crosses
@@ -16,17 +21,27 @@ INSIDE the container, where the `tree` package is NOT installed. Hence the
 The app is `ep-<endpoint_name>` with `class Server` — the same SHAPE
 (`ep-<name>`, class `Server`) a Dedicated endpoint has, inside our `tree-`
 namespace, so ONE `modal.Server.from_name(app_name, "Server")` lookup resolves
-every Serving path and the client stays path-blind. The shape is what the
-lookup needs; the prefix is what keeps this deploy off an endpoint the operator
-created by hand (`ep-<model>`, ADR-009 §3). A model is served by exactly one
-path at a time: stop the endpoint before deploying this.
+both routes and the client stays path-blind. The shape is what the lookup
+needs; the prefix is what keeps this deploy off an endpoint the operator
+created by hand (`ep-<model>`, ADR-009 §3), and the driver's existence guard
+refuses before it writes over anything.
 Auth is Modal **Proxy tokens** only (`unauthenticated=False`) — the edge answers
 401 before a GPU wakes, so the engine needs no key of its own.
+
+Where this file deviates from Modal's own template, on purpose:
+
+* weights by `repo_id` + `revision` into the shared `huggingface-cache` Volume
+  — Modal's `MODEL_PATH` is a snapshot inside the endpoint's own volume, which
+  nothing outside that endpoint can mount;
+* `unauthenticated=False` spelled as a literal, never `not REQUIRE_AUTH`;
+* the stdlib logger instead of `print`, so nothing but one boolean about the
+  Hugging Face token can reach `modal app logs`;
+* GPU, CPU and memory come from the catalog entry instead of the per-recipe
+  module constants Modal bakes in.
 
 Deployed by the driver, never by hand:
 
     make memory-deploy-model MODEL=voyageai/voyage-4-nano
-    make memory-deploy-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=app
 """
 
 import json
@@ -44,7 +59,9 @@ PORT = 8000
 # Modal terminates a container that is not serving after `startup_timeout`.
 # The engine's own health wait is strictly SHORTER, so a model that cannot load
 # fails with vLLM's message in `modal app logs` instead of an opaque Modal
-# termination at the same instant.
+# termination at the same instant. Both are the ENGINE's budget for starting
+# up, unrelated to `modal.warmup_deadline_s`, which is how long a CLIENT polls
+# a cold server from outside (ADR-009 §11).
 STARTUP_TIMEOUT = 20 * MINUTES
 HEALTH_TIMEOUT = 18 * MINUTES
 
