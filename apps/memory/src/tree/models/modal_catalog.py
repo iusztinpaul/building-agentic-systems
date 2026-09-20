@@ -64,6 +64,19 @@ HF_TOKEN_HINT = (
     "deploy again."
 )
 
+# The strings the Hub and `huggingface_hub` use for a repo you may not read,
+# lower-cased (the match is case-insensitive). `gatedrepoerror` is listed even
+# though `gated` subsumes it: the list is read as documentation of what we
+# recognise, and one redundant element is cheaper than that ambiguity.
+_GATED_MARKERS = (
+    "401",
+    "403",
+    "gated",
+    "gatedrepoerror",
+    "repositorynotfounderror",
+    "access to model",
+)
+
 # The fallback deploy script per engine, relative to `apps/memory` (the cwd of
 # every `make memory-*` target). They arrive in #142; until then an
 # `sglang`/`vllm` deploy exits 2 on the missing file.
@@ -262,6 +275,12 @@ def modal_cli_command(
 ) -> list[str]:
     """The ``modal`` argv that deploys or stops ``entry`` on ``serving``.
 
+    Every name in it comes from the catalog's ONE derivation, so it always
+    carries the ``tree-`` namespace (``tree-<slug>`` for an endpoint,
+    ``ep-tree-<slug>`` for an app). The driver checks that again on the name it
+    is about to pass to ``modal`` (``modal_cli.assert_owned_name``): this
+    function builds the command, it does not authorise it.
+
     ALWAYS token-free, so the driver can log it verbatim and a test can assert
     on it (ADR-009 §9). The Hugging Face token is appended separately by
     :func:`hf_token_args`, at the ``subprocess.run`` boundary.
@@ -364,6 +383,35 @@ def redact_argv(argv: list[str]) -> list[str]:
         if item == _HF_TOKEN_FLAG:
             redacted[index + 1] = "***"
     return redacted
+
+
+def redact_text(text: str, token: str) -> str:
+    """``text`` with every occurrence of ``token`` replaced by ``***``.
+
+    Belt and braces for the captured output of ``modal endpoint create``: Modal
+    is not known to echo the argv it was given, but the output is logged line
+    by line and a token is forever. An EMPTY token is a no-op — ``"".replace``
+    would otherwise splice ``***`` between every character.
+    """
+
+    return text.replace(token, "***") if token else text
+
+
+def looks_gated(text: str) -> bool:
+    """Does ``text`` look like "you may not read this Hugging Face repo"?
+
+    The gate on the one ``HF_TOKEN`` hint (ADR-009 §9). Before this, the hint
+    was printed under EVERY failure with an empty token — under an
+    architecture mismatch, under "is not available for dedicated Endpoints"
+    and under a cold-start 503, none of which a token fixes.
+
+    Substrings, not a parser: the text is whatever Modal's CLI, the Hub or
+    ``huggingface_hub`` wrote, and the cost of a false positive is one extra
+    line of advice.
+    """
+
+    lowered = text.lower()
+    return any(marker in lowered for marker in _GATED_MARKERS)
 
 
 def truncate_embedding(vector: list[float], dimensions: int) -> list[float]:

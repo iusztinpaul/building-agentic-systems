@@ -17,6 +17,7 @@ from tree.config.app_config import (
     EmbeddingConfig,
     HdbscanConfig,
     MemoryConfig,
+    MODAL_NAME_PREFIX,
     ModalEmbeddingModelConfig,
     ObservabilityConfig,
     QueryConfig,
@@ -1123,8 +1124,8 @@ class TestModalCatalog:
 
         assert entry.serving == "endpoint"
         assert entry.revision == "main"
-        assert entry.endpoint_name == "bge-m3"
-        assert entry.app_name == "ep-bge-m3"
+        assert entry.endpoint_name == "tree-bge-m3"
+        assert entry.app_name == "ep-tree-bge-m3"
         assert entry.extra_server_args == {}
 
     @pytest.mark.parametrize(
@@ -1147,21 +1148,66 @@ class TestModalCatalog:
     @pytest.mark.parametrize(
         "repo_id,endpoint_name",
         [
-            ("voyageai/voyage-4-nano", "voyage-4-nano"),
-            ("Qwen/Qwen3-Embedding-0.6B", "qwen3-embedding-0-6b"),
-            ("Org/My_Model..v2", "my-model-v2"),
+            ("voyageai/voyage-4-nano", "tree-voyage-4-nano"),
+            ("Qwen/Qwen3-Embedding-0.6B", "tree-qwen3-embedding-0-6b"),
+            ("BAAI/bge-m3", "tree-bge-m3"),
+            ("Org/My_Model..v2", "tree-my-model-v2"),
         ],
     )
     def test_name_derivation(self, repo_id: str, endpoint_name: str) -> None:
-        """ASSUMPTION H1 (proven in #141): the Dedicated endpoint named ``N``
-        is the Modal app ``ep-N``. ONE derivation, so a correction is one line."""
+        """Every name we create carries the ``tree-`` namespace (ADR-009 §3):
+        Modal names a hand-made endpoint's app ``ep-<slug>``, ours is
+        ``ep-tree-<slug>``, so a deploy of ours can never land on it.
+
+        ASSUMPTION H1 (proven in #141) is untouched — it needs the ``ep-<N>``
+        SHAPE, not a particular ``N``. ONE derivation, so a correction to
+        either half is one line."""
 
         entry = ModalEmbeddingModelConfig(
             repo_id=repo_id, base_model=repo_id, native_dimensions=1024
         )
 
+        assert MODAL_NAME_PREFIX == "tree"
         assert entry.endpoint_name == endpoint_name
         assert entry.app_name == f"ep-{endpoint_name}"
+
+    @pytest.mark.parametrize(
+        "slug_length,fits",
+        [(55, True), (56, False)],
+        ids=["55-characters-fit", "56-characters-do-not"],
+    )
+    def test_app_name_length_limit(self, slug_length: int, fits: bool) -> None:
+        """``ep-tree-`` spends 8 of Modal's 63 characters, so a slug may be at
+        most 55. Caught at LOAD time instead of after an image build."""
+
+        repo_id = f"acme/{'a' * slug_length}"
+
+        if fits:
+            entry = ModalEmbeddingModelConfig(
+                repo_id=repo_id, base_model=repo_id, native_dimensions=1024
+            )
+            assert len(entry.app_name) == 63
+            return
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(
+                repo_id=repo_id, base_model=repo_id, native_dimensions=1024
+            )
+
+        message = str(excinfo.value)
+        assert "at most 63" in message
+        assert "64 characters" in message
+
+    def test_empty_slug_is_still_rejected(self) -> None:
+        """The prefix must not mask an empty derivation: ``tree-`` is truthy,
+        so the validator reads the SLUG."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(
+                repo_id="a/---", base_model="a/---", native_dimensions=1024
+            )
+
+        assert "derives an empty endpoint name" in str(excinfo.value)
 
     @pytest.mark.parametrize(
         "entries,expected_fragments",
@@ -1258,7 +1304,7 @@ class TestModalCatalog:
                 [_VALID_ENTRY, {**_VALID_ENTRY, "repo_id": "acme/voyage-4-nano"}],
                 [
                     "'voyageai/voyage-4-nano' and 'acme/voyage-4-nano' both derive",
-                    "'ep-voyage-4-nano'",
+                    "'ep-tree-voyage-4-nano'",
                     "one app per model",
                 ],
                 id="duplicate-app-name",

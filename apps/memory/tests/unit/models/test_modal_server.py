@@ -32,7 +32,7 @@ from tree.models.modal_catalog import get_catalog_entry
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
-_URL = "https://acme--ep-qwen3-embedding-0-6b-server.modal.run"
+_URL = "https://acme--ep-tree-qwen3-embedding-0-6b-server.modal.run"
 _BEARER = "wk-1.ws-2"
 
 
@@ -191,7 +191,7 @@ class TestResolveServerUrl:
         url = await resolve_server_url(entry)
 
         modal_server.from_name.assert_called_once_with(
-            "ep-qwen3-embedding-0-6b", "Server"
+            "ep-tree-qwen3-embedding-0-6b", "Server"
         )
         assert url == _URL
 
@@ -221,7 +221,7 @@ class TestResolveServerUrl:
             await resolve_server_url(get_catalog_entry(_QWEN))
 
         message = str(excinfo.value)
-        assert "ep-qwen3-embedding-0-6b/Server" in message
+        assert "ep-tree-qwen3-embedding-0-6b/Server" in message
         assert f"make memory-deploy-embedding-model MODEL={_QWEN}" in message
         assert "modal endpoint list" in message
 

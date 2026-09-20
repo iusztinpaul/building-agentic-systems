@@ -14,10 +14,13 @@ into the container as ONE JSON env var baked into the image
 INSIDE the container, where the `tree` package is NOT installed. Hence the
 `modal.is_local()` split below: nothing under `tree` may be imported outside it.
 
-The app is `ep-<endpoint_name>` with `class Server` — the same name a Dedicated
-endpoint of this model has, so ONE `modal.Server.from_name(app_name, "Server")`
-lookup resolves every Serving path and the client stays path-blind. A model is
-served by exactly one path at a time: stop the endpoint before deploying this.
+The app is `ep-<endpoint_name>` with `class Server` — the same SHAPE
+(`ep-<name>`, class `Server`) a Dedicated endpoint has, inside our `tree-`
+namespace, so ONE `modal.Server.from_name(app_name, "Server")` lookup resolves
+every Serving path and the client stays path-blind. The shape is what the
+lookup needs; the prefix is what keeps this deploy off an endpoint the operator
+created by hand (`ep-<model>`, ADR-009 §3). A model is served by exactly one
+path at a time: stop the endpoint before deploying this.
 Auth is Modal **Proxy tokens** only (`unauthenticated=False`) — the edge answers
 401 before a GPU wakes, so the engine needs no key of its own.
 

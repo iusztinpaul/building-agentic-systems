@@ -42,7 +42,7 @@ from tree.models.modal_embedding import ModalEmbeddingModel
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
-_URL = "https://acme--ep-voyage-4-nano-server.modal.run"
+_URL = "https://acme--ep-tree-voyage-4-nano-server.modal.run"
 _BEARER = "wk-1.ws-2"
 
 
@@ -310,7 +310,7 @@ class TestUrlResolution:
         command, not a wrapped transport error."""
 
         failure = (
-            "Failed to resolve Modal server ep-voyage-4-nano/Server. Is the "
+            "Failed to resolve Modal server ep-tree-voyage-4-nano/Server. Is the "
             "model deployed (...)? Run: make memory-deploy-embedding-model "
             f"MODEL={_VOYAGE}"
         )
@@ -641,7 +641,7 @@ class TestReadyLog:
             for record in caplog.records
             if record.getMessage().startswith("ModalEmbeddingModel ready")
         )
-        assert "app=ep-voyage-4-nano" in line
+        assert "app=ep-tree-voyage-4-nano" in line
         assert "server=Server" in line
         assert f"served_model={_VOYAGE}" in line
         assert "native=2048" in line

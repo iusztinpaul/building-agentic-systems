@@ -166,8 +166,9 @@ class TestGlueContract:
             assert id(node) in local_branch
 
     def test_the_server_class_carries_the_catalog_name(self, engine: str) -> None:
-        """``Server`` in app ``ep-<endpoint_name>``: the name Modal's own
-        generated ``serve.py`` uses, so ONE lookup resolves every path."""
+        """``Server`` in app ``ep-<endpoint_name>`` (e.g.
+        ``ep-tree-voyage-4-nano``): the SHAPE Modal's own generated
+        ``serve.py`` uses, so ONE lookup resolves every path."""
 
         module = _module(engine)
         decorated = [

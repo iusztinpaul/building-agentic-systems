@@ -587,8 +587,33 @@ logged as `***`), a fallback script as a Modal Secret built at deploy time — s
 a gated *base* model is served through a fallback script, not an endpoint.
 
 *Troubleshooting:* `401` / `403` / `GatedRepoError` from `huggingface.co` in
-`modal app logs ep-<endpoint_name>` → accept the model's licence on its Hub
-page, set `HF_TOKEN` in `.env`, deploy again.
+`modal app logs ep-<endpoint_name>` (e.g. `modal app logs ep-tree-voyage-4-nano`)
+→ accept the model's licence on its Hub page, set `HF_TOKEN` in `.env`, deploy
+again. The `HF_TOKEN` hint the driver prints appears only for those
+gated-looking failures — never under a cold-start `503` or an architecture
+mismatch, which no token fixes.
+
+**1b. Nothing these targets touch is yours by accident.** Every name we create
+on Modal starts with `tree-` (endpoint `tree-<model>`, app `ep-tree-<model>`),
+so a Dedicated Endpoint you made by hand in the dashboard (`ep-<model>`) can
+never be overwritten or stopped by these targets. On top of that:
+
+- `deploy` looks before it writes: it refuses (exit 3) when the name already
+  exists as something the requested Serving path did not create — anything at
+  all before an endpoint create, a Dedicated Endpoint before an App deploy.
+  `FORCE=yes` overrides that refusal (it never overrides the `tree-` check);
+  redeploying your own App is a normal update and is not refused.
+  `-stop` only ever stops `tree-` names.
+- `DRY_RUN=yes` prints the (redacted) `modal` command and exits 0 without
+  starting `modal` — the ONLY way to try these targets without deploying:
+
+  ```bash
+  make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano SERVING=endpoint DRY_RUN=yes
+  ```
+
+  A fake `modal` on `PATH` does NOT work: `make` and `uv run` put `.venv/bin`
+  first, so the real CLI wins — which is how two accidental deploys once
+  happened.
 
 **2. Mint a Proxy token** in Modal → Settings → Proxy Auth Tokens and put both
 halves in `.env` as `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`. It is

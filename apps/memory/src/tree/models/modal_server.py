@@ -6,7 +6,8 @@ ONE smoke test, shared by the deploy driver (``scripts/modal_embedding_model.py`
 and the ``ModalEmbeddingModel`` client (#140). They rest on assumption H1 — a
 **Dedicated endpoint** named ``N`` is the Modal app ``ep-N`` with a server class
 ``Server``, which the fallback scripts copy — so the caller never reads
-``serving``. ``tasks/141`` proves H1 live and owns the correction if it is false.
+``serving``. Every ``N`` of ours is ``tree-<slug>``, hence every app is
+``ep-tree-<slug>``: H1 needs the shape, not a particular name. ``tasks/141`` proves H1 live and owns the correction if it is false.
 
 This module imports the ``modal`` SDK, so it is imported by the driver and the
 client only — never by :mod:`tree.models.modal_catalog` and never at MCP boot.

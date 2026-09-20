@@ -27,10 +27,12 @@ from tree.models.modal_catalog import (
     get_catalog_entry,
     hf_token_args,
     hf_token_env,
+    looks_gated,
     modal_cli_command,
     modal_proxy_bearer,
     prompt_for,
     redact_argv,
+    redact_text,
     resolve_serving,
     truncate_embedding,
 )
@@ -38,6 +40,7 @@ from tree.models.modal_catalog import (
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
 _QWEN_SHA = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+_FAKE_TOKEN = "hf_secret123"
 _VOYAGE_SHA = "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
 
 
@@ -218,7 +221,7 @@ class TestDeploySpec:
     def test_carries_the_hardware_and_the_app_name(self) -> None:
         spec = build_deploy_spec(_VOYAGE, "vllm")
 
-        assert spec.app_name == "ep-voyage-4-nano"
+        assert spec.app_name == "ep-tree-voyage-4-nano"
         assert spec.gpu == "A10"
         assert spec.cpu == 4
         assert spec.memory_mb == 16384
@@ -313,7 +316,7 @@ class TestModalCliCommand:
             "endpoint",
             "create",
             "--name",
-            "qwen3-embedding-0-6b",
+            "tree-qwen3-embedding-0-6b",
             "--model",
             _QWEN,
             "--routing-region",
@@ -329,7 +332,7 @@ class TestModalCliCommand:
             "endpoint",
             "create",
             "--name",
-            "voyage-4-nano",
+            "tree-voyage-4-nano",
             "--model",
             _QWEN,
             "--custom-hf-repo",
@@ -377,7 +380,7 @@ class TestModalCliCommand:
             "endpoint",
             "stop",
             "-y",
-            "qwen3-embedding-0-6b",
+            "tree-qwen3-embedding-0-6b",
         ]
         # `-y` verified NECESSARY on the pinned client (modal 1.5.5,
         # modal/cli/app.py:573 `if not yes: ... confirm_or_suggest_yes`):
@@ -388,8 +391,42 @@ class TestModalCliCommand:
             "app",
             "stop",
             "-y",
-            "ep-qwen3-embedding-0-6b",
+            "ep-tree-qwen3-embedding-0-6b",
         ]
+        assert modal_cli_command("stop", voyage_entry, "vllm") == [
+            "modal",
+            "app",
+            "stop",
+            "-y",
+            "ep-tree-voyage-4-nano",
+        ]
+
+    def test_modal_cli_command_uses_prefixed_names(
+        self, qwen_entry, voyage_entry
+    ) -> None:
+        """One test for the namespace as the CLI sees it: every name in every
+        argv — and in the deploy spec the fallback scripts read — carries
+        ``tree-``, so nothing this project runs can name a Dedicated Endpoint
+        an operator created by hand (ADR-009 §3)."""
+
+        create = modal_cli_command("deploy", qwen_entry, "endpoint")
+
+        assert create[create.index("--name") + 1] == "tree-qwen3-embedding-0-6b"
+        assert modal_cli_command("stop", qwen_entry, "endpoint") == [
+            "modal",
+            "endpoint",
+            "stop",
+            "-y",
+            "tree-qwen3-embedding-0-6b",
+        ]
+        assert modal_cli_command("stop", voyage_entry, "vllm") == [
+            "modal",
+            "app",
+            "stop",
+            "-y",
+            "ep-tree-voyage-4-nano",
+        ]
+        assert build_deploy_spec(_VOYAGE, "vllm").app_name == "ep-tree-voyage-4-nano"
 
     def test_the_routing_region_is_pinned(self) -> None:
         assert MODAL_ROUTING_REGION == "eu-west"
@@ -474,7 +511,7 @@ class TestRedactArgv:
         ) == ["modal", "--custom-hf-token", "***", "--custom-hf-token", "***"]
 
     def test_an_argv_without_the_flag_is_unchanged(self) -> None:
-        argv = ["modal", "endpoint", "create", "--name", "voyage-4-nano"]
+        argv = ["modal", "endpoint", "create", "--name", "tree-voyage-4-nano"]
 
         assert redact_argv(argv) == argv
 
@@ -504,6 +541,60 @@ class TestHfTokenHint:
         assert hint.startswith(f"If {_VOYAGE} is a private or gated")
         assert "HF_TOKEN" in hint
         assert "https://huggingface.co/settings/tokens" in hint
+
+
+class TestRedactText:
+    """Belt and braces for CAPTURED ``modal`` output (ADR-009 §9)."""
+
+    def test_every_occurrence_of_the_token_becomes_stars(self) -> None:
+        text = f"downloading with {_FAKE_TOKEN}\nfailed with {_FAKE_TOKEN}"
+
+        redacted = redact_text(text, _FAKE_TOKEN)
+
+        assert _FAKE_TOKEN not in redacted
+        assert redacted.count("***") == 2
+
+    def test_an_empty_token_is_a_no_op(self) -> None:
+        """``"".replace`` would splice ``***`` between every character —
+        turning "no token set" into unreadable output."""
+
+        assert redact_text("modal: all good", "") == "modal: all good"
+
+
+class TestLooksGated:
+    """The gate on the ONE ``HF_TOKEN`` hint (ADR-009 §9). The false cases are
+    the live texts that printed the hint before this existed — none of them is
+    fixed by a token."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "401 Client Error",
+            "403 Forbidden",
+            "GatedRepoError: You must accept the licence",
+            "Cannot access gated repo for url https://huggingface.co/...",
+            "RepositoryNotFoundError: repo not found",
+            "You do not have access to model acme/private",
+        ],
+    )
+    def test_a_gated_looking_failure(self, text: str) -> None:
+        assert looks_gated(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "'voyageai/voyage-4-nano' is not available for dedicated Endpoints.",
+            "The custom model is not a servable checkpoint of base model "
+            "'Qwen/Qwen3-Embedding-0.6B': hidden_size 1024 != 2048",
+            "Health check on https://x/health answered 503.",
+            "",
+        ],
+    )
+    def test_a_failure_no_token_would_fix(self, text: str) -> None:
+        assert looks_gated(text) is False
+
+    def test_the_match_is_case_insensitive(self) -> None:
+        assert looks_gated("GATEDREPOERROR") is True
 
 
 class TestTruncateEmbedding:

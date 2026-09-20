@@ -656,6 +656,32 @@ It is ``serving``, not ``deployment``: the glossary's **Deployment** is a
 registered Prefect flow.
 """
 
+MODAL_NAME_PREFIX = "tree"
+"""The namespace EVERY Modal name this project creates carries (ADR-009 §3).
+
+Modal names the app of a Dedicated endpoint an operator creates by hand
+``ep-<slug of the model name>`` — exactly what our first derivation produced,
+so on 2026-09-20 an accidental ``modal deploy`` silently overwrote a hand-made
+``ep-qwen3-embedding-0-6b``. With the prefix our names are ``tree-<slug>`` /
+``ep-tree-<slug>``, so the collision is impossible BY CONSTRUCTION, and the
+prefix doubles as the ownership mark: ``deploy`` and ``stop`` refuse any name
+without it (``tree.models.modal_cli.assert_owned_name``).
+
+ONE constant beside the ONE derivation, not a YAML knob: a second project
+deploying into the same Modal workspace is what would justify configuring it.
+"""
+
+MODAL_APP_NAME_MAX_LENGTH = 63
+"""Longest ``app_name`` we accept, checked at load time (ADR-009 §3).
+
+Modal's own rule is ``len(name) <= 64`` while its error text says "shorter than
+64" (pinned client, modal 1.5.5: ``modal/_utils/name_utils.py:19-27`` and
+``:64``); 63 satisfies both readings. ``modal endpoint create --name`` adds no
+stricter limit — it sends the name unvalidated (``modal/cli/endpoint.py:255``),
+and https://modal.com/docs/cli/latest/endpoint.md documents none (read
+2026-09-20). With ``ep-tree-`` = 8 characters a slug may be at most 55.
+"""
+
 # `<org>/<name>` — the Hugging Face repo id shape. Also applied to
 # ``base_model`` (a model id from Modal's endpoint catalog).
 _REPO_ID_PATTERN = r"^[\w.-]+/[\w.-]+$"
@@ -793,25 +819,45 @@ class ModalEmbeddingModelConfig(BaseModel):
     )
 
     @property
-    def endpoint_name(self) -> str:
-        """The Dedicated endpoint's name: the part of ``repo_id`` after ``/``,
-        lower-cased, every run of non-``[a-z0-9]`` characters collapsed to a
-        single ``-``.
+    def name_slug(self) -> str:
+        """The part of ``repo_id`` after ``/``, lower-cased, every run of
+        non-``[a-z0-9]`` characters collapsed to a single ``-``.
 
         ``voyageai/voyage-4-nano`` -> ``voyage-4-nano``;
         ``Qwen/Qwen3-Embedding-0.6B`` -> ``qwen3-embedding-0-6b``.
+
+        The derived charset ``[a-z0-9-]`` is inside Modal's object-name charset
+        ``[a-zA-Z0-9-_.]``, so only the LENGTH can make a legal slug illegal.
         """
 
         suffix = self.repo_id.split("/")[-1].lower()
         return re.sub(r"[^a-z0-9]+", "-", suffix).strip("-")
 
     @property
+    def endpoint_name(self) -> str:
+        """The Dedicated endpoint's name: ``tree-<slug>``.
+
+        The ``tree-`` namespace (``MODAL_NAME_PREFIX``) is what keeps a deploy
+        of ours off an endpoint the operator made by hand — Modal would name
+        that one's app ``ep-<slug>``, ours is ``ep-tree-<slug>``.
+
+        ``voyageai/voyage-4-nano`` -> ``tree-voyage-4-nano``;
+        ``Qwen/Qwen3-Embedding-0.6B`` -> ``tree-qwen3-embedding-0-6b``.
+        """
+
+        return f"{MODAL_NAME_PREFIX}-{self.name_slug}"
+
+    @property
     def app_name(self) -> str:
         """The Modal app serving this model, on ALL three Serving paths.
 
         ASSUMPTION H1, proven live in ``tasks/141``: ``modal endpoint create
-        --name N`` yields the Modal app ``ep-N``. The derivation lives in this
-        ONE place so a wrong assumption costs a one-line change.
+        --name N`` yields the Modal app ``ep-N``. H1 needs the ``ep-<N>``
+        SHAPE, not a particular ``N``, so the prefix costs it nothing. The
+        derivation lives in this ONE place so a wrong assumption costs a
+        one-line change.
+
+        ``voyageai/voyage-4-nano`` -> ``ep-tree-voyage-4-nano``.
         """
 
         return f"ep-{self.endpoint_name}"
@@ -854,13 +900,30 @@ class ModalEmbeddingModelConfig(BaseModel):
     def _check_the_derived_names_are_not_empty(self) -> "ModalEmbeddingModelConfig":
         """``repo_id`` may legally end in punctuation (``a/---`` matches the
         pattern), but every such character is dropped by the name derivation —
-        leaving the endpoint nameless and the Modal app a bare ``ep-``."""
+        leaving the endpoint nameless and the Modal app a bare ``ep-tree-``.
 
-        if not self.endpoint_name:
+        It checks the SLUG, not ``endpoint_name``: the prefix is always there,
+        so a prefixed name is never empty and would mask the mistake."""
+
+        if not self.name_slug:
             raise ValueError(
                 f"repo_id {self.repo_id!r} derives an empty endpoint name: the "
                 "part after '/' must contain at least one ASCII letter or digit "
                 "(everything else is collapsed away)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_the_app_name_fits_modal(self) -> "ModalEmbeddingModelConfig":
+        """Modal rejects an object name longer than its limit, and it would do
+        so at ``modal deploy`` time — after the operator waited for an image
+        build. A load-time error costs nothing and names the fix."""
+
+        if len(self.app_name) > MODAL_APP_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"repo_id {self.repo_id!r} derives the Modal app name "
+                f"{self.app_name!r} ({len(self.app_name)} characters); Modal "
+                f"allows at most {MODAL_APP_NAME_MAX_LENGTH}."
             )
         return self
 
