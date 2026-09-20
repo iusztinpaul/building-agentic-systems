@@ -32,9 +32,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import openai as openai_sdk
 import pytest
 from openai import AsyncOpenAI
 
+from tree.config.app_config import app_config
 from tree.models import modal_embedding
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import get_catalog_entry, truncate_embedding
@@ -64,15 +66,42 @@ def _response(vectors: list[list[float]], total_tokens: int | None = 7) -> Any:
     )
 
 
+def _cold(status: int = 503) -> openai_sdk.InternalServerError:
+    """What a scaled-to-zero container looks like AT CALL TIME: the SDK maps
+    every status >= 500 to ``InternalServerError``."""
+
+    request = httpx.Request("POST", f"{_URL}/v1/embeddings")
+    return openai_sdk.InternalServerError(
+        "boom", response=httpx.Response(status, request=request), body=None
+    )
+
+
+def _bad_request() -> openai_sdk.BadRequestError:
+    """A 400 — never a cold start, so it must reach the existing wrapper."""
+
+    request = httpx.Request("POST", f"{_URL}/v1/embeddings")
+    return openai_sdk.BadRequestError(
+        "nope", response=httpx.Response(400, request=request), body=None
+    )
+
+
 class _Embeddings:
-    """``client.embeddings`` — records every call, answers the recorder."""
+    """``client.embeddings`` — records every call, answers the recorder.
+
+    ``answers`` is a queue for the re-warm tests (cold first, vectors after);
+    ``answer`` is the single standing answer every other test sets.
+    """
 
     def __init__(self, recorder: "_OpenAI") -> None:
         self._recorder = recorder
 
     async def create(self, **kwargs: Any) -> Any:
         self._recorder.calls.append(kwargs)
-        answer = self._recorder.answer
+        answer = (
+            self._recorder.answers.pop(0)
+            if self._recorder.answers
+            else self._recorder.answer
+        )
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -84,6 +113,7 @@ class _OpenAI:
     def __init__(self) -> None:
         self.built: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
+        self.answers: list[Any] = []
         self.answer: Any = _response([])
 
     def build(self, **kwargs: Any) -> SimpleNamespace:
@@ -102,10 +132,10 @@ def openai(mocker) -> _OpenAI:
 
 @pytest.fixture
 def server(mocker) -> SimpleNamespace:
-    """Patch the three ``modal_server`` helpers the client awaits.
+    """Patch the three coroutines the warm body awaits.
 
-    Patched on the CLIENT's bindings, so the real module (and the ``modal``
-    SDK it imports) is never exercised.
+    Patched on the CLIENT's bindings, so the real modules (and the ``modal``
+    SDK ``modal_server`` imports) are never exercised.
     """
 
     return SimpleNamespace(
@@ -115,9 +145,9 @@ def server(mocker) -> SimpleNamespace:
             new_callable=mocker.AsyncMock,
             return_value=_URL,
         ),
-        healthy=mocker.patch.object(
+        poll=mocker.patch.object(
             modal_embedding,
-            "wait_until_healthy",
+            "poll_health",
             new_callable=mocker.AsyncMock,
             return_value=1.5,
         ),
@@ -143,9 +173,18 @@ class _WireStub:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.vectors: list[list[float]] = [_vector(2048)]
+        #: While this answers True every POST is a 503 — a server that scaled
+        #: to zero between the warm and the call. A PERIOD, not a request
+        #: count: the real server stays cold until a poll boots it, so the
+        #: predicate is normally "until the re-warm polled it". With
+        #: ``max_retries=0`` the SDK turns each 503 into the
+        #: ``InternalServerError`` the gate classifies as cold.
+        self.cold_while: Any = lambda: False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if self.cold_while():
+            return httpx.Response(503, request=request, json={"error": "cold"})
         return httpx.Response(
             200,
             request=request,
@@ -192,30 +231,33 @@ async def wire(mocker) -> AsyncIterator[_WireStub]:
 
 
 class _SuspendingServer:
-    """The three ``modal_server`` helpers — counting, and yielding to the loop.
+    """The three coroutines of the warm body — counting, and yielding.
 
     An ``AsyncMock`` completes without ever suspending, so a ``gather`` over it
     runs each coroutine to completion in turn and a check-then-act race cannot
-    even appear. The real helpers hold a network round trip; these hold the
-    smallest thing that reschedules, ``asyncio.sleep(0)``.
+    even appear. The real ones hold a network round trip (the poll holds up to
+    600 s of them); these hold the smallest thing that reschedules,
+    ``asyncio.sleep(0)``.
     """
 
     def __init__(self) -> None:
         self.resolve_calls = 0
-        self.health_calls = 0
+        self.poll_calls = 0
         self.models_calls = 0
-        self.health_error: Exception | None = None
+        self.poll_error: Exception | None = None
 
     async def resolve(self, entry: Any) -> str:
         self.resolve_calls += 1
         await asyncio.sleep(0)
         return _URL
 
-    async def healthy(self, url: str, bearer: str, timeout: float) -> float:
-        self.health_calls += 1
+    async def poll(
+        self, url: str, headers: dict[str, str], *, deadline_s: float
+    ) -> float:
+        self.poll_calls += 1
         await asyncio.sleep(0)
-        if self.health_error is not None:
-            raise self.health_error
+        if self.poll_error is not None:
+            raise self.poll_error
         return 1.5
 
     async def served(self, url: str, bearer: str, default: str) -> str:
@@ -226,11 +268,11 @@ class _SuspendingServer:
 
 @pytest.fixture
 def suspending_server(mocker) -> _SuspendingServer:
-    """Patch the three ``modal_server`` helpers with suspending doubles."""
+    """Patch the warm body's three coroutines with suspending doubles."""
 
     helpers = _SuspendingServer()
     mocker.patch.object(modal_embedding, "resolve_server_url", helpers.resolve)
-    mocker.patch.object(modal_embedding, "wait_until_healthy", helpers.healthy)
+    mocker.patch.object(modal_embedding, "poll_health", helpers.poll)
     mocker.patch.object(modal_embedding, "served_model_id", helpers.served)
     return helpers
 
@@ -272,7 +314,7 @@ class TestInit:
         _model()
 
         server.resolve.assert_not_awaited()
-        server.healthy.assert_not_awaited()
+        server.poll.assert_not_awaited()
         assert openai.built == []
 
 
@@ -298,7 +340,7 @@ class TestUrlResolution:
         await model.embed(["dogs"])
 
         assert server.resolve.await_count == 1
-        assert server.healthy.await_count == 1
+        assert server.poll.await_count == 1
         assert server.served.await_count == 1
         assert len(openai.built) == 1
         assert len(openai.calls) == 2
@@ -367,15 +409,39 @@ class TestProxyAuth:
 
         assert openai.built[0]["api_key"] == _BEARER
 
-    async def test_health_is_awaited_with_the_bearer_and_the_timeout(
+    async def test_the_health_poll_gets_the_bearer_header_and_the_deadline(
         self, server, openai
     ) -> None:
-        model = _model(health_timeout=42.0)
+        """The poll sends the SAME ``Authorization: Bearer`` header the
+        embeddings call does (ADR-009 §4) — Modal's edge checks it before a GPU
+        container wakes."""
+
+        model = _model(warmup_deadline_s=42.0)
         openai.answer = _response([_vector(2048)])
 
         await model.embed(["cats"])
 
-        server.healthy.assert_awaited_once_with(_URL, _BEARER, 42.0)
+        server.poll.assert_awaited_once_with(
+            f"{_URL}/health",
+            {"Authorization": f"Bearer {_BEARER}"},
+            deadline_s=42.0,
+        )
+
+    async def test_the_deadline_defaults_to_the_configured_budget(
+        self, server, openai
+    ) -> None:
+        """ONE knob (ADR-009 §11), read at CONSTRUCTION — the client's own
+        300 s default is gone."""
+
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert (
+            server.poll.await_args.kwargs["deadline_s"]
+            == app_config.modal.warmup_deadline_s
+        )
 
     async def test_a_401_model_error_propagates_and_embeds_nothing(
         self, server, openai
@@ -383,8 +449,9 @@ class TestProxyAuth:
         """A wrong token is a configuration error: no retry can fix it, so the
         401 must NOT be re-typed into a retryable ``ExtractionError``."""
 
-        server.healthy.side_effect = ModelError(
-            "Modal answered 401 for .../health — the Proxy token is wrong"
+        server.poll.side_effect = ModelError(
+            "Health poll of .../health returned HTTP 401 — not a cold start, "
+            "giving up after 1 attempt."
         )
         model = _model()
 
@@ -397,18 +464,24 @@ class TestProxyAuth:
         assert "401" in str(excinfo.value)
         assert openai.calls == []
 
-    async def test_a_503_extraction_error_propagates_unchanged(
+    async def test_a_spent_deadline_propagates_as_a_retryable_error(
         self, server, openai
     ) -> None:
-        """A provisioning endpoint IS retryable — it stays an ExtractionError."""
+        """Story 5: a server that never comes up IS retryable — the spent
+        budget stays an ExtractionError, wrapped in nothing."""
 
-        server.healthy.side_effect = ExtractionError(
-            "Health check on .../health answered 503."
+        server.poll.side_effect = ExtractionError(
+            "Health poll of .../health gave up after 600s (deadline 600s); "
+            "last result: HTTP 503",
+            status_code=503,
         )
         model = _model()
 
-        with pytest.raises(ExtractionError, match="answered 503"):
+        with pytest.raises(ExtractionError) as excinfo:
             await model.embed(["cats"])
+
+        assert "gave up after 600s" in str(excinfo.value)
+        assert excinfo.value.status_code == 503
 
 
 class TestServedModel:
@@ -714,7 +787,7 @@ class TestWireContract:
         assert await model.embed([]) == []
 
         server.resolve.assert_not_awaited()
-        server.healthy.assert_not_awaited()
+        server.poll.assert_not_awaited()
         server.served.assert_not_awaited()
         assert wire.requests == []
 
@@ -722,47 +795,52 @@ class TestWireContract:
 class TestConcurrentInitialisation:
     """One shared model instance, several callers embedding at once.
 
-    ``wait_until_healthy`` holds ONE long request (up to ``health_timeout``,
-    300s by default) while a scaled-to-zero GPU container wakes. N racing
-    first ``embed()`` calls would mean N such wake-holding requests against a
-    billed endpoint plus N orphaned HTTP clients.
+    The **Warm gate** subsumed #140's double-checked ``_init_lock``: the URL
+    lookup, the health poll, the served-model discovery and the client
+    construction are ONE all-or-nothing single-flight body. N racing first
+    ``embed()`` calls would otherwise mean N poll loops (up to 600s each)
+    against a billed endpoint plus N orphaned HTTP clients.
     """
 
-    async def test_three_concurrent_first_embeds_initialise_exactly_once(
-        self, suspending_server, wire
+    @pytest.mark.parametrize("callers", [3, 8, 10])
+    async def test_concurrent_first_embeds_initialise_exactly_once(
+        self, suspending_server, wire, callers: int
     ) -> None:
+        """Story 4: eight (here also three and ten) coroutines embed on one
+        fresh instance — one URL lookup, one poll loop, one /v1/models call."""
+
         model = _model()
 
         results = await asyncio.gather(
-            model.embed(["a"]), model.embed(["b"]), model.embed(["c"])
+            *(model.embed([str(index)]) for index in range(callers))
         )
 
         assert suspending_server.resolve_calls == 1
-        assert suspending_server.health_calls == 1
+        assert suspending_server.poll_calls == 1
         assert suspending_server.models_calls == 1
-        assert [len(vectors[0]) for vectors in results] == [2048, 2048, 2048]
-        assert len(wire.requests) == 3
+        assert [len(vectors[0]) for vectors in results] == [2048] * callers
+        assert len(wire.requests) == callers
 
     async def test_a_failed_initialisation_is_retried_in_full(
         self, suspending_server, wire
     ) -> None:
-        """A 503 while the endpoint provisions must leave NOTHING half-built:
-        the next call re-runs resolve -> health -> /v1/models before it embeds."""
+        """A spent deadline must leave NOTHING half-built: the next call re-runs
+        resolve -> poll -> /v1/models before it embeds."""
 
-        suspending_server.health_error = ExtractionError("answered 503.")
+        suspending_server.poll_error = ExtractionError("gave up after 600s")
         model = _model()
 
-        with pytest.raises(ExtractionError, match="answered 503"):
+        with pytest.raises(ExtractionError, match="gave up after 600s"):
             await model.embed(["cats"])
         assert wire.requests == []
 
-        suspending_server.health_error = None
+        suspending_server.poll_error = None
         vectors = await model.embed(["cats"])
 
         assert suspending_server.resolve_calls == 2
-        assert suspending_server.health_calls == 2
-        # 1, not 2: the failed attempt never got past the health check, so the
-        # retry is the first time the served id is discovered at all.
+        assert suspending_server.poll_calls == 2
+        # 1, not 2: the failed attempt never got past the poll, so the retry is
+        # the first time the served id is discovered at all.
         assert suspending_server.models_calls == 1
         assert len(vectors[0]) == 2048
 
@@ -770,9 +848,9 @@ class TestConcurrentInitialisation:
         self, suspending_server, wire
     ) -> None:
         """No waiter may fall through to the embeddings call with an unbuilt
-        client — and each keeps the unwrapped health error."""
+        client — and each keeps the unwrapped poll error."""
 
-        suspending_server.health_error = ExtractionError("answered 503.")
+        suspending_server.poll_error = ExtractionError("gave up after 600s")
         model = _model()
 
         results = await asyncio.gather(
@@ -783,5 +861,154 @@ class TestConcurrentInitialisation:
         )
 
         assert [type(result) for result in results] == [ExtractionError] * 3
-        assert all("answered 503" in str(result) for result in results)
+        assert all("gave up after 600s" in str(result) for result in results)
         assert wire.requests == []
+
+    async def test_a_cancelled_waiter_leaves_the_instance_usable(
+        self, suspending_server, wire
+    ) -> None:
+        """An MCP tool call that its client gave up on must not deadlock the
+        next embed, nor leave a half-built client behind."""
+
+        model = _model()
+        callers = [asyncio.create_task(model.ensure_warm()) for _ in range(3)]
+        await asyncio.sleep(0)
+        # The winner is INSIDE the warm body and the other two are queued on
+        # its lock — without this the cancelled task might never reach it.
+        assert suspending_server.resolve_calls == 1
+
+        callers[-1].cancel()
+        results = await asyncio.gather(*callers, return_exceptions=True)
+
+        assert isinstance(results[-1], asyncio.CancelledError)
+        assert results[:-1] == [None, None]
+        assert suspending_server.poll_calls == 1
+        # The instance still works, on the warm the winner finished.
+        assert len((await model.embed(["again"]))[0]) == 2048
+        assert suspending_server.poll_calls == 1
+
+
+class TestWarmAtUse:
+    """ADR-009 §11: the warm flag is a HINT with an expiry — Modal scales the
+    server back to zero after its idle window."""
+
+    async def test_embed_rewarms_once_when_cold_again(
+        self, server, openai, caplog
+    ) -> None:
+        """Story 3: a long ingestion paused on a slow LLM stage, Modal scaled
+        the embedding server to zero, and the next embed answers 503. One
+        re-warm, one retry, no failed document."""
+
+        model = _model(dimensions=1024)
+        openai.answer = _response([_vector(2048)])
+        await model.embed(["warm me"])
+        openai.answers = [_cold(), _response([_vector(2048)])]
+
+        with caplog.at_level(logging.INFO):
+            returned = await model.embed(["cats"])
+
+        assert [len(vector) for vector in returned] == [1024]
+        assert server.poll.await_count == 2
+        warnings = [
+            record for record in caplog.records if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert (
+            warnings[0].getMessage()
+            == "Cold again: ep-tree-voyage-4-nano answered HTTP 503 — re-warming once"
+        )
+
+    async def test_embed_wraps_non_cold_errors(self, server, openai) -> None:
+        """A 400 is the caller's problem, not a cold start: no re-warm, and the
+        existing retryable wrapper still applies."""
+
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+        await model.embed(["warm me"])
+        openai.answer = _bad_request()
+
+        with pytest.raises(ExtractionError, match="Embedding call failed"):
+            await model.embed(["cats"])
+
+        assert server.poll.await_count == 1
+
+    async def test_the_retry_uses_the_client_the_re_warm_built(
+        self, server, openai
+    ) -> None:
+        """The re-warm replaces ``_client`` and the served id, so the retry must
+        read both at CALL time — a lambda closed over the old client would talk
+        to the dead one."""
+
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+        await model.embed(["warm me"])
+        server.served.return_value = "served/after-rewarm"
+        openai.answers = [_cold(), _response([_vector(2048)])]
+
+        await model.embed(["cats"])
+
+        assert len(openai.built) == 2
+        assert openai.calls[-1]["model"] == "served/after-rewarm"
+
+    async def test_model_exposes_ensure_warm_and_warm_key(self, server, openai) -> None:
+        """#149's pre-warm is duck-typed on ``ensure_warm`` and warms each
+        distinct Modal app once — hence ``warm_key``."""
+
+        model = _model()
+
+        await model.ensure_warm()
+        await model.ensure_warm()
+
+        assert model.warm_key == "ep-tree-voyage-4-nano"
+        assert server.poll.await_count == 1
+        assert server.resolve.await_count == 1
+
+    async def test_eight_concurrent_cold_embeds_share_one_re_warm(
+        self, suspending_server, wire, caplog
+    ) -> None:
+        """The burst the ADR's consequence names: eight extractions share ONE
+        gate, all eight get a 503 from a server that idled out, and exactly one
+        of them re-warms — nine re-warms would be nine boots of a billed GPU,
+        each with its own 600 s budget.
+
+        The REAL SDK over the wire (``max_retries=0``), so the 503 becomes the
+        ``InternalServerError`` the gate classifies.
+        """
+
+        model = _model()
+        await model.ensure_warm()
+        # Cold until something polls it warm AGAIN — the server's own state,
+        # not a request count.
+        wire.cold_while = lambda: suspending_server.poll_calls < 2
+
+        with caplog.at_level(logging.WARNING):
+            results = await asyncio.gather(
+                *(model.embed([str(index)]) for index in range(8))
+            )
+
+        assert [len(vectors[0]) for vectors in results] == [2048] * 8
+        # 2, not 9: one warm at the start, one re-warm for the whole burst.
+        assert suspending_server.resolve_calls == 2
+        assert suspending_server.poll_calls == 2
+        assert suspending_server.models_calls == 2
+        # At least one retry on top of the eight calls. How many of the eight
+        # see the 503 at all depends on how the loop interleaves them — the
+        # deterministic "all eight answer cold" proof is the gate's own
+        # ``test_eight_concurrent_cold_callers_log_one_warning``.
+        assert len(wire.requests) >= 9
+        warnings = [
+            record for record in caplog.records if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+
+    async def test_empty_batch_never_warms(self, server, openai) -> None:
+        """An empty call must never wake a scaled-to-zero GPU: the guard sits
+        ABOVE the gate."""
+
+        model = _model()
+
+        assert await model.embed([]) == []
+
+        server.poll.assert_not_awaited()
+        server.resolve.assert_not_awaited()
+        assert openai.calls == []

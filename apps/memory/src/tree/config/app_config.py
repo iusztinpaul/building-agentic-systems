@@ -953,6 +953,12 @@ class ModalConfig(BaseModel):
         default_factory=list,
         description="The Embedding catalog — one entry per Modal-hosted model.",
     )
+    warmup_deadline_s: float = Field(
+        default=600.0,
+        ge=1.0,
+        description="Total budget (seconds) polling ONE cold Modal server's "
+        "/health before failing; per server.",
+    )
 
     @model_validator(mode="after")
     def _check_entries_are_unique(self) -> "ModalConfig":

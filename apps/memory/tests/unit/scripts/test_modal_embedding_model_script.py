@@ -661,6 +661,49 @@ class TestSmokeTestCommand:
         assert result.exit_code == 1
         assert "expected 2048 dims, got 1024" in _output(result, caplog)
 
+    def test_a_wrong_proxy_token_exits_one_with_the_polls_message(
+        self, cli_module, smoke, caplog
+    ) -> None:
+        """Story 2 (#144): the health poll gives up after ONE attempt on a 401,
+        and the operator reads WHICH variables to check — within seconds, not
+        after the whole 600 s budget."""
+
+        smoke.side_effect = ModelError(
+            "Health poll of https://acme--x.modal.run/health returned HTTP 401 "
+            "— not a cold start, giving up after 1 attempt. Check "
+            "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET in .env."
+        )
+
+        result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
+
+        output = _output(result, caplog)
+        assert result.exit_code == 1
+        assert "giving up after 1 attempt" in output
+        assert "MODAL_PROXY_TOKEN_ID" in output
+        # ADR-009 §9: the HF_TOKEN hint never fires under a wrong Proxy token,
+        # which is exactly why a fail-fast poll raises ModelError, not
+        # ExtractionError.
+        assert "HF_TOKEN" not in output
+
+    def test_a_spent_warmup_budget_exits_one_with_the_polls_message(
+        self, cli_module, smoke, caplog
+    ) -> None:
+        """Story 5 (#144): a server that never comes up is reported as the
+        transient failure it is, naming the budget it spent."""
+
+        smoke.side_effect = ExtractionError(
+            "Health poll of https://acme--x.modal.run/health gave up after 600s "
+            "(deadline 600s); last result: HTTP 503",
+            status_code=503,
+        )
+
+        result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
+
+        output = _output(result, caplog)
+        assert result.exit_code == 1
+        assert "gave up after 600s (deadline 600s)" in output
+        assert "last result: HTTP 503" in output
+
 
 @pytest.mark.usefixtures("with_token")
 class TestHfToken:

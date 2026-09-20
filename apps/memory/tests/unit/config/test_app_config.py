@@ -18,6 +18,7 @@ from tree.config.app_config import (
     HdbscanConfig,
     MemoryConfig,
     MODAL_NAME_PREFIX,
+    ModalConfig,
     ModalEmbeddingModelConfig,
     ObservabilityConfig,
     QueryConfig,
@@ -1111,6 +1112,33 @@ class TestModalCatalog:
         assert config.modal.autoinference_utils_version == "0.2.6"
         assert config.modal.engines["vllm"].version == "0.17.1"
         assert config.modal.engines["sglang"].version == "0.5.20"
+
+    def test_modal_warmup_deadline_default_and_override(
+        self, tmp_path, monkeypatch, frozen_config_path
+    ) -> None:
+        """ADR-009 §11: ONE budget for waiting out a cold start — the client's
+        300 s and the smoke test's 1200 s are gone. 600 s is ~3x the slowest
+        boot measured live (199 s, a 35B LLM)."""
+
+        # Default: the typed default, the frozen fixture and the real
+        # configs/default.yaml all agree on 600.
+        assert ModalConfig().warmup_deadline_s == 600.0
+        assert load_app_config(frozen_config_path).modal.warmup_deadline_s == 600.0
+        assert load_app_config(_DEFAULT_CONFIG_PATH).modal.warmup_deadline_s == 600.0
+
+        # Override: a first deploy that also downloads 16 GB of weights gets a
+        # longer budget for ONE command, with no file edit (story 6).
+        custom = tmp_path / "modal.yaml"
+        custom.write_text("modal:\n  warmup_deadline_s: 600\n")
+        monkeypatch.setenv("TREE_MODAL__WARMUP_DEADLINE_S", "45")
+        assert load_app_config(custom).modal.warmup_deadline_s == 45.0
+
+        # Bounds: a 0 s budget would fail every cold start on its first poll,
+        # which is the bug this knob exists to fix.
+        monkeypatch.setenv("TREE_MODAL__WARMUP_DEADLINE_S", "0")
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+        assert "warmup_deadline_s" in str(excinfo.value)
 
     def test_serving_defaults_to_endpoint(self) -> None:
         """Story 1: a minimal entry (repo_id + base_model + dimensions) is a

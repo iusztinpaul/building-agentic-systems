@@ -1,9 +1,11 @@
 """Talking to a served **Embedding catalog** model — the same way on every
 **Serving path** (ADR-009 §3/§4).
 
-ONE URL lookup, ONE authenticated health check, ONE served-model discovery and
-ONE smoke test, shared by the deploy driver (``scripts/modal_embedding_model.py``)
-and the ``ModalEmbeddingModel`` client (#140). They rest on assumption H1 — a
+ONE URL lookup, ONE served-model discovery and ONE smoke test, shared by the
+deploy driver (``scripts/modal_embedding_model.py``) and the
+``ModalEmbeddingModel`` client (#140); waiting out a cold start belongs to the
+**Warm gate**'s poller (:mod:`tree.models.modal_warmup`), which the smoke test
+below and the client both call. They rest on assumption H1 — a
 **Dedicated endpoint** named ``N`` is the Modal app ``ep-N`` with a server class
 ``Server``, which the fallback scripts copy — so the caller never reads
 ``serving``. Every ``N`` of ours is ``tree-<slug>``, hence every app is
@@ -15,13 +17,12 @@ client only — never by :mod:`tree.models.modal_catalog` and never at MCP boot.
 
 import logging
 import math
-import time
 
 import aiohttp
 import modal
 from pydantic import BaseModel, Field
 
-from tree.config.app_config import ModalEmbeddingModelConfig
+from tree.config.app_config import ModalEmbeddingModelConfig, app_config
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     EMBEDDING_SERVER_NAME,
@@ -30,6 +31,7 @@ from tree.models.modal_catalog import (
     prompt_for,
     truncate_embedding,
 )
+from tree.models.modal_warmup import poll_health
 
 logger = logging.getLogger(__name__)
 
@@ -94,46 +96,6 @@ async def resolve_server_url(entry: ModalEmbeddingModelConfig) -> str:
     return url.rstrip("/").removesuffix("/v1").rstrip("/")
 
 
-async def wait_until_healthy(url: str, bearer: str, timeout: float) -> float:
-    """Seconds until ``GET {url}/health`` answered 200 through proxy auth.
-
-    ONE long-held request rather than a poll loop: Modal's edge holds the
-    request while a scaled-to-zero container wakes, which is the cold start we
-    are measuring.
-
-    Raises:
-        ModelError: 401 — the **Proxy token** is wrong or missing, which no
-            amount of waiting fixes.
-        ExtractionError: any other status or a transport failure (transient:
-            a provisioning endpoint, a crashed engine).
-    """
-
-    started = time.monotonic()
-    try:
-        async with aiohttp.ClientSession(
-            headers={"Authorization": f"Bearer {bearer}"}
-        ) as session:
-            async with session.get(
-                f"{url}/health", timeout=aiohttp.ClientTimeout(total=timeout)
-            ) as response:
-                status = response.status
-    except Exception as exc:  # noqa: BLE001 — a transport failure is retryable, like a 5xx
-        raise ExtractionError(f"Health check on {url}/health failed: {exc}") from exc
-
-    elapsed = time.monotonic() - started
-    if status == 200:
-        return elapsed
-    if status == 401:
-        raise ModelError(
-            f"Modal answered 401 for {url}/health — the Proxy token is wrong "
-            "or missing. Check MODAL_PROXY_TOKEN_ID and "
-            "MODAL_PROXY_TOKEN_SECRET in .env."
-        )
-    raise ExtractionError(
-        f"Health check on {url}/health answered {status}.", status_code=status
-    )
-
-
 async def served_model_id(url: str, bearer: str, default: str) -> str:
     """The model id the server answers to, discovered from ``/v1/models``.
 
@@ -178,7 +140,7 @@ async def served_model_id(url: str, bearer: str, default: str) -> str:
     return served[0]
 
 
-async def smoke_test(model: str, health_timeout: float = 1200.0) -> SmokeTestReport:
+async def smoke_test(model: str, deadline_s: float | None = None) -> SmokeTestReport:
     """Prove one served model end-to-end, on whatever path serves it.
 
     Health through proxy auth, the DISCOVERED model id, three prompted inputs,
@@ -186,16 +148,31 @@ async def smoke_test(model: str, health_timeout: float = 1200.0) -> SmokeTestRep
     ordering at the truncated width the memory stores, and a 401 without the
     token.
 
+    The health check is the SAME poller the clients use (ADR-009 §11), so a
+    smoke test right after a deploy waits the cold start out instead of failing
+    in a second on the 503 a scaled-to-zero server answers. ``deadline_s``
+    defaults to ``modal.warmup_deadline_s``; a first-ever deploy that also
+    downloads weights gets a longer budget for ONE command with
+    ``TREE_MODAL__WARMUP_DEADLINE_S=1200``.
+
     Raises:
-        ModelError: any assertion failed (the message carries the numbers).
-        ExtractionError: the server was unreachable or unhealthy.
+        ModelError: any assertion failed (the message carries the numbers), or
+            the health poll failed on something waiting cannot fix.
+        ExtractionError: the server was unreachable, or still cold when the
+            budget ran out.
     """
 
     entry = get_catalog_entry(model)
     bearer = modal_proxy_bearer()
 
     url = await resolve_server_url(entry)
-    elapsed = await wait_until_healthy(url, bearer, health_timeout)
+    elapsed = await poll_health(
+        f"{url}/health",
+        {"Authorization": f"Bearer {bearer}"},
+        deadline_s=(
+            app_config.modal.warmup_deadline_s if deadline_s is None else deadline_s
+        ),
+    )
     logger.info("health 200 after %.1fs", elapsed)
 
     served = await served_model_id(url, bearer, entry.repo_id)

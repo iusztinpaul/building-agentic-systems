@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tree.models.modal_embedding import ModalEmbeddingModel
+from tree.models.modal_warmup import WarmGate
 from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
@@ -134,9 +135,11 @@ class TestModalUsageRecording:
 
     def _model(self) -> ModalEmbeddingModel:
         m = ModalEmbeddingModel(proxy_token="wk-1.ws-2", model="voyageai/voyage-4-nano")
-        # Bypass lazy URL resolution, the health warm-up and model discovery.
+        # A REAL Warm gate over a no-op warm body: the call path (single
+        # flight + cold-start recovery) stays exercised, while the URL lookup,
+        # the health poll and the served-model discovery are bypassed.
         m._client = MagicMock()
-        m._ensure_initialised = AsyncMock()  # type: ignore[method-assign]
+        m._gate = WarmGate(AsyncMock(), label="ep-tree-voyage-4-nano")
         return m
 
     async def test_records_token_usage_with_zero_cost(self, mocker) -> None:

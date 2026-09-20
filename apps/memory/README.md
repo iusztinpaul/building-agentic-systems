@@ -630,6 +630,15 @@ make memory-deploy-embedding-model-test MODEL=Qwen/Qwen3-Embedding-0.6B   # heal
 make memory-deploy-embedding-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B   # stop paying for it
 ```
 
+The smoke test polls `/health` until the container is up — a scaled-to-zero
+Modal server answers HTTP 503 in about a second and boots *because* it is
+polled — for up to `modal.warmup_deadline_s` (600 s; ~3x the slowest boot
+measured). A first-ever deploy that also downloads tens of GB of weights can
+outlast that: raise the budget for one command, without editing a file, with
+`make memory-deploy-embedding-model-test MODEL=<repo_id> TREE_MODAL__WARMUP_DEADLINE_S=1200`.
+A 401/403 (wrong **Proxy token**) or a 404 is never waited out — it fails after
+one poll.
+
 **4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
 `models.resolution_embedding`) in `configs/default.yaml` to
 `{provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`. The

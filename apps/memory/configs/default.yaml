@@ -198,6 +198,8 @@ modal:
       # PyPI's latest is 0.29.0, unverified for it — #141 owns the live bump.
     sglang:
       version: "0.5.20" # latest on PyPI, 2026-09-19
+  # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
+  warmup_deadline_s: 600
   embedding_models:
     # Qwen3-Embedding-0.6B IS in Modal's endpoint catalog, so it needs no code.
     - repo_id: Qwen/Qwen3-Embedding-0.6B

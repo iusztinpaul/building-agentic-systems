@@ -1,6 +1,8 @@
 """Unit tests for ``tree.models.modal_server`` — the ONE URL lookup, the ONE
-authenticated health check and the ONE smoke test every **Serving path**
-shares (ADR-009 §3/§4).
+served-model discovery and the ONE smoke test every **Serving path** shares
+(ADR-009 §3/§4). Waiting out a cold start lives in ``tree.models.modal_warmup``
+and is tested there; here what matters is that the smoke test calls THAT
+poller, with the configured budget (ADR-009 §11).
 
 No test touches the network: ``modal.Server`` and ``aiohttp.ClientSession``
 are replaced by fakes, and the **Proxy token** is always the fake pair
@@ -20,14 +22,14 @@ import aiohttp
 import pytest
 from pydantic import SecretStr
 
+from tree.config.app_config import app_config
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.models import modal_catalog
 from tree.models.modal_server import (
     resolve_server_url,
     served_model_id,
     smoke_test,
-    wait_until_healthy,
 )
-from tree.models import modal_catalog
 from tree.models.modal_catalog import get_catalog_entry
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
@@ -240,49 +242,6 @@ class TestResolveServerUrl:
         assert "make memory-deploy-embedding-model" in str(excinfo.value)
 
 
-class TestWaitUntilHealthy:
-    async def test_sends_the_proxy_token_and_returns_the_elapsed_seconds(
-        self, http
-    ) -> None:
-        http.responses = [_FakeResponse(200)]
-
-        elapsed = await wait_until_healthy(_URL, _BEARER, 30.0)
-
-        assert elapsed >= 0
-        assert http.session_kwargs[0]["headers"] == {
-            "Authorization": f"Bearer {_BEARER}"
-        }
-        assert http.calls[0]["url"] == f"{_URL}/health"
-
-    async def test_401_names_both_env_vars_and_is_not_retryable(self, http) -> None:
-        """A wrong **Proxy token** is an operator error, not a transient one —
-        so it must NOT surface as the retryable ``ExtractionError``."""
-
-        http.responses = [_FakeResponse(401)]
-
-        with pytest.raises(ModelError) as excinfo:
-            await wait_until_healthy(_URL, _BEARER, 30.0)
-
-        assert not isinstance(excinfo.value, ExtractionError)
-        message = str(excinfo.value)
-        assert "MODAL_PROXY_TOKEN_ID" in message
-        assert "MODAL_PROXY_TOKEN_SECRET" in message
-
-    async def test_any_other_status_is_transient(self, http) -> None:
-        http.responses = [_FakeResponse(503)]
-
-        with pytest.raises(ExtractionError) as excinfo:
-            await wait_until_healthy(_URL, _BEARER, 30.0)
-
-        assert "503" in str(excinfo.value)
-
-    async def test_a_transport_error_is_transient(self, http) -> None:
-        http.responses = [TimeoutError("timed out")]
-
-        with pytest.raises(ExtractionError):
-            await wait_until_healthy(_URL, _BEARER, 30.0)
-
-
 class TestServedModelId:
     """A managed recipe — not us — names the model it serves, and vLLM rejects
     an unknown ``model`` (ADR-009 §3)."""
@@ -311,6 +270,93 @@ class TestServedModelId:
             assert await served_model_id(_URL, _BEARER, _QWEN) == _QWEN
 
         assert [r.levelname for r in caplog.records] == ["WARNING"]
+
+
+@pytest.fixture
+def poll(mocker):
+    """Patch the SHARED poller (ADR-009 §11) on the smoke test's binding.
+
+    With it patched, ``_smoke_responses``' first canned 200 is not consumed —
+    hence ``responses[1:]`` in these tests.
+    """
+
+    return mocker.patch(
+        "tree.models.modal_server.poll_health",
+        new_callable=mocker.AsyncMock,
+        return_value=113.0,
+    )
+
+
+@pytest.mark.usefixtures("proxy_token", "modal_server")
+class TestSmokeTestWarmUp:
+    """The smoke test waits out the cold start on the SAME poller the client
+    uses — before #144 it failed in ~1 s on the 503 a scaled-to-zero server
+    answers, right after the deploy that made it worth testing."""
+
+    async def test_the_poll_gets_the_health_url_the_bearer_and_the_budget(
+        self, http, poll, caplog
+    ) -> None:
+        """Story 1: no new CLI flag — the ONE knob is the budget, and the
+        operator raises it for one command with TREE_MODAL__WARMUP_DEADLINE_S."""
+
+        http.responses = _smoke_responses(_voyage_vectors())[1:]
+
+        with caplog.at_level(logging.INFO):
+            report = await smoke_test(_VOYAGE)
+
+        poll.assert_awaited_once_with(
+            f"{_URL}/health",
+            {"Authorization": f"Bearer {_BEARER}"},
+            deadline_s=app_config.modal.warmup_deadline_s,
+        )
+        # The poll's own measurement is what the report and the log carry.
+        assert report.cold_start_seconds == 113.0
+        assert "health 200 after 113.0s" in [r.getMessage() for r in caplog.records]
+
+    async def test_an_explicit_deadline_wins(self, http, poll) -> None:
+        http.responses = _smoke_responses(_voyage_vectors())[1:]
+
+        await smoke_test(_VOYAGE, deadline_s=1200.0)
+
+        assert poll.await_args.kwargs["deadline_s"] == 1200.0
+
+    async def test_a_wrong_proxy_token_fails_fast_and_embeds_nothing(
+        self, http, poll
+    ) -> None:
+        """Story 2: ONE poll, then exit — not 600 s of waiting on a 401."""
+
+        poll.side_effect = ModelError(
+            f"Health poll of {_URL}/health returned HTTP 401 — not a cold "
+            "start, giving up after 1 attempt. Check MODAL_PROXY_TOKEN_ID and "
+            "MODAL_PROXY_TOKEN_SECRET in .env."
+        )
+        http.responses = _smoke_responses(_voyage_vectors())[1:]
+
+        with pytest.raises(ModelError) as excinfo:
+            await smoke_test(_VOYAGE)
+
+        # Exactly ModelError: the driver's ExtractionError branch is the one
+        # that prints the HF_TOKEN hint, and a 401 here is a Proxy token.
+        assert type(excinfo.value) is ModelError
+        assert "giving up after 1 attempt" in str(excinfo.value)
+        assert http.calls == []
+
+    async def test_a_spent_budget_is_retryable(self, http, poll) -> None:
+        """Story 5: a server that never comes up — a transient failure."""
+
+        poll.side_effect = ExtractionError(
+            f"Health poll of {_URL}/health gave up after 600s (deadline 600s); "
+            "last result: HTTP 503",
+            status_code=503,
+        )
+        http.responses = _smoke_responses(_voyage_vectors())[1:]
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await smoke_test(_VOYAGE)
+
+        assert excinfo.value.status_code == 503
+        assert "gave up after 600s" in str(excinfo.value)
+        assert http.calls == []
 
 
 @pytest.mark.usefixtures("proxy_token", "modal_server")

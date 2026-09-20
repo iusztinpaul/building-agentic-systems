@@ -129,6 +129,7 @@ modal:
       version: "0.17.1"
     sglang:
       version: "0.5.20"
+  warmup_deadline_s: 600
   embedding_models:
     # A minimal Dedicated-endpoint entry: no serving line (endpoint is the
     # default), no script-only fields.
