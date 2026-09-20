@@ -19,6 +19,7 @@ from tree.models.get_model import (
     search_embedding_identity,
 )
 from tree.models.modal_embedding import ModalEmbeddingModel
+from tree.models.modal_llm import ModalLLM
 from tree.models.sentence_transformer import SentenceTransformerEmbeddingModel
 from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
@@ -26,6 +27,10 @@ from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingMod
 # An **Embedding catalog** id: the Modal provider resolves its entry at
 # construction, so the Modal tests cannot use an arbitrary model name.
 _CATALOG_MODEL = "voyageai/voyage-4-nano"
+
+# The LLM half of the same catalog (``modal.llm_models``). ``get_llm`` resolves
+# the entry at construction too, so the id must be a real one.
+_CATALOG_LLM = "LiquidAI/LFM2.5-350M"
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +105,54 @@ class TestGetLLM:
     def test_raises_for_unknown_provider(self) -> None:
         with pytest.raises(ValueError, match="Unknown LLM provider: unknown"):
             get_llm(provider="unknown")
+
+    def test_returns_modal_llm_for_a_catalog_id(self, mocker) -> None:
+        """ADR-009 §10: ``models.llm: {provider: modal, model: <repo_id>}``
+        switches the LLM exactly like the embedding blocks."""
+
+        mocker.patch("tree.models.get_model.app_config.models.llm.model", _CATALOG_LLM)
+
+        result = get_llm(provider="modal")
+
+        assert isinstance(result, ModalLLM)
+        # Built from the CATALOG entry, not from the raw id.
+        assert result.warm_key == "ep-tree-lfm2-5-350m"
+        # The joined Proxy token halves — what Modal's edge checks.
+        assert result._proxy_token == "wk-1.ws-2"
+
+    def test_the_provider_may_come_from_the_config_alone(self, mocker) -> None:
+        """Story 5: ``TREE_MODELS__LLM__PROVIDER=modal
+        TREE_MODELS__LLM__MODEL=<repo_id>`` switches ONE run — the factory is
+        called with no argument at all."""
+
+        mocker.patch("tree.models.get_model.app_config.models.llm.provider", "modal")
+        mocker.patch(
+            "tree.models.get_model.app_config.models.llm.model", "Qwen/Qwen3.5-0.8B"
+        )
+
+        result = get_llm()
+
+        assert isinstance(result, ModalLLM)
+        assert result.warm_key == "ep-tree-qwen3-5-0-8b"
+
+    def test_a_non_catalog_model_fails_before_any_gpu_wakes(self, mocker) -> None:
+        """Story 3: the Gemini default model id under ``provider: modal`` is a
+        typo, and the catalog says so — no network call, no deploy."""
+
+        with pytest.raises(ModelError, match="Unknown Modal model"):
+            get_llm(provider="modal")
+
+    def test_a_half_proxy_token_fails_before_a_client_exists(self, mocker) -> None:
+        """A half token is no token: Modal answers 401 before any container
+        wakes, so the factory refuses to build the model."""
+
+        mocker.patch.object(
+            modal_catalog.settings, "modal_proxy_token_secret", SecretStr("")
+        )
+        mocker.patch("tree.models.get_model.app_config.models.llm.model", _CATALOG_LLM)
+
+        with pytest.raises(ModelError, match="Modal proxy token is required"):
+            get_llm(provider="modal")
 
 
 class TestGetEmbeddingModel:
@@ -417,12 +470,15 @@ class TestModalBranch:
 
     def test_importing_the_factory_does_not_import_modal(self) -> None:
         """MCP cold-boot budget: the Modal SDK is imported inside the branch,
-        never at module level. Run in a fresh interpreter so another test's
-        import of the client cannot mask a regression."""
+        never at module level — for BOTH Modal clients. Run in a fresh
+        interpreter so another test's import of a client cannot mask a
+        regression."""
 
         probe = (
             "import sys, tree.models.get_model; "
-            "assert 'modal' not in sys.modules, 'modal'"
+            "assert 'modal' not in sys.modules, 'modal'; "
+            "assert 'tree.models.modal_llm' not in sys.modules, 'modal_llm'; "
+            "assert 'tree.models.modal_embedding' not in sys.modules, 'modal_embedding'"
         )
 
         result = subprocess.run(

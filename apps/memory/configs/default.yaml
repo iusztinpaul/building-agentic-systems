@@ -67,6 +67,10 @@ models:
   llm:
     provider: gemini
     model: gemini-3.1-flash-lite
+  # Serve the LLM yourself instead (ADR-009 §10) — any id from
+  # `modal.llm_models` below; deploy it first:
+  #   make memory-deploy-model MODEL=LiquidAI/LFM2.5-350M
+  # llm: {provider: modal, model: LiquidAI/LFM2.5-350M}
   # Transient embedding used only by resolution's semantic stage
   # (computed on the entity NAME, dropped afterward, never persisted).
   resolution_embedding:

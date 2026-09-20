@@ -61,6 +61,17 @@ _LAZY_MODULES = ["umap", "sklearn"]
 # The MODE-NEUTRAL MCP App layer every visualization tool delivers through.
 _NEUTRAL_MODULE = "tree.mcp.viz_app"
 
+# The Modal SDK and the two clients that pull it (ADR-009 §10): lazy-imported
+# inside ``get_model``'s dispatch branches, never at module level. Importing
+# ``modal`` on the cloud MCP server's boot path is what blew Horizon's 60 s
+# port-readiness window once already (the torch regression), and a server on
+# ``voyage``/``gemini`` must not pay for a provider it never builds.
+_MODAL_MODULES = [
+    "modal",
+    "tree.models.modal_embedding",
+    "tree.models.modal_llm",
+]
+
 _MARKER = "__PROBE__"
 
 _PROBE = textwrap.dedent(
@@ -85,6 +96,9 @@ _PROBE = textwrap.dedent(
                 m for m in {_LAZY_MODULES!r} if m in sys.modules
             ],
             "neutral_module_imported": {_NEUTRAL_MODULE!r} in sys.modules,
+            "modal_modules_imported": [
+                m for m in {_MODAL_MODULES!r} if m in sys.modules
+            ],
             "embedding_map_parameters": sorted(
                 (await server.mcp.get_tool("visualize_memory_embeddings"))
                 .parameters["properties"]
@@ -142,6 +156,14 @@ class TestRegisteredToolSet:
         # ADR-007 §6: the surfaces READ stored coordinates. Importing umap here
         # would put the ~40 s cold numba compile on the MCP server's boot path.
         assert _probe(mode)["lazy_modules_imported"] == []
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_no_mode_imports_the_modal_sdk_or_its_clients(self, mode: str) -> None:
+        # ADR-009 §10: both Modal clients are lazy-imported inside
+        # ``get_model``'s branches. A top-level import in either one would put
+        # the Modal SDK on every MCP cold boot, for a server that talks to
+        # Voyage and Gemini.
+        assert _probe(mode)["modal_modules_imported"] == []
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     def test_both_modes_import_the_neutral_mcp_app_layer(self, mode: str) -> None:

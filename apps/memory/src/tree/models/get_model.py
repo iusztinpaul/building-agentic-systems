@@ -9,8 +9,8 @@ from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
 # NOTE: ``sentence_transformers`` (→ transformers/torch/sklearn, ~7s import) and
-# ``modal_embedding`` are imported LAZILY inside their dispatch branches below,
-# never at module level. The cloud MCP server runs ``voyage``/``gemini`` and must
+# the two Modal clients (``modal_embedding`` / ``modal_llm``) are imported
+# LAZILY inside their dispatch branches below, never at module level. The cloud MCP server runs ``voyage``/``gemini`` and must
 # bind its port within Horizon's 60s readiness window; dragging torch into every
 # boot blew that budget on cold serverless containers and the process was killed
 # mid-import. Keeping these provider imports inside their branches means the
@@ -25,6 +25,17 @@ def get_llm(provider: str | None = None) -> BaseLLM:
     if provider == "gemini":
         return GeminiLLM(
             api_key=settings.google_api_key.get_secret_value(),
+            model=app_config.models.llm.model,
+        )
+    if provider == "modal":
+        # Lazy import: keeps the Modal SDK off the common boot path. See the
+        # module note — the client pulls `modal`, which the MCP cold boot must
+        # not pay for.
+        from tree.models.modal_catalog import modal_proxy_bearer
+        from tree.models.modal_llm import ModalLLM
+
+        return ModalLLM(
+            proxy_token=modal_proxy_bearer(),
             model=app_config.models.llm.model,
         )
     raise ValueError(f"Unknown LLM provider: {provider}")

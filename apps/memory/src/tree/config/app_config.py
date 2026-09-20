@@ -28,6 +28,16 @@ _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
 
 
 class LLMConfig(BaseModel):
+    """Which LLM every ``generate_json`` call goes to (ADR-009 §10).
+
+    ``provider: gemini | modal``, switched in YAML exactly like the two
+    embedding blocks; Gemini stays the default. Under ``modal``, ``model`` is a
+    **Modal catalog** ``repo_id`` from ``modal.llm_models`` (deploy it first
+    with ``make memory-deploy-model MODEL=<repo_id>``) — an id that is unknown,
+    or that names an embedding entry, fails at construction before any GPU
+    wakes.
+    """
+
     provider: str = "gemini"
     model: str = "gemini-2.5-flash-lite"
 

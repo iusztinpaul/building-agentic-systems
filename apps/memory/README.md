@@ -701,6 +701,14 @@ wider (e.g. `voyageai/voyage-4-nano` at 2048) still fits the 1024-d vector
 index, and a mismatch between the catalog and the server fails loudly instead of
 writing a wrong-width vector.
 
+For an **LLM** it is the same switch one block up: `models.llm: {provider: modal,
+model: LiquidAI/LFM2.5-350M}` (any id from `modal.llm_models`) sends every
+`generate_json` call to your own server, in JSON mode, instead of to Gemini —
+which stays the default. For one run without editing the file:
+`TREE_MODELS__LLM__PROVIDER=modal TREE_MODELS__LLM__MODEL=<repo_id>`. Whether a
+small model is good enough for extraction is yours to judge; the client
+guarantees the plumbing, not the quality.
+
 A Dedicated endpoint's min/max containers are dashboard-only settings; to change
 what was created, stop the endpoint first and deploy again.
 
