@@ -86,17 +86,17 @@ lint-check: # Check code for linting issues without fixing them using ruff linte
 #
 ### --- Modal ---
 
-deploy-embedding-model: # Serve ONE Embedding catalog model on Modal as its own app (ep-tree-<model>) via the entry's Serving path — endpoint (Modal Dedicated Endpoint, default) | sglang | vllm (our fallback scripts). Requires MODEL=<repo_id>, e.g. MODEL=Qwen/Qwen3-Embedding-0.6B. Optional SERVING=endpoint|sglang|vllm overrides the YAML for this command only (the client still reads the YAML). DRY_RUN=yes logs the (redacted) modal command and exits 0 without starting modal. FORCE=yes deploys over a name that is already live on Modal — it never overrides the `tree-` ownership check.
-	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model MODEL=<repo_id> [SERVING=endpoint|sglang|vllm] [DRY_RUN=yes] [FORCE=yes]'; exit 1; fi
-	uv run python scripts/modal_embedding_model.py deploy --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",) $(if $(filter yes,$(DRY_RUN)),--dry-run,) $(if $(filter yes,$(FORCE)),--force,)
+deploy-model: # Serve ONE Modal catalog model — embedding or LLM — on Modal as its own app (ep-tree-<model>). The driver asks Modal first and logs ONE `Routing ...` line: a Dedicated Endpoint when Modal can serve the model, else our App for the entry's kind (vLLM for embeddings, SGLang for LLMs). Requires MODEL=<repo_id>, e.g. MODEL=Qwen/Qwen3-Embedding-0.6B. Optional SERVING=endpoint|app pins the path for THIS command only (an ops escape hatch; nothing records it). DRY_RUN=yes logs the (redacted) modal command and exits 0 without starting modal. FORCE=yes deploys over a name that is already live on Modal — it never overrides the `tree-` ownership check.
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-model MODEL=<repo_id> [SERVING=endpoint|app] [DRY_RUN=yes] [FORCE=yes]'; exit 1; fi
+	uv run python scripts/modal_model.py deploy --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",) $(if $(filter yes,$(DRY_RUN)),--dry-run,) $(if $(filter yes,$(FORCE)),--force,)
 
-deploy-embedding-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token). Requires MODEL=<repo_id>.
-	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model-test MODEL=<repo_id>'; exit 1; fi
-	uv run python scripts/modal_embedding_model.py test --model "$(MODEL)"
+deploy-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token). Embedding entries only for now — an LLM entry exits 2 (tasks/147). Requires MODEL=<repo_id>.
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-model-test MODEL=<repo_id>'; exit 1; fi
+	uv run python scripts/modal_model.py test --model "$(MODEL)"
 
-deploy-embedding-model-stop: # Stop one catalog model on Modal — only ever a `tree-` name, so a Dedicated Endpoint you made by hand is never stopped. Requires MODEL=<repo_id>; pass the same SERVING= you deployed with. DRY_RUN=yes logs the modal command and exits 0 without starting modal. No FORCE= here: a stop has nothing to force.
-	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-embedding-model-stop MODEL=<repo_id> [SERVING=endpoint|sglang|vllm] [DRY_RUN=yes]'; exit 1; fi
-	uv run python scripts/modal_embedding_model.py stop --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",) $(if $(filter yes,$(DRY_RUN)),--dry-run,)
+deploy-model-stop: # Stop one catalog model on Modal, path-blind: the Dedicated Endpoint if it is one, else the App — only ever a `tree-` name, so an Endpoint you made by hand is never stopped. Requires MODEL=<repo_id>; no SERVING= needed. DRY_RUN=yes logs both modal commands and exits 0 without starting modal. No FORCE= here: a stop has nothing to force.
+	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-model-stop MODEL=<repo_id> [SERVING=endpoint|app] [DRY_RUN=yes]'; exit 1; fi
+	uv run python scripts/modal_model.py stop --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",) $(if $(filter yes,$(DRY_RUN)),--dry-run,)
 
 ### --- MongoDB ---
 

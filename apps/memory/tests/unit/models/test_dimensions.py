@@ -158,7 +158,7 @@ class TestModalEmbeddingDimensions:
         assert model.dimensions == 2048
 
     def test_raises_for_a_model_outside_the_catalog(self) -> None:
-        with pytest.raises(ModelError, match="Unknown Modal embedding model"):
+        with pytest.raises(ModelError, match="Unknown Modal model"):
             ModalEmbeddingModel(
                 proxy_token="wk-1.ws-2",
                 model="some/unknown-model",

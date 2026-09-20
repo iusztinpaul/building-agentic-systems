@@ -1,13 +1,14 @@
-"""The client for ONE **Embedding catalog** model, on any **Serving path**.
+"""The client for ONE **Modal catalog** embedding model, on either
+**Serving path**.
 
 Everything model-specific — the Modal app, the prompts, the native and the
 effective vector width — comes from the catalog entry (ADR-009 §3); the URL and
 the served model id come from :mod:`tree.models.modal_server`, and the cold
 start is waited out by the **Warm gate** this client COMPOSES
-(:mod:`tree.models.modal_warmup`). A **Dedicated endpoint** and both fallback
-scripts expose the same app name, the same server class and the same **Proxy
-token** auth, so this client never reads how the entry is served: moving a
-model down the ladder changes YAML, never code.
+(:mod:`tree.models.modal_warmup`). A **Dedicated endpoint** and our own App
+expose the same app name, the same server class and the same **Proxy token**
+auth, so this client never learns which one answered — and a model that
+re-routes on its next deploy changes nothing here.
 
 Warming (ADR-009 §11): a scaled-to-zero Modal server answers ``/health`` with
 503 in about a second and boots BECAUSE it is polled, so the gate polls. Its
@@ -41,7 +42,7 @@ from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     EMBEDDING_SERVER_NAME,
-    get_catalog_entry,
+    get_embedding_entry,
     prompt_for,
     truncate_embedding,
 )
@@ -105,12 +106,12 @@ def _effective_dimensions(
         f"{entry.repo_id} cannot produce {requested}-d vectors: native "
         f"{entry.native_dimensions}, matryoshka_dimensions "
         f"{entry.matryoshka_dimensions}. Set models.<block>.dimensions to "
-        f"{entry.native_dimensions} or extend the Embedding catalog entry."
+        f"{entry.native_dimensions} or extend the Modal catalog entry."
     )
 
 
 class ModalEmbeddingModel(BaseEmbeddingModel):
-    """Embedding model served on Modal, resolved from the Embedding catalog.
+    """Embedding model served on Modal, resolved from the Modal catalog.
 
     Construction is offline and total: an unknown model id, a missing **Proxy
     token** and a width the model cannot produce all fail HERE, before a
@@ -133,7 +134,7 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             )
 
         self._proxy_token = proxy_token
-        self._entry = get_catalog_entry(model)
+        self._entry = get_embedding_entry(model)
         self._dimensions = _effective_dimensions(self._entry, dimensions)
         # Read at CONSTRUCTION, like every other knob this client takes: one
         # budget per server (ADR-009 §11), overridable per process with
@@ -307,7 +308,7 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             if len(vector) != native:
                 raise ExtractionError(
                     f"{self._entry.repo_id} returned {len(vector)}-d vectors "
-                    f"but its Embedding catalog entry says native_dimensions "
+                    f"but its Modal catalog entry says native_dimensions "
                     f"{native} — fix modal.embedding_models (or the Serving "
                     "path dropped the model's projection head). No vector was "
                     "returned."

@@ -24,8 +24,9 @@ Four rails, smallest first:
    ``.venv/bin`` (the real, authenticated CLI) first. That is how the two
    accidental deploys happened.
 
-``tree.models.modal_catalog`` stays pure and subprocess-free; the entry-point
-script stays glue. This module holds the logic between them.
+``tree.models.modal_catalog`` stays pure and subprocess-free, and
+``tree.models.modal_router`` imports its process door from here rather than
+``subprocess``; the entry-point script stays glue.
 """
 
 import json
@@ -34,7 +35,7 @@ import os
 import subprocess
 from typing import Literal
 
-from tree.config.app_config import MODAL_NAME_PREFIX, ModalEmbeddingModelConfig
+from tree.config.app_config import MODAL_NAME_PREFIX, ModalModelConfig
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import redact_argv
 
@@ -43,12 +44,18 @@ logger = logging.getLogger(__name__)
 # What `existing_kind` found live under the entry's names.
 ExistingKind = Literal["none", "endpoint", "app"]
 
-# What a `deploy` is about to CREATE — not which Serving path it uses. Keyed on
-# this rather than on the three path names so the guard survives #145, where
-# `serving` disappears and a router picks between the same two outcomes.
+# What a `deploy` is about to CREATE. Keyed on the OUTCOME rather than on a
+# path name, which is why the guard survived the auto-router: the router picks
+# between exactly these two (`tree.models.modal_router`).
 DeployTarget = Literal["endpoint", "app"]
 
 ModalAction = Literal["deploy", "stop"]
+
+# What `run_modal` answers when it actually ran something. Exported so a caller
+# can annotate a captured result WITHOUT importing `subprocess` itself: the
+# process boundary — types included — stays in this module (the router's
+# `test_router_does_not_import_modal_or_subprocess` rests on that).
+ModalResult = subprocess.CompletedProcess[str]
 
 # Set to 1 by `make ... DRY_RUN=yes`, by `--dry-run`, and by the unit suite for
 # EVERY test (tests/unit/conftest.py) — so a driver test that forgets to mock
@@ -112,7 +119,7 @@ def run_modal(
     dry_run: bool = False,
     capture_output: bool = False,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+) -> ModalResult | None:
     """Run ONE ``modal`` command, or describe it and start nothing.
 
     The single door: every ``modal`` process this project starts goes through
@@ -171,7 +178,7 @@ def assert_owned_name(name: str, action: ModalAction) -> None:
     )
 
 
-def existing_kind(entry: ModalEmbeddingModelConfig) -> ExistingKind:
+def existing_kind(entry: ModalModelConfig) -> ExistingKind:
     """What is live on Modal under ``entry``'s names, read-only.
 
     Two ``list --json`` calls, because they answer different questions:
@@ -203,11 +210,12 @@ def existing_kind(entry: ModalEmbeddingModelConfig) -> ExistingKind:
 
 
 def guard_deploy(
-    entry: ModalEmbeddingModelConfig,
+    entry: ModalModelConfig,
     target: DeployTarget,
     force: bool,
     *,
     path: str,
+    kind: ExistingKind | None = None,
 ) -> None:
     """Look before the deploy writes (ADR-009 §3).
 
@@ -220,9 +228,12 @@ def guard_deploy(
     ``app``      run            REFUSE             run (a normal update)
     ============ ============== ================== ==========================
 
-    ``path`` is only ever quoted back to the operator (the ``SERVING=`` they
-    typed), so it is a plain ``str``: the router of #145 passes its own route
-    name unchanged.
+    ``path`` is only ever quoted back to the operator, so it is a plain
+    ``str``: the router passes the route it is taking (``endpoint`` / ``app``).
+
+    ``kind`` is the answer of :func:`read_existing_kind` when the caller
+    already has it — the router reads the workspace ONCE, to route, and hands
+    the same reading to the guard. ``None`` means "read it now".
 
     Raises:
         ModalGuardError: the deploy was refused, or a list could not be read.
@@ -230,13 +241,8 @@ def guard_deploy(
             — a WARNING then replaces the refusal.
     """
 
-    try:
-        kind = existing_kind(entry)
-    except ModalGuardError as exc:
-        if not force:
-            raise
-        logger.warning("FORCE=yes: %s — deploying anyway.", exc.reason)
-        return
+    if kind is None:
+        kind = read_existing_kind(entry, force)
 
     if kind == "none" or (target == "app" and kind == "app"):
         return
@@ -248,19 +254,36 @@ def guard_deploy(
         )
         return
 
-    stop_with = "endpoint" if kind == "endpoint" else "the path it was deployed with"
     raise ModalGuardError(
         f"Refusing to deploy {entry.repo_id} via {path}: {name!r} already "
         f"exists on Modal as {_KIND_ARTICLES[kind]} {_KIND_LABELS[kind]}. Stop "
-        "it first (make memory-deploy-embedding-model-stop "
-        f"MODEL={entry.repo_id} SERVING={stop_with}) or pass FORCE=yes to "
-        "deploy over it."
+        f"it first (make memory-deploy-model-stop MODEL={entry.repo_id}) or "
+        "pass FORCE=yes to deploy over it."
     )
 
 
-def _list_rows(
-    entry: ModalEmbeddingModelConfig, argv: list[str], noun: str
-) -> list[dict]:
+def read_existing_kind(entry: ModalModelConfig, force: bool) -> ExistingKind:
+    """:func:`existing_kind`, with ``FORCE=yes`` downgrading a closed door.
+
+    The fail-closed rule says an unreadable list is not evidence that nothing
+    is there — but ``FORCE=yes`` is exactly the operator saying "deploy
+    anyway", so it becomes a WARNING and the caller proceeds as if the name
+    were free.
+
+    Raises:
+        ModalGuardError: a list could not be read and ``force`` is false.
+    """
+
+    try:
+        return existing_kind(entry)
+    except ModalGuardError as exc:
+        if not force:
+            raise
+        logger.warning("FORCE=yes: %s — deploying anyway.", exc.reason)
+        return "none"
+
+
+def _list_rows(entry: ModalModelConfig, argv: list[str], noun: str) -> list[dict]:
     """One ``modal ... list --json`` call, or a closed door.
 
     The human-readable table is NEVER parsed as a fallback: a guard that reads

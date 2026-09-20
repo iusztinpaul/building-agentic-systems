@@ -224,7 +224,7 @@ class TestResolveServerUrl:
 
         message = str(excinfo.value)
         assert "ep-tree-qwen3-embedding-0-6b/Server" in message
-        assert f"make memory-deploy-embedding-model MODEL={_QWEN}" in message
+        assert f"make memory-deploy-model MODEL={_QWEN}" in message
         assert "modal endpoint list" in message
 
     async def test_an_empty_url_is_a_failure(self, mocker) -> None:
@@ -239,7 +239,7 @@ class TestResolveServerUrl:
         with pytest.raises(ModelError) as excinfo:
             await resolve_server_url(get_catalog_entry(_QWEN))
 
-        assert "make memory-deploy-embedding-model" in str(excinfo.value)
+        assert "make memory-deploy-model" in str(excinfo.value)
 
 
 class TestServedModelId:

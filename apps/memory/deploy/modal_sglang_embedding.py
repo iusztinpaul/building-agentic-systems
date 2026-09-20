@@ -1,11 +1,11 @@
-"""Serve ONE **Embedding catalog** model with SGLang — the `sglang` **Serving path**.
+"""Serve ONE **Modal catalog** embedding model with SGLang — no longer routed to.
 
 The EJECT PATH (ADR-009 §2): Modal's own generated `serve.py` for a
 **Dedicated endpoint**, copied and parameterised by the catalog, for a model
-Modal's managed recipe has no base model for but SGLang supports natively
-(Qwen3-Embedding, BGE, E5, GTE-Qwen2, EmbeddingGemma). The preferred path is
-`modal endpoint create` and costs no code at all; take this one only when that
-failed (see the ladder in `apps/memory/README.md`).
+SGLang supports natively (Qwen3-Embedding, BGE, E5, GTE-Qwen2,
+EmbeddingGemma). NOTHING routes here since the auto-router landed: embeddings
+Modal refuses go to the vLLM App. #147 turns this file into the SGLang App for
+LLM entries; until then it is kept compiling and pinned by its static tests.
 
 A deliberate second copy of the vLLM script rather than a shared skeleton: the
 engines differ in image, launcher and flags, and ADR-009 keeps two boring
@@ -30,7 +30,8 @@ Auth is Modal **Proxy tokens** only (`unauthenticated=False`) — the edge answe
 
 Deployed by the driver, never by hand:
 
-    make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=sglang
+    (nothing routes here: embeddings go to the vLLM App. #147 turns this
+    file into deploy/modal_sglang_llm.py, the App for LLM entries.)
 """
 
 import json
@@ -68,9 +69,8 @@ if modal.is_local():
     from tree.models.modal_catalog import build_deploy_spec, hf_token_env
 
     init_logger()
-    # The engine is the SCRIPT's, never the entry's `serving`, so
-    # `SERVING=sglang` on an `endpoint` entry works without editing the YAML.
-    SPEC = build_deploy_spec(os.environ["EMBEDDING_MODEL"], "sglang").model_dump()
+    # The engine is the SCRIPT's: an entry names no engine.
+    SPEC = build_deploy_spec(os.environ["MODAL_MODEL"], "sglang").model_dump()
     # The Hugging Face token (optional, ADR-009 §9) travels as an EPHEMERAL
     # Secret built here, on the operator's machine — never in the image env
     # beside the spec, because image layers are cached and inspectable. It is

@@ -1,14 +1,14 @@
-"""Talking to a served **Embedding catalog** model — the same way on every
+"""Talking to a served **Modal catalog** model — the same way on every
 **Serving path** (ADR-009 §3/§4).
 
 ONE URL lookup, ONE served-model discovery and ONE smoke test, shared by the
-deploy driver (``scripts/modal_embedding_model.py``) and the
+deploy driver (``scripts/modal_model.py``) and the
 ``ModalEmbeddingModel`` client (#140); waiting out a cold start belongs to the
 **Warm gate**'s poller (:mod:`tree.models.modal_warmup`), which the smoke test
 below and the client both call. They rest on assumption H1 — a
 **Dedicated endpoint** named ``N`` is the Modal app ``ep-N`` with a server class
-``Server``, which the fallback scripts copy — so the caller never reads
-``serving``. Every ``N`` of ours is ``tree-<slug>``, hence every app is
+``Server``, which our App scripts copy — so the caller never learns which
+path served it. Every ``N`` of ours is ``tree-<slug>``, hence every app is
 ``ep-tree-<slug>``: H1 needs the shape, not a particular name. ``tasks/141`` proves H1 live and owns the correction if it is false.
 
 This module imports the ``modal`` SDK, so it is imported by the driver and the
@@ -26,7 +26,7 @@ from tree.config.app_config import ModalEmbeddingModelConfig, app_config
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     EMBEDDING_SERVER_NAME,
-    get_catalog_entry,
+    get_embedding_entry,
     modal_proxy_bearer,
     prompt_for,
     truncate_embedding,
@@ -82,7 +82,7 @@ async def resolve_server_url(entry: ModalEmbeddingModelConfig) -> str:
         f"Failed to resolve Modal server {entry.app_name}/{EMBEDDING_SERVER_NAME}. "
         "Is the model deployed (a Dedicated endpoint may still be provisioning "
         "— check `modal endpoint list`)? Run: "
-        f"make memory-deploy-embedding-model MODEL={entry.repo_id}"
+        f"make memory-deploy-model MODEL={entry.repo_id}"
     )
 
     try:
@@ -162,7 +162,7 @@ async def smoke_test(model: str, deadline_s: float | None = None) -> SmokeTestRe
             budget ran out.
     """
 
-    entry = get_catalog_entry(model)
+    entry = get_embedding_entry(model)
     bearer = modal_proxy_bearer()
 
     url = await resolve_server_url(entry)
@@ -189,7 +189,7 @@ async def smoke_test(model: str, deadline_s: float | None = None) -> SmokeTestRe
         if len(vector) != entry.native_dimensions:
             raise ModelError(
                 f"expected {entry.native_dimensions} dims, got {len(vector)} — "
-                "the Embedding catalog's native_dimensions is wrong for this "
+                "the Modal catalog's native_dimensions is wrong for this "
                 "Serving path, or the served architecture dropped the model's "
                 "projection head"
             )

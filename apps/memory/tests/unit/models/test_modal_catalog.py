@@ -1,9 +1,13 @@
-"""Pure-function tests for the **Embedding catalog** helpers (ADR-009 §2/§3).
+"""Pure-function tests for the **Modal catalog** helpers (ADR-009 §2/§3).
 
 Everything here runs against the REAL shipped catalog
-(``configs/default.yaml``) — it is the object both the deploy driver (#139)
-and the client (#140) read, so a test against a hand-rolled fixture would
-prove nothing about what an operator boots.
+(``configs/default.yaml``) — it is the object both the deploy driver and the
+clients read, so a test against a hand-rolled fixture would prove nothing
+about what an operator boots.
+
+The catalog knows WHICH model and what kind it is; it knows nothing about how
+the model ends up served. That decision — and the argv the router picks — is
+tested in ``test_modal_router.py`` and ``tests/unit/scripts``.
 """
 
 import math
@@ -13,7 +17,10 @@ import sys
 import pytest
 from pydantic import SecretStr
 
-from tree.config.app_config import ModalEmbeddingModelConfig
+from tree.config.app_config import (
+    ModalEmbeddingModelConfig,
+    ModalLLMModelConfig,
+)
 from tree.models import modal_catalog
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import (
@@ -22,9 +29,12 @@ from tree.models.modal_catalog import (
     HF_TOKEN_HINT,
     MODAL_ROUTING_REGION,
     EmbeddingDeploySpec,
+    app_script,
     build_deploy_spec,
     build_server_args,
     get_catalog_entry,
+    get_embedding_entry,
+    get_llm_entry,
     hf_token_args,
     hf_token_env,
     looks_gated,
@@ -33,12 +43,13 @@ from tree.models.modal_catalog import (
     prompt_for,
     redact_argv,
     redact_text,
-    resolve_serving,
     truncate_embedding,
 )
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
+_LFM = "LiquidAI/LFM2.5-350M"
+_QWEN_LLM = "Qwen/Qwen3.5-0.8B"
 _QWEN_SHA = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 _FAKE_TOKEN = "hf_secret123"
 _VOYAGE_SHA = "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
@@ -46,82 +57,98 @@ _VOYAGE_SHA = "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
 
 @pytest.fixture
 def qwen_entry() -> ModalEmbeddingModelConfig:
-    return get_catalog_entry(_QWEN)
+    return get_embedding_entry(_QWEN)
 
 
 @pytest.fixture
 def voyage_entry() -> ModalEmbeddingModelConfig:
-    return get_catalog_entry(_VOYAGE)
+    return get_embedding_entry(_VOYAGE)
 
 
-class TestLookup:
+@pytest.fixture
+def lfm_entry() -> ModalLLMModelConfig:
+    return get_llm_entry(_LFM)
+
+
+class TestGetCatalogEntry:
+    """ONE lookup over BOTH lists (ADR-009 §3): the entry's KIND says which
+    one it came from, so no caller passes a kind in."""
+
     def test_returns_the_entry_for_an_exact_repo_id(self, voyage_entry) -> None:
         assert voyage_entry.repo_id == _VOYAGE
-        assert voyage_entry.serving == "vllm"
+        assert voyage_entry.kind == "embedding"
 
-    def test_unknown_model_lists_the_catalog_ids_sorted(self) -> None:
-        """Story 4: a mistyped id fails loudly, naming every id it COULD have
+    def test_finds_an_llm_entry_in_the_other_list(self) -> None:
+        entry = get_catalog_entry(_LFM)
+
+        assert entry.repo_id == _LFM
+        assert entry.kind == "llm"
+        assert entry.app_name == "ep-tree-lfm2-5-350m"
+
+    def test_unknown_model_lists_both_groups_sorted(self) -> None:
+        """Story 7: a mistyped id fails loudly, naming every id it COULD have
         meant and the one file to edit."""
 
         with pytest.raises(ModelError) as excinfo:
             get_catalog_entry("BAAI/bge-m3")
 
         message = str(excinfo.value)
-        assert "BAAI/bge-m3" in message
-        assert f"Embedding catalog ids: {_QWEN}, {_VOYAGE}." in message
-        assert "modal.embedding_models" in message
+        assert "Unknown Modal model 'BAAI/bge-m3'" in message
+        assert (
+            f"Modal catalog ids — embeddings: {_QWEN}, {_VOYAGE}; "
+            f"llms: {_LFM}, {_QWEN_LLM}." in message
+        )
+        assert "modal.embedding_models or modal.llm_models" in message
 
     def test_a_near_miss_is_not_resolved_by_prefix(self) -> None:
-        """Story 4's exact input: matching is EXACT, never fuzzy — a truncated
-        id must not silently resolve to the real model."""
+        """Matching is EXACT, never fuzzy — a truncated id must not silently
+        resolve to the real model."""
 
         with pytest.raises(ModelError) as excinfo:
             get_catalog_entry("voyageai/voyage-4-nan")
 
-        assert "Unknown Modal embedding model 'voyageai/voyage-4-nan'" in str(
-            excinfo.value
-        )
+        assert "Unknown Modal model 'voyageai/voyage-4-nan'" in str(excinfo.value)
 
-
-class TestResolveServing:
-    def test_no_override_uses_the_yaml_path(self, qwen_entry) -> None:
-        assert resolve_serving(qwen_entry, None) == "endpoint"
-
-    def test_empty_override_uses_the_yaml_path(self, qwen_entry) -> None:
-        """``SERVING=`` (an unset Make variable) is not an override."""
-
-        assert resolve_serving(qwen_entry, "") == "endpoint"
-
-    def test_override_walks_the_ladder_without_editing_yaml(
-        self, qwen_entry, voyage_entry
-    ) -> None:
-        assert resolve_serving(qwen_entry, "sglang") == "sglang"
-        # voyage-4-nano's YAML path is vllm, but it carries a base_model so the
-        # endpoint path can be attempted (#141) for one command.
-        assert resolve_serving(voyage_entry, "endpoint") == "endpoint"
-
-    def test_unknown_path_names_the_three(self, qwen_entry) -> None:
-        with pytest.raises(ModelError) as excinfo:
-            resolve_serving(qwen_entry, "tgi")
-
-        message = str(excinfo.value)
-        assert "tgi" in message
-        assert "endpoint, sglang, vllm" in message
-
-    def test_endpoint_override_without_base_model_is_refused(self) -> None:
-        """The base-model rule is enforced at OVERRIDE time too — a Dedicated
-        endpoint has nothing to pass as ``--model`` without it."""
-
-        entry = ModalEmbeddingModelConfig(
-            repo_id="acme/my-embedder", serving="vllm", native_dimensions=768
-        )
+    def test_an_llm_id_is_refused_where_an_embedding_is_needed(self) -> None:
+        """The embedding client and the embedding deploy spec cannot serve a
+        chat model — and an LLM entry has no `native_dimensions` at all."""
 
         with pytest.raises(ModelError) as excinfo:
-            resolve_serving(entry, "endpoint")
+            get_embedding_entry(_LFM)
 
-        message = str(excinfo.value)
-        assert "acme/my-embedder" in message
-        assert "base_model" in message
+        assert (
+            f"{_LFM} is an LLM entry (modal.llm_models), not an embedding model."
+            in str(excinfo.value)
+        )
+
+    def test_an_embedding_id_is_refused_where_an_llm_is_needed(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            get_llm_entry(_VOYAGE)
+
+        assert (
+            f"{_VOYAGE} is an embedding entry (modal.embedding_models), not an LLM."
+            in str(excinfo.value)
+        )
+
+    @pytest.mark.parametrize(
+        "getter", [get_embedding_entry, get_llm_entry], ids=["embedding", "llm"]
+    )
+    def test_an_unknown_id_still_lists_the_catalog(self, getter) -> None:
+        """The kind check never shadows the unknown-id message."""
+
+        with pytest.raises(ModelError) as excinfo:
+            getter("BAAI/bge-m3")
+
+        assert "Unknown Modal model" in str(excinfo.value)
+
+
+class TestAppScript:
+    def test_the_kind_picks_the_app(self) -> None:
+        """One purpose per engine (ADR-009 §2): vLLM serves embeddings,
+        SGLang serves LLMs (its script arrives in #147)."""
+
+        assert app_script("embedding") == "deploy/modal_vllm_embedding.py"
+        assert app_script("llm") == "deploy/modal_sglang_llm.py"
 
 
 class TestServerArgs:
@@ -156,8 +183,8 @@ class TestServerArgs:
         }
 
     def test_the_same_entry_runs_under_either_engine(self, qwen_entry) -> None:
-        """One catalog entry, two fallback scripts: the embedding-mode flag is
-        the BUILDER's, which is what lets SERVING= walk the ladder."""
+        """One catalog entry, either engine: the embedding-mode flag is the
+        BUILDER's, never the entry's — an entry names no engine."""
 
         assert build_server_args(qwen_entry, "vllm") == {
             "--runner": "pooling",
@@ -168,9 +195,7 @@ class TestServerArgs:
     def test_default_revision_is_main(self) -> None:
         """An entry that pins no commit sha serves the branch tip."""
 
-        entry = ModalEmbeddingModelConfig(
-            repo_id="BAAI/bge-m3", base_model="BAAI/bge-m3", native_dimensions=1024
-        )
+        entry = ModalEmbeddingModelConfig(repo_id="BAAI/bge-m3", native_dimensions=1024)
 
         assert build_server_args(entry, "vllm")["--revision"] == "main"
 
@@ -209,8 +234,8 @@ class TestDeploySpec:
         )
 
     def test_the_engine_comes_from_the_caller_not_the_entry(self) -> None:
-        """``build_deploy_spec`` takes the SCRIPT's engine, so
-        ``SERVING=sglang`` on a ``serving: vllm`` entry deploys SGLang."""
+        """``build_deploy_spec`` takes the SCRIPT's engine: an entry carries
+        none, and #147 hands the SGLang half to the LLM script."""
 
         spec = build_deploy_spec(_VOYAGE, "sglang")
 
@@ -234,6 +259,15 @@ class TestDeploySpec:
     def test_unknown_model_raises_model_error(self) -> None:
         with pytest.raises(ModelError):
             build_deploy_spec("BAAI/bge-m3", "vllm")
+
+    def test_an_llm_entry_has_no_embedding_deploy_spec(self) -> None:
+        """The vLLM script serves embeddings only, so the spec builder refuses
+        an LLM entry instead of inventing `native_dimensions` for it."""
+
+        with pytest.raises(ModelError) as excinfo:
+            build_deploy_spec(_LFM, "vllm")
+
+        assert "is an LLM entry" in str(excinfo.value)
 
     def test_deploy_spec_env_var_name(self) -> None:
         assert DEPLOY_SPEC_ENV == "EMBEDDING_DEPLOY_SPEC"
@@ -264,8 +298,8 @@ class TestPrompts:
 
 
 class TestProxyBearer:
-    """**Proxy token** auth (ADR-009 §4): the ONE credential every Serving
-    path is reached through, joined exactly the way Modal documents it."""
+    """**Proxy token** auth (ADR-009 §4): the ONE credential BOTH Serving
+    paths are reached through, joined exactly the way Modal documents it."""
 
     def test_joins_the_id_and_the_secret_with_a_dot(self, mocker) -> None:
         mocker.patch.object(
@@ -304,12 +338,12 @@ class TestProxyBearer:
 
 
 class TestModalCliCommand:
-    """The argv the driver runs. Token-free BY CONSTRUCTION (ADR-009 §9), so
+    """The argv the ROUTER runs. Token-free BY CONSTRUCTION (ADR-009 §9), so
     it is safe to log and to assert on."""
 
-    def test_endpoint_without_custom_weights(self, qwen_entry) -> None:
-        """Story 1: ``repo_id == base_model``, so Modal serves its own catalog
-        model — no ``--custom-hf-*`` may appear."""
+    def test_an_endpoint_create_serves_the_repo_id_itself(self, qwen_entry) -> None:
+        """Story 1: no base model is passed, because the catalog no longer
+        guesses at one — Modal is asked about the model itself."""
 
         assert modal_cli_command("deploy", qwen_entry, "endpoint") == [
             "modal",
@@ -323,11 +357,13 @@ class TestModalCliCommand:
             "eu-west",
         ]
 
-    def test_endpoint_with_custom_weights(self, voyage_entry) -> None:
-        """Story 2: a repo_id that differs from base_model is served as CUSTOM
-        weights on the base model's recipe."""
+    def test_a_base_model_makes_it_a_custom_weights_create(self, voyage_entry) -> None:
+        """Story 3: the base comes from the RUNTIME lineage lookup, so the
+        weights are served on that base's recipe."""
 
-        assert modal_cli_command("deploy", voyage_entry, "endpoint") == [
+        assert modal_cli_command(
+            "deploy", voyage_entry, "endpoint", base_model=_QWEN
+        ) == [
             "modal",
             "endpoint",
             "create",
@@ -343,38 +379,37 @@ class TestModalCliCommand:
             "eu-west",
         ]
 
-    def test_never_public_never_token(self, qwen_entry, voyage_entry, mocker) -> None:
-        """Two invariants in one: proxy auth is never waived
-        (``--unauthenticated``), and the token joins the argv at the
-        ``subprocess.run`` boundary ONLY — even with one set."""
+    def test_a_base_equal_to_the_repo_id_is_not_custom_weights(
+        self, qwen_entry
+    ) -> None:
+        """A model that IS its own catalog base needs no ``--custom-hf-*``:
+        Modal serves its own snapshot."""
 
-        mocker.patch.object(
-            modal_catalog.settings, "hf_token", SecretStr("hf_secret123")
-        )
+        assert modal_cli_command(
+            "deploy", qwen_entry, "endpoint", base_model=_QWEN
+        ) == (modal_cli_command("deploy", qwen_entry, "endpoint"))
 
-        for action in ("deploy", "stop"):
-            for entry in (qwen_entry, voyage_entry):
-                for serving in ("endpoint", "sglang", "vllm"):
-                    argv = modal_cli_command(action, entry, serving)
+    def test_the_app_deploy_is_the_script_for_the_kind(
+        self, voyage_entry, lfm_entry
+    ) -> None:
+        """The KIND picks the script — an embedding entry can no longer be
+        sent to SGLang, and an LLM entry can no longer be sent to vLLM."""
 
-                    assert "--unauthenticated" not in argv
-                    assert "--custom-hf-token" not in argv
-                    assert "hf_secret123" not in argv
-
-    def test_script_and_stop_commands(self, qwen_entry, voyage_entry) -> None:
-        """The two fallback paths deploy a script FILE, and every path is
-        stopped by the name it was created with."""
-
-        assert modal_cli_command("deploy", voyage_entry, "vllm") == [
+        assert modal_cli_command("deploy", voyage_entry, "app") == [
             "modal",
             "deploy",
             "deploy/modal_vllm_embedding.py",
         ]
-        assert modal_cli_command("deploy", qwen_entry, "sglang") == [
+        assert modal_cli_command("deploy", lfm_entry, "app") == [
             "modal",
             "deploy",
-            "deploy/modal_sglang_embedding.py",
+            "deploy/modal_sglang_llm.py",
         ]
+
+    def test_the_two_stop_commands(self, qwen_entry, voyage_entry) -> None:
+        """``stop`` is path-blind (ADR-009 §2), so BOTH argvs are built for
+        every model and tried in order."""
+
         assert modal_cli_command("stop", qwen_entry, "endpoint") == [
             "modal",
             "endpoint",
@@ -386,14 +421,7 @@ class TestModalCliCommand:
         # modal/cli/app.py:573 `if not yes: ... confirm_or_suggest_yes`):
         # without it `modal app stop` pauses for a confirmation no driver can
         # answer.
-        assert modal_cli_command("stop", qwen_entry, "sglang") == [
-            "modal",
-            "app",
-            "stop",
-            "-y",
-            "ep-tree-qwen3-embedding-0-6b",
-        ]
-        assert modal_cli_command("stop", voyage_entry, "vllm") == [
+        assert modal_cli_command("stop", voyage_entry, "app") == [
             "modal",
             "app",
             "stop",
@@ -401,31 +429,44 @@ class TestModalCliCommand:
             "ep-tree-voyage-4-nano",
         ]
 
+    def test_never_public_never_token(
+        self, qwen_entry, voyage_entry, lfm_entry, mocker
+    ) -> None:
+        """Two invariants in one: proxy auth is never waived
+        (``--unauthenticated``), and the token joins the argv at the
+        ``subprocess.run`` boundary ONLY — even with one set."""
+
+        mocker.patch.object(
+            modal_catalog.settings, "hf_token", SecretStr("hf_secret123")
+        )
+
+        for action in ("deploy", "stop"):
+            for entry in (qwen_entry, voyage_entry, lfm_entry):
+                for target in ("endpoint", "app"):
+                    for base in (None, _QWEN):
+                        argv = modal_cli_command(action, entry, target, base_model=base)
+
+                        assert "--unauthenticated" not in argv
+                        assert "--custom-hf-token" not in argv
+                        assert "hf_secret123" not in argv
+
     def test_modal_cli_command_uses_prefixed_names(
         self, qwen_entry, voyage_entry
     ) -> None:
         """One test for the namespace as the CLI sees it: every name in every
-        argv — and in the deploy spec the fallback scripts read — carries
+        argv — and in the deploy spec the App scripts read — carries
         ``tree-``, so nothing this project runs can name a Dedicated Endpoint
         an operator created by hand (ADR-009 §3)."""
 
         create = modal_cli_command("deploy", qwen_entry, "endpoint")
 
         assert create[create.index("--name") + 1] == "tree-qwen3-embedding-0-6b"
-        assert modal_cli_command("stop", qwen_entry, "endpoint") == [
-            "modal",
-            "endpoint",
-            "stop",
-            "-y",
-            "tree-qwen3-embedding-0-6b",
-        ]
-        assert modal_cli_command("stop", voyage_entry, "vllm") == [
-            "modal",
-            "app",
-            "stop",
-            "-y",
-            "ep-tree-voyage-4-nano",
-        ]
+        assert modal_cli_command("stop", qwen_entry, "endpoint")[-1] == (
+            "tree-qwen3-embedding-0-6b"
+        )
+        assert modal_cli_command("stop", voyage_entry, "app")[-1] == (
+            "ep-tree-voyage-4-nano"
+        )
         assert build_deploy_spec(_VOYAGE, "vllm").app_name == "ep-tree-voyage-4-nano"
 
     def test_the_routing_region_is_pinned(self) -> None:
@@ -435,36 +476,29 @@ class TestModalCliCommand:
 class TestHfTokenArgs:
     """The ONE place the Hugging Face token joins an argv (ADR-009 §9)."""
 
-    def test_custom_weights_on_an_endpoint_get_the_token(self, voyage_entry) -> None:
-        assert hf_token_args(voyage_entry, "endpoint", "hf_secret123") == [
+    def test_a_custom_weights_create_gets_the_token(self) -> None:
+        assert hf_token_args(_QWEN, "hf_secret123") == [
             "--custom-hf-token",
             "hf_secret123",
         ]
 
     @pytest.mark.parametrize(
-        "entry_name,serving,token",
-        [
-            ("qwen_entry", "endpoint", "hf_secret123"),
-            ("voyage_entry", "vllm", "hf_secret123"),
-            ("voyage_entry", "sglang", "hf_secret123"),
-            ("voyage_entry", "endpoint", ""),
-        ],
-        ids=["no-custom-weights", "vllm-path", "sglang-path", "no-token"],
+        "base_model,token",
+        [(None, "hf_secret123"), (_QWEN, ""), (None, "")],
+        ids=["no-custom-weights", "no-token", "neither"],
     )
     def test_every_other_case_adds_nothing(
-        self, request, entry_name: str, serving: str, token: str
+        self, base_model: str | None, token: str
     ) -> None:
         """Modal documents ``--custom-hf-token`` as the token "for private
-        --custom-hf-repo", the fallback scripts receive it as a Secret (#142),
-        and an empty token must change no argv at all."""
+        --custom-hf-repo", our App scripts receive it as a Secret (#142), and
+        an empty token must change no argv at all."""
 
-        entry = request.getfixturevalue(entry_name)
-
-        assert hf_token_args(entry, serving, token) == []
+        assert hf_token_args(base_model, token) == []
 
 
 class TestHfTokenEnv:
-    """What the fallback scripts' ephemeral ``modal.Secret`` carries (§9).
+    """What the App scripts' ephemeral ``modal.Secret`` carries (§9).
 
     Every token here is FAKE and ``settings`` is patched on the binding THIS
     module holds: ``make`` exports the developer's real ``.env`` into the test

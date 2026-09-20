@@ -167,31 +167,30 @@ youtube:
   brightdata_timeout_seconds: 600
   brightdata_poll_interval_seconds: 10
 
-# The Embedding catalog (ADR-009 §3): one entry per Modal-hosted embedding
-# model, read by BOTH the deploy driver and the client so names, dimensions and
-# prompts have ONE source. Adding a model = one entry here + one
-# `make memory-deploy-embedding-model MODEL=<repo_id>`; an unknown id fails
-# loudly listing these ids.
+# The Modal catalog (ADR-009 §2/§3): one entry per Hugging Face model that may
+# be served on Modal, read by BOTH the deploy driver and the clients so names,
+# dimensions and prompts have ONE source. Adding a model = one entry here + one
+# `make memory-deploy-model MODEL=<repo_id>`; an unknown id fails loudly listing
+# these ids.
 #
-# `serving` is the Serving path ladder, best first:
-#   endpoint  a Modal Dedicated endpoint — Modal picks the recipe, GPU, engine
-#             and flags; zero serving code of ours. Needs `base_model` (the id
-#             from Modal's endpoint catalog passed as --model); when `repo_id`
-#             differs from it, the endpoint is created with CUSTOM weights.
-#   sglang    our fallback script deploy/modal_sglang_embedding.py
-#   vllm      our fallback script deploy/modal_vllm_embedding.py
-# One command may walk the ladder without editing YAML: SERVING=<path>.
+# An entry says WHICH model and the facts about it — never HOW it is served.
+# At deploy the driver asks Modal first (`modal endpoint create`) and, when
+# Modal refuses, deploys our App for the entry's KIND: an `embedding_models`
+# entry goes to deploy/modal_vllm_embedding.py, an `llm_models` entry to
+# deploy/modal_sglang_llm.py. The chosen route is in the driver's one
+# `Routing …` log line, not in this file.
 #
-# `gpu`, `cpu`, `memory_mb`, `max_model_len` and `extra_server_args` are used by
-# the FALLBACK scripts only — a Dedicated endpoint never sees them — but they
-# stay allowed (with defaults) on every entry so SERVING=sglang|vllm works on an
-# entry nobody edited. `extra_server_args` values may NOT contain whitespace:
-# autoinference-utils splits them into argv tokens, so use compact JSON.
+# `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args` (and `n_gpus`
+# on an LLM) are read by the APP scripts only — a Dedicated endpoint never sees
+# them — but they stay allowed (with defaults) on every entry, because nobody
+# can predict Modal's refusal while writing the entry. `extra_server_args`
+# values may NOT contain whitespace: autoinference-utils splits them into argv
+# tokens, so use compact JSON.
 # NOTE: the TREE_<SECTION>__<KEY> escape hatch does NOT reach list items — edit
 # this file to change a catalog entry.
 modal:
-  autoinference_utils_version: "0.2.6" # fallback scripts only
-  engines: # fallback scripts only; per ENGINE, not per model
+  autoinference_utils_version: "0.2.6" # App scripts only
+  engines: # App scripts only; per ENGINE, not per model
     vllm:
       version: "0.17.1" # the pin the repo's vLLM script has been serving
       # voyage-4-nano's own card pins vllm==0.16.0 for this architecture;
@@ -201,11 +200,10 @@ modal:
   # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
   warmup_deadline_s: 600
   embedding_models:
-    # Qwen3-Embedding-0.6B IS in Modal's endpoint catalog, so it needs no code.
+    # In Modal's endpoint catalog (2026-09-20) -> auto-routes to a Dedicated
+    # endpoint; the App fields below keep their defaults.
     - repo_id: Qwen/Qwen3-Embedding-0.6B
       revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3 # HF sha of `main`, 2026-09-19
-      serving: endpoint
-      base_model: Qwen/Qwen3-Embedding-0.6B # == repo_id -> no custom weights
       native_dimensions: 1024
       # The card says MRL 32-1024; empty because the 1024-d vector_index needs
       # nothing smaller. The client truncates client-side (ADR-009 §3) — list a
@@ -216,15 +214,11 @@ modal:
       # MUST stay double-quoted: single quotes would make \n a literal backslash-n.
       query_prompt: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
       document_prompt: "" # Qwen3 instructs the query side only
-    # voyage-4-nano needs an architecture override + MEAN pooling, which a
-    # managed recipe cannot express — hence the vLLM fallback. `base_model` is
-    # the closest model in Modal's endpoint catalog, so #141 can FIRST try it as
-    # custom weights on an endpoint and flip `serving` only on recorded evidence
-    # (the endpoint's vectors matching the script's).
+    # NOT in Modal's catalog, and its Hub card names no base model -> vLLM App,
+    # which is also the only way to get the architecture override + MEAN
+    # pooling a managed recipe cannot express.
     - repo_id: voyageai/voyage-4-nano
       revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f # HF sha of `main`, 2026-09-19
-      serving: vllm
-      base_model: Qwen/Qwen3-Embedding-0.6B
       gpu: A10 # Modal's GPU string (docs/guide/gpu, 2026-09-19); there is no "A10G"
       cpu: 4
       memory_mb: 16384
@@ -242,13 +236,29 @@ modal:
       max_model_len: 32768
       query_prompt: "Represent the query for retrieving supporting documents: "
       document_prompt: "Represent the document for retrieval: "
-      extra_server_args: # model-specific extras for the FALLBACK scripts only
+      extra_server_args: # model-specific extras for the APP scripts only
         "--convert": embed
         "--pooler-config": '{"pooling_type":"MEAN"}'
         "--hf-overrides": '{"architectures":["VoyageQwen3BidirectionalEmbedModel"]}'
         "--dtype": bfloat16
         "--enforce-eager": ""
         "--trust-remote-code": ""
+  llm_models:
+    # In Modal's endpoint catalog (2026-09-20) -> auto-routes to a Dedicated
+    # endpoint; the App fields keep their defaults. Chosen over the equally
+    # listed google/gemma-3-1b-it, which is `gated: manual` on the Hub
+    # (HF API, 2026-09-20) while this one is ungated Apache-2.0.
+    - repo_id: Qwen/Qwen3.5-0.8B
+      revision: 2fc06364715b967f1860aea9cf38778875588b17 # HF sha of `main`, 2026-09-20
+    # NOT in Modal's catalog (arch Lfm2ForCausalLM; its base
+    # LiquidAI/LFM2.5-350M-Base is not either) -> SGLang App.
+    - repo_id: LiquidAI/LFM2.5-350M
+      revision: 9e6c6ccf47cd318696e137d381a7ded8fe4df09f # HF sha of `main`, 2026-09-20
+      gpu: A10
+      n_gpus: 1
+      cpu: 4
+      memory_mb: 16384
+      max_model_len: 32768 # the card's context is 128000; 32K keeps the KV cache small on one A10
 
 observability:
   enabled: true

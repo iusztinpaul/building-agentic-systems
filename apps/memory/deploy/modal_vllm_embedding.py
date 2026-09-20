@@ -1,11 +1,10 @@
-"""Serve ONE **Embedding catalog** model with vLLM — the `vllm` **Serving path**.
+"""Serve ONE **Modal catalog** embedding model with vLLM — the `app` path.
 
 The EJECT PATH (ADR-009 §2): Modal's own generated `serve.py` for a
 **Dedicated endpoint**, copied and parameterised by the catalog, for what a
 managed recipe cannot express — an architecture override, a pooler config,
-`--trust-remote-code`, a pinned engine version. The preferred path is
-`modal endpoint create` and costs no code at all; take this one only when that
-failed (see the ladder in `apps/memory/README.md`).
+`--trust-remote-code`, a pinned engine version. The driver reaches for it when
+Modal refuses the model (`Routing ... → vLLM App`), never by a config field.
 
 Glue only: every decision — GPU, engine pin, revision, server flags — is
 resolved by `tree.models.modal_catalog` on the operator's machine and crosses
@@ -26,8 +25,8 @@ Auth is Modal **Proxy tokens** only (`unauthenticated=False`) — the edge answe
 
 Deployed by the driver, never by hand:
 
-    make memory-deploy-embedding-model MODEL=voyageai/voyage-4-nano
-    make memory-deploy-embedding-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=vllm
+    make memory-deploy-model MODEL=voyageai/voyage-4-nano
+    make memory-deploy-model MODEL=Qwen/Qwen3-Embedding-0.6B SERVING=app
 """
 
 import json
@@ -65,9 +64,9 @@ if modal.is_local():
     from tree.models.modal_catalog import build_deploy_spec, hf_token_env
 
     init_logger()
-    # The engine is the SCRIPT's, never the entry's `serving`, so
-    # `SERVING=vllm` on an `endpoint` entry works without editing the YAML.
-    SPEC = build_deploy_spec(os.environ["EMBEDDING_MODEL"], "vllm").model_dump()
+    # The engine is the SCRIPT's: an entry names no engine, and the router
+    # sends every embedding model Modal refuses to this file.
+    SPEC = build_deploy_spec(os.environ["MODAL_MODEL"], "vllm").model_dump()
     # The Hugging Face token (optional, ADR-009 §9) travels as an EPHEMERAL
     # Secret built here, on the operator's machine — never in the image env
     # beside the spec, because image layers are cached and inspectable. It is

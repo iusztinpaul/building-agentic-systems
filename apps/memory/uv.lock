@@ -3341,6 +3341,7 @@ name = "tree-memory"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "beanie" },
     { name = "beautifulsoup4" },
     { name = "click" },
@@ -3381,6 +3382,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10" },
     { name = "beanie", specifier = ">=2.0.1" },
     { name = "beautifulsoup4", specifier = ">=4.13" },
     { name = "click", specifier = ">=8.0" },

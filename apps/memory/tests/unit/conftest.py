@@ -62,6 +62,9 @@ def run(mocker, monkeypatch):
     * ``list_returncode`` / ``list_stdout`` — make a list call fail or answer
       something that is not a JSON list (the guard must fail CLOSED);
     * ``result`` — the ``CompletedProcess`` every OTHER command returns;
+    * ``results`` — a QUEUE consumed one command at a time when a test needs
+      the answers to differ (the router runs up to three: a refused create, a
+      second create, a deploy). Empty falls back to ``result``;
     * ``error`` — an exception that command raises instead (e.g. the
       ``FileNotFoundError`` of a missing CLI), leaving the list calls intact.
     """
@@ -74,6 +77,7 @@ def run(mocker, monkeypatch):
         list_returncode=0,
         list_stdout=None,
         result=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        results=[],
         error=None,
     )
 
@@ -88,6 +92,8 @@ def run(mocker, monkeypatch):
             )
         if state.error is not None:
             raise state.error
+        if state.results:
+            return state.results.pop(0)
         return state.result
 
     spy = mocker.patch.object(modal_cli.subprocess, "run", side_effect=_fake_modal)

@@ -215,12 +215,13 @@ class TestGlueContract:
             assert forbidden not in source
 
     def test_the_script_resolves_its_own_engine(self, engine: str) -> None:
-        """The engine is the SCRIPT's, never ``entry.serving`` — that is what
-        makes ``SERVING=sglang`` work on an ``endpoint`` entry."""
+        """The engine is the SCRIPT's — a catalog entry names none. The model
+        crosses from the driver as ``MODAL_MODEL``, the one env var both
+        kinds' scripts read."""
 
         source = _source(engine)
 
-        assert f'build_deploy_spec(os.environ["EMBEDDING_MODEL"], "{engine}")' in source
+        assert f'build_deploy_spec(os.environ["MODAL_MODEL"], "{engine}")' in source
 
     def test_the_endpoint_is_constructed_the_way_its_engine_takes_it(
         self, engine: str

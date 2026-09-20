@@ -1,10 +1,16 @@
-"""Pure read helpers over the **Embedding catalog** (ADR-009 §2/§3).
+"""Pure read helpers over the **Modal catalog** (ADR-009 §2/§3).
 
-The ONE place that turns ``modal.embedding_models`` in
-``configs/default.yaml`` into the names, flags and prompts the deploy driver
-(#139), the fallback scripts (#142) and the ``ModalEmbeddingModel`` client
-(#140) all need — so a model's app name, dimensions and prompts cannot drift
-between the thing that deploys it and the thing that calls it.
+The ONE place that turns ``modal.embedding_models`` / ``modal.llm_models`` in
+``configs/default.yaml`` into the names, flags and prompts the deploy driver,
+the App scripts and the clients all need — so a model's app name, dimensions
+and prompts cannot drift between the thing that deploys it and the thing that
+calls it.
+
+The catalog says WHICH model, never HOW it is served: the **Serving path** is
+the router's runtime decision (:mod:`tree.models.modal_router`), so nothing
+here reads a ``serving`` or a ``base_model`` field — they no longer exist. What
+an entry DOES fix is its ``kind``, and the kind picks the App script Modal's
+refusal falls back to.
 
 This module imports **no** ``modal``: it is configuration, not infrastructure.
 The MCP boot path and the unit suite therefore never pay for the SDK, and the
@@ -19,29 +25,30 @@ from pydantic import BaseModel, Field
 
 from tree.config.app_config import (
     ModalEmbeddingModelConfig,
-    ServingPath,
+    ModalLLMModelConfig,
+    ModalModelConfig,
+    ModelKind,
     app_config,
 )
 from tree.config.settings import settings
 from tree.models.base import EmbeddingRole
 from tree.models.exceptions import ModelError
 
-# The server class name on ALL three Serving paths: it is the class name in the
-# ``serve.py`` Modal generates for a Dedicated endpoint, and the fallback
-# scripts reuse it — so ONE `Server.from_name(app_name, "Server")` lookup
-# resolves every model regardless of how it is served.
+# The server class name on BOTH Serving paths: it is the class name in the
+# ``serve.py`` Modal generates for a Dedicated endpoint, and our App scripts
+# reuse it — so ONE `Server.from_name(app_name, "Server")` lookup resolves
+# every model regardless of how it is served.
 EMBEDDING_SERVER_NAME = "Server"
 
-# The env var the fallback scripts bake ``EmbeddingDeploySpec.model_dump_json()``
+# The env var the App scripts bake ``EmbeddingDeploySpec.model_dump_json()``
 # into: the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
 # inside the Modal container, so the resolved spec crosses as ONE JSON string.
 DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
 
-# Engines with a fallback deploy script. `endpoint` has none by design (Modal
-# picks the engine), which is why the builders take an engine, not a path.
+# Engines with a deploy script of ours. A Dedicated endpoint has none by design
+# (Modal picks the engine), which is why the builders take an engine, not a
+# Serving path.
 FallbackEngine = Literal["sglang", "vllm"]
-
-_SERVING_PATHS: tuple[ServingPath, ...] = ("endpoint", "sglang", "vllm")
 
 # Where a Dedicated endpoint's requests ENTER Modal (`--routing-region`;
 # Modal's own default is `us-west`). One region for the whole catalog: the
@@ -77,17 +84,18 @@ _GATED_MARKERS = (
     "access to model",
 )
 
-# The fallback deploy script per engine, relative to `apps/memory` (the cwd of
-# every `make memory-*` target). They arrive in #142; until then an
-# `sglang`/`vllm` deploy exits 2 on the missing file.
-_FALLBACK_SCRIPTS: dict[FallbackEngine, str] = {
-    "sglang": "deploy/modal_sglang_embedding.py",
-    "vllm": "deploy/modal_vllm_embedding.py",
+# The App deploy script per KIND, relative to `apps/memory` (the cwd of every
+# `make memory-*` target). One purpose per engine (ADR-009 §2): vLLM serves
+# embeddings, SGLang serves LLMs. The SGLang script arrives in #147; until then
+# an LLM Modal refuses exits 2 on the missing file.
+_APP_SCRIPTS: dict[ModelKind, str] = {
+    "embedding": "deploy/modal_vllm_embedding.py",
+    "llm": "deploy/modal_sglang_llm.py",
 }
 
 
 class EmbeddingDeploySpec(BaseModel):
-    """Everything ONE fallback deploy needs, resolved locally (ADR-009 §3).
+    """Everything ONE App deploy needs, resolved locally (ADR-009 §3).
 
     Configuration only — a credential never enters it (the Hugging Face token
     travels as an ephemeral ``modal.Secret``, ADR-009 §9), because the spec is
@@ -112,57 +120,74 @@ class EmbeddingDeploySpec(BaseModel):
     )
 
 
-def get_catalog_entry(model: str) -> ModalEmbeddingModelConfig:
+def get_catalog_entry(model: str) -> ModalModelConfig:
     """Return the catalog entry whose ``repo_id`` is exactly ``model``.
 
-    Matching is exact, never fuzzy: a near-miss id must fail loudly rather
-    than silently deploy or query the wrong weights.
+    ONE lookup over BOTH lists — the entry's ``kind`` tells the caller which
+    one it came from, so no caller passes a kind in. Matching is exact, never
+    fuzzy: a near-miss id must fail loudly rather than silently deploy or
+    query the wrong weights (a ``repo_id`` is unique across both lists, so the
+    answer cannot depend on the order).
 
     Raises:
-        ModelError: ``model`` is not in the catalog. The message lists every
-            id that IS, sorted, and names the file to edit.
+        ModelError: ``model`` is in neither list. The message lists every id
+            that IS, per group and sorted, and names the file to edit.
     """
 
-    for entry in app_config.modal.embedding_models:
+    for entry in [*app_config.modal.embedding_models, *app_config.modal.llm_models]:
         if entry.repo_id == model:
             return entry
 
-    known = ", ".join(sorted(e.repo_id for e in app_config.modal.embedding_models))
+    embeddings = ", ".join(sorted(e.repo_id for e in app_config.modal.embedding_models))
+    llms = ", ".join(sorted(e.repo_id for e in app_config.modal.llm_models))
     raise ModelError(
-        f"Unknown Modal embedding model {model!r}. "
-        f"Embedding catalog ids: {known}. "
-        "Add an entry under modal.embedding_models in configs/default.yaml."
+        f"Unknown Modal model {model!r}. "
+        f"Modal catalog ids — embeddings: {embeddings}; llms: {llms}. "
+        "Add an entry under modal.embedding_models or modal.llm_models in "
+        "configs/default.yaml."
     )
 
 
-def resolve_serving(
-    entry: ModalEmbeddingModelConfig, override: str | None
-) -> ServingPath:
-    """Resolve the **Serving path** for ONE command.
-
-    ``override`` is the operator's ``SERVING=<path>`` (``None`` or ``""`` when
-    unset), which walks the ladder for a single command without editing YAML;
-    the catalog stays the value the client reads.
+def get_embedding_entry(model: str) -> ModalEmbeddingModelConfig:
+    """:func:`get_catalog_entry`, for a caller that can only serve embeddings.
 
     Raises:
-        ModelError: the override is not one of the three paths, or the
-            resolved path is ``endpoint`` on an entry with no ``base_model``
-            (a Dedicated endpoint needs one to pass as ``--model``).
+        ModelError: ``model`` is unknown, or it is an LLM entry — which the
+            embedding client and the embedding deploy spec cannot use, and
+            whose `native_dimensions` do not exist.
     """
 
-    serving = override or entry.serving
-    if serving not in _SERVING_PATHS:
+    entry = get_catalog_entry(model)
+    if not isinstance(entry, ModalEmbeddingModelConfig):
         raise ModelError(
-            f"Unknown Serving path {serving!r}. "
-            f"Use one of: {', '.join(_SERVING_PATHS)}."
+            f"{model} is an LLM entry (modal.llm_models), not an embedding model."
         )
+    return entry
 
-    if serving == "endpoint" and not entry.base_model:
+
+def get_llm_entry(model: str) -> ModalLLMModelConfig:
+    """:func:`get_catalog_entry`, for a caller that can only serve LLMs.
+
+    Raises:
+        ModelError: ``model`` is unknown, or it is an embedding entry.
+    """
+
+    entry = get_catalog_entry(model)
+    if not isinstance(entry, ModalLLMModelConfig):
         raise ModelError(
-            f"{entry.repo_id} has no base_model — a Dedicated endpoint needs "
-            "one. Add base_model to its Embedding catalog entry."
+            f"{model} is an embedding entry (modal.embedding_models), not an LLM."
         )
-    return serving
+    return entry
+
+
+def app_script(kind: ModelKind) -> str:
+    """The deploy script of the App that serves ``kind`` (ADR-009 §2).
+
+    The ONE place the kind becomes a file path, so the router, the driver's
+    "does the file exist" check and the dry-run plan cannot disagree.
+    """
+
+    return _APP_SCRIPTS[kind]
 
 
 def build_server_args(
@@ -170,14 +195,13 @@ def build_server_args(
 ) -> dict[str, str]:
     """The full engine argv for ``entry`` under ``engine``.
 
-    The catalog's ``extra_server_args`` plus the keys the builder owns, so one
-    entry runs under EITHER fallback script: the embedding-mode flag
-    (``--runner pooling`` for vLLM, ``--is-embedding`` for SGLang), the pinned
-    revision, the served model id, and the context window only when the entry
-    sets one (otherwise the engine's own default wins).
+    The catalog's ``extra_server_args`` plus the keys the builder owns: the
+    embedding-mode flag (``--runner pooling`` for vLLM, ``--is-embedding`` for
+    SGLang), the pinned revision, the served model id, and the context window
+    only when the entry sets one (otherwise the engine's own default wins).
 
-    ``engine`` comes from the calling SCRIPT, not from ``entry.serving``, so
-    ``SERVING=`` works.
+    ``engine`` comes from the calling SCRIPT — an entry carries no engine of
+    its own (#147 turns the SGLang half into the LLM script).
     """
 
     args = dict(entry.extra_server_args)
@@ -196,14 +220,14 @@ def build_server_args(
 
 
 def build_deploy_spec(model: str, engine: FallbackEngine) -> EmbeddingDeploySpec:
-    """Resolve ``model`` into the spec one fallback deploy is driven by.
+    """Resolve ``model`` into the spec one App deploy is driven by.
 
     Raises:
-        ModelError: ``model`` is not in the catalog, or ``engine`` has no
+        ModelError: ``model`` is not an embedding entry, or ``engine`` has no
             pinned version under ``modal.engines``.
     """
 
-    entry = get_catalog_entry(model)
+    entry = get_embedding_entry(model)
     engine_config = app_config.modal.engines.get(engine)
     if engine_config is None:
         known = ", ".join(sorted(app_config.modal.engines))
@@ -270,10 +294,17 @@ def modal_proxy_bearer() -> str:
 
 def modal_cli_command(
     action: Literal["deploy", "stop"],
-    entry: ModalEmbeddingModelConfig,
-    serving: ServingPath,
+    entry: ModalModelConfig,
+    target: Literal["endpoint", "app"],
+    base_model: str | None = None,
 ) -> list[str]:
-    """The ``modal`` argv that deploys or stops ``entry`` on ``serving``.
+    """The ``modal`` argv that deploys or stops ``entry`` as ``target``.
+
+    ``target`` is what the command CREATES (or stops), which the ROUTER
+    decides at runtime — the catalog knows nothing about it. ``base_model`` is
+    the Modal-catalog ancestor a custom-weights create is built on: given, the
+    create serves ``entry.repo_id``'s weights on that base's recipe; ``None``
+    (the common case) creates the endpoint for ``repo_id`` itself.
 
     Every name in it comes from the catalog's ONE derivation, so it always
     carries the ``tree-`` namespace (``tree-<slug>`` for an endpoint,
@@ -294,7 +325,7 @@ def modal_cli_command(
     [-y] APP_IDENTIFIER`` both resolve a NAME and both prompt without ``-y``.
     """
 
-    if serving == "endpoint":
+    if target == "endpoint":
         if action == "stop":
             return ["modal", "endpoint", "stop", "-y", entry.endpoint_name]
 
@@ -305,10 +336,10 @@ def modal_cli_command(
             "--name",
             entry.endpoint_name,
             "--model",
-            entry.base_model,
+            base_model or entry.repo_id,
         ]
         # Custom weights: Modal serves `repo_id` on `base_model`'s recipe.
-        if entry.repo_id != entry.base_model:
+        if base_model and base_model != entry.repo_id:
             argv += [
                 "--custom-hf-repo",
                 entry.repo_id,
@@ -319,38 +350,26 @@ def modal_cli_command(
 
     if action == "stop":
         return ["modal", "app", "stop", "-y", entry.app_name]
-    return ["modal", "deploy", _FALLBACK_SCRIPTS[serving]]
+    return ["modal", "deploy", app_script(entry.kind)]
 
 
-def fallback_script(serving: ServingPath) -> str | None:
-    """The deploy script ``serving`` needs, or ``None`` for ``endpoint``.
-
-    A Dedicated endpoint has no script of ours — which is exactly why the
-    driver must not look for one before running the command.
-    """
-
-    return _FALLBACK_SCRIPTS.get(serving)
-
-
-def hf_token_args(
-    entry: ModalEmbeddingModelConfig, serving: ServingPath, token: str
-) -> list[str]:
+def hf_token_args(base_model: str | None, token: str) -> list[str]:
     """The ``--custom-hf-token`` pair, or ``[]`` (ADR-009 §9).
 
-    Appended ONLY for custom weights on a Dedicated endpoint: Modal documents
-    the flag as the token "for private --custom-hf-repo" (re-verified in
-    ``modal endpoint create --help`` on modal 1.5.5). The fallback scripts get
-    the token as an ephemeral ``modal.Secret`` instead (#142), and an empty
-    token changes no argv at all.
+    Appended ONLY to a CUSTOM-WEIGHTS create (``base_model`` given): Modal
+    documents the flag as the token "for private --custom-hf-repo"
+    (re-verified in ``modal endpoint create --help`` on modal 1.5.5). Our App
+    scripts get the token as an ephemeral ``modal.Secret`` instead (#142), and
+    an empty token changes no argv at all.
     """
 
-    if not token or serving != "endpoint" or entry.repo_id == entry.base_model:
+    if not token or not base_model:
         return []
     return [_HF_TOKEN_FLAG, token]
 
 
 def hf_token_env() -> dict[str, str]:
-    """The env dict a fallback script's ephemeral ``modal.Secret`` carries.
+    """The env dict an App script's ephemeral ``modal.Secret`` carries.
 
     ``{"HF_TOKEN": <token>}`` when the setting is non-empty, ``{}`` otherwise
     (ADR-009 §9) — so ``modal.Secret.from_dict(hf_token_env())`` is built the
@@ -422,7 +441,7 @@ def truncate_embedding(vector: list[float], dimensions: int) -> list[float]:
     it unless the model's HF config is flagged Matryoshka (voyage-4-nano's is
     not) and a managed recipe exposes no flag to change that. Slice-then-
     normalise is what a server-side truncation does, and it behaves
-    identically on all three Serving paths.
+    identically on both Serving paths.
 
     A zero vector is returned sliced (no division by zero) — a degenerate
     vector is a server problem, caught by the length and sanity assertions

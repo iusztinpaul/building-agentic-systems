@@ -119,7 +119,7 @@ observability:
   embedding_price_per_1m_tokens:
     voyage-3.5: 0.06
 
-# The Embedding catalog (ADR-009 §3). Mirrors the SHAPE of the shipped
+# The Modal catalog (ADR-009 §2/§3). Mirrors the SHAPE of the shipped
 # configs/default.yaml — the seed VALUES (revisions, prompts, engine pins) are
 # asserted against the real file, not against this fixture.
 modal:
@@ -131,17 +131,14 @@ modal:
       version: "0.5.20"
   warmup_deadline_s: 600
   embedding_models:
-    # A minimal Dedicated-endpoint entry: no serving line (endpoint is the
-    # default), no script-only fields.
+    # A minimal entry: a repo id, a revision and the measured vector width —
+    # nothing about HOW it is served.
     - repo_id: Qwen/Qwen3-Embedding-0.6B
       revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
-      base_model: Qwen/Qwen3-Embedding-0.6B
       native_dimensions: 1024
-    # A fallback-script entry, with the fields only the scripts read.
+    # An entry carrying the App fields, which only the App scripts read.
     - repo_id: voyageai/voyage-4-nano
       revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f
-      serving: vllm
-      base_model: Qwen/Qwen3-Embedding-0.6B
       gpu: A10
       cpu: 4
       memory_mb: 16384
@@ -153,3 +150,13 @@ modal:
       extra_server_args:
         "--convert": embed
         "--pooler-config": '{"pooling_type":"MEAN"}'
+  llm_models:
+    # The LLM half of the catalog: the same entry minus the embedding facts,
+    # plus `n_gpus` (SGLang's tp).
+    - repo_id: Qwen/Qwen3.5-0.8B
+      revision: 2fc06364715b967f1860aea9cf38778875588b17
+    - repo_id: LiquidAI/LFM2.5-350M
+      revision: 9e6c6ccf47cd318696e137d381a7ded8fe4df09f
+      gpu: A10
+      n_gpus: 1
+      max_model_len: 32768

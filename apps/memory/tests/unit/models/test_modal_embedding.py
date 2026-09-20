@@ -303,7 +303,7 @@ class TestInit:
             _model("BAAI/bge-m3")
 
         message = str(excinfo.value)
-        assert "Unknown Modal embedding model 'BAAI/bge-m3'" in message
+        assert "Unknown Modal model 'BAAI/bge-m3'" in message
         assert _QWEN in message
         assert _VOYAGE in message
 
@@ -353,7 +353,7 @@ class TestUrlResolution:
 
         failure = (
             "Failed to resolve Modal server ep-tree-voyage-4-nano/Server. Is the "
-            "model deployed (...)? Run: make memory-deploy-embedding-model "
+            "model deployed (...)? Run: make memory-deploy-model "
             f"MODEL={_VOYAGE}"
         )
         server.resolve.side_effect = ModelError(failure)

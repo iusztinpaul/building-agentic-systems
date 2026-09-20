@@ -46,9 +46,7 @@ def entry() -> ModalEmbeddingModelConfig:
     """A catalog entry built here, not read from YAML: these tests are about
     the guard, not about the seeds."""
 
-    return ModalEmbeddingModelConfig(
-        repo_id=_REPO_ID, base_model=_REPO_ID, native_dimensions=2048
-    )
+    return ModalEmbeddingModelConfig(repo_id=_REPO_ID, native_dimensions=2048)
 
 
 def _endpoint_row(name: str) -> dict[str, str]:
@@ -242,18 +240,19 @@ class TestGuardDeploy:
             assert messages == []
 
     def test_a_refusal_names_the_endpoint_and_how_to_stop_it(self, entry, run) -> None:
-        """Story 2: the operator walked the ladder and forgot the ``-stop``."""
+        """The operator forgot the ``-stop``, which needs no SERVING= at all
+        now that a stop is path-blind."""
 
         run.state.endpoints = [_endpoint_row(_ENDPOINT_NAME)]
 
         with pytest.raises(ModalGuardError) as excinfo:
-            guard_deploy(entry, "app", False, path="vllm")
+            guard_deploy(entry, "app", False, path="app")
 
         assert str(excinfo.value) == (
-            f"Refusing to deploy {_REPO_ID} via vllm: {_ENDPOINT_NAME!r} "
+            f"Refusing to deploy {_REPO_ID} via app: {_ENDPOINT_NAME!r} "
             "already exists on Modal as a Dedicated endpoint. Stop it first "
-            f"(make memory-deploy-embedding-model-stop MODEL={_REPO_ID} "
-            "SERVING=endpoint) or pass FORCE=yes to deploy over it."
+            f"(make memory-deploy-model-stop MODEL={_REPO_ID}) or pass "
+            "FORCE=yes to deploy over it."
         )
 
     def test_a_refusal_on_an_app_names_the_app(self, entry, run) -> None:
@@ -264,14 +263,25 @@ class TestGuardDeploy:
 
         message = str(excinfo.value)
         assert f"{_APP_NAME!r} already exists on Modal as an app" in message
-        assert "SERVING=the path it was deployed with" in message
+        assert f"make memory-deploy-model-stop MODEL={_REPO_ID}" in message
+
+    def test_a_pre_read_kind_costs_no_second_lookup(self, entry, run) -> None:
+        """The router reads the workspace once, to ROUTE, and hands the same
+        reading to the guard — so the guard lists nothing of its own."""
+
+        run.state.endpoints = [_endpoint_row(_ENDPOINT_NAME)]
+
+        with pytest.raises(ModalGuardError):
+            guard_deploy(entry, "endpoint", False, path="endpoint", kind="endpoint")
+
+        run.assert_not_called()
 
     def test_a_redeploy_of_our_own_app_is_a_normal_update(self, entry, run) -> None:
         """Story 3: the operator bumped ``revision`` and deploys again."""
 
         run.state.apps = [_app_row(_APP_NAME)]
 
-        assert guard_deploy(entry, "app", False, path="vllm") is None
+        assert guard_deploy(entry, "app", False, path="app") is None
 
     def test_a_failed_list_under_force_is_only_a_warning(
         self, entry, run, caplog
