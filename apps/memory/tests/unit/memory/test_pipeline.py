@@ -25,7 +25,7 @@ from beanie import PydanticObjectId
 from prefect.cache_policies import NO_CACHE
 
 from tests.unit.conftest import TEST_DATABASE
-from tree.config.app_config import ChunkingConfig, load_app_config
+from tree.config.app_config import ChunkingConfig, LLMConfig, load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document, SourceType
@@ -96,7 +96,11 @@ from tree.memory.graph.resolution.types import ResolvedEntity
 from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
 from tree.models.exceptions import ModelError
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
-from tree.models.get_model import prewarm_models, search_embedding_identity
+from tree.models.get_model import (
+    llm_identity,
+    prewarm_models,
+    search_embedding_identity,
+)
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -117,6 +121,11 @@ _PERSON_RESPONSE = {
     "nodes": [{"name": "alice", "type": "person", "properties": {}}],
     "edges": [],
 }
+
+# The cache-key identity of the LLM the two cached LLM tasks take as a required
+# input. Cache-key material only — the bodies never read it — so direct calls of
+# the bodies can pin any concrete ``provider:model`` string.
+_TEST_LLM_IDENTITY = "gemini:gemini-3.1-flash-lite"
 
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -519,7 +528,9 @@ class TestLlmExtractEntitiesTask:
             document_id="d1", source_uri="u1", source_type="huggingface"
         )
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         assert raw.extracted.nodes == []
         assert raw.extracted.edges == []
@@ -529,7 +540,9 @@ class TestLlmExtractEntitiesTask:
         mocker.patch("tree.memory.pipeline.get_llm", return_value=fake)
         chunked = _chunked_with_children(shape=(2, 2, 2))
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         # 3 parents -> 3 calls (NOT 6, one per child).
         assert fake.call_count == 3
@@ -544,7 +557,9 @@ class TestLlmExtractEntitiesTask:
         )
         chunked = _chunked_with_children(shape=(1, 1))
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         assert {node.chunk_id for node in raw.extracted.nodes} == {
             parent_row_id(_USER_ID, chunked.source_uri, 0),
@@ -1622,6 +1637,115 @@ class TestEmbedTaskCacheIdentity:
         assert vectors == {"a": [0.5] * 4}
 
 
+class TestLLMTaskCacheIdentity:
+    """Same rule, LLM side (ADR-009 decision 6 applied to decision 10's
+    ``models.llm`` switch).
+
+    ``llm-extract-entities`` (30 d) and ``summarise-cluster`` (90 d) cached on
+    inputs that never named the LLM, so after a ``gemini`` -> ``modal`` flip a
+    document / cluster seen inside the window REPLAYED the previous model's
+    JSON and the new model was never called. Both tasks now take an
+    ``llm_identity`` input — unused in the body, part of the cache key.
+    """
+
+    # Per-task fixed inputs; only the identity moves between the two keys.
+    _KEY_INPUTS: dict[str, dict[str, Any]] = {
+        "llm-extract-entities": {"chunked": "doc-1", "user_id": "user-1", "llm": None},
+        "summarise-cluster": {
+            "samples": ["a", "b"],
+            "cluster_id": 0,
+            "prompt_version": "v1",
+        },
+    }
+
+    _GEMINI = "gemini:gemini-3.1-flash-lite"
+    _MODAL = "modal:LiquidAI/LFM2.5-350M"
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_cache_key_differs_across_llm_identities(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+        inputs = self._KEY_INPUTS[cached_task.name]
+
+        def _key(identity: str) -> str:
+            return policy.compute_key(
+                task_ctx=None,
+                inputs={**inputs, "llm_identity": identity},
+                flow_parameters={},
+            )
+
+        # Story 1 — the provider flip.
+        assert _key(self._GEMINI) != _key(self._MODAL)
+        # Story 2 — same provider, a newer model id.
+        assert _key(self._GEMINI) != _key("gemini:gemini-2.5-flash")
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_cache_key_ignores_opik_trace_headers(self, cached_task) -> None:
+        """Story 4: an unchanged LLM still hits the cache — trace headers move
+        every run and must not buy a billable call."""
+
+        policy = cached_task.cache_policy
+        inputs = {**self._KEY_INPUTS[cached_task.name], "llm_identity": self._GEMINI}
+
+        first = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-1"}},
+            flow_parameters={},
+        )
+        second = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-2"}},
+            flow_parameters={},
+        )
+
+        assert first == second
+
+    @pytest.mark.parametrize(
+        ("task_fn", "other_args"),
+        [
+            (
+                _llm_extract_entities,
+                (
+                    ChunkedDocument(
+                        document_id="d1", source_uri="u1", source_type="huggingface"
+                    ),
+                    _USER_ID,
+                ),
+            ),
+            (_summarise_cluster, (["a"], 0, "v1")),
+        ],
+        ids=["llm-extract-entities", "summarise-cluster"],
+    )
+    def test_task_body_requires_llm_identity(self, task_fn, other_args) -> None:
+        """Story 5: a new call site that forgets the kwarg is a loud
+        ``TypeError``, never a silently shared cache key."""
+
+        params = inspect.signature(task_fn).parameters
+
+        assert params["llm_identity"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["llm_identity"].default is inspect.Parameter.empty
+        # Raised at CALL time (before the coroutine exists), so no await here.
+        with pytest.raises(TypeError, match="llm_identity"):
+            task_fn(*other_args)
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_llm_identity_is_not_excluded_from_the_key(self, cached_task) -> None:
+        # ``_INPUTS_NO_HEADERS`` drops only the trace headers; excluding the
+        # identity too would re-open the bug this task closes.
+        assert "llm_identity" not in (cached_task.cache_policy.exclude or [])
+
+
 # ---------------------------------------------------------------------------
 # Flow registration
 # ---------------------------------------------------------------------------
@@ -1936,6 +2060,10 @@ class TestFlowEmbeddingModelSplit:
     (persisted node vector). The two MUST be distinct objects so the
     operator can later swap a lighter resolution model without touching the
     persisted-vector space.
+
+    Also the home of the worker's cache-identity wiring (ADR-009 decision 6):
+    the embedding identity and the LLM identity are resolved once per run and
+    handed to every cached task that must not replay another model's output.
     """
 
     @pytest.fixture
@@ -1994,7 +2122,7 @@ class TestFlowEmbeddingModelSplit:
         mocker.patch(
             "tree.memory.pipeline.load_rag_rows_task", new=AsyncMock(return_value=0)
         )
-        mocker.patch(
+        llm_extract_entities = mocker.patch(
             "tree.memory.pipeline.llm_extract_entities_task",
             new=AsyncMock(return_value=raw),
         )
@@ -2039,6 +2167,7 @@ class TestFlowEmbeddingModelSplit:
             "apply_writes": apply_writes,
             "embed_children": embed_children,
             "embed_entities": embed_entities,
+            "llm_extract_entities": llm_extract_entities,
         }
 
     async def test_builds_the_resolver_from_the_resolution_model(
@@ -2089,6 +2218,25 @@ class TestFlowEmbeddingModelSplit:
         for task_name in ("embed_children", "embed_entities"):
             kwargs = stubbed_graph_stages[task_name].await_args.kwargs
             assert kwargs["embedding_identity"] == identity
+
+    async def test_worker_passes_the_llm_identity_to_extraction(
+        self, mocker, stubbed_graph_stages
+    ) -> None:
+        """Story 1: the operator flips ``models.llm`` to their own Modal
+        server — the extraction task's 30-day cache key must move with it
+        instead of replaying Gemini's JSON."""
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.llm",
+            LLMConfig(provider="modal", model="LiquidAI/LFM2.5-350M"),
+        )
+
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        kwargs = stubbed_graph_stages["llm_extract_entities"].await_args.kwargs
+        assert kwargs["llm_identity"] == "modal:LiquidAI/LFM2.5-350M"
 
     async def test_rag_mode_never_builds_the_graph_model_handles(
         self, mocker, monkeypatch, stubbed_graph_stages
@@ -3496,6 +3644,30 @@ class TestSummariseClustersPrewarm:
         ]
         assert len(skipped) == 1
         assert "HTTP 403" in caplog.text
+
+
+class TestSummariseClustersLLMIdentity:
+    """Story 2: the LLM identity rides into EVERY cluster's cache key, so a
+    model upgrade re-labels the clusters instead of replaying 40-day-old
+    labels for another 50 days."""
+
+    async def test_summaries_pass_the_llm_identity_to_every_cluster(
+        self, mocker
+    ) -> None:
+        config = load_app_config().memory.clustering
+        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(return_value=_summary()),
+        )
+
+        await _summarise_clusters({0: ["a"], 1: ["b"], 2: ["c"]}, config)
+
+        assert summarise.await_count == 3
+        identities = {call.kwargs["llm_identity"] for call in summarise.await_args_list}
+        # ONE identity for the whole fan-out — resolved once, not per cluster.
+        assert identities == {llm_identity()}
 
 
 class TestSummariseClustersParallelization:

@@ -162,6 +162,32 @@ def search_embedding_identity() -> str:
     return f"{cfg.provider}:{cfg.model}:{cfg.dimensions}:document"
 
 
+def llm_identity() -> str:
+    """Identity of the LLM behind the cached LLM tasks: ``provider:model``.
+
+    Decision 6's rule ("caches carry the identity of the model that produced
+    them") applied to the ``models.llm`` switch of ADR-009 decision 10. The
+    ``INPUTS`` caches on ``llm-extract-entities`` (30 days) and
+    ``summarise-cluster`` (90 days) named nothing about the LLM, so after a
+    ``gemini`` -> ``modal`` flip a document / cluster already seen inside the
+    window REPLAYED the previous model's JSON and the new model was never
+    called. Both tasks take this string as an input, which puts it in the key
+    — a provider or model-id change is a cache MISS instead of a silent replay.
+
+    Two parts only, unlike :func:`search_embedding_identity`: an LLM has no
+    dimensions and no **Embedding role**.
+
+    Read from ``app_config`` at CALL time (never a module constant): Prefect
+    re-imports this module inside flow-run subprocesses, and a
+    ``TREE_MODELS__LLM__MODEL=gemini-2.5-flash`` override must move the
+    identity with it. With the shipped defaults the value is
+    ``"gemini:gemini-3.1-flash-lite"``.
+    """
+
+    cfg = app_config.models.llm
+    return f"{cfg.provider}:{cfg.model}"
+
+
 def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     """Factory for embedding model instances (legacy shim).
 

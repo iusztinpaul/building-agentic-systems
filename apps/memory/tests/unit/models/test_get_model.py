@@ -5,7 +5,12 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import SecretStr
 
-from tree.config.app_config import EmbeddingConfig
+from tree.config.app_config import (
+    EmbeddingConfig,
+    LLMConfig,
+    app_config as real_app_config,
+    load_app_config,
+)
 from tree.models import modal_catalog
 from tree.models.fake_model import MockEmbeddingModel
 from tree.models.gemini import GeminiEmbeddingModel, GeminiLLM
@@ -16,6 +21,7 @@ from tree.models.get_model import (
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    llm_identity,
     search_embedding_identity,
 )
 from tree.models.modal_embedding import ModalEmbeddingModel
@@ -437,6 +443,62 @@ class TestSearchEmbeddingIdentity:
         )
 
         assert search_embedding_identity() == "voyage:voyage-4:512:document"
+
+
+class TestLLMIdentity:
+    """ADR-009 decision 6's rule ("caches carry the identity of the model that
+    produced them"), applied to the decision-10 ``models.llm`` switch: ONE
+    helper renders the identity the two cached LLM tasks carry, so flipping
+    ``gemini`` -> ``modal`` (or one model id -> another) is a cache MISS
+    instead of a replay of the old LLM's JSON.
+    """
+
+    def test_default_identity(self, mocker) -> None:
+        """The shipped ``configs/default.yaml`` renders
+        ``gemini:gemini-3.1-flash-lite``.
+
+        The module-level ``_mock_app_config`` fixture installs a ``MagicMock``
+        for ``app_config``; this test puts the REAL import-time singleton back
+        so the assertion is about the shipped YAML, not about the double.
+        """
+
+        mocker.patch("tree.models.get_model.app_config", real_app_config)
+
+        assert llm_identity() == "gemini:gemini-3.1-flash-lite"
+
+    def test_reads_the_config_at_call_time(self, mocker) -> None:
+        """Nothing is frozen at import time: Prefect re-imports this module in
+        flow-run subprocesses, so a ``models.llm`` switch made after import
+        must still move the identity."""
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.llm",
+            LLMConfig(provider="modal", model=_CATALOG_LLM),
+        )
+
+        assert llm_identity() == f"modal:{_CATALOG_LLM}"
+
+    def test_env_override_moves_the_identity(self, mocker, tmp_path, monkeypatch):
+        """Story 3: ``TREE_MODELS__LLM__MODEL=gemini-2.5-flash`` for ONE run
+        neither reads nor pollutes the default model's cache entries."""
+
+        custom = tmp_path / "models.yaml"
+        custom.write_text(
+            "models:\n  llm:\n    provider: gemini\n    model: gemini-3.1-flash-lite\n"
+        )
+        monkeypatch.setenv("TREE_MODELS__LLM__MODEL", "gemini-2.5-flash")
+
+        mocker.patch("tree.models.get_model.app_config", load_app_config(custom))
+
+        assert llm_identity() == "gemini:gemini-2.5-flash"
+
+    def test_two_parts_only(self, mocker) -> None:
+        """An LLM has no dimensions and no **Embedding role** — the identity is
+        ``provider:model`` and nothing else, unlike the 4-part embedding one."""
+
+        mocker.patch("tree.models.get_model.app_config", real_app_config)
+
+        assert llm_identity().count(":") == 1
 
 
 class TestModalBranch:

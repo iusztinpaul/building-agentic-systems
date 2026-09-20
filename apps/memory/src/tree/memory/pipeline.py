@@ -177,6 +177,7 @@ from tree.models.get_model import (
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    llm_identity,
     prewarm_models,
     search_embedding_identity,
 )
@@ -569,6 +570,8 @@ async def _llm_extract_entities(
     chunked: ChunkedDocument,
     user_id: PydanticObjectId,
     llm: BaseLLM | None = None,
+    *,
+    llm_identity: str,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> RawExtraction:
     """Invoke the LLM once per **Parent chunk** and merge the extractions.
@@ -581,6 +584,12 @@ async def _llm_extract_entities(
 
     ``llm`` is optional so a caller that already holds a handle can inject it.
     When omitted the flow uses the default ``get_llm()`` factory.
+
+    ``llm_identity`` (``provider:model``, from
+    :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
+    rides in the ``INPUTS`` cache key so this task's 30-day cache can never
+    replay the JSON of a previous LLM after a ``models.llm`` switch (ADR-009
+    decision 6's rule applied to decision 10's provider switch).
 
     ``opik_trace_headers`` attaches this task's span to the flow's trace. The
     nested Gemini LLM spans (with native usage + cost) attach to THIS span via
@@ -622,8 +631,9 @@ async def _llm_extract_entities(
             merged = merged.merge(piece)
 
         log.info(
-            "llm_extract_entities: doc_id=%s n_parents=%d n_entities_raw=%d "
+            "llm_extract_entities: llm=%s doc_id=%s n_parents=%d n_entities_raw=%d "
             "n_edges_raw=%d",
+            llm_identity,
             chunked.document_id,
             len(chunked.parents),
             len(merged.nodes),
@@ -2019,6 +2029,11 @@ async def _run_extraction_worker_body(
     # serve vectors embedded by a previous model. Resolved once per run, at run
     # time, so an env-override of the model moves it too.
     embedding_identity = search_embedding_identity()
+    # Same rule for the LLM behind the cached extraction task (ADR-009 decision
+    # 6 applied to the decision-10 ``models.llm`` switch): without it, a
+    # gemini -> modal flip REPLAYS the old model's JSON out of the 30-day
+    # cache. Resolved once per run, next to the embedding identity.
+    extraction_llm_identity = llm_identity()
     child_vectors = await embed_children_task(
         child_embedding_texts(chunked_docs),
         embedding_identity=embedding_identity,
@@ -2074,7 +2089,10 @@ async def _run_extraction_worker_body(
     for chunked in chunked_docs:
         raws.append(
             await llm_extract_entities_task(
-                chunked, user_id, opik_trace_headers=headers
+                chunked,
+                user_id,
+                llm_identity=extraction_llm_identity,
+                opik_trace_headers=headers,
             )
         )
 
@@ -2501,6 +2519,8 @@ async def _summarise_cluster(
     samples: list[str],
     cluster_id: int,
     prompt_version: str,
+    *,
+    llm_identity: str,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> ClusterSummary:
     """Name and describe ONE **Memory cluster** from its sampled members.
@@ -2512,6 +2532,12 @@ async def _summarise_cluster(
 
     ``get_llm()`` is built INSIDE the task: Prefect may run it in another
     thread/process, where a handle created at flow scope is not reusable.
+
+    ``llm_identity`` (``provider:model``, from
+    :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
+    rides in the ``INPUTS`` cache key so this task's 90-day cache can never
+    replay the labels of a previous LLM after a ``models.llm`` switch (ADR-009
+    decision 6's rule applied to decision 10's provider switch).
     """
 
     log = _get_run_logger()
@@ -2521,7 +2547,8 @@ async def _summarise_cluster(
         trace_headers=opik_trace_headers,
     ):
         log.info(
-            "summarise_cluster: cluster_id=%d n_samples=%d prompt_version=%s",
+            "summarise_cluster: llm=%s cluster_id=%d n_samples=%d prompt_version=%s",
+            llm_identity,
             cluster_id,
             len(samples),
             prompt_version,
@@ -2564,6 +2591,11 @@ async def _summarise_clusters(
 
     log = _get_run_logger()
     semaphore = asyncio.Semaphore(config.summaries.llm_concurrency)
+    # ADR-009 §6: the identity of the LLM rides into every cluster's cache key,
+    # so a ``models.llm`` switch re-labels the clusters instead of replaying the
+    # old model's labels for the rest of the 90-day window. Resolved ONCE before
+    # the fan-out, at run time, so an env override moves it too.
+    cluster_llm_identity = llm_identity()
 
     async def _one(cluster_id: int) -> ClusterSummary:
         async with semaphore:
@@ -2571,6 +2603,7 @@ async def _summarise_clusters(
                 samples_by_cluster[cluster_id],
                 cluster_id,
                 SUMMARY_PROMPT_VERSION,
+                llm_identity=cluster_llm_identity,
                 opik_trace_headers=opik_trace_headers,
             )
 
