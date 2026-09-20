@@ -41,7 +41,10 @@ from tree.entities.users import User
 from tree.memory.graph.dedup import DeduplicationConfig, DeduplicationResult
 from tree import offline, online
 from tree.memory import pipeline
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import (
+    node_to_embedding_text,
+    prospective_entity_embedding_text,
+)
 from tree.memory.clustering.store import ChildEmbeddingRow, ClusterWriteCounts
 from tree.memory.clustering.summaries import fallback_summary
 from tree.memory.clustering.types import (
@@ -57,7 +60,6 @@ from tree.memory.pipeline import (
     _dispatch_entity_write,
     _embed_children,
     _embed_entities,
-    _entity_embeddable_text,
     _llm_extract_entities,
     _load_rag_rows,
     _rag_row_id_map,
@@ -1756,11 +1758,16 @@ class TestIndexingFlowReturnsEmbeddedCount:
 
 
 class TestEntityEmbeddableText:
-    """``_entity_embeddable_text`` mirrors ``add_entity._embeddable_text``."""
+    """Task ④ pre-computes its texts with ``prospective_entity_embedding_text``.
+
+    The same function ``add_entity`` calls inline — these cases pin what the
+    pipeline's ``embeddable_text_by_key`` (and therefore the
+    ``_CachedSingleEmbedding`` lookup key) holds per node type.
+    """
 
     def test_generic_type_returns_node_text(self) -> None:
         properties = {"role": "researcher"}
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",
@@ -1780,7 +1787,7 @@ class TestEntityEmbeddableText:
     def test_generic_type_strips_aliases_and_confidence(self) -> None:
         # ``aliases`` / ``confidence`` are top-level columns on the stored
         # row, so they must not leak into the embeddable node-text.
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",
@@ -1791,7 +1798,7 @@ class TestEntityEmbeddableText:
         assert "researcher" in text
 
     def test_preference_returns_statement(self) -> None:
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PREFERENCE,
             name="prefers-dark-mode",
             canonical_name="prefers-dark-mode",
@@ -1800,7 +1807,7 @@ class TestEntityEmbeddableText:
         assert text == "prefers dark mode"
 
     def test_fact_returns_object(self) -> None:
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.FACT,
             name="france-capital",
             canonical_name="france-capital",
@@ -1810,7 +1817,7 @@ class TestEntityEmbeddableText:
 
     def test_preference_without_statement_falls_back_to_node_text(self) -> None:
         # A malformed preference (no statement) is still embeddable.
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PREFERENCE,
             name="prefers-dark-mode",
             canonical_name="prefers-dark-mode",
@@ -1852,7 +1859,7 @@ class TestDispatchEntityWriteReusesVector:
             match_type="exact",
         )
         key = make_entity_key("d1", NodeType.PERSON, "Andrej Karpathy")
-        node_text = _entity_embeddable_text(
+        node_text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",

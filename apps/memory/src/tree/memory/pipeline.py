@@ -82,7 +82,10 @@ from tree.entities.memory import (
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
-from tree.memory.embedding_text import embed_in_batches, entity_embedding_text
+from tree.memory.embedding_text import (
+    embed_in_batches,
+    prospective_entity_embedding_text,
+)
 from tree.memory.graph.add_entity import add_entity
 from tree.memory.graph.extraction import build_structural_entries, extract_entities
 from tree.memory.graph.dedup import (
@@ -289,38 +292,6 @@ def _build_dedup_config() -> DeduplicationConfig:
         match_same_type_only=cfg.match_same_type_only,
         merge_strategy=MergeStrategy(cfg.merge_strategy),
     )
-
-
-def _entity_embeddable_text(
-    *, entity_type: NodeType, name: str, canonical_name: str, properties: dict[str, Any]
-) -> str:
-    """Embeddable text for one extracted entity.
-
-    Mirrors :func:`tree.memory.graph.add_entity._embeddable_text` so
-    the vector task ④ pre-computes (that ⑤ deduplicates against and ⑥
-    persists) is byte-for-byte the text ``add_entity`` would build for the
-    same node. Both build the persisted row shape and hand it to the ONE
-    per-type chooser, :func:`tree.memory.embedding_text.entity_embedding_text`
-    (GENERIC types → node-text, PREFERENCE / FACT → ``properties.statement`` /
-    ``properties.object``), which the indexing backfill calls as well. Keeping
-    the three in lock-step is what lets ``_CachedSingleEmbedding`` reuse the
-    vector and makes the indexing backfill a no-op for dedup-created nodes.
-    """
-
-    # ``aliases`` / ``confidence`` are top-level columns on the persisted
-    # row, never under ``properties`` — strip them so this text matches
-    # both ``add_entity._embeddable_text`` and the indexing backfill text.
-    node = {
-        "type": entity_type.value,
-        "name": name,
-        "canonical_name": canonical_name,
-        "properties": {
-            k: v
-            for k, v in (properties or {}).items()
-            if k not in {"aliases", "confidence"}
-        },
-    }
-    return entity_embedding_text(node)
 
 
 def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
@@ -1121,7 +1092,7 @@ async def _resolve_entities(
                     # has picked a canonical_name. Generic types → node-text;
                     # PREFERENCE/FACT → statement/object.
                     node = node_by_key.get(key)
-                    embeddable_text_by_key[key] = _entity_embeddable_text(
+                    embeddable_text_by_key[key] = prospective_entity_embedding_text(
                         entity_type=etype,
                         name=name,
                         canonical_name=resolved.canonical_name,
@@ -1591,9 +1562,9 @@ async def _dispatch_entity_write(
     # vector up by the same embeddable-text key and wrap it in
     # ``_CachedSingleEmbedding`` so ``add_entity``'s internal
     # ``embedding_model.embed([...])`` returns it WITHOUT a second embed call.
-    # ``add_entity`` rebuilds the identical text via its own
-    # ``_embeddable_text`` and persists this same vector on the non-merged
-    # path — dedup vector == persisted vector, computed once.
+    # ``add_entity`` rebuilds the identical text through the SAME
+    # ``prospective_entity_embedding_text`` and persists this vector on the
+    # non-merged path — dedup vector == persisted vector, computed once.
     #
     # THIS INVARIANT FORCES THE **EMBEDDING ROLE** (ADR-009 decision 5): the
     # vector dedup searches with is the vector we store, so it must be a

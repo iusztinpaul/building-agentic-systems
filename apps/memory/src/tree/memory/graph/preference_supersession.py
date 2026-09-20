@@ -72,6 +72,7 @@ from tree.entities.memory import (
 )
 from tree.memory.graph.judge import judge_contradiction
 from tree.memory.graph.resolution.types import _normalize
+from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.memory.types import ExtractedNode, RawExtraction
 from tree.models.base import BaseEmbeddingModel, BaseLLM
 
@@ -233,14 +234,27 @@ def _preference_category(node: ExtractedNode) -> str | None:
 
 def _fact_object(node: ExtractedNode) -> str | None:
     """Return the fact's object string (the typed-slot key is
-    ``"object"``; ``"object_"`` is the Python attribute alias)."""
+    ``"object"``; ``"object_"`` is the Python attribute alias).
+
+    ``object`` wins whenever the key is PRESENT and not ``None``; the legacy
+    ``object_`` is read only when ``object`` is absent. Same presence rule as
+    :func:`tree.memory.embedding_text.entity_embedding_text`, and for the same
+    reason: this string becomes the embed input a few frames down
+    (:func:`_maybe_supersede`), so a present-but-blank ``object`` falling
+    through to the stale pre-rename ``object_`` would write a vector the
+    indexing backfill never rebuilds. A row with no usable ``object`` returns
+    ``None`` and is skipped by the resolver instead.
+    """
 
     if not node.properties:
         return None
-    for key in ("object", "object_"):
-        value = node.properties.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    value = (
+        node.properties["object"]
+        if node.properties.get("object") is not None
+        else node.properties.get("object_")
+    )
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
@@ -358,6 +372,12 @@ def _candidate_statement(cand: dict[str, Any]) -> str | None:
     ``properties.statement`` (preferences) → ``properties.content``
     (legacy preferences) → ``properties.object`` /
     ``properties.object_`` (facts).
+
+    Deliberately a first-NON-BLANK-value chain, not the first-PRESENT-key rule
+    :func:`_fact_object` uses: this string only ever becomes the OLD statement
+    in the judge PROMPT, never an embed input, and "first present key wins"
+    across a cross-type chain would drop the documented legacy ``content``
+    fallback for preferences written before the typed slots.
     """
 
     cand_props = cand.get("properties") or {}
@@ -413,18 +433,42 @@ async def _maybe_supersede(
     # role** is ``document`` (ADR-009 §5): this vector is WRITTEN on the
     # superseding row and compared against the old row's persisted statement
     # vector — statement-vs-statement inside document space.
-    try:
-        embedded = await embedding_model.embed([new_statement], input_type="document")
-    except Exception:  # noqa: BLE001
+    #
+    # The embed INPUT is sanitized exactly as
+    # ``embedding_text.entity_embedding_text`` sanitizes it — sanitize, THEN
+    # strip, with the one shared ``strip_invalid_chars``. Two reasons: Voyage
+    # answers 400 on control characters and lone surrogates, and this vector
+    # must be embedded on the SAME bytes the indexing backfill uses, or an
+    # **Embedding reset** (ADR-009 §7) silently moves it and supersession's
+    # comparisons drift. ``new_statement`` itself stays RAW — the judge prompt,
+    # the node slug and the persisted ``properties.statement`` read the user's
+    # text unchanged; only what we send to the embedding API is cleaned.
+    new_vector: list[float] = []
+    embeddable_statement = strip_invalid_chars(new_statement).strip()
+    if not embeddable_statement:
+        # All-invalid-character (or whitespace-only) statement: a blank string
+        # is never embedded. Fall through to the same "write the supersession
+        # without an embedding column" outcome the failure branch takes — the
+        # indexing backfill picks the row up later.
         logger.warning(
-            "preference_supersession: failed to embed statement %r; "
+            "preference_supersession: statement %r sanitizes to blank; "
             "writing supersession without embedding column",
             new_statement,
-            exc_info=True,
         )
-        new_vector: list[float] = []
     else:
-        new_vector = embedded[0] if embedded else []
+        try:
+            embedded = await embedding_model.embed(
+                [embeddable_statement], input_type="document"
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "preference_supersession: failed to embed statement %r; "
+                "writing supersession without embedding column",
+                new_statement,
+                exc_info=True,
+            )
+        else:
+            new_vector = embedded[0] if embedded else []
 
     candidates_judged = 0
     for cand in candidates:

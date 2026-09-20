@@ -20,15 +20,18 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.entities.memory import NodeType
-from tree.memory.embedding_text import node_to_embedding_text
-from tree.memory.graph.add_entity import _embeddable_text, add_entity
+from tree.memory.embedding_text import (
+    node_to_embedding_text,
+    prospective_entity_embedding_text,
+)
+from tree.memory.graph.add_entity import add_entity
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
     MergeStrategy,
 )
 from tree.memory.graph.resolution.types import ResolvedEntity
-from tree.memory.pipeline import _CachedSingleEmbedding, _entity_embeddable_text
+from tree.memory.pipeline import _CachedSingleEmbedding
 from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.memory.rag.indexing import node_embedding_text
 from tree.models.base import EmbeddingRole
@@ -949,7 +952,7 @@ def test_inline_and_backfill_text_agree_for_preference_and_fact(
     migrate. Both now route through ``embedding_text.entity_embedding_text``.
     """
 
-    inline = _embeddable_text(
+    inline = prospective_entity_embedding_text(
         entity_type=entity_type,
         name="prefers dark mode",
         canonical_name="prefers dark mode",
@@ -971,7 +974,7 @@ def test_inline_and_backfill_agree_on_the_generic_fallback() -> None:
 
     properties = {"statement": "   "}
 
-    inline = _embeddable_text(
+    inline = prospective_entity_embedding_text(
         entity_type=NodeType.PREFERENCE,
         name="malformed",
         canonical_name="malformed",
@@ -998,18 +1001,20 @@ def test_inline_and_backfill_agree_on_the_generic_fallback() -> None:
     ],
     ids=["control-char", "lone-surrogate"],
 )
-def test_preference_text_is_sanitized_identically_on_all_three_paths(
+def test_preference_text_is_sanitized_identically_on_both_paths(
     statement: str,
 ) -> None:
-    """Invalid characters are stripped from the statement — on ALL three paths.
+    """Invalid characters are stripped from the statement — on BOTH paths.
 
     Voyage 400s on control characters and lone surrogates. The generic node-text
     has always been run through ``strip_invalid_chars``; the PREFERENCE / FACT
-    branch must be too, otherwise a single bad statement is sent raw by the two
+    branch must be too, otherwise a single bad statement is sent raw by the
     inline writers AND by the backfill after an **Embedding reset** (ADR-009 §7).
-    Sanitizing inside ``entity_embedding_text`` moves all three together, so the
+    Sanitizing inside ``entity_embedding_text`` moves both together, so the
     ``_CachedSingleEmbedding`` key and the persisted vector's text stay identical
-    to each other — just clean.
+    to each other — just clean. (The two inline writers are now literally ONE
+    function, ``prospective_entity_embedding_text``; that identity is asserted in
+    ``tests/unit/memory/test_embedding_text.py``.)
     """
 
     properties = {"statement": statement, "polarity": "like"}
@@ -1026,14 +1031,13 @@ def test_preference_text_is_sanitized_identically_on_all_three_paths(
         "properties": properties,
     }
 
-    inline_add_entity = _embeddable_text(**kwargs)
-    inline_pipeline = _entity_embeddable_text(**kwargs)
+    inline = prospective_entity_embedding_text(**kwargs)
     backfill = node_embedding_text(stored_row)
 
-    assert inline_add_entity == inline_pipeline == backfill
+    assert inline == backfill
     # Clean, and identical to the same statement without the bad character.
-    assert inline_add_entity == "prefers dark mode"
-    assert strip_invalid_chars(inline_add_entity) == inline_add_entity
+    assert inline == "prefers dark mode"
+    assert strip_invalid_chars(inline) == inline
 
 
 def test_all_invalid_chars_statement_falls_back_to_the_generic_text() -> None:
@@ -1058,10 +1062,9 @@ def test_all_invalid_chars_statement_falls_back_to_the_generic_text() -> None:
         "properties": properties,
     }
 
-    inline_add_entity = _embeddable_text(**kwargs)
-    inline_pipeline = _entity_embeddable_text(**kwargs)
+    inline = prospective_entity_embedding_text(**kwargs)
     backfill = node_embedding_text(stored_row)
 
-    assert inline_add_entity == inline_pipeline == backfill
-    assert inline_add_entity == node_to_embedding_text(stored_row)
-    assert strip_invalid_chars(inline_add_entity) == inline_add_entity
+    assert inline == backfill
+    assert inline == node_to_embedding_text(stored_row)
+    assert strip_invalid_chars(inline) == inline

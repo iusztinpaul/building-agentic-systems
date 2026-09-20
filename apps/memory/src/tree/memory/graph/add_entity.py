@@ -40,7 +40,10 @@ from tree.entities.memory import (
     build_edge_id,
     build_node_id,
 )
-from tree.memory.embedding_text import _embed_chunk_resilient, entity_embedding_text
+from tree.memory.embedding_text import (
+    _embed_chunk_resilient,
+    prospective_entity_embedding_text,
+)
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -228,11 +231,11 @@ async def add_entity(
     # vector and the persisted vector: supersession compares
     # statement<->statement (resp. object<->object), so routing those types
     # through the generic node-text builder would silently break it.
-    # ``_embeddable_text`` picks the right text per type.
+    # ``prospective_entity_embedding_text`` picks the right text per type.
 
     embedding: list[float] = []
     if deduplicate and dedup_config.enabled:
-        embeddable_text = _embeddable_text(
+        embeddable_text = prospective_entity_embedding_text(
             entity_type=entity_type,
             name=name,
             canonical_name=resolved.canonical_name,
@@ -322,52 +325,6 @@ async def add_entity(
         )
 
     return target_id, resolved, dedup_result
-
-
-# ---------------------------------------------------------------------------
-# Internals — embeddable-text selection
-# ---------------------------------------------------------------------------
-
-
-def _embeddable_text(
-    *,
-    entity_type: NodeType,
-    name: str,
-    canonical_name: str,
-    properties: dict[str, Any],
-) -> str:
-    """Pick the text the prospective entity is embedded on for dedup + persist.
-
-    GENERIC node types embed their **node-text**, PREFERENCE its
-    ``properties.statement`` and FACT its ``properties.object`` — but that
-    per-type choice is NOT made here. It lives in
-    :func:`tree.memory.embedding_text.entity_embedding_text`, which the indexing
-    backfill calls too, so an **Embedding reset** (ADR-009 §7) re-embeds a
-    preference on its statement instead of on the generic node-text and
-    supersession keeps comparing statement to statement.
-
-    What this function owns is the SHAPE: build the row exactly as it will be
-    persisted, then delegate. That is what puts the dedup query vector in the
-    SAME space as the persisted corpus and lets the vector be reused verbatim
-    as the new node's ``embedding``.
-    """
-
-    # Mirror the persisted-node shape: ``aliases`` and ``confidence`` are
-    # promoted to top-level columns by ``_upsert_node`` and never live under
-    # ``properties`` on the stored row, so strip them here too. Otherwise the
-    # dedup-time node-text would carry properties the backfill's text (built
-    # from the stored row) does not, and the two would drift.
-    node = {
-        "type": entity_type.value,
-        "name": name,
-        "canonical_name": canonical_name,
-        "properties": {
-            k: v
-            for k, v in (properties or {}).items()
-            if k not in {"aliases", "confidence"}
-        },
-    }
-    return entity_embedding_text(node)
 
 
 # ---------------------------------------------------------------------------

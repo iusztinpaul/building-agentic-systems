@@ -1,10 +1,12 @@
 """Shared node-text embedding for dedup and indexing.
 
-Three functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
+Four functions: ``node_to_embedding_text`` turns a knowledge-graph node ``dict``
 into the GENERIC text we embed, ``entity_embedding_text`` picks the per-type text
-for ONE entity row (the PREFERENCE / FACT exception below, generic otherwise), and
-``embed_texts`` embeds already-built texts with the search model in as few requests
-as the provider caps allow. They are separate because the indexing backfill embeds
+for ONE persisted entity row (the PREFERENCE / FACT exception below, generic
+otherwise), ``prospective_entity_embedding_text`` builds that persisted-row shape
+for an entity that does not exist yet and hands it over, and ``embed_texts``
+embeds already-built texts with the search model in as few requests as the
+provider caps allow. They are separate because the indexing backfill embeds
 **Child chunk**s by their **Contextual header** rather than by a node-text. Lives at
 the ``memory/`` layer because both ``rag/`` and ``graph/`` depend on it (``rag/`` may
 not import ``graph/`` — ADR-006).
@@ -12,9 +14,9 @@ not import ``graph/`` — ADR-006).
 PREFERENCE and FACT nodes must NOT be routed through the GENERIC path: they
 embed ``properties.statement`` / ``properties.object`` so the supersession
 resolver compares statement-to-statement (resp. object-to-object). That choice
-lives in ``entity_embedding_text`` here — NOT in each caller — so the inline
-write path (``graph/add_entity._embeddable_text``,
-``memory/pipeline._entity_embeddable_text``) and the indexing backfill
+lives in ``entity_embedding_text`` here — NOT in each caller — so the two inline
+write paths (``graph/add_entity``, ``memory/pipeline``, both through
+``prospective_entity_embedding_text``) and the indexing backfill
 (``rag/indexing.node_embedding_text``) cannot drift into two different vectors
 for the same row. Drift matters most after an **Embedding reset** (ADR-009 §7):
 the backfill re-embeds EVERY preference, and on the generic text supersession
@@ -234,7 +236,13 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
     ``preference`` embeds ``properties.statement`` and ``fact`` embeds
     ``properties.object`` (``object_`` on rows written before the rename), so
     supersession's statement<->statement (resp. object<->object) comparison stays
-    apples-to-apples. The special text is sanitized with
+    apples-to-apples. ``object`` wins whenever the key is PRESENT and not ``None``
+    — the legacy ``object_`` is read only when ``object`` is absent. A present but
+    blank (or non-string, or all-invalid-character) ``object`` therefore falls back
+    to :func:`node_to_embedding_text`, never to the ``object_`` of the same row: a
+    row written across the rename carries the STALE pre-rename value there, and
+    embedding it would silently put the row in the wrong place in vector space.
+    The special text is sanitized with
     :func:`~tree.memory.rag.cleaning.strip_invalid_chars` exactly like the generic
     path — Voyage 400s on control characters and lone surrogates, and sanitizing
     HERE (not in each caller) keeps all three call sites on the same bytes, so the
@@ -244,6 +252,14 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
     to :func:`node_to_embedding_text`, as a blank or missing statement does — a row
     is never embedded on a blank string. Only the embedding INPUT is cleaned; the
     persisted ``properties.statement`` / ``properties.object`` are untouched.
+
+    One embed input does NOT come through here: the supersession resolver
+    (``graph/preference_supersession._maybe_supersede``) embeds the statement of
+    a row it is about to write, and on a blank result it must SKIP the embed
+    rather than fall back to the node-text — so it applies the same
+    ``strip_invalid_chars(...).strip()`` itself. Same bytes for every non-blank
+    statement, which is what keeps that vector equal to the one the backfill
+    would rebuild.
 
     Takes the PERSISTED row shape (``type`` / ``name`` / ``canonical_name`` /
     ``properties``) because both sides must agree on it: the inline path builds
@@ -258,7 +274,14 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
     if node_type == NodeType.PREFERENCE:
         special = properties.get("statement")
     elif node_type == NodeType.FACT:
-        special = properties.get("object") or properties.get("object_")
+        # Presence, not truthiness: a present-but-blank ``object`` must NOT let
+        # the legacy ``object_`` (the stale pre-rename value on the same row)
+        # take over.
+        special = (
+            properties["object"]
+            if properties.get("object") is not None
+            else properties.get("object_")
+        )
     else:
         special = None
 
@@ -268,6 +291,49 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
             return cleaned
 
     return node_to_embedding_text(node)
+
+
+# ``aliases`` and ``confidence`` are promoted to TOP-LEVEL columns by
+# ``add_entity._upsert_node`` and never live under ``properties`` on the stored
+# row, so the prospective shape strips them: otherwise the dedup-time text would
+# carry properties the backfill's text (built from the stored row) does not.
+_TOP_LEVEL_ONLY_PROPERTIES = frozenset({"aliases", "confidence"})
+
+
+def prospective_entity_embedding_text(
+    *,
+    entity_type: NodeType,
+    name: str,
+    canonical_name: str,
+    properties: dict[str, Any],
+) -> str:
+    """The text an entity that does not exist YET is embedded on.
+
+    The ONE builder of the persisted-row shape for the two inline write paths:
+    ``graph.add_entity`` (dedup query vector, reused verbatim as the new row's
+    ``embedding``) and the pipeline's pre-computed ``embeddable_text_by_key``
+    (task ④, consumed by ``_CachedSingleEmbedding`` in task ⑥). Both used to
+    assemble this dict by hand and promise "byte-for-byte" agreement in a
+    docstring; one function makes the promise structural — and it extends to the
+    indexing backfill, which hands the STORED row to the same
+    :func:`entity_embedding_text`.
+
+    That three-way equality is what an **Embedding reset** (ADR-009 §7) rests on:
+    the backfill must rebuild the exact text the inline writer used, or a reset
+    moves every preference/fact vector and supersession stops matching.
+    """
+
+    node = {
+        "type": entity_type.value,
+        "name": name,
+        "canonical_name": canonical_name,
+        "properties": {
+            k: v
+            for k, v in (properties or {}).items()
+            if k not in _TOP_LEVEL_ONLY_PROPERTIES
+        },
+    }
+    return entity_embedding_text(node)
 
 
 async def embed_texts(
