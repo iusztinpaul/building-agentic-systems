@@ -1,7 +1,8 @@
 """Talking to a served **Modal catalog** model — the same way on every
 **Serving path** (ADR-009 §3/§4).
 
-ONE URL lookup, ONE served-model discovery and ONE smoke test, shared by the
+ONE URL lookup, ONE served-model discovery and ONE smoke test PER KIND
+(embeddings: :func:`smoke_test`; LLMs: :func:`chat_smoke_test`), shared by the
 deploy driver (``scripts/modal_model.py``) and the
 ``ModalEmbeddingModel`` client (#140); waiting out a cold start belongs to the
 **Warm gate**'s poller (:mod:`tree.models.modal_warmup`), which the smoke test
@@ -15,6 +16,7 @@ This module imports the ``modal`` SDK, so it is imported by the driver and the
 client only — never by :mod:`tree.models.modal_catalog` and never at MCP boot.
 """
 
+import json
 import logging
 import math
 
@@ -22,11 +24,16 @@ import aiohttp
 import modal
 from pydantic import BaseModel, Field
 
-from tree.config.app_config import ModalEmbeddingModelConfig, app_config
+from tree.config.app_config import (
+    ModalEmbeddingModelConfig,
+    ModalModelConfig,
+    app_config,
+)
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     EMBEDDING_SERVER_NAME,
     get_embedding_entry,
+    get_llm_entry,
     modal_proxy_bearer,
     prompt_for,
     truncate_embedding,
@@ -34,6 +41,39 @@ from tree.models.modal_catalog import (
 from tree.models.modal_warmup import poll_health
 
 logger = logging.getLogger(__name__)
+
+# The ONE question every chat smoke test asks, under the STRICT JSON schema the
+# SGLang App's own warm-up uses (Modal's `city_facts` payload). Asserting on
+# the SHAPE, never on the content: a 350M model may believe anything about
+# Tokyo, but a server that cannot honour `response_format` is broken for
+# `ModalLLM`, which is the thing this proves.
+CHAT_SMOKE_PROMPT = "Reply with JSON facts about Tokyo."
+CITY_FACTS_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "city_facts",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "population": {"type": "integer"},
+            },
+            "required": ["city", "population"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+# The in-container warm-up spends 64; from the laptop the budget is wider
+# because a REASONING model may spend tokens thinking before the JSON, and a
+# completion cut short would fail as "not valid JSON" — a wrong diagnosis.
+CHAT_SMOKE_MAX_TOKENS = 256
+
+# How much of a bad completion the failure message carries: enough to
+# recognise a `<think>` block or a "Sure! Tokyo is…" preamble, short enough to
+# stay one readable line in a terminal.
+_CONTENT_EXCERPT = 200
 
 # The three texts every smoke test embeds: one question, the document that
 # answers it and one that does not. A wrong architecture or pooling returns
@@ -46,6 +86,19 @@ SMOKE_UNRELATED = "The Eiffel Tower is 330 metres tall."
 # How far a truncated vector may sit from unit length before we call the
 # client-side Matryoshka truncation broken.
 _NORM_TOLERANCE = 1e-3
+
+
+class ChatSmokeTestReport(BaseModel):
+    """What one CHAT smoke test measured — the evidence ``tasks/141`` records."""
+
+    url: str = Field(description="Root URL of the served model (no /v1).")
+    served_model: str = Field(description="The id discovered from /v1/models.")
+    cold_start_seconds: float = Field(description="Seconds until /health was 200.")
+    city: str = Field(description="`city` from the strict-JSON completion.")
+    population: int = Field(description="`population` from the same completion.")
+    unauthenticated_status: int = Field(
+        description="What /health answers WITHOUT the Proxy token — 401."
+    )
 
 
 class SmokeTestReport(BaseModel):
@@ -66,8 +119,13 @@ class SmokeTestReport(BaseModel):
     )
 
 
-async def resolve_server_url(entry: ModalEmbeddingModelConfig) -> str:
+async def resolve_server_url(entry: ModalModelConfig) -> str:
     """The root URL of the Modal app serving ``entry`` (no trailing ``/v1``).
+
+    Takes an entry of EITHER kind: it reads only ``app_name`` and ``repo_id``,
+    which every catalog entry has, and under H1 the lookup is the same on both
+    **Serving paths** — so the embedding smoke test, the chat smoke test and
+    both clients share this one function.
 
     Resolved without blocking the event loop (``get_url.aio()`` on the pinned
     client, modal 1.5.5).
@@ -231,6 +289,166 @@ async def smoke_test(model: str, deadline_s: float | None = None) -> SmokeTestRe
         cos_unrelated=cos_unrelated,
         unauthenticated_status=unauthenticated_status,
     )
+
+
+async def chat_smoke_test(
+    model: str, deadline_s: float | None = None
+) -> ChatSmokeTestReport:
+    """Prove one served LLM end-to-end, on whatever path serves it.
+
+    The twin of :func:`smoke_test` for the LLM half of the catalog, and just as
+    path-blind: an endpoint-routed ``Qwen/Qwen3.5-0.8B`` and our SGLang App
+    answer the same OpenAI-compatible API through the same **Proxy token**
+    auth, so nothing here branches on the route (ADR-009 §3/§10).
+
+    Health through the SHARED poller (ADR-009 §11), the DISCOVERED model id,
+    ONE chat completion under the STRICT ``city_facts`` schema — the same
+    constrained decoding ``ModalLLM`` depends on — and a 401 without the token.
+    What is asserted is the SHAPE of the answer, never its content: the
+    population of Tokyo is the model's business, valid JSON is ours.
+
+    Raises:
+        ModelError: any assertion failed (the message carries the numbers or
+            the first characters of the content), or the health poll failed on
+            something waiting cannot fix.
+        ExtractionError: the server was unreachable, answered non-200, or was
+            still cold when the budget ran out.
+    """
+
+    entry = get_llm_entry(model)
+    bearer = modal_proxy_bearer()
+
+    url = await resolve_server_url(entry)
+    elapsed = await poll_health(
+        f"{url}/health",
+        {"Authorization": f"Bearer {bearer}"},
+        deadline_s=(
+            app_config.modal.warmup_deadline_s if deadline_s is None else deadline_s
+        ),
+    )
+    logger.info("health 200 after %.1fs", elapsed)
+
+    served = await served_model_id(url, bearer, entry.repo_id)
+    logger.info("served model id: %s", served)
+
+    content = await _chat(url, bearer, served)
+    logger.info("chat completion: %s", content)
+
+    city, population = _city_facts(content)
+    logger.info("strict JSON schema honoured: city=%s population=%d", city, population)
+
+    unauthenticated_status = await _unauthenticated_health_status(url)
+    if unauthenticated_status != 401:
+        raise ModelError(
+            f"unauthenticated /health answered {unauthenticated_status}, "
+            "expected 401 — the server is public"
+        )
+    logger.info("unauthenticated health -> %d", unauthenticated_status)
+    logger.info("Smoke test passed")
+
+    return ChatSmokeTestReport(
+        url=url,
+        served_model=served,
+        cold_start_seconds=elapsed,
+        city=city,
+        population=population,
+        unauthenticated_status=unauthenticated_status,
+    )
+
+
+async def _chat(url: str, bearer: str, served: str) -> str:
+    """``POST /v1/chat/completions`` under the strict schema; the content.
+
+    Raises:
+        ExtractionError: the transport failed or the server did not answer 200
+            (``status_code`` carries it — a 400 is how a server that cannot
+            compile the schema refuses).
+        ModelError: the 200 carried no message content, which no retry fixes.
+    """
+
+    body = {
+        "model": served,
+        "messages": [{"role": "user", "content": CHAT_SMOKE_PROMPT}],
+        "max_tokens": CHAT_SMOKE_MAX_TOKENS,
+        "temperature": 0,
+        "response_format": CITY_FACTS_SCHEMA,
+    }
+    try:
+        async with aiohttp.ClientSession(
+            headers={"Authorization": f"Bearer {bearer}"}
+        ) as session:
+            async with session.post(
+                f"{url}/v1/chat/completions", json=body
+            ) as response:
+                status = response.status
+                payload = await response.json() if status == 200 else {}
+    except Exception as exc:  # noqa: BLE001 — a transport failure is retryable
+        raise ExtractionError(f"POST {url}/v1/chat/completions failed: {exc}") from exc
+
+    if status != 200:
+        raise ExtractionError(
+            f"POST {url}/v1/chat/completions answered {status}, expected 200.",
+            status_code=status,
+        )
+
+    choices = payload.get("choices") or []
+    content = choices[0].get("message", {}).get("content") if choices else None
+    if not content:
+        raise ModelError(
+            "the chat completion carried no content — the served model "
+            "answered with an empty message"
+        )
+    return content
+
+
+def _city_facts(content: str) -> tuple[str, int]:
+    """``(city, population)`` from a completion the schema should have forced.
+
+    Strict means strict: exactly the two keys, a string and an integer. A
+    server that ignored ``response_format`` fails here rather than in the
+    extraction pipeline three weeks later.
+
+    Raises:
+        ModelError: the content is not JSON, is not an object, carries the
+            wrong keys, or types them wrongly. The message quotes the first
+            :data:`_CONTENT_EXCERPT` characters, which is what tells a
+            `<think>` block apart from a chatty preamble.
+    """
+
+    excerpt = content[:_CONTENT_EXCERPT]
+    try:
+        parsed = json.loads(content)
+    except ValueError as exc:
+        raise ModelError(f"chat completion is not valid JSON: {excerpt!r}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ModelError(
+            f"chat completion is not a JSON object: {excerpt!r} — the strict "
+            "city_facts schema was ignored"
+        )
+
+    expected = {"city", "population"}
+    missing = sorted(expected - set(parsed))
+    unexpected = sorted(set(parsed) - expected)
+    if missing or unexpected:
+        raise ModelError(
+            f"chat completion does not match the strict city_facts schema: "
+            f"missing {missing}, unexpected {unexpected} in {excerpt!r}"
+        )
+
+    city, population = parsed["city"], parsed["population"]
+    if not isinstance(city, str):
+        raise ModelError(
+            f"chat completion types 'city' as {type(city).__name__}, expected "
+            f"a string: {excerpt!r}"
+        )
+    # `bool` is an `int` in Python, and `true` is not a population.
+    if not isinstance(population, int) or isinstance(population, bool):
+        raise ModelError(
+            f"chat completion types 'population' as {type(population).__name__}"
+            f", expected an integer: {excerpt!r}"
+        )
+    return city, population
 
 
 async def _embed(

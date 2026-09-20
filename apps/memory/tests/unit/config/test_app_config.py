@@ -1165,18 +1165,23 @@ class TestModalCatalog:
         2026-09-20) in the YAML, in the code default AND in the frozen
         fixture: a bump that moves only one of the three would build the image
         with a version no test describes.
+
+        SGLang's pin is a DOCKER TAG of ``lmsysorg/sglang`` (``v0.5.18``,
+        Modal's own LLM recipe), not a PyPI version — the SGLang App runs the
+        official image instead of pip-installing the engine, so a bare
+        ``0.5.18`` here would name no image at all.
         """
 
         config = load_app_config(_DEFAULT_CONFIG_PATH)
 
         assert config.modal.autoinference_utils_version == "0.2.6"
         assert config.modal.engines["vllm"].version == "0.26.0"
-        assert config.modal.engines["sglang"].version == "0.5.20"
+        assert config.modal.engines["sglang"].version == "v0.5.18"
         assert ModalConfig().engines["vllm"].version == "0.26.0"
-        assert (
-            load_app_config(frozen_config_path).modal.engines["vllm"].version
-            == "0.26.0"
-        )
+        assert ModalConfig().engines["sglang"].version == "v0.5.18"
+        frozen = load_app_config(frozen_config_path).modal
+        assert frozen.engines["vllm"].version == "0.26.0"
+        assert frozen.engines["sglang"].version == "v0.5.18"
 
     def test_modal_warmup_deadline_default_and_override(
         self, tmp_path, monkeypatch, frozen_config_path

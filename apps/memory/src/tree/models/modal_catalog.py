@@ -40,15 +40,22 @@ from tree.models.exceptions import ModelError
 # every model regardless of how it is served.
 EMBEDDING_SERVER_NAME = "Server"
 
-# The env var the App scripts bake ``EmbeddingDeploySpec.model_dump_json()``
+# The env vars the App scripts bake their resolved spec's ``model_dump_json()``
 # into: the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
 # inside the Modal container, so the resolved spec crosses as ONE JSON string.
-DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
+# One per KIND, because the two specs carry different fields — a script reading
+# the wrong one would fail on a missing key instead of on a wrong model.
+EMBEDDING_DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
+LLM_DEPLOY_SPEC_ENV = "LLM_DEPLOY_SPEC"
 
-# Engines with a deploy script of ours. A Dedicated endpoint has none by design
-# (Modal picks the engine), which is why the builders take an engine, not a
-# Serving path.
-FallbackEngine = Literal["sglang", "vllm"]
+# The tensor-parallel defaults of the SGLang App, applied to every LLM unless
+# the entry overrides them (they are NOT builder-owned keys, ADR-009 §2):
+# `--trust-remote-code` because Modal sets it on both its LLM recipes and every
+# new architecture needs it, `--mem-fraction-static` because SGLang's own
+# default leaves too little room for the CUDA graphs on a small GPU. Modal's
+# recipes lower it to 0.75 for a 120B and a 35B-MoE model; 0.85 is the generic
+# value, and an entry that needs Modal's is one YAML line away.
+_LLM_TUNING_DEFAULTS = {"--trust-remote-code": "", "--mem-fraction-static": "0.85"}
 
 # Where a Dedicated endpoint's requests ENTER Modal (`--routing-region`;
 # Modal's own default is `us-west`). One region for the whole catalog: the
@@ -86,38 +93,59 @@ _GATED_MARKERS = (
 
 # The App deploy script per KIND, relative to `apps/memory` (the cwd of every
 # `make memory-*` target). One purpose per engine (ADR-009 §2): vLLM serves
-# embeddings, SGLang serves LLMs. The SGLang script arrives in #147; until then
-# an LLM Modal refuses exits 2 on the missing file.
+# embeddings, SGLang serves LLMs.
 _APP_SCRIPTS: dict[ModelKind, str] = {
     "embedding": "deploy/modal_vllm_embedding.py",
     "llm": "deploy/modal_sglang_llm.py",
 }
 
 
-class EmbeddingDeploySpec(BaseModel):
-    """Everything ONE App deploy needs, resolved locally (ADR-009 §3).
+class DeploySpec(BaseModel):
+    """What BOTH App deploys need, resolved locally (ADR-009 §3).
 
     Configuration only — a credential never enters it (the Hugging Face token
     travels as an ephemeral ``modal.Secret``, ADR-009 §9), because the spec is
     baked into a cached, inspectable image layer.
+
+    It carries no ``engine``: the SCRIPT is the engine (vLLM serves the
+    embedding entries, SGLang the LLM ones), so the only engine fact a script
+    needs is the version it pins.
     """
 
     repo_id: str = Field(description="Hugging Face repo id of the weights to serve.")
     revision: str = Field(description="Commit sha or branch of those weights.")
-    engine: FallbackEngine = Field(description="The engine the calling SCRIPT runs.")
     app_name: str = Field(description="Modal app name — the same on every path.")
     server_name: str = Field(description="Server class name inside that app.")
     gpu: str = Field(description="Modal GPU string, e.g. A10.")
     cpu: float
     memory_mb: int
-    native_dimensions: int = Field(
-        description="Vector width the server returns untruncated."
+    engine_version: str = Field(
+        description="Pinned engine version: a PyPI version for vLLM, a docker "
+        "tag of lmsysorg/sglang for SGLang."
     )
-    engine_version: str = Field(description="Pinned version of `engine`.")
     autoinference_utils_version: str
     server_args: dict[str, str] = Field(
         description="Full engine argv: the catalog's extras + the builder-owned keys."
     )
+
+
+class EmbeddingDeploySpec(DeploySpec):
+    """One vLLM App deploy: the shared spec plus the vector width."""
+
+    native_dimensions: int = Field(
+        description="Vector width the server returns untruncated."
+    )
+
+
+class LLMDeploySpec(DeploySpec):
+    """One SGLang App deploy: the shared spec plus the tensor parallelism.
+
+    ``n_gpus`` is BOTH the ``:N`` of the Modal GPU string and SGLang's ``tp``,
+    which is why the script builds ``gpu=f"{gpu}:{n_gpus}"`` from it instead of
+    the catalog carrying a second, droppable copy.
+    """
+
+    n_gpus: int = Field(description="GPUs of `gpu` this App runs on = SGLang's tp.")
 
 
 def get_catalog_entry(model: str) -> ModalModelConfig:
@@ -190,66 +218,138 @@ def app_script(kind: ModelKind) -> str:
     return _APP_SCRIPTS[kind]
 
 
-def build_server_args(
-    entry: ModalEmbeddingModelConfig, engine: FallbackEngine
-) -> dict[str, str]:
-    """The full engine argv for ``entry`` under ``engine``.
+def build_server_args(entry: ModalEmbeddingModelConfig) -> dict[str, str]:
+    """The full vLLM argv for an embedding ``entry``.
 
     The catalog's ``extra_server_args`` plus the keys the builder owns: the
-    embedding-mode flag (``--runner pooling`` for vLLM, ``--is-embedding`` for
-    SGLang), the pinned revision, the served model id, and the context window
-    only when the entry sets one (otherwise the engine's own default wins).
+    pooling mode every embedding server runs in, the pinned revision, the
+    served model id, and the context window only when the entry sets one
+    (otherwise vLLM's own default wins).
 
-    ``engine`` comes from the calling SCRIPT — an entry carries no engine of
-    its own (#147 turns the SGLang half into the LLM script).
+    No ``engine`` parameter: the SCRIPT is the engine, and the only script that
+    calls this is ``deploy/modal_vllm_embedding.py`` (ADR-009 §2).
     """
 
     args = dict(entry.extra_server_args)
     args["--revision"] = entry.revision
     args["--served-model-name"] = entry.repo_id
-
-    if engine == "vllm":
-        args["--runner"] = "pooling"
-        if entry.max_model_len is not None:
-            args["--max-model-len"] = str(entry.max_model_len)
-    else:
-        args["--is-embedding"] = ""
-        if entry.max_model_len is not None:
-            args["--context-length"] = str(entry.max_model_len)
+    args["--runner"] = "pooling"
+    if entry.max_model_len is not None:
+        args["--max-model-len"] = str(entry.max_model_len)
     return args
 
 
-def build_deploy_spec(model: str, engine: FallbackEngine) -> EmbeddingDeploySpec:
-    """Resolve ``model`` into the spec one App deploy is driven by.
+def build_llm_server_args(entry: ModalLLMModelConfig) -> dict[str, str]:
+    """The full SGLang argv for an LLM ``entry`` (ADR-009 §2).
+
+    Generic-safe flags only: the served model id, the pinned revision, the
+    context window when the entry sets one, and the two tuning defaults an
+    entry MAY override (``--trust-remote-code``, ``--mem-fraction-static``).
+    Speculative decoding, mamba and multimodal flags are Modal's MODEL-SPECIFIC
+    tuning for a 120B and a 35B-MoE model — a generic script must not assume
+    them, and a model that wants ``--reasoning-parser`` or
+    ``--tool-call-parser`` names it in ``extra_server_args``.
+
+    ``--tp`` is NOT here: ``autoinference-utils`` renders it from
+    ``SGLangEndpoint(tp=…)``, which the script passes ``n_gpus`` to.
+
+    Overrides are merged by FLAG NAME, not by dict key, because
+    ``autoinference-utils`` accepts the attached spelling too: without it,
+    ``{"--mem-fraction-static=0.75": ""}`` would leave BOTH keys in the argv
+    and SGLang would see the flag twice.
+    """
+
+    args = _merge_by_flag(_LLM_TUNING_DEFAULTS, entry.extra_server_args)
+    args["--revision"] = entry.revision
+    args["--served-model-name"] = entry.repo_id
+    if entry.max_model_len is not None:
+        args["--context-length"] = str(entry.max_model_len)
+    return args
+
+
+def build_deploy_spec(model: str) -> EmbeddingDeploySpec:
+    """Resolve ``model`` into the spec the vLLM App deploy is driven by.
 
     Raises:
-        ModelError: ``model`` is not an embedding entry, or ``engine`` has no
+        ModelError: ``model`` is not an embedding entry, or ``vllm`` has no
             pinned version under ``modal.engines``.
     """
 
     entry = get_embedding_entry(model)
-    engine_config = app_config.modal.engines.get(engine)
-    if engine_config is None:
-        known = ", ".join(sorted(app_config.modal.engines))
-        raise ModelError(
-            f"No pinned version for engine {engine!r}. "
-            f"Engines in modal.engines: {known}."
-        )
 
     return EmbeddingDeploySpec(
         repo_id=entry.repo_id,
         revision=entry.revision,
-        engine=engine,
         app_name=entry.app_name,
         server_name=EMBEDDING_SERVER_NAME,
         gpu=entry.gpu,
         cpu=entry.cpu,
         memory_mb=entry.memory_mb,
         native_dimensions=entry.native_dimensions,
-        engine_version=engine_config.version,
+        engine_version=_engine_version("vllm"),
         autoinference_utils_version=app_config.modal.autoinference_utils_version,
-        server_args=build_server_args(entry, engine),
+        server_args=build_server_args(entry),
     )
+
+
+def build_llm_deploy_spec(model: str) -> LLMDeploySpec:
+    """Resolve ``model`` into the spec the SGLang App deploy is driven by.
+
+    Raises:
+        ModelError: ``model`` is not an LLM entry, or ``sglang`` has no pinned
+            version under ``modal.engines``.
+    """
+
+    entry = get_llm_entry(model)
+
+    return LLMDeploySpec(
+        repo_id=entry.repo_id,
+        revision=entry.revision,
+        app_name=entry.app_name,
+        server_name=EMBEDDING_SERVER_NAME,
+        gpu=entry.gpu,
+        n_gpus=entry.n_gpus,
+        cpu=entry.cpu,
+        memory_mb=entry.memory_mb,
+        engine_version=_engine_version("sglang"),
+        autoinference_utils_version=app_config.modal.autoinference_utils_version,
+        server_args=build_llm_server_args(entry),
+    )
+
+
+def _engine_version(engine: str) -> str:
+    """The pinned version of ``engine``, or a loud failure.
+
+    Raises:
+        ModelError: ``modal.engines`` has no entry for it — a YAML edit that
+            removed the pin the script builds its image from.
+    """
+
+    engine_config = app_config.modal.engines.get(engine)  # type: ignore[arg-type]
+    if engine_config is None:
+        known = ", ".join(sorted(app_config.modal.engines))
+        raise ModelError(
+            f"No pinned version for engine {engine!r}. "
+            f"Engines in modal.engines: {known}."
+        )
+    return engine_config.version
+
+
+def _merge_by_flag(
+    defaults: dict[str, str], overrides: dict[str, str]
+) -> dict[str, str]:
+    """``defaults`` overlaid with ``overrides``, keyed by FLAG name.
+
+    ``--flag=value`` and ``--flag value`` set the same flag
+    (``autoinference-utils`` 0.2.6, ``server_arg_tokens``), so an override in
+    either spelling must REPLACE the default rather than join it.
+    """
+
+    merged = {key.partition("=")[0]: (key, value) for key, value in defaults.items()}
+    merged.update(
+        (key.partition("=")[0], (key, value)) for key, value in overrides.items()
+    )
+    return dict(merged.values())
 
 
 def prompt_for(

@@ -7,11 +7,14 @@ functions that read text nobody promised us:
 :func:`classify_endpoint_refusal`, :func:`parse_endpoint_catalog` and
 :func:`hf_base_models`.
 
-The Modal texts below are the LIVE ones (2026-09-20, modal 1.5.5) recorded in
-``tasks/145``: a refusal arrives inside a Rich box, so the fixtures carry the
-box borders and the wrapping — which is exactly what a naive ``in`` check
-would miss. Every Hugging Face call is an ``httpx.MockTransport``: no test
-here touches the network.
+The two refusals are VENDORED from the live CLI (2026-09-20, modal 1.5.5) into
+``fixtures/real_*_boxed.txt`` and read byte for byte: a refusal arrives inside
+a Rich box, so the fixture carries the borders and the wrapping — which is
+exactly what a naive ``in`` check would miss — and the bullet list is Modal's
+own 44 models, not a synthetic list of the same shape. Two hand-written
+fixtures remain, each one narrower than the terminal the real output was
+captured at, so the marker sentence itself breaks across lines. Every Hugging
+Face call is an ``httpx.MockTransport``: no test here touches the network.
 """
 
 import ast
@@ -36,21 +39,21 @@ _FAKE_TOKEN = "hf_secret123"
 # The substring the classifier matches — asserted ABSENT from the wrapped
 # fixture, so the test proves normalisation and not a lucky `in`.
 _ON_ONE_LINE = "is not available for dedicated Endpoints"
+_NOT_SERVABLE_ON_ONE_LINE = "is not a servable checkpoint of base model"
 
 # --- The live refusal texts (2026-09-20), boxed exactly as the CLI prints ---
 
-NOT_IN_CATALOG = """
-╭─────────────────────────────── Error ────────────────────────────────╮
-│ 'Qwen/Qwen3-Embedding-4B' is not available for dedicated Endpoints.  │
-│                                                                      │
-│ Models available for dedicated Endpoints:                            │
-│ - Qwen/Qwen3-Embedding-0.6B                                          │
-│ - Qwen/Qwen3-Embedding-8B                                            │
-│ - Qwen/Qwen3.5-0.8B                                                  │
-│ - google/gemma-3-1b-it                                               │
-│ - openai/gpt-oss-120b                                                │
-╰──────────────────────────────────────────────────────────────────────╯
-"""
+# VENDORED from the real `modal endpoint create` runs of tasks/145, byte for
+# byte: the whole design rests on two substrings of Modal's prose and on a
+# best-effort parse of its bullet list, so the fixtures are the OUTPUT, not a
+# hand-written imitation of it. They carry public model ids and Modal's own
+# messages — no URL, no workspace name, no credential.
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+NOT_IN_CATALOG = (_FIXTURES / "real_not_in_catalog_boxed.txt").read_text(
+    encoding="utf-8"
+)
+NOT_SERVABLE = (_FIXTURES / "real_not_servable_boxed.txt").read_text(encoding="utf-8")
 
 # The same verdict with the sentence WRAPPED by the box: `dedicated` and
 # `Endpoints` end up on different lines, so a substring match on the raw text
@@ -62,40 +65,21 @@ NOT_IN_CATALOG_WRAPPED = """
 ╰──────────────────────────────────────────────────────────────╯
 """
 
+# The same verdict at a NARROWER terminal, where the marker sentence itself
+# breaks: `base` and `model` land on different lines with two borders between
+# them, so a substring match on the raw text fails.
 NOT_SERVABLE_WRAPPED = """
-╭─────────────────────────── Error ────────────────────────────╮
-│ The custom model is not a servable checkpoint of base model  │
-│ 'Qwen/Qwen3-Embedding-0.6B': Custom model hidden_size=2560   │
-│ does not match base model hidden_size=1024                   │
-╰──────────────────────────────────────────────────────────────╯
+╭──────────────────────────── Error ─────────────────────────╮
+│ The custom model is not a servable checkpoint of base      │
+│ model 'Qwen/Qwen3-Embedding-0.6B': Custom model            │
+│ hidden_size=2560 does not match base model                 │
+│ hidden_size=1024                                           │
+╰────────────────────────────────────────────────────────────╯
 """
 
-# 44 bullet lines, the count Modal printed that day (ADR-009 Context). The
-# six ids ADR-009 / the glossary / tasks/145 actually record are real; the
-# rest is shape padding, so nothing here claims a provenance it does not have.
-_REAL_CATALOG_IDS = [
-    "Qwen/Qwen3-Embedding-0.6B",
-    "Qwen/Qwen3-Embedding-8B",
-    "Qwen/Qwen3.5-0.8B",
-    "Qwen/Qwen3.6-35B-A3B-FP8",
-    "google/gemma-3-1b-it",
-    "openai/gpt-oss-120b",
-]
-_PADDING_IDS = [
-    f"acme/filler-model-{index}" for index in range(44 - len(_REAL_CATALOG_IDS))
-]
-CATALOG_IDS = _REAL_CATALOG_IDS + _PADDING_IDS
-
-FULL_CATALOG_REFUSAL = "\n".join(
-    [
-        "╭─────────────────────────────── Error ────────────────────────────────╮",
-        "│ 'Qwen/Qwen3-Embedding-4B' is not available for dedicated Endpoints.  │",
-        "│                                                                      │",
-        "│ Models available for dedicated Endpoints:                            │",
-        *(f"│ - {repo_id:<66} │" for repo_id in CATALOG_IDS),
-        "╰──────────────────────────────────────────────────────────────────────╯",
-    ]
-)
+# How many models Modal's endpoint catalog held that day (ADR-009 Context) —
+# 2 of them embedding models, which is why our Apps are the general path.
+_CATALOG_SIZE = 44
 
 
 def _card(
@@ -154,18 +138,37 @@ class TestClassifyEndpointRefusal:
     exact texts Modal printed on 2026-09-20."""
 
     def test_the_live_not_in_catalog_refusal(self) -> None:
+        """The vendored CLI output, byte for byte."""
+
         assert classify_endpoint_refusal(NOT_IN_CATALOG) == "not_in_catalog"
 
     def test_a_wrapped_not_in_catalog_refusal(self) -> None:
         """Rich wraps the sentence at the box width: `dedicated` and
-        `Endpoints` land on different lines with two borders between them."""
+        `Endpoints` land on different lines with two borders between them.
+
+        Synthetic, and deliberately so: the vendored refusal happens to fit on
+        one line at the width it was captured at, so only this fixture proves
+        the normalisation for THIS verdict. The vendored ``not_servable`` one
+        is genuinely wrapped and covers the other half.
+        """
 
         assert _ON_ONE_LINE not in NOT_IN_CATALOG_WRAPPED
         assert classify_endpoint_refusal(NOT_IN_CATALOG_WRAPPED) == "not_in_catalog"
 
-    def test_a_wrapped_architecture_mismatch(self) -> None:
-        """The custom-weights refusal, wrapped the same way."""
+    def test_the_live_architecture_mismatch(self) -> None:
+        """The vendored custom-weights refusal, byte for byte — four config
+        mismatches inside a box, which is what "custom weights = a
+        SAME-ARCHITECTURE fine-tune" looks like from the CLI."""
 
+        assert "hidden_size=2560 does not match" in " ".join(NOT_SERVABLE.split())
+        assert classify_endpoint_refusal(NOT_SERVABLE) == "not_servable"
+
+    def test_a_wrapped_architecture_mismatch(self) -> None:
+        """Synthetic, like its not-in-catalog twin: at the width the vendored
+        output was captured, the marker sentence happens to fit on one line,
+        so only this fixture splits it across two."""
+
+        assert _NOT_SERVABLE_ON_ONE_LINE not in NOT_SERVABLE_WRAPPED
         assert classify_endpoint_refusal(NOT_SERVABLE_WRAPPED) == "not_servable"
 
     def test_the_unwrapped_architecture_mismatch(self) -> None:
@@ -196,23 +199,41 @@ class TestClassifyEndpointRefusal:
 
 class TestParseEndpointCatalog:
     def test_the_full_live_list(self) -> None:
-        """Every bullet line after the header, borders and padding stripped."""
+        """Every bullet line after the header, borders and padding stripped —
+        on the REAL output, not a synthetic one of the same shape.
 
-        ids = parse_endpoint_catalog(FULL_CATALOG_REFUSAL)
+        The four ids ADR-009, the glossary and the seeds rest on are asserted
+        by name: the two embedding models of 44 are exactly why our Apps are
+        the general path, and the two LLMs are the catalog's seeds.
+        """
 
-        assert len(ids) == len(CATALOG_IDS)
-        assert ids == CATALOG_IDS
-        assert "Qwen/Qwen3-Embedding-0.6B" in ids
-        assert "Qwen/Qwen3.5-0.8B" in ids
-        assert "google/gemma-3-1b-it" in ids
+        ids = parse_endpoint_catalog(NOT_IN_CATALOG)
+
+        assert len(ids) == _CATALOG_SIZE
+        assert ids == sorted(ids), "Modal prints the list sorted"
+        for repo_id in (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "Qwen/Qwen3-Embedding-8B",
+            "openai/gpt-oss-120b",
+            "Qwen/Qwen3.5-0.8B",
+        ):
+            assert repo_id in ids
+
+    def test_only_two_of_the_forty_four_are_embedding_models(self) -> None:
+        """The number ADR-009's Context rests on, read off the live list."""
+
+        ids = parse_endpoint_catalog(NOT_IN_CATALOG)
+
+        assert [repo_id for repo_id in ids if "Embedding" in repo_id] == [
+            "Qwen/Qwen3-Embedding-0.6B",
+            "Qwen/Qwen3-Embedding-8B",
+        ]
 
     def test_the_refused_model_itself_is_not_in_the_list(self) -> None:
         """The refusal names the model ABOVE the header; only what follows the
         header is a servable id."""
 
-        assert "Qwen/Qwen3-Embedding-4B" not in parse_endpoint_catalog(
-            FULL_CATALOG_REFUSAL
-        )
+        assert "Qwen/Qwen3-Embedding-4B" not in parse_endpoint_catalog(NOT_IN_CATALOG)
 
     @pytest.mark.parametrize(
         "bullet", ["-", "*", "•"], ids=["dash", "asterisk", "unicode-bullet"]

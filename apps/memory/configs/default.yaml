@@ -192,9 +192,14 @@ modal:
   autoinference_utils_version: "0.2.6" # App scripts only
   engines: # App scripts only; per ENGINE, not per model
     vllm:
-      version: "0.26.0" # Modal's own embedding recipe pin (serve.py, 2026-09-20)
+      version: "0.26.0" # a PyPI version (`vllm==0.26.0`); Modal's own embedding recipe pin (serve.py, 2026-09-20)
     sglang:
-      version: "0.5.20" # latest on PyPI, 2026-09-19
+      # A DOCKER TAG of lmsysorg/sglang, NOT a PyPI version: the SGLang App
+      # runs the official image, like Modal's own LLM recipe. At v0.5.18 the
+      # plain tag IS the CUDA 13 build — sglang's release-docker.yml gives the
+      # cu130 image the tags v0.5.18 / latest / v0.5.18-cu130 — and Modal's
+      # hosts run driver 580.95.05 with CUDA Driver API 13.0.
+      version: "v0.5.18"
   # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
   warmup_deadline_s: 600
   embedding_models:

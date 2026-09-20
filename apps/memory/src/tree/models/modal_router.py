@@ -457,8 +457,8 @@ def _deploy_app(
     """Step 3: ``modal deploy`` the App script this entry's KIND is served by.
 
     Raises:
-        ModelError: that script does not exist (the SGLang one arrives in
-            #147) — said here rather than letting Modal fail on a missing path.
+        ModelError: that script does not exist — said here rather than letting
+            Modal fail on a missing path.
         ModalGuardError: the guard refused the App deploy (exit 3).
     """
 
@@ -543,9 +543,16 @@ def _log_modal_output(result: ModalResult, token: str) -> str:
     Captured output is output the operator would otherwise have seen on their
     terminal (the endpoint URL on success, the verdict on failure), so it is
     logged either way — and only ever after ``redact_text``.
+
+    The two streams are joined by a NEWLINE, not concatenated: Modal writes the
+    refusal to one of them and nothing guarantees a trailing newline, so
+    ``f"{stdout}{stderr}"`` could glue the last word of stdout to the first of
+    stderr — splicing "… is not available for dedicatedEndpoints." and turning
+    a verdict the router reads into an ``other`` that aborts the deploy.
     """
 
-    text = redact_text(f"{result.stdout or ''}{result.stderr or ''}", token)
+    streams = [stream for stream in (result.stdout, result.stderr) if stream]
+    text = redact_text("\n".join(streams), token)
     for line in text.splitlines():
         if line.strip():
             logger.info("modal: %s", line)

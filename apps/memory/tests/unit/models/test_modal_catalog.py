@@ -25,13 +25,17 @@ from tree.config.app_config import (
 from tree.models import modal_catalog
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import (
-    DEPLOY_SPEC_ENV,
+    EMBEDDING_DEPLOY_SPEC_ENV,
     EMBEDDING_SERVER_NAME,
     HF_TOKEN_HINT,
+    LLM_DEPLOY_SPEC_ENV,
     MODAL_ROUTING_REGION,
     EmbeddingDeploySpec,
+    LLMDeploySpec,
     app_script,
     build_deploy_spec,
+    build_llm_deploy_spec,
+    build_llm_server_args,
     build_server_args,
     get_catalog_entry,
     get_embedding_entry,
@@ -54,6 +58,7 @@ _QWEN_LLM = "Qwen/Qwen3.5-0.8B"
 _QWEN_SHA = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 _FAKE_TOKEN = "hf_secret123"
 _VOYAGE_SHA = "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
+_LFM_SHA = "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
 
 
 @pytest.fixture
@@ -146,7 +151,7 @@ class TestGetCatalogEntry:
 class TestAppScript:
     def test_the_kind_picks_the_app(self) -> None:
         """One purpose per engine (ADR-009 §2): vLLM serves embeddings,
-        SGLang serves LLMs (its script arrives in #147)."""
+        SGLang serves LLMs."""
 
         assert app_script("embedding") == "deploy/modal_vllm_embedding.py"
         assert app_script("llm") == "deploy/modal_sglang_llm.py"
@@ -156,7 +161,7 @@ class TestServerArgs:
     def test_vllm_args_are_the_yaml_extras_plus_the_builder_owned_keys(
         self, voyage_entry
     ) -> None:
-        args = build_server_args(voyage_entry, "vllm")
+        args = build_server_args(voyage_entry)
 
         assert args == {
             "--convert": "embed",
@@ -181,25 +186,15 @@ class TestServerArgs:
         """
 
         for entry in app_config.modal.embedding_models:
-            assert "is_matryoshka" not in str(build_server_args(entry, "vllm"))
+            assert "is_matryoshka" not in str(build_server_args(entry))
 
-    def test_sglang_args_omit_context_length_without_max_model_len(
+    def test_args_omit_the_context_window_without_max_model_len(
         self, qwen_entry
     ) -> None:
         """A minimal entry sets no ``max_model_len``, so the builder must not
         invent one — the engine's own default wins."""
 
-        assert build_server_args(qwen_entry, "sglang") == {
-            "--is-embedding": "",
-            "--revision": _QWEN_SHA,
-            "--served-model-name": _QWEN,
-        }
-
-    def test_the_same_entry_runs_under_either_engine(self, qwen_entry) -> None:
-        """One catalog entry, either engine: the embedding-mode flag is the
-        BUILDER's, never the entry's — an entry names no engine."""
-
-        assert build_server_args(qwen_entry, "vllm") == {
+        assert build_server_args(qwen_entry) == {
             "--runner": "pooling",
             "--revision": _QWEN_SHA,
             "--served-model-name": _QWEN,
@@ -219,7 +214,7 @@ class TestServerArgs:
             max_model_len=8192,
         )
 
-        assert build_server_args(entry, "vllm") == {
+        assert build_server_args(entry) == {
             "--served-model-name": "BAAI/bge-m3",
             "--runner": "pooling",
             "--revision": "5617a9f61b028005a4858fdac845db406aefb181",
@@ -231,54 +226,131 @@ class TestServerArgs:
 
         entry = ModalEmbeddingModelConfig(repo_id="BAAI/bge-m3", native_dimensions=1024)
 
-        assert build_server_args(entry, "vllm")["--revision"] == "main"
+        assert build_server_args(entry)["--revision"] == "main"
 
     def test_the_entry_is_not_mutated(self, voyage_entry) -> None:
         """The builder returns a NEW dict; a second call must see the YAML
         extras, not the previous call's builder-owned keys."""
 
-        build_server_args(voyage_entry, "vllm")
+        build_server_args(voyage_entry)
 
         assert "--runner" not in voyage_entry.extra_server_args
 
 
+class TestLlmServerArgs:
+    """ADR-009 §2: generic-safe SGLang flags — what ANY LLM takes, never the
+    per-model tuning Modal's own 120B / 35B-MoE recipes carry."""
+
+    def test_the_seed_gets_the_generic_baseline(self, lfm_entry) -> None:
+        """Story 1: `LiquidAI/LFM2.5-350M` is five YAML lines, and the engine
+        starts with the served id, the pinned sha, the context window the entry
+        asks for and the two tuning defaults."""
+
+        assert build_llm_server_args(lfm_entry) == {
+            "--served-model-name": _LFM,
+            "--revision": _LFM_SHA,
+            "--trust-remote-code": "",
+            "--mem-fraction-static": "0.85",
+            "--context-length": "32768",
+        }
+
+    def test_nothing_modal_tuned_per_model_leaks_in(self, lfm_entry) -> None:
+        """Speculative decoding needs a draft model FOR THAT MODEL; the mamba
+        and multimodal flags describe Modal's Qwen3.6-35B-A3B-FP8. A generic
+        script that assumed any of them would fail on the first model that is
+        neither."""
+
+        for key in build_llm_server_args(lfm_entry):
+            assert not key.startswith(
+                ("--speculative", "--mamba", "--enable-multimodal")
+            )
+
+    def test_an_entry_overrides_the_tuning_defaults(self) -> None:
+        """Story 3: a bigger reasoning model adds its parsers and lowers the
+        memory fraction — both are per-model facts, so the ENTRY wins."""
+
+        entry = ModalLLMModelConfig(
+            repo_id="Qwen/Qwen3.6-35B-A3B-FP8",
+            revision="a" * 40,
+            gpu="H100",
+            n_gpus=2,
+            extra_server_args={
+                "--reasoning-parser": "qwen3",
+                "--tool-call-parser": "qwen3_coder",
+                "--mem-fraction-static": "0.75",
+            },
+        )
+
+        assert build_llm_server_args(entry) == {
+            "--served-model-name": "Qwen/Qwen3.6-35B-A3B-FP8",
+            "--revision": "a" * 40,
+            "--reasoning-parser": "qwen3",
+            "--tool-call-parser": "qwen3_coder",
+            "--trust-remote-code": "",
+            "--mem-fraction-static": "0.75",
+        }
+
+    def test_an_attached_override_replaces_the_default(self) -> None:
+        """``--flag=value`` and ``--flag value`` set the SAME flag
+        (``autoinference-utils`` 0.2.6), so a dict-key merge would hand SGLang
+        ``--mem-fraction-static 0.85 --mem-fraction-static=0.75``."""
+
+        entry = ModalLLMModelConfig(
+            repo_id="acme/llm",
+            extra_server_args={"--mem-fraction-static=0.75": ""},
+        )
+
+        args = build_llm_server_args(entry)
+
+        assert "--mem-fraction-static" not in args
+        assert args["--mem-fraction-static=0.75"] == ""
+
+    def test_the_context_window_is_omitted_without_max_model_len(self) -> None:
+        entry = ModalLLMModelConfig(repo_id="acme/llm")
+
+        assert build_llm_server_args(entry) == {
+            "--served-model-name": "acme/llm",
+            "--revision": "main",
+            "--trust-remote-code": "",
+            "--mem-fraction-static": "0.85",
+        }
+
+    def test_the_entry_is_not_mutated(self, lfm_entry) -> None:
+        build_llm_server_args(lfm_entry)
+
+        assert lfm_entry.extra_server_args == {}
+
+
 class TestDeploySpec:
-    @pytest.mark.parametrize(
-        "model,engine,engine_version",
-        [(_VOYAGE, "vllm", "0.26.0"), (_QWEN, "sglang", "0.5.20")],
-    )
-    def test_json_round_trip(
-        self, model: str, engine: str, engine_version: str
-    ) -> None:
+    @pytest.mark.parametrize("model", [_VOYAGE, _QWEN])
+    def test_json_round_trip(self, model: str) -> None:
         """The spec crosses into the Modal container as ONE JSON env var
         (ADR-009 §3), so it must survive dump -> parse byte-for-byte."""
 
-        spec = build_deploy_spec(model, engine)
+        spec = build_deploy_spec(model)
 
         restored = EmbeddingDeploySpec.model_validate_json(spec.model_dump_json())
 
         assert restored == spec
         assert restored.repo_id == model
-        assert restored.engine == engine
-        assert restored.engine_version == engine_version
+        assert restored.engine_version == "0.26.0"
         assert restored.autoinference_utils_version == "0.2.6"
         assert restored.server_name == EMBEDDING_SERVER_NAME == "Server"
-        assert restored.server_args == build_server_args(
-            get_catalog_entry(model), engine
-        )
+        assert restored.server_args == build_server_args(get_embedding_entry(model))
 
-    def test_the_engine_comes_from_the_caller_not_the_entry(self) -> None:
-        """``build_deploy_spec`` takes the SCRIPT's engine: an entry carries
-        none, and #147 hands the SGLang half to the LLM script."""
+    def test_the_engine_is_the_scripts_so_the_spec_names_none(self) -> None:
+        """The vLLM script is the only caller, so the spec carries vLLM's
+        PINNED VERSION and no engine field at all — there is nothing left to
+        choose (ADR-009 §2)."""
 
-        spec = build_deploy_spec(_VOYAGE, "sglang")
+        spec = build_deploy_spec(_VOYAGE)
 
-        assert spec.engine == "sglang"
-        assert spec.engine_version == "0.5.20"
-        assert "--is-embedding" in spec.server_args
+        assert not hasattr(spec, "engine")
+        assert spec.engine_version == "0.26.0"
+        assert "--runner" in spec.server_args
 
     def test_carries_the_hardware_and_the_app_name(self) -> None:
-        spec = build_deploy_spec(_VOYAGE, "vllm")
+        spec = build_deploy_spec(_VOYAGE)
 
         assert spec.app_name == "ep-tree-voyage-4-nano"
         assert spec.gpu == "A10"
@@ -292,19 +364,104 @@ class TestDeploySpec:
 
     def test_unknown_model_raises_model_error(self) -> None:
         with pytest.raises(ModelError):
-            build_deploy_spec("BAAI/bge-m3", "vllm")
+            build_deploy_spec("BAAI/bge-m3")
 
     def test_an_llm_entry_has_no_embedding_deploy_spec(self) -> None:
         """The vLLM script serves embeddings only, so the spec builder refuses
         an LLM entry instead of inventing `native_dimensions` for it."""
 
         with pytest.raises(ModelError) as excinfo:
-            build_deploy_spec(_LFM, "vllm")
+            build_deploy_spec(_LFM)
 
         assert "is an LLM entry" in str(excinfo.value)
 
-    def test_deploy_spec_env_var_name(self) -> None:
-        assert DEPLOY_SPEC_ENV == "EMBEDDING_DEPLOY_SPEC"
+    def test_deploy_spec_env_var_names(self) -> None:
+        """One env var per KIND: a script that read the other one would fail on
+        a missing key instead of on a wrong model."""
+
+        assert EMBEDDING_DEPLOY_SPEC_ENV == "EMBEDDING_DEPLOY_SPEC"
+        assert LLM_DEPLOY_SPEC_ENV == "LLM_DEPLOY_SPEC"
+
+
+class TestBuildLlmDeploySpec:
+    """What the SGLang App deploy is driven by (ADR-009 §2/§10)."""
+
+    def test_the_seed_resolves_to_modals_llm_recipe_inputs(self) -> None:
+        spec = build_llm_deploy_spec(_LFM)
+
+        assert spec.app_name == "ep-tree-lfm2-5-350m"
+        assert spec.repo_id == _LFM
+        assert spec.revision == _LFM_SHA
+        assert spec.gpu == "A10"
+        assert spec.n_gpus == 1
+        assert spec.cpu == 4
+        assert spec.memory_mb == 16384
+        # A DOCKER TAG of lmsysorg/sglang, not a PyPI version: the App runs the
+        # official image.
+        assert spec.engine_version == "v0.5.18"
+        assert spec.autoinference_utils_version == "0.2.6"
+        assert spec.server_name == EMBEDDING_SERVER_NAME == "Server"
+        assert spec.server_args == {
+            "--served-model-name": _LFM,
+            "--revision": _LFM_SHA,
+            "--trust-remote-code": "",
+            "--mem-fraction-static": "0.85",
+            "--context-length": "32768",
+        }
+
+    def test_json_round_trip(self) -> None:
+        """It crosses into the container as ONE JSON env var (ADR-009 §3)."""
+
+        spec = build_llm_deploy_spec(_LFM)
+
+        assert LLMDeploySpec.model_validate_json(spec.model_dump_json()) == spec
+
+    def test_no_credential_is_ever_in_the_spec(self, mocker) -> None:
+        """ADR-009 §9: the spec is baked into a cached, inspectable image
+        layer, so the Hugging Face token travels as an ephemeral Secret — even
+        with one configured, the dump must not mention it."""
+
+        mocker.patch.object(modal_catalog.settings, "hf_token", SecretStr(_FAKE_TOKEN))
+
+        dumped = build_llm_deploy_spec(_LFM).model_dump_json()
+
+        assert "HF_TOKEN" not in dumped
+        assert _FAKE_TOKEN not in dumped
+
+    def test_an_embedding_entry_is_refused(self) -> None:
+        """Story 5: the LLM script pointed at an embedding model fails BEFORE
+        any image is built (through the driver the kind picks the script, so
+        this can only happen by hand)."""
+
+        with pytest.raises(ModelError) as excinfo:
+            build_llm_deploy_spec(_VOYAGE)
+
+        assert (
+            f"{_VOYAGE} is an embedding entry (modal.embedding_models), not an LLM."
+            in str(excinfo.value)
+        )
+
+    def test_unknown_model_raises_model_error(self) -> None:
+        with pytest.raises(ModelError) as excinfo:
+            build_llm_deploy_spec("BAAI/bge-m3")
+
+        assert "Unknown Modal model" in str(excinfo.value)
+
+    def test_a_missing_engine_pin_names_the_engines_that_exist(
+        self, mocker, lfm_entry
+    ) -> None:
+        """A YAML edit that drops the pin must fail HERE, not in a container
+        that pulled `lmsysorg/sglang:None`."""
+
+        mocker.patch.object(
+            app_config.modal, "engines", {"vllm": app_config.modal.engines["vllm"]}
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            build_llm_deploy_spec(_LFM)
+
+        assert "No pinned version for engine 'sglang'" in str(excinfo.value)
+        assert "Engines in modal.engines: vllm." in str(excinfo.value)
 
 
 class TestPrompts:
@@ -501,7 +658,7 @@ class TestModalCliCommand:
         assert modal_cli_command("stop", voyage_entry, "app")[-1] == (
             "ep-tree-voyage-4-nano"
         )
-        assert build_deploy_spec(_VOYAGE, "vllm").app_name == "ep-tree-voyage-4-nano"
+        assert build_deploy_spec(_VOYAGE).app_name == "ep-tree-voyage-4-nano"
 
     def test_the_routing_region_is_pinned(self) -> None:
         assert MODAL_ROUTING_REGION == "eu-west"

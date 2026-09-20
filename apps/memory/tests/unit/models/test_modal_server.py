@@ -1,14 +1,14 @@
 """Unit tests for ``tree.models.modal_server`` — the ONE URL lookup, the ONE
-served-model discovery and the ONE smoke test every **Serving path** shares
-(ADR-009 §3/§4). Waiting out a cold start lives in ``tree.models.modal_warmup``
-and is tested there; here what matters is that the smoke test calls THAT
-poller, with the configured budget (ADR-009 §11).
+served-model discovery and the ONE smoke test PER KIND that every **Serving
+path** shares (ADR-009 §3/§4/§10). Waiting out a cold start lives in
+``tree.models.modal_warmup`` and is tested there; here what matters is that
+both smoke tests call THAT poller, with the configured budget (ADR-009 §11).
 
 No test touches the network: ``modal.Server`` and ``aiohttp.ClientSession``
 are replaced by fakes, and the **Proxy token** is always the fake pair
-``wk-1`` / ``ws-2``. What is asserted is the CONTRACT the driver and the
-``ModalEmbeddingModel`` client (#140) both depend on — the wire shape (no
-``dimensions`` key, the prompted inputs, the discovered model id), the vector
+``wk-1`` / ``ws-2``. What is asserted is the CONTRACT the driver and the two
+clients depend on — the wire shape (no ``dimensions`` key, the prompted
+inputs, the discovered model id, the strict ``city_facts`` schema), the vector
 width the memory stores, and that a public server is caught.
 """
 
@@ -26,6 +26,7 @@ from tree.config.app_config import app_config
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models import modal_catalog
 from tree.models.modal_server import (
+    chat_smoke_test,
     resolve_server_url,
     served_model_id,
     smoke_test,
@@ -34,6 +35,7 @@ from tree.models.modal_catalog import get_catalog_entry
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
+_LFM = "LiquidAI/LFM2.5-350M"
 _URL = "https://acme--ep-tree-qwen3-embedding-0-6b-server.modal.run"
 _BEARER = "wk-1.ws-2"
 
@@ -502,3 +504,315 @@ class TestSmokeTest:
 
         assert report.truncated_dimensions == 1024
         assert math.isclose(report.cos_relevant, 0.9, abs_tol=1e-3)
+
+
+# --- the LLM half ------------------------------------------------------------
+
+# Modal's own `city_facts` answer, as a server that honoured the strict schema
+# returns it: the CONTENT of `choices[0].message.content` is a JSON string.
+_CITY_FACTS = '{"city": "Tokyo", "population": 13960000}'
+
+# The six INFO lines one passing chat smoke test logs, in this order.
+_CHAT_LOG_LINES = [
+    "health 200 after 113.0s",
+    "served model id: modal-recipe/lfm2-5-350m",
+    f"chat completion: {_CITY_FACTS}",
+    "strict JSON schema honoured: city=Tokyo population=13960000",
+    "unauthenticated health -> 401",
+    "Smoke test passed",
+]
+
+
+def _completion(content: str) -> dict[str, Any]:
+    """One OpenAI-compatible chat completion carrying ``content``."""
+
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _chat_responses(
+    completion: _FakeResponse | Exception | None = None,
+    *,
+    served_id: str = "modal-recipe/lfm2-5-350m",
+    unauthenticated_status: int = 401,
+) -> list[_FakeResponse | Exception]:
+    """The three calls one chat smoke test makes AFTER the patched poll."""
+
+    return [
+        _FakeResponse(200, {"data": [{"id": served_id}]}),  # GET /v1/models
+        (
+            _FakeResponse(200, _completion(_CITY_FACTS))
+            if completion is None
+            else completion
+        ),
+        _FakeResponse(unauthenticated_status),  # header-less GET /health
+    ]
+
+
+@pytest.mark.usefixtures("proxy_token", "modal_server")
+class TestChatSmokeTest:
+    """ADR-009 §10: the LLM twin of the embedding smoke test — path-blind, and
+    asserting the SHAPE of the answer, never its content."""
+
+    async def test_the_happy_path_logs_six_lines_in_order(
+        self, http, poll, caplog
+    ) -> None:
+        """Story 2: what the operator reads after
+        ``make memory-deploy-model-test MODEL=LiquidAI/LFM2.5-350M``."""
+
+        http.responses = _chat_responses()
+
+        with caplog.at_level(logging.INFO):
+            report = await chat_smoke_test(_LFM)
+
+        assert report.url == _URL
+        assert report.served_model == "modal-recipe/lfm2-5-350m"
+        assert report.cold_start_seconds == 113.0
+        assert report.city == "Tokyo"
+        assert report.population == 13960000
+        assert report.unauthenticated_status == 401
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage() in _CHAT_LOG_LINES
+        ] == _CHAT_LOG_LINES
+
+    async def test_it_waits_the_cold_start_out_on_the_shared_poller(
+        self, http, poll
+    ) -> None:
+        """ADR-009 §11: the SAME poller the clients use, with the SAME budget
+        — a smoke test right after a deploy must not fail on the 503 a
+        scaled-to-zero server answers in a second."""
+
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(_LFM)
+
+        poll.assert_awaited_once_with(
+            f"{_URL}/health",
+            {"Authorization": f"Bearer {_BEARER}"},
+            deadline_s=app_config.modal.warmup_deadline_s,
+        )
+
+    async def test_an_explicit_deadline_wins(self, http, poll) -> None:
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(_LFM, deadline_s=1200.0)
+
+        assert poll.await_args.kwargs["deadline_s"] == 1200.0
+
+    async def test_it_posts_the_strict_city_facts_schema(self, http, poll) -> None:
+        """The request is the script's warm-up payload with a WIDER token
+        budget: a reasoning model may spend tokens before the JSON, and a
+        completion cut short would fail as "not valid JSON"."""
+
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(_LFM)
+
+        post = next(call for call in http.calls if call["method"] == "POST")
+        assert post["url"] == f"{_URL}/v1/chat/completions"
+        body = post["json"]
+        assert body["model"] == "modal-recipe/lfm2-5-350m"
+        assert body["messages"] == [
+            {"role": "user", "content": "Reply with JSON facts about Tokyo."}
+        ]
+        assert body["max_tokens"] == 256
+        assert body["temperature"] == 0
+        assert body["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city_facts",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "population": {"type": "integer"},
+                    },
+                    "required": ["city", "population"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        }
+
+    async def test_a_non_json_completion_fails_with_an_excerpt(
+        self, http, poll
+    ) -> None:
+        """Story 4: the model ignored ``response_format``. The message carries
+        the first characters, which is what tells a `<think>` block apart from
+        a chatty preamble."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(200, _completion("<think>Tokyo is in Japan</think> Sure!"))
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "chat completion is not valid JSON" in str(excinfo.value)
+        assert "<think>Tokyo is in Japan" in str(excinfo.value)
+
+    async def test_a_long_bad_completion_is_truncated(self, http, poll) -> None:
+        """A 4000-character apology must not become a 4000-character log
+        line."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(200, _completion("Sure! " + "very long " * 400))
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert len(str(excinfo.value)) < 300
+
+    async def test_json_that_is_not_an_object_fails(self, http, poll) -> None:
+        http.responses = _chat_responses(
+            _FakeResponse(200, _completion('["Tokyo", 13960000]'))
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "is not a JSON object" in str(excinfo.value)
+
+    async def test_a_missing_key_is_named(self, http, poll) -> None:
+        http.responses = _chat_responses(
+            _FakeResponse(200, _completion('{"city": "Tokyo"}'))
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "missing ['population']" in str(excinfo.value)
+
+    async def test_an_extra_key_is_named(self, http, poll) -> None:
+        """``additionalProperties: false`` is part of the schema, so a server
+        that added a key did not honour it."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(
+                200,
+                _completion(
+                    '{"city": "Tokyo", "population": 13960000, "country": "Japan"}'
+                ),
+            )
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "unexpected ['country']" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ('{"city": "Tokyo", "population": "many"}', "types 'population' as str"),
+            ('{"city": "Tokyo", "population": true}', "types 'population' as bool"),
+            ('{"city": 13960000, "population": 13960000}', "types 'city' as int"),
+        ],
+        ids=["population-string", "population-bool", "city-int"],
+    )
+    async def test_a_wrongly_typed_value_fails(
+        self, http, poll, content: str, expected: str
+    ) -> None:
+        """A strict schema types both keys. ``true`` is worth its own row:
+        ``bool`` IS an ``int`` in Python, so a naive check would accept it."""
+
+        http.responses = _chat_responses(_FakeResponse(200, _completion(content)))
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert expected in str(excinfo.value)
+
+    async def test_an_empty_completion_fails(self, http, poll) -> None:
+        http.responses = _chat_responses(_FakeResponse(200, {"choices": []}))
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "carried no content" in str(excinfo.value)
+
+    async def test_a_400_is_retryable_and_carries_the_status(self, http, poll) -> None:
+        """A server that cannot compile the schema answers 400 — server-side,
+        so it is the class the driver may print the HF_TOKEN hint under."""
+
+        http.responses = _chat_responses(_FakeResponse(400))
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert excinfo.value.status_code == 400
+        assert "answered 400, expected 200" in str(excinfo.value)
+
+    async def test_a_public_server_is_caught(self, http, poll) -> None:
+        """Auth is the thing a deploy can silently get wrong."""
+
+        http.responses = _chat_responses(unauthenticated_status=200)
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert "the server is public" in str(excinfo.value)
+
+    async def test_the_unauthenticated_probe_sends_no_authorization_header(
+        self, http, poll
+    ) -> None:
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(_LFM)
+
+        assert "Authorization" not in http.session_kwargs[-1].get("headers", {})
+
+    async def test_the_proxy_token_reaches_no_log_record(
+        self, http, poll, caplog
+    ) -> None:
+        """ADR-009 §9: the token authenticates every call here and appears in
+        none of them."""
+
+        http.responses = _chat_responses()
+
+        with caplog.at_level(logging.DEBUG):
+            await chat_smoke_test(_LFM)
+
+        assert _BEARER not in "\n".join(r.getMessage() for r in caplog.records)
+        assert "ws-2" not in "\n".join(r.getMessage() for r in caplog.records)
+
+    async def test_an_embedding_entry_is_refused_before_any_request(
+        self, http, poll
+    ) -> None:
+        """Story 5's client-side twin: the chat test cannot run against an
+        embedding model, and says so before resolving anything."""
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_VOYAGE)
+
+        assert "is an embedding entry" in str(excinfo.value)
+        assert http.calls == []
+
+    async def test_a_wrong_proxy_token_fails_fast(self, http, poll) -> None:
+        """ONE poll, then exit — and exactly ``ModelError``, because the
+        driver's ``ExtractionError`` branch is the one that prints the
+        HF_TOKEN hint."""
+
+        poll.side_effect = ModelError(
+            f"Health poll of {_URL}/health returned HTTP 401 — not a cold "
+            "start, giving up after 1 attempt."
+        )
+        http.responses = _chat_responses()
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert type(excinfo.value) is ModelError
+        assert http.calls == []

@@ -93,11 +93,12 @@ def in_app_root(monkeypatch) -> None:
 
 @pytest.fixture
 def app_scripts(tmp_path, monkeypatch, in_app_root) -> None:
-    """A workspace where BOTH App scripts exist.
+    """A workspace where BOTH App scripts exist, as EMPTY files.
 
-    The SGLang one arrives in #147; faking it here is what lets the LLM route
-    be tested now without pre-empting that task. It takes ``in_app_root`` so it
-    always chdirs LAST, whatever order pytest resolves the class fixtures in.
+    Both ship for real now, so this fixture proves the driver checks a PATH
+    and nothing more — it never reads, imports or runs the script. It takes
+    ``in_app_root`` so it always chdirs LAST, whatever order pytest resolves
+    the class fixtures in.
     """
 
     (tmp_path / "deploy").mkdir()
@@ -171,6 +172,28 @@ def smoke(mocker, cli_module):
     )
     return mocker.patch.object(
         cli_module, "smoke_test", new_callable=mocker.AsyncMock, return_value=report
+    )
+
+
+@pytest.fixture
+def chat_smoke(mocker, cli_module):
+    """Patch the LLM smoke test so ``test`` never leaves the process."""
+
+    from tree.models.modal_server import ChatSmokeTestReport
+
+    report = ChatSmokeTestReport(
+        url="https://acme--ep-tree-lfm2-5-350m-server.modal.run",
+        served_model=_LFM,
+        cold_start_seconds=96.0,
+        city="Tokyo",
+        population=13960000,
+        unauthenticated_status=401,
+    )
+    return mocker.patch.object(
+        cli_module,
+        "chat_smoke_test",
+        new_callable=mocker.AsyncMock,
+        return_value=report,
     )
 
 
@@ -323,6 +346,37 @@ class TestRouter:
         assert _routing_lines(caplog) == [
             f"Routing {_LFM}: not in Modal's endpoint catalog, no catalog base "
             "→ SGLang App"
+        ]
+
+    def test_a_verdict_split_across_stdout_and_stderr_still_routes(
+        self, cli_module, run, caplog
+    ) -> None:
+        """The two captured streams are joined by a NEWLINE, not concatenated.
+
+        Modal writes its refusal to one stream and nothing guarantees a
+        trailing newline on the other: glued together, ``…is not available for
+        dedicated`` + ``Endpoints.`` reads as ``dedicatedEndpoints.``, the
+        marker no longer matches, and a model that should route to the App
+        ABORTS the deploy as an unknown failure instead.
+        """
+
+        run.state.results = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout=f"'{_VOYAGE}' is not available for dedicated",
+                stderr="Endpoints.",
+            ),
+            _ok(),
+        ]
+
+        result = _invoke(cli_module, ["deploy", "--model", _VOYAGE], caplog)
+
+        assert result.exit_code == 0
+        assert _acting_argvs(run)[-1] == ["modal", "deploy", _VLLM_SCRIPT]
+        assert _routing_lines(caplog) == [
+            f"Routing {_VOYAGE}: not in Modal's endpoint catalog, no catalog "
+            "base → vLLM App"
         ]
 
     def test_a_fine_tune_of_a_catalog_model_becomes_custom_weights(
@@ -557,8 +611,9 @@ class TestRouter:
     def test_a_missing_app_script_exits_two_and_deploys_nothing(
         self, cli_module, run, caplog, tmp_path, monkeypatch
     ) -> None:
-        """The SGLang App script arrives in #147; until then an LLM Modal
-        refuses says which file is missing instead of letting Modal fail."""
+        """Run from the wrong directory (here: an empty ``tmp_path``), the
+        driver says WHICH file is missing instead of letting Modal fail on a
+        path a minute into a deploy."""
 
         monkeypatch.chdir(tmp_path)
 
@@ -1097,30 +1152,75 @@ def test_the_rail_is_wired_once_in_the_unit_conftest() -> None:
 
 
 @pytest.mark.usefixtures("no_token")
-class TestSmokeTestCommand:
-    def test_it_awaits_the_shared_smoke_test_once(
-        self, cli_module, smoke, caplog
+class TestTestCommandDispatch:
+    """ONE target family, two kinds (ADR-009 §10): the KIND picks the smoke
+    test exactly as it picks the App script, so an operator types the same
+    command for an embedding model and for an LLM."""
+
+    def test_an_embedding_entry_awaits_the_embedding_smoke_test(
+        self, cli_module, smoke, chat_smoke, caplog
     ) -> None:
         result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
 
         assert result.exit_code == 0
         smoke.assert_awaited_once_with(_VOYAGE)
+        chat_smoke.assert_not_awaited()
 
-    def test_an_llm_entry_has_no_smoke_test_yet(
-        self, cli_module, smoke, caplog
+    def test_an_llm_entry_awaits_the_chat_smoke_test(
+        self, cli_module, smoke, chat_smoke, caplog
     ) -> None:
-        """One target family serves both kinds, so the LLM half must say what
-        it cannot do yet instead of running the embedding test on a chat
-        model (#147 brings `chat_smoke_test`)."""
+        """Before this it exited 2 with "No smoke test for LLM entries yet" —
+        running the EMBEDDING test on a chat model was never the alternative.
+        """
 
         result = _invoke(cli_module, ["test", "--model", _LFM], caplog)
 
-        assert result.exit_code == 2
+        assert result.exit_code == 0
+        chat_smoke.assert_awaited_once_with(_LFM)
         smoke.assert_not_awaited()
-        assert "No smoke test for LLM entries yet (tasks/147)." in _output(
-            result, caplog
+
+    def test_an_endpoint_routed_llm_takes_the_same_path(
+        self, cli_module, chat_smoke, caplog
+    ) -> None:
+        """Path-blind: ``Qwen/Qwen3.5-0.8B`` is a Dedicated endpoint and gets
+        the very same test."""
+
+        result = _invoke(cli_module, ["test", "--model", _QWEN_LLM], caplog)
+
+        assert result.exit_code == 0
+        chat_smoke.assert_awaited_once_with(_QWEN_LLM)
+
+    def test_a_failing_chat_smoke_test_exits_one(
+        self, cli_module, chat_smoke, caplog
+    ) -> None:
+        """Story 4: the served model ignored ``response_format``."""
+
+        chat_smoke.side_effect = ModelError(
+            "chat completion is not valid JSON: 'Sure! Tokyo is…'"
         )
 
+        result = _invoke(cli_module, ["test", "--model", _LFM], caplog)
+
+        assert result.exit_code == 1
+        assert "chat completion is not valid JSON" in _output(result, caplog)
+
+    def test_a_server_side_chat_failure_exits_one(
+        self, cli_module, chat_smoke, caplog
+    ) -> None:
+        chat_smoke.side_effect = ExtractionError(
+            "POST https://acme--x.modal.run/v1/chat/completions answered 400, "
+            "expected 200.",
+            status_code=400,
+        )
+
+        result = _invoke(cli_module, ["test", "--model", _LFM], caplog)
+
+        assert result.exit_code == 1
+        assert "answered 400" in _output(result, caplog)
+
+
+@pytest.mark.usefixtures("no_token")
+class TestSmokeTestCommand:
     def test_an_unknown_model_exits_two(self, cli_module, smoke, caplog) -> None:
         result = _invoke(cli_module, ["test", "--model", "BAAI/bge-m3"], caplog)
 

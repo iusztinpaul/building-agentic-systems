@@ -720,6 +720,12 @@ class ModalEngineConfig(BaseModel):
 
     Per ENGINE, not per model (ADR-009 §3): promote to a per-entry override
     only when two catalog models need different engine versions.
+
+    What a ``version`` IS differs per engine, because the two Apps install the
+    engine differently (both after Modal's own recipe): ``vllm`` is a PyPI
+    version (``vllm==0.26.0`` on a CUDA base), ``sglang`` is a DOCKER TAG of
+    ``lmsysorg/sglang`` (``lmsysorg/sglang:v0.5.18``, the official image, which
+    ships the engine already built).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -966,9 +972,12 @@ class ModalConfig(BaseModel):
     engines: dict[Literal["sglang", "vllm"], ModalEngineConfig] = Field(
         default_factory=lambda: {
             "vllm": ModalEngineConfig(version="0.26.0"),
-            "sglang": ModalEngineConfig(version="0.5.20"),
+            "sglang": ModalEngineConfig(version="v0.5.18"),
         },
-        description="App scripts only: the pinned version of each engine.",
+        description=(
+            "App scripts only: the pinned version of each engine — a PyPI "
+            "version for vllm, a docker tag of lmsysorg/sglang for sglang."
+        ),
     )
     embedding_models: list[ModalEmbeddingModelConfig] = Field(
         default_factory=list,

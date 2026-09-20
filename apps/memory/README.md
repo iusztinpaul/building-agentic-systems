@@ -584,6 +584,33 @@ Routing LiquidAI/LFM2.5-350M: not in Modal's endpoint catalog, no catalog base �
   entry's `extra_server_args`, never in the scripts. Modal's endpoint catalog
   held 44 models on 2026-09-20, two of them embedding models, so the Apps are
   the general path.
+
+**1a. Serving your own LLM.** Any Hugging Face LLM Modal will not host goes to
+the SGLang App — `make memory-deploy-model MODEL=LiquidAI/LFM2.5-350M` is the
+whole command, and the entry is five YAML lines:
+
+```yaml
+llm_models:
+  - repo_id: LiquidAI/LFM2.5-350M
+    revision: <the commit sha you want served> # pinning one is what makes a re-deploy reproducible
+    gpu: A10
+    n_gpus: 1 # = SGLang's tensor parallelism, and the `:N` of the GPU string
+    max_model_len: 32768 # the card's context is 128k; 32k keeps the KV cache small
+```
+
+`deploy/modal_sglang_llm.py` follows the `serve.py` Modal generates for its own
+LLM endpoints: the official `lmsysorg/sglang:<tag>` image (the engine is IN the
+image — `modal.engines.sglang.version` is a DOCKER TAG, not a PyPI version),
+`SGLangEndpoint(tp=<n_gpus>)`, and a warm-up that is a chat completion under a
+strict JSON schema — **a server that cannot do constrained JSON never reports
+healthy**, because constrained JSON is exactly what the memory asks of it. The
+flags are the generic-safe subset (`--served-model-name`, `--revision`,
+`--trust-remote-code`, `--mem-fraction-static 0.85`, `--context-length`);
+anything model-specific — `--reasoning-parser`, `--tool-call-parser`, a lower
+memory fraction — goes in that entry's `extra_server_args`, which also
+overrides those two tuning defaults. Modal's own recipes add speculative
+decoding with a per-model draft model plus mamba/multimodal flags; a script
+that serves whatever the catalog names cannot assume any of it, so it does not.
 - **Any other failure** (auth, quota, network, a text we do not know) → the
   deploy ABORTS with Modal's own message and exit code. An unknown failure is
   not evidence that a model is ineligible.
@@ -643,8 +670,18 @@ make memory-deploy-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B   # stop paying fo
 ```
 
 `-stop` needs no `SERVING=`: it stops the Dedicated Endpoint if the model is
-one, and the App otherwise. `-test` covers embedding entries; the LLM smoke
-test arrives with `deploy/modal_sglang_llm.py`.
+one, and the App otherwise. `-test` covers both kinds — the entry's kind picks
+the test, so `make memory-deploy-model-test MODEL=LiquidAI/LFM2.5-350M` asks the
+LLM for one strict-JSON chat completion instead of embedding three texts:
+
+```
+health 200 after 96.0s
+served model id: LiquidAI/LFM2.5-350M
+chat completion: {"city": "Tokyo", "population": 13960000}
+strict JSON schema honoured: city=Tokyo population=13960000
+unauthenticated health -> 401
+Smoke test passed
+```
 
 The smoke test polls `/health` until the container is up — a scaled-to-zero
 Modal server answers HTTP 503 in about a second and boots *because* it is

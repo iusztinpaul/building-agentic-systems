@@ -90,7 +90,7 @@ deploy-model: # Serve ONE Modal catalog model — embedding or LLM — on Modal 
 	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-model MODEL=<repo_id> [SERVING=endpoint|app] [DRY_RUN=yes] [FORCE=yes]'; exit 1; fi
 	uv run python scripts/modal_model.py deploy --model "$(MODEL)" $(if $(SERVING),--serving "$(SERVING)",) $(if $(filter yes,$(DRY_RUN)),--dry-run,) $(if $(filter yes,$(FORCE)),--force,)
 
-deploy-model-test: # Smoke-test a served model through proxy-token auth (health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token). Embedding entries only for now — an LLM entry exits 2 (tasks/147). Requires MODEL=<repo_id>.
+deploy-model-test: # Smoke-test a served model through proxy-token auth; the entry's KIND picks the test. Embedding model: health, /v1/embeddings, native dimensions, client-side Matryoshka truncation when the entry lists sizes, relevant-vs-unrelated sanity, 401 without a token. LLM: health, one /v1/chat/completions under a strict JSON schema, 401 without a token. Requires MODEL=<repo_id>.
 	@if [ -z "$(MODEL)" ]; then echo 'USAGE: make memory-deploy-model-test MODEL=<repo_id>'; exit 1; fi
 	uv run python scripts/modal_model.py test --model "$(MODEL)"
 

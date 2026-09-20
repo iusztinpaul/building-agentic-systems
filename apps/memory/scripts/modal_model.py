@@ -41,12 +41,10 @@ from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import get_catalog_entry
 from tree.models.modal_cli import ModalGuardError
 from tree.models.modal_router import hint_if_gated, run_deploy, run_stop
-from tree.models.modal_server import smoke_test
+from tree.models.modal_server import chat_smoke_test, smoke_test
 
 init_logger()
 logger = logging.getLogger(__name__)
-
-_NO_LLM_SMOKE_TEST = "No smoke test for LLM entries yet (tasks/147)."
 
 model_option = click.option(
     "--model",
@@ -123,17 +121,17 @@ def stop(model: str, serving: str, dry_run: bool) -> None:
 def test_command(model: str) -> None:
     """Smoke-test the served MODEL through proxy-token auth.
 
-    No ``--serving``: under H1 the lookup is identical on both paths. No dry
-    run either — it starts no CLI.
+    The KIND picks the test — vectors and a ranking for an embedding entry, one
+    strict-JSON chat completion for an LLM — exactly as it picks the App script
+    (ADR-009 §2). No ``--serving``: under H1 the lookup is identical on both
+    paths. No dry run either — it starts no CLI.
     """
 
     entry = _entry_or_exit(model)
-    if entry.kind != "embedding":
-        logger.error(_NO_LLM_SMOKE_TEST)
-        raise SystemExit(2)
+    test = smoke_test if entry.kind == "embedding" else chat_smoke_test
 
     try:
-        asyncio.run(smoke_test(model))
+        asyncio.run(test(model))
     except ExtractionError as exc:
         # Server-side: the model answered, or failed to. Only these can be a
         # gated download — a bare `ModelError` is OUR configuration (a wrong
