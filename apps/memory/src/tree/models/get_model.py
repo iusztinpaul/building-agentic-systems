@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from tree.config.app_config import EmbeddingConfig, app_config
 from tree.config.settings import settings
@@ -172,3 +174,64 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     """
 
     return _build_embedding_model(app_config.models.search_embedding, provider=provider)
+
+
+async def prewarm_models(*models: object) -> None:
+    """Warm every DISTINCT Modal server behind ``models``, concurrently.
+
+    The **Pre-warm** of ADR-009 §11, ported from the `pulse` codebase: it runs
+    at the top of a run that fans out over Modal-backed models — before
+    document 1 — so a cold start is paid ONCE, by this call, instead of by each
+    of the N model instances the Prefect tasks build later. What is shared is
+    the warm SERVER, not the instance: every later instance's first poll is a
+    single GET answering 200.
+
+    DUCK-TYPED on ``ensure_warm``, which only the two Modal clients have — for
+    Voyage, Gemini, sentence-transformers and the mock this is a no-op that
+    awaits nothing, creates no task and logs nothing. DEDUPED on ``warm_key``
+    (the Modal app name): the resolution and the search embedding may be the
+    same app, and one boot serves both.
+
+    FAIL-FAST WITH AN EXPLICIT CANCEL. ``asyncio.gather`` propagates the first
+    failure but leaves its siblings RUNNING, so a 403 on one server would
+    otherwise wait out the other's 600 s poll — and leave that poll knocking on
+    the loop the run is about to use. The ``finally`` cancels every task and
+    reaps it inside this call. The first exception propagates unchanged
+    (``ModelError`` for a 4xx, ``ExtractionError`` for a spent deadline), which
+    is what fails the run with ZERO documents attempted.
+
+    IDEMPOTENT: on an already-warm gate each ``ensure_warm`` returns without a
+    request, so a flow-level retry re-runs this harmlessly. Deliberately NOT a
+    Prefect task — a cached "warm" is the "warm at t0" fallacy, task retries
+    would multiply the poller's deadline, and it must raise OUTSIDE per-document
+    error handling.
+
+    No ``modal`` import lives here or anywhere on this module's import path:
+    the MCP boot must not pay for the Modal SDK.
+    """
+
+    warms: dict[object, Callable[[], Awaitable[None]]] = {}
+    for model in models:
+        warm = getattr(model, "ensure_warm", None)
+        if warm is None:
+            continue
+        warms.setdefault(getattr(model, "warm_key", id(model)), warm)
+
+    if not warms:
+        return
+
+    logger.info(
+        "Pre-warming %d Modal server(s): %s",
+        len(warms),
+        ", ".join(str(key) for key in warms),
+    )
+
+    tasks = [asyncio.create_task(warm()) for warm in warms.values()]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        # Awaited so a cancelled poll is actually reaped here, not left pending
+        # on the loop the pipeline is about to fan out on.
+        await asyncio.gather(*tasks, return_exceptions=True)

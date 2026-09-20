@@ -168,11 +168,13 @@ from tree.memory.types import (
     make_type_name_key,
 )
 from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
+from tree.models.exceptions import ModelError
 from tree.models.get_model import (
     get_embedding_model,
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    prewarm_models,
     search_embedding_identity,
 )
 from tree.config.constants import TAGS_CLUSTERING, TAGS_EXTRACTION, TAGS_INDEXING
@@ -2013,6 +2015,23 @@ async def _run_extraction_worker_body(
     if not docs:
         return WriteSummary(documents_processed=0)
 
+    # ----- Pre-warm every Modal-backed model, before document 1 -------------
+    # ADR-009 §11. AFTER the zero-documents guard (an empty run must never wake
+    # a GPU) and BEFORE the first stage, so a cold start is paid ONCE here
+    # instead of once per model instance the tasks build below — and a DEAD
+    # server fails this run with zero documents attempted rather than counting
+    # as N failed documents. A no-op for Voyage / Gemini / sentence-transformers
+    # / mock, which have no ``ensure_warm``. These instances are throw-aways:
+    # what the tasks inherit is the warm SERVER, not the object. Plain awaited
+    # helper, never a Prefect task — a cached "warm" is the "warm at t0"
+    # fallacy, and task retries would multiply the poller's deadline.
+    if mode == "rag":
+        await prewarm_models(get_search_embedding_model())
+    else:
+        await prewarm_models(
+            get_llm(), get_resolution_embedding_model(), get_search_embedding_model()
+        )
+
     # ----- Task ① — clean + chunk (per-doc fan-out) -------------------------
     # Fans out under a bounded semaphore sized by ``doc_concurrency`` (#059 R7,
     # default 1 = serial-equivalent). gather preserves order so ``chunked_docs``
@@ -2227,6 +2246,12 @@ async def _embed_nodes(
     with span(
         "embed_nodes_task", tags=_INDEXING_TAGS, trace_headers=opik_trace_headers
     ):
+        # NOT pre-warmed, on purpose (ADR-009 §11): ONE model, sequential
+        # batches, and whether there is anything to backfill is known only
+        # inside ``embed_nodes``. The Warm gate warms at use — the first
+        # ``embed()`` waits out the cold start and a dead server fails this task
+        # before any write — while a pre-warm at the top of the flow would wake
+        # a GPU for a backfill that usually has nothing to do.
         embedding_model = get_embedding_model()
         return await embed_nodes(client, database, embedding_model, user_id)
 
@@ -2579,6 +2604,22 @@ async def _summarise_clusters(
             )
 
     ordered = sorted(samples_by_cluster)
+    if ordered:
+        # Pre-warm before the fan-out (ADR-009 §11): without it a dead Modal
+        # LLM costs every cluster its own 600 s poll. ``get_llm()`` sits OUTSIDE
+        # the ``try`` — a missing Proxy token is a configuration error and must
+        # fail the run loudly; only the WARM fails open, per ADR-007 §4: ONE
+        # warning and the existing fallback label for every cluster, with no LLM
+        # call attempted. ``ModelError`` is the warm path's closed set: a
+        # fail-fast 4xx raises it directly, a spent deadline raises its
+        # ``ExtractionError`` subclass — nothing else escapes a warm.
+        llm = get_llm()
+        try:
+            await prewarm_models(llm)
+        except ModelError as exc:
+            log.warning("Cluster summaries skipped: %s", exc)
+            return {cid: fallback_summary(cid) for cid in ordered}, len(ordered)
+
     outcomes = await asyncio.gather(
         *[_one(cluster_id) for cluster_id in ordered], return_exceptions=True
     )

@@ -700,6 +700,72 @@ class TestSupersessionSweep:
         boom.assert_not_called()
         resolver.assert_not_called()
 
+    async def test_no_delta_never_prewarms(self, mocker) -> None:
+        """Nothing to sweep ⇒ no GPU is woken (ADR-009 §11)."""
+
+        prewarm = mocker.patch("tree.memory.graph.consolidation.dream.prewarm_models")
+        mocker.patch("tree.memory.graph.consolidation.dream.resolve_supersessions")
+
+        nodes = [
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:stale",
+                statement="prefers tea",
+                category="drinks",
+                updated_at=_OLD,
+            )
+        ]
+        database = _SupersessionFakeDatabase(_SupersessionFakeCollection(nodes))
+
+        await dream_mod._supersession_sweep(
+            database=database,
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dry_run=False,
+        )
+
+        prewarm.assert_not_awaited()
+
+    async def test_dream_prewarms_the_models_it_built(self, mocker) -> None:
+        """Both Modal servers are warmed once — before the sweep calls either.
+
+        The SAME instances then go into the resolver, so the gate's warm hint
+        carries over to the first real call.
+        """
+
+        mocker.patch(
+            "tree.memory.graph.consolidation.dream.get_llm", return_value="LLM"
+        )
+        mocker.patch(
+            "tree.memory.graph.consolidation.dream.get_search_embedding_model",
+            return_value="EMB",
+        )
+        prewarm = mocker.patch("tree.memory.graph.consolidation.dream.prewarm_models")
+        # The resolver asserts, as it is entered, that the warm already happened.
+        resolver = mocker.patch(
+            "tree.memory.graph.consolidation.dream.resolve_supersessions",
+            side_effect=lambda **_kwargs: prewarm.assert_awaited_once() or [],
+        )
+
+        nodes = [
+            _pref_node(
+                node_id=f"{_USER_ID}:preference:fresh",
+                statement="prefers light mode",
+                category="ui",
+                updated_at=_FRESH,
+            )
+        ]
+        database = _SupersessionFakeDatabase(_SupersessionFakeCollection(nodes))
+
+        await dream_mod._supersession_sweep(
+            database=database,
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dry_run=False,
+        )
+
+        prewarm.assert_awaited_once_with("LLM", "EMB")
+        resolver.assert_called_once()
+
     async def test_drives_only_delta_nodes_into_resolver(self, mocker) -> None:
         """Flag-on real run: only the delta pref drives resolve_supersessions.
 

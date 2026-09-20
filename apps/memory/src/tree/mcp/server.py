@@ -163,6 +163,11 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
         settings.mongo.mongo_uri.get_secret_value(),
         database,
     )
+    # Built, never pre-warmed (ADR-009 §11): this process lives for hours while
+    # a Modal container idles out after ~5 minutes, so warming a GPU here bills
+    # an afternoon of nothing and spends Horizon's 60 s readiness window on a
+    # boot. The Warm gate warms at use instead — the first query after a quiet
+    # period waits out the cold start.
     llm = get_llm()
     embedding_model = get_embedding_model()
 

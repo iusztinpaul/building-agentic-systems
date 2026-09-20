@@ -43,6 +43,7 @@ from tree import offline, online
 from tree.memory import pipeline
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.memory.clustering.store import ChildEmbeddingRow, ClusterWriteCounts
+from tree.memory.clustering.summaries import fallback_summary
 from tree.memory.clustering.types import (
     ClusteringResult,
     ClusterSummary,
@@ -91,8 +92,9 @@ from tree.memory.rag.types import ChildChunk, ParentChunk
 from tree.memory.graph.resolution.composite import CompositeResolver
 from tree.memory.graph.resolution.types import ResolvedEntity
 from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
+from tree.models.exceptions import ModelError
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
-from tree.models.get_model import search_embedding_identity
+from tree.models.get_model import prewarm_models, search_embedding_identity
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -1994,7 +1996,13 @@ class TestFlowEmbeddingModelSplit:
         )
         mocker.patch("tree.memory.pipeline.redirect_first_person", return_value=[])
         mocker.patch("tree.memory.pipeline.canonicalize_preference_names")
-        mocker.patch("tree.memory.pipeline.get_llm", return_value=MagicMock())
+        # ``spec=BaseLLM`` so the double carries the LLM contract and NOTHING
+        # else: an unspec'd MagicMock answers to ``ensure_warm`` as well, which
+        # makes the **Pre-warm** mistake it for a Modal client (the embedding
+        # doubles above are already spec'd for the same reason).
+        mocker.patch(
+            "tree.memory.pipeline.get_llm", return_value=MagicMock(spec=BaseLLM)
+        )
         supersession = mocker.patch(
             "tree.memory.pipeline.resolve_supersessions", new=AsyncMock()
         )
@@ -2549,6 +2557,208 @@ async def _run_worker(
         document_ids=[str(document.id)],
         log=logging.getLogger("test.worker"),
     )
+
+
+# --- The **Pre-warm** seam (ADR-009 §11) -----------------------------------
+
+
+class _StopAtFirstStage(Exception):
+    """Tripwire: ends the run at stage ① so the test observes only the seam."""
+
+
+def _install_prewarm_tripwire(
+    mocker, *, error: Exception | None = None
+) -> tuple[list[str], list[tuple[object, ...]]]:
+    """Record the pre-warm / first-stage ORDER and stop the run at stage ①.
+
+    Returns ``(trace, warmed)``: the ordered stage labels and the model tuples
+    the worker handed to the pre-warm.
+    """
+
+    trace: list[str] = []
+    warmed: list[tuple[object, ...]] = []
+
+    async def _prewarm(*models: object) -> None:
+        trace.append("prewarm")
+        warmed.append(models)
+        if error is not None:
+            raise error
+
+    async def _split(*_args: Any, **_kwargs: Any) -> list[ChunkedDocument]:
+        trace.append("split")
+        raise _StopAtFirstStage
+
+    mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+    mocker.patch("tree.memory.pipeline._split_documents", new=_split)
+    return trace, warmed
+
+
+async def _run_worker_for_prewarm(
+    mocker,
+    monkeypatch,
+    *,
+    mode: str,
+    test_database: Any,
+    user_id: PydanticObjectId,
+    document_ids: list[str],
+) -> WriteSummary:
+    """Drive the worker body far enough to observe the pre-warm seam."""
+
+    monkeypatch.setenv("TREE_MEMORY__MODE", mode)
+    mocker.patch(
+        "tree.memory.pipeline.init_mongodb",
+        new=AsyncMock(return_value=_ClientToTestDatabase(test_database)),
+    )
+    mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
+    mocker.patch(
+        "tree.memory.pipeline.get_resolution_embedding_model",
+        return_value="RESOLUTION-EMBEDDING",
+    )
+    mocker.patch(
+        "tree.memory.pipeline.get_search_embedding_model",
+        return_value="SEARCH-EMBEDDING",
+    )
+
+    return await _run_extraction_worker_body(
+        user_id=user_id,
+        document_ids=document_ids,
+        log=logging.getLogger("test.worker"),
+    )
+
+
+class TestWorkerPrewarm:
+    """Before document 1, after the zero-documents guard (ADR-009 §11)."""
+
+    async def test_worker_prewarms_before_the_first_stage(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        user, document = ingested_document
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode="graphrag",
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [("LLM", "RESOLUTION-EMBEDDING", "SEARCH-EMBEDDING")]
+
+    async def test_rag_warms_the_search_embedding_model_only(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        """No LLM and no resolution model run in ``rag`` — warming them would
+        wake a GPU the run never calls."""
+
+        user, document = ingested_document
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode="rag",
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [("SEARCH-EMBEDDING",)]
+
+    async def test_zero_documents_never_wakes_a_gpu(
+        self, mocker, monkeypatch, test_database
+    ) -> None:
+        """The guard comes FIRST: an empty run must not warm anything."""
+
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        summary = await _run_worker_for_prewarm(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user_id=_USER_ID,
+            document_ids=[str(PydanticObjectId())],
+        )
+
+        assert summary == WriteSummary(documents_processed=0)
+        assert trace == []
+        assert warmed == []
+
+    async def test_dead_server_fails_the_run_with_zero_documents_attempted(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        """One ``ModelError`` before stage ① — not N failed documents."""
+
+        user, document = ingested_document
+        dead = ModelError(
+            "Failed to resolve Modal server ep-tree-lfm2-5-350m/Server. Is the "
+            "model deployed?"
+        )
+        trace, _ = _install_prewarm_tripwire(mocker, error=dead)
+        embed_children = mocker.patch(
+            "tree.memory.pipeline.embed_children_task", new=AsyncMock()
+        )
+        load_rag_rows = mocker.patch(
+            "tree.memory.pipeline.load_rag_rows_task", new=AsyncMock()
+        )
+
+        with pytest.raises(ModelError, match="ep-tree-lfm2-5-350m"):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode="graphrag",
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        # Nothing was attempted: the first stage never ran, so no document can
+        # be counted — failed or otherwise.
+        assert trace == ["prewarm"]
+        embed_children.assert_not_called()
+        load_rag_rows.assert_not_called()
+
+    @pytest.mark.usefixtures("fixed_two_by_three_chunking")
+    async def test_worker_prewarm_is_a_noop_on_default_providers(
+        self, mocker, monkeypatch, test_database, ingested_document
+    ) -> None:
+        """Voyage + Gemini, as shipped: no task, no latency, no behaviour change.
+
+        Runs the REAL helper over the models the worker builds (none of which
+        has an ``ensure_warm``) and counts the tasks created across that call
+        alone — the worker itself creates plenty.
+        """
+
+        user, document = ingested_document
+        created: list[set[asyncio.Task]] = []
+        warmed: list[tuple[object, ...]] = []
+
+        async def _counting_prewarm(*models: object) -> None:
+            before = asyncio.all_tasks()
+            await prewarm_models(*models)
+            created.append(asyncio.all_tasks() - before)
+            warmed.append(models)
+
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_counting_prewarm)
+
+        summary = await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert summary.documents_processed == 1
+        assert created == [set()]
+        assert [hasattr(model, "ensure_warm") for model in warmed[0]] == [False]
 
 
 @pytest.mark.usefixtures("fixed_two_by_three_chunking")
@@ -3203,6 +3413,82 @@ class TestMemoryClusteringFailsOpenPerCluster:
             await memory_clustering(user_id=_USER_ID)
 
         assert "summarise-cluster failed for cluster 0" in caplog.text
+
+
+class TestSummariseClustersPrewarm:
+    """The cluster-summary seam pre-warms, but keeps ADR-007 §4's fail-open."""
+
+    async def test_the_llm_is_prewarmed_once_before_the_fan_out(self, mocker) -> None:
+        config = load_app_config().memory.clustering
+        trace: list[str] = []
+        warmed: list[tuple[object, ...]] = []
+
+        async def _prewarm(*models: object) -> None:
+            trace.append("prewarm")
+            warmed.append(models)
+
+        async def _one_summary(*_args: Any, **_kwargs: Any) -> ClusterSummary:
+            trace.append("summarise")
+            return _summary()
+
+        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+        mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(side_effect=_one_summary),
+        )
+
+        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
+
+        assert trace == ["prewarm", "summarise", "summarise"]
+        assert warmed == [("LLM",)]
+        assert failed == 0
+
+    async def test_no_clusters_never_wakes_a_gpu(self, mocker) -> None:
+        config = load_app_config().memory.clustering
+        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
+        build_llm = mocker.patch("tree.memory.pipeline.get_llm")
+
+        summaries, failed = await _summarise_clusters({}, config)
+
+        assert (summaries, failed) == ({}, 0)
+        prewarm.assert_not_called()
+        build_llm.assert_not_called()
+
+    async def test_cluster_summaries_fail_open_when_the_llm_is_dead(
+        self, mocker, caplog
+    ) -> None:
+        """ONE warning and the fallback labels — not N x 600 s of polling."""
+
+        config = load_app_config().memory.clustering
+        samples_by_cluster = {0: ["a"], 1: ["b"], 2: ["c"]}
+        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
+        mocker.patch(
+            "tree.memory.pipeline.prewarm_models",
+            new=AsyncMock(
+                side_effect=ModelError(
+                    "Health poll of https://ep-tree-lfm2-5-350m.modal.run/health "
+                    "returned HTTP 403 — not a cold start."
+                )
+            ),
+        )
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task", new=AsyncMock()
+        )
+
+        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
+            summaries, failed = await _summarise_clusters(samples_by_cluster, config)
+
+        assert failed == len(samples_by_cluster)
+        assert [summaries[cid].label for cid in sorted(samples_by_cluster)] == [
+            fallback_summary(cid).label for cid in sorted(samples_by_cluster)
+        ]
+        summarise.assert_not_called()
+        skipped = [
+            r for r in caplog.records if "Cluster summaries skipped" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "HTTP 403" in caplog.text
 
 
 class TestSummariseClustersParallelization:
