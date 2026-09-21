@@ -55,8 +55,11 @@ logger = logging.getLogger(__name__)
 
 
 async def _run(user_id: str | None, user_identifier: str | None) -> None:
-    # The small-corpus knob is read by the SERVING process, not by this one.
+    # The small-corpus knob — and the model / Modal ones the summaries run on —
+    # are read by the SERVING process, not by this one.
     warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
+    warn_ignored_config_overrides("TREE_MODELS__")
+    warn_ignored_config_overrides("TREE_MODAL__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,

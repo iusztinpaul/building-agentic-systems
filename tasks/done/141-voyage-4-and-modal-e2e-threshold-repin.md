@@ -2400,3 +2400,24 @@ round's own SWE entry, are historical records, not live boxes):
 `status: done` on this basis** — no agent-actionable, non-`[HUMAN]` work remains open.
 
 **VERDICT: PASS**
+
+### [PA] 2026-09-21 23:45 — Acceptance Review (feature: tasks 134-158, PR #44)
+
+**VERDICT: REJECT**
+
+All nine of the human's requirements are DELIVERED in code and proven (unit suite + this task's live rounds); the
+code-level failure messages an operator meets (unknown `MODEL`, guard refusal, 401/403 poll, not deployed, timeout,
+wrong `native_dimensions`) each name the next step. No operator doc still promises strict `json_schema`, `0.75`,
+`MODAL_EMBEDDING_API_KEY`, `serving:` or the retired targets.
+
+Rejected on ONE surface — `apps/memory/README.md` "Serving models on Modal" — where an operator who reads only the
+README does NOT succeed. Found 8 issues: (1) the routing-verdict list is split in two by section 1a; (2) step 4
+switches `models.search_embedding` to a Modal model without pointing at the **Embedding reset** — silent retrieval
+corruption; (3) step 4's "for one run" `TREE_MODELS__…` override is a silent no-op on every `make memory-run-*`
+command (dispatch forwards no environment; only the clustering script warns); (4) no `embedding_models:` example and
+no recipe for `native_dimensions`; (5) the LLM example is not the seed it claims to be; (6) the **Pre-warm** is
+absent from the README; (7) Proxy token described as embedding-only, CLI login never mentioned; (8) PR body says the
+reset has `DRY_RUN`.
+
+Filed rollup task: `tasks/159-pa-rejection-voyage-4-and-modal-embedding-catalog.md`.
+Pipeline re-runs from inner loop with the rollup task; on green, re-run acceptance on the feature.

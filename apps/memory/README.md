@@ -89,7 +89,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 | `PREFECT_API_URL` | yes | `http://127.0.0.1:4200/api` | Prefect API URL |
 | `GOOGLE_API_KEY` | **yes** | — | Gemini (LLM extraction + NL query) |
 | `VOYAGE_API_KEY` | no | — | Voyage AI embeddings (alternative embedder) |
-| `MODAL_PROXY_TOKEN_ID` | no | — | Modal Proxy token id (`wk-…`) — the only auth in front of a Modal-hosted embedding model |
+| `MODAL_PROXY_TOKEN_ID` | no | — | Modal Proxy token id (`wk-…`) — the only auth in front of Modal-hosted models (embedding models and LLMs) |
 | `MODAL_PROXY_TOKEN_SECRET` | no | — | Modal Proxy token secret (`ws-…`), sent joined as `Bearer <id>.<secret>` |
 | `HF_TOKEN` | no | — | Hugging Face token — only to serve a private or gated repo on Modal |
 | `BRIGHTDATA_API_KEY` | no | — | Bright Data API key (Web Unlocker fallback + SERP API) |
@@ -551,16 +551,15 @@ echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session
 
 Serve a model yourself, on your own GPU, instead of calling a hosted API. One
 model = one entry in the **Modal catalog** (`modal.embedding_models` or
-`modal.llm_models` in `configs/default.yaml`) + one command; the entry is the
-single source of truth that both the deploy driver and the clients read, so a
-model's app name, vector width and prompts cannot drift apart.
+`modal.llm_models` in `configs/default.yaml`) + one command; both the deploy
+driver and the clients read it, so app name, width and prompts cannot drift.
 
 **1. The YAML names the model, never the path.** An entry is a Hugging Face
 `repo_id`, its `revision`, and the facts about the model itself (for an
 embedding model its `native_dimensions`, `matryoshka_dimensions` and the two
-role prompts; for an LLM its `n_gpus` and its two optional request knobs) plus optional hardware defaults. There
-is no `serving:` field: whether Modal can serve a model is something only Modal
-knows.
+role prompts; for an LLM its `n_gpus` and its two optional request knobs) plus
+optional hardware defaults. There is no `serving:` field: whether Modal can
+serve a model is something only Modal knows.
 
 `make memory-deploy-model MODEL=<repo_id>` asks it. The driver runs
 `modal endpoint create` first and logs ONE line with the decision and its
@@ -569,7 +568,6 @@ reason:
 ```
 Routing Qwen/Qwen3-Embedding-0.6B: Modal accepted it → Dedicated endpoint tree-qwen3-embedding-0-6b
 Routing voyageai/voyage-4-nano: not in Modal's endpoint catalog, no catalog base → vLLM App
-Routing LiquidAI/LFM2.5-350M: not in Modal's endpoint catalog, no catalog base → SGLang App
 ```
 
 - **Accepted** → a **Dedicated endpoint**: Modal picks the recipe, GPU, engine
@@ -578,17 +576,41 @@ Routing LiquidAI/LFM2.5-350M: not in Modal's endpoint catalog, no catalog base �
   the model's fine-tune lineage from the Hub and, if an ancestor IS in the list
   Modal just printed, retries it as custom weights
   (`--custom-hf-repo`/`--custom-hf-revision`). Otherwise it deploys **our App
-  for the model's kind**: embeddings go to `deploy/modal_vllm_embedding.py`,
-  LLMs to `deploy/modal_sglang_llm.py` — Modal's own eject path, the `serve.py`
-  its **Source view** generates, parameterised by the catalog entry, which
-  crosses into the container as one JSON env var. Engine flags live in the
-  entry's `extra_server_args`, never in the scripts. Modal's endpoint catalog
-  held 44 models on 2026-09-20, two of them embedding models, so the Apps are
-  the general path.
+  for the model's kind** — embeddings to `deploy/modal_vllm_embedding.py`, LLMs
+  to `deploy/modal_sglang_llm.py` — parameterised by the entry, whose
+  `extra_server_args` holds the engine flags, never the scripts. Modal's
+  endpoint catalog held 44 models on 2026-09-20 (two of them embedding models),
+  so the Apps are the general path.
+- **Any other failure** (auth, quota, network, a text we do not know) → the
+  deploy ABORTS with Modal's own message and exit code. An unknown failure is
+  not evidence that a model is ineligible.
+
+`SERVING=endpoint|app` forces the route for ONE command — e.g. to pin the vLLM
+version yourself. It is never written down: the clients resolve the same app
+name either way, and `-stop` tries both.
+
+**Your own embedding model is that one entry**, placeholders and all — the two
+seeds in `configs/default.yaml` show the App fields (`gpu`, `cpu`, `memory_mb`,
+`max_model_len`, `extra_server_args`):
+
+```yaml
+embedding_models:
+  - repo_id: <org>/<embedding-model>
+    revision: <commit sha> # the sha on the model's Hub page (Files → History)
+    native_dimensions: 1024 # the width the SERVER returns, NOT config.json's hidden_size
+    matryoshka_dimensions: [] # truncations the card allows; [] is fine
+    query_prompt: "" # the card's query prefix, byte-exact ("" when it has none)
+    document_prompt: "" # the card's document prefix
+```
+
+`native_dimensions` is the one value no model card states: deploy, then `make
+memory-deploy-model-test MODEL=<repo_id>` — a wrong one fails with `expected
+1024 dims, got 2048 — the Modal catalog's native_dimensions is wrong for this
+Serving path …`. Write the second number.
 
 **1a. Serving your own LLM.** Any Hugging Face LLM Modal will not host goes to
 the SGLang App — `make memory-deploy-model MODEL=LiquidAI/LFM2.5-350M` is the
-whole command, and the entry is five YAML lines:
+whole command, and the entry mirrors the committed seed:
 
 ```yaml
 llm_models:
@@ -596,91 +618,59 @@ llm_models:
     revision: <the commit sha you want served> # pinning one is what makes a re-deploy reproducible
     gpu: A10
     n_gpus: 1 # = SGLang's tensor parallelism, and the `:N` of the GPU string
+    cpu: 4
+    memory_mb: 16384
     max_model_len: 32768 # the card's context is 128k; 32k keeps the KV cache small
     max_tokens: 4096 # the completion budget sent on every chat request
-    chat_template_kwargs: { enable_thinking: false } # what the chat template is told, e.g. thinking off
 ```
 
-`max_tokens` and `chat_template_kwargs` are **request** knobs, not server
-flags: both clients and the chat smoke test send them from one helper, so they
-behave identically on both Serving paths and changing either needs **no
-redeploy** — write the line, re-run `-test`. Omit a knob and nothing is sent
-for it (the smoke test then spends its own 256-token bound). `enable_thinking:
-false` is how a THINKING model is told to skip reasoning: with it on,
-`Qwen/Qwen3.5-0.8B` spent its whole budget reasoning and returned an empty
-message. On a **Dedicated endpoint** that is not enough — with thinking off the
-same model, and `google/gemma-3-1b-it` which has no thinking mode at all, both
-ran the strict-JSON decoder into an unbounded filler run until
-`finish_reason=length`, while plain JSON mode answered sanely (`tasks/141`
-round 2). Hence the rule: **every Modal chat request is JSON mode**
-(`response_format: {"type": "json_object"}`) on both Serving paths, from one
-shared constant — the client is path-blind, so it sends only what every route
-honours, and never a strict schema.
+`max_tokens` and the optional `chat_template_kwargs` are **request** knobs, not
+server flags: client and smoke test send them from one helper, so they behave
+identically on both Serving paths and changing either needs **no redeploy** —
+write the line, re-run `-test`. `chat_template_kwargs: { enable_thinking: false }`
+is for a THINKING model (the `Qwen/Qwen3.5-0.8B` seed), never for one whose chat
+template does not define the flag. And on both paths: **every Modal chat request
+is JSON mode** (`response_format: {"type": "json_object"}`) from one shared
+constant, never a strict schema (ADR-009 §10).
 
 `deploy/modal_sglang_llm.py` follows the `serve.py` Modal generates for its own
-LLM endpoints: the official `lmsysorg/sglang:<tag>` image (the engine is IN the
-image — `modal.engines.sglang.version` is a DOCKER TAG, not a PyPI version),
-`SGLangEndpoint(tp=<n_gpus>)`, and a warm-up that is a chat completion under a
-strict JSON schema — **a server that cannot do constrained JSON never reports
-healthy**, because that is the same grammar backend the memory's JSON mode
-relies on. The
-flags are the generic-safe subset (`--served-model-name`, `--revision`,
-`--trust-remote-code`, `--mem-fraction-static 0.85`, `--context-length`);
-anything model-specific — `--reasoning-parser`, `--tool-call-parser`, a lower
-memory fraction — goes in that entry's `extra_server_args`, which also
-overrides those two tuning defaults. Modal's own recipes add speculative
-decoding with a per-model draft model plus mamba/multimodal flags; a script
-that serves whatever the catalog names cannot assume any of it, so it does not.
-- **Any other failure** (auth, quota, network, a text we do not know) → the
-  deploy ABORTS with Modal's own message and exit code. An unknown failure is
-  not evidence that a model is ineligible.
-
-`SERVING=endpoint|app` is an escape hatch for ONE command — e.g. to pin the
-vLLM version yourself on a model Modal would accept. It is never written down:
-the clients resolve the same app name either way, and `-stop` tries both.
+LLM endpoints (`modal.engines.sglang.version` is the official image's DOCKER
+TAG, not a PyPI version), and its warm-up is a chat completion under a strict
+JSON schema — **a server that cannot do constrained JSON never reports
+healthy**. Its flags are the generic-safe subset: anything model-specific
+(`--reasoning-parser`, a lower memory fraction) goes in `extra_server_args`.
 
 `HF_TOKEN` in `.env` is optional and only for private or **gated** repos: a
 custom-weights endpoint create receives it as `--custom-hf-token` (logged as
-`***`), an App as a Modal Secret built at deploy time — so a gated *base* model
-is served with `SERVING=app`, not as an endpoint.
-
-*Troubleshooting:* `401` / `403` / `GatedRepoError` from `huggingface.co` in
-`modal app logs ep-<endpoint_name>` (e.g. `modal app logs ep-tree-voyage-4-nano`)
-→ accept the model's licence on its Hub page, set `HF_TOKEN` in `.env`, deploy
-again. The `HF_TOKEN` hint the driver prints appears only for those
-gated-looking failures — never under a cold-start `503` or an architecture
-mismatch, which no token fixes.
+`***`), an App as a Modal Secret — so a gated *base* model is served with
+`SERVING=app`, not as an endpoint. *Troubleshooting:* `401` / `403` /
+`GatedRepoError` from `huggingface.co` in `modal app logs ep-<endpoint_name>` →
+accept the licence on the model's Hub page, set `HF_TOKEN`, deploy again. The
+driver prints that hint only for gated-looking failures — never under a
+cold-start `503` or an architecture mismatch, which no token fixes.
 
 **1b. Nothing these targets touch is yours by accident.** Every name we create
-on Modal starts with `tree-` (endpoint `tree-<model>`, app `ep-tree-<model>`),
-so a Dedicated Endpoint you made by hand in the dashboard (`ep-<model>`) can
-never be overwritten or stopped by these targets. On top of that:
+starts with `tree-` (endpoint `tree-<model>`, app `ep-tree-<model>`) and `-stop`
+only stops `tree-` names, so an `ep-<model>` you made by hand is out of reach:
 
 - `deploy` looks before it writes: it refuses (exit 3) when the name is already
   live as something this command would not merely update — a Dedicated Endpoint
   before either route. A live App of yours is redeployed in place (stop it first
-  if you want it re-routed). `FORCE=yes` overrides that refusal (it never
-  overrides the `tree-` check); `-stop` only ever stops `tree-` names.
-- `DRY_RUN=yes` prints the (redacted) `modal` command and exits 0 without
+  to re-route it). `FORCE=yes` overrides that refusal (never the `tree-` check).
+- `DRY_RUN=yes` (e.g. `make memory-deploy-model MODEL=voyageai/voyage-4-nano
+  DRY_RUN=yes`) prints the (redacted) `modal` command and exits 0 without
   starting `modal` or reading the Hub — the ONLY way to try these targets
-  without deploying. Since Modal is the oracle, it also says which command each
-  verdict would lead to:
-
-  ```bash
-  make memory-deploy-model MODEL=voyageai/voyage-4-nano DRY_RUN=yes
-  ```
-
-  A fake `modal` on `PATH` does NOT work: `make` and `uv run` put `.venv/bin`
-  first, so the real CLI wins — which is how two accidental deploys once
-  happened. The unit suite therefore closes both doors to Modal itself — the
-  CLI one and the SDK one — with two autouse fixtures (see "Tests & QA").
+  without deploying, and it says which command each verdict leads to. A fake
+  `modal` on `PATH` does NOT work: `make` and `uv run` put `.venv/bin` first, so
+  the real CLI wins; the unit suite closes both doors too (see "Testing").
 
 **2. Mint a Proxy token** in Modal → Settings → Proxy Auth Tokens and put both
 halves in `.env` as `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`. It is
 the only auth in front of every model, on both paths: Modal's edge rejects
-unauthenticated traffic *before* a GPU container wakes. (`HF_TOKEN` is separate
-and optional — it downloads private or gated weights, it never authenticates a
-request.)
+unauthenticated traffic *before* a GPU container wakes. The Modal CLI needs its
+own one-time login (`uv --directory apps/memory run modal setup`) before any
+`make memory-deploy-model*` — that authorises the deploy, the **Proxy token**
+authenticates requests, and `HF_TOKEN` (a third thing) downloads weights.
 
 **3. Deploy, smoke-test, stop** — always with `MODEL=<repo_id>`:
 
@@ -690,64 +680,73 @@ make memory-deploy-model-test MODEL=Qwen/Qwen3-Embedding-0.6B   # health, dims, 
 make memory-deploy-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B   # stop paying for it, whichever way it was served
 ```
 
-`-stop` needs no `SERVING=`: it stops the Dedicated Endpoint if the model is
-one, and the App otherwise. `-test` covers both kinds — the entry's kind picks
-the test, so `make memory-deploy-model-test MODEL=LiquidAI/LFM2.5-350M` asks the
-LLM for one JSON-mode chat completion instead of embedding three texts:
+`-stop` needs no `SERVING=`: the Dedicated Endpoint if the model is one, the App
+otherwise. `-test` covers both kinds — the entry's kind picks the test, so
+`make memory-deploy-model-test MODEL=LiquidAI/LFM2.5-350M` asks for a JSON-mode
+chat completion instead of embedding three texts:
 
 ```
 health 200 after 96.0s
-served model id: LiquidAI/LFM2.5-350M
 chat completion: {"city": "Tokyo", "population": 13960000}
 JSON mode honoured: keys=['city', 'population']
 unauthenticated health -> 401
 Smoke test passed
 ```
 
-The smoke test polls `/health` until the container is up — a scaled-to-zero
-Modal server answers HTTP 503 in about a second and boots *because* it is
-polled — for up to `modal.warmup_deadline_s` (600 s; ~3x the slowest boot
-measured). A first-ever deploy that also downloads tens of GB of weights can
-outlast that: raise the budget for one command, without editing a file, with
-`make memory-deploy-model-test MODEL=<repo_id> TREE_MODAL__WARMUP_DEADLINE_S=1200`.
-A 401/403 (wrong **Proxy token**) or a 404 is never waited out — it fails after
-one poll.
-
+The smoke test polls `/health` through the same **Warm gate** the clients use —
+a scaled-to-zero Modal server answers HTTP 503 in about a second and boots
+*because* it is polled — for up to `modal.warmup_deadline_s` (600 s, ~3x the
+slowest boot measured). A first deploy that downloads tens of GB of weights can
+outlast that: raise the budget for one command with `make
+memory-deploy-model-test MODEL=<repo_id> TREE_MODAL__WARMUP_DEADLINE_S=1200` —
+this target runs the code IN this process, so the prefix reaches it. A 401/403
+(wrong **Proxy token**) or a 404 is never waited out; it fails after one poll.
 That budget waits for a COLD server; `modal.request_timeout_s` (300 s;
-`TREE_MODAL__REQUEST_TIMEOUT_S`) bounds ONE answer from a living one — the
-smoke test's completion and every call both Modal clients make, sent once, with
-no SDK retries. A timeout is therefore never read as a cold start (a cold
-server answers 503 in a second): it fails with the knob's name instead of
-re-warming and waiting again.
+`TREE_MODAL__REQUEST_TIMEOUT_S`) bounds ONE answer from a living one, sent once
+with no SDK retries — a timeout is never a cold start, it fails with the knob.
 
 A **Dedicated endpoint** is `provisioning` before it is `live`: `modal endpoint
-create` returns in a few seconds and the endpoint starts serving minutes later
-(measured 2026-09-21: 2m15s for `Qwen/Qwen3-Embedding-0.6B`, 9m25s for
-`Qwen/Qwen3.5-0.8B`). `-test` waits that out by itself — one read-only `modal
-endpoint list --json` on the same poll schedule, for up to 30 minutes
-(`Provisioning: tree-qwen3-5-0-8b is not live yet — 120s/1800s` … `Live:
-tree-qwen3-5-0-8b after 548s`) — and only then polls `/health`. An App has no
-such row, so nothing is waited for there.
+create` returns in seconds and the endpoint serves minutes later (measured:
+2m15s for `Qwen/Qwen3-Embedding-0.6B`, 9m25s for `Qwen/Qwen3.5-0.8B`). `-test`
+waits that out by itself — one read-only `modal endpoint list --json` on the
+same poll schedule, for up to 30 minutes (`Provisioning: tree-qwen3-5-0-8b is
+not live yet — 120s/1800s` … `Live: … after 548s`) — then polls `/health`; its
+min/max containers are dashboard-only settings, so stop it and deploy again to
+change them. An App has no such row, so nothing is waited for there.
 
 **4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
 `models.resolution_embedding`) in `configs/default.yaml` to
 `{provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`. The
 client asks the server for the model's native width, then truncates +
-L2-renormalises client-side to `dimensions` — so a model whose native width is
-wider (e.g. `voyageai/voyage-4-nano` at 2048) still fits the 1024-d vector
-index, and a mismatch between the catalog and the server fails loudly instead of
-writing a wrong-width vector.
+L2-renormalises client-side to `dimensions` — so a wider model (e.g.
+`voyageai/voyage-4-nano` at 2048) still fits the 1024-d vector index, and a
+catalog-vs-server mismatch fails loudly instead of writing a wrong-width vector.
+A new `models.search_embedding` leaves every STORED vector in a space the new
+ones do not share — no error, meaningless scores — so the switch is half done
+until the **Embedding reset**: [Changing the embedding
+model](#changing-the-embedding-model). `models.resolution_embedding` is transient
+and needs no reset.
 
 For an **LLM** it is the same switch one block up: `models.llm: {provider: modal,
 model: LiquidAI/LFM2.5-350M}` (any id from `modal.llm_models`) sends every
 `generate_json` call to your own server, in JSON mode, instead of to Gemini —
-which stays the default. For one run without editing the file:
-`TREE_MODELS__LLM__PROVIDER=modal TREE_MODELS__LLM__MODEL=<repo_id>`. Whether a
-small model is good enough for extraction is yours to judge; the client
-guarantees the plumbing, not the quality.
+which stays the default. The client guarantees the plumbing, not the quality:
+whether a small model extracts well enough is yours to judge.
 
-A Dedicated endpoint's min/max containers are dashboard-only settings; to change
-what was created, stop the endpoint first and deploy again.
+Set a `TREE_MODELS__…` / `TREE_MODAL__…` override where the FLOW runs, not where
+you type `make`: a `make memory-run-*` command only dispatches and forwards no
+environment, so `TREE_MODELS__LLM__PROVIDER=modal make memory-run-memory-pipeline`
+is a silent no-op that bills Gemini (the command warns when it sees one).
+Locally, export it in the shell running `make memory-serve-workflows` and
+restart that; on Prefect Managed, put it in the deployment's environment.
+
+A run whose `models.*` is `provider: modal` **Pre-warm**s every distinct Modal
+server concurrently before document 1 — extraction worker, dream consolidation,
+cluster summaries — each through its **Warm gate**: `Pre-warming 1 Modal
+server(s): ep-tree-lfm2-5-350m`, then `Still cold (HTTP 503) at … — 38s/600s`
+lines, then `Warm: … after 113s`. A server that never warms fails the run with
+ZERO documents attempted; the MCP server is deliberately NOT pre-warmed, so the
+first `search_memory` after ~5 idle minutes waits out the boot instead.
 
 ## Testing
 

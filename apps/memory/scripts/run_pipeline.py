@@ -49,6 +49,7 @@ from tree.cli import (
     mode_option,
     user_options,
     wait_for_dispatch,
+    warn_ignored_config_overrides,
 )
 from tree.config.sources import build_uri_sources, parse_uri_token
 from tree.logging import init_logger
@@ -67,6 +68,9 @@ async def _run_offline(
     inline_sources: list[dict[str, Any]],
     num_shards: int,
 ) -> None:
+    # The model / Modal knobs are read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MODELS__")
+    warn_ignored_config_overrides("TREE_MODAL__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,
@@ -83,6 +87,9 @@ async def _run_online(
     source: str,
     title: str | None,
 ) -> None:
+    # The model / Modal knobs are read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MODELS__")
+    warn_ignored_config_overrides("TREE_MODAL__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     online_source = build_online_source(source, title)
     try:
