@@ -122,7 +122,7 @@ def test_command(model: str) -> None:
     """Smoke-test the served MODEL through proxy-token auth.
 
     The KIND picks the test — vectors and a ranking for an embedding entry, one
-    strict-JSON chat completion for an LLM — exactly as it picks the App script
+    JSON-mode chat completion for an LLM — exactly as it picks the App script
     (ADR-009 §2). No ``--serving``: under H1 the lookup is identical on both
     paths. One read-only ``modal endpoint list --json`` first (skipped under
     ``DRY_RUN=yes``), to sit out a Dedicated endpoint still ``provisioning``.

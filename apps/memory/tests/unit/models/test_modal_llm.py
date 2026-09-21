@@ -25,6 +25,7 @@ see either.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -40,7 +41,7 @@ from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models import modal_llm
 from tree.models.base import BaseLLM
 from tree.models.exceptions import ExtractionError, ModelError
-from tree.models.modal_catalog import get_catalog_entry
+from tree.models.modal_catalog import CHAT_RESPONSE_FORMAT, get_catalog_entry
 from tree.models.modal_llm import ModalLLM
 
 _LFM = "LiquidAI/LFM2.5-350M"
@@ -728,38 +729,20 @@ class TestGenerateJson:
 
         assert openai.calls[0]["temperature"] == 0
 
-    async def test_json_mode_is_the_default_response_format(
-        self, server, openai
-    ) -> None:
-        """``BaseLLM.generate_json`` carries no schema — callers embed theirs in
-        the prompt — so the default is JSON MODE, the counterpart of Gemini's
-        ``response_mime_type="application/json"``."""
+    async def test_json_mode_is_the_only_response_format(self, server, openai) -> None:
+        """ADR-009 §10 rev 7: ``BaseLLM.generate_json`` carries no schema —
+        callers embed theirs in the prompt — and a path-blind client may send
+        only what EVERY route honours, so JSON MODE is the one
+        ``response_format`` there is: the counterpart of Gemini's
+        ``response_mime_type="application/json"``, from the ONE constant the
+        chat smoke test sends too."""
 
         model = _model()
 
         await model.generate_json("hi")
 
         assert openai.calls[0]["response_format"] == {"type": "json_object"}
-
-    async def test_a_schema_upgrades_the_request_to_strict_json_schema(
-        self, server, openai
-    ) -> None:
-        """The extra, Liskov-safe keyword only this class has (#141 uses it)."""
-
-        schema = {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
-            "additionalProperties": False,
-        }
-        model = _model()
-
-        await model.generate_json("hi", schema=schema)
-
-        assert openai.calls[0]["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {"name": "response", "strict": True, "schema": schema},
-        }
+        assert openai.calls[0]["response_format"] is CHAT_RESPONSE_FORMAT
 
     async def test_valid_json_comes_back_as_a_dict(self, server, openai) -> None:
         model = _model()
@@ -789,21 +772,18 @@ class TestGenerateJson:
             "response_format",
         }
 
-    @pytest.mark.parametrize(
-        "schema", [None, {"type": "object"}], ids=["json-mode", "strict-schema"]
-    )
     async def test_the_seeded_thinking_model_sends_both_knobs(
-        self, server, openai, schema: dict[str, Any] | None
+        self, server, openai
     ) -> None:
         """Story 1: `Qwen/Qwen3.5-0.8B` is a THINKING model — live it spent a
         256-token budget reasoning and answered nothing (``tasks/141`` round
-        1). Both knobs ride on EVERY call, JSON mode and strict schema alike:
+        1). Both knobs ride on EVERY call:
         ``chat_template_kwargs`` is not an OpenAI parameter, so it travels as
         ``extra_body``, which the SDK merges into the TOP-LEVEL body."""
 
         model = _model(_QWEN_LLM)
 
-        await model.generate_json("hi", schema=schema)
+        await model.generate_json("hi")
 
         assert openai.calls[0]["max_tokens"] == 4096
         assert openai.calls[0]["extra_body"] == {
@@ -1279,25 +1259,6 @@ class TestWireContract:
         assert body["response_format"] == {"type": "json_object"}
         assert result == {"a": 1}
 
-    async def test_a_schema_reaches_the_wire_as_strict_json_schema(
-        self, server, wire
-    ) -> None:
-        """SGLang compiles ``json_schema`` + ``strict: true`` into constrained
-        decoding (``protocol.py`` v0.5.18) — the shape #141's live check sends."""
-
-        model = _model()
-
-        await model.generate_json("hi", schema={"type": "object"})
-
-        assert wire.bodies[0]["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "response",
-                "strict": True,
-                "schema": {"type": "object"},
-            },
-        }
-
     async def test_the_proxy_token_reaches_the_wire_as_a_bearer(
         self, server, wire
     ) -> None:
@@ -1431,8 +1392,8 @@ class TestBaseContract:
         assert issubclass(ModalLLM, BaseLLM)
 
     async def test_the_two_argument_contract_is_enough(self, server, openai) -> None:
-        """``schema`` is an EXTRA keyword: a caller that knows only ``BaseLLM``
-        must be served by ``(prompt, system=…)`` alone."""
+        """A caller that knows only ``BaseLLM`` is served by
+        ``(prompt, system=…)`` — which is the WHOLE contract now."""
 
         llm: BaseLLM = _model()
 
@@ -1440,6 +1401,23 @@ class TestBaseContract:
 
         assert result == {"a": 1}
         assert "response_format" in openai.calls[0]
+
+    async def test_generate_json_has_no_schema_keyword(self, server, openai) -> None:
+        """Story 6 (ADR-009 §10 rev 7): the ``schema=`` keyword of the first
+        design is DELETED — no caller ever passed one, and on a Dedicated
+        endpoint it decoded into an endless digit run. The signature is exactly
+        ``BaseLLM``'s again, so an engineer who tries gets a ``TypeError``
+        before a single request — not a silent hang on one of two routes."""
+
+        signature = inspect.signature(ModalLLM.generate_json)
+        assert list(signature.parameters) == ["self", "prompt", "system"]
+
+        llm = _model()
+        with pytest.raises(TypeError) as excinfo:
+            await llm.generate_json("hi", schema={})  # type: ignore[call-arg]
+
+        assert "schema" in str(excinfo.value)
+        assert openai.calls == []
 
 
 class TestProxyTokenIsNeverLeaked:

@@ -612,15 +612,18 @@ message. On a **Dedicated endpoint** that is not enough — with thinking off th
 same model, and `google/gemma-3-1b-it` which has no thinking mode at all, both
 ran the strict-JSON decoder into an unbounded filler run until
 `finish_reason=length`, while plain JSON mode answered sanely (`tasks/141`
-round 2). Strict-schema completions are proven on the **App** path
-(`LiquidAI/LFM2.5-350M`), not on the endpoint one.
+round 2). Hence the rule: **every Modal chat request is JSON mode**
+(`response_format: {"type": "json_object"}`) on both Serving paths, from one
+shared constant — the client is path-blind, so it sends only what every route
+honours, and never a strict schema.
 
 `deploy/modal_sglang_llm.py` follows the `serve.py` Modal generates for its own
 LLM endpoints: the official `lmsysorg/sglang:<tag>` image (the engine is IN the
 image — `modal.engines.sglang.version` is a DOCKER TAG, not a PyPI version),
 `SGLangEndpoint(tp=<n_gpus>)`, and a warm-up that is a chat completion under a
 strict JSON schema — **a server that cannot do constrained JSON never reports
-healthy**, because constrained JSON is exactly what the memory asks of it. The
+healthy**, because that is the same grammar backend the memory's JSON mode
+relies on. The
 flags are the generic-safe subset (`--served-model-name`, `--revision`,
 `--trust-remote-code`, `--mem-fraction-static 0.85`, `--context-length`);
 anything model-specific — `--reasoning-parser`, `--tool-call-parser`, a lower
@@ -690,13 +693,13 @@ make memory-deploy-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B   # stop paying fo
 `-stop` needs no `SERVING=`: it stops the Dedicated Endpoint if the model is
 one, and the App otherwise. `-test` covers both kinds — the entry's kind picks
 the test, so `make memory-deploy-model-test MODEL=LiquidAI/LFM2.5-350M` asks the
-LLM for one strict-JSON chat completion instead of embedding three texts:
+LLM for one JSON-mode chat completion instead of embedding three texts:
 
 ```
 health 200 after 96.0s
 served model id: LiquidAI/LFM2.5-350M
 chat completion: {"city": "Tokyo", "population": 13960000}
-strict JSON schema honoured: city=Tokyo population=13960000
+JSON mode honoured: keys=['city', 'population']
 unauthenticated health -> 401
 Smoke test passed
 ```

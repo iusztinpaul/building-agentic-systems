@@ -42,6 +42,14 @@ from tree.models.exceptions import ModelError
 # every model regardless of how it is served.
 MODAL_SERVER_NAME = "Server"
 
+# The ONLY ``response_format`` a Modal chat request carries, on either Serving
+# path (ADR-009 §10): a path-blind client may send only what EVERY route
+# honours, and strict ``json_schema`` decoding is degenerate on a Dedicated
+# endpoint (``tasks/141`` round 2). ONE constant, imported by
+# :class:`~tree.models.modal_llm.ModalLLM` AND by the chat smoke test, so the
+# command that proves a model sends the request the memory sends.
+CHAT_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
+
 # The env vars the App scripts bake :func:`encode_deploy_spec`'s output into:
 # the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
 # inside the Modal container, so the resolved spec crosses as ONE base64 string

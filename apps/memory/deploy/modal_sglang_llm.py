@@ -154,8 +154,8 @@ logger = logging.getLogger(__name__)
 # The request `@modal.enter` makes (twice) before declaring the server up —
 # Modal's own warm-up payload, value for value. It is a chat completion under a
 # STRICT JSON schema, so two successes prove the whole path the memory uses:
-# the chat template, the tokenizer, the decoder AND the constrained decoding
-# `ModalLLM` will ask for. A model that ignores `response_format` never gets
+# the chat template, the tokenizer, the decoder AND the grammar backend
+# `ModalLLM`'s JSON mode relies on. A model that ignores `response_format` never gets
 # two successes, so its container never serves traffic.
 WARMUP_PAYLOAD = {
     "model": SPEC["repo_id"],

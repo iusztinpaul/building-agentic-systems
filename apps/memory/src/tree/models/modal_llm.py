@@ -9,17 +9,18 @@ same app name and the same ``Server`` class, so this client never learns which
 one answered (H1, ADR-009 §3).
 
 **JSON mode, not a schema.** :meth:`BaseLLM.generate_json` carries no schema —
-every caller embeds its own in the prompt — so the default is
-``response_format={"type": "json_object"}``, the exact counterpart of
-:class:`~tree.models.gemini.GeminiLLM`'s
+every caller embeds its own in the prompt — so the ONLY ``response_format``
+this client sends is :data:`~tree.models.modal_catalog.CHAT_RESPONSE_FORMAT`,
+the exact counterpart of :class:`~tree.models.gemini.GeminiLLM`'s
 ``response_mime_type="application/json"``. SGLang honours it with REAL
-constrained decoding: ``ResponseFormat.type`` is
-``Literal["text", "json_object", "json_schema"]`` and a ``json_object`` request
-becomes ``sampling_params["json_schema"] = '{"type": "object"}'``
+constrained decoding: a ``json_object`` request is compiled into the permissive
+``{"type": "object"}`` grammar
 (``python/sglang/srt/entrypoints/openai/protocol.py`` at ``v0.5.18``, :230 and
-:1068-1069, read 2026-09-20) — so no permissive-schema fallback is needed. The
-optional ``schema=`` keyword (this class only, never on ``BaseLLM``) sends a
-STRICT ``json_schema`` instead, for the callers that do have one.
+:1068-1069, read 2026-09-20) — so no permissive-schema fallback is needed. A
+STRICT schema is never sent: on a **Dedicated endpoint** it is compiled and
+DEGENERATE (``tasks/141`` round 2 — two models ran a number into an endless
+digit run until ``finish_reason=length``). A path-blind client may send only
+what EVERY route honours.
 
 **Failures mirror Gemini's**, with ``Modal LLM`` in place of ``Gemini``, so the
 pipeline's existing handling of a chatty small model is unchanged; each one
@@ -47,6 +48,7 @@ from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models.base import BaseLLM
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
+    CHAT_RESPONSE_FORMAT,
     MODAL_SERVER_NAME,
     chat_request_knobs,
     empty_answer_details,
@@ -63,27 +65,6 @@ logger = logging.getLogger(__name__)
 # the chat smoke test quotes: enough to recognise a `<think>` block or a
 # "Sure! Here is the JSON" preamble, short enough to stay one terminal line.
 _CONTENT_EXCERPT = 200
-
-# The name of the strict schema an optional ``schema=`` is sent under. OpenAI
-# requires a name; nothing reads it back, so ONE constant beats a parameter.
-_SCHEMA_NAME = "response"
-
-
-def _response_format(schema: dict[str, Any] | None) -> dict[str, Any]:
-    """JSON mode, or STRICT JSON-schema mode when the caller has a schema.
-
-    ``{"type": "json_object"}`` is what a ``BaseLLM`` call can ask for: the
-    contract has no schema parameter, so the shape lives in the prompt.
-    ``schema`` — an extra, Liskov-safe keyword only this class has — upgrades
-    the same request to constrained decoding against that schema.
-    """
-
-    if schema is None:
-        return {"type": "json_object"}
-    return {
-        "type": "json_schema",
-        "json_schema": {"name": _SCHEMA_NAME, "strict": True, "schema": schema},
-    }
 
 
 def _knob_kwargs(entry: ModalLLMModelConfig) -> dict[str, Any]:
@@ -332,19 +313,13 @@ class ModalLLM(BaseLLM):
 
     @track(type="llm", name="modal-generate-json")
     async def generate_json(
-        self,
-        prompt: str,
-        *,
-        system: str | None = None,
-        schema: dict[str, Any] | None = None,
+        self, prompt: str, *, system: str | None = None
     ) -> dict[str, Any]:
         """One chat completion, parsed as a JSON object.
 
-        ``system`` becomes a leading ``system`` message (Gemini's
-        ``system_instruction``); ``schema`` — the extra keyword only this class
-        has — upgrades JSON mode to STRICT JSON-schema decoding. Both optional,
-        so a caller holding a plain :class:`~tree.models.base.BaseLLM` is served
-        by exactly the two-argument contract.
+        Exactly :class:`~tree.models.base.BaseLLM`'s contract: ``system``
+        becomes a leading ``system`` message (Gemini's ``system_instruction``)
+        and the shape the caller wants lives in its prompt.
 
         An EMPTY (or whitespace-only) prompt is refused BEFORE the gate: there
         is no correct object to return for "generate JSON from nothing" — ``{}``
@@ -385,7 +360,6 @@ class ModalLLM(BaseLLM):
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        response_format = _response_format(schema)
         # Read per CALL, not cached on the instance: an entry is config, and a
         # knob changed under a running process must reach the next request.
         knobs = _knob_kwargs(self._entry)
@@ -398,7 +372,7 @@ class ModalLLM(BaseLLM):
                     model=self._served_model,
                     messages=messages,  # type: ignore[arg-type]
                     temperature=0,
-                    response_format=response_format,  # type: ignore[arg-type]
+                    response_format=CHAT_RESPONSE_FORMAT,  # type: ignore[arg-type]
                     **knobs,
                 )
             )

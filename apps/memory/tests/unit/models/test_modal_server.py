@@ -8,12 +8,14 @@ No test touches the network: ``modal.Server`` and ``aiohttp.ClientSession``
 are replaced by fakes, and the **Proxy token** is always the fake pair
 ``wk-1`` / ``ws-2``. What is asserted is the CONTRACT the driver and the two
 clients depend on — the wire shape (no ``dimensions`` key, the prompted
-inputs, the discovered model id, the strict ``city_facts`` schema), the vector
-width the memory stores, and that a public server is caught.
+inputs, the discovered model id, JSON mode with the ``city_facts`` schema in
+the PROMPT), the vector width the memory stores, and that a public server is
+caught.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from types import SimpleNamespace
@@ -28,12 +30,14 @@ from tree.models.exceptions import ExtractionError, ModelError
 from tree.models import modal_catalog, modal_llm
 from tree.models.modal_llm import ModalLLM
 from tree.models.modal_server import (
+    CITY_FACTS_SCHEMA,
     chat_smoke_test,
     resolve_server_url,
     served_model_id,
     smoke_test,
 )
 from tree.models.modal_catalog import (
+    CHAT_RESPONSE_FORMAT,
     chat_request_knobs,
     get_catalog_entry,
     get_llm_entry,
@@ -587,7 +591,7 @@ class TestSmokeTest:
 
 # --- the LLM half ------------------------------------------------------------
 
-# Modal's own `city_facts` answer, as a server that honoured the strict schema
+# Modal's own `city_facts` answer, as a model that followed the prompt's shape
 # returns it: the CONTENT of `choices[0].message.content` is a JSON string.
 _CITY_FACTS = '{"city": "Tokyo", "population": 13960000}'
 
@@ -599,10 +603,26 @@ _CHAT_LOG_LINES = [
     "served model id: modal-recipe/lfm2-5-350m",
     "chat knobs: max_tokens=4096 chat_template_kwargs={}",
     f"chat completion: {_CITY_FACTS}",
-    "strict JSON schema honoured: city=Tokyo population=13960000",
+    "JSON mode honoured: keys=['city', 'population']",
     "unauthenticated health -> 401",
     "Smoke test passed",
 ]
+
+
+def _warnings(caplog: Any) -> list[str]:
+    """Every WARNING message the smoke test logged.
+
+    The happy-path assertion FILTERS ``caplog`` down to the known lines, so a
+    stray "prompt schema not followed" record would slip through it unseen —
+    the recorded-not-gated verdict is only meaningful if exactly one warning is
+    counted where one is expected, and none where none is.
+    """
+
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+    ]
 
 
 def _completion(
@@ -651,7 +671,8 @@ def _chat_responses(
 @pytest.mark.usefixtures("proxy_token", "modal_server")
 class TestChatSmokeTest:
     """ADR-009 §10: the LLM twin of the embedding smoke test — path-blind, and
-    asserting the SHAPE of the answer, never its content."""
+    GATING on the client's three verdicts (not empty, valid JSON, an object)
+    while only RECORDING whether the prompt's shape was followed."""
 
     async def test_the_happy_path_logs_seven_lines_in_order(
         self, http, poll, caplog
@@ -667,14 +688,15 @@ class TestChatSmokeTest:
         assert report.url == _URL
         assert report.served_model == "modal-recipe/lfm2-5-350m"
         assert report.cold_start_seconds == 113.0
-        assert report.city == "Tokyo"
-        assert report.population == 13960000
+        assert report.keys == ["city", "population"]
+        assert report.follows_prompt_schema is True
         assert report.unauthenticated_status == 401
         assert [
             record.getMessage()
             for record in caplog.records
             if record.getMessage() in _CHAT_LOG_LINES
         ] == _CHAT_LOG_LINES
+        assert _warnings(caplog) == []
 
     async def test_it_waits_the_cold_start_out_on_the_shared_poller(
         self, http, poll
@@ -732,10 +754,15 @@ class TestChatSmokeTest:
         )
         assert excinfo.value.status_code is None
 
-    async def test_it_posts_the_strict_city_facts_schema(self, http, poll) -> None:
-        """The request is the script's warm-up payload with the ENTRY's token
-        budget: a reasoning model may spend tokens before the JSON, and a
-        completion cut short would fail as "not valid JSON"."""
+    async def test_it_posts_json_mode_with_the_schema_in_the_prompt(
+        self, http, poll
+    ) -> None:
+        """ADR-009 §10 rev 7: the request is the CLIENT's — JSON mode and
+        nothing else, with the ``city_facts`` schema travelling in the PROMPT
+        exactly as every caller of ``generate_json`` carries its own. The
+        entry's token budget rides along: a reasoning model may spend tokens
+        before the JSON, and a completion cut short would fail as "not valid
+        JSON"."""
 
         http.responses = _chat_responses()
 
@@ -745,27 +772,16 @@ class TestChatSmokeTest:
         assert post["url"] == f"{_URL}/v1/chat/completions"
         body = post["json"]
         assert body["model"] == "modal-recipe/lfm2-5-350m"
-        assert body["messages"] == [
-            {"role": "user", "content": "Reply with JSON facts about Tokyo."}
-        ]
         assert body["max_tokens"] == 4096
         assert body["temperature"] == 0
-        assert body["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "city_facts",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "population": {"type": "integer"},
-                    },
-                    "required": ["city", "population"],
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
-        }
+        assert body["response_format"] == {"type": "json_object"}
+        assert "json_schema" not in json.dumps(body)
+
+        assert len(body["messages"]) == 1
+        prompt = body["messages"][0]
+        assert prompt["role"] == "user"
+        assert prompt["content"].startswith("Reply with JSON facts about Tokyo.")
+        assert json.dumps(CITY_FACTS_SCHEMA, separators=(",", ":")) in prompt["content"]
 
     @pytest.mark.parametrize(
         "model,expected",
@@ -830,7 +846,12 @@ class TestChatSmokeTest:
         EMITTED — the POSTed body here, the ``create`` kwargs of a real
         ``ModalLLM`` call — so a knob added later cannot reach one and miss the
         other. The client's ``extra_body`` is compared as the top-level fields
-        the SDK merges it into (``openai`` 2.28.0, ``_base_client.py:500``)."""
+        the SDK merges it into (``openai`` 2.28.0, ``_base_client.py:500``).
+
+        ``response_format`` joins the knobs (ADR-009 §10 rev 7): comparing the
+        knobs ALONE is the hole that let the smoke test POST a strict
+        ``json_schema`` for weeks while the client sent JSON mode — the drift
+        this test exists to forbid."""
 
         http.responses = _chat_responses()
         await chat_smoke_test(model)
@@ -845,6 +866,8 @@ class TestChatSmokeTest:
         knobs = chat_request_knobs(get_llm_entry(model))
         assert client_fields == {key: smoke_body[key] for key in knobs}
         assert client_fields == knobs
+        assert smoke_body["response_format"] == call["response_format"]
+        assert smoke_body["response_format"] == CHAT_RESPONSE_FORMAT
 
     async def test_an_empty_answer_names_the_reasoning_budget(
         self, http, poll, caplog
@@ -923,22 +946,36 @@ class TestChatSmokeTest:
             "the served model answered with an empty message"
         )
 
+    @pytest.mark.parametrize(
+        "content,excerpt",
+        [
+            (
+                "<think>Tokyo is in Japan</think> Sure!",
+                "<think>Tokyo is in Japan",
+            ),
+            (
+                '{"city": "Tokyo", "population": 1400000000000000000000',
+                '{"city": "Tokyo", "population": 1400000',
+            ),
+        ],
+        ids=["a-think-block", "the-live-digit-run"],
+    )
     async def test_a_non_json_completion_fails_with_an_excerpt(
-        self, http, poll
+        self, http, poll, content: str, excerpt: str
     ) -> None:
-        """Story 4: the model ignored ``response_format``. The message carries
+        """Story 4: the server could not produce JSON at all, so the deploy
+        check fails — the SAME verdict ``ModalLLM`` raises. The message carries
         the first characters, which is what tells a `<think>` block apart from
-        a chatty preamble."""
+        the unbounded digit run a strict schema decoded into on a Dedicated
+        endpoint (``tasks/141`` round 2, cut at ``max_tokens``)."""
 
-        http.responses = _chat_responses(
-            _FakeResponse(200, _completion("<think>Tokyo is in Japan</think> Sure!"))
-        )
+        http.responses = _chat_responses(_FakeResponse(200, _completion(content)))
 
         with pytest.raises(ModelError) as excinfo:
             await chat_smoke_test(_LFM)
 
         assert "chat completion is not valid JSON" in str(excinfo.value)
-        assert "<think>Tokyo is in Japan" in str(excinfo.value)
+        assert excerpt in str(excinfo.value)
 
     async def test_a_long_bad_completion_is_truncated(self, http, poll) -> None:
         """A 4000-character apology must not become a 4000-character log
@@ -963,19 +1000,32 @@ class TestChatSmokeTest:
 
         assert "is not a JSON object" in str(excinfo.value)
 
-    async def test_a_missing_key_is_named(self, http, poll) -> None:
+    async def test_a_missing_key_is_recorded_not_gated(
+        self, http, poll, caplog
+    ) -> None:
+        """ADR-009 §10 rev 7: JSON mode promises an OBJECT, never its keys, so
+        a key the model left out is model quality — recorded for the operator,
+        never a failed deploy that no redeploy fixes."""
+
         http.responses = _chat_responses(
             _FakeResponse(200, _completion('{"city": "Tokyo"}'))
         )
 
-        with pytest.raises(ModelError) as excinfo:
-            await chat_smoke_test(_LFM)
+        with caplog.at_level(logging.INFO):
+            report = await chat_smoke_test(_LFM)
 
-        assert "missing ['population']" in str(excinfo.value)
+        assert report.keys == ["city"]
+        assert report.follows_prompt_schema is False
+        assert len(_warnings(caplog)) == 1
+        assert _warnings(caplog)[0].startswith(
+            "prompt schema not followed (recorded, not gated): "
+        )
+        assert "missing ['population']" in _warnings(caplog)[0]
+        assert "Smoke test passed" in [r.getMessage() for r in caplog.records]
 
-    async def test_an_extra_key_is_named(self, http, poll) -> None:
-        """``additionalProperties: false`` is part of the schema, so a server
-        that added a key did not honour it."""
+    async def test_an_extra_key_is_recorded_not_gated(self, http, poll, caplog) -> None:
+        """The prompt asked for exactly two keys, so a third is a shape the
+        model chose — the operator reads it and decides."""
 
         http.responses = _chat_responses(
             _FakeResponse(
@@ -986,10 +1036,17 @@ class TestChatSmokeTest:
             )
         )
 
-        with pytest.raises(ModelError) as excinfo:
-            await chat_smoke_test(_LFM)
+        with caplog.at_level(logging.INFO):
+            report = await chat_smoke_test(_LFM)
 
-        assert "unexpected ['country']" in str(excinfo.value)
+        assert report.keys == ["city", "country", "population"]
+        assert report.follows_prompt_schema is False
+        assert len(_warnings(caplog)) == 1
+        assert _warnings(caplog)[0].startswith(
+            "prompt schema not followed (recorded, not gated): "
+        )
+        assert "unexpected ['country']" in _warnings(caplog)[0]
+        assert "Smoke test passed" in [r.getMessage() for r in caplog.records]
 
     @pytest.mark.parametrize(
         "content,expected",
@@ -1000,18 +1057,55 @@ class TestChatSmokeTest:
         ],
         ids=["population-string", "population-bool", "city-int"],
     )
-    async def test_a_wrongly_typed_value_fails(
-        self, http, poll, content: str, expected: str
+    async def test_a_wrongly_typed_value_is_recorded_not_gated(
+        self, http, poll, caplog, content: str, expected: str
     ) -> None:
-        """A strict schema types both keys. ``true`` is worth its own row:
-        ``bool`` IS an ``int`` in Python, so a naive check would accept it."""
+        """The prompt types both keys, and a value typed otherwise is recorded
+        with the key and the type it came back as. ``true`` is worth its own
+        row: ``bool`` IS an ``int`` in Python, so a naive check would call that
+        a population."""
 
         http.responses = _chat_responses(_FakeResponse(200, _completion(content)))
 
-        with pytest.raises(ModelError) as excinfo:
-            await chat_smoke_test(_LFM)
+        with caplog.at_level(logging.INFO):
+            report = await chat_smoke_test(_LFM)
 
-        assert expected in str(excinfo.value)
+        assert report.keys == ["city", "population"]
+        assert report.follows_prompt_schema is False
+        assert len(_warnings(caplog)) == 1
+        assert _warnings(caplog)[0].startswith(
+            "prompt schema not followed (recorded, not gated): "
+        )
+        assert expected in _warnings(caplog)[0]
+        assert "Smoke test passed" in [r.getMessage() for r in caplog.records]
+
+    async def test_a_nested_object_of_the_models_own_shape_passes(
+        self, http, poll, caplog
+    ) -> None:
+        """Story 3: a 350M model answered JSON of its OWN shape in JSON mode
+        (``tasks/141`` round 2, shortened). The server works — that is what the
+        deploy check proves — and the weak instruction-following is a quality
+        call the operator makes from the warning."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(
+                200,
+                _completion('{"tokyo_facts": [{"city": "Tokyo", "population": 37}]}'),
+            )
+        )
+
+        with caplog.at_level(logging.INFO):
+            report = await chat_smoke_test(_LFM)
+
+        assert report.keys == ["tokyo_facts"]
+        assert report.follows_prompt_schema is False
+        assert "JSON mode honoured: keys=['tokyo_facts']" in [
+            r.getMessage() for r in caplog.records
+        ]
+        assert len(_warnings(caplog)) == 1
+        assert "missing ['city', 'population']" in _warnings(caplog)[0]
+        assert "unexpected ['tokyo_facts']" in _warnings(caplog)[0]
+        assert "Smoke test passed" in [r.getMessage() for r in caplog.records]
 
     async def test_an_empty_completion_fails(self, http, poll) -> None:
         http.responses = _chat_responses(_FakeResponse(200, {"choices": []}))
@@ -1022,8 +1116,8 @@ class TestChatSmokeTest:
         assert "carried no content" in str(excinfo.value)
 
     async def test_a_400_is_retryable_and_carries_the_status(self, http, poll) -> None:
-        """A server that cannot compile the schema answers 400 — server-side,
-        so it is the class the driver may print the HF_TOKEN hint under."""
+        """A server that refuses the request answers 400 — server-side, so it
+        is the class the driver may print the HF_TOKEN hint under."""
 
         http.responses = _chat_responses(_FakeResponse(400))
 

@@ -19,6 +19,7 @@ client only — never by :mod:`tree.models.modal_catalog` and never at MCP boot.
 import json
 import logging
 import math
+from typing import Any
 
 import aiohttp
 import modal
@@ -32,6 +33,7 @@ from tree.config.app_config import (
 )
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
+    CHAT_RESPONSE_FORMAT,
     MODAL_SERVER_NAME,
     chat_request_knobs,
     empty_answer_details,
@@ -46,28 +48,24 @@ from tree.models.modal_warmup import poll_health
 
 logger = logging.getLogger(__name__)
 
-# The ONE question every chat smoke test asks, under the STRICT JSON schema the
-# SGLang App's own warm-up uses (Modal's `city_facts` payload). Asserting on
-# the SHAPE, never on the content: a 350M model may believe anything about
-# Tokyo, but a server that cannot honour `response_format` is broken for
-# `ModalLLM`, which is the thing this proves.
-CHAT_SMOKE_PROMPT = "Reply with JSON facts about Tokyo."
+# The ONE question every chat smoke test asks, in JSON mode with its schema in
+# the PROMPT — as every caller of `generate_json` carries its own (ADR-009
+# §10). Gating on the SHAPE, never on the content: a 350M model may believe
+# anything about Tokyo, but a server that cannot return a JSON object is broken
+# for `ModalLLM`, which is the thing this proves.
 CITY_FACTS_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "city_facts",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "city": {"type": "string"},
-                "population": {"type": "integer"},
-            },
-            "required": ["city", "population"],
-            "additionalProperties": False,
-        },
-        "strict": True,
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"},
+        "population": {"type": "integer"},
     },
+    "required": ["city", "population"],
+    "additionalProperties": False,
 }
+CHAT_SMOKE_PROMPT = (
+    "Reply with JSON facts about Tokyo. Answer with ONE JSON object matching "
+    "this JSON Schema: " + json.dumps(CITY_FACTS_SCHEMA, separators=(",", ":"))
+)
 
 # The in-container warm-up spends 64; from the laptop the budget is wider
 # because a REASONING model may spend tokens thinking before the JSON, and a
@@ -98,8 +96,15 @@ class ChatSmokeTestReport(BaseModel):
     url: str = Field(description="Root URL of the served model (no /v1).")
     served_model: str = Field(description="The id discovered from /v1/models.")
     cold_start_seconds: float = Field(description="Seconds until /health was 200.")
-    city: str = Field(description="`city` from the strict-JSON completion.")
-    population: int = Field(description="`population` from the same completion.")
+    keys: list[str] = Field(
+        description="The completion object's keys, sorted — what JSON mode "
+        "actually returned."
+    )
+    follows_prompt_schema: bool = Field(
+        description="Did that object match the city_facts shape the PROMPT "
+        "asked for? RECORDED, never gated: JSON mode promises an object, "
+        "never its keys."
+    )
     unauthenticated_status: int = Field(
         description="What /health answers WITHOUT the Proxy token — 401."
     )
@@ -306,15 +311,20 @@ async def chat_smoke_test(
     auth, so nothing here branches on the route (ADR-009 §3/§10).
 
     Health through the SHARED poller (ADR-009 §11), the DISCOVERED model id,
-    ONE chat completion under the STRICT ``city_facts`` schema — the same
-    constrained decoding ``ModalLLM`` depends on — and a 401 without the token.
-    What is asserted is the SHAPE of the answer, never its content: the
-    population of Tokyo is the model's business, valid JSON is ours.
+    ONE chat completion in JSON mode — the request ``ModalLLM`` sends, from the
+    same :data:`~tree.models.modal_catalog.CHAT_RESPONSE_FORMAT` constant and
+    with the ``city_facts`` schema in the PROMPT — and a 401 without the token.
+
+    It GATES on the client's own three verdicts and nothing more: content came
+    back, it is valid JSON, and it is an object. Whether the model followed the
+    prompt's SHAPE is RECORDED (one INFO line, one WARNING when it did not) —
+    JSON mode promises an object, never its keys, and a gate on key-following
+    would fail a deploy for a reason no redeploy fixes.
 
     Raises:
-        ModelError: any assertion failed (the message carries the numbers or
-            the first characters of the content), or the health poll failed on
-            something waiting cannot fix.
+        ModelError: a gate failed (the message carries the numbers or the first
+            characters of the content), or the health poll failed on something
+            waiting cannot fix.
         ExtractionError: the server was unreachable, answered non-200, or was
             still cold when the budget ran out.
     """
@@ -338,8 +348,13 @@ async def chat_smoke_test(
     content = await _chat(url, bearer, served, entry)
     logger.info("chat completion: %s", content)
 
-    city, population = _city_facts(content)
-    logger.info("strict JSON schema honoured: city=%s population=%d", city, population)
+    parsed = _json_object(content)
+    keys = sorted(parsed)
+    logger.info("JSON mode honoured: keys=%s", keys)
+
+    mismatch = _prompt_schema_mismatch(parsed)
+    if mismatch is not None:
+        logger.warning("prompt schema not followed (recorded, not gated): %s", mismatch)
 
     unauthenticated_status = await _unauthenticated_health_status(url)
     if unauthenticated_status != 401:
@@ -354,14 +369,14 @@ async def chat_smoke_test(
         url=url,
         served_model=served,
         cold_start_seconds=elapsed,
-        city=city,
-        population=population,
+        keys=keys,
+        follows_prompt_schema=mismatch is None,
         unauthenticated_status=unauthenticated_status,
     )
 
 
 async def _chat(url: str, bearer: str, served: str, entry: ModalLLMModelConfig) -> str:
-    """``POST /v1/chat/completions`` under the strict schema; the content.
+    """``POST /v1/chat/completions`` in JSON mode; the content.
 
     The body is the ENTRY's request, not a fixed one: ``chat_request_knobs``
     adds its ``max_tokens`` and its ``chat_template_kwargs`` (ADR-009 §10),
@@ -377,8 +392,8 @@ async def _chat(url: str, bearer: str, served: str, entry: ModalLLMModelConfig) 
     Raises:
         ExtractionError: the transport failed, the server answered nothing
             within ``modal.request_timeout_s``, or it did not answer 200
-            (``status_code`` carries it — a 400 is how a server that cannot
-            compile the schema refuses).
+            (``status_code`` carries it — a 400 is how a server refuses the
+            request outright).
         ModelError: the 200 carried no message content, which no retry fixes.
     """
 
@@ -388,7 +403,7 @@ async def _chat(url: str, bearer: str, served: str, entry: ModalLLMModelConfig) 
         "messages": [{"role": "user", "content": CHAT_SMOKE_PROMPT}],
         "max_tokens": CHAT_SMOKE_MAX_TOKENS,
         "temperature": 0,
-        "response_format": CITY_FACTS_SCHEMA,
+        "response_format": CHAT_RESPONSE_FORMAT,
     } | knobs
     # Configuration, never a secret — and the line an operator reads when a
     # knob is wrong, so it goes out BEFORE the POST it describes.
@@ -458,18 +473,19 @@ async def _chat(url: str, bearer: str, served: str, entry: ModalLLMModelConfig) 
     )
 
 
-def _city_facts(content: str) -> tuple[str, int]:
-    """``(city, population)`` from a completion the schema should have forced.
+def _json_object(content: str) -> dict[str, Any]:
+    """The completion as a JSON OBJECT — the client's own two verdicts.
 
-    Strict means strict: exactly the two keys, a string and an integer. A
-    server that ignored ``response_format`` fails here rather than in the
-    extraction pipeline three weeks later.
+    Exactly what :func:`tree.models.modal_llm._parsed_object` gates on, in this
+    command's words: JSON mode's whole promise is an object back, and a server
+    that cannot keep it is broken for ``ModalLLM``. Nothing about the object's
+    KEYS is decided here (:func:`_prompt_schema_mismatch` records those).
 
     Raises:
-        ModelError: the content is not JSON, is not an object, carries the
-            wrong keys, or types them wrongly. The message quotes the first
-            :data:`_CONTENT_EXCERPT` characters, which is what tells a
-            `<think>` block apart from a chatty preamble.
+        ModelError: the content is not JSON, or is JSON that is not an object.
+            The message quotes the first :data:`_CONTENT_EXCERPT` characters,
+            which is what tells a `<think>` block apart from a chatty preamble
+            or an unbounded digit run.
     """
 
     excerpt = content[:_CONTENT_EXCERPT]
@@ -479,33 +495,39 @@ def _city_facts(content: str) -> tuple[str, int]:
         raise ModelError(f"chat completion is not valid JSON: {excerpt!r}") from exc
 
     if not isinstance(parsed, dict):
-        raise ModelError(
-            f"chat completion is not a JSON object: {excerpt!r} — the strict "
-            "city_facts schema was ignored"
-        )
+        raise ModelError(f"chat completion is not a JSON object: {excerpt!r}")
+    return parsed
+
+
+def _prompt_schema_mismatch(parsed: dict[str, Any]) -> str | None:
+    """Why ``parsed`` is not the ``city_facts`` object the PROMPT asked for.
+
+    ``None`` when it is: exactly the two keys, a string and an integer. The
+    reason is RECORDED as one WARNING and never gates the smoke test (ADR-009
+    §10) — JSON mode promises an object, never its keys, so a 350M model
+    answering JSON of its own shape is a quality call for the operator, not a
+    failed deploy. It never raises, and it never quotes the completion: the
+    whole content is already on the ``chat completion:`` line above it.
+    """
 
     expected = {"city", "population"}
     missing = sorted(expected - set(parsed))
     unexpected = sorted(set(parsed) - expected)
     if missing or unexpected:
-        raise ModelError(
-            f"chat completion does not match the strict city_facts schema: "
-            f"missing {missing}, unexpected {unexpected} in {excerpt!r}"
-        )
+        return f"missing {missing}, unexpected {unexpected}"
 
     city, population = parsed["city"], parsed["population"]
     if not isinstance(city, str):
-        raise ModelError(
-            f"chat completion types 'city' as {type(city).__name__}, expected "
-            f"a string: {excerpt!r}"
+        return (
+            f"the completion types 'city' as {type(city).__name__}, expected a string"
         )
     # `bool` is an `int` in Python, and `true` is not a population.
     if not isinstance(population, int) or isinstance(population, bool):
-        raise ModelError(
-            f"chat completion types 'population' as {type(population).__name__}"
-            f", expected an integer: {excerpt!r}"
+        return (
+            f"the completion types 'population' as {type(population).__name__}"
+            ", expected an integer"
         )
-    return city, population
+    return None
 
 
 async def _embed(

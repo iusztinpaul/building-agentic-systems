@@ -185,8 +185,8 @@ def chat_smoke(mocker, cli_module):
         url="https://acme--ep-tree-lfm2-5-350m-server.modal.run",
         served_model=_LFM,
         cold_start_seconds=96.0,
-        city="Tokyo",
-        population=13960000,
+        keys=["city", "population"],
+        follows_prompt_schema=True,
         unauthenticated_status=401,
     )
     return mocker.patch.object(
