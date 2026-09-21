@@ -1,10 +1,10 @@
 # ADR-009: Voyage 4, Embedding Roles, and a Catalog of Modal-Hosted Models (Embeddings and LLMs)
 
 - **Status:** Accepted
-- **Date:** 2026-09-19. Revised, always before the affected tasks shipped: (1)-(2) the same day — Dedicated endpoints added as the first Serving path; the optional Hugging Face token (Decision 9); (3) during task 138's QA — `voyageai/voyage-4-nano` is natively 2048-d, so Decision 3 gained client-side truncation and the response-length assertion; (4) 2026-09-20, after an accidental deploy during task 142's QA overwrote an operator's hand-made endpoint — the `tree-` name namespace, the existence guard, the ownership rule and the dry run (drafted, merged into revision 5); (5) 2026-09-20, by the owner's decision after a day of live results — **the Serving path left the configuration**: Decisions 2 and 3 rewritten as auto-routing with Modal as the oracle (endpoint first, App by kind: vLLM = embeddings, SGLang = LLMs); LLMs brought into scope (Decision 10); the warm-up design ported from the `pulse` codebase (Decision 11). Tasks 138-140 and 142 were already built on the earlier text; tasks 143-150 rework that code and task 141 proves it live.
+- **Date:** 2026-09-19. Revised, always before the affected tasks shipped: (1)-(2) the same day — Dedicated endpoints added as the first Serving path; the optional Hugging Face token (Decision 9); (3) during task 138's QA — `voyageai/voyage-4-nano` is natively 2048-d, so Decision 3 gained client-side truncation and the response-length assertion; (4) 2026-09-20, after an accidental deploy during task 142's QA overwrote an operator's hand-made endpoint — the `tree-` name namespace, the existence guard, the ownership rule and the dry run (drafted, merged into revision 5); (5) 2026-09-20, by the owner's decision after a day of live results — **the Serving path left the configuration**: Decisions 2 and 3 rewritten as auto-routing with Modal as the oracle (endpoint first, App by kind: vLLM = embeddings, SGLang = LLMs); LLMs brought into scope (Decision 10); the warm-up design ported from the `pulse` codebase (Decision 11). Tasks 138-140 and 142 were already built on the earlier text; tasks 143-150 rework that code and task 141 proves it live; (6) 2026-09-21, after round 1 of task 141's live e2e — three defects the unit suite could not see: the deploy spec is now base64 inside its env var (Decision 3; the raw JSON was corrupted by the image build for any value holding a `"`, which made the default embedding model unservable), the weights Volume mounts at `/cache/huggingface` with `HF_HOME` set (Decision 3; the SGLang image ships a non-empty `/root/.cache/huggingface`), and `ModalLLM` gains a request timeout, no SDK retries, a timeout that is NOT a cold answer, and per-entry `max_tokens` / `chat_template_kwargs` (Decisions 10 and 11; a thinking model hung a call for 13 minutes). Tasks 153-157 implement it; task 141 round 2 re-proves only what round 1 could not.
 - **Deciders:** Paul (project owner)
 - **Context references:**
-  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/150-embedding-text-follow-ups-from-137-qa.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 141)
+  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/150-embedding-text-follow-ups-from-137-qa.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 151 -> 152 -> 141 round 1 -> 153 -> 154 -> 155 -> 156 -> 157 -> 141 round 2)
   - `ADR-001` (embedding model + dimension pinned in config; its `voyage-3` example is superseded IN PRACTICE by the pin below — the ADR text is unchanged)
   - `ADR-002` §1 (the `voyage-embeddings` rate limit at the real POST; `_CachedSingleEmbedding` never reaches a client) — unchanged
   - `ADR-006` §4 (only Child chunks are embedded; backfill by empty `embedding`) and its `rag/` ↛ `graph/` import rule — unchanged, relied on
@@ -177,11 +177,37 @@ Eleven related choices, one design:
    which the unit suite sets for every test) logs the redacted argv and starts NO `modal` process —
    the only way to exercise the driver without deploying; since Modal is the oracle, a dry run also
    says which command each verdict would lead to.
-   For the App scripts the resolved entry crosses into the container as ONE JSON env var baked
-   into the image (`EMBEDDING_DEPLOY_SPEC` / `LLM_DEPLOY_SPEC`), read under `not modal.is_local()` —
-   the only way to honour both "catalog logic lives in `src/tree/`" and "`tree` is not importable in
-   the container". That spec holds configuration only; a credential never enters the image env (§9).
-   Weights come from a shared `huggingface-cache` Volume by `repo_id` + `revision`.
+   For the App scripts the resolved entry crosses into the container as ONE env var baked into the
+   image (`EMBEDDING_DEPLOY_SPEC` / `LLM_DEPLOY_SPEC`) whose value is the **base64 of the spec's
+   JSON** (`encode_deploy_spec` in `tree.models.modal_catalog`; the container does
+   `json.loads(base64.b64decode(os.environ[…]))`), read under `not modal.is_local()` — the only way
+   to honour both "catalog logic lives in `src/tree/`" and "`tree` is not importable in the
+   container". *Why base64 and not the raw JSON (the first design, broken live 2026-09-21):* Modal
+   renders `.env({k: v})` as a Dockerfile `ENV k=<shlex.quote(v)>` (modal 1.5.5, `_image.py:2821`)
+   and the build's `ENV` parsing drops each backslash, so every `\"` of a JSON-in-JSON value —
+   exactly the compact JSON this section prescribes for `--pooler-config` / `--hf-overrides` —
+   arrived as `"` and the container died at import with `JSONDecodeError`; a quote-free spec
+   (LFM2.5) crossed intact, which hid it from every test. The value's alphabet is now
+   `[A-Za-z0-9+/=]`: no quote, backslash, `$` or whitespace, so NO quoting layer (shlex, Dockerfile
+   `ENV`, its `$VAR` expansion) has anything to interpret — robust to any byte a catalog value may
+   hold. *Rejected:* pre-escaping the backslashes (emulates a parser we inferred, not read, and
+   still loses to `$`); a file added to the image or a second Secret (a new path contract, and §9's
+   "the ONE Secret is the token's" guard) — more mechanism for the same bytes. The price: the layer
+   is no longer greppable (`base64 -d` reads it). That spec holds configuration only; a credential
+   never enters the image env (§9) — the spec models have no credential field and a unit test pins
+   that the decoded spec never carries `HF_TOKEN`'s value. The `.env({...})` value is ONE name on
+   both sides of `modal.is_local()` (the encoder's output locally, the env var's own raw string in
+   the container), so the image definition is byte-identical where Modal re-imports it.
+   Weights come from a shared `huggingface-cache` Volume by `repo_id` + `revision`, mounted by BOTH
+   scripts at `/cache/huggingface` with `HF_HOME=/cache/huggingface` and
+   `HF_HUB_CACHE=/cache/huggingface/hub` in the image env. Never under `/root/.cache`: Modal refuses
+   to mount a Volume on a non-empty path and `lmsysorg/sglang:v0.5.18` ships content at
+   `/root/.cache/huggingface` (live, 2026-09-21: `cannot mount volume on non-empty path`). `HF_HOME`
+   is what `huggingface_hub` — and through it vLLM, SGLang and `transformers` — derives every cache
+   path from, and it keeps the Volume's existing layout (`hub/` at the Volume root, as under the old
+   mount); `HF_HUB_CACHE` is set too because it outranks `HF_HOME` and a legacy
+   `HUGGINGFACE_HUB_CACHE` (`huggingface_hub/constants.py`), so a base image that sets one cannot
+   move the weights off the Volume.
    ONE smoke test per kind (`tree.models.modal_server.smoke_test` / `chat_smoke_test`), run by the
    driver's `test` command, path-blind.
    **Dimensions: the embedding client never sends `dimensions`.** `native_dimensions` is the width the
@@ -290,6 +316,21 @@ Eleven related choices, one design:
     kinds (one lookup over two lists beats six targets and a `--kind`). *Not decided here:* that a
     small Modal LLM is good enough for extraction — the e2e proves plumbing (valid JSON back), not
     quality.
+    **Two optional per-entry request knobs, sent only when set** (added 2026-09-21; this ADR had
+    named them as the upgrade path and `tasks/141` round 1 produced the evidence — `Qwen/Qwen3.5-0.8B`,
+    a THINKING model, spent a 256-token budget reasoning and answered with empty `content`, and an
+    unbounded call hung for 13 minutes): `max_tokens` (the completion budget) and
+    `chat_template_kwargs` (a JSON object passed as `extra_body`, e.g. `{"enable_thinking": false}`).
+    Both are CLIENT-side request fields, so they work identically on both Serving paths and changing
+    one needs no redeploy. Verified in SGLang `v0.5.18` (`entrypoints/openai/protocol.py`):
+    `ChatCompletionRequest.chat_template_kwargs: Optional[Dict]` (:844), `separate_reasoning: bool =
+    True` (:842) — with a `--reasoning-parser` the answer stays in `content` and the thinking goes to
+    `reasoning_content` — and `max_new_tokens = max_completion_tokens or max_tokens` (:1035). ONE pure
+    helper (`chat_request_knobs(entry)`) feeds `ModalLLM` AND the chat smoke test, so the smoke test
+    proves the request the memory will send. Seeds: both LLMs `max_tokens: 4096`;
+    `Qwen/Qwen3.5-0.8B` also `chat_template_kwargs: {enable_thinking: false}`. NOT carried into the
+    SGLang App's in-container warm-up (Modal's payload, value for value): no thinking model routes
+    to the App today.
 
 11. **Warm at use, not at t0** (ported from the `pulse` codebase's warm-up design, same owner).
     A scaled-to-zero Modal server answers `/health` with 503 in about a second and boots BECAUSE it
@@ -305,8 +346,12 @@ Eleven related choices, one design:
     - **One gate, composed by BOTH Modal clients** (`WarmGate`): single-flight behind a lock that is
       per RUNNING EVENT LOOP; the `warmed` flag is a HINT with an expiry, set only after a
       successful warm. At call time a COLD error — the OpenAI SDK's `InternalServerError` (any 5xx)
-      or `APIConnectionError` (incl. timeouts), nothing else; a 429 or 4xx is never cold — flips the
-      flag, re-warms ONCE behind the same lock, retries the call ONCE; a second cold answer raises.
+      or `APIConnectionError` EXCEPT its `APITimeoutError` subclass, nothing else; a 429 or 4xx is
+      never cold — flips the flag, re-warms ONCE behind the same lock, retries the call ONCE; a
+      second cold answer raises. **A timeout is not cold** (revised 2026-09-21): a cold Modal server
+      answers 503 in about a second, so a request that ran into the timeout reached a server that
+      is ALIVE and slow; re-warming it answers 200 at once and the retry only doubles the wait. It
+      propagates unchanged and the client raises `ExtractionError` naming the knob.
       ONE warning per cold period, not one per concurrent caller. The gate SUBSUMES the
       double-checked `_init_lock` task 140 added: URL resolution + poll + served-model discovery +
       client construction are one all-or-nothing single-flight body, re-run on a re-warm and on a
@@ -314,6 +359,19 @@ Eleven related choices, one design:
     - **One knob:** `modal.warmup_deadline_s: 600` (`ge=1`; `TREE_MODAL__WARMUP_DEADLINE_S`) replaces
       the client's 300 s and the smoke test's 1200 s; the smoke tests use the SAME poller, so
       `make memory-deploy-model-test` right after a deploy waits out the cold start.
+    - **One request timeout, the gate owns the only retry** (added 2026-09-21):
+      `modal.request_timeout_s: 300` (`ge=1`; `TREE_MODAL__REQUEST_TIMEOUT_S`) is the `timeout=` of
+      BOTH clients' `AsyncOpenAI` and of the chat smoke test's POST, and both clients pass
+      `max_retries=0`. The SDK's defaults are 600 s and 2 silent retries: one hung completion could
+      hold a caller 30 minutes, and twice that through the gate's re-warm (measured: 13 minutes
+      until killed). Worst case per call is now 300 s.
+    - **A Dedicated endpoint is `provisioning` before it is `live`.** `modal endpoint create` returns
+      in ~4 s (measured 2026-09-21: `live` after 2m15s for a 0.6B embedding model, 9m25s for a 0.8B
+      LLM — 94 % of the warm-up budget). The driver's `deploy` says so in one line and its `test`
+      first waits, on `modal endpoint list --json`, while the entry's endpoint row reads
+      `provisioning` (same poll schedule, a 1800 s code constant — not a YAML knob; an unreadable
+      list is a WARNING, not a refusal: this is a wait, not a guard). No row (an App, or a dry
+      run) -> no wait.
     - **Pre-warm before document 1:** at the top of a run that fans out over Modal-backed models
       (the extraction worker, dream consolidation, cluster summaries) every DISTINCT Modal app is
       warmed CONCURRENTLY by a plain awaited helper, duck-typed on `ensure_warm` (a no-op for
@@ -548,6 +606,22 @@ flowchart LR
   create. A missing token surfaces late (at container start) and is explained by a hint that now
   fires only for gated-looking failures (401 / 403 / `gated` / `GatedRepoError`), never under a
   catalog refusal, an architecture mismatch or a 503.
+- **What the existence guard can and cannot see** (live, 2026-09-21, modal 1.5.5). `modal app list`
+  shows neither the `ep-*` app behind a Dedicated endpoint (ours or hand-made) nor long-stopped apps;
+  `modal endpoint list` hides STOPPED endpoints. So the ENDPOINT list is the leg that protects, it is
+  read FIRST and a hit short-circuits (pinned by `TestExistingKind`), and the app-list leg only ever
+  finds a live App of ours — a normal update. No collision class is left open: a hand-made name
+  cannot carry our prefix, a live endpoint is always listed, and whatever is invisible is STOPPED,
+  which a deploy replaces and never overwrites while serving. What Modal answers to an
+  `endpoint create` that reuses the name of a STOPPED endpoint is recorded in `tasks/141` round 2;
+  anything but success aborts loudly as verdict `other`.
+- **The baked spec is opaque.** `EMBEDDING_DEPLOY_SPEC` / `LLM_DEPLOY_SPEC` hold base64, so reading
+  a deployed image's spec takes `base64 -d`; the driver's dry run and the catalog stay the readable
+  source.
+- **A slow Modal server now fails a call in 300 s instead of hanging it.** The cost: a legitimately
+  long completion on a big model needs `TREE_MODAL__REQUEST_TIMEOUT_S` raised or the entry's
+  `max_tokens` lowered, and a 429 is no longer retried silently by the SDK (it surfaces as
+  `ExtractionError(status_code=429)` to Prefect's task retries).
 - **What would justify upgrading.** Modal shipping a "can you serve X" API or a machine-readable
   catalog → replace the two substrings and the list parse; routing flapping between deploys, or an
   audit need → record the last route in a state file (not in YAML); a second project deploying into
@@ -556,8 +630,9 @@ flowchart LR
   script for that kind, selected per entry; measured per-task first-use overhead → a per-process
   model cache in `get_model`; measured first-query latency after idle → a keep-warm ping or
   `min_containers > 0` on the Apps (an endpoint's is dashboard-only); a caller with a real schema →
-  thread `schema=` through `BaseLLM`; thinking models eating the JSON budget → per-entry
-  `chat_template_kwargs` / `max_tokens`; Modal shipping an env-var form of `--custom-hf-token` → drop
+  thread `schema=` through `BaseLLM`; a THINKING model that Modal refuses as an endpoint (it would
+  route to the SGLang App, whose in-container warm-up sends no `chat_template_kwargs`) → carry the
+  entry's knobs into the App's warm-up payload; Modal shipping an env-var form of `--custom-hf-token` → drop
   the argv form and its redaction; a second Hub identity, or a team workspace → a named Modal Secret
   (`Secret.from_name`); repeated late failures on gated repos → a pre-flight `huggingface_hub` access
   check; measured payload pain from full-width responses → server-side truncation (an

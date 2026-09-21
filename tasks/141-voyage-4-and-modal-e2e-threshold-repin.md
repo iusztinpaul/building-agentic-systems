@@ -1,13 +1,13 @@
 ---
 id: 141-voyage-4-and-modal-e2e-threshold-repin
-status: pending
+status: in-progress
 feature: voyage-4-and-modal-embedding-catalog
 ---
 
 # Live e2e: reset -> index -> query on `voyage-4` with a threshold re-pin (in a separate local database); then four auto-routed Modal cycles — embedding -> endpoint, embedding -> vLLM App, LLM -> SGLang App, LLM -> endpoint — under our own `tree-` names, touching nothing that existed before
 
 Tags: `e2e`, `config`, `modal`, `llm`, `docs`
-Depends on: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150, #151, #152
+Depends on: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150, #151, #152 (all done — round 1 ran on them); ROUND 2: #153, #154, #155, #156, #157
 Blocks: —
 Implements: ADR-009 — Decision 2 (auto-routing, proven live on four cycles), Decision 3 (the `tree-` namespace, the guard and H1, proven live), Decision 7 (migration run), Decision 8 (threshold re-pin protocol; amends ADR-008 §4), Decision 9 (the `HF_TOKEN` path on the Apps, checked live on public weights), Decision 10 (`ModalLLM` returns valid JSON from both routes) and Decision 11 (cold start waited out; one cold-again re-warm)
 
@@ -228,6 +228,99 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
    one story and match what 4a-4d actually showed. Per the project rule, REMOVE now-wrong sentences rather
    than adding caveats.
 
+## ROUND 2 AMENDMENT (PA, 2026-09-21) — read this BEFORE the Scope above; where the two disagree, THIS wins
+
+**ORDER: 153 -> 154 -> 155 -> 156 -> 157 -> 141 round 2.** Do not start before all five are merged into this branch
+(`git log --oneline` must show them). The HARD SAFETY RULE and the HARD RULES above are unchanged and apply in full.
+
+**Round 2 re-runs ONLY what round 1 left unproven.** PROVEN, evidence in the `[SWE] 2026-09-21 14:50` entry, NOT re-run:
+the 4.0 baseline method, cycle **4a** in full (routing, smoke lines, wire probe `no dimensions -> 1024`, the guard
+refusal with exit 3, **H1: TRUE**, stop by name), the four `Routing …` lines, the stderr finding, step 5's docs greps.
+Do NOT deploy `Qwen/Qwen3-Embedding-0.6B` again. Still take a fresh 4.0 baseline first and finish with 4e: the expected
+baseline is the human's 4 endpoints + 2 apps, plus possibly our two STOPPED apps `ep-tree-voyage-4-nano` /
+`ep-tree-lfm2-5-350m` from round 1 (stopped = fine; a LIVE `tree-*` / `ep-tree-*` thing = stop and ask).
+
+**R2-Part 2 — three cycles, in this order: 4b, 4c, 4d.** Each exactly as written above, plus:
+- **Every `-test` is started IMMEDIATELY after its `deploy` returns** — no hand-polling of `modal endpoint list`. For 4d
+  that exercises #157 live: record the `Endpoint tree-qwen3-5-0-8b is provisioning — …` deploy line, the
+  `Provisioning: … — Ns/1800s` series and the `Live: … after <N>s` line. For 4b/4c record that NO `Provisioning` line
+  appears. The `Warm: … after <N>s` line that follows is the cycle's cold-start number (three are owed: 4b, 4c, 4d; 4a's
+  `after 0s` is on record with its reason).
+- **4b (proves #153 + #154 live):** the container's first log line is `HF_TOKEN set in container: …` (not
+  `JSONDecodeError`); the image build shows the new `ENV` steps (`HF_HOME`, `HF_HUB_CACHE`, the base64
+  `EMBEDDING_DEPLOY_SPEC`) — so layers are rebuilt from that step; say whether the `vllm==0.26.0` layer was rebuilt or
+  cached, and either way the ENGINE starting is now the proof of the pin + CUDA 13.0.2 +
+  `VoyageQwen3BidirectionalEmbedModel`. Then everything 4b lists: smoke lines, wire probe (`no dimensions -> 2048`),
+  the shared-space check, the cold-again proof (still required once, here), and — new, read-only, AFTER the first warm —
+  `uv --directory apps/memory run modal volume ls huggingface-cache hub` showing `models--voyageai--voyage-4-nano`
+  (weights are ON the Volume). Stop.
+- **4c (proves #154 live):** no `cannot mount volume on non-empty path`; then everything 4c lists (six chat smoke lines
+  incl. the new `chat knobs: max_tokens=4096 chat_template_kwargs={}` line, the `ModalLLM` strict-schema dict, the
+  JSON-mode result recorded-not-gated, the Opik `modal` span, the SGLang tag that ran, `4c-app.log` with the container
+  boolean). If SGLang cannot serve LFM2.5, #147's LOUD replacement procedure still applies. Stop.
+- **4d (proves #155 + #156 live) — the LADDER, all inside ONE live cycle (the knobs are request fields: edit YAML,
+  re-run `-test`, NO redeploy):**
+  1. As seeded (`chat_template_kwargs: {enable_thinking: false}`, `max_tokens: 4096`): expect
+     `strict JSON schema honoured: …` and the `ModalLLM` dict. Done.
+  2. If the smoke test fails with `… no content (finish_reason=length, reasoning_content: N chars)`: the managed recipe
+     ignored the kwarg. Set the seed to `chat_template_kwargs: {}` + `max_tokens: 8192` (thinking on, budget large
+     enough for reasoning + JSON; the recipe's reasoning parser keeps the answer in `content`) and re-run `-test`.
+  3. If that fails too: stop the endpoint, write `PA: ADR-009 §10 seed Qwen/Qwen3.5-0.8B cannot answer under strict
+     JSON on a managed endpoint — <both messages verbatim>`, and run the cycle ONCE more with the fallback seed
+     **`google/gemma-3-1b-it`** (non-thinking, in Modal's 44-id list; Modal serves its own snapshot on the endpoint
+     route, so no `HF_TOKEN` of ours should be needed — if Modal demands one or a licence, STOP: that is a `[HUMAN]`
+     decision, not a workaround). Every other small id in the list is a Qwen3.5 thinking sibling, so there is no
+     second fallback. A seed change goes in `configs/default.yaml` + `test_seed_entries` + `frozen_config.yaml` in this
+     task's commit with a `PA:` line (glossary "Modal catalog" names the seeds).
+  Whichever rung held, record it in ONE line: `4d knobs that answered: <…>`. No call may exceed 300 s — a
+  `timed out after 300s` line is a complete, recordable answer, not a hang to sit through.
+  Also record, as a FACT for ADR-009 Consequences, what `modal endpoint create --name tree-qwen3-5-0-8b` answers now that
+  a STOPPED endpoint of that name exists from round 1: success (expected) -> one line; anything else -> the router aborts
+  as verdict `other`; paste it and STOP 4d (do not rename, do not `FORCE`).
+- **Accepted as unrecordable (PA):** the GPU of a managed endpoint (no CLI column on modal 1.5.5) — write
+  `GPU: Modal's choice, dashboard-only`; and `modal app list` never shows an endpoint's `ep-*` app — 4a's
+  `modal app history ep-tree-qwen3-embedding-0-6b` evidence replaces that clause of the 4a criterion.
+- **HF token line:** re-state it after 4b/4c now that the container boolean is actually observed (`settings.hf_token`
+  was empty in round 1, so expect `NOT PROVEN LIVE — … (container says False)` — this time with the container line
+  pasted). Leak check over every round-2 captured file.
+
+**R2-Part 1 — isolation WITHOUT touching the human's containers (SUPERSEDES step 0's `docker stop tree-prefect-worker`
+sentence; never stop, restart or exec into `tree-prefect-worker`).** The compose worker serves the same deployment names
+against database `tree` through the Prefect server on port 4200; two runners on ONE server race for every run. So Part 1
+uses its OWN throwaway Prefect server — no code change, nothing shared:
+1. Start it in the background from the worktree, state kept out of `~/.prefect`:
+   `PREFECT_HOME=<scratchpad>/prefect-141 uv --directory apps/memory run prefect server start --host 127.0.0.1 --port 4201`
+   and wait for `curl -s http://127.0.0.1:4201/api/health` -> `true`.
+2. EVERY Part 1 `make` command carries THREE command-line variables (after the target — the form verified to beat
+   `include .env`): `MONGO_INITDB_DATABASE=tree_e2e_141 USER_IDENTIFIER=e2e-141@example.com PREFECT_API_URL=http://127.0.0.1:4201/api`
+   — first of all `make memory-serve-workflows …`, then signup, pipelines, reset, query, visualize.
+3. PROVE it before the first ingest: `PREFECT_API_URL=http://127.0.0.1:4201/api uv --directory apps/memory run prefect deployment ls`
+   lists our deployments on 4201; after the first ingest the document is in `tree_e2e_141.documents`, the flow run is
+   listed on 4201, and NO new flow run appeared on 4200 in that window (`prefect flow-run ls` against 4200, read-only).
+   The fresh server has no `voyage-embeddings` limit: `rate_limit` is non-strict by design ("fresh dev boxes"), and 4
+   documents sit far below the API limit — note the warning, do not create the limit on 4200.
+4. The `tree` counts: the compose worker keeps running, so the HUMAN may legitimately write to `tree` during Part 1.
+   Record both counts before/after (round 1: 2539 embedded `memory` rows, 2922 `documents`); if they differ, show that
+   no `tree.documents` row created in the window has one of the four `docs/adrs/00{2,6,7,8}_*.md` worktree paths as
+   its source — THAT is the invariant.
+5. Cleanup: stop the serve process and the 4201 server; delete `<scratchpad>/prefect-141`. `tree_e2e_141` already exists
+   EMPTY from round 1 (7 collections, 0 documents) — reuse it. If `dropDatabase` is denied again, do not work around
+   it: the `[HUMAN]` line below covers it.
+6. If step 1 is denied by the sandbox or port 4201 is taken (try 4202), STOP Part 1 and write so — the fallback is the
+   `[HUMAN]` precondition below, never a `docker` command of yours.
+
+### Round 2 acceptance criteria (in addition to every unticked box above)
+
+- [ ] `git log --oneline` shows #153-#157 BEFORE any round-2 evidence; no round-2 command names `Qwen/Qwen3-Embedding-0.6B` in a `deploy`.
+- [ ] 4b: container log starts with `HF_TOKEN set in container: …`; `modal volume ls huggingface-cache hub` lists `models--voyageai--voyage-4-nano`; all of 4b's original lines (smoke, wire `-> 2048`, shared-space cosines, cold-again sequence or its honest "not reproduced").
+- [ ] 4c: no `cannot mount volume on non-empty path` anywhere in `4c-app.log`; the six chat smoke lines + `chat knobs: …`; the `ModalLLM` dict with exactly `city` / `population`; the Opik `modal` span.
+- [ ] 4d: the deploy line `… is provisioning — …`, >= 1 `Provisioning: tree-qwen3-5-0-8b …` line, `Live: … after <N>s`, the line `4d knobs that answered: …` (or rung 3's `PA:` line + the fallback seed's full cycle), the `ModalLLM` dict, the Opik `modal` span, and the one-line fact about re-creating a stopped endpoint's name. No call ran longer than 300 s.
+- [ ] Part 1: every pasted Part 1 command carries all THREE variables; the 4201 isolation proof (deployments on 4201, run on 4201, none on 4200, document in `tree_e2e_141`); no `docker` command appears in the round-2 Log.
+- [ ] Every row of round 1's "SWE must verify" table that reads **NOT VERIFIED** / **NOT MEASURED** / **NOT PROVEN LIVE** is re-answered with its source (vLLM 0.26.0 + CUDA 13.0.2, `VoyageQwen3BidirectionalEmbedModel`, sgl-kernel on the A10, LFM2 on SGLang, `json_object` on SGLang, voyage-4-nano's wire width + `dimensions` answer, container half of `Secret.from_dict`, engine subprocess inheriting `HF_TOKEN`).
+- [ ] 4e again at the very end: `baseline: <n> apps, <m> endpoints — all unchanged`, no live `tree-*` / `ep-tree-*`.
+- [ ] [HUMAN] Drops the empty database `tree_e2e_141` (agents are denied `dropDatabase`): `mongosh` -> `db.getSiblingDB("tree_e2e_141").dropDatabase()` — after round 2's Part 1, or now if Part 1 is abandoned.
+- [ ] [HUMAN] ONLY if the throwaway Prefect server (R2-Part 1 step 1) could not be started: stops the compose worker (`docker stop tree-prefect-worker`), CONFIRMS in this Log, lets Part 1 run against port 4200, and restarts it after (`docker start tree-prefect-worker`). No agent runs either command.
+
 ## Out of scope
 - Resetting, re-embedding or writing the real local database `tree` (the human does it after merge).
 - Any request to, stop of, or deploy over a Modal app or endpoint that is in the 4.0 baseline. `FORCE=yes`.
@@ -251,10 +344,10 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
 - [ ] `## Log` records both `min_vector_score` pin queries with their `top=` scores and the FINAL value; the nonsense query answers `nothing_found`, the on-topic query `found`, at that value.
 - [ ] `## Log` records >= 1 true-duplicate and >= 1 distinct-pair similarity on voyage-4 and, per knob (`semantic_threshold`, `auto_merge_threshold`, `flag_threshold`), either `unchanged — evidence` or `old -> new` with the YAML/default/test diff in the same commit.
 - [ ] `make memory-visualize-embeddings` output starts with the stale-map warning after indexing and does not after clustering — both first lines pasted in `## Log`.
-- [ ] 4.0: `## Log` has the baseline summary (every app and endpoint: name, id, state/status, latest version of each non-`tree` `ep-*` app) and the two `list --json` key sets, taken BEFORE the first deploy.
-- [ ] Routing, live: `## Log` has FOUR `Routing …` lines — 4a `→ Dedicated endpoint tree-qwen3-embedding-0-6b`, 4b `→ vLLM App`, 4c `→ SGLang App`, 4d `→ Dedicated endpoint tree-qwen3-5-0-8b` — and, for 4b and 4c, Modal's verbatim refusal containing `is not available for dedicated Endpoints` plus the stream it came on. No `SERVING=` and no `FORCE=yes` appears in any command of this Log.
-- [ ] Guard, live: the refusal line `Refusing to deploy Qwen/Qwen3-Embedding-0.6B …: 'tree-qwen3-embedding-0-6b' already exists on Modal as a Dedicated endpoint. …` with exit code 3.
-- [ ] 4a: the `tree-qwen3-embedding-0-6b` smoke lines (`health 200 after …s`, `served model id: …`, `3 embeddings, 1024 dims`, `sanity: cos(query, relevant)=… > cos(query, unrelated)=…`, `unauthenticated health -> 401`, `Smoke test passed`), the pasted `modal endpoint list --json`, `modal app list` showing `ep-tree-qwen3-embedding-0-6b`, and an explicit line `H1: TRUE` or `H1: FALSE -> fix (i)|(ii)` with the diff in the same commit and `make memory-tests` green.
+- [x] 4.0: `## Log` has the baseline summary (every app and endpoint: name, id, state/status, latest version of each non-`tree` `ep-*` app) and the two `list --json` key sets, taken BEFORE the first deploy.
+- [x] Routing, live: `## Log` has FOUR `Routing …` lines — 4a `→ Dedicated endpoint tree-qwen3-embedding-0-6b`, 4b `→ vLLM App`, 4c `→ SGLang App`, 4d `→ Dedicated endpoint tree-qwen3-5-0-8b` — and, for 4b and 4c, Modal's verbatim refusal containing `is not available for dedicated Endpoints` plus the stream it came on. No `SERVING=` and no `FORCE=yes` appears in any command of this Log.
+- [x] Guard, live: the refusal line `Refusing to deploy Qwen/Qwen3-Embedding-0.6B …: 'tree-qwen3-embedding-0-6b' already exists on Modal as a Dedicated endpoint. …` with exit code 3.
+- [x] 4a: the `tree-qwen3-embedding-0-6b` smoke lines (`health 200 after …s`, `served model id: …`, `3 embeddings, 1024 dims`, `sanity: cos(query, relevant)=… > cos(query, unrelated)=…`, `unauthenticated health -> 401`, `Smoke test passed`), the pasted `modal endpoint list --json`, `modal app list` showing `ep-tree-qwen3-embedding-0-6b`, and an explicit line `H1: TRUE` or `H1: FALSE -> fix (i)|(ii)` with the diff in the same commit and `make memory-tests` green.
 - [ ] 4b: the vLLM App smoke lines (`3 embeddings, 2048 dims`, `truncated 2048 -> 1024 dims client-side`, `sanity@1024: …`), the vLLM version actually built, and the stop's `Not a Dedicated endpoint (…) — stopping the App instead.` line.
 - [ ] Wire width: TWO `wire: …` lines (4a, 4b) — `no dimensions -> 1024` (Qwen3) and `-> 2048` (voyage-4-nano), each with the length or HTTP status + message for the `dimensions` call — or the catalog fix + `PA:` line in the same commit.
 - [ ] Shared space: the 3 same-text cosines `cos(voyage-4 API @1024, nano @1024)` and the 1 cross-text contrast, labelled recorded-not-gated, and a `PA:` line only if same-text is not clearly above cross-text.
@@ -262,12 +355,12 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
 - [ ] Cold again: either the sequence `Cold again: ep-tree-voyage-4-nano answered HTTP 503 — re-warming once` -> `Warm: …` -> `Warm again: …` with a 1024-d vector returned and exactly ONE `Cold again` line, or `cold-again: not reproduced — container still warm after 420 s`.
 - [ ] 4c + 4d: for EACH LLM cycle the six chat smoke lines (incl. `strict JSON schema honoured: city=… population=…` and `unauthenticated health -> 401`), the dict returned by `ModalLLM.generate_json(…, schema=…)` with exactly the keys `city` / `population`, the JSON-mode result or its `ExtractionError` text (recorded, not gated), the `ModalLLM ready: app=ep-tree-… served_model=…` line, and for 4c the SGLang image tag that actually ran; for 4d the GPU Modal picked.
 - [ ] Modal LLM really called (not a cache replay): for EACH of 4c and 4d, `## Log` pastes the `ModalLLM ready: app=ep-tree-… served_model=…` line of the run AND the Opik usage span of the same call showing `provider: modal`, `total_cost=0` and non-zero token counts, with one sentence stating whether the call went through Prefect (then also the `llm-extract-entities` task state `Completed`, never `Cached`) or was the direct client call (no cache in the path). `git log --oneline` of the branch shows #151's commit BEFORE any 4c/4d evidence.
-- [ ] HF token: exactly one of `HF token path (App): PROVEN (HF_TOKEN set in container: True, leak-check exit=0)` or `HF token path (App): NOT PROVEN LIVE — HF_TOKEN not set (container says False); unit evidence only`, plus the sentence that the endpoint `--custom-hf-token` half is unit-tested only. `grep -c "hf_[A-Za-z0-9]\{20,\}" tasks/141-voyage-4-and-modal-e2e-threshold-repin.md` -> 0.
-- [ ] 4e: `modal endpoint list --json` AND `modal app list --json` pasted in `## Log` show no `tree-*` endpoint and no live `ep-tree-*` app, and the line `baseline: <n> apps, <m> endpoints — all unchanged` (same ids, same states, no new version in any baseline `ep-*` app's history). Every `modal … stop` argv in this Log names a `tree-` / `ep-tree-` name.
-- [ ] Cost: per cycle the GPU and deploy-to-stop minutes; no cycle above 30 minutes (or the reason).
-- [ ] Every "SWE must verify" item left open by #138-#140, #142 and #143-#148 is answered in `## Log` with its source: GPU strings, the vLLM pin + CUDA base actually working, `VoyageQwen3BidirectionalEmbedModel` on that pin, the SGLang docker tag + `uv_pip_install` on it, LFM2 on SGLang, `speculative_model_path` optional, `json_object` on SGLang, async `get_url`, `modal endpoint stop` by name, `--name` -> app-name rule (H1), the two `list --json` key sets, whether `endpoint create` blocks, refusal on stdout vs stderr, Qwen3 prompt bytes, the wire width of each embedding seed and what each route answers to `dimensions`, `secrets=` on `@app.server`, local-vs-container `Secret.from_dict`, the engine subprocess inheriting `HF_TOKEN`.
-- [ ] `grep -c "memory-reset-embeddings" .agents/skills/run-pipelines-e2e/SKILL.md` >= 1, `grep -c "memory-deploy-model" …` >= 1, `grep -c "Routing" …` >= 1, `grep -c "HF_TOKEN" …` >= 1, `grep -c "DRY_RUN=yes" …` >= 1, `grep -c "TREE_MODAL__WARMUP_DEADLINE_S" …` >= 1, and `grep -c "deploy-embedding-model" …` == 0.
-- [ ] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green after any threshold, seed, pin or H1 change.
+- [x] HF token: exactly one of `HF token path (App): PROVEN (HF_TOKEN set in container: True, leak-check exit=0)` or `HF token path (App): NOT PROVEN LIVE — HF_TOKEN not set (container says False); unit evidence only`, plus the sentence that the endpoint `--custom-hf-token` half is unit-tested only. `grep -c "hf_[A-Za-z0-9]\{20,\}" tasks/141-voyage-4-and-modal-e2e-threshold-repin.md` -> 0.
+- [x] 4e: `modal endpoint list --json` AND `modal app list --json` pasted in `## Log` show no `tree-*` endpoint and no live `ep-tree-*` app, and the line `baseline: <n> apps, <m> endpoints — all unchanged` (same ids, same states, no new version in any baseline `ep-*` app's history). Every `modal … stop` argv in this Log names a `tree-` / `ep-tree-` name.
+- [x] Cost: per cycle the GPU and deploy-to-stop minutes; no cycle above 30 minutes (or the reason).
+- [x] Every "SWE must verify" item left open by #138-#140, #142 and #143-#148 is answered in `## Log` with its source: GPU strings, the vLLM pin + CUDA base actually working, `VoyageQwen3BidirectionalEmbedModel` on that pin, the SGLang docker tag + `uv_pip_install` on it, LFM2 on SGLang, `speculative_model_path` optional, `json_object` on SGLang, async `get_url`, `modal endpoint stop` by name, `--name` -> app-name rule (H1), the two `list --json` key sets, whether `endpoint create` blocks, refusal on stdout vs stderr, Qwen3 prompt bytes, the wire width of each embedding seed and what each route answers to `dimensions`, `secrets=` on `@app.server`, local-vs-container `Secret.from_dict`, the engine subprocess inheriting `HF_TOKEN`.
+- [x] `grep -c "memory-reset-embeddings" .agents/skills/run-pipelines-e2e/SKILL.md` >= 1, `grep -c "memory-deploy-model" …` >= 1, `grep -c "Routing" …` >= 1, `grep -c "HF_TOKEN" …` >= 1, `grep -c "DRY_RUN=yes" …` >= 1, `grep -c "TREE_MODAL__WARMUP_DEADLINE_S" …` >= 1, and `grep -c "deploy-embedding-model" …` == 0.
+- [x] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green after any threshold, seed, pin or H1 change.
 - [ ] [HUMAN] Confirms the hand-made `qwen3-embedding-0-6b` Dedicated Endpoint (overwritten by the accidental deploy of 2026-09-20) was restored in the dashboard and serves again — this task sent it no request. Says here if a smoke test of it is wanted.
 - [ ] [HUMAN] After merge: runs reset -> indexing -> clustering on the real local memory (`tree`, 2423 embedded rows) per the README, and decides whether to delete the stopped accidental apps `ep-voyage-4-nano` and `ep-qwen3-embedding-4b`.
 - [ ] [HUMAN] Confirms in the Modal dashboard (Endpoints AND Apps) that nothing of ours (`tree-*`) is billing, and removes `MODAL_EMBEDDING_API_KEY` from `.env` / `.env.prod`.
@@ -323,7 +416,7 @@ write `PA: glossary "Modal catalog" + ADR-009 need native_dimensions <old -> new
 
 ---
 
-Blocked by: #134, #135, #136, #137, #138, #139, #140, #142, #143, #144, #145, #146, #147, #148, #149, #150, #151, #152
+Blocked by: #153, #154, #155, #156, #157 (round 2; everything up to #152 is done)
 
 ## Log
 
@@ -436,3 +529,502 @@ Ready for implementation.
 ### [PA] 2026-09-20 19:30 — Re-grooming (two tasks inserted before this one; LLM cache caveat)
 
 - `Depends on` / `Blocked by` gain **#151** (LLM identity in the `llm-extract-entities` / `summarise-cluster` cache key — found by #148, commit 22734df) and **#152** (pre-warm leak + provider-gated seams, two deploy-script static guards, `MODAL_SERVER_NAME` — from #147's and #149's QA, commit d3a9fe2); those follow-ups had been "routed to #150", which stays its three embedding-text items. New order: … 150 -> 151 -> 152 -> 141. Added one Scope paragraph (LLM cache caveat) and one AC ("Modal LLM really called"): with #151 the replay is impossible by construction, and this task still proves from the `ModalLLM ready:` line + the `modal` usage span (`total_cost=0`) that the Modal server answered. Nothing else in this task changed.
+
+### [SWE] 2026-09-21 14:50 — Implementation (live e2e, PARTIAL — two blockers, two real bugs found)
+
+**Verdict up front.** Part 2 ran: all FOUR cycles were deployed, routed, probed and STOPPED under `tree-`
+names only; the human's four endpoints and two apps are untouched. Two of the four cycles FAILED on real,
+newly-discovered defects in the App path (not on the models) and one gated smoke test failed on a live
+model behaviour. **Part 1 never started** — the sandbox refused the `docker stop tree-prefect-worker` the
+task requires, and without it a dispatched run is a coin flip between this worktree and the human's real
+`tree` database. NOTHING was written to any database. No `FORCE=yes`, no `SERVING=`, no command against a
+name without the `tree-` prefix.
+
+**Files modified**
+- `.agents/skills/run-pipelines-e2e/SKILL.md` — new step 4 ("After changing the embedding model") and step 5
+  ("Models on Modal"), ending with the verbatim `DRY_RUN=yes` sentence; cleanup renumbered to 6.
+- `apps/memory/README.md` — one paragraph the live run showed was missing: an endpoint is `provisioning`
+  after `create` returns, and a smoke test started before it is `live` fails in `resolve_server_url`, not on
+  a 503 the poller would sit out.
+
+No code, config, threshold, catalog seed or test was changed: nothing this run measured justified a re-pin
+(Part 1 did not run) and both catalog facts it COULD check were already right.
+
+**Tests**
+- Unit: `make memory-tests` -> **3917 passed** in 56.85s, 0 failing.
+- `make memory-format-fix` / `lint-fix` / `format-check` / `lint-check` / `make pre-commit` — all exit 0
+  (`313 files already formatted`, `All checks passed!`, every hook Passed).
+- Integration: N/A — neither app has an integration suite (deliberate, see AGENTS.md).
+
+---
+
+#### BLOCKER 1 (human) — Part 1 could not be run: `docker stop tree-prefect-worker` was denied
+
+`docker-compose.yml:107-127` shows `tree-prefect-worker` runs `uv run python -m tree.orchestrator` — the SAME
+`serve()` as `make memory-serve-workflows` — with `MONGO_INITDB_DATABASE=tree` and the MAIN checkout baked
+into its image. Two serving processes register the same deployment names and BOTH poll for that deployment's
+runs, so a run dispatched by `make memory-run-pipeline` is a coin flip between my worktree (`tree_e2e_141`)
+and the human's real memory (`tree`, 2539 embedded rows). The task's step 0 therefore requires stopping it;
+the sandbox policy refused (`docker stop tree-prefect-worker` -> denied, "Interfere With Workloads"), and I
+did not work around it. **Part 1 was not started and no database was written.**
+
+Needed from the human: permission for `docker stop tree-prefect-worker` / `docker start tree-prefect-worker`,
+then a re-run of Part 1.
+
+**Isolation was nevertheless PROVEN before anything else** (the differential probe, read-only):
+
+```
+$ make memory-whoami
+6a8ea9579a7aeb13175955c8	paul@example.com	paul@example.com
+
+$ make memory-whoami MONGO_INITDB_DATABASE=tree_e2e_141
+Error: No current user is set. Run `signup` or `set-current` first.   (exit 1)
+```
+
+Different answers => the make COMMAND-LINE variable does reach pydantic-settings and switch the database,
+exactly as the PA verified at grooming.
+
+**The real database, read-only, BEFORE and AFTER the whole task:**
+
+| | before | after |
+|---|---|---|
+| `tree.memory` rows with a non-empty `embedding` | **2539** | **2539** |
+| `tree.documents` | **2922** | **2922** |
+
+UNCHANGED. Note the task expected 2423 — the human's memory has grown since grooming (2026-09-20); 2539 is
+today's number and the invariant that matters (before == after) holds.
+
+`tree_e2e_141` **was created and is LEFT IN PLACE, empty**: the read-only `whoami` probe above connects and
+bootstraps indexes, which creates the 7 collections `knowledge_graph_meta_state, users, memory,
+memory_clusters, extraction_rejections, extraction_dropped_fields, documents` — **0 documents in each,
+`dataSize` 0 bytes**. `db.getSiblingDB("tree_e2e_141").dropDatabase()` was DENIED by the sandbox
+("Cloud Storage Mass Delete"), so the human should drop it (it costs nothing where it is).
+
+#### BLOCKER 2 (PA) — the deploy spec cannot cross into a container intact. ADR-009 §3's transport is broken for any quoted value.
+
+Found by 4b, diagnosed byte-exactly, NOT fixed (choosing a transport is an architectural decision and
+ADR-009 §3 names the current one: "the resolved entry crosses into the container as ONE JSON env var baked
+into the image").
+
+The container crash-loops at module import:
+
+```
+File "/root/modal_vllm_embedding.py", line 98, in <module>
+  SPEC = json.loads(os.environ["EMBEDDING_DEPLOY_SPEC"])
+json.decoder.JSONDecodeError: Expecting ',' delimiter: line 1 column 331 (char 330)
+Runner failed with exception: JSONDecodeError("Expecting ',' delimiter: line 1 column 331 (char 330)")
+```
+
+`deploy/modal_vllm_embedding.py:113` bakes the spec with `.env({… DEPLOY_SPEC_ENV: json.dumps(SPEC)})`.
+`modal/_image.py:2821` (modal 1.5.5) renders that as a **Dockerfile** directive
+`ENV {key}={shlex.quote(val)}`. `shlex.quote` is POSIX-SHELL quoting, but a Dockerfile `ENV` is parsed by
+Docker, whose escape character is `\` — so every `\"` inside the value is UNESCAPED to `"` and the JSON is
+destroyed. Proof, locally:
+
+```
+json.dumps(build_deploy_spec("voyageai/voyage-4-nano").model_dump())      -> parses OK
+  the same string with \" -> "   -> Expecting ',' delimiter: line 1 column 331 (char 330)   <- the container's error
+  the same string with \" -> \\" -> Expecting ',' delimiter: line 1 column 333 (char 332)
+```
+
+Only the stripped variant matches, character for character.
+
+**Scope of the bug:** any entry whose `extra_server_args` carries a value containing a quote — i.e. exactly
+the compact JSON ADR-009 §3 prescribes: `--pooler-config '{"pooling_type":"MEAN"}'` and
+`--hf-overrides '{"architectures":["VoyageQwen3BidirectionalEmbedModel"]}'`. The CONTROL that isolates it:
+`LiquidAI/LFM2.5-350M`'s spec has no quoted value, is byte-identical after the same unescaping, and its
+container parsed the spec fine (it died later, of an unrelated cause — blocker 3).
+
+**PA: ADR-009 §3 needs a decision on the deploy-spec transport.** I did not pick. The options:
+- **A. base64 the spec** into the env var, decode in the container. Immune to every quoting layer; changes
+  ADR-009 §3's sentence from "ONE JSON env var" to "one base64 env var" and makes the layer un-greppable.
+- **B. pre-escape the backslashes** before `.env()` so Docker's unescaping restores the JSON. Keeps the ADR
+  sentence literally true; depends on a Dockerfile unescaping layer we would be inferring, not reading.
+- **C. a non-env transport** (e.g. a file added to the image). Most explicit, largest change.
+
+**This defeats three "#141 verifies live" items by construction** — vLLM 0.26.0 on the CUDA 13.0.2 base
+(#146 B.3, #142), `VoyageQwen3BidirectionalEmbedModel` on that pin, and the container half of
+`Secret.from_dict` (#142 (b)) — none can be verified until the transport is fixed, and no amount of retrying
+4b changes that.
+
+#### BLOCKER 3 (PA) — the SGLang App cannot mount the shared weights Volume on its own image
+
+Found by 4c, also NOT fixed (the mount path is a design choice; ADR-009 fixes the Volume, not the path).
+
+```
+Runner failed with exception: cannot mount volume on non-empty path: "/root/.cache/huggingface"
+Function modal_sglang_llm.Server is crash-looping: containers are repeatedly failing to start.
+```
+
+Both App scripts mount `huggingface-cache` at `/root/.cache/huggingface`
+(`deploy/modal_sglang_llm.py:164-166`, `deploy/modal_vllm_embedding.py:134-136`). The official
+`lmsysorg/sglang:v0.5.18` image already has content there, so Modal refuses the mount; the
+`nvidia/cuda:13.0.2-devel-ubuntu22.04` base does not, which is why only the SGLang script hits it.
+The IMAGE itself is fine — `lmsysorg/sglang:v0.5.18` + `uv_pip_install(autoinference-utils==0.2.6)` built
+and deployed (`Built image im-jtjusQsLZ25CsaavQuZCeo in 5.93s`, `✓ App deployed in 8.853s!`); it is the
+CONTAINER that never starts.
+
+**PA: ADR-009 §3 (App scripts) needs the shared-cache mount path decided** — e.g. mount at `/cache/huggingface`
+and set `HF_HOME` to it (in the SGLang script only, or both for symmetry). Consequence: LFM2 on SGLang, the
+in-container strict-JSON warm-up, `json_object` on SGLang and the SGLang half of the token path stay
+UNVERIFIED until then.
+
+---
+
+### Part 2 — the four Modal cycles
+
+#### 4.0 Baseline (read-only, BEFORE the first deploy)
+
+`modal endpoint list --json` key set: `name, endpoint_id, status, created_at, created_by`
+`modal app list --json` key set: `app_id, description, state, tasks, created_at, stopped_at`
+(both confirm #143's claim, read off the live CLI on modal 1.5.5)
+
+Endpoints — 4, all `status: live`, all `created_by: p-b-iusztin`:
+
+| name | endpoint_id | status | created_at |
+|---|---|---|---|
+| qwen3-embedding-8b | ep-UDN0woLFq8dwNwMoHqK3A1 | live | 2026-09-20 11:05:47+03:00 |
+| qwen3-embedding-0-6b | ep-AFm6anFYXobWj3ba0MxKOw | live | 2026-09-20 10:59:56+03:00 |
+| gpt-oss-120b | ep-AZAaUPQk88Ko2i9xx5olsc | live | 2026-09-15 20:01:50+03:00 |
+| qwen3-6-35b-a3b-fp8 | ep-nCsyPubmp2JsVUMkfPQR6E | live | 2026-09-14 13:22:55+03:00 |
+
+Apps — 2, both `state: deployed`, `tasks: 0`, `stopped_at: null`:
+
+| app_id | description | state | created_at |
+|---|---|---|---|
+| ap-opyKC4h4Z7RVMV3KaFbi8M | decode-sandbox-prod | deployed | 2026-09-09 15:09:03+03:00 |
+| ap-v7ZtWBI4HIgrCiBF3IXZpI | decode-sandbox-local | deployed | 2026-09-11 00:20:41+03:00 |
+
+No baseline app name starts with `ep-`, so no `modal app history` of a non-`tree` `ep-*` app was needed. No
+`tree-*` endpoint and no `ep-tree-*` app existed. **FINDING:** `modal app list` (table AND `--json`) lists
+NEITHER endpoint-backed `ep-*` apps NOR stopped apps — the human's four endpoints have apps that never appear
+there, and neither do the two stopped accidental apps `ep-voyage-4-nano` / `ep-qwen3-embedding-4b` (so I can
+say nothing about them; they are invisible to this CLI surface). That is precisely why the existence guard
+reads the ENDPOINT list first; its app-list leg can never see a live endpoint's app.
+
+#### The four `Routing …` lines (no `SERVING=`, no `FORCE=yes` anywhere in this run)
+
+```
+Routing Qwen/Qwen3-Embedding-0.6B: Modal accepted it → Dedicated endpoint tree-qwen3-embedding-0-6b
+Routing voyageai/voyage-4-nano: not in Modal's endpoint catalog, no catalog base → vLLM App
+Routing LiquidAI/LFM2.5-350M: not in Modal's endpoint catalog, no catalog base → SGLang App
+Routing Qwen/Qwen3.5-0.8B: Modal accepted it → Dedicated endpoint tree-qwen3-5-0-8b
+```
+
+Modal's refusal, verbatim (first line of the Rich `╭─ Error ─╮` box), for the two App cycles:
+
+```
+'voyageai/voyage-4-nano' is not available for dedicated Endpoints.
+'LiquidAI/LFM2.5-350M' is not available for dedicated Endpoints.
+```
+
+followed by `Models available for dedicated Endpoints:` and 44 bullets (which DID include
+`Qwen/Qwen3-Embedding-0.6B`, `Qwen/Qwen3-Embedding-8B`, `Qwen/Qwen3.5-0.8B` and `google/gemma-3-1b-it`).
+Nothing was created by either refusal. **Stream: stderr** — `modal/__main__.py:main` catches the exception
+and calls `OutputManager.get().print_error(content)`, which at `modal/_output/rich.py:340-346` prints the
+`Panel(title="Error")` on `self._stderr_console`, built at `:264` as `_make_console(stderr=True)`. This is
+why `_log_modal_output` must join BOTH captured streams — it does. #145's two substrings match today's live
+text unchanged.
+
+Every cycle was DRY-RUN first and the name confirmed before the real command:
+`tree-qwen3-embedding-0-6b`, `tree-voyage-4-nano`, `tree-lfm2-5-350m`, `tree-qwen3-5-0-8b` — and nothing else
+was ever created.
+
+#### 4a — `Qwen/Qwen3-Embedding-0.6B` -> Dedicated endpoint — **PASS**
+
+`modal: ✓ Endpoint 'tree-qwen3-embedding-0-6b' (ep-cdhIRjCpSKKpCyOpUxMNg7) was created and started provisioning.`
+`--routing-region eu-west` ACCEPTED. **`modal endpoint create` does NOT block**: it returned in 4 s with
+`status: provisioning`; `provisioning -> live` took **2m15s** (bounded read-only poll on
+`modal endpoint list --json`, 6 polls).
+
+Smoke test:
+
+```
+Warming https://p-b-iusztin--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct/health — polling for up to 600s
+Warm: https://…/health answered HTTP 200 after 0s
+health 200 after 0.5s
+served model id: Qwen/Qwen3-Embedding-0.6B
+3 embeddings, 1024 dims
+sanity: cos(query, relevant)=0.78 > cos(query, unrelated)=0.09
+unauthenticated health -> 401
+Smoke test passed
+```
+
+The two listings WHILE it was up.
+
+`modal endpoint list --json` — ours added, the human's four untouched and still `live`:
+
+```
+tree-qwen3-embedding-0-6b  ep-cdhIRjCpSKKpCyOpUxMNg7  provisioning
+qwen3-embedding-8b         ep-UDN0woLFq8dwNwMoHqK3A1  live
+qwen3-embedding-0-6b       ep-AFm6anFYXobWj3ba0MxKOw  live
+gpt-oss-120b               ep-AZAaUPQk88Ko2i9xx5olsc  live
+qwen3-6-35b-a3b-fp8        ep-nCsyPubmp2JsVUMkfPQR6E  live
+```
+
+`modal app list` (both the table and `--json`) — only the two baseline apps:
+
+```
+ap-opyKC4h4Z7RVMV3KaFbi8M  decode-sandbox-prod   deployed
+ap-v7ZtWBI4HIgrCiBF3IXZpI  decode-sandbox-local  deployed
+```
+
+`modal app list` does NOT show `ep-tree-qwen3-embedding-0-6b`, and this AC's clause expecting it rests on a
+premise this run disproved: the command lists no endpoint-backed `ep-*` app at all — not ours, not any of
+the human's four (see 4.0). The app's existence under the derived name is proven instead by
+`modal app history ep-tree-qwen3-embedding-0-6b --json`, which RESOLVES that name, plus the URL
+`resolve_server_url` returned for it. That is strictly stronger evidence than an `app list` row would have
+been.
+
+Wire probe (two raw `POST /v1/embeddings`, one text, nothing committed):
+
+`wire: Qwen/Qwen3-Embedding-0.6B via endpoint — no dimensions -> 1024; dimensions=512 -> HTTP 400 "Model 'Qwen/Qwen3-Embedding-0.6B' does not support Matryoshka embeddings; dimensions must be unset (received dimensions=512)."`
+
+GATE PASSES: the catalog's `native_dimensions: 1024` is the measured wire width — **no catalog fix needed**.
+The 400 is the complete answer ADR-009 §3 predicted (Modal's 0.6B recipe sets no `is_matryoshka`), and the
+client never sends `dimensions`.
+
+Guard, live — a SECOND deploy while it was up:
+
+```
+Refusing to deploy Qwen/Qwen3-Embedding-0.6B via endpoint: 'tree-qwen3-embedding-0-6b' already exists on Modal as a Dedicated endpoint. Stop it first (make memory-deploy-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B) or pass FORCE=yes to deploy over it.
+```
+
+`scripts/modal_model.py deploy` exit code **3** (via `make`: `make[1]: *** [deploy-model] Error 3`). It cost
+one read-only `modal endpoint list --json` and no Modal mutation.
+
+(The string `FORCE=yes` occurs in this task file only in the Scope/AC text and inside quoted Modal / guard
+messages such as the refusal above — **no command of this run carried it**, and none carried `SERVING=`
+either.)
+
+**H1: TRUE.** The app IS `ep-tree-qwen3-embedding-0-6b` —
+`modal app history ep-tree-qwen3-embedding-0-6b --json` -> `v1` 2026-09-21 13:56:03+03:00 and `v2` 13:56:10+03:00,
+`deployed_by: p-b-iusztin`, client `1.5.1.dev13` (Modal itself deployed v2 seven seconds later, while
+provisioning — no command of ours ran between 13:56:03 and 13:56:10) — and its server class is `Server`:
+`resolve_server_url` = `modal.Server.from_name("ep-tree-qwen3-embedding-0-6b", "Server")` resolved
+`https://p-b-iusztin--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct`. No fix (i) or (ii) was needed.
+
+Stop: `modal endpoint stop -y tree-qwen3-embedding-0-6b` ->
+`modal: ✓ Stopped Endpoint 'tree-qwen3-embedding-0-6b' in environment 'main' (ID: ep-cdhIRjCpSKKpCyOpUxMNg7).`
+First try, exit 0 — **`modal endpoint stop` accepts the NAME**.
+
+#### 4b — `voyageai/voyage-4-nano` -> vLLM App — **FAIL (blocker 2)**
+
+Routing and refusal as above; `Running: modal deploy deploy/modal_vllm_embedding.py` in the SAME command.
+Image: only `Step 0: FROM base`, `Step 1: ENV HF_XET_HIGH_PERFORMANCE=1`, `Step 2: ENV EMBEDDING_DEPLOY_SPEC=…`
+were built (6.59 s) — the CUDA 13.0.2 + `vllm==0.26.0` + `autoinference-utils==0.2.6` layers came from Modal's
+cache, so **this run did not rebuild them and cannot claim they work**. `✓ App deployed in 10.320s!`,
+`✓ Created function Server.`, endpoint `https://p-b-iusztin--ep-tree-voyage-4-nano-server.eu-west.modal.direct`.
+
+`-test` polled `Still cold (HTTP 503)` from 0s to 420s and never went warm; `modal app logs
+ep-tree-voyage-4-nano` showed the container crash-looping (7 crashes in 100 s of log) with the
+`JSONDecodeError` of blocker 2. I stopped it at 420 s rather than burn the full 600 s deadline on a crash loop.
+
+NOT verified in 4b, therefore: the 2048-d wire width, the `dimensions` answer on this route, the
+`3 embeddings, 2048 dims` / `truncated 2048 -> 1024 dims client-side` / `sanity@1024` smoke lines, the
+shared-space cosines against the `voyage-4` API, the cold-again proof, and the `HF_TOKEN set in container:`
+line (the crash is AT module import, before any container logging).
+
+Stop, path-blind, worked exactly as designed:
+
+```
+Running: modal endpoint stop -y tree-voyage-4-nano
+modal: Error: Endpoint 'tree-voyage-4-nano' not found in environment 'main'.
+Not a Dedicated endpoint (Error: Endpoint 'tree-voyage-4-nano' not found in environment 'main'.) — stopping the App instead.
+Running: modal app stop -y ep-tree-voyage-4-nano
+```
+
+#### 4c — `LiquidAI/LFM2.5-350M` -> SGLang App — **FAIL (blocker 3)**
+
+Routing and refusal as above; `Running: modal deploy deploy/modal_sglang_llm.py`;
+`Built image im-jtjusQsLZ25CsaavQuZCeo in 5.93s`; `✓ App deployed in 8.853s!`. The `LLM_DEPLOY_SPEC` parsed
+fine in the container (no quoted value -> blocker 2 does not apply), which is what isolates blocker 2 to
+quoted values. `-test` polled `Still cold (HTTP 503)` to 301 s while the container crash-looped on the
+volume mount. Stopped with the same path-blind `Not a Dedicated endpoint (…) — stopping the App instead.`
+
+The six chat smoke lines, the `ModalLLM` strict-schema and JSON-mode calls, and the SGLang image tag
+*actually running* are therefore NOT on record for 4c.
+
+#### 4d — `Qwen/Qwen3.5-0.8B` -> Dedicated endpoint — **deploy/route/stop PASS, chat smoke test FAIL (a live model finding)**
+
+`modal: ✓ Endpoint 'tree-qwen3-5-0-8b' (ep-9kO3qTOKBybx76R5GBkmNB) was created and started provisioning.`
+`provisioning -> live` took **9m25s** (28 polls) — four times the embedding endpoint's, which is the number
+the README paragraph I added now records. **GPU: Modal's choice and NOT exposed by the CLI** —
+`modal endpoint list --json` has no GPU column on modal 1.5.5, and a managed recipe's hardware is a
+dashboard-only fact (ADR-009 already says so). NOT RECORDED, and not recordable without the dashboard.
+
+```
+Warm: https://p-b-iusztin--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health answered HTTP 200 after 2s
+health 200 after 1.6s
+served model id: Qwen/Qwen3.5-0.8B
+the chat completion carried no content — the served model answered with an empty message
+```
+
+exit 1. The strict `city_facts` schema + `max_tokens=256` yielded an EMPTY `message.content`: consistent with
+a thinking model spending its whole budget before emitting the JSON. This is the "what would justify
+upgrading" evidence ADR-009 §10 asked for — per-entry `chat_template_kwargs` / `max_tokens` is the knob it
+names, and this is the first live case for it.
+
+The `ModalLLM` client check (ad-hoc, nothing committed) got as far as:
+
+```
+ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server served_model=Qwen/Qwen3.5-0.8B url=https://p-b-iusztin--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/v1
+Retrying request to /chat/completions in 0.452048 seconds
+```
+
+and then HUNG for 13 minutes without returning — `ModalLLM.generate_json` sends no `max_tokens`, so the same
+thinking loop runs unbounded to the context limit. I killed it at the 30-minute cycle cap (23m23s
+deploy-to-stop) and stopped the endpoint. So: the `ModalLLM ready:` line IS on record (and it went through
+NO Prefect, so no `llm-extract-entities` cache sat in its path — the completion could only have come from
+the Modal server), but there is **no returned dict, no JSON-mode result and no Opik usage span**: the call
+never completed. `git log --oneline` confirms #151 (`32a296d`, "LLM identity in the cache key of
+llm-extract-entities and summarise-cluster") is on this branch BEFORE any of this evidence.
+
+Stop: `modal: ✓ Stopped Endpoint 'tree-qwen3-5-0-8b' in environment 'main' (ID: ep-9kO3qTOKBybx76R5GBkmNB).`
+First try, exit 0.
+
+#### Cold start — only TWO `Warm:` lines exist, and here is the arithmetic
+
+| cycle | `Warm:` line | preceded by `Still cold`? |
+|---|---|---|
+| 4a | `Warm: … answered HTTP 200 after 0s` | no — the endpoint was already warm because I waited for `live` before testing |
+| 4b | none | 40+ `Still cold (HTTP 503) … 0s..420s`, never warm (crash loop) |
+| 4c | none | 20+ `Still cold (HTTP 503) … 0s..301s`, never warm (crash loop) |
+| 4d | `Warm: … answered HTTP 200 after 2s` | no — same reason as 4a |
+
+The poller itself is proven working in all four (the `Still cold (HTTP 5xx) at <url> — Ns/600s` series in 4b
+and 4c is exactly ADR-009 §11's contract, including the 5 s x 1.5 backoff capped at 15 s, visible in the
+`0s, 6s, 13s, 25s, 40s, 55s, 70s, 86s, 101s, 116s, 131s…` stamps). What is NOT on record is four
+`Warm:` lines, and no cold-again proof was possible (it lives on the vLLM App, which never served).
+
+#### HF token
+
+`HF token path (App): NOT PROVEN LIVE — HF_TOKEN not set (container says False); unit evidence only`
+
+`settings.hf_token` is EMPTY — checked value-free before anything else (the task's own snippet with no file
+arguments: exit 2 = no token configured). The leak check over every captured file
+(`4a-deploy.log`, `4b-deploy.log`, `4b-app.log`, `4c-deploy.log`, `4c-app.log`, `4c-app2.log`,
+`4d-deploy.log`) prints `leak-check exit=2` — no token configured, so nothing could leak. The check is
+vacuous for the same reason on the files not listed (the `-test`, wire-probe and client captures): with no
+token configured, no file can contain one. Strictly, the
+container never reached the point of logging `HF_TOKEN set in container: …` either (blockers 2 and 3), so the
+App half is doubly unproven. The ENDPOINT half of the token path (`--custom-hf-token ***` on a custom-weights
+create) is **unit-tested only** — no selected cycle is a custom-weights create (#139 `TestHfToken`,
+#145 `TestRouter` case 4). The conditional [HUMAN] criterion below therefore fires.
+
+#### 4e — nothing of ours left running, nothing of theirs changed
+
+Final `modal endpoint list --json` — the four baseline endpoints, same ids, all still `live`, and **no
+`tree-*` endpoint**:
+
+```
+qwen3-embedding-8b    ep-UDN0woLFq8dwNwMoHqK3A1  live
+qwen3-embedding-0-6b  ep-AFm6anFYXobWj3ba0MxKOw  live
+gpt-oss-120b          ep-AZAaUPQk88Ko2i9xx5olsc  live
+qwen3-6-35b-a3b-fp8   ep-nCsyPubmp2JsVUMkfPQR6E  live
+```
+
+Final `modal app list --json` — the two baseline apps unchanged (same ids, `deployed`, `tasks: 0`,
+`stopped_at: null`) plus **two new rows, both ours, both `stopped`**:
+
+```
+ap-opyKC4h4Z7RVMV3KaFbi8M  decode-sandbox-prod   deployed  stopped_at=null
+ap-v7ZtWBI4HIgrCiBF3IXZpI  decode-sandbox-local  deployed  stopped_at=null
+ap-aYgIDQe2awiumbVi1WwyIO  ep-tree-lfm2-5-350m   stopped   stopped_at=2026-09-21 14:21:57+03:00
+ap-MYMUtuVpim0sByBqAHwd29  ep-tree-voyage-4-nano stopped   stopped_at=2026-09-21 14:10:18+03:00
+```
+
+**`baseline: 2 apps, 4 endpoints — all unchanged`** (same ids, same states; the only additions are the two
+STOPPED `ep-tree-*` apps this run created, which are not live and not billing). Every `modal … stop` argv in
+this Log names a `tree-` / `ep-tree-` name and nothing else. The orphaned Modal secret
+`vllm-embedding-api-key` and the old app `vllm-embedding-models` are not visible in `modal app list --json`
+(which hides stopped apps) — the human should check the dashboard.
+
+#### Cost — per cycle, GPU and deploy-to-stop
+
+| cycle | model | route | GPU | deploy -> stop | outcome |
+|---|---|---|---|---|---|
+| 4a | Qwen/Qwen3-Embedding-0.6B | Dedicated endpoint | Modal's choice (not exposed by the CLI) | 10:55:59Z -> 10:59:34Z = **3m35s** | PASS |
+| 4b | voyageai/voyage-4-nano | vLLM App | A10 (catalog) | 10:59:57Z -> 11:10:18Z = **10m21s** | FAIL (spec transport) |
+| 4c | LiquidAI/LFM2.5-350M | SGLang App | A10 (catalog) | 11:12:34Z -> 11:21:57Z = **9m23s** | FAIL (volume mount) |
+| 4d | Qwen/Qwen3.5-0.8B | Dedicated endpoint | Modal's choice (not exposed by the CLI) | 11:22:22Z -> 11:45:45Z = **23m23s** | deploy/route/stop PASS, chat smoke FAIL |
+
+No cycle exceeded the 30-minute cap; ONE model was live at a time; every cycle was stopped, success or
+failure. Both crash-looping Apps were stopped as soon as the loop was recognised rather than at the deadline.
+
+#### Every "SWE must verify" / "#141 verifies live" item, answered
+
+| item | verdict | source |
+|---|---|---|
+| GPU strings (`A10`, no `A10G`) | **OK** for the Apps — `gpu: A10` in both deploy specs, `✓ Created function Server.` with no GPU error | 4b/4c deploy logs |
+| the GPU a managed endpoint picks | **NOT RECORDABLE via CLI** — `modal endpoint list --json` has no GPU column on modal 1.5.5; dashboard-only | 4a/4d listings |
+| vLLM `0.26.0` pin + CUDA 13.0.2 base actually working | **NOT VERIFIED** — layers came from Modal's cache and the container never reached the engine (blocker 2) | 4b app log |
+| `VoyageQwen3BidirectionalEmbedModel` on that pin | **NOT VERIFIED** (same) | 4b app log |
+| SGLang docker tag + `uv_pip_install` on it | **IMAGE OK** (`lmsysorg/sglang:v0.5.18` + `autoinference-utils==0.2.6` built and deployed); **sgl-kernel / sm_86 NOT VERIFIED** — the container never started (blocker 3) | 4c deploy + app logs |
+| LFM2 on SGLang | **NOT VERIFIED** (blocker 3) | 4c app log |
+| `speculative_model_path` optional | not exercised live; unit evidence only (#147) | — |
+| `json_object` on SGLang | **NOT VERIFIED** (blocker 3) | — |
+| async `get_url` | **VERIFIED** — `resolve_server_url` used `get_url.aio()` and returned the URL without blocking in 4a and 4d | 4a smoke, 4d `ModalLLM ready:` |
+| `modal endpoint stop` by NAME | **VERIFIED** — `modal endpoint stop -y tree-qwen3-embedding-0-6b` / `-y tree-qwen3-5-0-8b`, both `✓ Stopped Endpoint … (ID: ep-…)`, first try | 4a/4d stop logs |
+| `--name` -> app-name rule (H1) | **VERIFIED TRUE** — app `ep-tree-qwen3-embedding-0-6b`, class `Server` | `modal app history` + resolved URL |
+| the two `list --json` key sets | **VERIFIED** — endpoints `name, endpoint_id, status, created_at, created_by`; apps `app_id, description, state, tasks, created_at, stopped_at` | 4.0 baseline |
+| whether `endpoint create` blocks | **VERIFIED: it does NOT** — returns in ~4 s with `status: provisioning`; `live` after 2m15s (0.6B) / 9m25s (0.8B) | 4a/4d |
+| refusal on stdout vs stderr | **stderr** — `modal/__main__.py:main` -> `print_error` -> `modal/_output/rich.py:340-346`, `_stderr_console` (`:264`) | pinned client source |
+| Qwen3 prompt bytes | sent as the catalog spells them; ranking held (0.78 > 0.09). Nothing ASSERTS the bytes — ADR-009 Consequences already says so | 4a smoke |
+| wire width per embedding seed + the `dimensions` answer | **Qwen3 endpoint: 1024 native; `dimensions=512` -> HTTP 400 "does not support Matryoshka embeddings".** voyage-4-nano: **NOT MEASURED** (blocker 2) | 4a wire probe |
+| `secrets=` on `@app.server` | **ACCEPTED** — both App deploys created the Server function with `secrets=[HF_SECRET]`, no error | 4b/4c deploy logs |
+| local-vs-container `Secret.from_dict` | local half deployed; **container half NOT PROVEN LIVE** (blockers 2/3, and no token configured) | — |
+| engine subprocess inheriting `HF_TOKEN` | **NOT PROVEN LIVE** — no engine ever started, no token configured | — |
+| `--routing-region eu-west` accepted | **VERIFIED** — both endpoint creates succeeded with it | 4a/4d deploy logs |
+| `modal app list` sees an endpoint's app | **NO** — it lists neither endpoint-backed `ep-*` apps nor stopped apps. The guard's endpoint-list leg is what covers that case | 4.0 + 4a listings |
+
+#### Docs (step 5)
+
+`.agents/skills/run-pipelines-e2e/SKILL.md` gained step 4 (After changing the embedding model — dry run,
+`CONFIRM=yes`, reset -> indexing -> clustering) and step 5 (Models on Modal — the three targets for both
+kinds, the one `Routing …` line, `SERVING=` as an escape hatch only, always stop after, `HF_TOKEN` only for
+private/gated repos, the poller and `TREE_MODAL__WARMUP_DEADLINE_S`), ending with the verbatim `DRY_RUN=yes`
+sentence the task specifies. Greps: `memory-reset-embeddings` 2, `memory-deploy-model` 4, `Routing` 1,
+`HF_TOKEN` 1, `DRY_RUN=yes` 1, `TREE_MODAL__WARMUP_DEADLINE_S` 1, `deploy-embedding-model` **0**.
+
+`apps/memory/README.md` gained the one paragraph this run proved was missing (endpoint `provisioning` vs
+`live`, with the two measured times). Everything else in its Modal sections still matches what 4a/4d showed,
+so nothing was removed. I deliberately did NOT rewrite the App-route sections around blockers 2 and 3: the
+PA's decision will change that code, and a caveat today would be a wrong sentence tomorrow.
+
+**Notes for the Tester and the PA**
+- NOT RUN — Part 1 in full (isolation proof and both `tree` counts done; nothing else), because
+  `docker stop tree-prefect-worker` was refused by the sandbox. Needs the human.
+- NOT RUN — the threshold re-pin, so `configs/default.yaml`, the Pydantic defaults, their tests and
+  `frozen_config.yaml` are untouched and `min_vector_score` stays 0.75 on voyage-3.5 evidence.
+- `tree_e2e_141` exists and is EMPTY (7 collections, 0 documents, 0 bytes); the drop was refused by the
+  sandbox. Safe to drop by hand.
+- Three escalations are above: blocker 1 (human, permission), blockers 2 and 3 (PA, ADR-009 §3).
+- Nothing was committed — the Tester goes first.
+
+### [PA] 2026-09-21 16:10 — Re-grooming after round 1 (five fix tasks; round 2 = only what is unproven)
+
+**What round 1 proved and what it could not**
+- PROVEN, not re-run: baseline/4e method, cycle 4a in full (H1 TRUE, guard exit 3, stop by name, `eu-west`, wire 1024 + the 400 on `dimensions`), all four `Routing …` lines, refusals on STDERR (already joined since #147), `modal endpoint create` is asynchronous, the docs greps.
+- FAILED on three real defects + one missing permission -> five tasks, order **153 -> 154 -> 155 -> 156 -> 157 -> 141 round 2**:
+  - #153 (4b) the deploy spec crosses as BASE64 — the raw JSON lost every `\"` in the image build, so the default embedding model crashed at import.
+  - #154 (4c) the weights Volume mounts at `/cache/huggingface` with `HF_HOME` + `HF_HUB_CACHE`, both scripts — the SGLang image ships a non-empty `/root/.cache/huggingface`.
+  - #155 (4d) `modal.request_timeout_s: 300`, `max_retries=0`, and a TIMEOUT is not a cold answer (no re-warm loop) — the 13-minute hang.
+  - #156 (4d) per-LLM-entry `max_tokens` + `chat_template_kwargs`, one helper for client and smoke test; `Qwen/Qwen3.5-0.8B` seeded `enable_thinking: false`.
+  - #157 `-test` waits while our endpoint is `provisioning` (1800 s, fail-open); `deploy` says so; the guard's endpoint-first short-circuit pinned.
+- F4 (`modal app list` sees neither an endpoint's app nor long-stopped apps): analysed, NO open collision class — the endpoint list is read first and is what protects; recorded in ADR-009 Consequences, pinned in #157.
+
+**Decisions taken here (ADR-009 revision 6; glossary rows "Modal catalog" and "Warm gate" updated)**
+- Part 1 no longer needs the human's container stopped: a throwaway Prefect server on port 4201 + `PREFECT_API_URL` as a third make command-line variable isolates the worktree's runner completely, with zero code change. A deployment-name suffix was rejected — `run_deployment` names are spelled in 5+ modules. The `[HUMAN]` stop/confirm/restart line remains only as the fallback.
+- 4d gets an explicit three-rung ladder inside one live cycle (the knobs are request fields — no redeploy), with `google/gemma-3-1b-it` as the only non-thinking small fallback in Modal's list.
+- Two clauses of round 1's criteria are accepted as unrecordable (endpoint GPU; `modal app list` row of an endpoint app) and replaced as written in the amendment.
+- For the human: drop the empty `tree_e2e_141` database (agents were denied).
+
+**Answers to the SWE's `PA:` escalations**
+- BLOCKER 2 -> option A (base64), #153. BLOCKER 3 -> `/cache/huggingface` + `HF_HOME`, both scripts, #154. BLOCKER 1 -> no permission needed, see R2-Part 1.
+- The README paragraph round 1 added ("Watch that column, then run `-test`") is rewritten by #157, not here.
+
+**Dependencies**
+- #153-#157.
+
+Ready for round 2 once #157 is merged.

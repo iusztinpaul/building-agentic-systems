@@ -693,6 +693,14 @@ outlast that: raise the budget for one command, without editing a file, with
 A 401/403 (wrong **Proxy token**) or a 404 is never waited out — it fails after
 one poll.
 
+A **Dedicated endpoint** has one wait the poller cannot cover: `modal endpoint
+create` returns in a few seconds while the endpoint is still `provisioning`
+(measured 2026-09-21: 2m15s for `Qwen/Qwen3-Embedding-0.6B`, 9m25s for
+`Qwen/Qwen3.5-0.8B`). Until it reports `live` in `modal endpoint list --json`
+there is no server to resolve, so a smoke test started too early fails in
+`resolve_server_url` — not on a 503 the poller would sit out. Watch that
+column, then run `-test`.
+
 **4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
 `models.resolution_embedding`) in `configs/default.yaml` to
 `{provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`. The
