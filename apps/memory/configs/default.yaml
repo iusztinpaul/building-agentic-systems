@@ -265,6 +265,13 @@ modal:
     # (HF API, 2026-09-20) while this one is ungated Apache-2.0.
     - repo_id: Qwen/Qwen3.5-0.8B
       revision: 2fc06364715b967f1860aea9cf38778875588b17 # HF sha of `main`, 2026-09-20
+      # The two CLIENT-side request knobs (ADR-009 §10): sent by ModalLLM and
+      # by the chat smoke test from one helper, identical on both Serving
+      # paths, and changing either needs no redeploy.
+      max_tokens: 4096
+      chat_template_kwargs:
+        # a THINKING model: with thinking on it spent 256 tokens reasoning and answered nothing (tasks/141 round 1)
+        enable_thinking: false
     # NOT in Modal's catalog (arch Lfm2ForCausalLM; its base
     # LiquidAI/LFM2.5-350M-Base is not either) -> SGLang App.
     - repo_id: LiquidAI/LFM2.5-350M
@@ -274,6 +281,7 @@ modal:
       cpu: 4
       memory_mb: 16384
       max_model_len: 32768 # the card's context is 128000; 32K keeps the KV cache small on one A10
+      max_tokens: 4096 # bounds a runaway constrained-JSON generation on a 32K context
 
 observability:
   enabled: true

@@ -1,3 +1,4 @@
+import datetime
 import json
 import textwrap
 
@@ -1103,6 +1104,11 @@ class TestModalCatalog:
         assert qwen_llm.n_gpus == 1
         assert qwen_llm.max_model_len is None
         assert qwen_llm.app_name == "ep-tree-qwen3-5-0-8b"
+        # A THINKING model: live, with thinking ON, it spent the smoke test's
+        # 256-token budget reasoning and answered with empty `content`
+        # (tasks/141 round 1). Both knobs are CLIENT-side request fields.
+        assert qwen_llm.max_tokens == 4096
+        assert qwen_llm.chat_template_kwargs == {"enable_thinking": False}
 
         assert lfm.kind == "llm"
         assert lfm.revision == "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
@@ -1111,6 +1117,10 @@ class TestModalCatalog:
         # The card's context is 128000; 32K keeps the KV cache small on one A10.
         assert lfm.max_model_len == 32768
         assert lfm.app_name == "ep-tree-lfm2-5-350m"
+        # Not a thinking model: a budget that bounds a runaway constrained-JSON
+        # generation, and no chat-template kwarg at all.
+        assert lfm.max_tokens == 4096
+        assert lfm.chat_template_kwargs == {}
 
     def test_the_kind_comes_from_the_list_not_from_the_model(self) -> None:
         """``kind`` is a class fact, not a value YAML may assert: an entry
@@ -1263,6 +1273,146 @@ class TestModalCatalog:
         assert entry.n_gpus == 1
         assert entry.gpu == "A10"
         assert entry.app_name == "ep-tree-small-llm"
+
+    def test_the_frozen_fixture_carries_the_request_knobs(
+        self, frozen_config_path
+    ) -> None:
+        """The fixture mirrors the SHAPE of the shipped catalog. A knob that
+        lived only in ``configs/default.yaml`` would leave every test that
+        loads the fixture proving nothing about the request the memory sends."""
+
+        qwen_llm, lfm = load_app_config(frozen_config_path).modal.llm_models
+
+        assert qwen_llm.max_tokens == 4096
+        assert qwen_llm.chat_template_kwargs == {"enable_thinking": False}
+        assert lfm.max_tokens == 4096
+        assert lfm.chat_template_kwargs == {}
+
+    def test_the_request_knobs_are_off_by_default(self) -> None:
+        """ADR-009 §10: both knobs are OPT-IN. An entry that names neither
+        sends the request it sent before they existed — ``None`` is "send no
+        `max_tokens`", not "send 0"."""
+
+        entry = ModalLLMModelConfig(repo_id="acme/small-llm")
+
+        assert entry.max_tokens is None
+        assert entry.chat_template_kwargs == {}
+
+    @pytest.mark.parametrize("max_tokens", [0, -1], ids=["zero", "negative"])
+    def test_a_non_positive_max_tokens_is_refused(self, max_tokens: int) -> None:
+        """A 0-token budget makes every completion empty — the exact live
+        failure this knob exists to fix (``tasks/141`` round 1)."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", max_tokens=max_tokens)
+
+        assert "max_tokens" in str(excinfo.value)
+
+    def test_chat_template_kwargs_must_be_a_json_object(self) -> None:
+        """It goes on the wire as a JSON OBJECT (SGLang's
+        ``chat_template_kwargs: Optional[Dict]``, ``protocol.py:844`` at
+        v0.5.18), so a bare string would be a 400 from a booted GPU."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs="x")
+
+        assert "chat_template_kwargs" in str(excinfo.value)
+
+    def test_a_chat_template_kwarg_key_may_not_be_empty(self) -> None:
+        """``{"": false}`` names no template variable at all — a YAML typo,
+        caught at load time instead of on a running GPU."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(
+                repo_id="acme/small-llm", chat_template_kwargs={"": False}
+            )
+
+        assert "chat_template_kwargs" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "value,offending_key",
+        [
+            ({"cutoff": datetime.date(2026, 1, 1)}, "cutoff"),
+            ({"limits": {"cutoff": datetime.date(2026, 1, 1)}}, "limits"),
+            ({"temperature": float("nan")}, "temperature"),
+            ({"temperature": float("inf")}, "temperature"),
+            ({"seen": {"a"}}, "seen"),
+        ],
+        ids=["a-yaml-date", "a-nested-yaml-date", "nan", "infinity", "a-set"],
+    )
+    def test_a_chat_template_kwarg_value_that_is_not_json_is_refused(
+        self, value: dict[str, object], offending_key: str
+    ) -> None:
+        """The knob is POSTed as a JSON object by both chat paths, so a value
+        `json.dumps` cannot write is not a knob — it is a crash before the
+        request (`json.dumps` in the smoke test's pre-POST log line) on one
+        path and a silently re-interpreted value (`"2026-01-01"`) on the
+        other, which is the parity guarantee itself breaking. NaN and Infinity
+        are floats Python writes and JSON has no syntax for, so they are
+        refused too. A NESTED offender names the TOP-LEVEL key that holds it —
+        the one an operator edits in the YAML."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs=value)
+
+        message = str(excinfo.value)
+        assert "chat_template_kwargs" in message
+        assert offending_key in message
+        assert "quote" in message
+
+    def test_an_unquoted_yaml_date_is_refused_at_load_time(self) -> None:
+        """The footgun in the operator's own words: YAML parses a BARE
+        `2026-01-01` into a `datetime.date`, not a string — so the rejection
+        has to survive the real parser, not just a hand-built dict."""
+
+        parsed = yaml.safe_load("cutoff: 2026-01-01")
+        assert parsed == {"cutoff": datetime.date(2026, 1, 1)}
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs=parsed)
+
+        assert "cutoff" in str(excinfo.value)
+
+    def test_every_json_native_chat_template_kwarg_is_accepted(self) -> None:
+        """The refusal above may not cost the knob its range: SGLang passes the
+        object to a Jinja chat template, and every JSON type is a legal value
+        there. Asserted by ROUND-TRIPPING what was stored, so a validator that
+        quietly dropped or mangled a value could not pass."""
+
+        kwargs = {
+            "enable_thinking": False,
+            "name": "qwen",
+            "top_k": 20,
+            "temperature": 0.7,
+            "stop": None,
+            "tags": ["a", 1, None],
+            "nested": {"deep": {"ok": True, "list": [1.5, "x"]}},
+        }
+
+        entry = ModalLLMModelConfig(
+            repo_id="acme/small-llm", chat_template_kwargs=kwargs
+        )
+
+        assert entry.chat_template_kwargs == kwargs
+        assert json.loads(json.dumps(entry.chat_template_kwargs, allow_nan=False)) == (
+            kwargs
+        )
+
+    @pytest.mark.parametrize(
+        "knob,value",
+        [("max_tokens", 512), ("chat_template_kwargs", {"enable_thinking": False})],
+        ids=["max_tokens", "chat_template_kwargs"],
+    )
+    def test_the_request_knobs_are_llm_only(self, knob: str, value: object) -> None:
+        """Story 5: ``/v1/embeddings`` has neither a completion budget nor a
+        chat template, so ``extra="forbid"`` refuses the knob on an EMBEDDING
+        entry — at load time, naming the field."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(**{**_VALID_ENTRY, knob: value})
+
+        assert "Extra inputs are not permitted" in str(excinfo.value)
+        assert knob in str(excinfo.value)
 
     def test_n_gpus_must_be_positive(self) -> None:
         """It becomes SGLang's ``tp`` and the ``:N`` of the GPU string, so a

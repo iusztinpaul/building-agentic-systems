@@ -36,7 +36,7 @@ import openai as openai_sdk
 import pytest
 from openai import AsyncOpenAI
 
-from tree.config.app_config import app_config
+from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models import modal_llm
 from tree.models.base import BaseLLM
 from tree.models.exceptions import ExtractionError, ModelError
@@ -46,6 +46,13 @@ from tree.models.modal_llm import ModalLLM
 _LFM = "LiquidAI/LFM2.5-350M"
 _QWEN_LLM = "Qwen/Qwen3.5-0.8B"
 _VOYAGE = "voyageai/voyage-4-nano"
+# A catalog id added by the ``bare_entry`` fixture alone: an LLM entry with
+# NEITHER request knob, which no seed is any more.
+_BARE = "acme/bare-llm"
+# What a thinking model spent its budget on, at the LENGTH the live run
+# measured (``tasks/141`` round 1). Only that length may ever reach a message
+# or a log line — the trace itself is the user's content.
+_REASONING = ("The user wants JSON facts about Tokyo. " * 21)[:812]
 _APP = "ep-tree-lfm2-5-350m"
 _URL = "https://acme--ep-tree-lfm2-5-350m-server.modal.run"
 _BEARER = "wk-1.ws-2"
@@ -179,7 +186,18 @@ class _WireStub:
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
-        self.content: str = '{"a": 1}'
+        self.content: str | None = '{"a": 1}'
+        #: What ended the completion, and the thinking a reasoning model spent
+        #: its budget on — the two fields an empty answer is diagnosed from.
+        #: ``reasoning_content`` is NOT in the SDK's ``ChatCompletionMessage``,
+        #: so answering it here is also what proves the pinned SDK
+        #: (``openai`` 2.28.0, ``_models.py`` ``extra="allow"``) hands a
+        #: server-specific field through to the client at all.
+        self.finish_reason: str = "stop"
+        #: Typed ``Any``, not ``str``: nothing in the OpenAI schema types this
+        #: extra, so a proxy may answer any JSON value and the SDK hands it
+        #: through verbatim.
+        self.reasoning_content: Any = None
         #: While this answers True every POST is a 503 — a server that scaled
         #: to zero between the warm and the call. A PERIOD, not a request
         #: count: the real server stays cold until a poll boots it. With
@@ -201,6 +219,9 @@ class _WireStub:
             raise self.raises
         if self.cold_while():
             return httpx.Response(503, request=request, json={"error": "cold"})
+        message: dict[str, Any] = {"role": "assistant", "content": self.content}
+        if self.reasoning_content is not None:
+            message["reasoning_content"] = self.reasoning_content
         return httpx.Response(
             200,
             request=request,
@@ -212,8 +233,8 @@ class _WireStub:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": self.content},
-                        "finish_reason": "stop",
+                        "message": message,
+                        "finish_reason": self.finish_reason,
                     }
                 ],
                 "usage": {
@@ -307,6 +328,23 @@ def _model(model: str = _LFM, **kwargs: Any) -> ModalLLM:
     """A client on the FAKE proxy token."""
 
     return ModalLLM(proxy_token=_BEARER, model=model, **kwargs)
+
+
+@pytest.fixture
+def bare_entry(mocker) -> str:
+    """One catalog entry carrying NEITHER request knob, and its repo id.
+
+    BOTH seeds set ``max_tokens`` today (ADR-009 §10), so "what an entry
+    without the knobs sends" — the request this client sent before they
+    existed — can only be pinned against an entry added for it.
+    """
+
+    mocker.patch.object(
+        app_config.modal,
+        "llm_models",
+        [*app_config.modal.llm_models, ModalLLMModelConfig(repo_id=_BARE)],
+    )
+    return _BARE
 
 
 # --- tests ------------------------------------------------------------------
@@ -729,16 +767,48 @@ class TestGenerateJson:
 
         assert await model.generate_json("hi") == {"a": 1}
 
-    async def test_no_max_tokens_is_sent(self, server, openai) -> None:
-        """Out of scope by ADR-009 §10's "what would justify upgrading": the
-        server's own default wins, and a completion cut short would surface as
-        "empty response", not as a silent truncation."""
+    async def test_a_bare_entry_sends_exactly_todays_request(
+        self, server, openai, bare_entry: str
+    ) -> None:
+        """Story 3 (ADR-009 §10): both request knobs are OPT-IN. An entry that
+        names neither sends the four fields it sent before they existed — no
+        ``max_tokens``, no ``extra_body``, nothing the server must interpret.
 
-        model = _model()
+        Supersedes #148's ``test_no_max_tokens_is_sent``: the knob exists now,
+        so what needs pinning is the WHOLE request an entry without it sends.
+        """
+
+        model = _model(bare_entry)
 
         await model.generate_json("hi")
 
-        assert "max_tokens" not in openai.calls[0]
+        assert set(openai.calls[0]) == {
+            "model",
+            "messages",
+            "temperature",
+            "response_format",
+        }
+
+    @pytest.mark.parametrize(
+        "schema", [None, {"type": "object"}], ids=["json-mode", "strict-schema"]
+    )
+    async def test_the_seeded_thinking_model_sends_both_knobs(
+        self, server, openai, schema: dict[str, Any] | None
+    ) -> None:
+        """Story 1: `Qwen/Qwen3.5-0.8B` is a THINKING model — live it spent a
+        256-token budget reasoning and answered nothing (``tasks/141`` round
+        1). Both knobs ride on EVERY call, JSON mode and strict schema alike:
+        ``chat_template_kwargs`` is not an OpenAI parameter, so it travels as
+        ``extra_body``, which the SDK merges into the TOP-LEVEL body."""
+
+        model = _model(_QWEN_LLM)
+
+        await model.generate_json("hi", schema=schema)
+
+        assert openai.calls[0]["max_tokens"] == 4096
+        assert openai.calls[0]["extra_body"] == {
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
 
 
 class TestFailures:
@@ -1189,7 +1259,17 @@ class TestWireContract:
         result = await model.generate_json("extract this", system="be terse")
 
         body = wire.bodies[0]
-        assert set(body) == {"model", "messages", "temperature", "response_format"}
+        # ``max_tokens`` joins the four because the LFM2.5-350M SEED sets it
+        # (ADR-009 §10); an entry without it sends exactly the four —
+        # ``TestGenerateJson::test_a_bare_entry_sends_exactly_todays_request``.
+        assert set(body) == {
+            "model",
+            "messages",
+            "temperature",
+            "response_format",
+            "max_tokens",
+        }
+        assert body["max_tokens"] == 4096
         assert body["model"] == _LFM
         assert body["messages"] == [
             {"role": "system", "content": "be terse"},
@@ -1236,6 +1316,97 @@ class TestWireContract:
         await model.generate_json("hi")
 
         assert str(wire.requests[0].url) == f"{_URL}/v1/chat/completions"
+
+    async def test_the_template_kwargs_reach_the_wire_at_the_top_level(
+        self, server, wire
+    ) -> None:
+        """Story 1: ``chat_template_kwargs`` is not an OpenAI parameter, so it
+        rides in ``extra_body`` — which the SDK MERGES into the top-level JSON
+        body (``openai`` 2.28.0, ``_base_client.py:500-508``), never nests
+        under an ``extra_body`` key. SGLang reads it top-level
+        (``protocol.py:844`` at v0.5.18), so a nested one would be ignored in
+        silence and the model would keep thinking."""
+
+        model = _model(_QWEN_LLM)
+
+        await model.generate_json("hi")
+
+        body = wire.bodies[0]
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert body["max_tokens"] == 4096
+        assert "extra_body" not in body
+
+    async def test_an_empty_answer_names_the_reasoning_budget(
+        self, server, wire, caplog
+    ) -> None:
+        """Story 2, the client's half: a 200 whose ``content`` is null because
+        the whole budget went into thinking (live, ``tasks/141`` round 1). The
+        message still STARTS with the Gemini-parity sentence and appends what
+        the server said about WHY — the reasoning's LENGTH, never a character
+        of its text, which is the user's content."""
+
+        wire.content = None
+        wire.finish_reason = "length"
+        wire.reasoning_content = _REASONING
+        model = _model(_QWEN_LLM)
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(ExtractionError) as excinfo:
+                await model.generate_json("hi")
+
+        message = str(excinfo.value)
+        assert message.startswith("Modal LLM returned an empty response")
+        assert "finish_reason=length" in message
+        assert "reasoning_content: 812 chars" in message
+        assert _REASONING[:40] not in message
+        assert _REASONING[:40] not in "\n".join(
+            record.getMessage() for record in caplog.records
+        )
+
+    async def test_an_empty_answer_without_reasoning_still_names_the_reason(
+        self, server, wire
+    ) -> None:
+        """A server that sends no ``reasoning_content`` (every non-thinking
+        model) still says what ended the completion — that one word is the
+        difference between "truncated" and "the model had nothing to say"."""
+
+        wire.content = ""
+        wire.finish_reason = "stop"
+        model = _model()
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.generate_json("hi")
+
+        assert str(excinfo.value) == (
+            "Modal LLM returned an empty response (finish_reason=stop)"
+        )
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [5, 1.5, True, ["a", "b"], {"text": "a"}],
+        ids=["int", "float", "bool", "list", "dict"],
+    )
+    async def test_a_non_string_reasoning_content_still_raises_the_plain_error(
+        self, server, wire, reasoning: Any
+    ) -> None:
+        """``reasoning_content`` is a server-specific extra the SDK passes
+        through verbatim (``extra="allow"``), so a proxy is free to answer a
+        JSON number or object. Measuring it would then raise ``TypeError:
+        object of type 'int' has no len()`` FROM INSIDE the diagnosis — a raw
+        crash instead of the ``ExtractionError`` the caller retries on. The
+        diagnosis degrades to what is known instead."""
+
+        wire.content = None
+        wire.finish_reason = "length"
+        wire.reasoning_content = reasoning
+        model = _model(_QWEN_LLM)
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.generate_json("hi")
+
+        assert str(excinfo.value) == (
+            "Modal LLM returned an empty response (finish_reason=length)"
+        )
 
     async def test_prose_from_a_real_sdk_response_is_still_invalid_json(
         self, server, wire

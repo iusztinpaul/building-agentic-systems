@@ -9,6 +9,7 @@ Resolution order:
     2. configs/default.yaml (memory app root: ``apps/memory/``)
 """
 
+import json
 import logging
 import os
 import re
@@ -947,9 +948,13 @@ class ModalLLMModelConfig(ModalModelConfig):
     """One entry of ``modal.llm_models`` — the **Modal catalog**'s LLM half
     (ADR-009 §3/§10).
 
-    Adds only ``n_gpus``: SGLang's tensor parallelism, which is also the
-    ``:N`` of the Modal GPU string. Everything else an LLM needs is already on
-    the shared base.
+    Adds ``n_gpus`` — SGLang's tensor parallelism, which is also the ``:N`` of
+    the Modal GPU string — and the two optional REQUEST knobs of ADR-009 §10,
+    ``max_tokens`` and ``chat_template_kwargs``. The knobs are the only fields
+    here that a **Dedicated endpoint** also honours: they are client-side
+    request fields, sent by ``ModalLLM`` and by the chat smoke test from one
+    helper, so changing one needs no redeploy. Everything else an LLM needs is
+    already on the shared base.
     """
 
     n_gpus: int = Field(
@@ -961,8 +966,66 @@ class ModalLLMModelConfig(ModalModelConfig):
             "which is why `--tp` and its aliases are builder-owned."
         ),
     )
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Request knob, CLIENT-side: the completion budget sent on every "
+            "chat request, on BOTH Serving paths and with no redeploy. Null "
+            "sends no `max_tokens` at all, leaving the server's own default."
+        ),
+    )
+    chat_template_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Request knob, CLIENT-side: a JSON object passed to the served "
+            "model's chat template, e.g. {enable_thinking: false} for a "
+            "thinking model. Every value must be JSON — quote a YAML date, "
+            'e.g. cutoff: "2026-01-01". Empty sends no key at all; identical '
+            "on BOTH Serving paths, and changing it needs no redeploy."
+        ),
+    )
 
     kind: ClassVar[ModelKind] = "llm"
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def _check_the_template_kwargs_go_on_the_wire(
+        cls, value: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Every key names a variable of the served model's chat template, so
+        an empty one (`"": false`, a YAML typo) can only be ignored by the
+        server — silently, on a booted GPU.
+
+        And every VALUE is POSTed inside a JSON object by both chat paths, so
+        one that `json.dumps` cannot write is not a knob at all: an UNQUOTED
+        YAML date (`cutoff: 2026-01-01`) parses to a `datetime.date`, which
+        crashes the smoke test before its POST while the OpenAI client quietly
+        sends `"2026-01-01"` — the two paths would no longer send the same
+        request, which is the whole point of the knobs living here. `NaN` and
+        `Infinity` are refused with them (`allow_nan=False`): Python writes
+        them, JSON has no syntax for them, and a strict server rejects them.
+
+        Each value is dumped on its OWN so the message names the top-level key
+        an operator edits, even when the offender is nested under it.
+        """
+
+        for key, knob in value.items():
+            if not key.strip():
+                raise ValueError(
+                    "chat_template_kwargs keys must be non-empty names, e.g. "
+                    "{enable_thinking: false}"
+                )
+            try:
+                json.dumps(knob, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"chat_template_kwargs value for {key!r} is not JSON "
+                    f"({exc}) — it is POSTed inside a JSON object, so give it "
+                    f'a JSON value or quote it, e.g. {key}: "2026-01-01" for '
+                    "an unquoted YAML date"
+                ) from exc
+        return value
 
 
 class ModalConfig(BaseModel):

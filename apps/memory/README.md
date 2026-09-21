@@ -73,7 +73,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
 - `modal` — the **Modal catalog** (`embedding_models` + `llm_models`) plus the App pins (`autoinference_utils_version`, `engines.vllm/sglang.version`) and the two waits, `warmup_deadline_s` (for a
-  cold server) and `request_timeout_s` (for one answer). One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
+  cold server) and `request_timeout_s` (for one answer). One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` plus the optional request knobs `max_tokens` and `chat_template_kwargs` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
 
 ### Environment variables
 
@@ -558,7 +558,7 @@ model's app name, vector width and prompts cannot drift apart.
 **1. The YAML names the model, never the path.** An entry is a Hugging Face
 `repo_id`, its `revision`, and the facts about the model itself (for an
 embedding model its `native_dimensions`, `matryoshka_dimensions` and the two
-role prompts; for an LLM its `n_gpus`) plus optional hardware defaults. There
+role prompts; for an LLM its `n_gpus` and its two optional request knobs) plus optional hardware defaults. There
 is no `serving:` field: whether Modal can serve a model is something only Modal
 knows.
 
@@ -597,7 +597,17 @@ llm_models:
     gpu: A10
     n_gpus: 1 # = SGLang's tensor parallelism, and the `:N` of the GPU string
     max_model_len: 32768 # the card's context is 128k; 32k keeps the KV cache small
+    max_tokens: 4096 # the completion budget sent on every chat request
+    chat_template_kwargs: { enable_thinking: false } # what the chat template is told, e.g. thinking off
 ```
+
+`max_tokens` and `chat_template_kwargs` are **request** knobs, not server
+flags: both clients and the chat smoke test send them from one helper, so they
+behave identically on both Serving paths and changing either needs **no
+redeploy** — write the line, re-run `-test`. Omit a knob and nothing is sent
+for it (the smoke test then spends its own 256-token bound). `enable_thinking:
+false` is what makes a THINKING model answer: with it on, `Qwen/Qwen3.5-0.8B`
+spent the whole 256-token budget reasoning and returned an empty message.
 
 `deploy/modal_sglang_llm.py` follows the `serve.py` Modal generates for its own
 LLM endpoints: the official `lmsysorg/sglang:<tag>` image (the engine is IN the

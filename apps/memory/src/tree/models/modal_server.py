@@ -26,16 +26,20 @@ from pydantic import BaseModel, Field
 
 from tree.config.app_config import (
     ModalEmbeddingModelConfig,
+    ModalLLMModelConfig,
     ModalModelConfig,
     app_config,
 )
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     MODAL_SERVER_NAME,
+    chat_request_knobs,
+    empty_answer_details,
     get_embedding_entry,
     get_llm_entry,
     modal_proxy_bearer,
     prompt_for,
+    reasoning_length,
     truncate_embedding,
 )
 from tree.models.modal_warmup import poll_health
@@ -331,7 +335,7 @@ async def chat_smoke_test(
     served = await served_model_id(url, bearer, entry.repo_id)
     logger.info("served model id: %s", served)
 
-    content = await _chat(url, bearer, served)
+    content = await _chat(url, bearer, served, entry)
     logger.info("chat completion: %s", content)
 
     city, population = _city_facts(content)
@@ -356,8 +360,14 @@ async def chat_smoke_test(
     )
 
 
-async def _chat(url: str, bearer: str, served: str) -> str:
+async def _chat(url: str, bearer: str, served: str, entry: ModalLLMModelConfig) -> str:
     """``POST /v1/chat/completions`` under the strict schema; the content.
+
+    The body is the ENTRY's request, not a fixed one: ``chat_request_knobs``
+    adds its ``max_tokens`` and its ``chat_template_kwargs`` (ADR-009 §10),
+    which is what makes this command prove the request ``ModalLLM`` will send.
+    An entry that sets no budget keeps :data:`CHAT_SMOKE_MAX_TOKENS` — 256 is
+    the cost bound of one smoke test, not a claim about the model.
 
     Bounded by ``modal.request_timeout_s`` — the SAME knob both clients use, so
     the command that proves a model can never outlast the memory that will call
@@ -372,13 +382,21 @@ async def _chat(url: str, bearer: str, served: str) -> str:
         ModelError: the 200 carried no message content, which no retry fixes.
     """
 
+    knobs = chat_request_knobs(entry)
     body = {
         "model": served,
         "messages": [{"role": "user", "content": CHAT_SMOKE_PROMPT}],
         "max_tokens": CHAT_SMOKE_MAX_TOKENS,
         "temperature": 0,
         "response_format": CITY_FACTS_SCHEMA,
-    }
+    } | knobs
+    # Configuration, never a secret — and the line an operator reads when a
+    # knob is wrong, so it goes out BEFORE the POST it describes.
+    logger.info(
+        "chat knobs: max_tokens=%s chat_template_kwargs=%s",
+        body["max_tokens"],
+        json.dumps(knobs.get("chat_template_kwargs", {})),
+    )
     timeout_s = app_config.modal.request_timeout_s
     try:
         async with aiohttp.ClientSession(
@@ -409,13 +427,35 @@ async def _chat(url: str, bearer: str, served: str) -> str:
         )
 
     choices = payload.get("choices") or []
-    content = choices[0].get("message", {}).get("content") if choices else None
-    if not content:
+    message = choices[0].get("message", {}) if choices else {}
+    content = message.get("content")
+    if content:
+        return content
+
+    # WHY it was empty, in one sentence the operator can act on. A server
+    # started with a `--reasoning-parser` puts the thinking in
+    # `reasoning_content` and leaves `content` empty when the budget ran out
+    # (SGLang v0.5.18, `serving_chat.py:700`) — the live failure of tasks/141
+    # round 1. Only the LENGTH of that trace is ever reported — and only when
+    # the server sent TEXT: an untyped extra that comes back as a number or an
+    # object has no length to report (`reasoning_length`) and no proof of
+    # thinking, so it takes the plain branch. The diagnosis is an addition to
+    # the sentence below, never a reason to lose it.
+    reasoning_chars = reasoning_length(message.get("reasoning_content"))
+    details = empty_answer_details(
+        choices[0].get("finish_reason") if choices else None,
+        reasoning_chars,
+    )
+    if reasoning_chars:
         raise ModelError(
-            "the chat completion carried no content — the served model "
-            "answered with an empty message"
+            f"the chat completion carried no content{details} — a thinking "
+            "model spent its budget reasoning: set chat_template_kwargs: "
+            "{enable_thinking: false} on the entry, or raise its max_tokens"
         )
-    return content
+    raise ModelError(
+        f"the chat completion carried no content{details} — the served model "
+        "answered with an empty message"
+    )
 
 
 def _city_facts(content: str) -> tuple[str, int]:

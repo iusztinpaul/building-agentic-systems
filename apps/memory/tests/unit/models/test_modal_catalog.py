@@ -42,6 +42,7 @@ from tree.models.modal_catalog import (
     build_llm_deploy_spec,
     build_llm_server_args,
     build_server_args,
+    chat_request_knobs,
     encode_deploy_spec,
     get_catalog_entry,
     get_embedding_entry,
@@ -52,6 +53,7 @@ from tree.models.modal_catalog import (
     modal_cli_command,
     modal_proxy_bearer,
     prompt_for,
+    reasoning_length,
     redact_argv,
     redact_text,
     truncate_embedding,
@@ -82,6 +84,11 @@ def voyage_entry() -> ModalEmbeddingModelConfig:
 @pytest.fixture
 def lfm_entry() -> ModalLLMModelConfig:
     return get_llm_entry(_LFM)
+
+
+@pytest.fixture
+def qwen_llm_entry() -> ModalLLMModelConfig:
+    return get_llm_entry(_QWEN_LLM)
 
 
 class TestGetCatalogEntry:
@@ -327,6 +334,101 @@ class TestLlmServerArgs:
         build_llm_server_args(lfm_entry)
 
         assert lfm_entry.extra_server_args == {}
+
+
+class TestChatRequestKnobs:
+    """ADR-009 §10: the two optional per-entry request knobs, from ONE pure
+    helper — the TOP-LEVEL JSON fields as they go on the wire.
+
+    ``ModalLLM`` and the chat smoke test both build their request from this,
+    so a knob added later cannot reach one and miss the other (the parity
+    itself is asserted in ``test_modal_server.py``).
+    """
+
+    def test_a_bare_entry_asks_for_nothing(self) -> None:
+        """Story 3: an entry with neither knob sends byte-for-byte the request
+        it sent before they existed."""
+
+        assert chat_request_knobs(ModalLLMModelConfig(repo_id="acme/small-llm")) == {}
+
+    def test_a_budget_alone(self) -> None:
+        entry = ModalLLMModelConfig(repo_id="acme/small-llm", max_tokens=4096)
+
+        assert chat_request_knobs(entry) == {"max_tokens": 4096}
+
+    def test_template_kwargs_alone(self) -> None:
+        """SGLang reads ``chat_template_kwargs`` as a TOP-LEVEL request field
+        (``protocol.py:844`` at v0.5.18), not as a nested sampling param."""
+
+        entry = ModalLLMModelConfig(
+            repo_id="acme/small-llm", chat_template_kwargs={"enable_thinking": False}
+        )
+
+        assert chat_request_knobs(entry) == {
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+
+    def test_both_knobs_together(self, qwen_llm_entry) -> None:
+        """Story 1: the seeded THINKING model — thinking off AND a budget wide
+        enough for the answer (``tasks/141`` round 1)."""
+
+        assert chat_request_knobs(qwen_llm_entry) == {
+            "max_tokens": 4096,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+
+    def test_the_knobs_come_back_as_a_deep_copy(self) -> None:
+        """The entry is a field of the process-wide ``app_config``, and every
+        caller mutates what it gets back (a request body is merged into, an
+        ``extra_body`` is handed to the SDK). A shallow copy would leave a
+        NESTED value shared, so one request could rewrite the catalog."""
+
+        entry = ModalLLMModelConfig(
+            repo_id="acme/small-llm",
+            max_tokens=4096,
+            chat_template_kwargs={"thinking": {"enabled": True}},
+        )
+
+        knobs = chat_request_knobs(entry)
+        knobs["max_tokens"] = 1
+        knobs["chat_template_kwargs"]["enable_thinking"] = False
+        knobs["chat_template_kwargs"]["thinking"]["enabled"] = False
+
+        assert entry.max_tokens == 4096
+        assert entry.chat_template_kwargs == {"thinking": {"enabled": True}}
+
+
+class TestReasoningLength:
+    """How much thinking the server reported — the ONE door both empty-answer
+    diagnoses ask, so ``ModalLLM`` and the chat smoke test cannot drift on it.
+
+    ``reasoning_content`` is a server-specific extra: nothing in the OpenAI
+    schema types it, so a proxy or a future server may answer any JSON value.
+    The diagnosis is a convenience — an unexpected type degrades it to
+    ``finish_reason`` alone, it never crashes the error it is describing.
+    """
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("thinking…", 9),
+            ("", 0),
+            (None, None),
+            (5, None),
+            (1.5, None),
+            (True, None),
+            (["a", "b"], None),
+            ({"text": "a"}, None),
+        ],
+        ids=["text", "empty", "absent", "int", "float", "bool", "list", "dict"],
+    )
+    def test_only_a_string_has_a_reported_length(
+        self, value: object, expected: int | None
+    ) -> None:
+        """A list or a dict has a ``len()`` too — of its container, which would
+        report "1 chars" for a trace of thousands. Unknown means unknown."""
+
+        assert reasoning_length(value) == expected
 
 
 class TestDeploySpec:

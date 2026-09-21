@@ -19,8 +19,9 @@ module stays importable without the ``local-models`` extra
 """
 
 import base64
+import copy
 import math
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -208,6 +209,82 @@ def get_llm_entry(model: str) -> ModalLLMModelConfig:
             f"{model} is an embedding entry (modal.embedding_models), not an LLM."
         )
     return entry
+
+
+def chat_request_knobs(entry: ModalLLMModelConfig) -> dict[str, Any]:
+    """The entry's optional chat-request knobs, as TOP-LEVEL body fields.
+
+    The ONE source both chat paths build their request from (ADR-009 §10):
+    :class:`~tree.models.modal_llm.ModalLLM` and the chat smoke test, so the
+    command that proves a model sends what the memory will send. Empty by
+    default — an entry that sets neither knob sends the request it sent before
+    they existed.
+
+    They are CLIENT-side request fields, not server flags: identical on both
+    **Serving paths** (we control no flag of a managed recipe) and changeable
+    without a redeploy. ``chat_template_kwargs`` is a top-level field of
+    SGLang's ``ChatCompletionRequest`` (``protocol.py:844`` at ``v0.5.18``),
+    which is why the OpenAI client must send it as ``extra_body`` — the SDK
+    merges that into the top-level body, so both requests match.
+
+    The returned object is a DEEP copy: the entry is a field of the
+    process-wide ``app_config``, and every caller mutates what it gets back (a
+    body is merged into, an ``extra_body`` is handed to the SDK). A shallow
+    copy would leave a nested value shared, so one request could rewrite the
+    catalog for the rest of the process.
+    """
+
+    knobs: dict[str, Any] = {}
+    if entry.max_tokens is not None:
+        knobs["max_tokens"] = entry.max_tokens
+    if entry.chat_template_kwargs:
+        knobs["chat_template_kwargs"] = copy.deepcopy(entry.chat_template_kwargs)
+    return knobs
+
+
+def reasoning_length(reasoning: Any) -> int | None:
+    """How many characters of thinking the server reported, or ``None``.
+
+    The ONE door both empty-answer diagnoses measure ``reasoning_content``
+    through (ADR-009 §10), so ``ModalLLM`` and the chat smoke test cannot
+    drift on it. NOTHING types that field — it is a server-specific extra the
+    OpenAI SDK hands through verbatim (``extra="allow"``) and a plain
+    ``dict.get`` on the smoke test's raw payload — so a proxy is free to
+    answer a JSON number, list or object there. A bare ``len()`` would then
+    raise (``object of type 'int' has no len()``) from INSIDE the error being
+    described, or report a container's length ("1 chars") for a trace of
+    thousands.
+
+    A non-string is an UNKNOWN length, not a wrong one: the caller falls back
+    to the plain empty-answer sentence the diagnosis is an addition to.
+    """
+
+    return len(reasoning) if isinstance(reasoning, str) else None
+
+
+def empty_answer_details(finish_reason: str | None, reasoning_chars: int | None) -> str:
+    """Why a 200 carried no content, as a ``" (…)"`` suffix — or ``""``.
+
+    The ONE place an empty answer is described, for the chat smoke test and
+    for ``ModalLLM`` alike (ADR-009 §10): a thinking model that spent its
+    budget reasoning is diagnosed by ``finish_reason=length`` plus a
+    ``reasoning_content`` that is long while ``content`` is empty.
+
+    The reasoning TEXT never enters it — only its LENGTH. It is the user's
+    content, it is written to a message that reaches a log and an exception,
+    and a trace is frequently thousands of characters long.
+
+    Returns a LEADING space with the parenthesis (``" (finish_reason=length,
+    reasoning_content: 812 chars)"``) so a caller appends it to its own
+    sentence, and ``""`` when the server said neither.
+    """
+
+    parts = []
+    if finish_reason:
+        parts.append(f"finish_reason={finish_reason}")
+    if reasoning_chars:
+        parts.append(f"reasoning_content: {reasoning_chars} chars")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 def app_script(kind: ModelKind) -> str:

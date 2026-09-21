@@ -43,10 +43,16 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
-from tree.config.app_config import app_config
+from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models.base import BaseLLM
 from tree.models.exceptions import ExtractionError, ModelError
-from tree.models.modal_catalog import MODAL_SERVER_NAME, get_llm_entry
+from tree.models.modal_catalog import (
+    MODAL_SERVER_NAME,
+    chat_request_knobs,
+    empty_answer_details,
+    get_llm_entry,
+    reasoning_length,
+)
 from tree.models.modal_server import resolve_server_url, served_model_id
 from tree.models.modal_warmup import WarmGate, poll_health
 from tree.observability import track, update_current_span
@@ -78,6 +84,28 @@ def _response_format(schema: dict[str, Any] | None) -> dict[str, Any]:
         "type": "json_schema",
         "json_schema": {"name": _SCHEMA_NAME, "strict": True, "schema": schema},
     }
+
+
+def _knob_kwargs(entry: ModalLLMModelConfig) -> dict[str, Any]:
+    """The entry's optional request knobs, as ``create(...)`` keywords.
+
+    The SAME fields the chat smoke test POSTs (ADR-009 §10), rendered for the
+    OpenAI SDK: ``max_tokens`` is a parameter it has, ``chat_template_kwargs``
+    is not — so it travels as ``extra_body``, which the SDK MERGES into the
+    top-level JSON body (``openai`` 2.28.0, ``_base_client.py:500-508``)
+    rather than nesting it. That is what makes the two wire requests equal.
+
+    Empty for an entry that sets neither: the ``create`` call then carries
+    exactly the four keywords it carried before the knobs existed.
+    """
+
+    knobs = chat_request_knobs(entry)
+    kwargs: dict[str, Any] = {}
+    if "max_tokens" in knobs:
+        kwargs["max_tokens"] = knobs["max_tokens"]
+    if "chat_template_kwargs" in knobs:
+        kwargs["extra_body"] = {"chat_template_kwargs": knobs["chat_template_kwargs"]}
+    return kwargs
 
 
 def _status_code(exc: Exception) -> int | None:
@@ -131,14 +159,31 @@ def _content(response: Any) -> str:
     Raises:
         ExtractionError: the server answered 200 with nothing to parse. A
             reasoning model that spent its whole budget thinking lands here —
-            the message IS the diagnosis, and the same one ``GeminiLLM`` gives.
+            the message IS the diagnosis, and it still STARTS with the sentence
+            ``GeminiLLM`` gives, so a caller matching on that keeps working.
+            What the server said about WHY is appended: ``finish_reason`` and
+            the LENGTH of ``reasoning_content`` — never a character of the
+            reasoning itself. ``reasoning_content`` is not an OpenAI field, but
+            the SDK's models allow extras (``openai`` 2.28.0, ``_models.py``
+            ``extra="allow"``), so a server that separates reasoning is read
+            here without a cast — and, for the same reason, without a
+            guarantee that it is text: a non-string has no reported length
+            (:func:`~tree.models.modal_catalog.reasoning_length`) and the
+            sentence then names ``finish_reason`` alone.
     """
 
     choices = response.choices or []
     content = choices[0].message.content if choices else None
-    if not content:
-        raise ExtractionError("Modal LLM returned an empty response")
-    return content
+    if content:
+        return content
+
+    choice = choices[0] if choices else None
+    message = getattr(choice, "message", None)
+    reasoning_chars = reasoning_length(getattr(message, "reasoning_content", None))
+    details = empty_answer_details(
+        getattr(choice, "finish_reason", None), reasoning_chars
+    )
+    raise ExtractionError(f"Modal LLM returned an empty response{details}")
 
 
 def _parsed_object(content: str) -> dict[str, Any]:
@@ -313,6 +358,12 @@ class ModalLLM(BaseLLM):
         before the first one, and a container that idled out mid-run costs ONE
         re-warm and ONE retry instead of a failed document.
 
+        The catalog entry's optional request knobs ride on EVERY call
+        (ADR-009 §10): its ``max_tokens`` when it sets one, and its
+        ``chat_template_kwargs`` — e.g. ``{"enable_thinking": false}`` for a
+        thinking model — as ``extra_body``. They are the same two top-level
+        fields the chat smoke test POSTs, from the same helper.
+
         Wrapped in an Opik ``llm``-type span; on success the token counts are
         recorded with ``total_cost=0`` (self-hosted). Recording is fail-open.
 
@@ -335,6 +386,9 @@ class ModalLLM(BaseLLM):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         response_format = _response_format(schema)
+        # Read per CALL, not cached on the instance: an entry is config, and a
+        # knob changed under a running process must reach the next request.
+        knobs = _knob_kwargs(self._entry)
 
         try:
             # The lambda reads `_client` and `_served_model` at CALL time: a
@@ -345,6 +399,7 @@ class ModalLLM(BaseLLM):
                     messages=messages,  # type: ignore[arg-type]
                     temperature=0,
                     response_format=response_format,  # type: ignore[arg-type]
+                    **knobs,
                 )
             )
         except ModelError:

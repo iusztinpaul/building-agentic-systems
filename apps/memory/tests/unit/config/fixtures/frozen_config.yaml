@@ -157,11 +157,15 @@ modal:
         "--pooler-config": '{"pooling_type":"MEAN"}'
   llm_models:
     # The LLM half of the catalog: the same entry minus the embedding facts,
-    # plus `n_gpus` (SGLang's tp).
+    # plus `n_gpus` (SGLang's tp) and the two client-side request knobs.
     - repo_id: Qwen/Qwen3.5-0.8B
       revision: 2fc06364715b967f1860aea9cf38778875588b17
+      max_tokens: 4096
+      chat_template_kwargs:
+        enable_thinking: false
     - repo_id: LiquidAI/LFM2.5-350M
       revision: 9e6c6ccf47cd318696e137d381a7ded8fe4df09f
       gpu: A10
       n_gpus: 1
+      max_tokens: 4096
       max_model_len: 32768

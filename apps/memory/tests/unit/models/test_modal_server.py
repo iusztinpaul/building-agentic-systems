@@ -16,28 +16,41 @@ from __future__ import annotations
 
 import logging
 import math
+from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
 import pytest
 from pydantic import SecretStr
 
-from tree.config.app_config import app_config
+from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models.exceptions import ExtractionError, ModelError
-from tree.models import modal_catalog
+from tree.models import modal_catalog, modal_llm
+from tree.models.modal_llm import ModalLLM
 from tree.models.modal_server import (
     chat_smoke_test,
     resolve_server_url,
     served_model_id,
     smoke_test,
 )
-from tree.models.modal_catalog import get_catalog_entry
+from tree.models.modal_catalog import (
+    chat_request_knobs,
+    get_catalog_entry,
+    get_llm_entry,
+)
 
 _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
 _LFM = "LiquidAI/LFM2.5-350M"
+_QWEN_LLM = "Qwen/Qwen3.5-0.8B"
+# A catalog id the ``bare_entry`` fixture adds: an LLM entry with NEITHER
+# request knob, which no seed is any more.
+_BARE = "acme/bare-llm"
 _URL = "https://acme--ep-tree-qwen3-embedding-0-6b-server.modal.run"
 _BEARER = "wk-1.ws-2"
+# What a thinking model spent its budget on, at the LENGTH the live run
+# measured (``tasks/141`` round 1). Only that length may ever be reported.
+_REASONING = ("The user wants JSON facts about Tokyo. " * 21)[:812]
 
 
 # --- HTTP doubles -----------------------------------------------------------
@@ -123,6 +136,72 @@ def proxy_token(mocker):
     mocker.patch.object(
         modal_catalog.settings, "modal_proxy_token_secret", SecretStr("ws-2")
     )
+
+
+@pytest.fixture
+def bare_entry(mocker) -> str:
+    """One catalog LLM entry carrying NEITHER request knob, and its repo id.
+
+    BOTH seeds set ``max_tokens`` (ADR-009 §10), so the smoke test's own 256
+    default — the cost bound of one command — has nothing to run against
+    otherwise.
+    """
+
+    mocker.patch.object(
+        app_config.modal,
+        "llm_models",
+        [*app_config.modal.llm_models, ModalLLMModelConfig(repo_id=_BARE)],
+    )
+    return _BARE
+
+
+@pytest.fixture
+def client_calls(mocker) -> list[dict[str, Any]]:
+    """Every ``chat.completions.create`` kwargs dict a real ``ModalLLM`` sent.
+
+    The parity assertion below compares two EMITTED requests, so the client
+    here is the real one — only its warm body (URL lookup, health poll, served
+    id) and the SDK object are replaced. Re-stated locally rather than shared
+    with ``test_modal_llm.py``: one duplicated double is cheaper than a
+    conftest that hides which module a test is about.
+    """
+
+    calls: list[dict[str, Any]] = []
+
+    async def create(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=_CITY_FACTS), finish_reason="stop"
+                )
+            ],
+            usage=None,
+        )
+
+    mocker.patch.object(
+        modal_llm,
+        "AsyncOpenAI",
+        lambda **_: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        ),
+    )
+    mocker.patch.object(
+        modal_llm,
+        "resolve_server_url",
+        new_callable=mocker.AsyncMock,
+        return_value=_URL,
+    )
+    mocker.patch.object(
+        modal_llm, "poll_health", new_callable=mocker.AsyncMock, return_value=1.5
+    )
+    mocker.patch.object(
+        modal_llm,
+        "served_model_id",
+        new_callable=mocker.AsyncMock,
+        side_effect=lambda url, bearer, default: default,
+    )
+    return calls
 
 
 @pytest.fixture
@@ -512,10 +591,13 @@ class TestSmokeTest:
 # returns it: the CONTENT of `choices[0].message.content` is a JSON string.
 _CITY_FACTS = '{"city": "Tokyo", "population": 13960000}'
 
-# The six INFO lines one passing chat smoke test logs, in this order.
+# The seven INFO lines one passing chat smoke test logs, in this order — the
+# knobs BEFORE the POST they are part of, so an operator reading a failure
+# sees what was asked for above what came back.
 _CHAT_LOG_LINES = [
     "health 200 after 113.0s",
     "served model id: modal-recipe/lfm2-5-350m",
+    "chat knobs: max_tokens=4096 chat_template_kwargs={}",
     f"chat completion: {_CITY_FACTS}",
     "strict JSON schema honoured: city=Tokyo population=13960000",
     "unauthenticated health -> 401",
@@ -523,19 +605,27 @@ _CHAT_LOG_LINES = [
 ]
 
 
-def _completion(content: str) -> dict[str, Any]:
-    """One OpenAI-compatible chat completion carrying ``content``."""
+def _completion(
+    content: str | None,
+    *,
+    finish_reason: str = "stop",
+    reasoning_content: Any = None,
+) -> dict[str, Any]:
+    """One OpenAI-compatible chat completion carrying ``content``.
 
+    ``reasoning_content`` is what a server started with a ``--reasoning-parser``
+    puts the thinking in (SGLang ``serving_chat.py:700`` at v0.5.18) — present
+    only when asked for, because a non-thinking server sends no such key. It is
+    typed ``Any``: no schema pins it, so a proxy may put any JSON value there.
+    """
+
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
     return {
         "id": "chatcmpl-1",
         "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
 
 
@@ -563,7 +653,7 @@ class TestChatSmokeTest:
     """ADR-009 §10: the LLM twin of the embedding smoke test — path-blind, and
     asserting the SHAPE of the answer, never its content."""
 
-    async def test_the_happy_path_logs_six_lines_in_order(
+    async def test_the_happy_path_logs_seven_lines_in_order(
         self, http, poll, caplog
     ) -> None:
         """Story 2: what the operator reads after
@@ -643,7 +733,7 @@ class TestChatSmokeTest:
         assert excinfo.value.status_code is None
 
     async def test_it_posts_the_strict_city_facts_schema(self, http, poll) -> None:
-        """The request is the script's warm-up payload with a WIDER token
+        """The request is the script's warm-up payload with the ENTRY's token
         budget: a reasoning model may spend tokens before the JSON, and a
         completion cut short would fail as "not valid JSON"."""
 
@@ -658,7 +748,7 @@ class TestChatSmokeTest:
         assert body["messages"] == [
             {"role": "user", "content": "Reply with JSON facts about Tokyo."}
         ]
-        assert body["max_tokens"] == 256
+        assert body["max_tokens"] == 4096
         assert body["temperature"] == 0
         assert body["response_format"] == {
             "type": "json_schema",
@@ -676,6 +766,162 @@ class TestChatSmokeTest:
                 "strict": True,
             },
         }
+
+    @pytest.mark.parametrize(
+        "model,expected",
+        [
+            (
+                _QWEN_LLM,
+                {
+                    "max_tokens": 4096,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            ),
+            (_BARE, {"max_tokens": 256}),
+        ],
+        ids=["the-seeded-thinking-model", "an-entry-with-no-knobs"],
+    )
+    async def test_the_smoke_test_sends_the_clients_knobs(
+        self, http, poll, bare_entry, model: str, expected: dict[str, Any]
+    ) -> None:
+        """Story 1 / story 3 (ADR-009 §10): the POST carries the ENTRY's
+        request knobs — the same ones ``ModalLLM`` sends. An entry that sets no
+        budget keeps 256 as the cost bound of one smoke test, and sends no
+        ``chat_template_kwargs`` key at all."""
+
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(model)
+
+        body = next(call for call in http.calls if call["method"] == "POST")["json"]
+        assert {key: body[key] for key in expected} == expected
+        assert ("chat_template_kwargs" in body) == ("chat_template_kwargs" in expected)
+
+    @pytest.mark.parametrize(
+        "model,expected",
+        [
+            (
+                _QWEN_LLM,
+                'chat knobs: max_tokens=4096 chat_template_kwargs={"enable_thinking": false}',
+            ),
+            (_BARE, "chat knobs: max_tokens=256 chat_template_kwargs={}"),
+        ],
+        ids=["the-seeded-thinking-model", "an-entry-with-no-knobs"],
+    )
+    async def test_the_knobs_are_logged_before_the_post(
+        self, http, poll, caplog, bare_entry, model: str, expected: str
+    ) -> None:
+        """Story 2: the operator changes a knob and re-runs ``-test`` with no
+        redeploy, so the command must say which request it actually sent.
+        Configuration, never a secret — the **Proxy token** is not in it."""
+
+        http.responses = _chat_responses()
+
+        with caplog.at_level(logging.INFO):
+            await chat_smoke_test(model)
+
+        assert expected in [record.getMessage() for record in caplog.records]
+
+    @pytest.mark.parametrize("model", [_QWEN_LLM, _LFM], ids=["qwen3-5", "lfm2-5"])
+    async def test_wire_parity_between_client_and_smoke_test(
+        self, http, poll, client_calls: list[dict[str, Any]], model: str
+    ) -> None:
+        """Story 4: ONE helper feeds both paths, asserted on what each one
+        EMITTED — the POSTed body here, the ``create`` kwargs of a real
+        ``ModalLLM`` call — so a knob added later cannot reach one and miss the
+        other. The client's ``extra_body`` is compared as the top-level fields
+        the SDK merges it into (``openai`` 2.28.0, ``_base_client.py:500``)."""
+
+        http.responses = _chat_responses()
+        await chat_smoke_test(model)
+        smoke_body = next(c for c in http.calls if c["method"] == "POST")["json"]
+
+        await ModalLLM(proxy_token=_BEARER, model=model).generate_json("hi")
+
+        call = client_calls[0]
+        client_fields = {
+            key: value for key, value in call.items() if key == "max_tokens"
+        } | call.get("extra_body", {})
+        knobs = chat_request_knobs(get_llm_entry(model))
+        assert client_fields == {key: smoke_body[key] for key in knobs}
+        assert client_fields == knobs
+
+    async def test_an_empty_answer_names_the_reasoning_budget(
+        self, http, poll, caplog
+    ) -> None:
+        """Story 2: the live failure of ``tasks/141`` round 1 — a 200 whose
+        ``content`` is null because the budget went into thinking. The message
+        IS the fix, and carries the reasoning's LENGTH only: the trace itself
+        is the user's content and reaches neither a message nor a log line."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(
+                200,
+                _completion(None, finish_reason="length", reasoning_content=_REASONING),
+            )
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(ModelError) as excinfo:
+                await chat_smoke_test(_QWEN_LLM)
+
+        assert str(excinfo.value) == (
+            "the chat completion carried no content (finish_reason=length, "
+            "reasoning_content: 812 chars) — a thinking model spent its budget "
+            "reasoning: set chat_template_kwargs: {enable_thinking: false} on "
+            "the entry, or raise its max_tokens"
+        )
+        assert _REASONING[:40] not in "\n".join(
+            record.getMessage() for record in caplog.records
+        )
+
+    async def test_an_empty_answer_without_reasoning_names_the_finish_reason(
+        self, http, poll
+    ) -> None:
+        """A server with no ``--reasoning-parser`` sends no
+        ``reasoning_content``: the old sentence stands, plus the one word that
+        tells a truncation from a model with nothing to say."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(200, _completion(None, finish_reason="stop"))
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert str(excinfo.value) == (
+            "the chat completion carried no content (finish_reason=stop) — the "
+            "served model answered with an empty message"
+        )
+
+    @pytest.mark.parametrize(
+        "reasoning",
+        [5, 1.5, True, ["a", "b"], {"text": "a"}],
+        ids=["int", "float", "bool", "list", "dict"],
+    )
+    async def test_a_non_string_reasoning_content_still_raises_the_plain_error(
+        self, http, poll, reasoning: Any
+    ) -> None:
+        """Nothing types ``reasoning_content``, so a proxy may answer a JSON
+        number or object. Measuring it would raise ``TypeError: object of type
+        'int' has no len()`` from inside the diagnosis — the smoke test would
+        crash instead of REPORTING that the completion was empty. Unknown
+        length, unknown thinking: the plain sentence plus what is known."""
+
+        http.responses = _chat_responses(
+            _FakeResponse(
+                200,
+                _completion(None, finish_reason="length", reasoning_content=reasoning),
+            )
+        )
+
+        with pytest.raises(ModelError) as excinfo:
+            await chat_smoke_test(_QWEN_LLM)
+
+        assert str(excinfo.value) == (
+            "the chat completion carried no content (finish_reason=length) — "
+            "the served model answered with an empty message"
+        )
 
     async def test_a_non_json_completion_fails_with_an_excerpt(
         self, http, poll
