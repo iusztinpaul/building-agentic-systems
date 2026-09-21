@@ -15,7 +15,7 @@ logic, no ``print``), the container re-import cannot break on a ``tree`` import,
 the optional Hugging Face token travels as an ephemeral Secret — never baked
 into a cached, inspectable image layer, never logged as a value.
 
-Seven guards are written AGAINST A MUTANT, not only against the shipped file,
+Nine guards are written AGAINST A MUTANT, not only against the shipped file,
 and ``TestTheGuardsCatchTheirMutants`` proves each one on a mutated COPY in
 ``tmp_path`` — the shipped scripts are never edited and never executed. Two
 came from #142's QA (``unauthenticated=not True`` survived a literal-substring
@@ -46,6 +46,13 @@ to the spec MODEL (``test_deploy_spec_has_no_credential_field`` in
 the ``.env({...})`` literal for a credential, so what is pinned instead is
 that no field of a spec can hold one and that a sentinel token never appears
 in the DECODED value.
+
+#154 added the eighth and ninth, from the SAME live deploy: the shared weights
+Volume mounts at ``HF_CACHE_DIR`` (``/cache/huggingface``) and the image env
+derives both Hugging Face cache roots from it. Their mutant is the mount as it
+shipped — ``"/root/.cache/huggingface"`` — which no container could start on,
+because the official SGLang image already ships files there and Modal answered
+``cannot mount volume on non-empty path``.
 
 #152's QA rewrote both of those in ONE token and got past them again:
 ``__import__("os").system("env")`` (the dotted name of a chain rooted at a CALL
@@ -152,6 +159,30 @@ _ENDPOINT_CALLS: dict[str, tuple[str, str, set[str]]] = {
     ),
 }
 
+# The ONE path the shared weights Volume mounts at — in BOTH scripts, spelled
+# out in each because `tree` is not importable in the container (ADR-009 §3).
+# `/root/.cache` is what it may never be again: Modal refuses to mount a Volume
+# on a non-empty path, and the SGLang image COPYs a kernels cache into the
+# DEFAULT Hugging Face cache root (live, 2026-09-21, `tasks/141` round 1).
+_HF_CACHE_CONSTANT = "HF_CACHE_DIR"
+_HF_CACHE_DIR = "/cache/huggingface"
+_HOME_CACHE = "/root/.cache"
+
+# The Volume that mount takes, as `ast.unparse` renders it: ONE shared Volume
+# for both kinds, whose root holds `hub/` — the layout `HF_HOME` keeps.
+_WEIGHTS_VOLUME = "modal.Volume.from_name('huggingface-cache', create_if_missing=True)"
+
+# `HF_HUB_CACHE`'s value as `ast.unparse` renders it, built by the same round
+# trip so the comparison cannot drift on an f-string quoting detail.
+_HUB_CACHE_VALUE = ast.unparse(ast.parse(f'f"{{{_HF_CACHE_CONSTANT}}}/hub"'))
+
+# EVERY LITERAL key the image env may carry, sorted — an allow-list widened by
+# a deliberate edit HERE, never by a rule that stops asking. The spec's own key
+# is a NAME (`DEPLOY_SPEC_ENV`), so it is not in this list; `HF_TOKEN` is the
+# key this list exists to keep out (ADR-009 §9: image layers are cached and
+# inspectable). A sorted LIST, not a set: a key baked twice must fail too.
+_IMAGE_ENV_KEYS = ["HF_HOME", "HF_HUB_CACHE", "HF_XET_HIGH_PERFORMANCE"]
+
 # The one log line that proves the Secret arrived, and the only other place the
 # variable's name may appear (as the key that line looks up).
 _TOKEN_LOG_MESSAGE = "HF_TOKEN set in container: %s"
@@ -225,7 +256,12 @@ _FORBIDDEN_ENV_READERS = frozenset({"os.getenv", "os.environ.copy", "os.environb
 _AUTH_KEYWORD = "unauthenticated=False,"
 _STOP_CALL = "        self.endpoint.stop()"
 _APP_LINE = 'app = modal.App(SPEC["app_name"])'
-_SPEC_ENV_LAYER = f"DEPLOY_SPEC_ENV: {_SPEC_VALUE_NAME}}}"
+# No closing brace: the `.env({...})` layer carries four entries and is written
+# one per line, so the spec's is not the last thing before the `}`.
+_SPEC_ENV_LAYER = f"DEPLOY_SPEC_ENV: {_SPEC_VALUE_NAME}"
+_VOLUME_MOUNT_KEY = f"{_HF_CACHE_CONSTANT}: modal.Volume.from_name("
+_HF_HOME_ENTRY = f'"HF_HOME": {_HF_CACHE_CONSTANT},'
+_HF_HUB_CACHE_ENTRY = f'"HF_HUB_CACHE": f"{{{_HF_CACHE_CONSTANT}}}/hub",'
 
 # The words each script may no longer contain (ADR-009 §2): one App per kind,
 # neither of them a rung on a ladder. `(?<!v)llm` keeps `vLLM` /
@@ -242,6 +278,17 @@ _RETIRED_VOCABULARY: dict[str, re.Pattern[str]] = {
 }
 
 _CONFIGS = _APP_ROOT / "configs" / "default.yaml"
+
+# The decision these two scripts implement. READ here, never written (the PA
+# owns `docs/adrs/`): the mount path and both cache variables are spelled out
+# in ADR-009 §3, so the scripts and the ADR hold the same three strings — and
+# `test_both_scripts_share_one_cache_path` is what keeps them the same.
+_ADR = (
+    _APP_ROOT.parents[1]
+    / "docs"
+    / "adrs"
+    / "009_embedding_roles_and_modal_embedding_catalog.md"
+)
 
 
 def _source(engine: str) -> str:
@@ -834,6 +881,64 @@ def _container_decode(engine: str, value: str) -> object:
     return namespace["SPEC"]
 
 
+def _assert_the_weights_volume_mounts_outside_the_home_cache(
+    module: ast.Module,
+) -> None:
+    """ONE Volume, mounted at the script's own ``HF_CACHE_DIR``.
+
+    ADR-009 §3, after the live crash of ``tasks/141`` round 1: Modal refuses to
+    mount a Volume on a path that already holds files, and
+    ``lmsysorg/sglang:v0.5.18`` COPYs its kernels-community cubin cache into
+    the default Hugging Face cache root — so the App crash-looped before the
+    engine ever started. The mount key is the module CONSTANT, not a literal:
+    the same name is what the image env points ``HF_HOME`` at, so the two
+    cannot drift apart inside one file.
+    """
+
+    volumes = _keyword(_server_decorator(module), "volumes")
+    assert isinstance(volumes, ast.Dict), "`volumes=` must be a dict literal"
+    assert len(volumes.keys) == 1, (
+        f"exactly ONE Volume is mounted, found {len(volumes.keys)}"
+    )
+
+    key = volumes.keys[0]
+    assert isinstance(key, ast.Name) and key.id == _HF_CACHE_CONSTANT, (
+        f"the Volume must mount at the module's `{_HF_CACHE_CONSTANT}` "
+        f"({_HF_CACHE_DIR}, never under {_HOME_CACHE}), not "
+        f"`{ast.unparse(key)}`"
+    )
+    assert _module_constant(module, _HF_CACHE_CONSTANT) == _HF_CACHE_DIR
+    assert ast.unparse(volumes.values[0]) == _WEIGHTS_VOLUME
+
+
+def _assert_hf_home_points_at_the_volume(module: ast.Module) -> None:
+    """The image env derives every download path from the mounted Volume.
+
+    ``HF_HOME`` is the root ``huggingface_hub`` builds its cache paths from
+    (``constants.py``: ``HF_HOME``, then ``default_cache_path = HF_HOME/hub``),
+    and it keeps the Volume's EXISTING layout, whose root already holds
+    ``hub/``. ``HF_HUB_CACHE`` names that same directory and OUTRANKS both
+    ``HF_HOME`` and the legacy ``HUGGINGFACE_HUB_CACHE``, so no base image can
+    move the weights off the Volume by setting a cache variable of its own.
+    """
+
+    baked = {
+        key.value: ast.unparse(value)
+        for env in _image_env_dicts(module)
+        for key, value in zip(env.keys, env.values, strict=True)
+        if isinstance(key, ast.Constant)
+    }
+
+    assert baked.get("HF_HOME") == _HF_CACHE_CONSTANT, (
+        f"the image must set `HF_HOME` to `{_HF_CACHE_CONSTANT}` (the mount "
+        f"path), not to {baked.get('HF_HOME')}"
+    )
+    assert baked.get("HF_HUB_CACHE") == _HUB_CACHE_VALUE, (
+        f"the image must set `HF_HUB_CACHE` to `{_HUB_CACHE_VALUE}` (the "
+        f"Volume's own `hub/`), not to {baked.get('HF_HUB_CACHE')}"
+    )
+
+
 def _assert_proxy_auth_is_pinned(module: ast.Module) -> None:
     """``unauthenticated`` is the LITERAL ``False`` — never an expression.
 
@@ -991,6 +1096,31 @@ class TestGlueContract:
             assert literal in source
 
         _assert_proxy_auth_is_pinned(_module(engine))
+
+    def test_the_weights_volume_mounts_outside_the_home_cache(
+        self, engine: str
+    ) -> None:
+        """The shared weights Volume mounts at ``/cache/huggingface``.
+
+        Under ``/root/.cache/huggingface`` the SGLang App never started: the
+        official image ships a kernels cache there and Modal answered
+        ``cannot mount volume on non-empty path`` (live, 2026-09-21). The CUDA
+        base of the vLLM script happened to have nothing there, which is the
+        only reason one of the two scripts survived it — so both move.
+        """
+
+        _assert_the_weights_volume_mounts_outside_the_home_cache(_module(engine))
+
+    def test_hf_home_points_at_the_volume(self, engine: str) -> None:
+        """Both cache roots point INTO the mount, and the image env carries
+        nothing else: the literal keys are an allow-list (ADR-009 §9), so a new
+        one — a credential above all — is a deliberate edit in the test."""
+
+        module = _module(engine)
+
+        _assert_hf_home_points_at_the_volume(module)
+
+        assert sorted(_image_env_keys(module)) == _IMAGE_ENV_KEYS
 
     def test_the_retired_auth_never_comes_back(self, engine: str) -> None:
         """ADR-009 §4 retired the engine-level key and every named Modal
@@ -1213,6 +1343,41 @@ def test_only_the_hf_token_secret(engine: str) -> None:
     assert len(lookups) == 1
 
 
+def test_both_scripts_share_one_cache_path() -> None:
+    """ONE path, ONE Volume, ONE layout — spelled out in two files.
+
+    The vLLM script changed although its base image tolerated the old path:
+    two mount paths over one Volume would mean two ``hub/`` layouts, and the
+    second cold start would download weights the first one already paid for.
+    """
+
+    paths = {
+        engine: _module_constant(_module(engine), _HF_CACHE_CONSTANT)
+        for engine in _SCRIPTS
+    }
+
+    assert set(paths.values()) == {_HF_CACHE_DIR}, paths
+
+    for engine in _SCRIPTS:
+        assert _HOME_CACHE not in _source(engine), (
+            f"the {engine} script still names {_HOME_CACHE} — the path Modal "
+            "refuses to mount a Volume on"
+        )
+
+    # ... and the same string in the document that decided it. The ADR is the
+    # third copy (the README and the skills name no path), so a path changed in
+    # the code and nowhere else fails HERE instead of in a cold container.
+    assert _ADR.is_file(), f"ADR-009 is not at {_ADR}"
+    adr = _ADR.read_text(encoding="utf-8")
+
+    for literal in (
+        f"`{_HF_CACHE_DIR}`",
+        f"`HF_HOME={_HF_CACHE_DIR}`",
+        f"`HF_HUB_CACHE={_HF_CACHE_DIR}/hub`",
+    ):
+        assert literal in adr, f"ADR-009 §3 does not say {literal}"
+
+
 @_ENGINES
 class TestTheGuardsCatchTheirMutants:
     """Every guard, proven on a MUTATED COPY in ``tmp_path``.
@@ -1225,28 +1390,73 @@ class TestTheGuardsCatchTheirMutants:
     """
 
     def test_the_shipped_script_passes_every_guard(self, engine: str) -> None:
-        """The control row: without a mutation, all seven guards are silent."""
+        """The control row: without a mutation, all nine guards are silent."""
 
         module = _module(engine)
 
         _assert_proxy_auth_is_pinned(module)
         _assert_the_spec_crosses_as_base64(module, engine)
+        _assert_the_weights_volume_mounts_outside_the_home_cache(module)
+        _assert_hf_home_points_at_the_volume(module)
         assert not _console_writes(module)
         assert not _environ_reads(module, engine)
         assert not _log_offenders(module, engine)
         assert not _process_spawns(module)
         assert _TOKEN_VAR not in _image_env_keys(module)
 
+    def test_a_volume_mounted_on_the_home_cache_fails(
+        self, engine: str, tmp_path: pathlib.Path
+    ) -> None:
+        """The mount as it shipped before #154 — the one Modal refused to
+        start the SGLang App on."""
+
+        mutant = _mutate(
+            engine,
+            tmp_path,
+            _VOLUME_MOUNT_KEY,
+            f'"{_HOME_CACHE}/huggingface": modal.Volume.from_name(',
+        )
+
+        with pytest.raises(AssertionError, match=_HF_CACHE_CONSTANT):
+            _assert_the_weights_volume_mounts_outside_the_home_cache(mutant)
+
+    @pytest.mark.parametrize(
+        "anchor,mutation,needle",
+        [
+            # A cache root that points back where the weights are NOT: the
+            # container would download them into its own filesystem and throw
+            # them away at scale-down.
+            (_HF_HOME_ENTRY, f'"HF_HOME": "{_HOME_CACHE}/huggingface",', "HF_HOME"),
+            # Dropping the variable that OUTRANKS `HF_HOME`: a base image that
+            # sets `HF_HUB_CACHE` (or the legacy `HUGGINGFACE_HUB_CACHE`) then
+            # moves the weights off the Volume, and nothing here notices.
+            (_HF_HUB_CACHE_ENTRY, "", "HF_HUB_CACHE"),
+        ],
+        ids=["home-cache", "no-hub-cache"],
+    )
+    def test_a_cache_env_that_leaves_the_volume_fails(
+        self,
+        engine: str,
+        anchor: str,
+        mutation: str,
+        needle: str,
+        tmp_path: pathlib.Path,
+    ) -> None:
+        mutant = _mutate(engine, tmp_path, anchor, mutation)
+
+        with pytest.raises(AssertionError, match=needle):
+            _assert_hf_home_points_at_the_volume(mutant)
+
     @pytest.mark.parametrize(
         "mutation",
         [
             # The transport as it shipped before #153 — the one that killed
             # the DEFAULT embedding model's container at import.
-            "DEPLOY_SPEC_ENV: json.dumps(SPEC)}",
+            "DEPLOY_SPEC_ENV: json.dumps(SPEC)",
             # ... and re-encoding the spec in the layer instead of baking the
             # value both branches share: the container would then read an env
             # var nothing wrote the same way.
-            "DEPLOY_SPEC_ENV: encode_deploy_spec(RESOLVED_SPEC)}",
+            "DEPLOY_SPEC_ENV: encode_deploy_spec(RESOLVED_SPEC)",
         ],
         ids=["raw-json", "recomputed"],
     )

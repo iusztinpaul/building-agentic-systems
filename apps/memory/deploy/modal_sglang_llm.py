@@ -81,6 +81,14 @@ PORT = 8000
 STARTUP_TIMEOUT = 20 * MINUTES
 HEALTH_TIMEOUT = 18 * MINUTES
 
+# Where the shared `huggingface-cache` Volume mounts, and the root the image
+# env derives every Hugging Face cache path from. NOT the default cache under
+# the home directory: Modal refuses with `cannot mount volume on non-empty
+# path` when an image already ships files there — the official SGLang image
+# COPYs a kernels cache into it (live, 2026-09-21). ONE path for both engines,
+# so ONE Volume layout: its root holds `hub/`, where `HF_HOME` puts it again.
+HF_CACHE_DIR = "/cache/huggingface"
+
 # The env var the resolved catalog entry crosses into the container in. The
 # name is `tree.models.modal_catalog.LLM_DEPLOY_SPEC_ENV`, spelled out because
 # `tree` is not importable here on the container side (a unit test pins the two
@@ -179,7 +187,18 @@ image = (
     # DOCKER TAG from the catalog, not a PyPI version.
     modal.Image.from_registry(f"lmsysorg/sglang:{SPEC['engine_version']}")
     .uv_pip_install(f"autoinference-utils=={SPEC['autoinference_utils_version']}")
-    .env({"HF_XET_HIGH_PERFORMANCE": "1", DEPLOY_SPEC_ENV: SPEC_ENV_VALUE})
+    # `HF_HUB_CACHE` as well as `HF_HOME`: it names the same directory but
+    # OUTRANKS both `HF_HOME` and the legacy `HUGGINGFACE_HUB_CACHE`
+    # (`huggingface_hub/constants.py`), so an image that sets a cache variable
+    # of its own cannot move the weights off the Volume.
+    .env(
+        {
+            "HF_XET_HIGH_PERFORMANCE": "1",
+            "HF_HOME": HF_CACHE_DIR,
+            "HF_HUB_CACHE": f"{HF_CACHE_DIR}/hub",
+            DEPLOY_SPEC_ENV: SPEC_ENV_VALUE,
+        }
+    )
 )
 
 app = modal.App(SPEC["app_name"])
@@ -202,7 +221,7 @@ app = modal.App(SPEC["app_name"])
     target_concurrency=16,
     secrets=[HF_SECRET],
     volumes={
-        "/root/.cache/huggingface": modal.Volume.from_name(
+        HF_CACHE_DIR: modal.Volume.from_name(
             "huggingface-cache", create_if_missing=True
         )
     },
