@@ -117,11 +117,15 @@ query:
   embedding_batch_size: 64
   # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion; $text
   # hits are never gated. Atlas normalises cosine to (1 + cos) / 2, so this is
-  # an absolute similarity (the RRF score is not). PROVISIONAL — pinned by the
-  # two live queries in tasks/125's log (nonsense query top=0.728, on-topic
-  # top=0.882, so ADR-008 §4's proposed 0.65 let EVERY candidate through) and
-  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
-  min_vector_score: 0.75
+  # an absolute similarity (the RRF score is not). PROVISIONAL and owned by
+  # Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # re-pinned on voyage-4, 2026-09 — tasks/141 Log: voyage-4 scores lower than
+  # voyage-3.5 did, so 0.75 (tasks/125, on voyage-3.5) kept NOTHING for an
+  # on-topic query. Live, corpus 4 ADRs in tree_e2e_141: nonsense
+  # "zxqv plorb wumbus" top=0.649, on-topic "how does the coordinator shard
+  # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
+  # for the first (0 kept) and found for the second (7 of 10 kept).
+  min_vector_score: 0.70
 
 dream:
   enabled: true

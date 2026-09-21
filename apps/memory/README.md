@@ -70,7 +70,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-4` / 1024.
 - `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
-- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
+- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.70`, re-pinned live on voyage-4 in `tasks/141`; provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
 - `modal` — the **Modal catalog** (`embedding_models` + `llm_models`) plus the App pins (`autoinference_utils_version`, `engines.vllm/sglang.version`) and the two waits, `warmup_deadline_s` (for a
   cold server) and `request_timeout_s` (for one answer). One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` plus the optional request knobs `max_tokens` and `chat_template_kwargs` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
@@ -606,8 +606,14 @@ flags: both clients and the chat smoke test send them from one helper, so they
 behave identically on both Serving paths and changing either needs **no
 redeploy** — write the line, re-run `-test`. Omit a knob and nothing is sent
 for it (the smoke test then spends its own 256-token bound). `enable_thinking:
-false` is what makes a THINKING model answer: with it on, `Qwen/Qwen3.5-0.8B`
-spent the whole 256-token budget reasoning and returned an empty message.
+false` is how a THINKING model is told to skip reasoning: with it on,
+`Qwen/Qwen3.5-0.8B` spent its whole budget reasoning and returned an empty
+message. On a **Dedicated endpoint** that is not enough — with thinking off the
+same model, and `google/gemma-3-1b-it` which has no thinking mode at all, both
+ran the strict-JSON decoder into an unbounded filler run until
+`finish_reason=length`, while plain JSON mode answered sanely (`tasks/141`
+round 2). Strict-schema completions are proven on the **App** path
+(`LiquidAI/LFM2.5-350M`), not on the endpoint one.
 
 `deploy/modal_sglang_llm.py` follows the `serve.py` Modal generates for its own
 LLM endpoints: the official `lmsysorg/sglang:<tag>` image (the engine is IN the

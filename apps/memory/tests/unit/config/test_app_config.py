@@ -632,17 +632,17 @@ class TestQueryConfig:
 
     The ONE absolute score in retrieval (Atlas normalises cosine to
     ``(1 + cos) / 2``), so it is the only place a "nothing relevant" decision
-    can sit. PROVISIONAL at 0.75 — ADR-008 §4 proposed 0.65, the two live
-    queries in ``tasks/125``'s log moved it one step up (a nonsense query
-    scored 0.728), and Chapter 7's evals own it from here. Which is exactly why
-    it is a knob.
+    can sit. PROVISIONAL at 0.70 — re-pinned on voyage-4 by the two live
+    queries in ``tasks/141``'s log (nonsense top=0.649, on-topic top=0.735, so
+    the voyage-3.5 pin of 0.75 from ``tasks/125`` kept nothing on topic), and
+    Chapter 7's evals own it from here. Which is exactly why it is a knob.
     """
 
     def test_min_vector_score_default_override_and_bounds(self, tmp_path, monkeypatch):
         # Default: the typed default, the frozen fixture and the real
-        # configs/default.yaml all agree on the pinned 0.75.
-        assert QueryConfig().min_vector_score == 0.75
-        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_vector_score == 0.75
+        # configs/default.yaml all agree on the pinned 0.70.
+        assert QueryConfig().min_vector_score == 0.70
+        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_vector_score == 0.70
 
         # Override: an operator raises the bar for a noisy corpus with the same
         # TREE_<SECTION>__<KEY> hatch every other knob uses — no YAML edit.
@@ -661,7 +661,7 @@ class TestQueryConfig:
     def test_min_vector_score_loaded_from_frozen_config(self, frozen_config_path):
         config = load_app_config(frozen_config_path)
 
-        assert config.query.min_vector_score == 0.75
+        assert config.query.min_vector_score == 0.70
 
     def test_min_vector_score_defaults_when_key_absent(self, tmp_path):
         """A YAML ``query:`` block written before #125 keeps the typed default
@@ -670,7 +670,7 @@ class TestQueryConfig:
         custom = tmp_path / "query.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
-        assert load_app_config(custom).query.min_vector_score == 0.75
+        assert load_app_config(custom).query.min_vector_score == 0.70
 
 
 class TestChunkingConfig:

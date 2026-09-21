@@ -314,17 +314,18 @@ class QueryConfig(BaseModel):
     ``min_vector_score`` is the bar the VECTOR leg of the hybrid search must
     clear before fusion (ADR-008 §3): Atlas normalises cosine similarity to
     ``(1 + cos) / 2``, so it is an absolute score, unlike the rank-based RRF
-    one. ``0.75`` is PROVISIONAL — ADR-008 §4 proposed 0.65, and the live pin in
-    ``tasks/125``'s log moved it up one step: a nonsense query still scored
-    0.728 against the local corpus, an on-topic one 0.882. Owned by Chapter 7's
-    evals; override per shell with ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
+    one. ``0.70`` is PROVISIONAL — re-pinned on voyage-4, 2026-09 (``tasks/141``
+    Log): the model scores lower than voyage-3.5, for which ``tasks/125`` pinned
+    0.75, and at 0.75 an ON-TOPIC query kept nothing (top=0.735) while nonsense
+    peaked at 0.649. Owned by Chapter 7's evals; override per shell with
+    ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
     """
 
     top_k: int = 10
     max_hops: int = 1
     rrf_k: int = 60
     embedding_batch_size: int = 64
-    min_vector_score: float = Field(0.75, ge=0.0, le=1.0)
+    min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
 
 
 class ObservabilityConfig(BaseModel):

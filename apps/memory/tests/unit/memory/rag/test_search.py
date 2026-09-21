@@ -37,7 +37,7 @@ _CHILD_FILTER = {"type": "chunk", "subtype": "child"}
 _OFF_TOPIC = "zxqv plorb wumbus"
 
 # The bar these tests pin the gate to — a fixed number, NOT the shipped default
-# (0.75 today): that one is provisional and evals own it (ADR-008 §4), so it is
+# (0.70 today): that one is provisional and evals own it (ADR-008 §4), so it is
 # asserted once, in tests/unit/config/test_app_config.py, and patched here.
 _MIN_VECTOR_SCORE = 0.65
 
@@ -527,9 +527,11 @@ class TestMinVectorScore:
         self, make_collection, embedding_model, make_child_row, mocker, caplog
     ) -> None:
         # An operator raises the bar on a noisy corpus: what passed at the
-        # pinned 0.65 must vanish, and the log must name the new bar. 0.85 rather
-        # than the User Story's 0.75 — the live pin in tasks/125 moved the
-        # SHIPPED default to 0.75, so that value no longer reads as an override.
+        # pinned 0.65 must vanish, and the log must name the new bar. 0.85
+        # rather than the User Story's 0.75 for the same reason the bar above is
+        # pinned: the SHIPPED default is provisional (0.75 on voyage-3.5 in
+        # tasks/125, 0.70 on voyage-4 in tasks/141), so this test holds a value
+        # no re-pin can turn into "the default" and stop reading as an override.
         mocker.patch("tree.memory.rag.search.app_config.query.min_vector_score", 0.85)
         collection = make_collection([_vector_candidate(make_child_row, "c0", 0.80)])
 
