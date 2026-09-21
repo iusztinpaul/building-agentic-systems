@@ -15,7 +15,7 @@ logic, no ``print``), the container re-import cannot break on a ``tree`` import,
 the optional Hugging Face token travels as an ephemeral Secret — never baked
 into a cached, inspectable image layer, never logged as a value.
 
-Six guards are written AGAINST A MUTANT, not only against the shipped file,
+Seven guards are written AGAINST A MUTANT, not only against the shipped file,
 and ``TestTheGuardsCatchTheirMutants`` proves each one on a mutated COPY in
 ``tmp_path`` — the shipped scripts are never edited and never executed. Two
 came from #142's QA (``unauthenticated=not True`` survived a literal-substring
@@ -36,6 +36,17 @@ a second logger spelled anything but ``logger.`` — ``logging.info(...)``,
 ``logging.getLogger().info(...)``, a ``log = logging.getLogger(…)`` alias —
 which walked straight past the message allow-list (``_log_offenders``).
 
+#153 added the seventh, and the FIRST one a live deploy — not a mutation —
+found: the spec's env value must be the base64 of its JSON, baked as the one
+name both sides of ``modal.is_local()`` share. Its mutant is the transport as
+it shipped, ``DEPLOY_SPEC_ENV: json.dumps(SPEC)``, which the image build
+corrupted for any value holding a quote. That guard's token-safety half moved
+to the spec MODEL (``test_deploy_spec_has_no_credential_field`` in
+``tests/unit/models/test_modal_catalog.py``): an opaque blob defeats reading
+the ``.env({...})`` literal for a credential, so what is pinned instead is
+that no field of a spec can hold one and that a sentinel token never appears
+in the DECODED value.
+
 #152's QA rewrote both of those in ONE token and got past them again:
 ``__import__("os").system("env")`` (the dotted name of a chain rooted at a CALL
 is not ``os.something``) and ``getattr(logger, "info")("…")`` (the ``func`` of
@@ -48,8 +59,11 @@ still cannot see.
 from __future__ import annotations
 
 import ast
+import base64
+import json
 import pathlib
 import re
+from typing import Any, Callable
 
 import pytest
 
@@ -58,7 +72,11 @@ from tree.models.modal_catalog import (
     MODAL_SERVER_NAME,
     LLM_DEPLOY_SPEC_ENV,
     MODAL_ROUTING_REGION,
+    DeploySpec,
     app_script,
+    build_deploy_spec,
+    build_llm_deploy_spec,
+    encode_deploy_spec,
     get_catalog_entry,
     modal_cli_command,
 )
@@ -84,6 +102,27 @@ _SPEC_BUILDER: dict[str, str] = {
     "vllm": "build_deploy_spec",
     "sglang": "build_llm_deploy_spec",
 }
+
+# The seed each script's kind is proven on, as the (builder, model) pair the
+# OPERATOR's side would resolve — so the transport tests below cross the same
+# bytes a real deploy would.
+_SEED: dict[str, tuple[Callable[[str], DeploySpec], str]] = {
+    "vllm": (build_deploy_spec, "voyageai/voyage-4-nano"),
+    "sglang": (build_llm_deploy_spec, "LiquidAI/LFM2.5-350M"),
+}
+
+# The ONE name the spec's env value is bound to on BOTH sides of
+# `modal.is_local()` (ADR-009 §3): the encoder's output locally, the env var's
+# own raw string in the container. One name keeps the `.env({...})` literal —
+# and so the image definition — byte-identical where Modal re-imports the file.
+_SPEC_VALUE_NAME = "SPEC_ENV_VALUE"
+
+# The module-level constant each script raises with when the value does not
+# decode, and the statements of the container branch that are NOT the decode
+# (they configure logging or build the Secret, neither of which a unit test
+# may run: `basicConfig(force=True)` would reconfigure pytest's own logging).
+_SPEC_ERROR_CONSTANT = "SPEC_DECODE_ERROR"
+_NOT_THE_DECODE = ("logging.", "HF_SECRET", _SPEC_VALUE_NAME)
 
 # The engine object and the exact keyword set each script constructs it with
 # (verified in the `autoinference-utils` 0.2.6 source).
@@ -186,6 +225,7 @@ _FORBIDDEN_ENV_READERS = frozenset({"os.getenv", "os.environ.copy", "os.environb
 _AUTH_KEYWORD = "unauthenticated=False,"
 _STOP_CALL = "        self.endpoint.stop()"
 _APP_LINE = 'app = modal.App(SPEC["app_name"])'
+_SPEC_ENV_LAYER = f"DEPLOY_SPEC_ENV: {_SPEC_VALUE_NAME}}}"
 
 # The words each script may no longer contain (ADR-009 §2): one App per kind,
 # neither of them a rung on a ladder. `(?<!v)llm` keeps `vLLM` /
@@ -692,6 +732,108 @@ def _log_offenders(module: ast.Module, engine: str) -> list[str]:
     return offenders
 
 
+def _env_layer_value(module: ast.Module, key_name: str) -> list[str]:
+    """What every image ``.env({...})`` stores under the NAME ``key_name``."""
+
+    return [
+        ast.unparse(value)
+        for env in _image_env_dicts(module)
+        for key, value in zip(env.keys, env.values, strict=True)
+        if isinstance(key, ast.Name) and key.id == key_name
+    ]
+
+
+def _assignments_to(module: ast.Module, name: str) -> list[ast.Assign]:
+    """Every module-level-or-nested ``name = ...`` assignment, as written."""
+
+    return [
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        )
+    ]
+
+
+def _assert_the_spec_crosses_as_base64(module: ast.Module, engine: str) -> None:
+    """The spec's transport, pinned on both sides of ``modal.is_local()``.
+
+    ADR-009 §3, after the live crash of ``tasks/141`` round 1: the image layer
+    bakes the BARE NAME the two branches share, the local branch fills it from
+    ``encode_deploy_spec`` (the catalog's one encoder, imported HERE so a
+    rename cannot drift), the container branch echoes the env var and decodes
+    it with the stdlib — and nothing in the file serialises JSON any more,
+    because a raw JSON value is what the image build corrupted.
+    """
+
+    stored = _env_layer_value(module, "DEPLOY_SPEC_ENV")
+    assert stored == [_SPEC_VALUE_NAME], (
+        f"the image layer must bake the bare `{_SPEC_VALUE_NAME}` "
+        f"(base64, ADR-009 §3), not {stored}"
+    )
+
+    branch = _is_local_branch(module)
+    local_nodes = _nodes_in(branch.body)
+    container_nodes = _nodes_in(branch.orelse)
+    assignments = _assignments_to(module, _SPEC_VALUE_NAME)
+    assert len(assignments) == 2, (
+        f"`{_SPEC_VALUE_NAME}` must be assigned exactly once per branch, "
+        f"found {len(assignments)}"
+    )
+
+    local = next(node for node in assignments if id(node) in local_nodes)
+    assert isinstance(local.value, ast.Call)
+    assert _dotted(local.value.func) == encode_deploy_spec.__name__
+
+    container = next(node for node in assignments if id(node) in container_nodes)
+    assert ast.unparse(container.value) == f"os.environ[{_SPEC_ENV[engine]!r}]"
+
+    decode = ast.Module(body=branch.orelse, type_ignores=[])
+    assert _calls(decode, "base64.b64decode"), "the container decodes no base64"
+    assert not _calls(module, "json.dumps"), "a raw JSON value is what broke"
+
+
+def _container_decode(engine: str, value: str) -> object:
+    """Run the container branch's DECODE over ``value``, nothing else.
+
+    The script is never imported (it would need ``modal``, and Modal re-imports
+    it in a container that has neither ``tree`` nor a test runner): the decode
+    statements are lifted out of the ``else`` branch by AST and executed with
+    the stdlib names they use. The statements that are NOT the decode —
+    ``logging.basicConfig(force=True)``, the Secret, the env read this
+    function replaces — are dropped by name.
+
+    That makes this the drift guard between the script's decoder and
+    ``encode_deploy_spec``: if either side changes alone, the round trip below
+    stops closing.
+    """
+
+    statements = [
+        ast.unparse(statement)
+        for statement in _is_local_branch(_module(engine)).orelse
+        if not ast.unparse(statement).startswith(_NOT_THE_DECODE)
+    ]
+    source = "\n".join(statements)
+    # Not `assert statements`: that only proves SOMETHING survived the filter
+    # above, so a renamed variable could leave this helper executing the
+    # neighbours and passing vacuously.
+    assert "b64decode" in source, f"no decode survived the lift:\n{source}"
+
+    namespace: dict[str, Any] = {
+        "json": json,
+        "base64": base64,
+        _SPEC_VALUE_NAME: value,
+        _SPEC_ERROR_CONSTANT: _module_constant(_module(engine), _SPEC_ERROR_CONSTANT),
+    }
+    # `exec` of THIS project's own source, lifted line by line from a file the
+    # tests above have already walked — the alternative is importing a module
+    # that needs `modal` and reconfigures logging.
+    exec(compile(source, "<container>", "exec"), namespace)
+    return namespace["SPEC"]
+
+
 def _assert_proxy_auth_is_pinned(module: ast.Module) -> None:
     """``unauthenticated`` is the LITERAL ``False`` — never an expression.
 
@@ -933,6 +1075,63 @@ class TestGlueContract:
         assert f'DEPLOY_SPEC_ENV = "{spec_env}"' in _source(engine)
         assert f'os.environ["{spec_env}"]' in _source(engine)
 
+    def test_the_spec_crosses_as_base64(self, engine: str) -> None:
+        """ADR-009 §3: the value is the base64 of the spec's JSON.
+
+        The raw JSON died live — Modal renders an image env var as a
+        Dockerfile ``ENV k=<shlex.quote(v)>`` and the build unescaped every
+        backslash, so voyage-4-nano's JSON-in-JSON server args reached the
+        container broken and the App crash-looped at import.
+        """
+
+        _assert_the_spec_crosses_as_base64(_module(engine), engine)
+
+        assert "json.dumps" not in _source(engine)
+
+    def test_the_container_decode_inverts_the_catalog_encoder(
+        self, engine: str
+    ) -> None:
+        """The two halves of the transport are written in two files; this is
+        the one test that closes the loop between them."""
+
+        builder, model = _SEED[engine]
+        spec = builder(model)
+
+        decoded = _container_decode(engine, encode_deploy_spec(spec))
+
+        assert decoded == spec.model_dump()
+
+    @pytest.mark.parametrize(
+        "value,reason",
+        [
+            ("", "empty"),
+            ("not base64!", "outside the alphabet"),
+            (base64.b64encode(b"{not json").decode(), "base64 of broken JSON"),
+            (base64.b64encode(b"[1, 2]").decode(), "base64 of a JSON non-object"),
+            (base64.b64encode(b"null").decode(), "base64 of JSON null"),
+            # The most plausible corruption left once the quoting layers can
+            # no longer touch the value: a clipped env var. Cut ON a 4-char
+            # group boundary, so the base64 itself is still well formed and
+            # only the JSON it hides is truncated.
+            (base64.b64encode(b'{"repo_id": "x"}').decode()[:8], "clipped value"),
+        ],
+    )
+    def test_a_corrupt_spec_fails_at_import_naming_the_env_var(
+        self, engine: str, value: str, reason: str
+    ) -> None:
+        """A value that does not decode kills the import LOUDLY.
+
+        The failure mode this whole task exists for was diagnosed from the
+        import traceback, so the replacement must not degrade into a silent
+        default: whatever the corruption, the container raises and the message
+        names the variable an operator has to look at.
+        """
+
+        with pytest.raises(RuntimeError) as excinfo:
+            _container_decode(engine, value)
+
+        assert _SPEC_ENV[engine] in str(excinfo.value), reason
+
     def test_the_script_talks_about_its_own_kind_only(self, engine: str) -> None:
         """ADR-009 §2: one App per kind — the vLLM script serves embedding
         models, the SGLang script LLMs, and neither is a rung on a ladder."""
@@ -1026,16 +1225,38 @@ class TestTheGuardsCatchTheirMutants:
     """
 
     def test_the_shipped_script_passes_every_guard(self, engine: str) -> None:
-        """The control row: without a mutation, all six guards are silent."""
+        """The control row: without a mutation, all seven guards are silent."""
 
         module = _module(engine)
 
         _assert_proxy_auth_is_pinned(module)
+        _assert_the_spec_crosses_as_base64(module, engine)
         assert not _console_writes(module)
         assert not _environ_reads(module, engine)
         assert not _log_offenders(module, engine)
         assert not _process_spawns(module)
         assert _TOKEN_VAR not in _image_env_keys(module)
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            # The transport as it shipped before #153 — the one that killed
+            # the DEFAULT embedding model's container at import.
+            "DEPLOY_SPEC_ENV: json.dumps(SPEC)}",
+            # ... and re-encoding the spec in the layer instead of baking the
+            # value both branches share: the container would then read an env
+            # var nothing wrote the same way.
+            "DEPLOY_SPEC_ENV: encode_deploy_spec(RESOLVED_SPEC)}",
+        ],
+        ids=["raw-json", "recomputed"],
+    )
+    def test_a_spec_not_baked_as_the_shared_base64_value_fails(
+        self, engine: str, mutation: str, tmp_path: pathlib.Path
+    ) -> None:
+        mutant = _mutate(engine, tmp_path, _SPEC_ENV_LAYER, mutation)
+
+        with pytest.raises(AssertionError, match=_SPEC_VALUE_NAME):
+            _assert_the_spec_crosses_as_base64(mutant, engine)
 
     @pytest.mark.parametrize(
         "mutation",

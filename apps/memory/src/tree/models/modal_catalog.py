@@ -18,6 +18,7 @@ module stays importable without the ``local-models`` extra
 (``tests/unit/models/test_modal_catalog.py::test_catalog_does_not_import_modal``).
 """
 
+import base64
 import math
 from typing import Literal
 
@@ -40,11 +41,12 @@ from tree.models.exceptions import ModelError
 # every model regardless of how it is served.
 MODAL_SERVER_NAME = "Server"
 
-# The env vars the App scripts bake their resolved spec's ``model_dump_json()``
-# into: the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
-# inside the Modal container, so the resolved spec crosses as ONE JSON string.
-# One per KIND, because the two specs carry different fields — a script reading
-# the wrong one would fail on a missing key instead of on a wrong model.
+# The env vars the App scripts bake :func:`encode_deploy_spec`'s output into:
+# the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
+# inside the Modal container, so the resolved spec crosses as ONE base64 string
+# (ADR-009 §3). One per KIND, because the two specs carry different fields — a
+# script reading the wrong one would fail on a missing key instead of on a
+# wrong model.
 EMBEDDING_DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
 LLM_DEPLOY_SPEC_ENV = "LLM_DEPLOY_SPEC"
 
@@ -315,6 +317,32 @@ def build_llm_deploy_spec(model: str) -> LLMDeploySpec:
         autoinference_utils_version=app_config.modal.autoinference_utils_version,
         server_args=build_llm_server_args(entry),
     )
+
+
+def encode_deploy_spec(spec: DeploySpec) -> str:
+    """The value an App script bakes into its spec env var (ADR-009 §3).
+
+    The base64 of the spec's JSON, so the alphabet that crosses into the
+    container is ``[A-Za-z0-9+/=]`` — no quote, backslash, ``$`` or whitespace
+    for any quoting layer to interpret. Modal renders an image env var as a
+    Dockerfile ``ENV {key}={shlex.quote(value)}`` (modal 1.5.5,
+    ``_image.py:2821``) and its image build UNESCAPED every backslash of the
+    value, so the raw JSON of a spec holding JSON-in-JSON values
+    (``--pooler-config``, ``--hf-overrides``) arrived with its ``\\"`` turned
+    into ``"`` and the container died at import with a ``JSONDecodeError``
+    (live, 2026-09-21, ``tasks/141``; a quote-free spec crossed intact, which
+    is why no test saw it).
+
+    The container decodes with the stdlib alone —
+    ``json.loads(base64.b64decode(os.environ[…]))`` — because ``tree`` is not
+    installed there. An operator reads a deployed layer back with
+    ``base64 -d``.
+
+    Pure: no ``modal`` import, no environment read. The spec is configuration
+    only, so this blob never carries a credential (ADR-009 §9).
+    """
+
+    return base64.b64encode(spec.model_dump_json().encode("utf-8")).decode("ascii")
 
 
 def _engine_version(engine: str) -> str:

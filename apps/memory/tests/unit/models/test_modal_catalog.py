@@ -10,7 +10,11 @@ the model ends up served. That decision — and the argv the router picks — is
 tested in ``test_modal_router.py`` and ``tests/unit/scripts``.
 """
 
+import base64
+import json
 import math
+import re
+import shlex
 import subprocess
 import sys
 
@@ -30,6 +34,7 @@ from tree.models.modal_catalog import (
     HF_TOKEN_HINT,
     LLM_DEPLOY_SPEC_ENV,
     MODAL_ROUTING_REGION,
+    DeploySpec,
     EmbeddingDeploySpec,
     LLMDeploySpec,
     app_script,
@@ -37,6 +42,7 @@ from tree.models.modal_catalog import (
     build_llm_deploy_spec,
     build_llm_server_args,
     build_server_args,
+    encode_deploy_spec,
     get_catalog_entry,
     get_embedding_entry,
     get_llm_entry,
@@ -57,6 +63,8 @@ _LFM = "LiquidAI/LFM2.5-350M"
 _QWEN_LLM = "Qwen/Qwen3.5-0.8B"
 _QWEN_SHA = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 _FAKE_TOKEN = "hf_secret123"
+# A FAKE token whose only purpose is to be searched for in a spec's bytes.
+_SENTINEL_TOKEN = "hf_SENTINEL_153"
 _VOYAGE_SHA = "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
 _LFM_SHA = "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
 
@@ -324,8 +332,8 @@ class TestLlmServerArgs:
 class TestDeploySpec:
     @pytest.mark.parametrize("model", [_VOYAGE, _QWEN])
     def test_json_round_trip(self, model: str) -> None:
-        """The spec crosses into the Modal container as ONE JSON env var
-        (ADR-009 §3), so it must survive dump -> parse byte-for-byte."""
+        """The spec crosses into the Modal container as the base64 of this
+        JSON (ADR-009 §3), so it must survive dump -> parse byte-for-byte."""
 
         spec = build_deploy_spec(model)
 
@@ -410,7 +418,7 @@ class TestBuildLlmDeploySpec:
         }
 
     def test_json_round_trip(self) -> None:
-        """It crosses into the container as ONE JSON env var (ADR-009 §3)."""
+        """It crosses into the container as the base64 of this JSON (§3)."""
 
         spec = build_llm_deploy_spec(_LFM)
 
@@ -462,6 +470,173 @@ class TestBuildLlmDeploySpec:
 
         assert "No pinned version for engine 'sglang'" in str(excinfo.value)
         assert "Engines in modal.engines: vllm." in str(excinfo.value)
+
+
+# --- The spec's transport into the Modal container (ADR-009 §3) -------------
+#
+# The regression tests for the live crash of `tasks/141` round 1, cycle 4b:
+# `voyageai/voyage-4-nano` — the DEFAULT embedding model — could not be served
+# at all, because the spec arrived in the container corrupted and the App died
+# at import with `JSONDecodeError … char 330`.
+
+
+def _as_the_image_build_renders_it(value: str) -> str:
+    """``value`` as the container reads it back out of the image env.
+
+    Two layers, both READ rather than guessed:
+
+    1. Modal turns ``.env({key: value})`` into the Dockerfile directive
+       ``ENV {key}={shlex.quote(value)}`` — modal 1.5.5, ``_image.py:2821``,
+       the pinned client in this project's ``.venv``. ``shlex.split(...)[0]``
+       is that quoting undone.
+    2. Modal's image build then UNESCAPES the directive's backslashes: each
+       ``\\`` is dropped and the character after it kept. This is the layer
+       nothing documents, so it is pinned to LIVE EVIDENCE instead: of the
+       three candidate models tried in ``tasks/141`` ("drop", "double",
+       "keep"), only "drop" reproduces the container's traceback byte for byte
+       — ``Expecting ',' delimiter: line 1 column 331 (char 330)`` on
+       voyage-4-nano's spec, with LFM2.5's quote-free spec intact. (A local
+       ``docker build`` — Docker 29.4.3, BuildKit and the classic builder —
+       does NOT drop them, so this is Modal's builder, not Docker's; the
+       divergence is exactly why the fix is a transport with nothing to
+       unescape rather than an escaping scheme of ours.)
+
+    :func:`test_the_rendering_simulation_still_breaks_the_old_json_transport`
+    keeps this simulation honest: on base64 it is the identity function, so
+    without that control it could rot into one and nothing would notice.
+    """
+
+    quoted = shlex.quote(value)
+    unquoted = shlex.split(quoted)[0]
+    return re.sub(r"\\(.)", r"\1", unquoted)
+
+
+def _decode_as_the_container_does(value: str) -> object:
+    """What the App scripts' container branch does with the env var."""
+
+    return json.loads(base64.b64decode(value, validate=True))
+
+
+# Every seed of the **Modal catalog**, with the builder its kind is resolved
+# by: the transport is one mechanism for both kinds, and the defect only ever
+# showed on ONE of the four (voyage-4-nano, the only spec holding a quote).
+_SEEDS = [
+    (build_deploy_spec, _VOYAGE),
+    (build_deploy_spec, _QWEN),
+    (build_llm_deploy_spec, _LFM),
+    (build_llm_deploy_spec, _QWEN_LLM),
+]
+_SEED_SPECS = [pytest.param(builder, model, id=model) for builder, model in _SEEDS]
+
+
+@pytest.mark.parametrize("builder,model", _SEED_SPECS)
+def test_deploy_spec_survives_modal_and_docker_env_rendering(builder, model) -> None:
+    """Story 1: the image env var reaches the container's `json.loads` intact.
+
+    The whole path without Modal: encode, render the value the way the image
+    build does, decode it the way the script's container branch does.
+    """
+
+    spec = builder(model)
+
+    rendered = _as_the_image_build_renders_it(encode_deploy_spec(spec))
+
+    assert _decode_as_the_container_does(rendered) == spec.model_dump()
+
+
+def test_the_rendering_simulation_still_breaks_the_old_json_transport() -> None:
+    """The control: the simulation above must still bite.
+
+    On base64 every step of :func:`_as_the_image_build_renders_it` is the
+    identity, so the other tests here would pass against ``lambda v: v``. This
+    is the reproduction of the live crash — the spec's raw JSON, rendered, no
+    longer parses — and it is what proves the simulation models a real
+    corruption rather than nothing at all.
+    """
+
+    spec = build_deploy_spec(_VOYAGE)
+
+    rendered = _as_the_image_build_renders_it(json.dumps(spec.model_dump()))
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(rendered)
+
+
+def test_a_quote_free_spec_crossed_the_old_transport_intact() -> None:
+    """Why no test caught it: three of the four seeds were never affected.
+
+    Only ``--pooler-config`` / ``--hf-overrides`` put a ``"`` inside a value,
+    so only voyage-4-nano's spec carried the backslashes the build ate.
+    """
+
+    spec = build_llm_deploy_spec(_LFM)
+
+    rendered = _as_the_image_build_renders_it(json.dumps(spec.model_dump()))
+
+    assert json.loads(rendered) == spec.model_dump()
+
+
+@pytest.mark.parametrize("builder,model", _SEED_SPECS)
+def test_encoded_deploy_spec_alphabet(builder, model) -> None:
+    """``[A-Za-z0-9+/=]`` and nothing else — the reason the fix works.
+
+    No quote, backslash, ``$`` or whitespace means no quoting layer (shlex, a
+    Dockerfile ``ENV``, its ``$VAR`` expansion) has anything to interpret.
+    """
+
+    encoded = encode_deploy_spec(builder(model))
+
+    assert re.fullmatch(r"[A-Za-z0-9+/=]+", encoded)
+    assert shlex.quote(encoded) == encoded, "shlex found something to quote"
+
+
+def test_deploy_spec_roundtrips_any_byte() -> None:
+    """Story 2: an engineer adds a server arg without learning any of this.
+
+    Every character that broke, or could break, a quoting layer: the JSON
+    quote that actually did it, a backslash, a shell variable, a single quote,
+    a command substitution, a newline and a non-ASCII letter.
+    """
+
+    hostile = {
+        "--double-quote": '"',
+        "--backslash": "\\",
+        "--dollar": "$HOME",
+        "--single-quote": "'",
+        "--backtick": "`id`",
+        "--newline": "a\nb",
+        "--non-ascii": "é",
+    }
+    spec = build_deploy_spec(_VOYAGE).model_copy(update={"server_args": hostile})
+
+    rendered = _as_the_image_build_renders_it(encode_deploy_spec(spec))
+
+    assert _decode_as_the_container_does(rendered) == spec.model_dump()
+
+
+def test_deploy_spec_has_no_credential_field(mocker) -> None:
+    """Story 3: the opaque blob cannot hide a credential (ADR-009 §9).
+
+    Base64 defeats the guard that inspected the ``.env({...})`` literal for
+    ``HF_TOKEN``, so token safety is pinned on the spec MODEL instead: no
+    field can hold one, and with a token configured the DECODED value of every
+    seed still does not contain it.
+    """
+
+    for model_class in (DeploySpec, EmbeddingDeploySpec, LLMDeploySpec):
+        for field in model_class.model_fields:
+            assert not any(
+                needle in field.lower()
+                for needle in ("token", "secret", "key", "password")
+            ), f"{model_class.__name__}.{field} is credential-shaped"
+
+    mocker.patch.object(modal_catalog.settings, "hf_token", SecretStr(_SENTINEL_TOKEN))
+
+    for builder, model in _SEEDS:
+        decoded = base64.b64decode(encode_deploy_spec(builder(model))).decode("utf-8")
+
+        assert decoded.count(_SENTINEL_TOKEN) == 0, model
+        assert "HF_TOKEN" not in decoded
 
 
 class TestPrompts:

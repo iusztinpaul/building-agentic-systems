@@ -19,10 +19,19 @@ any LLM takes (`--served-model-name`, `--revision`, `--trust-remote-code`,
 
 Glue only: every decision — GPU, engine pin, revision, server flags — is
 resolved by `tree.models.modal_catalog` on the operator's machine and crosses
-into the container as ONE JSON env var baked into the image (`LLM_DEPLOY_SPEC`,
+into the container as ONE env var baked into the image (`LLM_DEPLOY_SPEC`,
 ADR-009 §3), because Modal re-imports this file INSIDE the container, where the
 `tree` package is NOT installed. Hence the `modal.is_local()` split below:
 nothing under `tree` may be imported outside it.
+
+That env var holds the BASE64 of the spec's JSON — `base64 -d` reads a
+deployed layer back. Modal renders an image env var as a Dockerfile
+`ENV {key}={shlex.quote(value)}` (modal 1.5.5, `_image.py:2821`) and the image
+build unescaped every backslash of the value, so the raw JSON of a spec whose
+values are themselves JSON arrived corrupted and the container it belonged to
+died at import (live, 2026-09-21; this script's quote-free spec crossed
+intact, which is what hid the defect). Base64's alphabet leaves no quote,
+backslash or `$` for any quoting layer to interpret.
 
 The app is `ep-<endpoint_name>` with `class Server` — the same SHAPE
 (`ep-<name>`, class `Server`) a Dedicated endpoint has, inside our `tree-`
@@ -50,6 +59,7 @@ Deployed by the driver, never by hand:
     make memory-deploy-model MODEL=LiquidAI/LFM2.5-350M
 """
 
+import base64
 import json
 import logging
 import os
@@ -77,14 +87,35 @@ HEALTH_TIMEOUT = 18 * MINUTES
 # together).
 DEPLOY_SPEC_ENV = "LLM_DEPLOY_SPEC"
 
+# What the container says when that variable does not decode. A corrupted
+# value is a TRANSPORT failure, so the import dies naming the variable instead
+# of falling back to a default nobody deployed — the crash-loop that made this
+# transport base64 was diagnosed from exactly such an import traceback.
+SPEC_DECODE_ERROR = (
+    "LLM_DEPLOY_SPEC does not hold the base64 of a JSON object "
+    "(tree.models.modal_catalog.encode_deploy_spec writes it). Redeploy with "
+    "`make memory-deploy-model MODEL=<repo_id>`."
+)
+
 if modal.is_local():
     from tree.logging import init_logger
-    from tree.models.modal_catalog import build_llm_deploy_spec, hf_token_env
+    from tree.models.modal_catalog import (
+        build_llm_deploy_spec,
+        encode_deploy_spec,
+        hf_token_env,
+    )
 
     init_logger()
     # The engine is the SCRIPT's: an entry names no engine, and the router
     # sends every LLM Modal refuses to this file.
-    SPEC = build_llm_deploy_spec(os.environ["MODAL_MODEL"]).model_dump()
+    RESOLVED_SPEC = build_llm_deploy_spec(os.environ["MODAL_MODEL"])
+    SPEC = RESOLVED_SPEC.model_dump()
+    # ONE name on both sides of the split, and the container ECHOES the string
+    # it was given rather than re-encoding `SPEC`: Pydantic's
+    # `model_dump_json()` and a hand-rolled serialisation differ in separators,
+    # so recomputing the value on the re-import would change the image
+    # definition Modal compares.
+    SPEC_ENV_VALUE = encode_deploy_spec(RESOLVED_SPEC)
     # The Hugging Face token (optional, ADR-009 §9) travels as an EPHEMERAL
     # Secret built here, on the operator's machine — never in the image env
     # beside the spec, because image layers are cached and inspectable. It is
@@ -96,7 +127,16 @@ else:
     # `basicConfig` would then be a no-op, root would stay at WARNING and the
     # one boolean line ADR-009 §9 rests on would never reach `modal app logs`.
     logging.basicConfig(level=logging.INFO, force=True)
-    SPEC = json.loads(os.environ["LLM_DEPLOY_SPEC"])
+    SPEC_ENV_VALUE = os.environ["LLM_DEPLOY_SPEC"]
+    # `validate=True`: a value corrupted in transit must RAISE here, not be
+    # silently stripped of the bytes that are not base64 and then parsed into
+    # some other spec.
+    try:
+        SPEC = json.loads(base64.b64decode(SPEC_ENV_VALUE, validate=True))
+    except ValueError as error:
+        raise RuntimeError(SPEC_DECODE_ERROR) from error
+    if not isinstance(SPEC, dict):
+        raise RuntimeError(SPEC_DECODE_ERROR)
     # Re-import inside the container: the local dict was already inlined into
     # the deployed Secret, so this side must only match its SHAPE (one element).
     HF_SECRET = modal.Secret.from_dict({})
@@ -139,7 +179,7 @@ image = (
     # DOCKER TAG from the catalog, not a PyPI version.
     modal.Image.from_registry(f"lmsysorg/sglang:{SPEC['engine_version']}")
     .uv_pip_install(f"autoinference-utils=={SPEC['autoinference_utils_version']}")
-    .env({"HF_XET_HIGH_PERFORMANCE": "1", DEPLOY_SPEC_ENV: json.dumps(SPEC)})
+    .env({"HF_XET_HIGH_PERFORMANCE": "1", DEPLOY_SPEC_ENV: SPEC_ENV_VALUE})
 )
 
 app = modal.App(SPEC["app_name"])
