@@ -15,6 +15,11 @@ ten failed documents. :class:`WarmGate` therefore owns ``warmed`` as a HINT: a
 call-time 5xx or connection error (:data:`COLD_CALL_ERRORS`) flips it back,
 re-warms ONCE behind the same single-flight lock and retries the call ONCE.
 
+**A timeout is not cold.** A request that ran into ``modal.request_timeout_s``
+reached a server that is ALIVE and slow — the cold one would have answered 503
+in a second — so it propagates unchanged, with no re-warm and no retry, and
+the client turns it into an ``ExtractionError`` naming the knob.
+
 Two deliberate boundaries:
 
 * **No new exception type.** :class:`~tree.models.exceptions.ModelError` means
@@ -56,10 +61,22 @@ MAX_INTERVAL_S = 15.0
 
 # What a cold container looks like AT CALL TIME — the twin of the poll's
 # classification below. The OpenAI SDK raises ``InternalServerError`` for EVERY
-# status >= 500 and ``APIConnectionError`` (incl. its ``APITimeoutError``
-# subclass) for refused connections and timeouts. Nothing else: a 4xx — 429
-# included — never becomes 200 by waiting, so spending the deadline on it only
-# wastes the operator's time.
+# status >= 500 and ``APIConnectionError`` for a refused or reset connection.
+# Nothing else: a 4xx — 429 included — never becomes 200 by waiting, so
+# spending the deadline on it only wastes the operator's time.
+#
+# ``APITimeoutError`` IS an ``APIConnectionError``, so this tuple catches it by
+# inheritance — and it must NOT: a cold Modal server answers 503 in about a
+# second (measured twice), so a call that ran into the timeout reached a server
+# that is ALIVE and slow. The tuple stays as it is and :class:`WarmGate` carves
+# the subclass out with an earlier ``except`` (ADR-009 §11, "a timeout is not
+# cold"); narrowing the tuple instead would need a second, equally implicit
+# rule to keep a future ``APIConnectionError`` sibling cold.
+#
+# The POLLER classifies its own timeout the other way (still booting) and that
+# is not a contradiction: a 10 s GET of /health that never answered means the
+# edge never answered, while a 300 s completion means the server took the
+# request and is grinding on it.
 COLD_CALL_ERRORS: tuple[type[Exception], ...] = (
     openai.InternalServerError,
     openai.APIConnectionError,
@@ -218,9 +235,13 @@ class WarmGate:
 
         Every other exception propagates UNCHANGED — the caller's ``except``
         already turns it into its own error, and this gate must not widen what
-        a 4xx means.
+        a 4xx means. A TIMEOUT is one of those: it is an ``APIConnectionError``
+        by inheritance, so its handler must come FIRST or the gate re-warms a
+        living server and sends the same slow call again, doubling the wait.
 
         Raises:
+            openai.APITimeoutError: the server is alive and slow — unchanged,
+                so the client can name ``modal.request_timeout_s``.
             ExtractionError: the second answer was cold too, or the re-warm
                 itself failed on a spent deadline (prefixed, retryable).
             ModelError: the re-warm failed fast (a bad token, a wrong URL).
@@ -229,6 +250,11 @@ class WarmGate:
         await self.ensure_warm()
         try:
             return await fn()
+        except openai.APITimeoutError:
+            # Not cold, so: no `Cold again` warning, no re-warm, no retry, and
+            # `warmed` stays true — the request that timed out reached this
+            # server, which is the strongest evidence of warmth there is.
+            raise
         except COLD_CALL_ERRORS as exc:
             label = _cold_label(exc)
             # ONE line per cold period, not one per caller: eight concurrent
@@ -259,10 +285,18 @@ class WarmGate:
             ) from exc
 
     async def _retry[T](self, fn: Callable[[], Awaitable[T]]) -> T:
-        """The one retry after a successful re-warm; a second cold answer ends it."""
+        """The one retry after a successful re-warm; a second cold answer ends it.
+
+        The timeout is carved out here too, in the same order: the re-warm just
+        proved this server answers, so a retry that times out is slow, not
+        cold, and reporting it as "still answered … after one re-warm" would
+        send the operator to the warm-up budget instead of the request timeout.
+        """
 
         try:
             result = await fn()
+        except openai.APITimeoutError:
+            raise
         except COLD_CALL_ERRORS as exc:
             raise ExtractionError(
                 f"{self._label} still answered {_cold_label(exc)} after one re-warm",

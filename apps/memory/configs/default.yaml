@@ -206,6 +206,11 @@ modal:
       version: "v0.5.18"
   # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
   warmup_deadline_s: 600
+  # ONE request to a warm server — both clients (AsyncOpenAI timeout, no SDK
+  # retries) and the chat smoke test's POST. Half the OpenAI SDK's 600 s
+  # default, which with its two silent retries let a thinking model hang a
+  # call for 13 minutes (#141). Override: TREE_MODAL__REQUEST_TIMEOUT_S.
+  request_timeout_s: 300
   embedding_models:
     # In Modal's endpoint catalog (2026-09-20) -> auto-routes to a Dedicated
     # endpoint; the App fields below keep their defaults.

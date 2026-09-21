@@ -610,6 +610,38 @@ class TestChatSmokeTest:
 
         assert poll.await_args.kwargs["deadline_s"] == 1200.0
 
+    async def test_the_chat_post_is_bounded(self, http, poll) -> None:
+        """Story 4 (ADR-009 §11): the smoke test's POST carried no timeout at
+        all — it inherited ``aiohttp``'s 300 s default by accident. The bound
+        is now the SAME knob both clients use, so the command that proves a
+        model cannot outlast the memory that will call it."""
+
+        http.responses = _chat_responses()
+
+        await chat_smoke_test(_LFM)
+
+        post = next(call for call in http.calls if call["method"] == "POST")
+        assert post["timeout"].total == 300.0
+        assert post["timeout"].total == app_config.modal.request_timeout_s
+
+    async def test_a_hung_server_times_the_smoke_test_out_loudly(
+        self, http, poll
+    ) -> None:
+        """``str(TimeoutError())`` is EMPTY, so the generic wrapper alone would
+        print ``POST …/v1/chat/completions failed: `` and leave the operator
+        guessing. Exit 1 with the reason and the knob instead."""
+
+        http.responses = _chat_responses(TimeoutError())
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await chat_smoke_test(_LFM)
+
+        assert str(excinfo.value) == (
+            f"POST {_URL}/v1/chat/completions timed out after 300s "
+            "(modal.request_timeout_s)"
+        )
+        assert excinfo.value.status_code is None
+
     async def test_it_posts_the_strict_city_facts_schema(self, http, poll) -> None:
         """The request is the script's warm-up payload with a WIDER token
         budget: a reasoning model may spend tokens before the JSON, and a

@@ -1003,6 +1003,14 @@ class ModalConfig(BaseModel):
         description="Total budget (seconds) polling ONE cold Modal server's "
         "/health before failing; per server.",
     )
+    request_timeout_s: float = Field(
+        default=300.0,
+        ge=1.0,
+        description="Bound (seconds) on ONE request to a Modal server — the "
+        "`timeout` of both clients' AsyncOpenAI (with `max_retries=0`) and of "
+        "the chat smoke test's POST. The twin of warmup_deadline_s: that one "
+        "waits for a COLD server, this one waits for ONE answer.",
+    )
 
     @model_validator(mode="after")
     def _check_entries_are_unique(self) -> "ModalConfig":

@@ -1210,6 +1210,40 @@ class TestModalCatalog:
             load_app_config(custom)
         assert "warmup_deadline_s" in str(excinfo.value)
 
+    def test_modal_request_timeout_default_and_override(
+        self, tmp_path, monkeypatch, frozen_config_path
+    ) -> None:
+        """ADR-009 §11: ONE bound on a SINGLE request — the twin of the warm-up
+        budget, and a different wait: that one waits for a COLD server, this
+        one waits for ONE answer from a living one.
+
+        The SDK's own defaults are 600 s and two SILENT retries, so one
+        thinking model held a caller for 13 minutes before it was killed
+        (``tasks/141``, cycle 4d). 300 s is half the SDK's default and the same
+        order as the chat smoke test's accidental ``aiohttp`` default.
+        """
+
+        # Default: the typed default, the frozen fixture and the real
+        # configs/default.yaml all agree on 300.
+        assert ModalConfig().request_timeout_s == 300.0
+        assert load_app_config(frozen_config_path).modal.request_timeout_s == 300.0
+        assert load_app_config(_DEFAULT_CONFIG_PATH).modal.request_timeout_s == 300.0
+        assert "request_timeout_s: 300" in frozen_config_path.read_text()
+
+        # Override: an operator serving a 35B model whose answers take seven
+        # minutes widens it for ONE serving process, with no file edit.
+        custom = tmp_path / "modal.yaml"
+        custom.write_text("modal:\n  request_timeout_s: 300\n")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "45")
+        assert load_app_config(custom).modal.request_timeout_s == 45.0
+
+        # Bounds: a 0 s timeout would fail every call before the server could
+        # answer at all.
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "0")
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+        assert "request_timeout_s" in str(excinfo.value)
+
     def test_a_minimal_entry_is_a_repo_id_and_its_facts(self) -> None:
         """Story 1: nothing about serving, nothing about hardware — the App
         fields default, and a Dedicated endpoint never reads them."""

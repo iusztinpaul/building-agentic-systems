@@ -180,9 +180,19 @@ class _WireStub:
         #: ``max_retries=0`` the SDK turns each 503 into the
         #: ``InternalServerError`` the gate classifies as cold.
         self.cold_while: Any = lambda: False
+        #: An ``httpx`` transport failure raised INSTEAD of answering — a
+        #: server that accepted the request and never finished it. Recorded
+        #: first, so a test can still count the requests that were sent.
+        self.raises: Exception | None = None
+        #: Every REAL ``AsyncOpenAI`` the client under test built, so a test
+        #: can read the timeout and the retry budget off the SDK object rather
+        #: than off the kwargs we happened to pass it.
+        self.clients: list[AsyncOpenAI] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if self.raises is not None:
+            raise self.raises
         if self.cold_while():
             return httpx.Response(503, request=request, json={"error": "cold"})
         return httpx.Response(
@@ -211,14 +221,15 @@ async def wire(mocker) -> AsyncIterator[_WireStub]:
     """Build REAL ``AsyncOpenAI`` clients against an in-process transport."""
 
     stub = _WireStub()
-    clients: list[AsyncOpenAI] = []
+    clients = stub.clients
 
     def build(**kwargs: Any) -> AsyncOpenAI:
-        # max_retries=0: a retried request would inflate the request count the
-        # wire tests assert on.
+        # ONLY the transport is replaced: ``timeout`` and ``max_retries`` come
+        # from the client under test, so a production default that retried a
+        # request would inflate the counts these tests assert on instead of
+        # passing silently (#155).
         client = AsyncOpenAI(
             **kwargs,
-            max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(stub.handle)),
         )
         clients.append(client)
@@ -731,6 +742,137 @@ class TestEmbedFailure:
 
         with pytest.raises(ExtractionError, match="Embedding call failed"):
             await model.embed(["cats"])
+
+
+class TestRequestTimeout:
+    """ADR-009 §11: one call, one bound, one retry — and that retry is the
+    gate's. The embedding client gets the identical treatment to the LLM one:
+    a huge batch against a small GPU is slow the same way a thinking model is.
+    """
+
+    async def test_the_client_is_bounded_and_never_retries_silently(
+        self, server, openai
+    ) -> None:
+        """``modal.request_timeout_s`` is read at CONSTRUCTION, like the warm-up
+        deadline, and ``max_retries=0`` leaves the ONE retry to the gate."""
+
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert openai.built[0]["timeout"] == 300.0
+        assert openai.built[0]["max_retries"] == 0
+
+    async def test_the_operator_can_widen_the_budget_for_one_process(
+        self, server, openai, mocker
+    ) -> None:
+        """Story 3's twin: ``TREE_MODAL__REQUEST_TIMEOUT_S`` on the serving
+        process, and nothing else changes."""
+
+        mocker.patch.object(app_config.modal, "request_timeout_s", 45.0)
+        model = _model()
+        openai.answer = _response([_vector(2048)])
+
+        await model.embed(["cats"])
+
+        assert openai.built[0]["timeout"] == 45.0
+
+    async def test_the_real_sdk_client_carries_the_bound_and_no_retries(
+        self, server, wire
+    ) -> None:
+        """Read off the SDK object, not off the kwargs: ``timeout=`` and
+        ``max_retries=`` are what the REAL ``AsyncOpenAI`` will enforce."""
+
+        model = _model()
+
+        await model.embed(["cats"])
+
+        assert [client.timeout for client in wire.clients] == [300.0]
+        assert wire.clients[0].max_retries == 0
+
+    @pytest.mark.parametrize(
+        "failure",
+        [httpx.ReadTimeout("timed out"), httpx.ConnectTimeout("timed out")],
+        ids=["read-timeout", "connect-timeout"],
+    )
+    async def test_a_timeout_is_an_extraction_error_naming_the_knob(
+        self, suspending_server, wire, caplog, failure: Exception
+    ) -> None:
+        """Through the REAL SDK: both httpx timeouts become
+        ``APITimeoutError``, the request is sent ONCE, nothing re-warms, and
+        the message says which knob to turn.
+
+        A connect timeout is in the same class on purpose: Modal's edge answers
+        a scaled-to-zero server's ``/health`` with 503 in about a second, so a
+        connection that never completes is a network fault, never a cold start
+        (ADR-009 §11).
+
+        The transport records the request and THEN raises, so in the connect
+        case the count means "the SDK built one request and gave up", not "one
+        request reached a server" — which is exactly the property at stake: two
+        SDK retries would make it three either way.
+        """
+
+        wire.raises = failure
+        model = _model()
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(ExtractionError) as excinfo:
+                await model.embed(["cats"])
+
+        assert str(excinfo.value) == (
+            "Modal embedding call timed out after 300s (modal.request_timeout_s)"
+            " — raise TREE_MODAL__REQUEST_TIMEOUT_S"
+        )
+        # NOT 400: `_embed_chunk_resilient` skips a 400 as a poison input and
+        # bisects the batch around it. A slow server is neither poison nor an
+        # HTTP answer at all, so the chunk must re-raise, not be dropped.
+        assert excinfo.value.status_code is None
+        assert isinstance(excinfo.value.__cause__, openai_sdk.APITimeoutError)
+        # ONE request: no SDK retry underneath, no gate retry above it.
+        assert len(wire.requests) == 1
+        assert suspending_server.poll_calls == 1
+        lines = [record.getMessage() for record in caplog.records]
+        assert not any("Cold again" in line for line in lines)
+        assert not any("Retrying request" in line for line in lines)
+
+    async def test_the_timed_out_message_carries_the_configured_number(
+        self, suspending_server, wire, mocker
+    ) -> None:
+        """The message quotes the budget that was actually spent — an operator
+        who raised the knob must not read the default back."""
+
+        mocker.patch.object(app_config.modal, "request_timeout_s", 900.0)
+        wire.raises = httpx.ReadTimeout("timed out")
+        model = _model()
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.embed(["cats"])
+
+        assert "timed out after 900s" in str(excinfo.value)
+
+    async def test_a_cold_answer_still_costs_exactly_one_re_warm(
+        self, suspending_server, wire, caplog
+    ) -> None:
+        """The regression pin: the carve-out took ONLY the timeout out of the
+        cold class — a real 503 still re-warms once and retries once, over the
+        REAL SDK with the production retry budget."""
+
+        model = _model()
+        await model.ensure_warm()
+        wire.cold_while = lambda: suspending_server.poll_calls < 2
+
+        with caplog.at_level(logging.WARNING):
+            vectors = await model.embed(["cats"])
+
+        assert len(vectors[0]) == 2048
+        assert suspending_server.poll_calls == 2
+        # 2, not 6: the SDK's two silent retries per call are gone.
+        assert len(wire.requests) == 2
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "answered HTTP 503" in warnings[0].getMessage()
 
 
 class TestWireContract:

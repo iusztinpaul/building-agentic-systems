@@ -133,6 +133,8 @@ modal:
     sglang:
       version: "v0.5.18"
   warmup_deadline_s: 600
+  # Waiting for ONE answer, not for a cold server (ADR-009 §11).
+  request_timeout_s: 300
   embedding_models:
     # A minimal entry: a repo id, a revision and the measured vector width —
     # nothing about HOW it is served.

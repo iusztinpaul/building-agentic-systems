@@ -198,6 +198,10 @@ class ModalLLM(BaseLLM):
             if warmup_deadline_s is None
             else warmup_deadline_s
         )
+        # The OTHER wait, read at construction the same way: that one waits for
+        # a COLD server, this one bounds ONE answer from a living one
+        # (TREE_MODAL__REQUEST_TIMEOUT_S).
+        self._request_timeout_s = app_config.modal.request_timeout_s
         # Replaced by the id discovered from /v1/models on the first warm; the
         # repo id is the fallback the discovery itself already applies.
         self._served_model = self._entry.repo_id
@@ -257,7 +261,18 @@ class ModalLLM(BaseLLM):
         )
         # The Proxy token IS the OpenAI api_key: the client sends it as
         # `Authorization: Bearer <id>.<secret>`.
-        client = AsyncOpenAI(base_url=f"{url}/v1", api_key=self._proxy_token)
+        #
+        # The SDK's defaults are a 600 s timeout and TWO silent retries, so one
+        # unbounded completion could hold a caller 30 minutes — and twice that
+        # through the gate's re-warm (measured: 13 minutes until killed,
+        # tasks/141 cycle 4d). `max_retries=0` leaves the ONE retry to the
+        # gate, which is the layer that can actually fix a cold server.
+        client = AsyncOpenAI(
+            base_url=f"{url}/v1",
+            api_key=self._proxy_token,
+            timeout=self._request_timeout_s,
+            max_retries=0,
+        )
 
         self._served_model = served
         self._client = client
@@ -306,8 +321,10 @@ class ModalLLM(BaseLLM):
                 wrong **Proxy token**, an undeployed model).
             ExtractionError: the prompt was empty, the call failed
                 (``status_code`` carries the HTTP status when there was one),
-                the server stayed cold through one re-warm, or the completion
-                was empty / not JSON / not a JSON object.
+                the call outlived ``modal.request_timeout_s`` (sent ONCE — a
+                timeout is not a cold server, so nothing re-warms and nothing
+                retries), the server stayed cold through one re-warm, or the
+                completion was empty / not JSON / not a JSON object.
         """
 
         if not prompt.strip():
@@ -337,6 +354,20 @@ class ModalLLM(BaseLLM):
             # it in "call failed" would re-type a configuration error as a
             # retryable one.
             raise
+        except openai.APITimeoutError as exc:
+            # The server is alive and slow, so the generic "call failed: " —
+            # whose `{exc}` is the SDK's bare "Request timed out." — would name
+            # neither the budget that was spent nor the two ways to change the
+            # outcome. `status_code` stays None: there was no HTTP answer, and
+            # a caller that branches on 400 (`_embed_chunk_resilient`) must
+            # never read a slow server as a poison input.
+            raise ExtractionError(
+                f"Modal LLM call timed out after {self._request_timeout_s:g}s "
+                "(modal.request_timeout_s) — the server is alive but slow: "
+                "lower the entry's max_tokens or raise "
+                "TREE_MODAL__REQUEST_TIMEOUT_S",
+                status_code=None,
+            ) from exc
         except Exception as exc:
             raise ExtractionError(
                 f"Modal LLM call failed: {exc}", status_code=_status_code(exc)

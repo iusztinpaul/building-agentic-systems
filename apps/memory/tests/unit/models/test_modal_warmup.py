@@ -121,7 +121,14 @@ def _refused() -> openai.APIConnectionError:
 
 
 def _timed_out() -> openai.APITimeoutError:
-    """A timeout IS a cold start — ``APITimeoutError`` is an ``APIConnectionError``."""
+    """A timeout is NOT a cold start, although it IS an ``APIConnectionError``.
+
+    The trap this carve-out exists for: a cold Modal server answers 503 in
+    about a second, so a request that ran into the timeout reached a server
+    that is ALIVE and slow (ADR-009 §11, revised 2026-09-21). Classifying it as
+    cold re-warms a live server (a fast 200) and sends the same slow call
+    again — which is how one hung completion became 13 minutes.
+    """
 
     return openai.APITimeoutError(request=httpx.Request("POST", _CALL_URL))
 
@@ -224,8 +231,15 @@ class TestConstants:
     ) -> None:
         """The call-time twin of the poll's classification: the SDK raises
         ``InternalServerError`` for every status >= 500 and
-        ``APIConnectionError`` (incl. ``APITimeoutError``) for refused
-        connections and timeouts. A 429 or any other 4xx is NEVER cold."""
+        ``APIConnectionError`` for refused connections. A 429 or any other 4xx
+        is NEVER cold.
+
+        The ``issubclass`` line is the TRAP, not the contract: a timeout is an
+        ``APIConnectionError``, so ``COLD_CALL_ERRORS`` catches it by
+        inheritance and the gate must carve it out with an earlier ``except``
+        (ADR-009 §11, "a timeout is not cold"). Ordering the handlers the other
+        way round compiles, passes every 503 test, and re-warms a living server.
+        """
 
         assert COLD_CALL_ERRORS == (
             openai.InternalServerError,
@@ -689,20 +703,55 @@ class TestWarmGateCall:
         assert f"Cold again: {_LABEL} answered HTTP 503 — re-warming once" in messages
         assert f"Warm again: {_LABEL} answered after one re-warm" in messages
 
-    @pytest.mark.parametrize(
-        "error", [_refused(), _timed_out()], ids=["refused", "timeout"]
-    )
-    async def test_a_connection_error_is_a_cold_start_too(
-        self, error: Exception
-    ) -> None:
-        """A container that refuses the connection, or answers too slowly, is
-        booting — not broken."""
+    async def test_a_refused_connection_is_still_cold(self) -> None:
+        """A container that refuses the connection is booting, not broken —
+        and the regression pin for the carve-out below: ONLY the
+        ``APITimeoutError`` subclass left the cold class.
+        """
 
         warm = _Warm()
         gate = WarmGate(warm, label=_LABEL)
-        call = _Call(error)
+        call = _Call(_refused())
 
         assert await gate.call(call) == "ok"
+        assert (warm.calls, call.calls) == (2, 2)
+
+    async def test_a_timeout_is_not_cold(self, caplog) -> None:
+        """Story 1: a cold server answers 503 in about a second, so a timed-out
+        call reached a LIVING, slow server. Re-warming it would answer 200 at
+        once and send the same slow call again — 13 minutes of waiting where
+        the operator asked for 300 s (``tasks/141``, cycle 4d)."""
+
+        warm = _Warm()
+        gate = WarmGate(warm, label=_LABEL)
+        timeout = _timed_out()
+        call = _Call(timeout)
+
+        with caplog.at_level(logging.INFO):
+            with pytest.raises(openai.APITimeoutError) as excinfo:
+                await gate.call(call)
+
+        # The SAME exception, unchanged: the client above turns it into the
+        # ExtractionError that names the knob.
+        assert excinfo.value is timeout
+        assert (warm.calls, call.calls) == (1, 1)
+        assert gate.warmed is True
+        assert not any("Cold again" in r.getMessage() for r in caplog.records)
+
+    async def test_a_timeout_on_the_retry_is_not_reported_as_still_cold(self) -> None:
+        """A real 503 re-warms; the retry then times out against the server the
+        re-warm just proved alive. That is a SLOW server, so the timeout
+        propagates instead of being re-typed as "still cold"."""
+
+        warm = _Warm()
+        gate = WarmGate(warm, label=_LABEL)
+        timeout = _timed_out()
+        call = _Call(_cold(), timeout)
+
+        with pytest.raises(openai.APITimeoutError) as excinfo:
+            await gate.call(call)
+
+        assert excinfo.value is timeout
         assert (warm.calls, call.calls) == (2, 2)
 
     async def test_eight_concurrent_cold_callers_log_one_warning(self, caplog) -> None:

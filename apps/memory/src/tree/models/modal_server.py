@@ -359,8 +359,14 @@ async def chat_smoke_test(
 async def _chat(url: str, bearer: str, served: str) -> str:
     """``POST /v1/chat/completions`` under the strict schema; the content.
 
+    Bounded by ``modal.request_timeout_s`` — the SAME knob both clients use, so
+    the command that proves a model can never outlast the memory that will call
+    it (it had no explicit timeout at all before, and inherited ``aiohttp``'s
+    300 s default by accident).
+
     Raises:
-        ExtractionError: the transport failed or the server did not answer 200
+        ExtractionError: the transport failed, the server answered nothing
+            within ``modal.request_timeout_s``, or it did not answer 200
             (``status_code`` carries it — a 400 is how a server that cannot
             compile the schema refuses).
         ModelError: the 200 carried no message content, which no retry fixes.
@@ -373,15 +379,26 @@ async def _chat(url: str, bearer: str, served: str) -> str:
         "temperature": 0,
         "response_format": CITY_FACTS_SCHEMA,
     }
+    timeout_s = app_config.modal.request_timeout_s
     try:
         async with aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {bearer}"}
         ) as session:
             async with session.post(
-                f"{url}/v1/chat/completions", json=body
+                f"{url}/v1/chat/completions",
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
             ) as response:
                 status = response.status
                 payload = await response.json() if status == 200 else {}
+    except TimeoutError as exc:
+        # BEFORE the generic wrapper: `str(TimeoutError())` is EMPTY, so the
+        # line below would read "… failed: " and name neither the wait nor the
+        # knob. `asyncio.TimeoutError` IS `TimeoutError` on 3.11+.
+        raise ExtractionError(
+            f"POST {url}/v1/chat/completions timed out after {timeout_s:g}s "
+            "(modal.request_timeout_s)"
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — a transport failure is retryable
         raise ExtractionError(f"POST {url}/v1/chat/completions failed: {exc}") from exc
 

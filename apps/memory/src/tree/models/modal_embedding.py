@@ -35,6 +35,7 @@ scheme the OpenAI API uses" (docs/guide/webhook-proxy-auth, read 2026-09-19).
 
 import logging
 
+import openai
 from openai import AsyncOpenAI
 
 from tree.config.app_config import ModalEmbeddingModelConfig, app_config
@@ -144,6 +145,10 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             if warmup_deadline_s is None
             else warmup_deadline_s
         )
+        # The OTHER wait, read at construction the same way: that one waits for
+        # a COLD server, this one bounds ONE answer from a living one
+        # (TREE_MODAL__REQUEST_TIMEOUT_S).
+        self._request_timeout_s = app_config.modal.request_timeout_s
         # Replaced by the id discovered from /v1/models on the first warm; the
         # repo id is the fallback the discovery itself already applies.
         self._served_model = self._entry.repo_id
@@ -206,7 +211,18 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         )
         # The Proxy token IS the OpenAI api_key: the client sends it as
         # `Authorization: Bearer <id>.<secret>`.
-        client = AsyncOpenAI(base_url=f"{url}/v1", api_key=self._proxy_token)
+        #
+        # Bounded exactly like the LLM client (ADR-009 §11): a big batch
+        # against a small GPU is slow the same way a thinking model is, and the
+        # SDK's defaults (600 s, two SILENT retries) would hide it.
+        # `max_retries=0` leaves the ONE retry to the gate, which is the layer
+        # that can actually fix a cold server.
+        client = AsyncOpenAI(
+            base_url=f"{url}/v1",
+            api_key=self._proxy_token,
+            timeout=self._request_timeout_s,
+            max_retries=0,
+        )
 
         self._served_model = served
         self._client = client
@@ -256,9 +272,11 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         Raises:
             ModelError: the warm failed on something waiting cannot fix (a
                 wrong **Proxy token**, an undeployed model).
-            ExtractionError: the call failed (retryable), the server stayed
-                cold through one re-warm, or it answered with vectors of the
-                wrong width.
+            ExtractionError: the call failed (retryable), it outlived
+                ``modal.request_timeout_s`` (sent ONCE — a timeout is not a
+                cold server, so nothing re-warms and nothing retries), the
+                server stayed cold through one re-warm, or it answered with
+                vectors of the wrong width.
         """
 
         if not texts:
@@ -287,6 +305,17 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             # it in "Embedding call failed" would re-type a configuration error
             # as a retryable one.
             raise
+        except openai.APITimeoutError as exc:
+            # The server is alive and slow. `status_code` stays None, which is
+            # what keeps `_embed_chunk_resilient` re-raising it: only a
+            # structured 400 is a poison input it skips and bisects around, and
+            # a slow server would otherwise cost the chunk its vectors.
+            raise ExtractionError(
+                "Modal embedding call timed out after "
+                f"{self._request_timeout_s:g}s (modal.request_timeout_s) — "
+                "raise TREE_MODAL__REQUEST_TIMEOUT_S",
+                status_code=None,
+            ) from exc
         except Exception as exc:
             raise ExtractionError(f"Embedding call failed: {exc}") from exc
 

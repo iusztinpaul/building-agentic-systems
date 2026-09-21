@@ -72,7 +72,8 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.75`, provisional per ADR-008 §4).
 - `mcp` — `max_retries`, `max_results`.
-- `modal` — the **Modal catalog** (`embedding_models` + `llm_models`) plus the App pins (`autoinference_utils_version`, `engines.vllm/sglang.version`) and `warmup_deadline_s`. One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
+- `modal` — the **Modal catalog** (`embedding_models` + `llm_models`) plus the App pins (`autoinference_utils_version`, `engines.vllm/sglang.version`) and the two waits, `warmup_deadline_s` (for a
+  cold server) and `request_timeout_s` (for one answer). One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
 
 ### Environment variables
 
@@ -692,6 +693,13 @@ outlast that: raise the budget for one command, without editing a file, with
 `make memory-deploy-model-test MODEL=<repo_id> TREE_MODAL__WARMUP_DEADLINE_S=1200`.
 A 401/403 (wrong **Proxy token**) or a 404 is never waited out — it fails after
 one poll.
+
+That budget waits for a COLD server; `modal.request_timeout_s` (300 s;
+`TREE_MODAL__REQUEST_TIMEOUT_S`) bounds ONE answer from a living one — the
+smoke test's completion and every call both Modal clients make, sent once, with
+no SDK retries. A timeout is therefore never read as a cold start (a cold
+server answers 503 in a second): it fails with the knob's name instead of
+re-warming and waiting again.
 
 A **Dedicated endpoint** has one wait the poller cannot cover: `modal endpoint
 create` returns in a few seconds while the endpoint is still `provisioning`
