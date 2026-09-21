@@ -266,11 +266,11 @@ def _no_hub(**_: object) -> None:
     raise AssertionError("this command must not reach the Hub")
 
 
-def _endpoint_row(name: str) -> dict[str, str]:
+def _endpoint_row(name: str, status: str = "live") -> dict[str, str]:
     return {
         "name": name,
         "endpoint_id": "ep-abcdefghijklmnopqrstuv",
-        "status": "running",
+        "status": status,
         "created_at": "2026-08-24T10:00:00Z",
         "created_by": "someone",
     }
@@ -1217,6 +1217,66 @@ class TestTestCommandDispatch:
 
         assert result.exit_code == 1
         assert "answered 400" in _output(result, caplog)
+
+
+@pytest.mark.usefixtures("no_token")
+class TestTestCommandWaitsOutProvisioning:
+    """#141 round 1 bridged this BY HAND: ``create`` returns while the endpoint
+    is still ``provisioning``, so the smoke test waits for the row to read
+    ``live`` FIRST — before it resolves a URL there is no server behind
+    (ADR-009 §11)."""
+
+    @pytest.fixture
+    def wait(self, mocker, cli_module):
+        """The wait itself is unit-tested in ``tests/unit/models/
+        test_modal_cli.py``; here only its PLACE in the command is."""
+
+        return mocker.patch.object(cli_module, "wait_until_live")
+
+    def test_the_wait_runs_before_the_smoke_test(
+        self, cli_module, wait, smoke, caplog, mocker
+    ) -> None:
+        manager = mocker.MagicMock()
+        manager.attach_mock(wait, "wait")
+        manager.attach_mock(smoke, "smoke")
+
+        result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
+
+        assert result.exit_code == 0
+        assert [name for name, *_ in manager.mock_calls] == ["wait", "smoke"]
+        assert wait.call_args.args[0].repo_id == _VOYAGE
+
+    def test_a_live_endpoint_costs_one_list_call_and_no_wait(
+        self, cli_module, run, smoke, caplog
+    ) -> None:
+        """The chain UNPATCHED, through the CLI: one read-only list call, no
+        ``Provisioning`` line, and the smoke test runs as it always did."""
+
+        run.state.endpoints = [_endpoint_row(_VOYAGE_ENDPOINT, status="live")]
+
+        result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
+
+        assert result.exit_code == 0
+        assert _argvs(run) == [["modal", "endpoint", "list", "--json"]]
+        smoke.assert_awaited_once_with(_VOYAGE)
+        assert "Provisioning" not in _output(result, caplog)
+
+    def test_a_spent_provisioning_budget_exits_one_and_never_smoke_tests(
+        self, cli_module, wait, smoke, caplog
+    ) -> None:
+        """Story 4: Modal never brings the endpoint up. The driver's existing
+        ``ModelError`` branch is what turns it into exit 1."""
+
+        wait.side_effect = ModelError(
+            "tree-qwen3-5-0-8b is still provisioning after 1800s — check "
+            "`modal endpoint list` and the Modal dashboard"
+        )
+
+        result = _invoke(cli_module, ["test", "--model", _VOYAGE], caplog)
+
+        assert result.exit_code == 1
+        smoke.assert_not_awaited()
+        assert "still provisioning after 1800s" in _output(result, caplog)
 
 
 @pytest.mark.usefixtures("no_token")

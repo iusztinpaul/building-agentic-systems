@@ -24,6 +24,12 @@ Four rails, smallest first:
    ``.venv/bin`` (the real, authenticated CLI) first. That is how the two
    accidental deploys happened.
 
+One thing here is NOT a rail: :func:`wait_until_live` (with
+:func:`endpoint_status`), which sits out the minutes a freshly created
+Dedicated endpoint spends ``provisioning``. It fails OPEN — a list it cannot
+read is a WARNING and the smoke test still runs — precisely because it guards
+nothing.
+
 ``tree.models.modal_catalog`` stays pure and subprocess-free, and
 ``tree.models.modal_router`` imports its process door from here rather than
 ``subprocess``; the entry-point script stays glue.
@@ -33,9 +39,12 @@ import json
 import logging
 import os
 import subprocess
+import time
+from collections.abc import Callable
 from typing import Literal
 
 from tree.config.app_config import MODAL_NAME_PREFIX, ModalModelConfig
+from tree.models import modal_warmup
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import redact_argv
 
@@ -78,6 +87,13 @@ _KIND_LABELS: dict[ExistingKind, str] = {
     "app": "app",
 }
 _KIND_ARTICLES: dict[ExistingKind, str] = {"endpoint": "a", "app": "an"}
+
+# How long `-test` waits for a Dedicated endpoint to leave `provisioning`:
+# ~3x the slowest create measured live (565 s for `Qwen/Qwen3.5-0.8B`,
+# 2026-09-21; 135 s for a 0.6B embedding model). A CODE constant, not a YAML
+# knob — 565 s against the 600 s `modal.warmup_deadline_s` is far too tight to
+# share that budget, and nobody has asked to tune this one.
+PROVISIONING_DEADLINE_S = 1800.0
 
 _MODAL_NOT_INSTALLED = (
     "The `modal` CLI is not installed. Install the local-models extra: "
@@ -181,10 +197,15 @@ def assert_owned_name(name: str, action: ModalAction) -> None:
 def existing_kind(entry: ModalModelConfig) -> ExistingKind:
     """What is live on Modal under ``entry``'s names, read-only.
 
-    Two ``list --json`` calls, because they answer different questions:
-    ``modal endpoint list`` hides STOPPED endpoints (modal 1.5.5,
-    ``modal/cli/endpoint.py:271-311``), so the app list is what catches
-    everything else — including an app of ours from a previous deploy.
+    Two ``list --json`` calls, ENDPOINT first — and a hit there SHORT-CIRCUITS,
+    because that is the leg which protects (live, 2026-09-21): ``modal app
+    list`` shows neither the ``ep-*`` app behind a Dedicated endpoint, ours or
+    hand-made, nor long-stopped apps, so the app leg only ever finds a live App
+    of ours, which a deploy merely updates. ``modal endpoint list`` in turn
+    hides STOPPED endpoints (modal 1.5.5, ``modal/cli/endpoint.py:271-311``) —
+    and whatever is invisible is stopped, which a deploy replaces and never
+    overwrites while it serves. A ``provisioning`` row counts as an endpoint:
+    the minutes before ``live`` are exactly when a second create is retyped.
 
     Column names verified on the pinned client (modal 1.5.5, 2026-09-20):
     endpoints ``name, endpoint_id, status, created_at, created_by``
@@ -207,6 +228,103 @@ def existing_kind(entry: ModalModelConfig) -> ExistingKind:
             if row.get("state") not in _DEAD_APP_STATES:
                 return "app"
     return "none"
+
+
+def endpoint_status(entry: ModalModelConfig) -> str | None:
+    """What ``modal endpoint list`` says about ``entry``'s endpoint, or ``None``.
+
+    ONE read-only call. ``None`` means "nothing to wait for": no row of ours
+    (an App, a stopped endpoint) — or no look at all (a dry run, a list that
+    would not read), which is ONE WARNING and not a refusal.
+
+    This is a WAIT, not a guard, so it fails OPEN: the smoke test that follows
+    gives the verdict either way, while an unreadable list before a DEPLOY
+    could hide an overwrite, which is why :func:`_list_rows` raises instead.
+    """
+
+    rows, detail = _read_rows(["modal", "endpoint", "list", "--json"])
+    if detail:
+        logger.warning(
+            "could not read the endpoint list (%s) — not waiting for provisioning",
+            detail,
+        )
+        return None
+
+    for row in rows:
+        if row.get("name") == entry.endpoint_name:
+            status = row.get("status")
+            return status if isinstance(status, str) else None
+    return None
+
+
+def wait_until_live(
+    entry: ModalModelConfig,
+    *,
+    deadline_s: float = PROVISIONING_DEADLINE_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Sit out the minutes an endpoint spends ``provisioning`` (ADR-009 §11).
+
+    ``modal endpoint create`` is ASYNCHRONOUS: it returned in ~4 s and the
+    endpoint read ``live`` 2m15s (a 0.6B embedding model) / 9m25s (a 0.8B LLM)
+    later, measured 2026-09-21. A smoke test started in between meets an
+    endpoint with no server behind it, so ``-test`` bridges the gap here — on
+    the health poller's own schedule
+    (:data:`~tree.models.modal_warmup.INITIAL_INTERVAL_S` x
+    :data:`~tree.models.modal_warmup.BACKOFF_FACTOR`, capped at
+    :data:`~tree.models.modal_warmup.MAX_INTERVAL_S`), whose constants are read
+    from that module rather than copied.
+
+    Everything but ``provisioning`` returns at once: ``None`` is nothing to
+    wait for and :func:`endpoint_status` has already said why, ``live`` is the
+    state we are waiting FOR, and an unknown status is ONE warning — waiting
+    out a state we have never seen is guesswork.
+
+    ``Live:`` is claimed ONLY when a read said ``live``: a list that goes
+    unreadable mid-wait, or a row that vanishes (a ``-stop`` racing the wait),
+    ends the wait with no verdict of ours — and no line, because ``None`` does
+    not distinguish those two, so "no longer listed" would be the next
+    invention.
+
+    Synchronous on purpose: the driver calls it BEFORE ``asyncio.run``, so it
+    never runs inside an event loop. ``sleep`` and ``clock`` are injected,
+    which is what lets the unit suite exercise a 1800 s budget in milliseconds.
+
+    Raises:
+        ModelError: still ``provisioning`` when the budget ran out — the
+            driver's existing branch turns it into exit 1.
+    """
+
+    start = clock()
+    interval = modal_warmup.INITIAL_INTERVAL_S
+    waited = False
+
+    while (status := endpoint_status(entry)) == "provisioning":
+        elapsed = clock() - start
+        if elapsed >= deadline_s:
+            raise ModelError(
+                f"{entry.endpoint_name} is still provisioning after "
+                f"{deadline_s:.0f}s — check `modal endpoint list` and the "
+                "Modal dashboard"
+            )
+        # One line per poll: a 10-minute provisioning must never look hung.
+        logger.info(
+            "Provisioning: %s is not live yet — %.0fs/%.0fs",
+            entry.endpoint_name,
+            elapsed,
+            deadline_s,
+        )
+        sleep(interval)
+        interval = min(
+            interval * modal_warmup.BACKOFF_FACTOR, modal_warmup.MAX_INTERVAL_S
+        )
+        waited = True
+
+    if status is not None and status != "live":
+        logger.warning("%s has status %r — not waiting", entry.endpoint_name, status)
+    elif waited and status == "live":
+        logger.info("Live: %s after %.0fs", entry.endpoint_name, clock() - start)
 
 
 def guard_deploy(
@@ -283,33 +401,44 @@ def read_existing_kind(entry: ModalModelConfig, force: bool) -> ExistingKind:
         return "none"
 
 
-def _list_rows(entry: ModalModelConfig, argv: list[str], noun: str) -> list[dict]:
-    """One ``modal ... list --json`` call, or a closed door.
+def _read_rows(argv: list[str]) -> tuple[list[dict], str]:
+    """One ``modal ... list --json`` call: its rows, or WHY there are none.
 
-    The human-readable table is NEVER parsed as a fallback: a guard that reads
-    a format nobody promised is a guard that eventually reads it wrong.
+    The human-readable table is NEVER parsed as a fallback: a reader that
+    parses a format nobody promised is a reader that eventually reads it wrong.
+
+    Both callers get the same ``detail`` ("dry run", "exit 1", "invalid JSON")
+    and differ only in what they make of it — the guard refuses
+    (:func:`_list_rows`), the wait warns (:func:`endpoint_status`).
     """
 
     result = run_modal(argv, capture_output=True)
-    detail = ""
-    rows: object = None
-
     if result is None:
-        # Unreachable from the driver (a dry run skips the guard entirely), so
-        # this is the door's own answer: a check we did not run is not a pass.
-        detail = "dry run"
-    elif result.returncode != 0:
-        detail = f"exit {result.returncode}"
-    else:
-        try:
-            rows = json.loads(result.stdout or "")
-        except ValueError:
-            detail = "invalid JSON"
+        # A dry run: unreachable from a deploy (which skips the guard
+        # entirely), normal for `-test` under DRY_RUN=yes.
+        return [], "dry run"
+    if result.returncode != 0:
+        return [], f"exit {result.returncode}"
 
+    try:
+        rows = json.loads(result.stdout or "")
+    except ValueError:
+        return [], "invalid JSON"
+    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+        return rows, ""
+    return [], "invalid JSON"
+
+
+def _list_rows(entry: ModalModelConfig, argv: list[str], noun: str) -> list[dict]:
+    """The rows :func:`_read_rows` found, or a closed door.
+
+    "I could not look" is not "nothing is there", so every ``detail`` becomes a
+    refusal here — the guard's half of the split.
+    """
+
+    rows, detail = _read_rows(argv)
     if not detail:
-        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
-            return rows
-        detail = "invalid JSON"
+        return rows
 
     reason = f"could not list Modal {noun} ({detail})"
     raise ModalGuardError(

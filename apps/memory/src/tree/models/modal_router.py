@@ -116,6 +116,15 @@ _DRY_RUN_SKIPPED_CHECK = (
     "DRY RUN — skipped the Modal existence check (no modal process is started)."
 )
 
+# What a successful `endpoint create` does NOT say: the create is asynchronous
+# — it returned in ~4 s while the endpoint was `provisioning`, and `live` came
+# 2m15s / 9m25s later (2026-09-21). So the operator is told once, with the
+# command that sits the wait out (`tree.models.modal_cli.wait_until_live`).
+_PROVISIONING_NOTICE = (
+    "Endpoint %s is provisioning — Modal returns before it is live (minutes). "
+    "make memory-deploy-model-test MODEL=%s waits for it."
+)
+
 # A dry run cannot consult the oracle, so it says what each verdict would lead
 # to instead of pretending to have routed.
 _DRY_RUN_UNDECIDED = (
@@ -283,6 +292,7 @@ def run_deploy(
             _log_route(
                 entry, "Modal accepted it", f"Dedicated endpoint {entry.endpoint_name}"
             )
+        logger.info(_PROVISIONING_NOTICE, entry.endpoint_name, entry.repo_id)
         return 0
 
     verdict = classify_endpoint_refusal(output)
@@ -307,6 +317,7 @@ def run_deploy(
                         f"not in Modal's endpoint catalog, fine-tune of {base}",
                         f"Dedicated endpoint {entry.endpoint_name} (custom weights)",
                     )
+                logger.info(_PROVISIONING_NOTICE, entry.endpoint_name, entry.repo_id)
                 return 0
 
             verdict = classify_endpoint_refusal(output)

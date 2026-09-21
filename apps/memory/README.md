@@ -711,13 +711,14 @@ no SDK retries. A timeout is therefore never read as a cold start (a cold
 server answers 503 in a second): it fails with the knob's name instead of
 re-warming and waiting again.
 
-A **Dedicated endpoint** has one wait the poller cannot cover: `modal endpoint
-create` returns in a few seconds while the endpoint is still `provisioning`
+A **Dedicated endpoint** is `provisioning` before it is `live`: `modal endpoint
+create` returns in a few seconds and the endpoint starts serving minutes later
 (measured 2026-09-21: 2m15s for `Qwen/Qwen3-Embedding-0.6B`, 9m25s for
-`Qwen/Qwen3.5-0.8B`). Until it reports `live` in `modal endpoint list --json`
-there is no server to resolve, so a smoke test started too early fails in
-`resolve_server_url` — not on a 503 the poller would sit out. Watch that
-column, then run `-test`.
+`Qwen/Qwen3.5-0.8B`). `-test` waits that out by itself — one read-only `modal
+endpoint list --json` on the same poll schedule, for up to 30 minutes
+(`Provisioning: tree-qwen3-5-0-8b is not live yet — 120s/1800s` … `Live:
+tree-qwen3-5-0-8b after 548s`) — and only then polls `/health`. An App has no
+such row, so nothing is waited for there.
 
 **4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
 `models.resolution_embedding`) in `configs/default.yaml` to

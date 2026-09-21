@@ -27,14 +27,19 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from tree.config.app_config import ModalEmbeddingModelConfig
 from tree.models import modal_router
 from tree.models.modal_router import (
     classify_endpoint_refusal,
     hf_base_models,
     parse_endpoint_catalog,
+    run_deploy,
 )
 
 _FAKE_TOKEN = "hf_secret123"
+
+# The model both vendored refusals were captured against.
+_VOYAGE = "voyageai/voyage-4-nano"
 
 # The substring the classifier matches — asserted ABSENT from the wrapped
 # fixture, so the test proves normalisation and not a lucky `in`.
@@ -383,6 +388,80 @@ class TestHfBaseModels:
         hf_base_models("acme/thing")
 
         assert "Authorization" not in hub.requests[0].headers
+
+
+class TestProvisioningNotice:
+    """``modal endpoint create`` returns in ~4 s with the endpoint still
+    ``provisioning`` — ``live`` came 2m15s / 9m25s later (2026-09-21). A
+    successful create therefore says so, and names the command that waits it
+    out; the routing DECISIONS stay tested through the driver.
+    """
+
+    @pytest.fixture
+    def entry(self) -> ModalEmbeddingModelConfig:
+        return ModalEmbeddingModelConfig(repo_id=_VOYAGE, native_dimensions=2048)
+
+    @staticmethod
+    def _notices(entry: ModalEmbeddingModelConfig, caplog) -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith(f"Endpoint {entry.endpoint_name} ")
+        ]
+
+    def test_a_successful_endpoint_create_announces_the_wait(
+        self, entry, run, caplog
+    ) -> None:
+        """Story 1: the operator reads what to run next, not `modal endpoint
+        list`."""
+
+        with caplog.at_level(logging.INFO):
+            assert run_deploy(entry) == 0
+
+        assert self._notices(entry, caplog) == [
+            f"Endpoint {entry.endpoint_name} is provisioning — Modal returns "
+            f"before it is live (minutes). make memory-deploy-model-test "
+            f"MODEL={_VOYAGE} waits for it."
+        ]
+
+    def test_an_app_deploy_announces_nothing(
+        self, entry, run, caplog, hub, monkeypatch
+    ) -> None:
+        """An App has no endpoint row to go `live`; its container cold start is
+        the health poller's business."""
+
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
+        run.state.results = [
+            subprocess.CompletedProcess(
+                args=[], returncode=1, stdout=NOT_IN_CATALOG, stderr=""
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+
+        with caplog.at_level(logging.INFO):
+            assert run_deploy(entry) == 0
+
+        assert self._notices(entry, caplog) == []
+
+    def test_a_dry_run_announces_nothing(self, entry, run, caplog) -> None:
+        with caplog.at_level(logging.INFO):
+            assert run_deploy(entry, dry_run=True) == 0
+
+        run.assert_not_called()
+        assert self._notices(entry, caplog) == []
+
+    def test_a_refused_create_announces_nothing(self, entry, run, caplog) -> None:
+        """Nothing is provisioning after a failure — Modal's own message and
+        exit code are the whole answer."""
+
+        run.state.result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="Token missing.", stderr=""
+        )
+
+        with caplog.at_level(logging.INFO):
+            assert run_deploy(entry) == 1
+
+        assert self._notices(entry, caplog) == []
 
 
 def test_router_does_not_import_modal_or_subprocess() -> None:

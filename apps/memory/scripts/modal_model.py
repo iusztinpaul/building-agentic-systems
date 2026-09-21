@@ -39,7 +39,7 @@ from tree.config.settings import settings
 from tree.logging import init_logger
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import get_catalog_entry
-from tree.models.modal_cli import ModalGuardError
+from tree.models.modal_cli import ModalGuardError, wait_until_live
 from tree.models.modal_router import hint_if_gated, run_deploy, run_stop
 from tree.models.modal_server import chat_smoke_test, smoke_test
 
@@ -124,13 +124,17 @@ def test_command(model: str) -> None:
     The KIND picks the test — vectors and a ranking for an embedding entry, one
     strict-JSON chat completion for an LLM — exactly as it picks the App script
     (ADR-009 §2). No ``--serving``: under H1 the lookup is identical on both
-    paths. No dry run either — it starts no CLI.
+    paths. One read-only ``modal endpoint list --json`` first (skipped under
+    ``DRY_RUN=yes``), to sit out a Dedicated endpoint still ``provisioning``.
     """
 
     entry = _entry_or_exit(model)
     test = smoke_test if entry.kind == "embedding" else chat_smoke_test
 
     try:
+        # Before the event loop: the wait is synchronous, and a URL resolved
+        # while the endpoint provisions has no server behind it.
+        wait_until_live(entry)
         asyncio.run(test(model))
     except ExtractionError as exc:
         # Server-side: the model answered, or failed to. Only these can be a
