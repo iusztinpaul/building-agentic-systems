@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 from tree.config.app_config import EmbeddingConfig, app_config
 from tree.config.settings import settings
@@ -12,11 +13,12 @@ from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingMod
 
 # NOTE: ``sentence_transformers`` (→ transformers/torch/sklearn, ~7s import) and
 # the two Modal clients (``modal_embedding`` / ``modal_llm``) are imported
-# LAZILY inside their dispatch branches below, never at module level. The cloud MCP server runs ``voyage``/``gemini`` and must
-# bind its port within Horizon's 60s readiness window; dragging torch into every
-# boot blew that budget on cold serverless containers and the process was killed
-# mid-import. Keeping these provider imports inside their branches means the
-# common boot path never pays for them.
+# LAZILY inside their dispatch branches below, never at module level. The cloud
+# MCP server runs ``voyage``/``gemini`` and must bind its port within Horizon's
+# 60s readiness window; dragging torch into every boot blew that budget on cold
+# serverless containers and the process was killed mid-import. Keeping these
+# provider imports inside their branches means the common boot path never pays
+# for them.
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +204,46 @@ def get_embedding_model(provider: str | None = None) -> BaseEmbeddingModel:
     return _build_embedding_model(app_config.models.search_embedding, provider=provider)
 
 
+def modal_backed_models(
+    *blocks: Literal["llm", "resolution_embedding", "search_embedding"],
+) -> list[object]:
+    """Build the models of ``blocks`` that are served by Modal — and only those.
+
+    The caller-side gate in front of the **Pre-warm**: it reads
+    ``app_config.models.<block>.provider`` BEFORE calling that block's factory,
+    so a provider with nothing to warm is never CONSTRUCTED for the pre-warm's
+    sake. The seams used to build every block and throw the instance away;
+    under ``sentence-transformers`` that is a ``SentenceTransformer(...)`` —
+    a torch weight load, seconds plus memory — paid by every run, including a
+    fully cached one that would otherwise build no model at all (#149 QA).
+
+    ``== "modal"`` IS the rule: the two Modal clients are the only models with
+    an ``ensure_warm``, so no capability registry and no new config key. A
+    second warmable provider would make one worth having; one does not.
+
+    Read at CALL time (never a module constant), like
+    :func:`search_embedding_identity`: Prefect re-imports this module inside
+    flow-run subprocesses and a ``TREE_MODELS__LLM__PROVIDER=modal`` override
+    must move the gate with it. The factories are looked up in the module
+    globals for the same reason.
+
+    The returned instances are THROW-AWAYS: what the later Prefect tasks
+    inherit is the warm server, not the object (ADR-009 §11).
+    """
+
+    factories: dict[str, Callable[[], object]] = {
+        "llm": get_llm,
+        "resolution_embedding": get_resolution_embedding_model,
+        "search_embedding": get_search_embedding_model,
+    }
+
+    return [
+        factories[block]()
+        for block in blocks
+        if getattr(app_config.models, block).provider == "modal"
+    ]
+
+
 async def prewarm_models(*models: object) -> None:
     """Warm every DISTINCT Modal server behind ``models``, concurrently.
 
@@ -252,8 +294,16 @@ async def prewarm_models(*models: object) -> None:
         ", ".join(str(key) for key in warms),
     )
 
-    tasks = [asyncio.create_task(warm()) for warm in warms.values()]
+    # Built INCREMENTALLY, inside the ``try``: a duck whose ``ensure_warm`` is
+    # not a coroutine function makes ``create_task`` raise, and a list
+    # comprehension outside the ``try`` would let that ``TypeError`` escape with
+    # an EARLIER model's real poll still scheduled (#149 QA). The ``finally``
+    # reaps whatever was appended before the raise; the ``TypeError`` itself
+    # propagates unchanged.
+    tasks: list[asyncio.Task[None]] = []
     try:
+        for warm in warms.values():
+            tasks.append(asyncio.create_task(warm()))
         await asyncio.gather(*tasks)
     finally:
         for task in tasks:

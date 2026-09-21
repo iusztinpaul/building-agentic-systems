@@ -178,6 +178,7 @@ from tree.models.get_model import (
     get_resolution_embedding_model,
     get_search_embedding_model,
     llm_identity,
+    modal_backed_models,
     prewarm_models,
     search_embedding_identity,
 )
@@ -2002,15 +2003,18 @@ async def _run_extraction_worker_body(
     # instead of once per model instance the tasks build below — and a DEAD
     # server fails this run with zero documents attempted rather than counting
     # as N failed documents. A no-op for Voyage / Gemini / sentence-transformers
-    # / mock, which have no ``ensure_warm``. These instances are throw-aways:
-    # what the tasks inherit is the warm SERVER, not the object. Plain awaited
-    # helper, never a Prefect task — a cached "warm" is the "warm at t0"
-    # fallacy, and task retries would multiply the poller's deadline.
+    # / mock, which have no ``ensure_warm`` — and ``modal_backed_models`` builds
+    # NOTHING for them (#149 QA: a ``sentence-transformers`` run used to pay a
+    # torch weight load here for a model the pre-warm then skipped). These
+    # instances are throw-aways: what the tasks inherit is the warm SERVER, not
+    # the object. Plain awaited helper, never a Prefect task — a cached "warm"
+    # is the "warm at t0" fallacy, and task retries would multiply the poller's
+    # deadline.
     if mode == "rag":
-        await prewarm_models(get_search_embedding_model())
+        await prewarm_models(*modal_backed_models("search_embedding"))
     else:
         await prewarm_models(
-            get_llm(), get_resolution_embedding_model(), get_search_embedding_model()
+            *modal_backed_models("llm", "resolution_embedding", "search_embedding")
         )
 
     # ----- Task ① — clean + chunk (per-doc fan-out) -------------------------
@@ -2610,16 +2614,18 @@ async def _summarise_clusters(
     ordered = sorted(samples_by_cluster)
     if ordered:
         # Pre-warm before the fan-out (ADR-009 §11): without it a dead Modal
-        # LLM costs every cluster its own 600 s poll. ``get_llm()`` sits OUTSIDE
-        # the ``try`` — a missing Proxy token is a configuration error and must
-        # fail the run loudly; only the WARM fails open, per ADR-007 §4: ONE
-        # warning and the existing fallback label for every cluster, with no LLM
-        # call attempted. ``ModelError`` is the warm path's closed set: a
-        # fail-fast 4xx raises it directly, a spent deadline raises its
-        # ``ExtractionError`` subclass — nothing else escapes a warm.
-        llm = get_llm()
+        # LLM costs every cluster its own 600 s poll. The CONSTRUCTION sits
+        # OUTSIDE the ``try`` — a missing Proxy token is a configuration error
+        # and must fail the run loudly; only the WARM fails open, per ADR-007
+        # §4: ONE warning and the existing fallback label for every cluster,
+        # with no LLM call attempted. ``ModelError`` is the warm path's closed
+        # set: a fail-fast 4xx raises it directly, a spent deadline raises its
+        # ``ExtractionError`` subclass — nothing else escapes a warm. Under
+        # ``llm.provider != modal`` nothing is built at all: the instance exists
+        # only to be warmed (the fan-out builds its own inside each task).
+        llms = modal_backed_models("llm")
         try:
-            await prewarm_models(llm)
+            await prewarm_models(*llms)
         except ModelError as exc:
             log.warning("Cluster summaries skipped: %s", exc)
             return {cid: fallback_summary(cid) for cid in ordered}, len(ordered)

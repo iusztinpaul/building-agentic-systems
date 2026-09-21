@@ -1,9 +1,14 @@
-"""The **Pre-warm** helper: :func:`tree.models.get_model.prewarm_models`.
+"""The **Pre-warm** helpers of :mod:`tree.models.get_model`:
+:func:`prewarm_models` and :func:`modal_backed_models`, its caller-side gate.
 
 Every fake here is a duck: the helper only ever touches ``ensure_warm`` and
 ``warm_key``, so no Modal client, no HTTP and no ``modal`` import is involved.
 Nothing sleeps for real — the one ``asyncio.sleep(600)`` is the sibling that
 gets cancelled, which is exactly what these tests prove.
+
+``modal_backed_models`` is tested with the factories as TRIPWIRES: the point of
+the helper is what it does NOT call, and "no factory call" is the only
+assertion that catches a ``sentence-transformers`` torch load nobody asked for.
 """
 
 import asyncio
@@ -18,7 +23,12 @@ import pytest
 from tree.config.app_config import EmbeddingConfig
 from tree.models.exceptions import ModelError
 from tree.models.fake_model import MockEmbeddingModel
-from tree.models.get_model import _build_embedding_model, get_llm, prewarm_models
+from tree.models.get_model import (
+    _build_embedding_model,
+    get_llm,
+    modal_backed_models,
+    prewarm_models,
+)
 
 _LOGGER_NAME = "tree.models.get_model"
 
@@ -59,6 +69,21 @@ class _SleepingFake:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
+
+class _SyncWarmFake:
+    """A duck that LOOKS warmable but whose ``ensure_warm`` is a plain ``def``.
+
+    What a hand-written test double looks like when the next engineer forgets
+    the ``async``: ``warm()`` returns ``None``, so ``create_task`` raises
+    ``TypeError`` instead of scheduling anything (#149 QA, finding 1).
+    """
+
+    def __init__(self, warm_key: str) -> None:
+        self.warm_key = warm_key
+
+    def ensure_warm(self) -> None:
+        return None
 
 
 class _FailingFake:
@@ -152,6 +177,30 @@ async def test_first_failure_cancels_the_sibling() -> None:
     assert asyncio.all_tasks() == before
 
 
+async def test_a_sync_ensure_warm_does_not_leak_the_sibling() -> None:
+    """A ``TypeError`` at scheduling time still reaps what was already scheduled.
+
+    #149 QA, finding 1: the task list used to be built OUTSIDE the ``try``, so a
+    LATER duck whose ``ensure_warm`` is a plain ``def`` raised before the
+    ``finally`` existed — and the FIRST model's real 600 s poll stayed alive on
+    the loop the run was about to fan out on, against this function's own
+    "fail-fast with an explicit cancel" guarantee.
+    """
+
+    sleeping = _SleepingFake(_EMBEDDING_APP)
+    sync_duck = _SyncWarmFake(_LLM_APP)
+    before = asyncio.all_tasks()
+
+    with pytest.raises(TypeError, match="a coroutine was expected"):
+        await prewarm_models(sleeping, sync_duck)
+
+    # Nothing is left knocking on the loop: the poll was cancelled and reaped
+    # inside the call. It may never have started (no await separates the two
+    # ``create_task`` calls) — but if it did, it took the cancellation.
+    assert asyncio.all_tasks() == before
+    assert not sleeping.entered.is_set() or sleeping.cancelled is True
+
+
 async def test_is_idempotent() -> None:
     """A second call re-asks each gate; the GATE, not this helper, makes it cheap."""
 
@@ -187,6 +236,67 @@ async def test_default_providers_have_no_gate_to_warm(mocker, caplog) -> None:
     assert not hasattr(embedding, "ensure_warm")
     assert asyncio.all_tasks() == before
     assert "Pre-warming" not in caplog.text
+
+
+class TestModalBackedModels:
+    """The gate in front of the pre-warm: read the provider, THEN build.
+
+    The providers and the two factory tripwires come from the ``modal_seam``
+    fixture (``tests/unit/conftest.py``), shared with the pipeline seam's tests.
+    """
+
+    @pytest.mark.parametrize(
+        "provider", ["sentence-transformers", "voyage", "gemini", "mock"]
+    )
+    def test_a_non_modal_provider_never_calls_its_factory(
+        self, modal_seam, provider: str
+    ) -> None:
+        """#149 QA, finding 2: a fully cached ``sentence-transformers`` run used
+        to pay a torch weight load for a model with no ``ensure_warm`` at all."""
+
+        modal_seam.providers(llm="gemini", resolution=provider, search=provider)
+
+        models = modal_backed_models("llm", "resolution_embedding", "search_embedding")
+
+        assert models == []
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
+
+    def test_a_modal_block_is_built_once(self, modal_seam) -> None:
+        """Only the ``modal`` block reaches its factory — the others cost nothing."""
+
+        modal_seam.providers(llm="gemini", resolution="voyage", search="modal")
+
+        models = modal_backed_models("llm", "resolution_embedding", "search_embedding")
+
+        assert models == ["SEARCH-EMBEDDING"]
+        assert modal_seam.embedding.call_count == 1
+        modal_seam.llm.assert_not_called()
+
+    def test_every_modal_block_is_built_in_the_order_asked(self, modal_seam) -> None:
+        """All three on Modal: three instances, in the caller's order (the
+        pre-warm logs the app names in exactly that order)."""
+
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
+
+        models = modal_backed_models("llm", "resolution_embedding", "search_embedding")
+
+        assert models == ["LLM", "RESOLUTION-EMBEDDING", "SEARCH-EMBEDDING"]
+        assert (modal_seam.llm.call_count, modal_seam.embedding.call_count) == (1, 2)
+
+    def test_reads_the_provider_at_call_time(self, modal_seam) -> None:
+        """No import-time freeze: Prefect re-imports this module inside flow-run
+        subprocesses, and a ``TREE_MODELS__LLM__PROVIDER=modal`` override must
+        move the gate with it."""
+
+        modal_seam.providers(llm="gemini")
+
+        before = modal_backed_models("llm")
+        modal_seam.providers(llm="modal")
+        after = modal_backed_models("llm")
+
+        assert (before, after) == ([], ["LLM"])
+        assert modal_seam.llm.call_count == 1
 
 
 def test_prewarm_helper_does_not_import_modal() -> None:

@@ -31,7 +31,7 @@ from tree.config.app_config import (
 )
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
-    EMBEDDING_SERVER_NAME,
+    MODAL_SERVER_NAME,
     get_embedding_entry,
     get_llm_entry,
     modal_proxy_bearer,
@@ -137,14 +137,14 @@ async def resolve_server_url(entry: ModalModelConfig) -> str:
     """
 
     failure = (
-        f"Failed to resolve Modal server {entry.app_name}/{EMBEDDING_SERVER_NAME}. "
+        f"Failed to resolve Modal server {entry.app_name}/{MODAL_SERVER_NAME}. "
         "Is the model deployed (a Dedicated endpoint may still be provisioning "
         "— check `modal endpoint list`)? Run: "
         f"make memory-deploy-model MODEL={entry.repo_id}"
     )
 
     try:
-        server = modal.Server.from_name(entry.app_name, EMBEDDING_SERVER_NAME)
+        server = modal.Server.from_name(entry.app_name, MODAL_SERVER_NAME)
         url = await server.get_url.aio()
     except Exception as exc:  # noqa: BLE001 — every lookup failure is the same operator action
         raise ModelError(failure) from exc

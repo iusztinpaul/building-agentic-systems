@@ -26,7 +26,7 @@ from tree.models import modal_catalog
 from tree.models.exceptions import ModelError
 from tree.models.modal_catalog import (
     EMBEDDING_DEPLOY_SPEC_ENV,
-    EMBEDDING_SERVER_NAME,
+    MODAL_SERVER_NAME,
     HF_TOKEN_HINT,
     LLM_DEPLOY_SPEC_ENV,
     MODAL_ROUTING_REGION,
@@ -335,7 +335,7 @@ class TestDeploySpec:
         assert restored.repo_id == model
         assert restored.engine_version == "0.26.0"
         assert restored.autoinference_utils_version == "0.2.6"
-        assert restored.server_name == EMBEDDING_SERVER_NAME == "Server"
+        assert restored.server_name == MODAL_SERVER_NAME == "Server"
         assert restored.server_args == build_server_args(get_embedding_entry(model))
 
     def test_the_engine_is_the_scripts_so_the_spec_names_none(self) -> None:
@@ -400,7 +400,7 @@ class TestBuildLlmDeploySpec:
         # official image.
         assert spec.engine_version == "v0.5.18"
         assert spec.autoinference_utils_version == "0.2.6"
-        assert spec.server_name == EMBEDDING_SERVER_NAME == "Server"
+        assert spec.server_name == MODAL_SERVER_NAME == "Server"
         assert spec.server_args == {
             "--served-model-name": _LFM,
             "--revision": _LFM_SHA,

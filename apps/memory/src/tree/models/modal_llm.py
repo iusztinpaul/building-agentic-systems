@@ -46,7 +46,7 @@ from openai import AsyncOpenAI
 from tree.config.app_config import app_config
 from tree.models.base import BaseLLM
 from tree.models.exceptions import ExtractionError, ModelError
-from tree.models.modal_catalog import EMBEDDING_SERVER_NAME, get_llm_entry
+from tree.models.modal_catalog import MODAL_SERVER_NAME, get_llm_entry
 from tree.models.modal_server import resolve_server_url, served_model_id
 from tree.models.modal_warmup import WarmGate, poll_health
 from tree.observability import track, update_current_span
@@ -265,7 +265,7 @@ class ModalLLM(BaseLLM):
         logger.info(
             "ModalLLM ready: app=%s server=%s served_model=%s url=%s/v1",
             self._entry.app_name,
-            EMBEDDING_SERVER_NAME,
+            MODAL_SERVER_NAME,
             served,
             url,
         )

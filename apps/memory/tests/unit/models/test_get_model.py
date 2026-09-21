@@ -141,7 +141,7 @@ class TestGetLLM:
         assert isinstance(result, ModalLLM)
         assert result.warm_key == "ep-tree-qwen3-5-0-8b"
 
-    def test_a_non_catalog_model_fails_before_any_gpu_wakes(self, mocker) -> None:
+    def test_a_non_catalog_model_fails_before_any_gpu_wakes(self) -> None:
         """Story 3: the Gemini default model id under ``provider: modal`` is a
         typo, and the catalog says so — no network call, no deploy."""
 

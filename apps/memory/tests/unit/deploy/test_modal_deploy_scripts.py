@@ -15,7 +15,7 @@ logic, no ``print``), the container re-import cannot break on a ``tree`` import,
 the optional Hugging Face token travels as an ephemeral Secret — never baked
 into a cached, inspectable image layer, never logged as a value.
 
-Five guards are written AGAINST A MUTANT, not only against the shipped file,
+Six guards are written AGAINST A MUTANT, not only against the shipped file,
 and ``TestTheGuardsCatchTheirMutants`` proves each one on a mutated COPY in
 ``tmp_path`` — the shipped scripts are never edited and never executed. Two
 came from #142's QA (``unauthenticated=not True`` survived a literal-substring
@@ -28,6 +28,21 @@ from #146's, where these mutants all passed every guard of the day:
   console writes the dotted-name check did not name;
 * a SECOND ``.env({"HF_TOKEN": …})`` on another Image object — the helper only
   inspected the first ``.env({...})`` it found.
+
+#147's QA added the last two, both leaks of the same token past every guard of
+ITS day: ``subprocess.run(["env"])`` / ``os.system("env")``, whose CHILD
+inherits the environment and the container's stdout (``_process_spawns``), and
+a second logger spelled anything but ``logger.`` — ``logging.info(...)``,
+``logging.getLogger().info(...)``, a ``log = logging.getLogger(…)`` alias —
+which walked straight past the message allow-list (``_log_offenders``).
+
+#152's QA rewrote both of those in ONE token and got past them again:
+``__import__("os").system("env")`` (the dotted name of a chain rooted at a CALL
+is not ``os.something``) and ``getattr(logger, "info")("…")`` (the ``func`` of
+such a call is a Call, not an Attribute). Both helpers now also ban what HIDES
+a leak — dynamic imports, ``eval``/``exec``/``compile``, and calling the result
+of a call — and each carries a KNOWN BOUNDS block naming what a static walk
+still cannot see.
 """
 
 from __future__ import annotations
@@ -40,7 +55,7 @@ import pytest
 
 from tree.models.modal_catalog import (
     EMBEDDING_DEPLOY_SPEC_ENV,
-    EMBEDDING_SERVER_NAME,
+    MODAL_SERVER_NAME,
     LLM_DEPLOY_SPEC_ENV,
     MODAL_ROUTING_REGION,
     app_script,
@@ -126,6 +141,39 @@ _FORBIDDEN_IN_LOG_ARGS = ("environ", "getenv", "Secret", "HF_")
 _PRINTERS = frozenset({"print", "pprint"})
 _CONSOLE_STREAMS = frozenset({"stdout", "stderr", "__stdout__", "__stderr__"})
 _RAW_WRITERS = frozenset({"os.write", "os.writev"})
+
+# The modules whose whole point is starting a child process. `commands` is
+# Python 2's — never importable here, but the guard reads SOURCE, and naming it
+# costs one word.
+_SPAWN_MODULES = frozenset({"subprocess", "pty", "commands", "multiprocessing"})
+
+# The two ways to name a module WITHOUT an import statement, and the three that
+# run a string the AST cannot read. Both families are banned OUTRIGHT in these
+# scripts (#152 QA): they use neither, so any occurrence is either a leak being
+# hidden (`__import__("os").system("env")`) or the machinery to hide one.
+_DYNAMIC_IMPORTS = frozenset(
+    {"__import__", "importlib.import_module", "importlib.__import__"}
+)
+_DYNAMIC_EXECUTION = frozenset({"eval", "exec", "compile"})
+
+# The methods that EMIT a log record, on any receiver: `logger.info(...)`,
+# `logging.info(...)`, `logging.getLogger(__name__).warning(...)` and a
+# `log = logging.getLogger("x")` alias all reach the same `modal app logs`
+# (#147 QA). `basicConfig` / `getLogger` are not emit methods and stay legal —
+# both scripts configure logging that way.
+_LOG_EMIT_METHODS = frozenset(
+    {
+        "debug",
+        "info",
+        "warning",
+        "warn",
+        "error",
+        "exception",
+        "critical",
+        "fatal",
+        "log",
+    }
+)
 
 # Reading the environment WHOLE (or under another name) is how the token
 # escapes without the string "HF_TOKEN" appearing anywhere.
@@ -384,6 +432,134 @@ def _console_writes(module: ast.Module) -> list[str]:
     return offenders
 
 
+def _spawns_from_os(name: str) -> bool:
+    """``system`` / ``popen`` / ``fork*`` / the ``exec*`` and ``spawn*`` families."""
+
+    return name in {"system", "popen"} or name.startswith(
+        ("exec", "spawn", "posix_spawn", "fork")
+    )
+
+
+def _dynamically_imported(node: ast.expr) -> str | None:
+    """The module ``__import__("os")`` / ``import_module("os")`` names, or ``None``.
+
+    Only the LITERAL first argument is resolved: a computed module name is
+    already an offender on its own (any dynamic import is), so there is nothing
+    to resolve for it.
+    """
+
+    if (
+        isinstance(node, ast.Call)
+        and _dotted(node.func) in _DYNAMIC_IMPORTS
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ):
+        return node.args[0].value
+    return None
+
+
+def _process_spawns(module: ast.Module) -> list[str]:
+    """Every way ``module`` could start a CHILD PROCESS, or hide one, as written.
+
+    A child inherits the container's stdout AND its environment, so
+    ``subprocess.run(["env"])`` or ``os.system("env")`` inside ``@modal.enter``
+    puts the real ``HF_TOKEN`` into ``modal app logs`` — while naming no
+    variable, writing to no stream and reading no ``os.environ``, which is why
+    ``_console_writes``, ``_environ_reads`` and ``_log_offenders`` are all
+    silent on it (#147 QA).
+
+    Four shapes, all blunt on purpose:
+
+    * the IMPORT of a process-spawning module (``subprocess``, ``pty``,
+      ``commands``, ``multiprocessing`` — however aliased or nested);
+    * the ``os`` spawners by dotted name (``os.system``, ``os.popen``,
+      ``os.fork*``, ``os.exec*``, ``os.spawn*``, ``os.posix_spawn*``) or as a
+      ``from os import …``, and — receiver-agnostic, like
+      :data:`_LOG_EMIT_METHODS` — any ``…create_subprocess*`` (asyncio's pair);
+    * any DYNAMIC IMPORT or dynamic execution — ``__import__``,
+      ``importlib.import_module``, ``eval``, ``exec``, ``compile`` — CALLED or
+      merely BOUND TO A NAME. ``__import__("os").system("env")`` hid a spawn
+      from the dotted-name check above (#152 QA: the chain is rooted at a Call,
+      so ``.system`` renders as bare ``"system"``), and ``imp = __import__;
+      imp("os").system("env")`` hid it once more behind an alias — so the
+      BINDING is the offence too, which needs no data-flow analysis. A spawn
+      written as a STRING is unreadable to an AST walk, so banning the
+      primitive that would run it is the only sound answer;
+    * CALLING THE RESULT OF A CALL — ``getattr(os, "system")("env")``,
+      ``g = getattr; g(os, "system")("env")``. The ``func`` of such a call is a
+      Call, not an Attribute, so no dotted-name rule can see what it dispatches
+      to; these scripts call the result of a call exactly nowhere, so the blunt
+      rule costs nothing. :func:`_log_offenders` bans the same shape, for the
+      same reason — a spawn hidden this way must fail as a SPAWN, not as an
+      unreviewed log line.
+
+    Reporting an import (or a dynamic-execution name) alone is enough: these
+    scripts are glue that starts ONE server through the engine object, so the
+    occurrence is already the offence.
+
+    KNOWN BOUNDS — what a static walk of THIS file cannot see, named rather
+    than implied:
+
+    * exfiltration that is not a spawn (``socket``, ``urllib``, ``http.client``
+      POSTing ``os.environ`` somewhere) — a different attack class, caught by
+      neither this guard nor ``_environ_reads`` if it never names ``os.environ``
+      (it must, so ``_environ_reads`` holds that line);
+    * a dynamic import BOUND through an attribute rather than by its own name
+      (``f = importlib.import_module; f("subprocess")``, ``b = builtins;
+      b.__import__("os")``): the binding rule reads a bare ``ast.Name``, and
+      resolving what an attribute chain was bound to is the data-flow analysis
+      this file deliberately does not do (the same bound
+      :func:`_log_offenders` names for a bound emit method);
+    * anything a THIRD-PARTY import does on our behalf — the engine object
+      itself starts the server process, which is the whole point of the script.
+    """
+
+    offenders: list[str] = []
+    # The nodes that ARE the callee of a call, so the binding rule below can
+    # report `imp = __import__` without also reporting the `__import__` of a
+    # direct `__import__("os")` a second time (the Call rule has that one).
+    called = {id(node.func) for node in ast.walk(module) if isinstance(node, ast.Call)}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            offenders += [
+                ast.unparse(node)
+                for alias in node.names
+                if alias.name.split(".")[0] in _SPAWN_MODULES
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in _SPAWN_MODULES or (
+                root == "os" and any(_spawns_from_os(a.name) for a in node.names)
+            ):
+                offenders.append(ast.unparse(node))
+        elif isinstance(node, ast.Attribute):
+            dotted = _dotted(node)
+            imported = _dynamically_imported(node.value)
+            if dotted.startswith("os.") and _spawns_from_os(dotted.removeprefix("os.")):
+                offenders.append(dotted)
+            elif node.attr.startswith("create_subprocess"):
+                offenders.append(ast.unparse(node))
+            elif imported == "os" and _spawns_from_os(node.attr):
+                offenders.append(ast.unparse(node))
+        # Only the BARE-NAME primitives can match here (`__import__`, `eval`,
+        # `exec`, `compile`); the dotted spellings in `_DYNAMIC_IMPORTS` are a
+        # `node.id` no one can have, which is the attribute-binding bound named
+        # in the docstring above, not an oversight.
+        elif (
+            isinstance(node, ast.Name)
+            and node.id in _DYNAMIC_IMPORTS | _DYNAMIC_EXECUTION
+            and id(node) not in called
+        ):
+            offenders.append(node.id)
+        elif isinstance(node, ast.Call) and (
+            _dotted(node.func) in (_DYNAMIC_IMPORTS | _DYNAMIC_EXECUTION)
+            or isinstance(node.func, ast.Call)
+        ):
+            offenders.append(ast.unparse(node))
+    return offenders
+
+
 def _approved_environ_nodes(module: ast.Module, engine: str) -> set[int]:
     """The ``os.environ`` nodes an App script is ALLOWED to have.
 
@@ -437,29 +613,77 @@ def _environ_reads(module: ast.Module, engine: str) -> list[str]:
 
 
 def _log_offenders(module: ast.Module, engine: str) -> list[str]:
-    """Every logger call that is not an allow-listed message with safe args.
+    """Every logging call that is not an allow-listed message with safe args.
 
     Two rules, because either alone has a hole: the MESSAGE must be one of the
     literals pinned above (so a new line cannot appear unreviewed), and no
     ARGUMENT may reference the environment or a Secret (so an allow-listed
     ``%s`` cannot be fed the token).
+
+    RECEIVER-AGNOSTIC: any call to an emit method counts, whatever it is called
+    on. The old rule matched the dotted name ``logger.*``, so
+    ``logging.info(...)``, ``logging.getLogger().info(...)`` and a
+    ``log = logging.getLogger(__name__)`` alias all walked past the allow-list
+    into ``modal app logs`` (#147 QA) — and resolving those aliases by
+    data-flow is a far bigger walk than simply not trusting the spelling.
+    ``.log(level, msg, …)`` puts its message SECOND; every other method first.
+
+    A SUPERSET of the old rule, never a swap: anything on the module's own
+    ``logger`` still counts whatever the method is called, so
+    ``logger.handle(record)`` — which pushes a ``LogRecord`` past the message
+    allow-list straight into the handlers — cannot slip through the narrower
+    emit-method list.
+
+    KNOWN BOUNDS — what this walk cannot see, named rather than implied:
+
+    * a message built by ``eval`` / ``exec`` of a string: unreadable here, which
+      is why :func:`_process_spawns` bans those primitives outright;
+    * a HANDLER redirected on a logger this file does not name
+      (``logging.getLogger().addHandler(…)``): ``addHandler`` is not an emit
+      method, and only the module's own ``logger.`` prefix is guarded for
+      non-emit methods;
+    * an emit method BOUND to a name and called through it
+      (``emit = logger.info; emit("…")``): the call's ``func`` is then a plain
+      ``ast.Name``, and this walk reads the CALL, never the binding — closing it
+      means the data-flow analysis the receiver-agnostic rule exists to avoid.
+      An accepted bound, deliberately, not an oversight;
+    * bytes that never become a log record at all — a ``socket`` / ``urllib``
+      POST of the environment (a different attack class, out of reach of a
+      logging guard by construction).
     """
 
     offenders: list[str] = []
-    calls = [
-        node
+    # DYNAMIC DISPATCH, not a logging rule: `getattr(logger, "info")(msg)` has
+    # a Call — not an Attribute — for its `func`, so it walked straight past
+    # the receiver-agnostic match below, and so does `g = getattr; g(logger,
+    # "info")(msg)` (#152 QA). Both shipped scripts call the RESULT of a call
+    # exactly nowhere, so the sound rule is the blunt one: calling a call is
+    # the offence, whatever it resolves to.
+    offenders += [
+        ast.unparse(node)
         for node in ast.walk(module)
-        if isinstance(node, ast.Call) and _dotted(node.func).startswith("logger.")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Call)
     ]
-    for call in calls:
+    calls = [
+        (node, node.func.attr)
+        for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and (
+            node.func.attr in _LOG_EMIT_METHODS
+            or _dotted(node.func).startswith("logger.")
+        )
+    ]
+    for call, method in calls:
         rendered = ast.unparse(call)
-        first = call.args[0] if call.args else None
+        index = 1 if method == "log" else 0
+        first = call.args[index] if len(call.args) > index else None
         if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
             offenders.append(rendered)
             continue
         if first.value not in _LOG_MESSAGES[engine]:
             offenders.append(rendered)
-        for argument in call.args[1:]:
+        for argument in call.args[index + 1 :]:
             unparsed = ast.unparse(argument)
             if unparsed != _TOKEN_BOOLEAN and any(
                 needle in unparsed for needle in _FORBIDDEN_IN_LOG_ARGS
@@ -512,13 +736,36 @@ class TestGlueContract:
             f"{', '.join(writes)}"
         )
 
+    def test_no_process_is_spawned(self, engine: str) -> None:
+        """A child process inherits the container's stdout AND its environment.
+
+        ``subprocess.run(["env"])`` or ``os.system("env")`` inside
+        ``@modal.enter`` puts the real ``HF_TOKEN`` into ``modal app logs``
+        without the script naming a variable, writing to a stream or reading
+        ``os.environ`` — invisible to all three guards above (#147 QA). These
+        scripts are glue: they start ONE server, through the engine object —
+        so the primitives that would HIDE a spawn from this walk (a dynamic
+        import, an ``eval``) are banned with it (#152 QA).
+        """
+
+        spawns = _process_spawns(_module(engine))
+
+        assert not spawns, (
+            f"the script spawns a process, or hides one behind dynamic "
+            f"execution: {', '.join(spawns)} — a child inherits the "
+            "environment the HF_TOKEN lives in"
+        )
+
     def test_only_allow_listed_lines_are_logged(self, engine: str) -> None:
         """``modal app logs`` is where a container's bytes end up, so every
-        message is enumerated here and no argument may read the environment."""
+        message is enumerated here, no argument may read the environment, and
+        no call is dispatched dynamically past the allow-list."""
 
         offenders = _log_offenders(_module(engine), engine)
 
-        assert not offenders, f"unreviewed log call(s): {'; '.join(offenders)}"
+        assert not offenders, (
+            f"unreviewed or dynamically dispatched log call(s): {'; '.join(offenders)}"
+        )
 
     def test_the_environment_is_read_only_where_it_must_be(self, engine: str) -> None:
         """Three reads, no more: the model id, the spec, and the token as a
@@ -579,7 +826,7 @@ class TestGlueContract:
             )
         ]
 
-        assert decorated == [EMBEDDING_SERVER_NAME]
+        assert decorated == [MODAL_SERVER_NAME]
 
     def test_the_decorator_pins_the_serving_contract(self, engine: str) -> None:
         """The knobs an operator must not silently lose: proxy auth, the EU
@@ -779,7 +1026,7 @@ class TestTheGuardsCatchTheirMutants:
     """
 
     def test_the_shipped_script_passes_every_guard(self, engine: str) -> None:
-        """The control row: without a mutation, all five guards are silent."""
+        """The control row: without a mutation, all six guards are silent."""
 
         module = _module(engine)
 
@@ -787,6 +1034,7 @@ class TestTheGuardsCatchTheirMutants:
         assert not _console_writes(module)
         assert not _environ_reads(module, engine)
         assert not _log_offenders(module, engine)
+        assert not _process_spawns(module)
         assert _TOKEN_VAR not in _image_env_keys(module)
 
     @pytest.mark.parametrize(
@@ -881,6 +1129,178 @@ class TestTheGuardsCatchTheirMutants:
         )
 
         assert _log_offenders(mutant, engine) == ["logger.info('spec is %s', SPEC)"]
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            'logging.getLogger().info("spec is %s", SPEC)',
+            'logging.info("spec is %s", SPEC)',
+            'logging.getLogger(__name__).warning("spec is %s", SPEC)',
+            'log = logging.getLogger("x"); log.error("spec is %s", SPEC)',
+            'logger.log(logging.INFO, "spec is %s", SPEC)',
+        ],
+        ids=["root-getLogger", "module-level", "named-getLogger", "alias", "log-level"],
+    )
+    def test_any_spelling_of_a_logging_call_fails(
+        self, engine: str, statement: str, tmp_path: pathlib.Path
+    ) -> None:
+        """#147 QA: the allow-list only saw calls spelled ``logger.``.
+
+        A second logger — however it is spelled, and whatever name it is bound
+        to — reaches the same ``modal app logs``, so the RULE is the allow-list,
+        not the receiver.
+        """
+
+        mutant = _mutate(
+            engine, tmp_path, _STOP_CALL, f"        {statement}\n{_STOP_CALL}"
+        )
+
+        offenders = _log_offenders(mutant, engine)
+
+        assert any("spec is %s" in offender for offender in offenders), offenders
+
+    def test_a_record_pushed_past_the_allow_list_fails(
+        self, engine: str, tmp_path: pathlib.Path
+    ) -> None:
+        """The widened rule must stay a SUPERSET of the old ``logger.*`` one.
+
+        ``logger.handle(record)`` emits — it hands a ``LogRecord`` to the
+        handlers — while naming none of the nine emit methods.
+        """
+
+        record = 'logging.LogRecord("x", 20, "f", 1, "spec is %s", (SPEC,), None)'
+        mutant = _mutate(
+            engine,
+            tmp_path,
+            _STOP_CALL,
+            f"        logger.handle({record})\n{_STOP_CALL}",
+        )
+
+        assert _log_offenders(mutant, engine)
+
+    def test_an_allow_listed_message_passes_whatever_the_spelling(
+        self, engine: str, tmp_path: pathlib.Path
+    ) -> None:
+        """The other half of the same rule: a reviewed message with safe
+        arguments is legal through ANY logger — the guard is not a style check
+        on how the logger was obtained."""
+
+        mutant = _mutate(
+            engine,
+            tmp_path,
+            _STOP_CALL,
+            f'        logging.getLogger().info("{_TOKEN_LOG_MESSAGE}", '
+            f"{_TOKEN_BOOLEAN})\n{_STOP_CALL}",
+        )
+
+        assert _log_offenders(mutant, engine) == []
+
+    @pytest.mark.parametrize(
+        "statement,offender",
+        [
+            ('import subprocess; subprocess.run(["env"])', "subprocess"),
+            ('import subprocess as sp; sp.check_output("env")', "subprocess"),
+            ('from subprocess import run; run(["env"])', "subprocess"),
+            ('os.system("env")', "os.system"),
+            ('os.popen("env").read()', "os.popen"),
+            ('os.execvp("env", ["env"])', "os.execvp"),
+            ('os.spawnlp(os.P_WAIT, "env", "env")', "os.spawnlp"),
+            ("os.fork()", "os.fork"),
+            ('from os import system; system("env")', "system"),
+            ('import pty; pty.spawn("env")', "pty"),
+            ("import commands", "commands"),
+            # #152 QA: each of these is a ONE-TOKEN rewrite of the rows above,
+            # and each passed the guard as first written. `__import__("os")` is
+            # a Call, so the dotted name of `.system` rendered as bare
+            # `"system"` and never matched the `"os."` prefix.
+            ('__import__("os").system("env")', "__import__('os').system"),
+            (
+                'importlib.import_module("subprocess").run(["env"])',
+                "importlib.import_module",
+            ),
+            ('asyncio.create_subprocess_exec("env")', "create_subprocess_exec"),
+            ('asyncio.create_subprocess_shell("env")', "create_subprocess_shell"),
+            (
+                "import multiprocessing; multiprocessing.Process().start()",
+                "multiprocessing",
+            ),
+            # A spawn inside a string is unreadable to an AST walk, so the
+            # primitives that would run it are banned outright instead.
+            ("eval(\"__import__('os').system('env')\")", "eval"),
+            ('exec("import subprocess")', "exec"),
+            ('compile("import subprocess", "<x>", "exec")', "compile"),
+            # ... and one rewrite further: bind the primitive first, so the
+            # call names neither `__import__` nor `os` (#152 QA's own example).
+            # BINDING one is the offence, which needs no data-flow analysis.
+            ('imp = __import__; imp("os").system("env")', "__import__"),
+            ("runner = eval; runner(\"__import__('os').system('env')\")", "eval"),
+            # Dynamic DISPATCH: the `func` of the outer call is a Call, so no
+            # dotted-name rule can see `os.system` behind it. Caught here as a
+            # SPAWN, not only by `_log_offenders`, so the failure names what it
+            # is.
+            ('getattr(os, "system")("env")', "getattr(os, 'system')('env')"),
+            (
+                'g = getattr; g(os, "system")("env")',
+                "g(os, 'system')('env')",
+            ),
+        ],
+    )
+    def test_a_spawned_process_fails(
+        self, engine: str, statement: str, offender: str, tmp_path: pathlib.Path
+    ) -> None:
+        """#147 QA: ``subprocess.run(["env"])`` inside ``@modal.enter`` dumps the
+        container environment — the real ``HF_TOKEN`` — to the inherited stdout,
+        i.e. into ``modal app logs``, and passed every guard of the day."""
+
+        mutant = _mutate(
+            engine, tmp_path, _STOP_CALL, f"        {statement}\n{_STOP_CALL}"
+        )
+
+        spawns = _process_spawns(mutant)
+
+        assert any(offender in spawn for spawn in spawns), spawns
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            'getattr(logger, "info")("spec is %s", SPEC)',
+            'g = getattr; g(logger, "info")("spec is %s", SPEC)',
+            'getattr(logging, METHOD)("spec is %s", SPEC)',
+        ],
+        ids=["getattr", "aliased-getattr", "non-literal-method"],
+    )
+    def test_a_dynamically_dispatched_logging_call_fails(
+        self, engine: str, statement: str, tmp_path: pathlib.Path
+    ) -> None:
+        """#152 QA: ``getattr(logger, "info")(…)`` walked past the allow-list.
+
+        The receiver-agnostic rule above still requires ``node.func`` to be an
+        ``ast.Attribute``; a ``getattr`` call is an ``ast.Call``, so a
+        one-token rewrite routed an unreviewed message — or the token — into
+        ``modal app logs`` again.
+        """
+
+        mutant = _mutate(
+            engine, tmp_path, _STOP_CALL, f"        {statement}\n{_STOP_CALL}"
+        )
+
+        offenders = _log_offenders(mutant, engine)
+
+        assert any("spec is %s" in offender for offender in offenders), offenders
+
+    def test_an_imported_module_name_alone_fails(
+        self, engine: str, tmp_path: pathlib.Path
+    ) -> None:
+        """``__import__`` hides the name from an import-statement walk."""
+
+        mutant = _mutate(
+            engine,
+            tmp_path,
+            _STOP_CALL,
+            f'        __import__("subprocess").run(["env"])\n{_STOP_CALL}',
+        )
+
+        assert _process_spawns(mutant)
 
     def test_a_second_image_env_carrying_the_token_fails(
         self, engine: str, tmp_path: pathlib.Path

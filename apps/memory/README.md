@@ -652,7 +652,8 @@ never be overwritten or stopped by these targets. On top of that:
 
   A fake `modal` on `PATH` does NOT work: `make` and `uv run` put `.venv/bin`
   first, so the real CLI wins — which is how two accidental deploys once
-  happened.
+  happened. The unit suite therefore closes both doors to Modal itself — the
+  CLI one and the SDK one — with two autouse fixtures (see "Tests & QA").
 
 **2. Mint a Proxy token** in Modal → Settings → Proxy Auth Tokens and put both
 halves in `.env` as `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`. It is
@@ -719,6 +720,8 @@ make memory-tests              # unit suite (needs the local MongoDB from make l
 ```
 
 Layout mirrors the source tree: `tests/unit/<area>/` — unit tests with mocks (`pytest-mock`). The mirroring is enforced for the memory layers by `tests/unit/memory/test_package_layout.py`, which also asserts that no module under `rag/` imports `graph/`. There is no integration suite (see `AGENTS.md`); e2e verification happens by running the real pipelines (see "Running pipelines").
+
+*Safety:* the unit suite closes TWO doors to Modal, both as autouse fixtures in `tests/unit/conftest.py` — the CLI door (`TREE_MODAL_DRY_RUN=1`, so the deploy driver starts no `modal` process; a fake `modal` on `PATH` does not work, see above) and the SDK door (`modal.Server.from_name` and its neighbours raise `live Modal SDK lookup from a unit test`, so a test that flips a provider to `modal` without patching the factory fails instead of waking a GPU; request the `modal_sdk_allowed` fixture to opt one test out).
 
 Auto-format + lint before committing:
 

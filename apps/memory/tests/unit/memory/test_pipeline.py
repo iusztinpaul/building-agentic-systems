@@ -2135,9 +2135,13 @@ class TestFlowEmbeddingModelSplit:
         # else: an unspec'd MagicMock answers to ``ensure_warm`` as well, which
         # makes the **Pre-warm** mistake it for a Modal client (the embedding
         # doubles above are already spec'd for the same reason).
-        mocker.patch(
-            "tree.memory.pipeline.get_llm", return_value=MagicMock(spec=BaseLLM)
-        )
+        # BOTH namespaces: the worker's graph half calls the pipeline-level
+        # name, the pre-warm seam calls ``get_model``'s own (through
+        # ``modal_backed_models``). Without the second one a test that flips
+        # ``models.llm.provider`` to ``modal`` builds a REAL ``ModalLLM`` and
+        # the pre-warm polls Modal for a server that does not exist.
+        for target in ("tree.memory.pipeline.get_llm", "tree.models.get_model.get_llm"):
+            mocker.patch(target, return_value=MagicMock(spec=BaseLLM))
         supersession = mocker.patch(
             "tree.memory.pipeline.resolve_supersessions", new=AsyncMock()
         )
@@ -2757,21 +2761,17 @@ async def _run_worker_for_prewarm(
     user_id: PydanticObjectId,
     document_ids: list[str],
 ) -> WriteSummary:
-    """Drive the worker body far enough to observe the pre-warm seam."""
+    """Drive the worker body far enough to observe the pre-warm seam.
+
+    The models the seam may build come from the ``modal_seam`` fixture: the
+    gate calls the ``tree.models.get_model`` factories, so a pipeline-level
+    patch never reaches it.
+    """
 
     monkeypatch.setenv("TREE_MEMORY__MODE", mode)
     mocker.patch(
         "tree.memory.pipeline.init_mongodb",
         new=AsyncMock(return_value=_ClientToTestDatabase(test_database)),
-    )
-    mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
-    mocker.patch(
-        "tree.memory.pipeline.get_resolution_embedding_model",
-        return_value="RESOLUTION-EMBEDDING",
-    )
-    mocker.patch(
-        "tree.memory.pipeline.get_search_embedding_model",
-        return_value="SEARCH-EMBEDDING",
     )
 
     return await _run_extraction_worker_body(
@@ -2785,9 +2785,10 @@ class TestWorkerPrewarm:
     """Before document 1, after the zero-documents guard (ADR-009 §11)."""
 
     async def test_worker_prewarms_before_the_first_stage(
-        self, mocker, monkeypatch, test_database, ingested_document
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
     ) -> None:
         user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
         trace, warmed = _install_prewarm_tripwire(mocker)
 
         with pytest.raises(_StopAtFirstStage):
@@ -2803,33 +2804,84 @@ class TestWorkerPrewarm:
         assert trace == ["prewarm", "split"]
         assert warmed == [("LLM", "RESOLUTION-EMBEDDING", "SEARCH-EMBEDDING")]
 
-    async def test_rag_warms_the_search_embedding_model_only(
-        self, mocker, monkeypatch, test_database, ingested_document
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    async def test_worker_seam_builds_nothing_for_sentence_transformers(
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam, mode
     ) -> None:
-        """No LLM and no resolution model run in ``rag`` — warming them would
-        wake a GPU the run never calls."""
+        """Story 1 (#149 QA, finding 2): a ``sentence-transformers`` run must not
+        load torch weights for a model that has nothing to warm — in EITHER
+        mode, and even when every document is already in the embed cache."""
 
         user, document = ingested_document
+        modal_seam.providers(
+            llm="gemini",
+            resolution="sentence-transformers",
+            search="sentence-transformers",
+        )
         trace, warmed = _install_prewarm_tripwire(mocker)
 
         with pytest.raises(_StopAtFirstStage):
             await _run_worker_for_prewarm(
                 mocker,
                 monkeypatch,
-                mode="rag",
+                mode=mode,
                 test_database=test_database,
                 user_id=user.id,
                 document_ids=[str(document.id)],
             )
 
         assert trace == ["prewarm", "split"]
-        assert warmed == [("SEARCH-EMBEDDING",)]
+        assert warmed == [()]
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "mode,expected",
+        [
+            ("graphrag", ("LLM", "SEARCH-EMBEDDING")),
+            # No LLM and no resolution model run in ``rag`` — warming them would
+            # wake a GPU the run never calls.
+            ("rag", ("SEARCH-EMBEDDING",)),
+        ],
+    )
+    async def test_worker_seam_builds_the_modal_blocks_only(
+        self,
+        mocker,
+        monkeypatch,
+        test_database,
+        ingested_document,
+        modal_seam,
+        mode: str,
+        expected: tuple[str, ...],
+    ) -> None:
+        """Story 2: the LLM and the search embedding on Modal, resolution on
+        Voyage — the Voyage client is never even constructed by the seam."""
+
+        user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="voyage", search="modal")
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode=mode,
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [expected]
+        assert modal_seam.embedding.call_count == 1
 
     async def test_zero_documents_never_wakes_a_gpu(
-        self, mocker, monkeypatch, test_database
+        self, mocker, monkeypatch, test_database, modal_seam
     ) -> None:
-        """The guard comes FIRST: an empty run must not warm anything."""
+        """The guard comes FIRST: an empty run must not warm anything — nor
+        BUILD anything, with every block on Modal."""
 
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
         trace, warmed = _install_prewarm_tripwire(mocker)
 
         summary = await _run_worker_for_prewarm(
@@ -2844,13 +2896,16 @@ class TestWorkerPrewarm:
         assert summary == WriteSummary(documents_processed=0)
         assert trace == []
         assert warmed == []
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
 
     async def test_dead_server_fails_the_run_with_zero_documents_attempted(
-        self, mocker, monkeypatch, test_database, ingested_document
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
     ) -> None:
         """One ``ModelError`` before stage ① — not N failed documents."""
 
         user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
         dead = ModelError(
             "Failed to resolve Modal server ep-tree-lfm2-5-350m/Server. Is the "
             "model deployed?"
@@ -2881,13 +2936,15 @@ class TestWorkerPrewarm:
 
     @pytest.mark.usefixtures("fixed_two_by_three_chunking")
     async def test_worker_prewarm_is_a_noop_on_default_providers(
-        self, mocker, monkeypatch, test_database, ingested_document
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
     ) -> None:
         """Voyage + Gemini, as shipped: no task, no latency, no behaviour change.
 
-        Runs the REAL helper over the models the worker builds (none of which
-        has an ``ensure_warm``) and counts the tasks created across that call
-        alone — the worker itself creates plenty.
+        Runs the REAL helper over the models the seam hands it (none, now that
+        the gate reads the provider first) and counts the tasks created across
+        that call alone — the worker itself creates plenty. The seam builds
+        NOTHING: the shipped providers have no ``ensure_warm``, so constructing
+        a client for the pre-warm would be pure cost.
         """
 
         user, document = ingested_document
@@ -2913,7 +2970,9 @@ class TestWorkerPrewarm:
 
         assert summary.documents_processed == 1
         assert created == [set()]
-        assert [hasattr(model, "ensure_warm") for model in warmed[0]] == [False]
+        assert warmed == [()]
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
 
 
 @pytest.mark.usefixtures("fixed_two_by_three_chunking")
@@ -3573,8 +3632,11 @@ class TestMemoryClusteringFailsOpenPerCluster:
 class TestSummariseClustersPrewarm:
     """The cluster-summary seam pre-warms, but keeps ADR-007 §4's fail-open."""
 
-    async def test_the_llm_is_prewarmed_once_before_the_fan_out(self, mocker) -> None:
+    async def test_the_llm_is_prewarmed_once_before_the_fan_out(
+        self, mocker, modal_seam
+    ) -> None:
         config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
         trace: list[str] = []
         warmed: list[tuple[object, ...]] = []
 
@@ -3586,7 +3648,6 @@ class TestSummariseClustersPrewarm:
             trace.append("summarise")
             return _summary()
 
-        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
         mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
         mocker.patch(
             "tree.memory.pipeline.summarise_cluster_task",
@@ -3599,25 +3660,70 @@ class TestSummariseClustersPrewarm:
         assert warmed == [("LLM",)]
         assert failed == 0
 
-    async def test_no_clusters_never_wakes_a_gpu(self, mocker) -> None:
+    @pytest.mark.parametrize("provider,expected", [("gemini", ()), ("modal", ("LLM",))])
+    async def test_summary_seam_builds_the_llm_only_under_modal(
+        self, mocker, modal_seam, provider: str, expected: tuple[str, ...]
+    ) -> None:
+        """Under ``gemini`` the seam builds nothing — the instance exists only to
+        be warmed, and a Gemini client has no gate. The summaries run either way.
+        """
+
         config = load_app_config().memory.clustering
+        modal_seam.providers(llm=provider)
+        warmed: list[tuple[object, ...]] = []
+
+        async def _prewarm(*models: object) -> None:
+            warmed.append(models)
+
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(return_value=_summary()),
+        )
+
+        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
+
+        assert warmed == [expected]
+        assert modal_seam.llm.call_count == len(expected)
+        assert (summarise.await_count, failed) == (2, 0)
+
+    async def test_a_missing_proxy_token_fails_the_run(
+        self, mocker, modal_seam
+    ) -> None:
+        """Construction stays OUTSIDE the ``try``: a configuration error must
+        fail the run loudly. Only the WARM fails open."""
+
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
+        modal_seam.llm.side_effect = ModelError(
+            "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET are required"
+        )
         prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
-        build_llm = mocker.patch("tree.memory.pipeline.get_llm")
+
+        with pytest.raises(ModelError, match="MODAL_PROXY_TOKEN_ID"):
+            await _summarise_clusters({0: ["a"]}, config)
+
+        prewarm.assert_not_called()
+
+    async def test_no_clusters_never_wakes_a_gpu(self, mocker, modal_seam) -> None:
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
+        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
 
         summaries, failed = await _summarise_clusters({}, config)
 
         assert (summaries, failed) == ({}, 0)
         prewarm.assert_not_called()
-        build_llm.assert_not_called()
+        modal_seam.llm.assert_not_called()
 
     async def test_cluster_summaries_fail_open_when_the_llm_is_dead(
-        self, mocker, caplog
+        self, mocker, modal_seam, caplog
     ) -> None:
         """ONE warning and the fallback labels — not N x 600 s of polling."""
 
         config = load_app_config().memory.clustering
         samples_by_cluster = {0: ["a"], 1: ["b"], 2: ["c"]}
-        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
+        modal_seam.providers(llm="modal")
         mocker.patch(
             "tree.memory.pipeline.prewarm_models",
             new=AsyncMock(
@@ -3655,7 +3761,6 @@ class TestSummariseClustersLLMIdentity:
         self, mocker
     ) -> None:
         config = load_app_config().memory.clustering
-        mocker.patch("tree.memory.pipeline.get_llm", return_value="LLM")
         mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
         summarise = mocker.patch(
             "tree.memory.pipeline.summarise_cluster_task",

@@ -41,7 +41,7 @@ from tree.config.app_config import ModalEmbeddingModelConfig, app_config
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
-    EMBEDDING_SERVER_NAME,
+    MODAL_SERVER_NAME,
     get_embedding_entry,
     prompt_for,
     truncate_embedding,
@@ -220,7 +220,7 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             "ModalEmbeddingModel ready: app=%s server=%s served_model=%s "
             "native=%d dimensions=%d%s url=%s/v1",
             self._entry.app_name,
-            EMBEDDING_SERVER_NAME,
+            MODAL_SERVER_NAME,
             served,
             self._entry.native_dimensions,
             self._dimensions,

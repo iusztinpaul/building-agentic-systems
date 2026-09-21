@@ -38,7 +38,7 @@ from tree.models.exceptions import ModelError
 # ``serve.py`` Modal generates for a Dedicated endpoint, and our App scripts
 # reuse it — so ONE `Server.from_name(app_name, "Server")` lookup resolves
 # every model regardless of how it is served.
-EMBEDDING_SERVER_NAME = "Server"
+MODAL_SERVER_NAME = "Server"
 
 # The env vars the App scripts bake their resolved spec's ``model_dump_json()``
 # into: the catalog logic lives in ``src/tree/``, but ``tree`` is not installed
@@ -281,7 +281,7 @@ def build_deploy_spec(model: str) -> EmbeddingDeploySpec:
         repo_id=entry.repo_id,
         revision=entry.revision,
         app_name=entry.app_name,
-        server_name=EMBEDDING_SERVER_NAME,
+        server_name=MODAL_SERVER_NAME,
         gpu=entry.gpu,
         cpu=entry.cpu,
         memory_mb=entry.memory_mb,
@@ -306,7 +306,7 @@ def build_llm_deploy_spec(model: str) -> LLMDeploySpec:
         repo_id=entry.repo_id,
         revision=entry.revision,
         app_name=entry.app_name,
-        server_name=EMBEDDING_SERVER_NAME,
+        server_name=MODAL_SERVER_NAME,
         gpu=entry.gpu,
         n_gpus=entry.n_gpus,
         cpu=entry.cpu,
