@@ -59,7 +59,7 @@ for this task; never open, read or `source` `.env` / `.env.prod`; no pipeline ru
 - [x] No operator-facing doc regains a retired promise: `grep -rn "0\.75\|MODAL_EMBEDDING_API_KEY\|deploy-embedding-model\|serving:" README.md apps/memory/README.md .env.example .agents/skills/run-pipelines-e2e/SKILL.md` returns only the existing "There is no `serving:` field" sentence.
 - [x] `make memory-format-check && make memory-lint-check && make pre-commit && make memory-tests` green (env `local`).
 - [x] Tester re-runs full QA suite and PASSES.
-- [ ] PA re-runs acceptance review on the feature and ACCEPTS.
+- [x] PA re-runs acceptance review on the feature and ACCEPTS.
 
 ## Issues (detail)
 

@@ -2421,3 +2421,29 @@ reset has `DRY_RUN`.
 
 Filed rollup task: `tasks/159-pa-rejection-voyage-4-and-modal-embedding-catalog.md`.
 Pipeline re-runs from inner loop with the rollup task; on green, re-run acceptance on the feature.
+
+### [PA] 2026-09-22 02:45 — Acceptance Review, cycle 2 (feature: tasks 134-159, PR #44 @ 44da452)
+
+**VERDICT: ACCEPT**
+
+Re-walked the 8 issues of #159 as an operator reading only `apps/memory/README.md` "Serving models on Modal", the
+root README and the PR body. All 8 fixed: (1) the three verdicts are consecutive bullets `:573/575/584`, 1a at `:611`;
+(2) step 4 `:724-728` names the **Embedding reset** and links `#changing-the-embedding-model` (heading at `:265`);
+(3) `:736-741` says where a `TREE_MODELS__…` / `TREE_MODAL__…` override goes, and five dispatch scripts call
+`warn_ignored_config_overrides` for both prefixes; `-test … TREE_MODAL__WARMUP_DEADLINE_S=1200` kept with its reason
+`:700-702`; (4) `embedding_models:` placeholder entry `:596-604` + the `expected 1024 dims, got 2048` recipe
+(`modal_server.py:258`); (5) the LLM example `:615-625` mirrors the seed, no `enable_thinking`; (6) **Pre-warm** /
+**Warm gate** paragraph `:743-749`, log lines match `get_model.py:292`, `modal_warmup.py:165,173`; (7) `README.md:43`,
+env table `:92`, `modal setup` clause `:670-673`; (8) PR body: reset is "a dry run BY DEFAULT; `CONFIRM=yes` applies
+it", follow-up 1 "once per user".
+
+No new trap: make targets, `SERVING=`/`DRY_RUN=`/`FORCE=`/`CONFIRM=`, exit 3, `modal.warmup_deadline_s: 600`,
+`request_timeout_s: 300`, `scaledown_window=5 * MINUTES`, the `Provisioning:`/`Live:`/`Routing` lines, the three
+Pre-warm call sites and the MCP "never pre-warmed" comment all exist in code as quoted. Section 203 -> 202 lines;
+the incident narrative is gone, the section reads as instructions.
+
+Not blocking, for the PR-Reviewer: `run_data_pipeline.py` has no ignored-override warning (the data flow only reads
+`search_embedding.dimensions` for a gate that fails LOUDLY — not issue-3 harm); `TREE_DREAM__DRY_RUN` is ignored on
+dispatch but `dream.dry_run` defaults to `true`, so the ignored override fails safe; PR body is stale by one task
+(no #159 row, "4056 passed" is now 4065); `README.md:198` still says "Modal embedding deployment". Hand off to the
+PR Reviewer.
