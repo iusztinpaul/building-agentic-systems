@@ -367,9 +367,9 @@ Observed, from real `modal` CLI output captured in my terminal:
   (`im-irFSum52eQ5hHU66NwO9hh`, baking the real `EMBEDDING_DEPLOY_SPEC` for
   `Qwen/Qwen3-Embedding-0.6B` under `sglang`) and printed
   `✓ App deployed in 77.981s! 🎉` for app **`ep-qwen3-embedding-0-6b`**,
-  workspace `p-b-iusztin`, endpoint
-  `https://p-b-iusztin--ep-qwen3-embedding-0-6b-server.eu-west.modal.direct`,
-  deployment page `https://modal.com/apps/p-b-iusztin/main/deployed/ep-qwen3-embedding-0-6b`.
+  workspace `<workspace>`, endpoint
+  `https://<workspace>--ep-qwen3-embedding-0-6b-server.eu-west.modal.direct`,
+  deployment page `https://modal.com/apps/<workspace>/main/deployed/ep-qwen3-embedding-0-6b`.
 - **UNCONFIRMED, assume also live**: the first command (`voyageai/voyage-4-nano`,
   `vllm`) completed a full real image build (`Built image
   im-gEpRpXhIKXSaY93MkcTU0U in 61.72s`, `vllm==0.17.1`, real package
@@ -385,7 +385,7 @@ Observed, from real `modal` CLI output captured in my terminal:
   and a second uninformed action would only compound the risk.
 
 **Action required from a human before this task is considered mergeable
-end-to-end:** check `https://modal.com/apps/p-b-iusztin/main` for
+end-to-end:** check `https://modal.com/apps/<workspace>/main` for
 `ep-qwen3-embedding-0-6b` and `ep-voyage-4-nano`, and stop/delete them if they
 were not intentionally wanted. This is unrelated to whether the SWE's code is
 correct (see below) — it's a byproduct of `uv run`'s `PATH` handling in this

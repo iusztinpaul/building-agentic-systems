@@ -1,6 +1,6 @@
 ---
 id: 141-voyage-4-and-modal-e2e-threshold-repin
-status: in-progress
+status: done
 feature: voyage-4-and-modal-embedding-catalog
 ---
 
@@ -314,7 +314,7 @@ uses its OWN throwaway Prefect server — no code change, nothing shared:
 - [x] `git log --oneline` shows #153-#157 BEFORE any round-2 evidence; no round-2 command names `Qwen/Qwen3-Embedding-0.6B` in a `deploy`.
 - [x] 4b: container log starts with `HF_TOKEN set in container: …`; `modal volume ls huggingface-cache hub` lists `models--voyageai--voyage-4-nano`; all of 4b's original lines (smoke, wire `-> 2048`, shared-space cosines, cold-again sequence or its honest "not reproduced").
 - [x] 4c: no `cannot mount volume on non-empty path` anywhere in `4c-app.log`; the six chat smoke lines + `chat knobs: …`; the `ModalLLM` dict with exactly `city` / `population`; the Opik `modal` span.
-- [ ] 4d: the deploy line `… is provisioning — …`, >= 1 `Provisioning: tree-qwen3-5-0-8b …` line, `Live: … after <N>s`, the line `4d knobs that answered: …` (or rung 3's `PA:` line + the fallback seed's full cycle), the `ModalLLM` dict, the Opik `modal` span, and the one-line fact about re-creating a stopped endpoint's name. No call ran longer than 300 s.
+- [x] 4d: the deploy line `… is provisioning — …`, >= 1 `Provisioning: tree-qwen3-5-0-8b …` line, `Live: … after <N>s`, the line `4d knobs that answered: …` (or rung 3's `PA:` line + the fallback seed's full cycle), the `ModalLLM` dict, the Opik `modal` span, and the one-line fact about re-creating a stopped endpoint's name. No call ran longer than 300 s. **[REPLACED by the round-3 criteria (#158's amendment) and closed there — see `### [SWE] 2026-09-21 23:10 — Round 3`: 16 `Provisioning:` lines, `Live: … after 276s`, the line `4d answered in JSON mode: Qwen/Qwen3.5-0.8B (enable_thinking: false, 4096)` in place of round 2's knobs line, the `ModalLLM` dict, the Opik `modal` span, and the stopped-name fact re-confirmed with a third new id.]**
 - [x] Part 1: every pasted Part 1 command carries all THREE variables; the 4201 isolation proof (deployments on 4201, run on 4201, none on 4200, document in `tree_e2e_141`); no `docker` command appears in the round-2 Log.
 - [x] Every row of round 1's "SWE must verify" table that reads **NOT VERIFIED** / **NOT MEASURED** / **NOT PROVEN LIVE** is re-answered with its source (vLLM 0.26.0 + CUDA 13.0.2, `VoyageQwen3BidirectionalEmbedModel`, sgl-kernel on the A10, LFM2 on SGLang, `json_object` on SGLang, voyage-4-nano's wire width + `dimensions` answer, container half of `Secret.from_dict`, engine subprocess inheriting `HF_TOKEN`).
 - [x] 4e again at the very end: `baseline: <n> apps, <m> endpoints — all unchanged`, no live `tree-*` / `ep-tree-*`.
@@ -353,7 +353,7 @@ uses its OWN throwaway Prefect server — no code change, nothing shared:
 - [x] Shared space: the 3 same-text cosines `cos(voyage-4 API @1024, nano @1024)` and the 1 cross-text contrast, labelled recorded-not-gated, and a `PA:` line only if same-text is not clearly above cross-text.
 - [x] Cold start: FOUR `Warm: … answered HTTP 200 after <N>s` lines (one per cycle, from the `-test` runs), each preceded by >= 1 `Still cold (HTTP 5xx)` line unless the server was already warm (say so).
 - [x] Cold again: either the sequence `Cold again: ep-tree-voyage-4-nano answered HTTP 503 — re-warming once` -> `Warm: …` -> `Warm again: …` with a 1024-d vector returned and exactly ONE `Cold again` line, or `cold-again: not reproduced — container still warm after 420 s`.
-- [ ] 4c + 4d: for EACH LLM cycle the six chat smoke lines (incl. `strict JSON schema honoured: city=… population=…` and `unauthenticated health -> 401`), the dict returned by `ModalLLM.generate_json(…, schema=…)` with exactly the keys `city` / `population`, the JSON-mode result or its `ExtractionError` text (recorded, not gated), the `ModalLLM ready: app=ep-tree-… served_model=…` line, and for 4c the SGLang image tag that actually ran; for 4d the GPU Modal picked.
+- [x] 4c + 4d: for EACH LLM cycle the six chat smoke lines (incl. ~~`strict JSON schema honoured: city=… population=…`~~ -> `JSON mode honoured: keys=[…]` (#158) and `unauthenticated health -> 401`), the dict returned by ~~`ModalLLM.generate_json(…, schema=…)`~~ -> `generate_json(CHAT_SMOKE_PROMPT)` with exactly the keys `city` / `population`, the JSON-mode result or its `ExtractionError` text (recorded, not gated), the `ModalLLM ready: app=ep-tree-… served_model=…` line, and for 4c the SGLang image tag that actually ran; for 4d the GPU Modal picked. **[REPLACED by the round-3 criteria (#158's amendment) and closed there. Its wording predates #158, which deleted `schema=` and turned `strict JSON schema honoured: …` into `JSON mode honoured: keys=[…]`. 4c stands on round 2 (five lines + `chat knobs:`, its strict-schema dict, the `lmsysorg/sglang:v0.5.18` tag) and is explicitly not re-run; 4d is in `### [SWE] 2026-09-21 23:10 — Round 3` in the new wording, with `4d shape: exact` for the keys, the `ModalLLM ready:` line, and the GPU still `Modal's choice, dashboard-only`.]**
 - [x] Modal LLM really called (not a cache replay): for EACH of 4c and 4d, `## Log` pastes the `ModalLLM ready: app=ep-tree-… served_model=…` line of the run AND the Opik usage span of the same call showing `provider: modal`, `total_cost=0` and non-zero token counts, with one sentence stating whether the call went through Prefect (then also the `llm-extract-entities` task state `Completed`, never `Cached`) or was the direct client call (no cache in the path). `git log --oneline` of the branch shows #151's commit BEFORE any 4c/4d evidence.
 - [x] HF token: exactly one of `HF token path (App): PROVEN (HF_TOKEN set in container: True, leak-check exit=0)` or `HF token path (App): NOT PROVEN LIVE — HF_TOKEN not set (container says False); unit evidence only`, plus the sentence that the endpoint `--custom-hf-token` half is unit-tested only. `grep -c "hf_[A-Za-z0-9]\{20,\}" tasks/141-voyage-4-and-modal-e2e-threshold-repin.md` -> 0.
 - [x] 4e: `modal endpoint list --json` AND `modal app list --json` pasted in `## Log` show no `tree-*` endpoint and no live `ep-tree-*` app, and the line `baseline: <n> apps, <m> endpoints — all unchanged` (same ids, same states, no new version in any baseline `ep-*` app's history). Every `modal … stop` argv in this Log names a `tree-` / `ep-tree-` name.
@@ -679,14 +679,14 @@ UNVERIFIED until then.
 `modal app list --json` key set: `app_id, description, state, tasks, created_at, stopped_at`
 (both confirm #143's claim, read off the live CLI on modal 1.5.5)
 
-Endpoints — 4, all `status: live`, all `created_by: p-b-iusztin`:
+Endpoints — 4, all `status: live`, all `created_by: <workspace>`:
 
 | name | endpoint_id | status | created_at |
 |---|---|---|---|
-| qwen3-embedding-8b | ep-UDN0woLFq8dwNwMoHqK3A1 | live | 2026-09-20 11:05:47+03:00 |
-| qwen3-embedding-0-6b | ep-AFm6anFYXobWj3ba0MxKOw | live | 2026-09-20 10:59:56+03:00 |
-| gpt-oss-120b | ep-AZAaUPQk88Ko2i9xx5olsc | live | 2026-09-15 20:01:50+03:00 |
-| qwen3-6-35b-a3b-fp8 | ep-nCsyPubmp2JsVUMkfPQR6E | live | 2026-09-14 13:22:55+03:00 |
+| qwen3-embedding-8b | ep-<human:qwen3-embedding-8b> | live | 2026-09-20 11:05:47+03:00 |
+| qwen3-embedding-0-6b | ep-<human:qwen3-embedding-0-6b> | live | 2026-09-20 10:59:56+03:00 |
+| gpt-oss-120b | ep-<human:gpt-oss-120b> | live | 2026-09-15 20:01:50+03:00 |
+| qwen3-6-35b-a3b-fp8 | ep-<human:qwen3-6-35b-a3b-fp8> | live | 2026-09-14 13:22:55+03:00 |
 
 Apps — 2, both `state: deployed`, `tasks: 0`, `stopped_at: null`:
 
@@ -740,7 +740,7 @@ was ever created.
 Smoke test:
 
 ```
-Warming https://p-b-iusztin--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct/health — polling for up to 600s
+Warming https://<workspace>--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct/health — polling for up to 600s
 Warm: https://…/health answered HTTP 200 after 0s
 health 200 after 0.5s
 served model id: Qwen/Qwen3-Embedding-0.6B
@@ -756,10 +756,10 @@ The two listings WHILE it was up.
 
 ```
 tree-qwen3-embedding-0-6b  ep-cdhIRjCpSKKpCyOpUxMNg7  provisioning
-qwen3-embedding-8b         ep-UDN0woLFq8dwNwMoHqK3A1  live
-qwen3-embedding-0-6b       ep-AFm6anFYXobWj3ba0MxKOw  live
-gpt-oss-120b               ep-AZAaUPQk88Ko2i9xx5olsc  live
-qwen3-6-35b-a3b-fp8        ep-nCsyPubmp2JsVUMkfPQR6E  live
+qwen3-embedding-8b         ep-<human:qwen3-embedding-8b>  live
+qwen3-embedding-0-6b       ep-<human:qwen3-embedding-0-6b>  live
+gpt-oss-120b               ep-<human:gpt-oss-120b>  live
+qwen3-6-35b-a3b-fp8        ep-<human:qwen3-6-35b-a3b-fp8>  live
 ```
 
 `modal app list` (both the table and `--json`) — only the two baseline apps:
@@ -799,10 +799,10 @@ either.)
 
 **H1: TRUE.** The app IS `ep-tree-qwen3-embedding-0-6b` —
 `modal app history ep-tree-qwen3-embedding-0-6b --json` -> `v1` 2026-09-21 13:56:03+03:00 and `v2` 13:56:10+03:00,
-`deployed_by: p-b-iusztin`, client `1.5.1.dev13` (Modal itself deployed v2 seven seconds later, while
+`deployed_by: <workspace>`, client `1.5.1.dev13` (Modal itself deployed v2 seven seconds later, while
 provisioning — no command of ours ran between 13:56:03 and 13:56:10) — and its server class is `Server`:
 `resolve_server_url` = `modal.Server.from_name("ep-tree-qwen3-embedding-0-6b", "Server")` resolved
-`https://p-b-iusztin--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct`. No fix (i) or (ii) was needed.
+`https://<workspace>--ep-tree-qwen3-embedding-0-6b-server.eu-west.modal.direct`. No fix (i) or (ii) was needed.
 
 Stop: `modal endpoint stop -y tree-qwen3-embedding-0-6b` ->
 `modal: ✓ Stopped Endpoint 'tree-qwen3-embedding-0-6b' in environment 'main' (ID: ep-cdhIRjCpSKKpCyOpUxMNg7).`
@@ -814,7 +814,7 @@ Routing and refusal as above; `Running: modal deploy deploy/modal_vllm_embedding
 Image: only `Step 0: FROM base`, `Step 1: ENV HF_XET_HIGH_PERFORMANCE=1`, `Step 2: ENV EMBEDDING_DEPLOY_SPEC=…`
 were built (6.59 s) — the CUDA 13.0.2 + `vllm==0.26.0` + `autoinference-utils==0.2.6` layers came from Modal's
 cache, so **this run did not rebuild them and cannot claim they work**. `✓ App deployed in 10.320s!`,
-`✓ Created function Server.`, endpoint `https://p-b-iusztin--ep-tree-voyage-4-nano-server.eu-west.modal.direct`.
+`✓ Created function Server.`, endpoint `https://<workspace>--ep-tree-voyage-4-nano-server.eu-west.modal.direct`.
 
 `-test` polled `Still cold (HTTP 503)` from 0s to 420s and never went warm; `modal app logs
 ep-tree-voyage-4-nano` showed the container crash-looping (7 crashes in 100 s of log) with the
@@ -854,7 +854,7 @@ the README paragraph I added now records. **GPU: Modal's choice and NOT exposed 
 dashboard-only fact (ADR-009 already says so). NOT RECORDED, and not recordable without the dashboard.
 
 ```
-Warm: https://p-b-iusztin--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health answered HTTP 200 after 2s
+Warm: https://<workspace>--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health answered HTTP 200 after 2s
 health 200 after 1.6s
 served model id: Qwen/Qwen3.5-0.8B
 the chat completion carried no content — the served model answered with an empty message
@@ -868,7 +868,7 @@ names, and this is the first live case for it.
 The `ModalLLM` client check (ad-hoc, nothing committed) got as far as:
 
 ```
-ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server served_model=Qwen/Qwen3.5-0.8B url=https://p-b-iusztin--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/v1
+ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server served_model=Qwen/Qwen3.5-0.8B url=https://<workspace>--ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/v1
 Retrying request to /chat/completions in 0.452048 seconds
 ```
 
@@ -918,10 +918,10 @@ Final `modal endpoint list --json` — the four baseline endpoints, same ids, al
 `tree-*` endpoint**:
 
 ```
-qwen3-embedding-8b    ep-UDN0woLFq8dwNwMoHqK3A1  live
-qwen3-embedding-0-6b  ep-AFm6anFYXobWj3ba0MxKOw  live
-gpt-oss-120b          ep-AZAaUPQk88Ko2i9xx5olsc  live
-qwen3-6-35b-a3b-fp8   ep-nCsyPubmp2JsVUMkfPQR6E  live
+qwen3-embedding-8b    ep-<human:qwen3-embedding-8b>  live
+qwen3-embedding-0-6b  ep-<human:qwen3-embedding-0-6b>  live
+gpt-oss-120b          ep-<human:gpt-oss-120b>  live
+qwen3-6-35b-a3b-fp8   ep-<human:qwen3-6-35b-a3b-fp8>  live
 ```
 
 Final `modal app list --json` — the two baseline apps unchanged (same ids, `deployed`, `tasks: 0`,
@@ -1051,14 +1051,14 @@ committing it would add a catalog entry whose only live evidence is a failure. `
 
 #### 4.0 Fresh baseline (read-only, BEFORE the first deploy)
 
-Endpoints — 4, all `live`, all `created_by: p-b-iusztin` (key set `name, endpoint_id, status, created_at, created_by`):
+Endpoints — 4, all `live`, all `created_by: <workspace>` (key set `name, endpoint_id, status, created_at, created_by`):
 
 | name | endpoint_id | status |
 |---|---|---|
-| qwen3-embedding-8b | ep-UDN0woLFq8dwNwMoHqK3A1 | live |
-| qwen3-embedding-0-6b | ep-AFm6anFYXobWj3ba0MxKOw | live |
-| gpt-oss-120b | ep-AZAaUPQk88Ko2i9xx5olsc | live |
-| qwen3-6-35b-a3b-fp8 | ep-nCsyPubmp2JsVUMkfPQR6E | live |
+| qwen3-embedding-8b | ep-<human:qwen3-embedding-8b> | live |
+| qwen3-embedding-0-6b | ep-<human:qwen3-embedding-0-6b> | live |
+| gpt-oss-120b | ep-<human:gpt-oss-120b> | live |
+| qwen3-6-35b-a3b-fp8 | ep-<human:qwen3-6-35b-a3b-fp8> | live |
 
 Apps — 2, both `deployed`, `tasks: 0`, `stopped_at: null` (key set `app_id, description, state, tasks, created_at, stopped_at`):
 `ap-opyKC4h4Z7RVMV3KaFbi8M decode-sandbox-prod`, `ap-v7ZtWBI4HIgrCiBF3IXZpI decode-sandbox-local`.
@@ -1364,10 +1364,10 @@ download used it.
 
 ```
 $ modal endpoint list --json
-qwen3-embedding-8b    ep-UDN0woLFq8dwNwMoHqK3A1  live
-qwen3-embedding-0-6b  ep-AFm6anFYXobWj3ba0MxKOw  live
-gpt-oss-120b          ep-AZAaUPQk88Ko2i9xx5olsc  live
-qwen3-6-35b-a3b-fp8   ep-nCsyPubmp2JsVUMkfPQR6E  live
+qwen3-embedding-8b    ep-<human:qwen3-embedding-8b>  live
+qwen3-embedding-0-6b  ep-<human:qwen3-embedding-0-6b>  live
+gpt-oss-120b          ep-<human:gpt-oss-120b>  live
+qwen3-6-35b-a3b-fp8   ep-<human:qwen3-6-35b-a3b-fp8>  live
 
 $ modal app list --json
 ap-opyKC4h4Z7RVMV3KaFbi8M  decode-sandbox-prod    deployed  tasks=0  stopped_at=null
@@ -1846,8 +1846,8 @@ which is exactly what the rail exists to gate, and the Log's cost table lists th
   "DRY RUN — skipped the Modal existence check (no modal process is started)").
 - The orchestrator's post-run read-only listings (`post_endpoints.json`, `post_apps.json`, captured 21:34 local,
   after the SWE's own 4e at 21:09) are identical to the 4.0 baseline for everything the human owns: the same
-  4 `live` endpoints (`ep-UDN0woLFq8dwNwMoHqK3A1`, `ep-AFm6anFYXobWj3ba0MxKOw`, `ep-AZAaUPQk88Ko2i9xx5olsc`,
-  `ep-nCsyPubmp2JsVUMkfPQR6E`) and the same 2 `deployed` apps (`ap-opyKC4h4Z7RVMV3KaFbi8M decode-sandbox-prod`,
+  4 `live` endpoints (`ep-<human:qwen3-embedding-8b>`, `ep-<human:qwen3-embedding-0-6b>`, `ep-<human:gpt-oss-120b>`,
+  `ep-<human:qwen3-6-35b-a3b-fp8>`) and the same 2 `deployed` apps (`ap-opyKC4h4Z7RVMV3KaFbi8M decode-sandbox-prod`,
   `ap-v7ZtWBI4HIgrCiBF3IXZpI decode-sandbox-local`) as `base_endpoints.json` / `base_apps.json`. The only
   additions are this round's own two STOPPED `ep-tree-*` apps.
 
@@ -2040,3 +2040,363 @@ rows 4/6/7/8 with no hedging, and the round-3 capture rule is on record. The thr
 `0.70`-accurate with no test value touched. `git status --short` matches the expected file set exactly. Leak
 check is 0 on all four patterns. All four gates green, 4056 tests passed. The dry-run breach itself and 4d's open
 `ModalLLM`-dict gap stay on record as findings, not re-litigated here; 4d is re-run in round 3 after #158.
+
+### [SWE] 2026-09-21 23:10 — Round 3 (live, ONE cycle: 4d only)
+
+**Verdict up front: 4d PASSES.** `Qwen/Qwen3.5-0.8B` on its Dedicated endpoint answered the #158 JSON-mode
+smoke test first try — `{"city": "Tokyo", "population": 13700000}`, `JSON mode honoured: keys=['city',
+'population']`, `Smoke test passed`, exit 0 — and `ModalLLM.generate_json(CHAT_SMOKE_PROMPT)` returned the same
+dict to the client. **No fallback cycle was needed** (`google/gemma-3-1b-it` was never deployed in this round),
+**no seed was changed**, and the round-2 route-level doubt is resolved: the endpoint route is fine for JSON
+mode; only strict `json_schema` was unusable on it, which is exactly what #158 removed from the request.
+Scope per the amendment: ONLY 4d re-ran. No Part 1, no 4a/4b/4c, no pipeline, no Prefect, no Mongo write, no
+`docker`. Two mutating commands in the whole round, both dry-run-captured first.
+
+*(Header time is this machine's local clock at write-time, 23:10 EEST; every evidence timestamp below is
+`date -u` UTC from `r3/4d-times.txt`, i.e. 19:5xZ = 22:5x EEST — this entry's live work ran 22:52-22:59 local.)*
+
+#### Per-command table — EVERY mutating command of round 3, dry log -> real log
+
+All logs are in `<scratchpad>/e2e-141/r3/`. "dry log" = a captured file containing the `DRY RUN — would run: …`
+line for that exact argv, written BEFORE the real command (the rule this round exists to honour).
+
+| # | cycle / verb | dry-run file -> argv(s) it shows | real file -> argv(s) actually run | names |
+|---|---|---|---|---|
+| 1 | 4d deploy (`Qwen/Qwen3.5-0.8B`) | `4d-qwen-deploy-dry.log:3` `modal endpoint create --name tree-qwen3-5-0-8b --model Qwen/Qwen3.5-0.8B --routing-region eu-west`; `:4` the undecided-routing fallback `modal deploy deploy/modal_sglang_llm.py` | `4d-qwen-deploy.log:5` — the SAME `endpoint create` argv (Modal accepted it, so the fallback never ran) | `tree-qwen3-5-0-8b` only |
+| 2 | 4d stop (`Qwen/Qwen3.5-0.8B`) | `4d-qwen-stop-dry.log:3` `modal endpoint stop -y tree-qwen3-5-0-8b`; `:4` `modal app stop -y ep-tree-qwen3-5-0-8b` | `4d-qwen-stop.log:3` — `modal endpoint stop -y tree-qwen3-5-0-8b` ONLY (path-blind stop found a Dedicated endpoint, so the App half was not run) | `tree-qwen3-5-0-8b` only |
+
+Nothing else mutated anything: **2 mutating commands, 2 dry logs, 2 real logs.** No `FORCE=yes`, no `SERVING=`,
+no raw `modal deploy|endpoint create|endpoint stop|app stop` typed by hand — every Modal write went through
+`make memory-deploy-model` / `-stop`. Read-only `modal endpoint list --json` / `modal app list --json` ran for
+the baseline, 4e, and inside the driver's own guard/poller (`Running: modal endpoint list --json` lines).
+No request of any kind was sent to `qwen3-embedding-8b`, `qwen3-embedding-0-6b`, `gpt-oss-120b`,
+`qwen3-6-35b-a3b-fp8`, `decode-sandbox-prod` or `decode-sandbox-local`; no name of theirs appears in any argv
+above. The guard never refused anything (no exit 3 this round).
+
+#### 4.0 — baseline before the deploy (read-only)
+
+```
+$ modal endpoint list --json      # r3/40-endpoints.json
+qwen3-embedding-8b    ep-<human:qwen3-embedding-8b>  live
+qwen3-embedding-0-6b  ep-<human:qwen3-embedding-0-6b>  live
+gpt-oss-120b          ep-<human:gpt-oss-120b>  live
+qwen3-6-35b-a3b-fp8   ep-<human:qwen3-6-35b-a3b-fp8>  live
+
+$ modal app list --json           # r3/40-apps.json
+ap-opyKC4h4Z7RVMV3KaFbi8M  decode-sandbox-prod   deployed  tasks=0  stopped_at=null
+ap-v7ZtWBI4HIgrCiBF3IXZpI  decode-sandbox-local  deployed  tasks=0  stopped_at=null
+```
+
+4 endpoints, 2 apps — identical to the orchestrator's `r3/pre_endpoints.json` / `pre_apps.json`. **No `tree-*`
+endpoint and no `ep-tree-*` app existed at all** (round 2's two stopped `ep-tree-*` apps have since aged out of
+`modal app list`), so nothing live was ours and nothing needed asking about.
+
+#### 4d — `Qwen/Qwen3.5-0.8B` -> Dedicated endpoint — **PASS on the first rung, no ladder needed**
+
+Deploy (`r3/4d-qwen-deploy.log`), 19:52:26Z -> 19:52:39Z:
+
+```
+Running: modal endpoint list --json
+Running: modal app list --json
+Running: modal endpoint create --name tree-qwen3-5-0-8b --model Qwen/Qwen3.5-0.8B --routing-region eu-west
+modal: ✓ Endpoint 'tree-qwen3-5-0-8b' (ep-xdPcQIC35mJ2FZFsHivUnG) was created and
+modal: started provisioning.
+Routing Qwen/Qwen3.5-0.8B: Modal accepted it → Dedicated endpoint tree-qwen3-5-0-8b
+Endpoint tree-qwen3-5-0-8b is provisioning — Modal returns before it is live (minutes). make memory-deploy-model-test MODEL=Qwen/Qwen3.5-0.8B waits for it.
+```
+
+(Re-confirms the ADR-009 Consequences fact a third time: `endpoint create` over round 2's STOPPED
+`tree-qwen3-5-0-8b` succeeds and allocates a NEW id — `ep-xdPcQIC35mJ2FZFsHivUnG`, round 2 was
+`ep-tLkmVXih4MuSi6jEji9Jd6`, round 1 `ep-9kO3qTOKBybx76R5GBkmNB`.)
+
+`-test` started 21 s after the deploy returned — no hand-polling, no hand-made probe before it
+(`r3/4d-qwen-test.log`, 19:53:00Z -> 19:57:43Z, **exit=0**):
+
+```
+Provisioning: tree-qwen3-5-0-8b is not live yet — 3s/1800s
+… 16 Provisioning lines, 3s → 257s …
+Live: tree-qwen3-5-0-8b after 276s
+Warming https://…-ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health — polling for up to 600s
+Warm: https://…-ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health answered HTTP 200 after 2s
+health 200 after 1.6s
+served model id: Qwen/Qwen3.5-0.8B
+chat knobs: max_tokens=4096 chat_template_kwargs={"enable_thinking": false}
+chat completion: {
+  "city": "Tokyo",
+  "population": 13700000
+}
+JSON mode honoured: keys=['city', 'population']
+unauthenticated health -> 401
+Smoke test passed
+```
+
+**No `prompt schema not followed (recorded, not gated): …` WARNING was logged** — the model's keys were exactly
+`{city, population}` with an `int` population, so #158's recorded-not-gated path stayed silent. Compare round 2
+on the same model and the same seeded knobs: `chat completion is not valid JSON: '{"city": "Tokyo",
+"population": 139000000000000…'`, exit 1. The ONLY thing that changed between the two runs is the
+`response_format` the smoke test POSTs (strict `json_schema` -> `{"type": "json_object"}`, #158): same model,
+same endpoint recipe, same `enable_thinking: false`, same `max_tokens: 4096`. The digit run was the strict
+grammar, not the model.
+
+Client check (`r3/llm_client_check_r3.py`, ad-hoc and uncommitted, `await ModalLLM(proxy_token=…,
+model="Qwen/Qwen3.5-0.8B").generate_json(CHAT_SMOKE_PROMPT)` with `CHAT_SMOKE_PROMPT` imported from
+`tree.models.modal_server`; **no Prefect anywhere in the path**, so no `llm-extract-entities` cache could
+replay it — `r3/4d-qwen-client.log`, 19:58:07Z -> 19:58:22Z, exit=0):
+
+```
+Warm: https://…-ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/health answered HTTP 200 after 1s
+ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server served_model=Qwen/Qwen3.5-0.8B url=https://…-ep-tree-qwen3-5-0-8b-server.eu-west.modal.direct/v1
+CLIENT result type: dict
+CLIENT result: {"city": "Tokyo", "population": 13700000}
+4d shape: exact
+```
+
+`4d shape: exact` (recorded, not gated): `set(result) == {"city", "population"}` and `population` is an `int`.
+The gated half — a `dict` came back with no `ExtractionError`, and the `ModalLLM ready:` line names our app —
+is above.
+
+Opik read-back (`r3/opik_spans_r3.py`, run AFTER the stop — Opik is a backend read, no GPU in the path;
+`r3/4d-qwen-opik.log`):
+
+```
+spans found: 10
+span: {"name": "modal-generate-json", "provider": "modal", "model": "Qwen/Qwen3.5-0.8B", "total_estimated_cost": null, "usage": {"total_tokens": 87, "completion_tokens": 27, "prompt_tokens": 60}, "start_time": "2026-09-21 19:58:14.820942+00:00", "type": "llm"}
+```
+
+`provider: modal`, `model: Qwen/Qwen3.5-0.8B`, non-zero tokens, `start_time` inside the client window
+(19:58:07Z-19:58:22Z). `total_estimated_cost: null` is the pre-accepted read-back of the client's
+`total_cost=0.0` (round 2 recorded the same). `prompt_tokens=60` vs round 2's `16` is itself #158 evidence: the
+schema now travels IN the prompt (`CHAT_SMOKE_PROMPT`), so the request got longer by design.
+
+Stop (`r3/4d-qwen-stop.log`, 19:58:54Z):
+
+```
+Running: modal endpoint stop -y tree-qwen3-5-0-8b
+modal: ✓ Stopped Endpoint 'tree-qwen3-5-0-8b' in environment 'main' (ID: ep-xdPcQIC35mJ2FZFsHivUnG).
+```
+
+`4d answered in JSON mode: Qwen/Qwen3.5-0.8B (enable_thinking: false, 4096)`
+
+**Round 2's two open `PA:` questions are both answered by this cycle — no NEW `PA:` line is owed.** (i) The
+route-level one ("strict `json_schema` … ENGAGED BUT UNUSABLE … Decision needed: drop strict schema on the
+endpoint route, bound the schema, or declare the route unfit") was decided by the PA in ADR-009 revision 7 and
+implemented as #158's JSON-mode-only rule; round 3 confirms that decision live, on the same model and the same
+route that failed in round 2. (ii) The seed one ("the seed `Qwen/Qwen3.5-0.8B` cannot answer under strict JSON
+on a managed endpoint") no longer argues for a catalog change: the seed as committed — same `revision`, same
+`max_tokens: 4096`, same `chat_template_kwargs: {enable_thinking: false}` — answers correctly once the request
+is JSON mode. `configs/default.yaml` stays as it is, and the router follow-up sketched in the amendment (an
+`llm` entry skipping the endpoint attempt) is NOT needed and was not built.
+
+#### 4e — nothing of ours left running, nothing of theirs changed
+
+```
+$ modal endpoint list --json      # r3/4e-endpoints.json — byte-identical to r3/40-endpoints.json
+qwen3-embedding-8b    ep-<human:qwen3-embedding-8b>  live
+qwen3-embedding-0-6b  ep-<human:qwen3-embedding-0-6b>  live
+gpt-oss-120b          ep-<human:gpt-oss-120b>  live
+qwen3-6-35b-a3b-fp8   ep-<human:qwen3-6-35b-a3b-fp8>  live
+
+$ modal app list --json           # r3/4e-apps.json
+ap-opyKC4h4Z7RVMV3KaFbi8M  decode-sandbox-prod   deployed  tasks=0  stopped_at=null
+ap-v7ZtWBI4HIgrCiBF3IXZpI  decode-sandbox-local  deployed  tasks=0  stopped_at=null
+```
+
+**`baseline: 2 apps, 4 endpoints — all unchanged`** — same ids, same states, and this time not even an addition:
+the endpoint route creates no Modal *app* row at all (round 2's `ep-tree-*` rows came from its two APP cycles,
+4b/4c, which round 3 did not re-run). No `tree-*` endpoint, no live `ep-tree-*` app. The `modal endpoint list
+--json` payload is byte-for-byte identical before and after the round.
+
+#### Cost / time
+
+| cycle | model | route | GPU | deploy → stop | outcome |
+|---|---|---|---|---|---|
+| 4d (round 3) | Qwen/Qwen3.5-0.8B | Dedicated endpoint | Modal's choice, dashboard-only (unchanged: no GPU column on `modal endpoint list --json`, modal 1.5.5) | 19:52:26Z → 19:58:54Z = **6m28s** | **PASS** |
+
+ONE model live at a time; **6m28s** deploy-to-stop, well inside the 30-minute cap; longest single call = the
+`-test` at 283 s wall (19:53:00Z -> 19:57:43Z), under the 300 s cap outright; 276 s of it was Modal's
+provisioning (#157's poller), and the chat request itself answered in well under a second. The
+whole round (baseline 19:51:57Z → 4e) ran in ~8 minutes of GPU time.
+
+#### Round 3 acceptance criteria (from the amendment in `tasks/done/158-…md`)
+
+- [x] `git log --oneline` shows #158 (`5ba0c54 refactor(memory): Modal LLM requests are JSON mode only; the chat smoke test sends the client's request`) BEFORE any round-3 evidence; the only `MODEL=` value in any round-3 command is `Qwen/Qwen3.5-0.8B` (`google/gemma-3-1b-it` never ran — no Qwen failure to trigger it).
+- [x] 4d: `Routing Qwen/Qwen3.5-0.8B: … → Dedicated endpoint tree-qwen3-5-0-8b`, `Endpoint tree-qwen3-5-0-8b is provisioning — …`, 16 `Provisioning:` lines (3s → 257s), `Live: tree-qwen3-5-0-8b after 276s`, `Warm: … after 2s`, `chat knobs: max_tokens=4096 chat_template_kwargs={"enable_thinking": false}`, `chat completion: {…}`, `JSON mode honoured: keys=['city', 'population']`, `unauthenticated health -> 401`, `Smoke test passed` — all pasted above. **No `json_schema` request was sent by anything in this round**: the smoke test POSTs `CHAT_RESPONSE_FORMAT` (#158, `{"type": "json_object"}`), the client has no `schema=` keyword left to pass, and no hand-made probe was run at all. Captured check, not just an argument: `grep -rc "json_schema" <scratchpad>/e2e-141/r3/*.log` -> `0` on all 7 logs (`r3/jsonschema-grep.txt`).
+- [x] 4d client: `ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server served_model=Qwen/Qwen3.5-0.8B url=…` pasted, the returned `dict` pasted (`{"city": "Tokyo", "population": 13700000}`), `4d shape: exact`, and the Opik `modal-generate-json` span with `provider: modal` / non-zero tokens (87) pasted. `total_estimated_cost: null` accepted per the criterion.
+- [x] Every deploy and stop argv was dry-run first and names a `tree-` name — see the per-command table (2 of 2 have a captured `-dry.log` written before the real run). No `FORCE`, no `SERVING`, no `docker`, no `.env`/`.env.prod` opened/cat/grepped/sourced, no env var or token echoed. Deploy → stop = 6m28s ≤ 30 min; no call above 300 s.
+- [x] 4e: `baseline: 2 apps, 4 endpoints — all unchanged`; no live `tree-*` / `ep-tree-*`.
+- [x] The line `4d answered in JSON mode: Qwen/Qwen3.5-0.8B (enable_thinking: false, 4096)` — the first branch of the ladder; no fallback seed line and no route-level `PA:` line is owed.
+- [x] Gates — **N/A, no file changed but this Log**: the criterion is conditioned on a seed change and none happened (`configs/default.yaml`, `test_seed_entries`, `frozen_config.yaml` are untouched; `git status --short` shows only `tasks/141-voyage-4-and-modal-e2e-threshold-repin.md`). Nothing was committed — the Tester audits first.
+- [ ] [HUMAN] (carried over) Drops `tree_e2e_141`: `mongosh` -> `db.getSiblingDB("tree_e2e_141").dropDatabase()`. Untouched this round (no Mongo command of any kind ran).
+
+#### Round-2 boxes this round closes
+
+The amendment's criteria replace two round-2 boxes, both now satisfied by the evidence above — ticked in place
+with a pointer, their round-2 wording (`strict JSON schema honoured: …`, `generate_json(…, schema=…)`) being
+exactly what #158 deleted:
+- the round-2 `4d: the deploy line … is provisioning …` box, and
+- the `4c + 4d: for EACH LLM cycle the six chat smoke lines …` box — 4c's five lines + `chat knobs:` are on
+  record from round 2 (its strict-schema dict and SGLang image tag included; the amendment explicitly does not
+  re-run 4c), and 4d's are above in the #158 wording.
+
+#### Leak check
+
+```
+$ grep -rcE "hf_[A-Za-z0-9]{20,}|wk-[A-Za-z0-9]{10,}|ws-[A-Za-z0-9]{10,}|Bearer [A-Za-z0-9._-]{20,}" <scratchpad>/e2e-141/r3   →  0 (summed over all 20 files)
+$ grep -cE  "…same pattern…" tasks/141-voyage-4-and-modal-e2e-threshold-repin.md                                                →  0
+```
+
+No `.env` / `.env.prod` was opened, cat'ed, grepped or sourced at any point; no env var value was echoed. The
+only env inspection was a boolean presence test (`MODAL_PROXY_TOKEN_ID=SET`, value never printed) to confirm
+direnv had exported what the ad-hoc client snippet needs. `HF_TOKEN` is unset in this shell, so round 2's
+`settings.hf_token` leak check would have returned `exit=2` (nothing to leak) and was deliberately replaced by
+the pattern grep above, which does not need a configured token to be meaningful.
+
+**Notes**
+
+- `make env-status` → `Env target: local (.env)` before the first command (read-only).
+- No pipeline run, no Prefect server, no MongoDB connection, no `docker`, no reset, no `dropDatabase` — Part 1
+  is done and was not re-touched. Nothing was committed and no `git checkout/restore/stash/clean` ran.
+- The real stop ran ONE argv where the dry run listed two: `modal app stop -y ep-tree-qwen3-5-0-8b` never
+  executed, because the path-blind stop resolved a Dedicated endpoint first. Same asymmetry as the deploy
+  (the dry run also lists the App fallback it would take on Modal's refusal). Expected — a dry run is
+  route-undecided by construction; recorded so the two-vs-one line count is not read as a missing command.
+- The Opik project also holds two `modal-generate-json` spans for `LiquidAI/LFM2.5-350M` at 19:41:34Z with
+  8 total tokens. They are **not mine** — they predate this round's first command (19:51:57Z) and match the
+  #158 Tester's mocked `127.0.0.1` adversarial script, whose first run had tracking on. Flagged for
+  transparency only; the round-3 span is the 19:58:14Z Qwen one.
+- NOT RUN — the gemma fallback cycle, any knob hunting, any second probe, the router follow-up task: all of
+  them are conditioned on a Qwen failure that did not happen. Per the amendment they must not be pre-built.
+- Nothing denied by the permission system this round.
+
+### [Tester] 2026-09-21 23:35 — Round 3 audit
+
+**Scope.** Evidence audit only — no `modal …` command, no `make memory-deploy-model*`, no pipeline, no docker,
+no Mongo write. Cross-checked `### [SWE] 2026-09-21 23:10 — Round 3` against the raw scratchpad
+(`<scratchpad>/e2e-141/r3/`, 20 files, read-only) and re-ran the four gates.
+
+**Per-command table vs scratch dir**
+```
+$ grep -rn "Running: modal" r3/ | grep -Ei "create|deploy|stop"
+4d-qwen-stop.log:3:Running: modal endpoint stop -y tree-qwen3-5-0-8b
+4d-qwen-deploy.log:5:Running: modal endpoint create --name tree-qwen3-5-0-8b --model Qwen/Qwen3.5-0.8B --routing-region eu-west
+```
+Exactly 2 mutating argvs, both named `tree-qwen3-5-0-8b`, matching the table 1:1.
+```
+$ ls -lT r3/*-dry.log r3/4d-qwen-deploy.log r3/4d-qwen-stop.log
+4d-qwen-deploy-dry.log  22:52:16   ->   4d-qwen-deploy.log  22:52:39   (dry BEFORE real)
+4d-qwen-stop-dry.log    22:58:36   ->   4d-qwen-stop.log    22:58:54   (dry BEFORE real)
+```
+Both dry logs contain the `DRY RUN — would run: …` line for the exact argv later run for real (deploy dry:
+`modal endpoint create --name tree-qwen3-5-0-8b --model Qwen/Qwen3.5-0.8B --routing-region eu-west` +
+undecided-routing fallback; stop dry: `modal endpoint stop -y tree-qwen3-5-0-8b` + `modal app stop -y
+ep-tree-qwen3-5-0-8b`). `grep -rniE "FORCE=|SERVING=|docker|qwen3-embedding-8b|qwen3-embedding-0-6b|gpt-oss-120b|qwen3-6-35b-a3b-fp8|decode-sandbox" r3/`
+→ hits ONLY in the read-only `40-*.json`/`4e-*.json`/`pre_*.json`/`post_*.json` baseline dumps (the human's own
+`endpoint list`/`app list` output) — no argv, no `FORCE`, no `SERVING`, no `docker`, no request sent to any of
+those names. PASS.
+
+**Round-3 criteria vs raw files (every ticked box)**
+- `git log --oneline -15` shows `5ba0c54 refactor(memory): Modal LLM requests are JSON mode only …` at HEAD of
+  this branch (`feat/voyage-4-and-modal-embedding-catalog`); `git show -s --format='%H %cI %s' 5ba0c54` →
+  `2026-09-21T22:46:06+03:00` = `19:46:06Z`, BEFORE the 4.0 baseline (`19:51:57Z`). `grep -rhoE -- '--model
+  "[^"]+"|MODEL=[^ ]+' r3/ | sort -u` → exactly `--model "Qwen/Qwen3.5-0.8B"` and `MODEL=Qwen/Qwen3.5-0.8B`, no
+  gemma. PASS.
+- 4d: `4d-qwen-test.log` has 16 `Provisioning:` lines (3s→257s), `Live: tree-qwen3-5-0-8b after 276s`, `Warm: …
+  after 2s`, `chat knobs: max_tokens=4096 chat_template_kwargs={"enable_thinking": false}`, `chat completion:
+  {"city": "Tokyo", "population": 13700000}`, `JSON mode honoured: keys=['city', 'population']`,
+  `unauthenticated health -> 401`, `Smoke test passed`, `exit=0` — byte-identical to the Log paste. `4d-qwen-deploy.log`
+  has the `Routing …` and `… is provisioning — …` lines. `grep -c '"json_schema"'`-equivalent
+  (`r3/jsonschema-grep.txt` + my own `grep -rc json_schema r3/*.log` and `grep -rc json_schema r3/`) → `0` on
+  all 7 logs AND all 20 files. PASS.
+- 4d client: `4d-qwen-client.log` has `ModalLLM ready: app=ep-tree-qwen3-5-0-8b server=Server
+  served_model=Qwen/Qwen3.5-0.8B url=…`, `CLIENT result: {"city": "Tokyo", "population": 13700000}`, `4d shape:
+  exact` — identical to the Log paste. `4d-qwen-opik.log` has `span: {"name": "modal-generate-json", "provider":
+  "modal", "model": "Qwen/Qwen3.5-0.8B", "total_estimated_cost": null, "usage": {"total_tokens": 87, …},
+  "start_time": "2026-09-21 19:58:14.820942+00:00"}` — `start_time` falls inside the client window
+  (`19:58:07Z`-`19:58:22Z` per `4d-times.txt`) and inside the whole deploy→stop window (`19:52:26Z`-`19:58:54Z`),
+  so this is THIS run's call, not a replay. The other 3 spans returned by the same query (2×`LiquidAI/LFM2.5-350M`
+  at `19:41:34Z`, 1×`google/gemma-3-1b-it` at `18:08:22Z`) all predate the 4.0 baseline (`19:51:57Z`) and are
+  correctly excluded from the pasted evidence; the two LFM2.5-350M spans match task 158's own Tester entry
+  verbatim ("My own QA script's first run (before I added `OPIK_TRACK_DISABLE=true`) printed `OPIK: Started
+  logging traces…`", `tasks/done/158-…md` Log), cross-confirming the SWE's attribution rather than resting on
+  it alone. PASS.
+- Timing: `4d-times.txt` — deploy `19:52:26Z` → stop `19:58:54Z` = 6m28s ≤ 30 min. `-test`: `19:53:00Z` →
+  `19:57:43Z` = 283s wall, under the 283 s the Log claims and under the 300 s cap; internally corroborated by
+  the log's own counters (`276s` provisioning + `2s` warm + `1.6s` health + a sub-second chat completion ≈
+  280s) and by `4d-qwen-test.log`'s own mtime (`22:57:43` local = `19:57:43Z`, matching the recorded end).
+  PASS.
+- 4e: `4e-endpoints.json` / `4e-apps.json` byte-identical to `40-endpoints.json` / `40-apps.json`
+  (`diff` → no output) and both byte-identical in turn to the orchestrator's `pre_endpoints.json`/`pre_apps.json`
+  and `post_endpoints.json`/`post_apps.json` (4 human endpoints, 2 human apps, unchanged throughout). PASS.
+- Gates conditioned on "if any file changed": `git diff --stat` before this entry showed only
+  `tasks/141-…md` — confirmed, no seed/config file touched this round. PASS.
+
+**Honesty of the round-2 text edits**
+Both round-2 boxes this round closes (`4d: the deploy line …` and `4c + 4d: for EACH LLM cycle …`) are ticked
+IN PLACE with their original round-2 wording preserved — the first via an appended `**[REPLACED by the
+round-3 criteria …]**` annotation, the second additionally via inline `~~strikethrough~~ -> new wording`
+markers on the two phrases #158 made obsolete (`strict JSON schema honoured: …` -> `JSON mode honoured:
+keys=[…]`, `generate_json(…, schema=…)` -> `generate_json(CHAT_SMOKE_PROMPT)`). Nothing was silently deleted
+or rewritten; a reader diffing round 2 against round 3 sees exactly what changed and why. PASS.
+
+The "only delta from round 2's failure is the response_format" claim is supported, not overclaimed: round 2
+rung 1 ran the SAME model (`Qwen/Qwen3.5-0.8B`), SAME route (Dedicated endpoint `tree-qwen3-5-0-8b`), SAME
+knobs (`chat_template_kwargs: {enable_thinking: false}`, `max_tokens: 4096`) and got a degenerate digit run
+under strict `json_schema`; round 3 changes only `response_format` (`json_schema` -> `json_object`, #158) and
+passes first try. The broader conclusion "the endpoint route is fine for JSON mode" is not resting on this one
+run alone either: round 2 already showed `google/gemma-3-1b-it` answering JSON mode correctly on the same
+route, so the round-3 evidence is the SECOND model confirming JSON mode works on the route while strict
+`json_schema` degenerated for BOTH models on it — two data points on `response_format` handling specifically,
+not a claim about extraction quality (accuracy of `population` is explicitly recorded-not-gated throughout).
+Not overclaimed — no FAIL sentence to quote.
+
+**Leak check**
+```
+$ grep -cE "hf_[A-Za-z0-9]{20,}|wk-[A-Za-z0-9]{10,}|ws-[A-Za-z0-9]{10,}|Bearer [A-Za-z0-9._-]{20,}" tasks/141-…md
+0
+$ grep -rcE "hf_[A-Za-z0-9]{20,}|wk-[A-Za-z0-9]{10,}|ws-[A-Za-z0-9]{10,}|Bearer [A-Za-z0-9._-]{20,}" r3/*   # all 0
+```
+Workspace-name exposure (`<workspace>`, the Modal account tied to the operator): whole task file = **8**
+occurrences; the round-3 entry alone (`sed -n '2044,$p'`) = **0** — the SWE redacted every
+`<workspace>--ep-tree-…modal.direct` hostname to `…-ep-tree-…modal.direct` and never pasted the
+`modal.com/endpoints/<workspace>/main/…` dashboard URL, even though the raw scratchpad logs (`r3/*.log`) DO
+carry the workspace name in full. This is round-3-specific hygiene — not a fix to the pre-existing rounds-1/2
+text, which is where all 8 occurrences live (`created_by: <workspace>` / `deployed_by: <workspace>` /
+`<workspace>--ep-tree-…modal.direct` hostnames, e.g. lines 427, 486, 489, 501, 738 and others). Flagging for
+the human's stated redaction decision before the PR ships — not a round-3 defect.
+
+**Gates** (re-run after appending this entry, since `make pre-commit` runs prettier over the whole tree
+including this file)
+```
+$ make memory-format-check
+313 files already formatted
+$ make memory-lint-check
+All checks passed!
+$ make pre-commit
+prettier / ruff check / ruff format / biome — Passed
+$ make memory-tests
+4056 passed in 536.81s (0:08:56)
+```
+`git diff --stat` (final) → `tasks/141-voyage-4-and-modal-e2e-threshold-repin.md | 1 file changed` only.
+
+**Whole-task status — every unticked box after round 3**
+Master checklist only (log-entry copies of the criteria, e.g. inside the round-2 Tester audit and inside this
+round's own SWE entry, are historical records, not live boxes):
+- Line 321 `[HUMAN]` drop `tree_e2e_141` — expected open.
+- Line 322 `[HUMAN]` conditional Prefect-worker stop — expected open (not triggered: the 4201 throwaway server
+  worked, per round 2's own record).
+- Line 342 **Isolation** — the only non-`[HUMAN]`-labeled open box. Its "counts BEFORE/AFTER Part 1 equal" and
+  "every command carries the three variables" clauses are satisfied (round 2's Log, `2423` embedded rows
+  unchanged); its ONLY unmet clause is `tree_e2e_141` is dropped at the end — and `dropDatabase` is denied to
+  agents by the sandbox (evidenced at ~line 600/1000: `DENIED by the sandbox`). This is NOT a round-3 defect —
+  round 3 never touched Part 1 — but the box as worded cannot be ticked by any agent; it is functionally
+  `[HUMAN]`-gated without the label. Recommend the PA split it or annotate it in the round-3 `[REPLACED]`
+  style so it reads correctly once line 321's human action lands.
+- Line 364-367 `[HUMAN]` (restore hand-made endpoint / post-merge reset-index-cluster / confirm nothing
+  billing / conditional HF_TOKEN) — all expected open; 367's trigger condition (`NOT PROVEN LIVE`) did not
+  fire (round 2 recorded `PROVEN`), so it stays open as N/A-not-triggered rather than a live gap.
+
+**Every remaining open box is either `[HUMAN]`-labeled or blocked exclusively on a human-only sandboxed action
+(line 342's `dropDatabase`), already tracked by an existing `[HUMAN]` box (line 321 / line 2229). #141 CAN go
+`status: done` on this basis** — no agent-actionable, non-`[HUMAN]` work remains open.
+
+**VERDICT: PASS**

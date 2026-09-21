@@ -405,7 +405,7 @@ uv run python -c "import tree.models.get_model; assert 'modal' not in sys.module
 git diff --name-only | xargs grep -Eco "hf_[A-Za-z0-9]{20,}|wk-[A-Za-z0-9]{10,}|ws-[A-Za-z0-9]{10,}"  # 0 hits
 grep -rn "modal_sglang_embedding" apps/memory --exclude-dir=.git      # 0 hits
 grep -rn "modal_sglang_embedding\|--is-embedding\|is_embedding" apps/memory/src apps/memory/deploy apps/memory/scripts apps/memory/README.md apps/memory/configs
-grep -Ino "p-b-iusztin|wk-...|ws-...|hf_...|https?://" apps/memory/tests/unit/models/fixtures/*.txt   # 0 hits
+grep -Ino "<workspace>|wk-...|ws-...|hf_...|https?://" apps/memory/tests/unit/models/fixtures/*.txt   # 0 hits
 ```
 Plus, in the session scratchpad only (never in the repo, never executed as a Modal process):
 - A standalone script that imports `tests/unit/deploy/test_modal_deploy_scripts.py`'s guard helper
