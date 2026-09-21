@@ -1,10 +1,10 @@
 # ADR-009: Voyage 4, Embedding Roles, and a Catalog of Modal-Hosted Models (Embeddings and LLMs)
 
 - **Status:** Accepted
-- **Date:** 2026-09-19. Revised, always before the affected tasks shipped: (1)-(2) the same day — Dedicated endpoints added as the first Serving path; the optional Hugging Face token (Decision 9); (3) during task 138's QA — `voyageai/voyage-4-nano` is natively 2048-d, so Decision 3 gained client-side truncation and the response-length assertion; (4) 2026-09-20, after an accidental deploy during task 142's QA overwrote an operator's hand-made endpoint — the `tree-` name namespace, the existence guard, the ownership rule and the dry run (drafted, merged into revision 5); (5) 2026-09-20, by the owner's decision after a day of live results — **the Serving path left the configuration**: Decisions 2 and 3 rewritten as auto-routing with Modal as the oracle (endpoint first, App by kind: vLLM = embeddings, SGLang = LLMs); LLMs brought into scope (Decision 10); the warm-up design ported from the `pulse` codebase (Decision 11). Tasks 138-140 and 142 were already built on the earlier text; tasks 143-150 rework that code and task 141 proves it live; (6) 2026-09-21, after round 1 of task 141's live e2e — three defects the unit suite could not see: the deploy spec is now base64 inside its env var (Decision 3; the raw JSON was corrupted by the image build for any value holding a `"`, which made the default embedding model unservable), the weights Volume mounts at `/cache/huggingface` with `HF_HOME` set (Decision 3; the SGLang image ships a non-empty `/root/.cache/huggingface`), and `ModalLLM` gains a request timeout, no SDK retries, a timeout that is NOT a cold answer, and per-entry `max_tokens` / `chat_template_kwargs` (Decisions 10 and 11; a thinking model hung a call for 13 minutes). Tasks 153-157 implement it; task 141 round 2 re-proves only what round 1 could not.
+- **Date:** 2026-09-19. Revised, always before the affected tasks shipped: (1)-(2) the same day — Dedicated endpoints added as the first Serving path; the optional Hugging Face token (Decision 9); (3) during task 138's QA — `voyageai/voyage-4-nano` is natively 2048-d, so Decision 3 gained client-side truncation and the response-length assertion; (4) 2026-09-20, after an accidental deploy during task 142's QA overwrote an operator's hand-made endpoint — the `tree-` name namespace, the existence guard, the ownership rule and the dry run (drafted, merged into revision 5); (5) 2026-09-20, by the owner's decision after a day of live results — **the Serving path left the configuration**: Decisions 2 and 3 rewritten as auto-routing with Modal as the oracle (endpoint first, App by kind: vLLM = embeddings, SGLang = LLMs); LLMs brought into scope (Decision 10); the warm-up design ported from the `pulse` codebase (Decision 11). Tasks 138-140 and 142 were already built on the earlier text; tasks 143-150 rework that code and task 141 proves it live; (6) 2026-09-21, after round 1 of task 141's live e2e — three defects the unit suite could not see: the deploy spec is now base64 inside its env var (Decision 3; the raw JSON was corrupted by the image build for any value holding a `"`, which made the default embedding model unservable), the weights Volume mounts at `/cache/huggingface` with `HF_HOME` set (Decision 3; the SGLang image ships a non-empty `/root/.cache/huggingface`), and `ModalLLM` gains a request timeout, no SDK retries, a timeout that is NOT a cold answer, and per-entry `max_tokens` / `chat_template_kwargs` (Decisions 10 and 11; a thinking model hung a call for 13 minutes). Tasks 153-157 implement it; task 141 round 2 re-proves only what round 1 could not; (7) 2026-09-21, after round 2 — STRICT `json_schema` decoding is degenerate on Modal's Dedicated-endpoint recipe while JSON mode answers, and no caller ever passed a schema: `ModalLLM` sends JSON mode only, `schema=` is deleted, the chat smoke test sends the client's request (Decision 10). Task 158 implements it; task 141 round 3 re-runs cycle 4d only.
 - **Deciders:** Paul (project owner)
 - **Context references:**
-  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/150-embedding-text-follow-ups-from-137-qa.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 151 -> 152 -> 141 round 1 -> 153 -> 154 -> 155 -> 156 -> 157 -> 141 round 2)
+  - `tasks/134-voyage-4-embedding-upgrade.md` … `tasks/150-embedding-text-follow-ups-from-137-qa.md` (this feature's task plan; execution order 134 … 140 -> 142 -> 143 -> 144 -> 145 -> 146 -> 147 -> 148 -> 149 -> 150 -> 151 -> 152 -> 141 round 1 -> 153 -> 154 -> 155 -> 156 -> 157 -> 141 round 2 -> 158 -> 141 round 3)
   - `ADR-001` (embedding model + dimension pinned in config; its `voyage-3` example is superseded IN PRACTICE by the pin below — the ADR text is unchanged)
   - `ADR-002` §1 (the `voyage-embeddings` rate limit at the real POST; `_CachedSingleEmbedding` never reaches a client) — unchanged
   - `ADR-006` §4 (only Child chunks are embedded; backfill by empty `embedding`) and its `rag/` ↛ `graph/` import rule — unchanged, relied on
@@ -305,14 +305,32 @@ Eleven related choices, one design:
     OpenAI-compatible chat API through **Proxy token** auth with JSON MODE
     (`response_format: {"type": "json_object"}`) — because `BaseLLM.generate_json` carries no schema
     and every caller embeds its schema in the prompt, exactly like Gemini's
-    `response_mime_type="application/json"`. An optional `schema=` keyword (this class only) sends a
-    STRICT `json_schema` instead, for callers that have one. Failures mirror `GeminiLLM`'s three
+    `response_mime_type="application/json"`. **JSON mode is the ONLY `response_format` a Modal chat
+    request carries, on both Serving paths** (revised 2026-09-21; the `schema=` keyword of the first
+    design is deleted — it had no caller). *Why:* a path-blind client (§3) may only send what EVERY
+    route honours, and on a Dedicated endpoint a strict `json_schema` is compiled but degenerate —
+    `Qwen/Qwen3.5-0.8B` (thinking off) and `google/gemma-3-1b-it` both ran `population` into an
+    endless digit run, an `enum: ["ALPHA"]` probe answered `{` plus whitespace to
+    `finish_reason=length` — while JSON mode on the SAME endpoint answered `"population": 14000000`
+    and the same strict schema on our SGLang App answered `{"city":"Tokyo","population":37}`. We
+    control no flag of a managed recipe, and the client cannot learn its route without a CLI call.
+    The callers' own parsers (`_parse_extraction`, the judge, the summaries) stay the schema check,
+    as under Gemini. *Good:* `response_format: {"type": "json_object"}` from ONE constant shared with
+    the smoke test. *Bad:* "strict `json_schema` when the entry runs as an App" (a route lookup the
+    client does not have); a `structured_output: strict | json` YAML knob (configuration about
+    something only Modal knows — the mistake Decision 2 removed). Failures mirror `GeminiLLM`'s three
     `ExtractionError`s (call failed / empty response / invalid JSON) plus "JSON that is not an
     object", and carry `status_code`. Usage is recorded on the Opik span with `total_cost=0` under
     the catalog `repo_id`. The import is lazy in `get_model.py` (the MCP boot never imports `modal`).
-    The client composes the **Warm gate** of §11 and is path-blind (§3). A chat smoke test — one strict
-    JSON-schema completion through proxy auth + the 401 check — sits beside the embedding one behind
-    the same `memory-deploy-model-test` target. ONE `memory-deploy-model*` target family serves both
+    The client composes the **Warm gate** of §11 and is path-blind (§3). A chat smoke test — ONE
+    completion that is the client's request (the same `response_format` constant, the same knobs, the
+    schema in the PROMPT as every caller has it) through proxy auth + the 401 check — sits beside the
+    embedding one behind the same `memory-deploy-model-test` target. It GATES on the client's own three
+    verdicts (not empty, valid JSON, an object) and only RECORDS whether the prompt's `city` /
+    `population` shape was followed: JSON mode promises an object, never its keys, and key-following
+    is the quality question this ADR does not decide. Strict decoding survives in ONE place, the
+    SGLang App's in-container warm-up (§2, Modal's payload) — an engine health check, not a request
+    the memory sends. ONE `memory-deploy-model*` target family serves both
     kinds (one lookup over two lists beats six targets and a `--kind`). *Not decided here:* that a
     small Modal LLM is good enough for extraction — the e2e proves plumbing (valid JSON back), not
     quality.
@@ -432,7 +450,7 @@ flowchart LR
         GEM["Gemini LLM + embeddings<br/>JSON mode · task_type RETRIEVAL_*"]
         ST["sentence-transformers<br/>prompt_name if defined"]
         MOD["ModalEmbeddingModel<br/>prompt prepended client-side · never sends dimensions<br/>asserts len == native · truncates + renormalises"]
-        MLLM["ModalLLM<br/>chat completions · JSON mode (optional strict schema)<br/>Opik usage, total_cost 0"]
+        MLLM["ModalLLM<br/>chat completions · JSON mode only<br/>Opik usage, total_cost 0"]
         GATE["WarmGate + poll_health — composed by both Modal clients<br/>Server.from_name(ep-tree-*, Server) · served id from /v1/models<br/>200 warm · 5xx/transport keep polling · anything else fail fast<br/>single-flight per event loop · cold again → one re-warm + one retry"]
     end
 
@@ -453,7 +471,7 @@ flowchart LR
         CLU["make memory-run-clustering-pipeline"]
         DEP["make memory-deploy-model MODEL=repo_id · -stop (path-blind)<br/>driver scripts/modal_model.py + tree.models.modal_router<br/>looks first: refuses a live foreign name (exit 3, FORCE=yes) · refuses any name without tree-<br/>logs ONE Routing line · unknown failure aborts, never falls back<br/>DRY_RUN=yes: redacted argv, no modal process · SERVING=endpoint|app = escape hatch"]
         HF["Hugging Face API<br/>cardData.base_model (fine-tune lineage, ≤ 2 hops)"]
-        SMOKE["make memory-deploy-model-test<br/>same poller · embeddings: dims, truncation, ranking · LLMs: strict JSON schema · 401 without token"]
+        SMOKE["make memory-deploy-model-test<br/>same poller · embeddings: dims, truncation, ranking · LLMs: one JSON-mode completion, the client's request · 401 without token"]
     end
 
     MEM[("memory<br/>vector_index 1024-d (unchanged)")]
@@ -585,7 +603,10 @@ flowchart LR
 - **LLMs on Modal are plumbing-complete, quality-unproven.** `ModalLLM` returns parsed JSON or one of
   four `ExtractionError`s; whether a given open model is good enough for extraction is an evals
   question. JSON mode does not make a small or a "thinking" model comply: an empty or `<think>`-led
-  answer surfaces as `empty response` / `invalid JSON`, recorded live in `tasks/141`.
+  answer surfaces as `empty response` / `invalid JSON`, recorded live in `tasks/141`. Without strict
+  decoding nothing server-side guarantees the KEYS either (LFM2.5-350M, given no schema in the
+  prompt, answered a nested `tokyo_facts` array): a wrong shape is the caller's parser's to reject,
+  and Prefect's task retry decides — the same contract as Gemini, paid more often by a small model.
 - **Whitespace-free server-arg values** are a constraint imported from `autoinference-utils`
   (it splits values into argv tokens); the config validator turns it into a load-time error instead
   of a container that dies on a mangled `--pooler-config`. It applies to the Apps only.
@@ -612,9 +633,9 @@ flowchart LR
   read FIRST and a hit short-circuits (pinned by `TestExistingKind`), and the app-list leg only ever
   finds a live App of ours — a normal update. No collision class is left open: a hand-made name
   cannot carry our prefix, a live endpoint is always listed, and whatever is invisible is STOPPED,
-  which a deploy replaces and never overwrites while serving. What Modal answers to an
-  `endpoint create` that reuses the name of a STOPPED endpoint is recorded in `tasks/141` round 2;
-  anything but success aborts loudly as verdict `other`.
+  which a deploy replaces and never overwrites while serving. `modal endpoint create` over a STOPPED
+  endpoint's name SUCCEEDS with a NEW endpoint id (live: `tree-qwen3-5-0-8b`,
+  `ep-9kO3qTOKBybx76R5GBkmNB` -> `ep-tLkmVXih4MuSi6jEji9Jd6`) — a stopped name is free.
 - **The baked spec is opaque.** `EMBEDDING_DEPLOY_SPEC` / `LLM_DEPLOY_SPEC` hold base64, so reading
   a deployed image's spec takes `base64 -d`; the driver's dry run and the catalog stay the readable
   source.
@@ -630,7 +651,8 @@ flowchart LR
   script for that kind, selected per entry; measured per-task first-use overhead → a per-process
   model cache in `get_model`; measured first-query latency after idle → a keep-warm ping or
   `min_containers > 0` on the Apps (an endpoint's is dashboard-only); a caller with a real schema →
-  thread `schema=` through `BaseLLM`; a THINKING model that Modal refuses as an endpoint (it would
+  thread `schema=` through `BaseLLM` as JSON mode + the schema in the prompt + client-side validation
+  (strict decoding is proven on the SGLang App only); a THINKING model that Modal refuses as an endpoint (it would
   route to the SGLang App, whose in-container warm-up sends no `chat_template_kwargs`) → carry the
   entry's knobs into the App's warm-up payload; Modal shipping an env-var form of `--custom-hf-token` → drop
   the argv form and its redaction; a second Hub identity, or a team workspace → a named Modal Secret

@@ -1,7 +1,7 @@
 # ADR-008: Tool Receipts, Errors and Retrieval Outcomes; MCP as the Only Harness Boundary
 
 - **Status:** Accepted
-- **Date:** 2026-09-12
+- **Date:** 2026-09-12. Amended 2026-09-21 on ONE value, by ADR-009 §8's re-pin protocol: §4's `min_vector_score` 0.75 → 0.70 on `voyage-4`.
 - **Deciders:** Paul (project owner)
 - **Context references:**
   - `tasks/122-ingest-receipt-and-source-uri-helper.md` … `tasks/129-session-end-hook-mcp-client-and-e2e.md` (this feature's task plan)
@@ -65,10 +65,12 @@ Five related choices, one contract:
    runs on an unavailable leg (degraded ≠ filtered). graphrag consumes `.hits` and keeps
    `QueryResult` unchanged — Chapter 8's contract is Chapter 8's decision.
 
-4. **`min_vector_score = 0.75` is provisional and evals-owned.** It is a YAML knob
+4. **`min_vector_score = 0.70` is provisional and evals-owned.** It is a YAML knob
    (`TREE_QUERY__MIN_VECTOR_SCORE`), pinned by two live queries (nonsense → `nothing_found`,
-   on-topic → `found`) whose observed top scores are recorded in `tasks/125`'s log. Chapter 7's
-   evaluation harness tunes it; nothing else does.
+   on-topic → `found`). Re-pinned on `voyage-4` per ADR-009 §8 (2026-09-21, `tasks/141`'s log:
+   nonsense top 0.649, on-topic top 0.735, on a 4-document corpus) — a THIN margin (0.051 below
+   the bar, 0.035 above it), so expect it to move; it was `0.75` on voyage-3.5 (`tasks/125`'s log:
+   0.728 / 0.882). Chapter 7's evaluation harness tunes it; nothing else does.
 
 5. **MCP is the only harness↔memory interface.** The Session-end hook (`tree.mcp.hooks`,
    glue `scripts/hook_session_end.py`, wired on Claude Code's `SessionEnd`) persists a session by
