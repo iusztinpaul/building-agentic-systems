@@ -12,10 +12,12 @@ assertion that catches a ``sentence-transformers`` torch load nobody asked for.
 """
 
 import asyncio
+import contextlib
 import logging
 import subprocess
 import sys
 import time
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +38,23 @@ _LOGGER_NAME = "tree.models.get_model"
 # real run's line.
 _EMBEDDING_APP = "ep-tree-voyage-4-nano"
 _LLM_APP = "ep-tree-lfm2-5-350m"
+
+
+def _running_tasks() -> set[asyncio.Task[Any]]:
+    """Every task alive on the loop right now — the input of the leak check.
+
+    The whole suite shares ONE session-scoped event loop, so ``all_tasks()``
+    also answers tasks no test here started (a Mongo keep-alive from the
+    session fixture, say). Comparing the WHOLE set before and after with ``==``
+    therefore failed ~1 run in 6 on a foreign task that merely RETIRED during
+    the call — it left the "after" set and the equality broke in the direction
+    that means nothing. What these tests mean is ``after - before == set()``:
+    ``prewarm_models`` left no NEW running task behind. The ``not done`` filter
+    is belt-and-braces (``all_tasks`` already drops finished tasks); the
+    SUBTRACTION is what makes the assertion say what the tests mean.
+    """
+
+    return {task for task in asyncio.all_tasks() if not task.done()}
 
 
 class _WarmingFake:
@@ -110,12 +129,12 @@ class _FailingFake:
 async def test_noop_without_ensure_warm(caplog) -> None:
     """Providers without a gate (Voyage, Gemini, mock) cost nothing at all."""
 
-    before = asyncio.all_tasks()
+    before = _running_tasks()
 
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await prewarm_models(object(), MockEmbeddingModel(dimensions=8))
 
-    assert asyncio.all_tasks() == before
+    assert _running_tasks() - before == set()
     assert [r for r in caplog.records if r.name == _LOGGER_NAME] == []
 
 
@@ -163,7 +182,7 @@ async def test_first_failure_cancels_the_sibling() -> None:
 
     sleeping = _SleepingFake(_EMBEDDING_APP)
     dead = _FailingFake(_LLM_APP, after=sleeping.entered)
-    before = asyncio.all_tasks()
+    before = _running_tasks()
 
     started = time.monotonic()
     with pytest.raises(ModelError, match="HTTP 403"):
@@ -174,7 +193,7 @@ async def test_first_failure_cancels_the_sibling() -> None:
     assert sleeping.cancelled is True
     # The `finally` reaped the cancelled poll INSIDE the call: nothing is left
     # knocking on the loop the pipeline is about to fan out on.
-    assert asyncio.all_tasks() == before
+    assert _running_tasks() - before == set()
 
 
 async def test_a_sync_ensure_warm_does_not_leak_the_sibling() -> None:
@@ -189,7 +208,7 @@ async def test_a_sync_ensure_warm_does_not_leak_the_sibling() -> None:
 
     sleeping = _SleepingFake(_EMBEDDING_APP)
     sync_duck = _SyncWarmFake(_LLM_APP)
-    before = asyncio.all_tasks()
+    before = _running_tasks()
 
     with pytest.raises(TypeError, match="a coroutine was expected"):
         await prewarm_models(sleeping, sync_duck)
@@ -197,8 +216,53 @@ async def test_a_sync_ensure_warm_does_not_leak_the_sibling() -> None:
     # Nothing is left knocking on the loop: the poll was cancelled and reaped
     # inside the call. It may never have started (no await separates the two
     # ``create_task`` calls) — but if it did, it took the cancellation.
-    assert asyncio.all_tasks() == before
+    assert _running_tasks() - before == set()
     assert not sleeping.entered.is_set() or sleeping.cancelled is True
+
+
+async def test_a_foreign_task_that_retires_mid_call_is_not_a_leak() -> None:
+    """The flake itself (PR #44, Nit 1): the old ``==`` broke on a task
+    LEAVING.
+
+    The suite shares one session-scoped loop, so a task another module started
+    (a Mongo keep-alive) can finish while this call awaits. The whole-set
+    equality then failed because ``before`` held a task ``after`` no longer
+    did — a direction that says nothing about ``prewarm_models``. The
+    subtraction only ever looks at what was ADDED.
+    """
+
+    foreign = asyncio.create_task(asyncio.sleep(0))
+    before = _running_tasks()
+
+    # A gated model, so the call really suspends: that is the window in which
+    # the foreign task retires.
+    await prewarm_models(_WarmingFake(_EMBEDDING_APP))
+
+    assert foreign.done()
+    assert _running_tasks() - before == set()
+
+
+async def test_a_leaked_foreign_task_that_never_finishes_is_not_a_leak() -> None:
+    """The other half: a foreign task still RUNNING across the call.
+
+    What a fixture elsewhere in the suite leaves alive on the shared loop —
+    the situation CI actually failed on. It is in both sets, so it cancels out
+    of the subtraction; only a task ``prewarm_models`` itself left could fail
+    the check. Cancelled at the end so this test leaks nothing in its turn.
+    """
+
+    leaked = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)  # let it reach its await, so it is really running
+    before = _running_tasks()
+
+    await prewarm_models(MockEmbeddingModel(dimensions=8))
+
+    assert leaked in _running_tasks()
+    assert _running_tasks() - before == set()
+
+    leaked.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await leaked
 
 
 async def test_is_idempotent() -> None:
@@ -227,14 +291,14 @@ async def test_default_providers_have_no_gate_to_warm(mocker, caplog) -> None:
     embedding = _build_embedding_model(
         EmbeddingConfig(provider="voyage", model="voyage-4", dimensions=1024)
     )
-    before = asyncio.all_tasks()
+    before = _running_tasks()
 
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await prewarm_models(llm, embedding)
 
     assert not hasattr(llm, "ensure_warm")
     assert not hasattr(embedding, "ensure_warm")
-    assert asyncio.all_tasks() == before
+    assert _running_tasks() - before == set()
     assert "Pre-warming" not in caplog.text
 
 

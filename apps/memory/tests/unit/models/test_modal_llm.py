@@ -37,6 +37,11 @@ import openai as openai_sdk
 import pytest
 from openai import AsyncOpenAI
 
+from tests.unit.models.modal_fixtures import (
+    SuspendingServer,
+    patch_server,
+    patch_suspending_server,
+)
 from tree.config.app_config import ModalLLMModelConfig, app_config
 from tree.models import modal_llm
 from tree.models.base import BaseLLM
@@ -148,32 +153,9 @@ def openai(mocker) -> _OpenAI:
 
 @pytest.fixture
 def server(mocker) -> SimpleNamespace:
-    """Patch the three coroutines the warm body awaits.
+    """The warm body's three coroutines, patched on THIS client's bindings."""
 
-    Patched on the CLIENT's bindings, so the real modules (and the ``modal``
-    SDK ``modal_server`` imports) are never exercised.
-    """
-
-    return SimpleNamespace(
-        resolve=mocker.patch.object(
-            modal_llm,
-            "resolve_server_url",
-            new_callable=mocker.AsyncMock,
-            return_value=_URL,
-        ),
-        poll=mocker.patch.object(
-            modal_llm,
-            "poll_health",
-            new_callable=mocker.AsyncMock,
-            return_value=1.5,
-        ),
-        served=mocker.patch.object(
-            modal_llm,
-            "served_model_id",
-            new_callable=mocker.AsyncMock,
-            return_value=_LFM,
-        ),
-    )
+    return patch_server(mocker, modal_llm, url=_URL, served_model=_LFM)
 
 
 class _WireStub:
@@ -278,51 +260,11 @@ async def wire(mocker) -> AsyncIterator[_WireStub]:
         await client.close()
 
 
-class _SuspendingServer:
-    """The three coroutines of the warm body — counting, and yielding.
-
-    An ``AsyncMock`` completes without ever suspending, so a ``gather`` over it
-    runs each coroutine to completion in turn and a check-then-act race cannot
-    even appear. The real ones hold a network round trip (the poll holds up to
-    600 s of them); these hold the smallest thing that reschedules,
-    ``asyncio.sleep(0)``.
-    """
-
-    def __init__(self) -> None:
-        self.resolve_calls = 0
-        self.poll_calls = 0
-        self.models_calls = 0
-        self.poll_error: Exception | None = None
-
-    async def resolve(self, entry: Any) -> str:
-        self.resolve_calls += 1
-        await asyncio.sleep(0)
-        return _URL
-
-    async def poll(
-        self, url: str, headers: dict[str, str], *, deadline_s: float
-    ) -> float:
-        self.poll_calls += 1
-        await asyncio.sleep(0)
-        if self.poll_error is not None:
-            raise self.poll_error
-        return 1.5
-
-    async def served(self, url: str, bearer: str, default: str) -> str:
-        self.models_calls += 1
-        await asyncio.sleep(0)
-        return default
-
-
 @pytest.fixture
-def suspending_server(mocker) -> _SuspendingServer:
-    """Patch the warm body's three coroutines with suspending doubles."""
+def suspending_server(mocker) -> SuspendingServer:
+    """The same three coroutines, as doubles that really SUSPEND."""
 
-    helpers = _SuspendingServer()
-    mocker.patch.object(modal_llm, "resolve_server_url", helpers.resolve)
-    mocker.patch.object(modal_llm, "poll_health", helpers.poll)
-    mocker.patch.object(modal_llm, "served_model_id", helpers.served)
-    return helpers
+    return patch_suspending_server(mocker, modal_llm, url=_URL)
 
 
 def _model(model: str = _LFM, **kwargs: Any) -> ModalLLM:

@@ -14,7 +14,8 @@ exactly what a naive ``in`` check would miss — and the bullet list is Modal's
 own 44 models, not a synthetic list of the same shape. Two hand-written
 fixtures remain, each one narrower than the terminal the real output was
 captured at, so the marker sentence itself breaks across lines. Every Hugging
-Face call is an ``httpx.MockTransport``: no test here touches the network.
+Face call is an ``httpx.MockTransport``: no test here touches the network (the
+shared ``hub`` fixture, ``tests/unit/models/modal_fixtures.py``).
 """
 
 import ast
@@ -22,7 +23,6 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -98,44 +98,6 @@ def _card(
     if relation is not None:
         data["base_model_relation"] = relation
     return {"modelId": "acme/model", "cardData": data}
-
-
-@pytest.fixture
-def hub(mocker):
-    """The Hugging Face API, faked at the transport.
-
-    Returns a namespace with ``cards`` (repo id -> the JSON to answer),
-    ``status`` (repo id -> an HTTP status to answer instead), ``requests``
-    (every request made) and ``error`` (an exception the transport raises).
-    """
-
-    state = SimpleNamespace(cards={}, status={}, requests=[], error=None, body=None)
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        state.requests.append(request)
-        if state.error is not None:
-            raise state.error
-        repo_id = str(request.url).split("/api/models/")[-1]
-        if repo_id in state.status:
-            return httpx.Response(state.status[repo_id], json={"error": "nope"})
-        if state.body is not None:
-            return httpx.Response(200, content=state.body)
-        return httpx.Response(200, json=state.cards.get(repo_id, {"cardData": {}}))
-
-    transport = httpx.MockTransport(_handler)
-
-    def _client(**kwargs) -> httpx.Client:
-        return httpx.Client(transport=transport, **kwargs)
-
-    # The SHIM replaces the httpx reference the router holds, never
-    # `httpx.Client` itself: openai subclasses that class at import time, and a
-    # patched-out class breaks every later import in the session.
-    mocker.patch.object(
-        modal_router,
-        "httpx",
-        SimpleNamespace(Client=_client, HTTPStatusError=httpx.HTTPStatusError),
-    )
-    return state
 
 
 class TestClassifyEndpointRefusal:

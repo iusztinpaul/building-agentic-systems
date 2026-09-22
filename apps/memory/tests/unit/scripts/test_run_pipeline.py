@@ -58,10 +58,29 @@ def mock_dispatch_offline(mocker, cli_module):
 
 
 @pytest.fixture
+def mock_dispatch_online(mocker, cli_module):
+    """Stub the online dispatcher — covered on its own in ``test_online.py``."""
+
+    return mocker.patch.object(
+        cli_module,
+        "dispatch_online_pipeline",
+        new_callable=AsyncMock,
+        return_value={"status": "scheduled", "flow_run_id": "run-1"},
+    )
+
+
+@pytest.fixture
 def mock_wait_for_dispatch(mocker, cli_module):
     """Stub the blocking log-stream wait (Prefect client plumbing)."""
 
     return mocker.patch.object(cli_module, "wait_for_dispatch", new_callable=AsyncMock)
+
+
+@pytest.fixture
+def mock_flush_opik(mocker, cli_module):
+    """Stub the Opik telemetry flush (a third-party SDK boundary)."""
+
+    return mocker.patch.object(cli_module, "flush_opik")
 
 
 @pytest.fixture
@@ -172,6 +191,33 @@ class TestRunPipelineIgnoredOverrides:
         assert any("TREE_MODAL__REQUEST_TIMEOUT_S" in message for message in messages)
         # It is a hint, not a gate: the run still dispatches.
         mock_dispatch_offline.assert_awaited_once()
+
+    async def test_the_online_path_warns_too(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_online,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # Both paths dispatch, so both must warn — ``_run_online`` had no test
+        # of its own (PR #44, Nit 20).
+        monkeypatch.setenv("TREE_MODELS__LLM__PROVIDER", "modal")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run_online(None, None, "https://x.com/a", None)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "TREE_MODELS__LLM__PROVIDER" in message
+            and "make memory-serve-workflows" in message
+            for message in messages
+        )
+        assert any("TREE_MODAL__REQUEST_TIMEOUT_S" in message for message in messages)
+        mock_dispatch_online.assert_awaited_once()
 
     async def test_a_clean_shell_dispatches_without_a_warning(
         self,

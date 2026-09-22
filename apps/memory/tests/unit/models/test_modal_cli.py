@@ -10,7 +10,8 @@ that failed.
 
 ``subprocess.run`` is replaced by the shared ``run`` fixture
 (``tests/unit/conftest.py``), which is also the only place in the test tree
-that leaves ``TREE_MODAL_DRY_RUN``.
+that leaves ``TREE_MODAL_DRY_RUN``. The two list-row builders are shared with
+the driver's tests (``tests/unit/models/modal_fixtures.py``).
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from collections.abc import Callable
 
 import pytest
 
+from tests.unit.models.modal_fixtures import app_row as _app_row
+from tests.unit.models.modal_fixtures import endpoint_row as _endpoint_row
 from tree.config.app_config import ModalEmbeddingModelConfig, ModalLLMModelConfig
 from tree.models import modal_warmup
 from tree.models.exceptions import ModelError
@@ -67,22 +70,6 @@ def llm_entry() -> ModalLLMModelConfig:
     return ModalLLMModelConfig(repo_id=_LLM_REPO_ID)
 
 
-def _endpoint_row(name: str, status: str = "live") -> dict[str, str]:
-    """A ``modal endpoint list --json`` row (modal 1.5.5 columns).
-
-    ``live`` and ``provisioning`` are the two statuses the live run saw
-    (``tasks/141``, 2026-09-21); the id is fake, as every id here is.
-    """
-
-    return {
-        "name": name,
-        "endpoint_id": "ep-FAKE0000000000000000",
-        "status": status,
-        "created_at": "2026-08-24T10:00:00Z",
-        "created_by": "someone",
-    }
-
-
 def _clock(*readings: float) -> Callable[[], float]:
     """A monotonic clock handing out ``readings`` in order, then repeating the
     last one — so a test SAYS when each elapsed line is measured instead of
@@ -105,19 +92,6 @@ def _wait_lines(caplog) -> list[str]:
         for record in caplog.records
         if not record.getMessage().startswith("Running: ")
     ]
-
-
-def _app_row(description: str, state: str = "deployed") -> dict[str, str]:
-    """A ``modal app list --json`` row (modal 1.5.5 columns)."""
-
-    return {
-        "app_id": "ap-abcdefghijklmnopqrstuv",
-        "description": description,
-        "state": state,
-        "tasks": "0",
-        "created_at": "2026-09-20T10:00:00Z",
-        "stopped_at": "",
-    }
 
 
 class TestAssertOwnedName:

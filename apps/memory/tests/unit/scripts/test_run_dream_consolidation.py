@@ -2,8 +2,9 @@
 
 The script takes no options (the parent flow enumerates users itself), so the
 only operator-visible surface worth a unit test is the one shared with the
-other dispatchers (#159): a ``TREE_MODELS__`` / ``TREE_MODAL__`` override typed
-in THIS shell never reaches the flow, and the script says so before dispatch.
+other dispatchers (#159): a ``TREE_MODELS__`` / ``TREE_MODAL__`` / ``TREE_DREAM__``
+override typed in THIS shell never reaches the flow, and the script says so
+before dispatch.
 
 The Prefect client is an external boundary: ``get_client`` is mocked with a
 run that is already final + completed, so the poll loop exits on its first
@@ -94,6 +95,33 @@ class TestRunDreamConsolidationIgnoredOverrides:
         # It is a hint, not a gate: the run still dispatches.
         mock_prefect_client.create_flow_run_from_deployment.assert_awaited_once()
 
+    async def test_it_warns_when_a_dream_override_is_set_in_this_shell(
+        self,
+        cli_module,
+        mock_prefect_client,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        """``dream.dry_run`` is read where the flow RUNS, like the rest.
+
+        The dream flow is the one dispatcher whose OWN section is a knob an
+        operator reaches for — "just report, don't mutate" — and typing it here
+        would let a run mutate the graph while the shell said otherwise.
+        """
+
+        monkeypatch.setenv("TREE_DREAM__DRY_RUN", "true")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "TREE_DREAM__DRY_RUN" in message
+            and "make memory-serve-workflows" in message
+            for message in messages
+        )
+        mock_prefect_client.create_flow_run_from_deployment.assert_awaited_once()
+
     async def test_a_clean_shell_dispatches_without_a_warning(
         self,
         cli_module,
@@ -105,7 +133,7 @@ class TestRunDreamConsolidationIgnoredOverrides:
         for name in [
             name
             for name in os.environ
-            if name.startswith(("TREE_MODELS__", "TREE_MODAL__"))
+            if name.startswith(("TREE_DREAM__", "TREE_MODELS__", "TREE_MODAL__"))
         ]:
             monkeypatch.delenv(name, raising=False)
 

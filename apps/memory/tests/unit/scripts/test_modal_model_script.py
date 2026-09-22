@@ -2,8 +2,9 @@
 
 The script is glue over the **Modal catalog** helpers, the auto-router and the
 rails in ``tree.models.modal_cli``, so ``subprocess.run`` is mocked (the shared
-``run`` fixture), the Hugging Face API is mocked (the autouse ``hub`` fixture)
-and NOTHING leaves the process. What is asserted is what an operator (and a
+``run`` fixture), the Hugging Face API is mocked (the shared ``hub`` fixture of
+``tests/unit/models/modal_fixtures.py``, requested for every test here) and
+NOTHING leaves the process. What is asserted is what an operator (and a
 leaked log) would see: the exact argv SEQUENCE per routing verdict, the ONE
 ``Routing …`` line that records the decision, the exit codes that stop a
 mistyped or dangerous command before it spends GPU money — 2 for
@@ -26,11 +27,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 from click.testing import CliRunner
 from pydantic import SecretStr
 
+from tests.unit.models.modal_fixtures import app_row as _app_row
+from tests.unit.models.modal_fixtures import endpoint_row as _endpoint_row
 from tree.config.app_config import ModalModelConfig
 from tree.models import modal_cli, modal_router
 from tree.models.exceptions import ExtractionError, ModelError
@@ -108,36 +110,15 @@ def app_scripts(tmp_path, monkeypatch, in_app_root) -> None:
 
 
 @pytest.fixture(autouse=True)
-def hub(mocker):
-    """The Hugging Face API, faked at the transport — for EVERY test.
+def _hub_for_every_test(hub) -> None:
+    """Request the shared ``hub`` (``tests/unit/scripts/conftest.py``) for
+    EVERY test in this module.
 
-    Autouse, because the router reads a model's fine-tune lineage whenever
-    Modal answers "not in the catalog": an un-mocked test would reach
-    huggingface.co. The default answer is a card with no ``base_model``, which
-    is the voyage-4-nano case (no lineage -> the App).
+    The router reads a model's fine-tune lineage whenever Modal answers "not in
+    the catalog", so an un-mocked test here would reach huggingface.co. The
+    tests that steer the answer take ``hub`` by name as well — same object,
+    pytest builds it once per test.
     """
-
-    state = SimpleNamespace(cards={}, requests=[])
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        state.requests.append(request)
-        repo_id = str(request.url).split("/api/models/")[-1]
-        return httpx.Response(200, json=state.cards.get(repo_id, {"cardData": {}}))
-
-    transport = httpx.MockTransport(_handler)
-
-    def _client(**kwargs) -> httpx.Client:
-        return httpx.Client(transport=transport, **kwargs)
-
-    # The SHIM replaces the httpx reference the router holds, never
-    # `httpx.Client` itself: openai subclasses that class at import time, and a
-    # patched-out class breaks every later import in the session.
-    mocker.patch.object(
-        modal_router,
-        "httpx",
-        SimpleNamespace(Client=_client, HTTPStatusError=httpx.HTTPStatusError),
-    )
-    return state
 
 
 @pytest.fixture
@@ -264,27 +245,6 @@ def _no_hub(**_: object) -> None:
     """A Hugging Face client that must never be built."""
 
     raise AssertionError("this command must not reach the Hub")
-
-
-def _endpoint_row(name: str, status: str = "live") -> dict[str, str]:
-    return {
-        "name": name,
-        "endpoint_id": "ep-abcdefghijklmnopqrstuv",
-        "status": status,
-        "created_at": "2026-08-24T10:00:00Z",
-        "created_by": "someone",
-    }
-
-
-def _app_row(description: str, state: str = "deployed") -> dict[str, str]:
-    return {
-        "app_id": "ap-abcdefghijklmnopqrstuv",
-        "description": description,
-        "state": state,
-        "tasks": "0",
-        "created_at": "2026-09-20T10:00:00Z",
-        "stopped_at": "",
-    }
 
 
 @pytest.mark.usefixtures("no_token", "in_app_root")

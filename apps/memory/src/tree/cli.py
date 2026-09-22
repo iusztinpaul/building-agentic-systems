@@ -83,8 +83,8 @@ def user_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     )(fn)
 
 
-def warn_ignored_config_overrides(prefix: str) -> None:
-    """Warn that ``prefix``-matching env overrides set HERE never reach the flow.
+def warn_ignored_config_overrides(*prefixes: str) -> None:
+    """Warn that ``prefixes``-matching env overrides set HERE never reach the flow.
 
     ``dispatch_*_pipeline`` forwards no environment: the flow reads YAML +
     ``TREE_<SECTION>__<KEY>`` overrides through ``_live_app_config()`` inside
@@ -94,9 +94,15 @@ def warn_ignored_config_overrides(prefix: str) -> None:
     memory-run-clustering-pipeline`` is a silent no-op, and the operator's next
     run behaves exactly like the last one with no hint why. A hint, never a
     gate: the run still dispatches.
+
+    Every dispatcher cares about 2-3 sections, so this takes them all at once
+    and answers with ONE line naming every matching variable — six repeated
+    call pairs collapsed into one call each. Note the prefixes end in the
+    DOUBLE underscore of ``TREE_<SECTION>__<KEY>``: ``TREE_MODAL_DRY_RUN``, the
+    deploy CLI's own rail, is deliberately not a match.
     """
 
-    names = sorted(name for name in os.environ if name.startswith(prefix))
+    names = sorted(name for name in os.environ if name.startswith(prefixes))
     if not names:
         return
     logger.warning(

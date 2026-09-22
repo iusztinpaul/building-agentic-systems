@@ -72,8 +72,7 @@ async def _run(
     num_shards: int | None,
 ) -> None:
     # The model / Modal knobs are read by the SERVING process, not by this one.
-    warn_ignored_config_overrides("TREE_MODELS__")
-    warn_ignored_config_overrides("TREE_MODAL__")
+    warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,

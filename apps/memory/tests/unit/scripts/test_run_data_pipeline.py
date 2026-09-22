@@ -17,6 +17,8 @@ through the CLI.
 
 from __future__ import annotations
 
+import logging
+import os
 from unittest.mock import AsyncMock
 
 import pytest
@@ -80,6 +82,17 @@ def mock_dispatch_offline(mocker):
 
     return mocker.patch(
         "scripts.run_data_pipeline.dispatch_offline_pipeline",
+        new_callable=AsyncMock,
+        return_value={"status": "scheduled", "flow_run_id": "run-1"},
+    )
+
+
+@pytest.fixture
+def mock_dispatch_online(mocker):
+    """Stub the online dispatcher — covered on its own in ``test_online.py``."""
+
+    return mocker.patch(
+        "scripts.run_data_pipeline.dispatch_online_pipeline",
         new_callable=AsyncMock,
         return_value={"status": "scheduled", "flow_run_id": "run-1"},
     )
@@ -281,3 +294,90 @@ class TestRunDataPipelineOfflineDispatch:
         await cli_module._run_offline(None, None, [], inline_sources)
 
         assert mock_dispatch_offline.await_args.kwargs["sources"] == inline_sources
+
+
+class TestRunDataPipelineIgnoredOverrides:
+    """A model/Modal override typed HERE never reaches the flow (#159).
+
+    The data pipeline was the one dispatcher pair left silent (PR #44, Nit 20):
+    both its paths now say so, exactly as ``run_pipeline.py`` does.
+    """
+
+    async def test_offline_warns_when_a_model_override_is_set_in_this_shell(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # The README's "try a Modal embedding for one run" knobs only work in
+        # the SERVING process; prefixing this command with them ingests with
+        # the configured provider, so say so at the mistake.
+        monkeypatch.setenv("TREE_MODELS__SEARCH_EMBEDDING__PROVIDER", "modal")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run_offline(None, None, [], [])
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "TREE_MODELS__SEARCH_EMBEDDING__PROVIDER" in message
+            and "make memory-serve-workflows" in message
+            for message in messages
+        )
+        assert any("TREE_MODAL__REQUEST_TIMEOUT_S" in message for message in messages)
+        # It is a hint, not a gate: the run still dispatches.
+        mock_dispatch_offline.assert_awaited_once()
+
+    async def test_online_warns_when_a_model_override_is_set_in_this_shell(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_online,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # The online path dispatches the same way and was equally silent.
+        monkeypatch.setenv("TREE_MODELS__LLM__PROVIDER", "modal")
+        monkeypatch.setenv("TREE_MODAL__WARMUP_DEADLINE_S", "1200")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run_online(None, None, "https://x.com/a", None)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "TREE_MODELS__LLM__PROVIDER" in message
+            and "make memory-serve-workflows" in message
+            for message in messages
+        )
+        assert any("TREE_MODAL__WARMUP_DEADLINE_S" in message for message in messages)
+        mock_dispatch_online.assert_awaited_once()
+
+    async def test_a_clean_shell_dispatches_without_a_warning(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # Hermetic: `make` exports `.env`, which may itself carry an override.
+        for name in [
+            name
+            for name in os.environ
+            if name.startswith(("TREE_MODELS__", "TREE_MODAL__"))
+        ]:
+            monkeypatch.delenv(name, raising=False)
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run_offline(None, None, [], [])
+
+        assert caplog.records == []
+        mock_dispatch_offline.assert_awaited_once()

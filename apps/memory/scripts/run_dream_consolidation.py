@@ -37,9 +37,9 @@ POLL_INTERVAL_SECONDS = 2
 
 
 async def _run() -> None:
-    # The model / Modal knobs are read by the SERVING process, not by this one.
-    warn_ignored_config_overrides("TREE_MODELS__")
-    warn_ignored_config_overrides("TREE_MODAL__")
+    # The dream / model / Modal knobs — `dream.dry_run` included — are read by
+    # the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_DREAM__", "TREE_MODELS__", "TREE_MODAL__")
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 
