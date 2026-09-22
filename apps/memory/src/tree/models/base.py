@@ -1,5 +1,10 @@
 import abc
-from typing import Any
+from typing import Any, Literal
+
+# The **Embedding role**: which side of retrieval a text is on (ADR-009 §5).
+# ``"query"`` is a user question, ``"document"`` is a text that gets persisted
+# and later retrieved; ``None`` means symmetric — no role at all.
+EmbeddingRole = Literal["query", "document"]
 
 
 class BaseLLM(abc.ABC):
@@ -27,5 +32,21 @@ class BaseEmbeddingModel(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Return one embedding vector per input text."""
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Return one embedding vector per input text.
+
+        ``input_type`` is the **Embedding role** (ADR-009 §5) — a retrieval
+        HINT, never a correctness input:
+
+        - ``None`` (the default) is SYMMETRIC: no provider-side prompt, no
+          role field on the wire. Both sides of the comparison are the same
+          kind of text (entity name vs entity name).
+        - A provider that CANNOT honour a role IGNORES it — it never raises.
+          Callers therefore pass the role blind, without asking which model is
+          configured.
+
+        The role is per CALL, never per instance: one model object serves both
+        the indexing path (``"document"``) and the query path (``"query"``).
+        """

@@ -81,7 +81,11 @@ from tree.memory.types import (
     ExtractionResult,
     RawExtraction,
 )
-from tree.models.get_model import get_llm, get_search_embedding_model
+from tree.models.get_model import (
+    get_llm,
+    get_search_embedding_model,
+    prewarm_models,
+)
 from tree.config.constants import TAGS_INGESTION_BATCH
 from tree.observability import (
     configure_opik,
@@ -665,6 +669,13 @@ async def _supersession_sweep(
     # Construct the LLM + embedding client ONLY here, on the flag-on path.
     llm = get_llm()
     embedding_model = get_search_embedding_model()
+
+    # Pre-warm both Modal servers concurrently before the sweep fans out
+    # (ADR-009 §11); a no-op for Gemini / Voyage. It sits behind the "nothing to
+    # do" guard above, so a sweep with no delta never wakes a GPU. Unlike the
+    # extraction worker, these are the SAME instances the sweep then uses, so
+    # the gate's warm hint carries straight over to the first real call.
+    await prewarm_models(llm, embedding_model)
 
     # Each delta node becomes a one-node RawExtraction envelope so the resolver
     # iterates exactly the watermark-fresh driving set; the partition lookup

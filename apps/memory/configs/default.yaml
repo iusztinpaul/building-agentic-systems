@@ -67,17 +67,21 @@ models:
   llm:
     provider: gemini
     model: gemini-3.1-flash-lite
+  # Serve the LLM yourself instead (ADR-009 §10) — any id from
+  # `modal.llm_models` below; deploy it first:
+  #   make memory-deploy-model MODEL=LiquidAI/LFM2.5-350M
+  # llm: {provider: modal, model: LiquidAI/LFM2.5-350M}
   # Transient embedding used only by resolution's semantic stage
   # (computed on the entity NAME, dropped afterward, never persisted).
   resolution_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   # Persisted embedding used for dedup + search/query. Its output is the
   # node `embedding` field and the live mongot `vector_index`
   search_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   embedding_batch:
     max_inputs: 1000
@@ -113,11 +117,15 @@ query:
   embedding_batch_size: 64
   # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion; $text
   # hits are never gated. Atlas normalises cosine to (1 + cos) / 2, so this is
-  # an absolute similarity (the RRF score is not). PROVISIONAL — pinned by the
-  # two live queries in tasks/125's log (nonsense query top=0.728, on-topic
-  # top=0.882, so ADR-008 §4's proposed 0.65 let EVERY candidate through) and
-  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
-  min_vector_score: 0.75
+  # an absolute similarity (the RRF score is not). PROVISIONAL and owned by
+  # Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # re-pinned on voyage-4, 2026-09 — tasks/141 Log: voyage-4 scores lower than
+  # voyage-3.5 did, so 0.75 (tasks/125, on voyage-3.5) kept NOTHING for an
+  # on-topic query. Live, corpus 4 ADRs in tree_e2e_141: nonsense
+  # "zxqv plorb wumbus" top=0.649, on-topic "how does the coordinator shard
+  # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
+  # for the first (0 kept) and found for the second (7 of 10 kept).
+  min_vector_score: 0.70
 
 dream:
   enabled: true
@@ -167,13 +175,132 @@ youtube:
   brightdata_timeout_seconds: 600
   brightdata_poll_interval_seconds: 10
 
+# The Modal catalog (ADR-009 §2/§3): one entry per Hugging Face model that may
+# be served on Modal, read by BOTH the deploy driver and the clients so names,
+# dimensions and prompts have ONE source. Adding a model = one entry here + one
+# `make memory-deploy-model MODEL=<repo_id>`; an unknown id fails loudly listing
+# these ids.
+#
+# An entry says WHICH model and the facts about it — never HOW it is served.
+# At deploy the driver asks Modal first (`modal endpoint create`) and, when
+# Modal refuses, deploys our App for the entry's KIND: an `embedding_models`
+# entry goes to deploy/modal_vllm_embedding.py, an `llm_models` entry to
+# deploy/modal_sglang_llm.py. The chosen route is in the driver's one
+# `Routing …` log line, not in this file.
+#
+# `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args` (and `n_gpus`
+# on an LLM) are read by the APP scripts only — a Dedicated endpoint never sees
+# them — but they stay allowed (with defaults) on every entry, because nobody
+# can predict Modal's refusal while writing the entry. `extra_server_args`
+# values may NOT contain whitespace: autoinference-utils splits them into argv
+# tokens, so use compact JSON.
+# NOTE: the TREE_<SECTION>__<KEY> escape hatch does NOT reach list items — edit
+# this file to change a catalog entry.
+modal:
+  autoinference_utils_version: "0.2.6" # App scripts only
+  engines: # App scripts only; per ENGINE, not per model
+    vllm:
+      version: "0.26.0" # a PyPI version (`vllm==0.26.0`); Modal's own embedding recipe pin (serve.py, 2026-09-20)
+    sglang:
+      # A DOCKER TAG of lmsysorg/sglang, NOT a PyPI version: the SGLang App
+      # runs the official image, like Modal's own LLM recipe. At v0.5.18 the
+      # plain tag IS the CUDA 13 build — sglang's release-docker.yml gives the
+      # cu130 image the tags v0.5.18 / latest / v0.5.18-cu130 — and Modal's
+      # hosts run driver 580.95.05 with CUDA Driver API 13.0.
+      version: "v0.5.18"
+  # ~3x the slowest boot measured (199 s); 300 s (client) and 1200 s (smoke test) before #144
+  warmup_deadline_s: 600
+  # ONE request to a warm server — both clients (AsyncOpenAI timeout, no SDK
+  # retries) and the chat smoke test's POST. Half the OpenAI SDK's 600 s
+  # default, which with its two silent retries let a thinking model hang a
+  # call for 13 minutes (#141). Override: TREE_MODAL__REQUEST_TIMEOUT_S.
+  request_timeout_s: 300
+  embedding_models:
+    # In Modal's endpoint catalog (2026-09-20) -> auto-routes to a Dedicated
+    # endpoint; the App fields below keep their defaults.
+    - repo_id: Qwen/Qwen3-Embedding-0.6B
+      revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3 # HF sha of `main`, 2026-09-19
+      native_dimensions: 1024
+      # The card says MRL 32-1024; empty because the 1024-d vector_index needs
+      # nothing smaller. The client truncates client-side (ADR-009 §3) — list a
+      # size only when a config asks for it.
+      matryoshka_dimensions: []
+      # Byte-exact from the model card's helper:
+      #   f'Instruct: {task_description}\nQuery:{query}'  (no space after Query:)
+      # MUST stay double-quoted: single quotes would make \n a literal backslash-n.
+      query_prompt: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+      document_prompt: "" # Qwen3 instructs the query side only
+    # NOT in Modal's catalog, and its Hub card names no base model -> vLLM App,
+    # which is also the only way to get the architecture override + MEAN
+    # pooling a managed recipe cannot express.
+    - repo_id: voyageai/voyage-4-nano
+      revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f # HF sha of `main`, 2026-09-19
+      gpu: A10 # Modal's GPU string (docs/guide/gpu, 2026-09-19); there is no "A10G"
+      cpu: 4
+      memory_mb: 16384
+      # config.json `num_labels: 2048`, NOT `hidden_size: 1024`: the custom
+      # modeling_qwen3_bidirectional.py AutoModel applies a learned
+      # nn.Linear(1024, 2048) head to last_hidden_state (safetensors
+      # `linear.weight` is [2048, 1024]), and vLLM's own
+      # VoyageQwen3BidirectionalEmbedModel returns it untruncated. The head is
+      # NOT a sentence-transformers Dense module, so modules.json never shows
+      # it — 1_Pooling/config.json's `word_embedding_dimension: 2048` does.
+      # 1024 is a Matryoshka TRUNCATION of this, which is exactly what
+      # models.search_embedding.dimensions: 1024 asks the server for.
+      native_dimensions: 2048
+      matryoshka_dimensions: [256, 512, 1024, 2048]
+      max_model_len: 32768
+      query_prompt: "Represent the query for retrieving supporting documents: "
+      document_prompt: "Represent the document for retrieval: "
+      # Model-specific extras for the APP scripts only. `--max-num-seqs` is
+      # accepted here too (Modal's own 8B embedding recipe sets it to 32 to
+      # bound the KV cache); no seed needs it — vLLM's default holds.
+      extra_server_args:
+        "--convert": embed
+        "--pooler-config": '{"pooling_type":"MEAN"}'
+        "--hf-overrides": '{"architectures":["VoyageQwen3BidirectionalEmbedModel"]}'
+        "--dtype": bfloat16
+        "--enforce-eager": ""
+        "--trust-remote-code": ""
+  llm_models:
+    # In Modal's endpoint catalog (2026-09-20) -> auto-routes to a Dedicated
+    # endpoint; the App fields keep their defaults. Chosen over the equally
+    # listed google/gemma-3-1b-it, which is `gated: manual` on the Hub
+    # (HF API, 2026-09-20) while this one is ungated Apache-2.0.
+    - repo_id: Qwen/Qwen3.5-0.8B
+      revision: 2fc06364715b967f1860aea9cf38778875588b17 # HF sha of `main`, 2026-09-20
+      # The two CLIENT-side request knobs (ADR-009 §10): sent by ModalLLM and
+      # by the chat smoke test from one helper, identical on both Serving
+      # paths, and changing either needs no redeploy.
+      max_tokens: 4096
+      chat_template_kwargs:
+        # a THINKING model: with thinking on it spent 256 tokens reasoning and answered nothing (tasks/141 round 1)
+        enable_thinking: false
+    # NOT in Modal's catalog (arch Lfm2ForCausalLM; its base
+    # LiquidAI/LFM2.5-350M-Base is not either) -> SGLang App.
+    - repo_id: LiquidAI/LFM2.5-350M
+      revision: 9e6c6ccf47cd318696e137d381a7ded8fe4df09f # HF sha of `main`, 2026-09-20
+      gpu: A10
+      n_gpus: 1
+      cpu: 4
+      memory_mb: 16384
+      max_model_len: 32768 # the card's context is 128000; 32K keeps the KV cache small on one A10
+      max_tokens: 4096 # bounds a runaway constrained-JSON generation on a 32K context
+
 observability:
   enabled: true
   # Per-model USD price per 1,000,000 tokens. Used to compute the manual
   # total_cost on Voyage embedding spans (Opik does not natively cost Voyage).
-  # Verified against https://docs.voyageai.com/docs/pricing (June 2026).
+  # Verified against https://docs.voyageai.com/docs/pricing (September 2026).
   # A model absent from this map yields total_cost=0 (usage still recorded).
+  # The 4 series is the current text family; the voyage-3.x rows are LEGACY but
+  # still served, so a `TREE_MODELS__SEARCH_EMBEDDING__MODEL=voyage-3.5`
+  # override still costs instead of silently reporting $0.
   embedding_price_per_1m_tokens:
+    voyage-4-large: 0.12
+    voyage-4: 0.06
+    voyage-4-lite: 0.02
+    voyage-code-4: 0.12
     voyage-3.5: 0.06
     voyage-3: 0.06
     voyage-3.5-lite: 0.02

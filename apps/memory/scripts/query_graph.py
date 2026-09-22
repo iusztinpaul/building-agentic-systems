@@ -127,6 +127,9 @@ async def _run(
     database = settings.mongo.mongo_initdb_database
     user_id = await resolve_user_id(user_id, user_identifier)
 
+    # No pre-warm here, on purpose (ADR-009 §11): a script issues ONE query, so
+    # the Warm gate's warm-at-use already pays the cold start exactly once, on
+    # the first ``embed()``, and a dead server fails the script the same way.
     try:
         if mode == "rag":
             logger.info(

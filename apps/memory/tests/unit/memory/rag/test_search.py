@@ -26,6 +26,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.memory.rag.search import SearchUnavailableError, _rrf_fuse, hybrid_search
+from tree.models.base import EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -36,7 +37,7 @@ _CHILD_FILTER = {"type": "chunk", "subtype": "child"}
 _OFF_TOPIC = "zxqv plorb wumbus"
 
 # The bar these tests pin the gate to — a fixed number, NOT the shipped default
-# (0.75 today): that one is provisional and evals own it (ADR-008 §4), so it is
+# (0.70 today): that one is provisional and evals own it (ADR-008 §4), so it is
 # asserted once, in tests/unit/config/test_app_config.py, and patched here.
 _MIN_VECTOR_SCORE = 0.65
 
@@ -526,9 +527,11 @@ class TestMinVectorScore:
         self, make_collection, embedding_model, make_child_row, mocker, caplog
     ) -> None:
         # An operator raises the bar on a noisy corpus: what passed at the
-        # pinned 0.65 must vanish, and the log must name the new bar. 0.85 rather
-        # than the User Story's 0.75 — the live pin in tasks/125 moved the
-        # SHIPPED default to 0.75, so that value no longer reads as an override.
+        # pinned 0.65 must vanish, and the log must name the new bar. 0.85
+        # rather than the User Story's 0.75 for the same reason the bar above is
+        # pinned: the SHIPPED default is provisional (0.75 on voyage-3.5 in
+        # tasks/125, 0.70 on voyage-4 in tasks/141), so this test holds a value
+        # no re-pin can turn into "the default" and stop reading as an override.
         mocker.patch("tree.memory.rag.search.app_config.query.min_vector_score", 0.85)
         collection = make_collection([_vector_candidate(make_child_row, "c0", 0.80)])
 
@@ -593,3 +596,44 @@ class TestRRFFuse:
         # Both appear in both lists at different ranks.
         # "a": 1/(k+1) + 1/(k+2), "b": 1/(k+2) + 1/(k+1) → equal.
         assert abs(fused["a"]["score"] - fused["b"]["score"]) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the query vector (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class _RoleRecordingEmbeddingModel(FakeEmbeddingModel):
+    """A :class:`FakeEmbeddingModel` that records the role of every call."""
+
+    def __init__(self, dimensions: int = 4) -> None:
+        super().__init__(dimensions=dimensions)
+        self.roles: list[EmbeddingRole | None] = []
+
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        self.roles.append(input_type)
+        return await super().embed(texts, input_type)
+
+
+class TestEmbeddingRole:
+    """A user's question is the QUERY side of retrieval, so it embeds as
+    ``query`` (ADR-009 §5) — against a corpus of ``document`` vectors. This is
+    the one place asymmetry pays off, and the only role the search path may use.
+    """
+
+    async def test_query_vector_uses_query_role(self, make_collection) -> None:
+        collection = make_collection()
+        embedding_model = _RoleRecordingEmbeddingModel(dimensions=4)
+
+        await hybrid_search(
+            collection,
+            "how does the coordinator shard documents?",
+            embedding_model,
+            _USER,
+            limit=8,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert embedding_model.roles == ["query"]

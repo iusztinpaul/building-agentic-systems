@@ -2,25 +2,37 @@
 
 Covers the generic ``node_to_embedding_text`` builder (including a
 byte-identical regression against the pre-refactor
-``indexing.core._node_to_text`` layout), the ``embed_texts`` seam the
-indexing backfill calls, and the #044 real-time request batcher
-``embed_in_batches`` (chunking by input-count AND token-budget caps, order
-preservation across multiple requests).
+``indexing.core._node_to_text`` layout), the per-type
+``entity_embedding_text`` chooser and the ONE prospective-row builder
+``prospective_entity_embedding_text`` both inline writers call, the
+``embed_texts`` seam the indexing backfill calls, and the #044 real-time
+request batcher ``embed_in_batches`` (chunking by input-count AND
+token-budget caps, order preservation across multiple requests).
 """
 
+import ast
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import tree.memory
+from tree.entities.memory import NodeType
 from tree.memory import embedding_text
 from tree.memory.embedding_text import (
     _embed_chunk_resilient,
     embed_in_batches,
     embed_texts,
+    entity_embedding_text,
     estimate_tokens,
     node_to_embedding_text,
+    prospective_entity_embedding_text,
 )
-from tree.models.base import BaseEmbeddingModel
+from tree.memory.graph import add_entity as add_entity_module
+from tree.memory.pipeline import prospective_entity_embedding_text as pipeline_builder
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
+
+_SRC_DIR = Path(tree.memory.__file__).parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +51,9 @@ class _RecordingEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
         # One distinct vector per input, aligned positionally.
         return [[float(i)] * self._dimensions for i, _ in enumerate(texts)]
@@ -59,20 +73,183 @@ class _OrderEncodingEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int = 1) -> None:
         self._dimensions = dimensions
         self.calls: list[list[str]] = []
+        # One entry per request, so a role that reaches only the FIRST chunk
+        # is visible as a shorter/mixed list rather than a passing test.
+        self.roles: list[EmbeddingRole | None] = []
         self._global_offset = 0
 
     @property
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         out = [
             [float(self._global_offset + i)] * self._dimensions
             for i, _ in enumerate(texts)
         ]
         self._global_offset += len(texts)
         return out
+
+
+# ---------------------------------------------------------------------------
+# entity_embedding_text — FACT ``object`` vs legacy ``object_`` precedence
+# ---------------------------------------------------------------------------
+
+
+class TestFactObjectPrecedence:
+    """``object`` wins on PRESENCE, never on truthiness.
+
+    A row written across the ``object_`` → ``object`` rename can carry BOTH: the
+    current value under ``object`` and a STALE pre-rename value under
+    ``object_``. The old ``properties.get("object") or properties.get("object_")``
+    read the stale one whenever the current value was falsy — so the row embedded
+    on text the user has since replaced (and the indexing backfill, reading the
+    same properties, would keep reproducing it after an **Embedding reset**).
+    A blank ``object`` means "this row has no usable object text": it falls back
+    to the generic node-text, which still surfaces every property, including
+    ``object_``, in a labelled line rather than presenting the stale value AS the
+    row's meaning.
+    """
+
+    def _fact_row(self, properties: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": NodeType.FACT.value,
+            "name": "paul-lives-in",
+            "canonical_name": "paul-lives-in",
+            "properties": properties,
+        }
+
+    def test_current_object_wins_over_the_legacy_one(self) -> None:
+        row = self._fact_row({"object": "new", "object_": "old"})
+
+        assert entity_embedding_text(row) == "new"
+
+    def test_legacy_object_is_read_when_object_is_absent(self) -> None:
+        row = self._fact_row({"object_": "old"})
+
+        assert entity_embedding_text(row) == "old"
+
+    def test_legacy_object_is_read_when_object_is_none(self) -> None:
+        # ``None`` is "not written", not "written blank" — the legacy column is
+        # the only value this row has.
+        row = self._fact_row({"object": None, "object_": "old"})
+
+        assert entity_embedding_text(row) == "old"
+
+    @pytest.mark.parametrize(
+        "blank_object",
+        ["", "  ", "\x00", "\x00 \ud800"],
+        ids=["empty", "whitespace", "control-char", "all-invalid"],
+    )
+    def test_a_blank_object_falls_back_to_node_text_not_to_the_legacy_one(
+        self, blank_object: str
+    ) -> None:
+        # The regression this class exists for: the stale ``object_`` must NOT
+        # become the embedded text just because the current value is blank.
+        row = self._fact_row({"object": blank_object, "object_": "old"})
+
+        text = entity_embedding_text(row)
+
+        assert text == node_to_embedding_text(row)
+        assert text != "old"
+
+    def test_a_non_string_object_falls_back_to_node_text(self) -> None:
+        # A falsy non-string (``0``, ``False``, ``[]``) is still a PRESENT
+        # value: it may not hand the row over to the legacy column either.
+        row = self._fact_row({"object": 0, "object_": "old"})
+
+        text = entity_embedding_text(row)
+
+        assert text == node_to_embedding_text(row)
+        assert text != "old"
+
+
+# ---------------------------------------------------------------------------
+# prospective_entity_embedding_text — ONE persisted-row builder
+# ---------------------------------------------------------------------------
+
+
+def _function_definitions(path: Path) -> set[str]:
+    """Every ``def``/``async def`` name defined in the file at ``path``."""
+
+    module_ast = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name
+        for node in ast.walk(module_ast)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+class TestProspectiveEntityEmbeddingText:
+    """The persisted-row shape is built in ONE place, for both inline writers.
+
+    ``add_entity`` (dedup query vector, reused as the persisted vector) and the
+    pipeline's task ④ (the ``_CachedSingleEmbedding`` lookup key) used to each
+    assemble the same ``{type, name, canonical_name, properties-minus-aliases-
+    and-confidence}`` dict by hand, promising "byte-for-byte" agreement in a
+    docstring. Two copies is how the key and the embedded text drift apart; one
+    function makes the promise structural.
+    """
+
+    def test_prospective_entity_text_is_one_function(self) -> None:
+        # Arrange: the two private builders that used to hold the duplicate.
+        duplicated = {"_embeddable_text", "_entity_embeddable_text"}
+
+        # Act: scan the shipped source, not just the two modules under test — a
+        # third hand-built copy anywhere is the same bug.
+        offenders = {
+            f"{path.relative_to(_SRC_DIR)}::{name}"
+            for path in sorted(_SRC_DIR.rglob("*.py"))
+            if "__pycache__" not in path.parts
+            for name in _function_definitions(path) & duplicated
+        }
+
+        assert not offenders, f"the persisted-row dict is still built in {offenders}"
+        # Both call sites reach the SAME object, not two same-looking ones.
+        assert (
+            add_entity_module.prospective_entity_embedding_text
+            is prospective_entity_embedding_text
+        )
+        assert pipeline_builder is prospective_entity_embedding_text
+
+    @pytest.mark.parametrize(
+        "entity_type,properties",
+        [
+            (NodeType.PERSON, {"role": "researcher"}),
+            (NodeType.PREFERENCE, {"statement": "prefers dark mode"}),
+            (NodeType.FACT, {"subject": "paul", "object": "Bucharest"}),
+        ],
+        ids=["generic", "preference", "fact"],
+    )
+    def test_output_equals_entity_embedding_text_on_the_persisted_row(
+        self, entity_type: NodeType, properties: dict[str, Any]
+    ) -> None:
+        # Arrange: the inline path sees ``aliases`` / ``confidence`` under
+        # ``properties``; the persisted row never does (``_upsert_node`` promotes
+        # them to top-level columns), so the two texts agree only if the builder
+        # strips them.
+        inline_properties = {**properties, "aliases": ["AK"], "confidence": 0.9}
+        persisted_row = {
+            "type": entity_type.value,
+            "name": "incoming name",
+            "canonical_name": "canonical name",
+            "properties": properties,
+        }
+
+        text = prospective_entity_embedding_text(
+            entity_type=entity_type,
+            name="incoming name",
+            canonical_name="canonical name",
+            properties=inline_properties,
+        )
+
+        assert text == entity_embedding_text(persisted_row)
+        assert "AK" not in text
+        assert "confidence" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +571,9 @@ class _PoisonEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         self.calls.append(list(texts))
@@ -413,7 +592,9 @@ class _RateLimitedEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         raise ExtractionError(
@@ -457,15 +638,21 @@ class _IdentityEncodingPoisonModel(BaseEmbeddingModel):
     def __init__(self, poison: set[str]) -> None:
         self._poison = poison
         self.calls: list[list[str]] = []
+        # One entry per request, INCLUDING the bisected halves — that is where
+        # a role would get dropped if the recursion forgot to pass it on.
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
         return 1
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         from tree.models.exceptions import ExtractionError
 
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         if any(t in self._poison for t in texts):
             raise ExtractionError(
                 "Voyage multimodal API error 400: inputs contain invalid elements",
@@ -520,7 +707,9 @@ class TestEmbedInBatchesAlignmentAdversarial:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 raise ExtractionError(
                     "Voyage API error 429: rate-limit exhausted after 400 retries",
                     status_code=429,
@@ -545,13 +734,79 @@ class TestEmbedInBatchesAlignmentAdversarial:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 raise ExtractionError("some failure mentioning 400 in passing")
 
         with pytest.raises(ExtractionError, match="400"):
             await embed_in_batches(
                 ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
             )
+
+
+class TestInputTypeThreading:
+    """The **Embedding role** must survive every hop of the batcher (ADR-009 §5).
+
+    Between the caller and ``.embed(...)`` sit two loops that can silently drop
+    it: the per-chunk dispatch in ``embed_in_batches`` and the bisect recursion
+    in ``_embed_chunk_resilient``. A role that reaches only the first request
+    would mix ``document`` and role-less vectors inside ONE persisted batch —
+    invisible in the vector shape, fatal to retrieval.
+    """
+
+    async def test_every_chunk_carries_the_role(self) -> None:
+        # Arrange: 5 texts under a 2-input cap -> 3 requests.
+        model = _OrderEncodingEmbeddingModel()
+        texts = [f"t{i}" for i in range(5)]
+
+        vectors = await embed_in_batches(
+            texts, model, input_type="document", max_inputs=2
+        )
+
+        # Assert: three requests, EACH carrying the role; vectors still aligned.
+        assert [len(c) for c in model.calls] == [2, 2, 1]
+        assert model.roles == ["document", "document", "document"]
+        assert vectors == [[float(i)] for i in range(5)]
+
+    async def test_bisect_preserves_the_role(self) -> None:
+        # Arrange: one poison input inside a single request, so the 400 handler
+        # bisects — the halves are separate ``.embed`` calls.
+        model = _IdentityEncodingPoisonModel(poison={"P1"})
+        texts = ["a", "P1", "c", "d"]
+
+        vectors = await embed_in_batches(
+            texts, model, input_type="document", max_inputs=1000
+        )
+
+        # Assert: the poison slot keeps its aligned ``[]`` placeholder ...
+        assert vectors == [
+            [float(ord("a"))],
+            [],
+            [float(ord("c"))],
+            [float(ord("d"))],
+        ]
+        # ... and every request of the recursion carried the role.
+        assert len(model.calls) > 1
+        assert model.roles == ["document"] * len(model.calls)
+
+    async def test_default_is_role_less(self) -> None:
+        # Symmetric callers (resolution) pass nothing and must stay role-less —
+        # the default may never quietly become ``document``.
+        model = _OrderEncodingEmbeddingModel()
+
+        await embed_in_batches(["a", "b"], model, max_inputs=1)
+
+        assert model.roles == [None, None]
+
+    async def test_embed_texts_forwards_the_role(self) -> None:
+        # ``embed_texts`` is the seam the indexing backfill calls; it resolves
+        # the caps from YAML and must not swallow the role on the way.
+        model = _OrderEncodingEmbeddingModel()
+
+        await embed_texts(["a", "b"], model, input_type="document", max_inputs=1)
+
+        assert model.roles == ["document", "document"]
 
 
 class TestEmbedChunkResilientDoesNotRateLimit:
@@ -583,7 +838,9 @@ class TestEmbedChunkResilientDoesNotRateLimit:
             def dimensions(self) -> int:
                 return 2
 
-            async def embed(self, texts: list[str]) -> list[list[float]]:
+            async def embed(
+                self, texts: list[str], input_type: EmbeddingRole | None = None
+            ) -> list[list[float]]:
                 return [[9.0, 9.0] for _ in texts]
 
         model = _CachedModel()

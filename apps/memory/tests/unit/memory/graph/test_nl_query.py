@@ -498,7 +498,7 @@ class TestReplaceEmbeddingPlaceholder:
 
         assert result[0]["$vectorSearch"]["queryVector"] == [0.1, 0.2, 0.3]
         assert "queryText" not in result[0]["$vectorSearch"]
-        mock_model.embed.assert_called_once_with(["test query"])
+        mock_model.embed.assert_called_once_with(["test query"], input_type="query")
 
     async def test_no_vector_search_unchanged(self, mocker):
         mock_model = mocker.AsyncMock()
@@ -852,3 +852,35 @@ class TestExecuteNlQuery:
             )
 
         assert mock_deps["llm"].generate_json.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the __EMBED__ placeholder (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRole:
+    """The ``__EMBED__`` placeholder stands for the USER's question, so it is
+    embedded as ``query`` (ADR-009 §5) — the same role the ``rag/search.py``
+    leg uses, against the same corpus of ``document`` vectors.
+    """
+
+    async def test_placeholder_embeds_the_question_as_query(self, mocker):
+        mock_model = mocker.AsyncMock()
+        mock_model.embed.return_value = [[0.1, 0.2, 0.3]]
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector_index",
+                    "path": "embedding",
+                    "queryVector": "__EMBED__",
+                    "queryText": "who wrote the sharding post?",
+                    "limit": 10,
+                }
+            },
+            {"$limit": 10},
+        ]
+
+        await _replace_embedding_placeholder(pipeline, mock_model)
+
+        assert mock_model.embed.await_args.kwargs["input_type"] == "query"

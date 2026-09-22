@@ -1,7 +1,9 @@
+import datetime
 import json
 import textwrap
 
 import pytest
+import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from tree.config.app_config import (
@@ -13,8 +15,14 @@ from tree.config.app_config import (
     ClusterSummariesConfig,
     ConcurrencyConfig,
     DreamConfig,
+    EmbeddingConfig,
     HdbscanConfig,
     MemoryConfig,
+    MODAL_NAME_PREFIX,
+    ModalConfig,
+    ModalEmbeddingModelConfig,
+    ModalLLMModelConfig,
+    ObservabilityConfig,
     QueryConfig,
     UmapConfig,
     YouTubeConfig,
@@ -26,6 +34,17 @@ from tree.config.sources import (
     SourceEntry,
 )
 
+# A minimal VALID Embedding catalog entry. Each rejection case below mutates
+# exactly one key of it, so the test names the mistake, not the boilerplate.
+_VALID_ENTRY = {
+    "repo_id": "voyageai/voyage-4-nano",
+    # 2048 = the real native width of this repo_id (see ::test_seed_entries),
+    # so the fixture never contradicts the shipped catalog it borrows its id from.
+    "native_dimensions": 2048,
+}
+
+_VALID_LLM_ENTRY = {"repo_id": "LiquidAI/LFM2.5-350M"}
+
 
 class TestLoadAppConfig:
     def test_loads_default_yaml(self, frozen_config_path):
@@ -33,16 +52,17 @@ class TestLoadAppConfig:
 
         assert config.models.llm.provider == "gemini"
         assert config.models.llm.model == "gemini-3.1-flash-lite"
-        # #048 flipped the default from the multimodal ``voyage-multimodal-3`` to
-        # the TEXT model ``voyage-3.5`` (routed to /v1/embeddings); ``voyage-3.5``
-        # is also 1024-d, so the dim stays put. #039 split the single
-        # ``embedding`` block into a transient ``resolution_embedding`` and a
-        # persisted ``search_embedding``; both point at the same model/dim.
+        # #048 flipped the default from the multimodal ``voyage-multimodal-3``
+        # to a TEXT model (routed to /v1/embeddings); ADR-009 then pinned the
+        # current ``voyage-4``, still 1024-d, so the dim never moved. #039
+        # split the single ``embedding`` block into a transient
+        # ``resolution_embedding`` and a persisted ``search_embedding``; both
+        # point at the same model/dim.
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-3.5"
+        assert config.models.resolution_embedding.model == "voyage-4"
         assert config.models.resolution_embedding.dimensions == 1024
         assert config.models.search_embedding.provider == "voyage"
-        assert config.models.search_embedding.model == "voyage-3.5"
+        assert config.models.search_embedding.model == "voyage-4"
         assert config.models.search_embedding.dimensions == 1024
         # #044: real-time request-batching caps. #054/ADR-002 dropped
         # max_total_tokens 320_000 → 10_000 (the shared free-tier Voyage TPM
@@ -306,9 +326,9 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.model == "voyage-multimodal-3"
         assert config.models.search_embedding.dimensions == 1024
         # resolution_embedding falls back to the EmbeddingConfig defaults
-        # (#048 flipped the code-level default model to the text ``voyage-3.5``).
+        # (ADR-009 pinned the code-level default to the text ``voyage-4``).
         assert config.models.resolution_embedding.provider == "voyage"
-        assert config.models.resolution_embedding.model == "voyage-3.5"
+        assert config.models.resolution_embedding.model == "voyage-4"
         assert config.models.resolution_embedding.dimensions == 1024
 
     def test_missing_file_returns_defaults(self, tmp_path):
@@ -612,17 +632,17 @@ class TestQueryConfig:
 
     The ONE absolute score in retrieval (Atlas normalises cosine to
     ``(1 + cos) / 2``), so it is the only place a "nothing relevant" decision
-    can sit. PROVISIONAL at 0.75 — ADR-008 §4 proposed 0.65, the two live
-    queries in ``tasks/125``'s log moved it one step up (a nonsense query
-    scored 0.728), and Chapter 7's evals own it from here. Which is exactly why
-    it is a knob.
+    can sit. PROVISIONAL at 0.70 — re-pinned on voyage-4 by the two live
+    queries in ``tasks/141``'s log (nonsense top=0.649, on-topic top=0.735, so
+    the voyage-3.5 pin of 0.75 from ``tasks/125`` kept nothing on topic), and
+    Chapter 7's evals own it from here. Which is exactly why it is a knob.
     """
 
     def test_min_vector_score_default_override_and_bounds(self, tmp_path, monkeypatch):
         # Default: the typed default, the frozen fixture and the real
-        # configs/default.yaml all agree on the pinned 0.75.
-        assert QueryConfig().min_vector_score == 0.75
-        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_vector_score == 0.75
+        # configs/default.yaml all agree on the pinned 0.70.
+        assert QueryConfig().min_vector_score == 0.70
+        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_vector_score == 0.70
 
         # Override: an operator raises the bar for a noisy corpus with the same
         # TREE_<SECTION>__<KEY> hatch every other knob uses — no YAML edit.
@@ -641,7 +661,7 @@ class TestQueryConfig:
     def test_min_vector_score_loaded_from_frozen_config(self, frozen_config_path):
         config = load_app_config(frozen_config_path)
 
-        assert config.query.min_vector_score == 0.75
+        assert config.query.min_vector_score == 0.70
 
     def test_min_vector_score_defaults_when_key_absent(self, tmp_path):
         """A YAML ``query:`` block written before #125 keeps the typed default
@@ -650,7 +670,7 @@ class TestQueryConfig:
         custom = tmp_path / "query.yaml"
         custom.write_text("query:\n  top_k: 5\n")
 
-        assert load_app_config(custom).query.min_vector_score == 0.75
+        assert load_app_config(custom).query.min_vector_score == 0.70
 
 
 class TestChunkingConfig:
@@ -991,3 +1011,720 @@ class TestClusteringConfig:
             assert description and description.strip(), (
                 f"{model.__name__}.{name} is missing Field(description=...)"
             )
+
+
+class TestEmbeddingDefaults:
+    """ADR-009 decision 1: both embedding blocks are pinned to ``voyage-4`` at
+    1024-d — the SAME dimension as legacy ``voyage-3.5``, so the live mongot
+    ``vector_index`` is untouched by the swap."""
+
+    def test_both_blocks_default_to_voyage_4_1024(self) -> None:
+        # Arrange / Act — the REAL shipped config, not the frozen fixture: this
+        # is what an operator boots.
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.models.resolution_embedding.provider == "voyage"
+        assert config.models.resolution_embedding.model == "voyage-4"
+        assert config.models.resolution_embedding.dimensions == 1024
+        assert config.models.search_embedding.provider == "voyage"
+        assert config.models.search_embedding.model == "voyage-4"
+        assert config.models.search_embedding.dimensions == 1024
+        # A YAML that omits the blocks entirely must land on the same pin.
+        assert EmbeddingConfig().provider == "voyage"
+        assert EmbeddingConfig().model == "voyage-4"
+        assert EmbeddingConfig().dimensions == 1024
+
+
+class TestModalCatalog:
+    """The **Modal catalog** — ``modal.embedding_models`` + ``modal.llm_models``
+    (ADR-009 §2/§3).
+
+    One YAML entry per Hugging Face model that MAY be served on Modal. An
+    entry says WHICH model and the facts about it; it never says HOW it is
+    served — the **Serving path** is the deploy driver's runtime decision, so
+    there is no ``serving`` and no ``base_model`` field to read. The seeds are
+    asserted against the REAL shipped ``configs/default.yaml`` (what an
+    operator boots), not the frozen fixture.
+    """
+
+    def test_seed_entries(self) -> None:
+        """Four seeds, two per list, each carrying only facts about the model
+        itself. Which of them becomes an endpoint is Modal's answer at deploy
+        time, and appears nowhere in this file."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        embeddings = config.modal.embedding_models
+        assert [e.repo_id for e in embeddings] == [
+            "Qwen/Qwen3-Embedding-0.6B",
+            "voyageai/voyage-4-nano",
+        ]
+
+        qwen, voyage = embeddings
+        assert qwen.kind == "embedding"
+        # HF API sha for `main`, read 2026-09-19.
+        assert qwen.revision == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+        # App-only fields are OPTIONAL: these come from the typed defaults, and
+        # are what the router needs the moment Modal refuses the model.
+        assert qwen.gpu == "A10"
+        assert qwen.cpu == 4
+        assert qwen.memory_mb == 16384
+        assert qwen.max_model_len is None
+        # MRL is on the card (32-1024), but nothing offline proves the
+        # Modal-picked recipe honours `dimensions` — stays empty until #141.
+        assert qwen.matryoshka_dimensions == []
+
+        assert voyage.kind == "embedding"
+        assert voyage.revision == "67fabc9bef010dabc5f6024aa1b1b6b93410426f"
+        assert voyage.max_model_len == 32768
+        assert voyage.matryoshka_dimensions == [256, 512, 1024, 2048]
+
+        # `native_dimensions` is what the server returns with NO `dimensions`
+        # asked for, so only Qwen3 lands in the 1024-d mongot vector_index
+        # untruncated. voyage-4-nano is natively 2048-d — its custom
+        # modeling_qwen3_bidirectional.py AutoModel applies a learned
+        # nn.Linear(1024, 2048) head (config.json `num_labels`, safetensors
+        # `linear.weight` [2048, 1024]) that modules.json cannot show — so the
+        # client MUST truncate to the index's 1024.
+        assert qwen.native_dimensions == 1024
+        assert voyage.native_dimensions == 2048
+
+        llms = config.modal.llm_models
+        assert [e.repo_id for e in llms] == [
+            "Qwen/Qwen3.5-0.8B",
+            "LiquidAI/LFM2.5-350M",
+        ]
+
+        qwen_llm, lfm = llms
+        assert qwen_llm.kind == "llm"
+        # HF API shas for `main`, read 2026-09-20. Qwen3.5-0.8B is in Modal's
+        # endpoint catalog and ungated (Apache-2.0), unlike the equally listed
+        # google/gemma-3-1b-it (`gated: manual`).
+        assert qwen_llm.revision == "2fc06364715b967f1860aea9cf38778875588b17"
+        assert qwen_llm.n_gpus == 1
+        assert qwen_llm.max_model_len is None
+        assert qwen_llm.app_name == "ep-tree-qwen3-5-0-8b"
+        # A THINKING model: live, with thinking ON, it spent the smoke test's
+        # 256-token budget reasoning and answered with empty `content`
+        # (tasks/141 round 1). Both knobs are CLIENT-side request fields.
+        assert qwen_llm.max_tokens == 4096
+        assert qwen_llm.chat_template_kwargs == {"enable_thinking": False}
+
+        assert lfm.kind == "llm"
+        assert lfm.revision == "9e6c6ccf47cd318696e137d381a7ded8fe4df09f"
+        assert lfm.gpu == "A10"
+        assert lfm.n_gpus == 1
+        # The card's context is 128000; 32K keeps the KV cache small on one A10.
+        assert lfm.max_model_len == 32768
+        assert lfm.app_name == "ep-tree-lfm2-5-350m"
+        # Not a thinking model: a budget that bounds a runaway constrained-JSON
+        # generation, and no chat-template kwarg at all.
+        assert lfm.max_tokens == 4096
+        assert lfm.chat_template_kwargs == {}
+
+    def test_the_kind_comes_from_the_list_not_from_the_model(self) -> None:
+        """``kind`` is a class fact, not a value YAML may assert: an entry
+        under ``llm_models`` IS an LLM, however its repo is named."""
+
+        assert ModalEmbeddingModelConfig.kind == "embedding"
+        assert ModalLLMModelConfig.kind == "llm"
+
+        with pytest.raises(ValidationError):
+            ModalLLMModelConfig(repo_id="acme/thing", kind="embedding")
+
+    def test_retired_fields_are_rejected(self, tmp_path) -> None:
+        """``serving:`` and ``base_model:`` asked the operator to predict an
+        answer only Modal has (ADR-009 §2). A YAML that still carries one must
+        fail at LOAD time, not be silently ignored."""
+
+        for field, value in (("serving", "vllm"), ("base_model", "Qwen/Qwen3-0.6B")):
+            custom = tmp_path / f"{field}.yaml"
+            custom.write_text(
+                yaml.safe_dump(
+                    {"modal": {"embedding_models": [{**_VALID_ENTRY, field: value}]}}
+                )
+            )
+
+            with pytest.raises(ValidationError) as excinfo:
+                load_app_config(custom)
+
+            message = str(excinfo.value)
+            assert field in message
+            assert "Extra inputs are not permitted" in message
+
+    def test_qwen_query_prompt_is_byte_exact(self) -> None:
+        """The Qwen3 instruction prompt is prepended client-side, so its BYTES
+        are the contract: a real newline, and NO space after ``Query:`` (the
+        model card's ``f'Instruct: {task}\nQuery:{query}'`` helper)."""
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        qwen = config.modal.embedding_models[0]
+        assert qwen.query_prompt == (
+            "Instruct: Given a web search query, retrieve relevant passages "
+            "that answer the query\nQuery:"
+        )
+        assert qwen.document_prompt == ""
+
+    def test_engine_pins(self, frozen_config_path) -> None:
+        """Engine versions are per ENGINE, not per model (ADR-009 §3), and the
+        ``autoinference-utils`` pin is shared by both App scripts.
+
+        vLLM is pinned to Modal's own embedding recipe (``vllm==0.26.0``, the
+        ``serve.py`` it generates for its embedding endpoints, read
+        2026-09-20) in the YAML, in the code default AND in the frozen
+        fixture: a bump that moves only one of the three would build the image
+        with a version no test describes.
+
+        SGLang's pin is a DOCKER TAG of ``lmsysorg/sglang`` (``v0.5.18``,
+        Modal's own LLM recipe), not a PyPI version — the SGLang App runs the
+        official image instead of pip-installing the engine, so a bare
+        ``0.5.18`` here would name no image at all.
+        """
+
+        config = load_app_config(_DEFAULT_CONFIG_PATH)
+
+        assert config.modal.autoinference_utils_version == "0.2.6"
+        assert config.modal.engines["vllm"].version == "0.26.0"
+        assert config.modal.engines["sglang"].version == "v0.5.18"
+        assert ModalConfig().engines["vllm"].version == "0.26.0"
+        assert ModalConfig().engines["sglang"].version == "v0.5.18"
+        frozen = load_app_config(frozen_config_path).modal
+        assert frozen.engines["vllm"].version == "0.26.0"
+        assert frozen.engines["sglang"].version == "v0.5.18"
+
+    def test_modal_warmup_deadline_default_and_override(
+        self, tmp_path, monkeypatch, frozen_config_path
+    ) -> None:
+        """ADR-009 §11: ONE budget for waiting out a cold start — the client's
+        300 s and the smoke test's 1200 s are gone. 600 s is ~3x the slowest
+        boot measured live (199 s, a 35B LLM)."""
+
+        # Default: the typed default, the frozen fixture and the real
+        # configs/default.yaml all agree on 600.
+        assert ModalConfig().warmup_deadline_s == 600.0
+        assert load_app_config(frozen_config_path).modal.warmup_deadline_s == 600.0
+        assert load_app_config(_DEFAULT_CONFIG_PATH).modal.warmup_deadline_s == 600.0
+
+        # Override: a first deploy that also downloads 16 GB of weights gets a
+        # longer budget for ONE command, with no file edit.
+        custom = tmp_path / "modal.yaml"
+        custom.write_text("modal:\n  warmup_deadline_s: 600\n")
+        monkeypatch.setenv("TREE_MODAL__WARMUP_DEADLINE_S", "45")
+        assert load_app_config(custom).modal.warmup_deadline_s == 45.0
+
+        # Bounds: a 0 s budget would fail every cold start on its first poll,
+        # which is the bug this knob exists to fix.
+        monkeypatch.setenv("TREE_MODAL__WARMUP_DEADLINE_S", "0")
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+        assert "warmup_deadline_s" in str(excinfo.value)
+
+    def test_modal_request_timeout_default_and_override(
+        self, tmp_path, monkeypatch, frozen_config_path
+    ) -> None:
+        """ADR-009 §11: ONE bound on a SINGLE request — the twin of the warm-up
+        budget, and a different wait: that one waits for a COLD server, this
+        one waits for ONE answer from a living one.
+
+        The SDK's own defaults are 600 s and two SILENT retries, so one
+        thinking model held a caller for 13 minutes before it was killed
+        (``tasks/141``, cycle 4d). 300 s is half the SDK's default and the same
+        order as the chat smoke test's accidental ``aiohttp`` default.
+        """
+
+        # Default: the typed default, the frozen fixture and the real
+        # configs/default.yaml all agree on 300.
+        assert ModalConfig().request_timeout_s == 300.0
+        assert load_app_config(frozen_config_path).modal.request_timeout_s == 300.0
+        assert load_app_config(_DEFAULT_CONFIG_PATH).modal.request_timeout_s == 300.0
+        assert "request_timeout_s: 300" in frozen_config_path.read_text()
+
+        # Override: an operator serving a 35B model whose answers take seven
+        # minutes widens it for ONE serving process, with no file edit.
+        custom = tmp_path / "modal.yaml"
+        custom.write_text("modal:\n  request_timeout_s: 300\n")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "45")
+        assert load_app_config(custom).modal.request_timeout_s == 45.0
+
+        # Bounds: a 0 s timeout would fail every call before the server could
+        # answer at all.
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "0")
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+        assert "request_timeout_s" in str(excinfo.value)
+
+    def test_a_minimal_entry_is_a_repo_id_and_its_facts(self) -> None:
+        """Story 1: nothing about serving, nothing about hardware — the App
+        fields default, and a Dedicated endpoint never reads them."""
+
+        entry = ModalEmbeddingModelConfig(repo_id="BAAI/bge-m3", native_dimensions=1024)
+
+        assert entry.kind == "embedding"
+        assert entry.revision == "main"
+        assert entry.endpoint_name == "tree-bge-m3"
+        assert entry.app_name == "ep-tree-bge-m3"
+        assert entry.extra_server_args == {}
+
+    def test_a_minimal_llm_entry_defaults_to_one_gpu(self) -> None:
+        entry = ModalLLMModelConfig(repo_id="acme/small-llm")
+
+        assert entry.kind == "llm"
+        assert entry.n_gpus == 1
+        assert entry.gpu == "A10"
+        assert entry.app_name == "ep-tree-small-llm"
+
+    def test_the_frozen_fixture_carries_the_request_knobs(
+        self, frozen_config_path
+    ) -> None:
+        """The fixture mirrors the SHAPE of the shipped catalog. A knob that
+        lived only in ``configs/default.yaml`` would leave every test that
+        loads the fixture proving nothing about the request the memory sends."""
+
+        qwen_llm, lfm = load_app_config(frozen_config_path).modal.llm_models
+
+        assert qwen_llm.max_tokens == 4096
+        assert qwen_llm.chat_template_kwargs == {"enable_thinking": False}
+        assert lfm.max_tokens == 4096
+        assert lfm.chat_template_kwargs == {}
+
+    def test_the_request_knobs_are_off_by_default(self) -> None:
+        """ADR-009 §10: both knobs are OPT-IN. An entry that names neither
+        sends the request it sent before they existed — ``None`` is "send no
+        `max_tokens`", not "send 0"."""
+
+        entry = ModalLLMModelConfig(repo_id="acme/small-llm")
+
+        assert entry.max_tokens is None
+        assert entry.chat_template_kwargs == {}
+
+    @pytest.mark.parametrize("max_tokens", [0, -1], ids=["zero", "negative"])
+    def test_a_non_positive_max_tokens_is_refused(self, max_tokens: int) -> None:
+        """A 0-token budget makes every completion empty — the exact live
+        failure this knob exists to fix (``tasks/141`` round 1)."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", max_tokens=max_tokens)
+
+        assert "max_tokens" in str(excinfo.value)
+
+    def test_chat_template_kwargs_must_be_a_json_object(self) -> None:
+        """It goes on the wire as a JSON OBJECT (SGLang's
+        ``chat_template_kwargs: Optional[Dict]``, ``protocol.py:844`` at
+        v0.5.18), so a bare string would be a 400 from a booted GPU."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs="x")
+
+        assert "chat_template_kwargs" in str(excinfo.value)
+
+    def test_a_chat_template_kwarg_key_may_not_be_empty(self) -> None:
+        """``{"": false}`` names no template variable at all — a YAML typo,
+        caught at load time instead of on a running GPU."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(
+                repo_id="acme/small-llm", chat_template_kwargs={"": False}
+            )
+
+        assert "chat_template_kwargs" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "value,offending_key",
+        [
+            ({"cutoff": datetime.date(2026, 1, 1)}, "cutoff"),
+            ({"limits": {"cutoff": datetime.date(2026, 1, 1)}}, "limits"),
+            ({"temperature": float("nan")}, "temperature"),
+            ({"temperature": float("inf")}, "temperature"),
+            ({"seen": {"a"}}, "seen"),
+        ],
+        ids=["a-yaml-date", "a-nested-yaml-date", "nan", "infinity", "a-set"],
+    )
+    def test_a_chat_template_kwarg_value_that_is_not_json_is_refused(
+        self, value: dict[str, object], offending_key: str
+    ) -> None:
+        """The knob is POSTed as a JSON object by both chat paths, so a value
+        `json.dumps` cannot write is not a knob — it is a crash before the
+        request (`json.dumps` in the smoke test's pre-POST log line) on one
+        path and a silently re-interpreted value (`"2026-01-01"`) on the
+        other, which is the parity guarantee itself breaking. NaN and Infinity
+        are floats Python writes and JSON has no syntax for, so they are
+        refused too. A NESTED offender names the TOP-LEVEL key that holds it —
+        the one an operator edits in the YAML."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs=value)
+
+        message = str(excinfo.value)
+        assert "chat_template_kwargs" in message
+        assert offending_key in message
+        assert "quote" in message
+
+    def test_an_unquoted_yaml_date_is_refused_at_load_time(self) -> None:
+        """The footgun in the operator's own words: YAML parses a BARE
+        `2026-01-01` into a `datetime.date`, not a string — so the rejection
+        has to survive the real parser, not just a hand-built dict."""
+
+        parsed = yaml.safe_load("cutoff: 2026-01-01")
+        assert parsed == {"cutoff": datetime.date(2026, 1, 1)}
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", chat_template_kwargs=parsed)
+
+        assert "cutoff" in str(excinfo.value)
+
+    def test_every_json_native_chat_template_kwarg_is_accepted(self) -> None:
+        """The refusal above may not cost the knob its range: SGLang passes the
+        object to a Jinja chat template, and every JSON type is a legal value
+        there. Asserted by ROUND-TRIPPING what was stored, so a validator that
+        quietly dropped or mangled a value could not pass."""
+
+        kwargs = {
+            "enable_thinking": False,
+            "name": "qwen",
+            "top_k": 20,
+            "temperature": 0.7,
+            "stop": None,
+            "tags": ["a", 1, None],
+            "nested": {"deep": {"ok": True, "list": [1.5, "x"]}},
+        }
+
+        entry = ModalLLMModelConfig(
+            repo_id="acme/small-llm", chat_template_kwargs=kwargs
+        )
+
+        assert entry.chat_template_kwargs == kwargs
+        assert json.loads(json.dumps(entry.chat_template_kwargs, allow_nan=False)) == (
+            kwargs
+        )
+
+    @pytest.mark.parametrize(
+        "knob,value",
+        [("max_tokens", 512), ("chat_template_kwargs", {"enable_thinking": False})],
+        ids=["max_tokens", "chat_template_kwargs"],
+    )
+    def test_the_request_knobs_are_llm_only(self, knob: str, value: object) -> None:
+        """Story 5: ``/v1/embeddings`` has neither a completion budget nor a
+        chat template, so ``extra="forbid"`` refuses the knob on an EMBEDDING
+        entry — at load time, naming the field."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(**{**_VALID_ENTRY, knob: value})
+
+        assert "Extra inputs are not permitted" in str(excinfo.value)
+        assert knob in str(excinfo.value)
+
+    def test_n_gpus_must_be_positive(self) -> None:
+        """It becomes SGLang's ``tp`` and the ``:N`` of the GPU string, so a
+        0 would deploy a server with no GPU at all."""
+
+        for n_gpus in (0, -1):
+            with pytest.raises(ValidationError) as excinfo:
+                ModalLLMModelConfig(repo_id="acme/small-llm", n_gpus=n_gpus)
+
+            assert "n_gpus" in str(excinfo.value)
+
+    @pytest.mark.parametrize("flag", ["--tp", "--tp-size", "--tensor-parallel-size"])
+    def test_tp_flags_are_builder_owned(self, flag: str) -> None:
+        """Parallelism is derived from ``n_gpus``; an entry that also set it
+        by hand could disagree with the GPU string the App asks Modal for."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalLLMModelConfig(repo_id="acme/small-llm", extra_server_args={flag: "2"})
+
+        assert f"{flag!r} is owned by the deploy builder" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "revision",
+        ["main", "refs/pr/3", "v1.2.0", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"],
+    )
+    def test_accepts_every_shape_a_hub_revision_takes(self, revision: str) -> None:
+        """A sha, a branch, a tag and a PR ref — the charset excludes only
+        whitespace and shell punctuation, not legal Hub revisions."""
+
+        entry = ModalEmbeddingModelConfig(
+            repo_id="BAAI/bge-m3", native_dimensions=1024, revision=revision
+        )
+
+        assert entry.revision == revision
+
+    @pytest.mark.parametrize(
+        "repo_id,endpoint_name",
+        [
+            ("voyageai/voyage-4-nano", "tree-voyage-4-nano"),
+            ("Qwen/Qwen3-Embedding-0.6B", "tree-qwen3-embedding-0-6b"),
+            ("Qwen/Qwen3.5-0.8B", "tree-qwen3-5-0-8b"),
+            ("LiquidAI/LFM2.5-350M", "tree-lfm2-5-350m"),
+            ("BAAI/bge-m3", "tree-bge-m3"),
+            ("Org/My_Model..v2", "tree-my-model-v2"),
+        ],
+    )
+    def test_name_derivation(self, repo_id: str, endpoint_name: str) -> None:
+        """Every name we create carries the ``tree-`` namespace (ADR-009 §3):
+        Modal names a hand-made endpoint's app ``ep-<slug>``, ours is
+        ``ep-tree-<slug>``, so a deploy of ours can never land on it.
+
+        ONE derivation for BOTH kinds — it lives on the shared base class, so
+        a correction to either half is one line."""
+
+        entry = ModalEmbeddingModelConfig(repo_id=repo_id, native_dimensions=1024)
+        llm_entry = ModalLLMModelConfig(repo_id=repo_id)
+
+        assert MODAL_NAME_PREFIX == "tree"
+        assert entry.endpoint_name == llm_entry.endpoint_name == endpoint_name
+        assert entry.app_name == llm_entry.app_name == f"ep-{endpoint_name}"
+
+    @pytest.mark.parametrize(
+        "slug_length,fits",
+        [(55, True), (56, False)],
+        ids=["55-characters-fit", "56-characters-do-not"],
+    )
+    def test_app_name_length_limit(self, slug_length: int, fits: bool) -> None:
+        """``ep-tree-`` spends 8 of Modal's 63 characters, so a slug may be at
+        most 55. Caught at LOAD time instead of after an image build."""
+
+        repo_id = f"acme/{'a' * slug_length}"
+
+        if fits:
+            entry = ModalEmbeddingModelConfig(repo_id=repo_id, native_dimensions=1024)
+            assert len(entry.app_name) == 63
+            return
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(repo_id=repo_id, native_dimensions=1024)
+
+        message = str(excinfo.value)
+        assert "at most 63" in message
+        assert "64 characters" in message
+
+    def test_empty_slug_is_still_rejected(self) -> None:
+        """The prefix must not mask an empty derivation: ``tree-`` is truthy,
+        so the validator reads the SLUG."""
+
+        with pytest.raises(ValidationError) as excinfo:
+            ModalEmbeddingModelConfig(repo_id="a/---", native_dimensions=1024)
+
+        assert "derives an empty endpoint name" in str(excinfo.value)
+
+    def test_uniqueness_spans_both_lists(self, tmp_path) -> None:
+        """One model, one entry, one Modal app — ACROSS the lists. A repo id
+        in both would make ``get_catalog_entry`` (and therefore the KIND)
+        order-dependent; two ids deriving one app name would share one Modal
+        app, so deploying one would stop the other."""
+
+        duplicate_id = tmp_path / "duplicate_id.yaml"
+        duplicate_id.write_text(
+            yaml.safe_dump(
+                {
+                    "modal": {
+                        "embedding_models": [_VALID_ENTRY],
+                        "llm_models": [{"repo_id": _VALID_ENTRY["repo_id"]}],
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(duplicate_id)
+
+        message = str(excinfo.value)
+        assert "duplicate repo_id 'voyageai/voyage-4-nano'" in message
+        assert "modal.embedding_models and modal.llm_models" in message
+
+        duplicate_app = tmp_path / "duplicate_app.yaml"
+        duplicate_app.write_text(
+            yaml.safe_dump(
+                {
+                    "modal": {
+                        "embedding_models": [_VALID_ENTRY],
+                        "llm_models": [{"repo_id": "acme/voyage-4-nano"}],
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(duplicate_app)
+
+        message = str(excinfo.value)
+        assert (
+            "'voyageai/voyage-4-nano' and 'acme/voyage-4-nano' both derive" in message
+        )
+        assert "'ep-tree-voyage-4-nano'" in message
+        assert "modal.embedding_models and modal.llm_models" in message
+
+    @pytest.mark.parametrize(
+        "entries,expected_fragments",
+        [
+            pytest.param(
+                [{**_VALID_ENTRY, "url": "https://acme--x.modal.run"}],
+                ["url", "Extra inputs are not permitted"],
+                id="unknown-field",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "repo_id": "no-slash"}],
+                ["repo_id", "should match pattern"],
+                id="repo-id-without-org",
+            ),
+            pytest.param(
+                [{k: v for k, v in _VALID_ENTRY.items() if k != "native_dimensions"}],
+                ["native_dimensions", "Field required"],
+                id="embedding-without-native-dimensions",
+            ),
+            pytest.param(
+                # Not in the AC: found by QA. `-` passes _REPO_ID_PATTERN but
+                # the derivation collapses it away, so the app would be `ep-`.
+                [{**_VALID_ENTRY, "repo_id": "acme/---"}],
+                [
+                    "'acme/---'",
+                    "derives an empty endpoint name",
+                    # The derivation is ASCII-only (`[^a-z0-9]+` -> `-`), so
+                    # the message must not promise that a non-ASCII letter
+                    # survives it.
+                    "at least one ASCII letter or digit",
+                ],
+                id="repo-id-deriving-an-empty-endpoint-name",
+            ),
+            pytest.param(
+                # Not in the AC: found by QA on #139. The revision travels as
+                # ONE element of the argv the driver logs with a plain
+                # `" ".join(...)`, so a value carrying whitespace would split
+                # into two tokens in a log line meant to be re-runnable.
+                [{**_VALID_ENTRY, "revision": "main branch"}],
+                ["revision", "should match pattern"],
+                id="revision-with-whitespace",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "revision": "main;rm -rf /"}],
+                ["revision", "should match pattern"],
+                id="revision-with-shell-punctuation",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"runner": "pooling"}}],
+                ["'runner'", "must start with '--'"],
+                id="server-arg-key-without-dashes",
+            ),
+            pytest.param(
+                [
+                    {
+                        **_VALID_ENTRY,
+                        "extra_server_args": {
+                            "--pooler-config": '{"pooling_type": "MEAN"}'
+                        },
+                    }
+                ],
+                ["value for --pooler-config contains whitespace", "compact JSON"],
+                id="server-arg-value-with-whitespace",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"--port": "8000"}}],
+                ["'--port'", "owned by the deploy builder"],
+                id="reserved-server-arg-key",
+            ),
+            pytest.param(
+                [{**_VALID_ENTRY, "extra_server_args": {"--is-embedding": ""}}],
+                ["'--is-embedding'", "owned by the deploy builder"],
+                id="builder-owned-server-arg-key",
+            ),
+            pytest.param(
+                [_VALID_ENTRY, _VALID_ENTRY],
+                [
+                    "duplicate repo_id 'voyageai/voyage-4-nano'",
+                    "one entry per model",
+                ],
+                id="duplicate-repo-id",
+            ),
+            pytest.param(
+                [_VALID_ENTRY, {**_VALID_ENTRY, "repo_id": "acme/voyage-4-nano"}],
+                [
+                    "'voyageai/voyage-4-nano' and 'acme/voyage-4-nano' both derive",
+                    "'ep-tree-voyage-4-nano'",
+                    "one app per model",
+                ],
+                id="duplicate-app-name",
+            ),
+        ],
+    )
+    def test_rejects_invalid_entries(
+        self,
+        tmp_path,
+        entries: list[dict],
+        expected_fragments: list[str],
+    ) -> None:
+        """Every catalog mistake is a LOAD-TIME error naming the offending key,
+        never a container that dies minutes later on a mangled flag."""
+
+        custom = tmp_path / "modal.yaml"
+        custom.write_text(yaml.safe_dump({"modal": {"embedding_models": entries}}))
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        message = str(excinfo.value)
+        for fragment in expected_fragments:
+            assert fragment in message
+
+    def test_an_llm_entry_takes_no_embedding_fields(self, tmp_path) -> None:
+        """The halves are not interchangeable: dimensions and prompts are
+        embedding facts, and an LLM entry that carried them would imply a
+        client that does not exist."""
+
+        custom = tmp_path / "llm.yaml"
+        custom.write_text(
+            yaml.safe_dump(
+                {
+                    "modal": {
+                        "llm_models": [{**_VALID_LLM_ENTRY, "native_dimensions": 1024}]
+                    }
+                }
+            )
+        )
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        assert "native_dimensions" in str(excinfo.value)
+
+    def test_modal_section_is_optional(self, tmp_path) -> None:
+        """A YAML with no ``modal:`` block boots with an EMPTY catalog: the
+        code default adds no model, the YAML seeds it."""
+
+        custom = tmp_path / "no_modal.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.modal.embedding_models == []
+        assert config.modal.llm_models == []
+        assert AppConfig().modal.embedding_models == []
+        assert AppConfig().modal.llm_models == []
+
+    def test_frozen_config_carries_the_catalog(self, frozen_config_path) -> None:
+        """The frozen fixture gains both lists too, so the loader assertions
+        cover a catalog without depending on operator edits to default.yaml."""
+
+        config = load_app_config(frozen_config_path)
+
+        assert [e.repo_id for e in config.modal.embedding_models] == [
+            "Qwen/Qwen3-Embedding-0.6B",
+            "voyageai/voyage-4-nano",
+        ]
+        assert [e.repo_id for e in config.modal.llm_models] == [
+            "Qwen/Qwen3.5-0.8B",
+            "LiquidAI/LFM2.5-350M",
+        ]
+
+
+def test_yaml_price_map_matches_code_default() -> None:
+    """The YAML price map and the Pydantic default price map are ONE table.
+
+    A model id present in only one of them costs $0 in half the deployments
+    (YAML-less boot vs shipped config) — a silent telemetry gap, so the two are
+    pinned identical here.
+    """
+
+    yaml_map = yaml.safe_load(_DEFAULT_CONFIG_PATH.read_text())["observability"][
+        "embedding_price_per_1m_tokens"
+    ]
+
+    assert yaml_map == ObservabilityConfig().embedding_price_per_1m_tokens

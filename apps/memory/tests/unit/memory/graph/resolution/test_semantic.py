@@ -4,7 +4,7 @@ import pytest
 
 from tree.entities.memory import NodeType
 from tree.memory.graph.resolution import ResolvedEntity, SemanticMatchResolver
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
 
 class _ScriptedEmbeddingModel(BaseEmbeddingModel):
@@ -21,7 +21,9 @@ class _ScriptedEmbeddingModel(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return next(iter(self._scripted.values())).__len__() if self._scripted else 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.embed_call_count += 1
         out: list[list[float]] = []
         for text in texts:
@@ -41,13 +43,17 @@ class _CountingEmbeddingModel(BaseEmbeddingModel):
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
         return 2
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.calls.append(list(texts))
+        self.roles.append(input_type)
         # Stable, distinct, finite-norm vector per text.
         return [[float(len(t)), float(sum(ord(c) for c in t))] for t in texts]
 
@@ -374,3 +380,31 @@ def test_cosine_similarity_edge_cases(
     score = SemanticMatchResolver._cosine_similarity(vec_a, vec_b)
 
     assert score == pytest.approx(expected, abs=1e-9)
+
+
+class TestEmbeddingRole:
+    """Resolution embeds with NO **Embedding role** (ADR-009 §5).
+
+    It compares a name to other names — symmetric by construction — and the
+    vector is never persisted. Both entry points must stay role-less, so the
+    per-instance LRU can never mix a role-less vector with a ``document`` one.
+    """
+
+    async def test_prewarm_embeds_without_a_role(self) -> None:
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80)
+
+        await resolver.prewarm_cache(["Ada Lovelace", "A. Lovelace"])
+
+        assert model.roles == [None]
+
+    async def test_single_name_embed_has_no_role(self) -> None:
+        model = _CountingEmbeddingModel()
+        resolver = SemanticMatchResolver(model, threshold=0.80)
+
+        await resolver.resolve(
+            "Ada Lovelace", NodeType.PERSON, candidate_names=["A. Lovelace"]
+        )
+
+        # One call per uncached name (no prewarm), all of them role-less.
+        assert model.roles == [None, None]

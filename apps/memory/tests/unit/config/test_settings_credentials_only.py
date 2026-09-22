@@ -72,7 +72,9 @@ class TestSettingsCredentialsOnlySurface:
         assert hasattr(s.mongo, "mongo_initdb_database")
         assert hasattr(s, "google_api_key")
         assert hasattr(s, "voyage_api_key")
-        assert hasattr(s, "modal_embedding_api_key")
+        assert hasattr(s, "modal_proxy_token_id")
+        assert hasattr(s, "modal_proxy_token_secret")
+        assert hasattr(s, "hf_token")
         assert hasattr(s, "brightdata_api_key")
         assert hasattr(s, "brightdata_unlocker_zone")
         assert hasattr(s, "brightdata_serp_zone")
@@ -95,7 +97,14 @@ class TestSettingsCredentialsOnlySurface:
             "mongo",
             "google_api_key",
             "voyage_api_key",
-            "modal_embedding_api_key",
+            # Modal Proxy token — the ONLY auth in front of every Embedding
+            # catalog app, on every Serving path; it retired the engine-level
+            # key this set used to carry. Plus the OPTIONAL Hugging Face
+            # weight-download token for private or gated repos — credentials,
+            # so never YAML (ADR-009 §4/§9).
+            "modal_proxy_token_id",
+            "modal_proxy_token_secret",
+            "hf_token",
             "brightdata_api_key",
             "brightdata_unlocker_zone",
             "brightdata_serp_zone",

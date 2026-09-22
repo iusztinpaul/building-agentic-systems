@@ -36,7 +36,7 @@ env-prod: # Switch make + direnv + running infra to prod (.env.prod) via .env.ta
 env-status: # Show which env target is active.
 	@echo "Env target: $(if $(filter prod,$(ENV_TARGET)),prod (.env.prod),local (.env))"
 
-generate-secret-key: # Generate a random URL-safe secret (e.g. MODAL_EMBEDDING_API_KEY).
+generate-secret-key: # Generate a random URL-safe secret (32 bytes) for a .env value you choose yourself.
 	@python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 generate-password: # Generate a random URL-safe secret (e.g. MONGO_INITDB_ROOT_PASSWORD).

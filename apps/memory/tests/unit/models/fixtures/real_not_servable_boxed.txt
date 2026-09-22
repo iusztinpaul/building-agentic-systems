@@ -1,0 +1,14 @@
+╭─ Error ──────────────────────────────────────────────────────────────────────╮
+│ The custom model is not a servable checkpoint of base model                  │
+│ 'Qwen/Qwen3-Embedding-0.6B': Custom model hidden_size=2560 does not match    │
+│ base model 'Qwen/Qwen3-Embedding-0.6B' hidden_size=1024. The custom model's  │
+│ weights are not compatible with this base model. Custom model                │
+│ num_hidden_layers=36 does not match base model 'Qwen/Qwen3-Embedding-0.6B'   │
+│ num_hidden_layers=28. The custom model's weights are not compatible with     │
+│ this base model. Custom model num_attention_heads=32 does not match base     │
+│ model 'Qwen/Qwen3-Embedding-0.6B' num_attention_heads=16. The custom model's │
+│ weights are not compatible with this base model. Custom model                │
+│ intermediate_size=9728 does not match base model 'Qwen/Qwen3-Embedding-0.6B' │
+│ intermediate_size=3072. The custom model's weights are not compatible with   │
+│ this base model.                                                             │
+╰──────────────────────────────────────────────────────────────────────────────╯

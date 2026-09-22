@@ -261,6 +261,38 @@ class TestEmbeddingCostMath:
         assert cost == 0.0
 
 
+class TestVoyage4Prices:
+    """ADR-009 decision 1: the price map GAINS the 4 series and KEEPS every
+    legacy id, so both the new pin and an escape-hatch legacy pin are costed.
+    Prices verified against https://docs.voyageai.com/docs/pricing (Sept 2026).
+    """
+
+    @pytest.mark.parametrize(
+        "model,price_per_1m",
+        [
+            ("voyage-4-large", 0.12),
+            ("voyage-4", 0.06),
+            ("voyage-4-lite", 0.02),
+            ("voyage-code-4", 0.12),
+            # Legacy row kept: a ``TREE_MODELS__…__MODEL=voyage-3.5`` override
+            # still costs instead of silently reporting $0.
+            ("voyage-3.5", 0.06),
+        ],
+    )
+    def test_cost_for_one_million_tokens(self, model: str, price_per_1m: float) -> None:
+        config = ObservabilityConfig()
+
+        cost = config.cost_for(model, 1_000_000)
+
+        assert cost == pytest.approx(price_per_1m)
+
+    def test_unknown_model_still_costs_zero(self) -> None:
+        config = ObservabilityConfig()
+
+        # Telemetry is fail-open: an unmapped id records usage with no cost.
+        assert config.cost_for("voyage-5", 1_000_000) == 0.0
+
+
 class TestLazyIdempotentConfiguration:
     """The configured flag does NOT survive into Prefect flow-run subprocesses,
     so configure-dependent helpers self-configure on first use, once per

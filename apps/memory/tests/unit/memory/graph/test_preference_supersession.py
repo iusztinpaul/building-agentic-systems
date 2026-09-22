@@ -18,6 +18,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.entities.memory import EdgeType, NodeType, build_node_id
+from tree.memory.embedding_text import entity_embedding_text
 from tree.memory.graph.preference_supersession import (
     canonicalize_preference_names,
     resolve_supersessions,
@@ -30,7 +31,7 @@ from tree.memory.types import (
     RawExtraction,
     ChunkedDocument,
 )
-from tree.models.base import BaseEmbeddingModel
+from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -152,16 +153,27 @@ class _FakeDatabase:
 
 
 class _FakeEmbedding(BaseEmbeddingModel):
-    """Embedding model that returns a pre-canned vector per input."""
+    """Embedding model that returns a pre-canned vector per input.
+
+    Records the exact texts of every call: what the resolver SENDS is the
+    behaviour under test for sanitization (the persisted statement stays raw,
+    so only the recorded call shows which bytes reached the API).
+    """
 
     def __init__(self, vector: list[float]) -> None:
         self._vector = vector
+        self.roles: list[EmbeddingRole | None] = []
+        self.texts: list[list[str]] = []
 
     @property
     def dimensions(self) -> int:
         return len(self._vector)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        self.roles.append(input_type)
+        self.texts.append(list(texts))
         return [list(self._vector) for _ in texts]
 
 
@@ -613,6 +625,241 @@ class TestPreferenceSupersessionWritePayload:
         assert new_row["embedding"] == [0.7, 0.7, 0.1]
 
 
+class TestSupersessionEmbedsSanitisedText:
+    """What reaches the embedding API is the SANITISED statement.
+
+    Two reasons, both load-bearing: Voyage answers 400 on control characters and
+    lone surrogates (the row would land without a vector), and this vector is
+    WRITTEN on the superseding row — so it must be embedded on the same bytes
+    ``embedding_text.entity_embedding_text`` builds, or the next **Embedding
+    reset** (ADR-009 §7) re-embeds the row on different text and supersession's
+    similarities move. The persisted ``properties.statement`` stays RAW: the
+    judge prompt and the node slug read the user's text, only the embed INPUT is
+    cleaned.
+    """
+
+    async def test_supersession_embeds_the_sanitised_statement(self) -> None:
+        # Arrange: a statement that came off a PDF with a stray control
+        # character and a lone surrogate.
+        raw_statement = "prefers light\x00 mode\ud800"
+        existing = _seed_preference_row(
+            name="prefers-dark-mode",
+            category="ui",
+            statement="prefers dark mode",
+            embedding=[1.0, 0.0, 0.0],
+        )
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        new_node = ExtractedNode(
+            name="prefers-light-mode",
+            type=NodeType.PREFERENCE,
+            properties={"statement": raw_statement, "category": "ui"},
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
+
+        await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[_make_raw(new_node)],
+        )
+
+        # Assert: cleaned text out, persisted statement still raw, role kept.
+        assert embedding_model.texts == [["prefers light mode"]]
+        assert embedding_model.roles == ["document"]
+        new_id = build_node_id(_USER_ID, NodeType.PREFERENCE, "prefers-light-mode")
+        new_row = collection.rows[new_id]
+        assert new_row["properties"]["statement"] == raw_statement
+        assert new_row["embedding"] == [0.7, 0.7, 0.1]
+
+    async def test_supersession_skips_the_embed_for_a_blank_statement(self) -> None:
+        # Arrange: a statement of nothing but invalid characters and spaces —
+        # it survives ``.strip()`` but sanitizes to blank.
+        existing = _seed_preference_row(
+            name="prefers-dark-mode",
+            category="ui",
+            statement="prefers dark mode",
+            embedding=[1.0, 0.0, 0.0],
+        )
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        new_node = ExtractedNode(
+            name="malformed-preference",
+            type=NodeType.PREFERENCE,
+            properties={"statement": "\x00 \ud800", "category": "ui"},
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
+
+        decisions = await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[_make_raw(new_node)],
+        )
+
+        # Assert: a blank string is NEVER embedded — the model is not called at
+        # all, and the supersession is still written, just without a vector
+        # (``_backfill_filter`` treats a missing/empty ``embedding`` alike, so
+        # the indexing backfill picks the row up).
+        assert embedding_model.texts == []
+        assert decisions[0].superseded is True
+        new_id = build_node_id(_USER_ID, NodeType.PREFERENCE, "malformed-preference")
+        new_row = collection.rows[new_id]
+        assert not new_row.get("embedding")
+        assert new_row["valid_until"] is None
+
+    async def test_supersession_text_equals_backfill_text(self) -> None:
+        # Arrange: the same preference row the indexing backfill would re-embed
+        # after an **Embedding reset**.
+        existing = _seed_preference_row(
+            name="prefers-dark-mode",
+            category="ui",
+            statement="prefers dark mode",
+            embedding=[1.0, 0.0, 0.0],
+        )
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        new_node = ExtractedNode(
+            name="prefers-light-mode",
+            type=NodeType.PREFERENCE,
+            properties={"statement": "  prefers light\x0c mode  ", "category": "ui"},
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
+
+        await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[_make_raw(new_node)],
+        )
+
+        # Assert: the bytes the resolver sent == the bytes the backfill rebuilds
+        # from the row it just wrote. Computed from the persisted row, not from
+        # a literal, so the two paths must actually agree.
+        new_id = build_node_id(_USER_ID, NodeType.PREFERENCE, "prefers-light-mode")
+        persisted_row = collection.rows[new_id]
+        assert embedding_model.texts[0][0] == entity_embedding_text(persisted_row)
+
+
+class TestFactObjectPresenceRule:
+    """A present-but-blank ``object`` never hands the row to legacy ``object_``.
+
+    Same rule as ``embedding_text.entity_embedding_text`` — and here it must
+    hold because ``_fact_object``'s return value becomes the embed input a few
+    frames later. Reading the stale pre-rename ``object_`` would write a vector
+    on text ``entity_embedding_text`` does not produce, i.e. a vector the
+    indexing backfill silently replaces after an **Embedding reset**.
+    """
+
+    async def test_blank_object_is_not_shadowed_by_the_legacy_column(self) -> None:
+        # Arrange: a row carrying both columns — current value blanked, stale
+        # pre-rename value still there.
+        existing_id = build_node_id(_USER_ID, NodeType.FACT, "paul-lives-in-paris")
+        existing = {
+            "_id": existing_id,
+            "user_id": _USER_ID,
+            "kind": "node",
+            "type": NodeType.FACT.value,
+            "name": "paul-lives-in-paris",
+            "properties": {
+                "subject": "paul",
+                "predicate": "lives_in",
+                "object": "Paris",
+            },
+            "embedding": [1.0, 0.0, 0.0],
+            "valid_from": None,
+            "valid_until": None,
+        }
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        new_node = ExtractedNode(
+            name="paul-lives-in-berlin",
+            type=NodeType.FACT,
+            properties={
+                "subject": "paul",
+                "predicate": "lives_in",
+                "object": "",
+                "object_": "Bucharest",
+            },
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
+
+        decisions = await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[_make_raw(new_node)],
+        )
+
+        # Assert: the row has no usable object, so it is skipped entirely — the
+        # stale "Bucharest" is neither judged nor embedded.
+        assert decisions == []
+        assert judge.calls == 0
+        assert embedding_model.texts == []
+
+    async def test_legacy_object_still_read_when_object_is_absent(self) -> None:
+        # The legacy column is NOT dead: a row written before the rename has
+        # only ``object_`` and must still supersede.
+        existing_id = build_node_id(_USER_ID, NodeType.FACT, "paul-lives-in-paris")
+        existing = {
+            "_id": existing_id,
+            "user_id": _USER_ID,
+            "kind": "node",
+            "type": NodeType.FACT.value,
+            "name": "paul-lives-in-paris",
+            "properties": {
+                "subject": "paul",
+                "predicate": "lives_in",
+                "object": "Paris",
+            },
+            "embedding": [1.0, 0.0, 0.0],
+            "valid_from": None,
+            "valid_until": None,
+        }
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        new_node = ExtractedNode(
+            name="paul-lives-in-bucharest",
+            type=NodeType.FACT,
+            properties={
+                "subject": "paul",
+                "predicate": "lives_in",
+                "object_": "Bucharest",
+            },
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
+
+        decisions = await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[_make_raw(new_node)],
+        )
+
+        assert decisions[0].superseded is True
+        assert embedding_model.texts == [["Bucharest"]]
+
+
 class TestFactSupersession:
     async def test_fact_contradiction_writes_superseded_by_same_subject_predicate(
         self,
@@ -888,3 +1135,49 @@ class TestResolverNameSlugConsistency:
         id_a = build_node_id(_USER_ID, NodeType.PREFERENCE, n_run_1.name)
         id_b = build_node_id(_USER_ID, NodeType.PREFERENCE, n_run_2.name)
         assert id_a == id_b
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the new statement (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRole:
+    """The new statement's vector is WRITTEN on the superseding row, so it is
+    a persisted vector and embeds as ``document`` (ADR-009 §5).
+
+    It is also compared against the OLD row's persisted statement vector —
+    statement-vs-statement inside document space, symmetric by construction.
+    """
+
+    async def test_new_statement_embeds_as_document(self) -> None:
+        existing = _seed_preference_row(
+            name="prefers-dark-mode",
+            category="ui",
+            statement="prefers dark mode",
+            embedding=[1.0, 0.0, 0.0],
+        )
+        collection = _FakeCollection(seed_rows=[existing])
+        database = _FakeDatabase(collection)
+        raw = _make_raw(
+            ExtractedNode(
+                name="prefers-light-mode",
+                type=NodeType.PREFERENCE,
+                properties={"statement": "prefers light mode", "category": "ui"},
+            )
+        )
+        judge = _StubJudgeLLM(
+            {"is_contradiction": True, "confidence": 0.91, "reasoning": "x"}
+        )
+        embedding_model = _FakeEmbedding([0.95, 0.05, 0.0])
+
+        await resolve_supersessions(
+            database=database,
+            user_id=_USER_ID,
+            llm=judge,  # type: ignore[arg-type]
+            embedding_model=embedding_model,
+            raws=[raw],
+            now=datetime.now(tz=UTC),
+        )
+
+        assert embedding_model.roles == ["document"]

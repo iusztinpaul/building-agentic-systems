@@ -30,6 +30,11 @@ class SemanticMatchResolver(AbstractResolver):
     least-recently-used (oldest-by-access). The cache key is the normalized
     form of the name, so ``"Alice"``, ``"  alice "``, and ``"ALICE"`` all
     share one slot.
+
+    Every embed here is role-less (``input_type=None``, ADR-009 §5): this
+    resolver compares a name to other names — symmetric — and the vector is
+    never persisted. Its LRU therefore never mixes **Embedding role**s, so a
+    cached vector is always comparable with a freshly computed one.
     """
 
     def __init__(

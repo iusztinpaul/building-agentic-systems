@@ -11,6 +11,7 @@ edges" is a claim about what landed in Mongo, not about which mock was called.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import timedelta
 from pathlib import Path
@@ -24,7 +25,7 @@ from beanie import PydanticObjectId
 from prefect.cache_policies import NO_CACHE
 
 from tests.unit.conftest import TEST_DATABASE
-from tree.config.app_config import ChunkingConfig, load_app_config
+from tree.config.app_config import ChunkingConfig, LLMConfig, load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.documents import Document, SourceType
@@ -40,8 +41,12 @@ from tree.entities.users import User
 from tree.memory.graph.dedup import DeduplicationConfig, DeduplicationResult
 from tree import offline, online
 from tree.memory import pipeline
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import (
+    node_to_embedding_text,
+    prospective_entity_embedding_text,
+)
 from tree.memory.clustering.store import ChildEmbeddingRow, ClusterWriteCounts
+from tree.memory.clustering.summaries import fallback_summary
 from tree.memory.clustering.types import (
     ClusteringResult,
     ClusterSummary,
@@ -55,7 +60,6 @@ from tree.memory.pipeline import (
     _dispatch_entity_write,
     _embed_children,
     _embed_entities,
-    _entity_embeddable_text,
     _llm_extract_entities,
     _load_rag_rows,
     _rag_row_id_map,
@@ -89,8 +93,14 @@ from tree.memory.rag.load import (
 from tree.memory.rag.types import ChildChunk, ParentChunk
 from tree.memory.graph.resolution.composite import CompositeResolver
 from tree.memory.graph.resolution.types import ResolvedEntity
-from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
+from tree.models.exceptions import ModelError
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
+from tree.models.get_model import (
+    llm_identity,
+    prewarm_models,
+    search_embedding_identity,
+)
 from tree.memory.types import (
     ChunkedDocument,
     DedupDecision,
@@ -111,6 +121,11 @@ _PERSON_RESPONSE = {
     "nodes": [{"name": "alice", "type": "person", "properties": {}}],
     "edges": [],
 }
+
+# The cache-key identity of the LLM the two cached LLM tasks take as a required
+# input. Cache-key material only — the bodies never read it — so direct calls of
+# the bodies can pin any concrete ``provider:model`` string.
+_TEST_LLM_IDENTITY = "gemini:gemini-3.1-flash-lite"
 
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -359,13 +374,17 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
     def __init__(self, dimensions: int = 4) -> None:
         self._dimensions = dimensions
         self.texts: list[str] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.texts.extend(texts)
+        self.roles.append(input_type)
         return [[0.5] * self._dimensions for _ in texts]
 
 
@@ -436,7 +455,9 @@ class TestEmbedChildrenTask:
             "tree.memory.pipeline.get_search_embedding_model", return_value=model
         )
 
-        vectors = await _embed_children(["a", "b"])
+        vectors = await _embed_children(
+            ["a", "b"], embedding_identity="voyage:voyage-4:1024"
+        )
 
         assert model.texts == ["a", "b"]
         assert vectors == {"a": [0.5] * 4, "b": [0.5] * 4}
@@ -446,7 +467,9 @@ class TestEmbedChildrenTask:
     ) -> None:
         factory = mocker.patch("tree.memory.pipeline.get_search_embedding_model")
 
-        assert await _embed_children([]) == {}
+        assert (
+            await _embed_children([], embedding_identity="voyage:voyage-4:1024") == {}
+        )
 
         factory.assert_not_called()
 
@@ -505,7 +528,9 @@ class TestLlmExtractEntitiesTask:
             document_id="d1", source_uri="u1", source_type="huggingface"
         )
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         assert raw.extracted.nodes == []
         assert raw.extracted.edges == []
@@ -515,7 +540,9 @@ class TestLlmExtractEntitiesTask:
         mocker.patch("tree.memory.pipeline.get_llm", return_value=fake)
         chunked = _chunked_with_children(shape=(2, 2, 2))
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         # 3 parents -> 3 calls (NOT 6, one per child).
         assert fake.call_count == 3
@@ -530,7 +557,9 @@ class TestLlmExtractEntitiesTask:
         )
         chunked = _chunked_with_children(shape=(1, 1))
 
-        raw = await _llm_extract_entities(chunked, _USER_ID)
+        raw = await _llm_extract_entities(
+            chunked, _USER_ID, llm_identity=_TEST_LLM_IDENTITY
+        )
 
         assert {node.chunk_id for node in raw.extracted.nodes} == {
             parent_row_id(_USER_ID, chunked.source_uri, 0),
@@ -712,14 +741,15 @@ class TestEmbedEntitiesTask:
             "person: Andrej Karpathy\nrole: researcher",
             "person: Yann LeCun\nrole: researcher",
         ]
-        result = await _embed_entities(texts)
+        result = await _embed_entities(texts, embedding_identity="voyage:voyage-4:1024")
 
         assert result == {
             texts[0]: [0.1, 0.2, 0.3],
             texts[1]: [0.4, 0.5, 0.6],
         }
-        # ONE embed() call carrying BOTH node-texts (not one call per text).
-        model.embed.assert_awaited_once_with(texts)
+        # ONE embed() call carrying BOTH node-texts (not one call per text),
+        # under the persisted **Embedding role** (ADR-009 §5).
+        model.embed.assert_awaited_once_with(texts, input_type="document")
         search_factory.assert_called_once()
 
     async def test_empty_input_returns_empty_without_calling_model(
@@ -732,7 +762,7 @@ class TestEmbedEntitiesTask:
             return_value=model,
         )
 
-        result = await _embed_entities([])
+        result = await _embed_entities([], embedding_identity="voyage:voyage-4:1024")
 
         assert result == {}
         model.embed.assert_not_awaited()
@@ -1464,6 +1494,257 @@ class TestCachedSingleEmbedding:
         out2 = await wrapper.embed(["another name"])
         assert out2 == [[0.1, 0.2]]
 
+    @pytest.mark.parametrize("role", [None, "query", "document"])
+    async def test_ignores_input_type(self, role) -> None:
+        """The wrapper replays a vector already computed with its own
+        **Embedding role**, so a role passed here can only be ignored
+        (ADR-009 §5)."""
+
+        wrapper = _CachedSingleEmbedding([0.1, 0.2])
+
+        out = await wrapper.embed(["any name"], input_type=role)
+
+        assert out == [[0.1, 0.2]]
+
+
+# ---------------------------------------------------------------------------
+# Embedding roles on the two persisting embed tasks (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRoles:
+    """Both embed tasks write vectors that are PERSISTED, so both embed as
+    ``document`` — forced by the "dedup vector == persisted vector, computed
+    once" invariant, not chosen per task (ADR-009 §5).
+    """
+
+    async def test_embed_children_embeds_as_document(self, mocker) -> None:
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        await _embed_children(["a", "b"], embedding_identity="voyage:voyage-4:1024")
+
+        assert model.roles == ["document"]
+
+    async def test_embed_entities_embeds_as_document(self, mocker) -> None:
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        await _embed_entities(
+            ["person: Alice"], embedding_identity="voyage:voyage-4:1024"
+        )
+
+        assert model.roles == ["document"]
+
+
+# ---------------------------------------------------------------------------
+# Embed-task cache identity (ADR-009 decision 6)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedTaskCacheIdentity:
+    """The 90-day ``INPUTS`` cache on ``embed-children`` / ``embed-entities``
+    was keyed on the text list alone, so re-extracting an already-seen document
+    after a model swap replayed vectors from the OLD embedding space. Both
+    tasks now take an ``embedding_identity`` input — unused in the body, but
+    part of the cache key, so a model change is a cache MISS.
+    """
+
+    _KEY_INPUTS = {"texts": ["a", "b"]}
+
+    def test_helper_returns_the_configured_embedding_identity(self) -> None:
+        # ``provider:model:dimensions:role`` of ``models.search_embedding``.
+        assert search_embedding_identity() == "voyage:voyage-4:1024:document"
+
+    def test_identity_includes_role(self) -> None:
+        """The identity carries the **Embedding role** the cached tasks embed
+        under, so a vector cached BEFORE roles existed (role-less, 3-part key)
+        can never be replayed into a ``document`` corpus (ADR-009 §6)."""
+
+        identity = search_embedding_identity()
+
+        assert identity.endswith(":document")
+        assert identity.count(":") == 3
+
+    @pytest.mark.parametrize(
+        "cached_task", [embed_children_task, embed_entities_task], ids=lambda t: t.name
+    )
+    def test_cache_key_differs_between_embedding_identities(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+
+        legacy_key = policy.compute_key(
+            task_ctx=None,
+            inputs={**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-3.5:1024"},
+            flow_parameters={},
+        )
+        new_key = policy.compute_key(
+            task_ctx=None,
+            inputs={**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-4:1024"},
+            flow_parameters={},
+        )
+
+        assert legacy_key != new_key
+
+    @pytest.mark.parametrize(
+        "cached_task", [embed_children_task, embed_entities_task], ids=lambda t: t.name
+    )
+    def test_cache_key_ignores_trace_headers(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+        inputs = {**self._KEY_INPUTS, "embedding_identity": "voyage:voyage-4:1024"}
+
+        first = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-1"}},
+            flow_parameters={},
+        )
+        second = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-2"}},
+            flow_parameters={},
+        )
+
+        assert first == second
+
+    @pytest.mark.parametrize(
+        "task_fn", [_embed_children, _embed_entities], ids=["children", "entities"]
+    )
+    def test_task_body_requires_embedding_identity(self, task_fn) -> None:
+        params = inspect.signature(task_fn).parameters
+
+        assert "embedding_identity" in params
+        # Required (no default) so a call site can NEVER silently fall back to
+        # an identity-less — i.e. model-blind — cache key.
+        assert params["embedding_identity"].default is inspect.Parameter.empty
+
+    async def test_embed_children_ignores_the_identity_when_embedding(
+        self, mocker
+    ) -> None:
+        # The identity is cache-key material only: it must not reach the model.
+        model = _SpyEmbeddingModel(dimensions=4)
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        vectors = await _embed_children(
+            ["a"], embedding_identity="voyage:voyage-4:1024"
+        )
+
+        assert model.texts == ["a"]
+        assert vectors == {"a": [0.5] * 4}
+
+
+class TestLLMTaskCacheIdentity:
+    """Same rule, LLM side (ADR-009 decision 6 applied to decision 10's
+    ``models.llm`` switch).
+
+    ``llm-extract-entities`` (30 d) and ``summarise-cluster`` (90 d) cached on
+    inputs that never named the LLM, so after a ``gemini`` -> ``modal`` flip a
+    document / cluster seen inside the window REPLAYED the previous model's
+    JSON and the new model was never called. Both tasks now take an
+    ``llm_identity`` input — unused in the body, part of the cache key.
+    """
+
+    # Per-task fixed inputs; only the identity moves between the two keys.
+    _KEY_INPUTS: dict[str, dict[str, Any]] = {
+        "llm-extract-entities": {"chunked": "doc-1", "user_id": "user-1", "llm": None},
+        "summarise-cluster": {
+            "samples": ["a", "b"],
+            "cluster_id": 0,
+            "prompt_version": "v1",
+        },
+    }
+
+    _GEMINI = "gemini:gemini-3.1-flash-lite"
+    _MODAL = "modal:LiquidAI/LFM2.5-350M"
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_cache_key_differs_across_llm_identities(self, cached_task) -> None:
+        policy = cached_task.cache_policy
+        inputs = self._KEY_INPUTS[cached_task.name]
+
+        def _key(identity: str) -> str:
+            return policy.compute_key(
+                task_ctx=None,
+                inputs={**inputs, "llm_identity": identity},
+                flow_parameters={},
+            )
+
+        # Story 1 — the provider flip.
+        assert _key(self._GEMINI) != _key(self._MODAL)
+        # Story 2 — same provider, a newer model id.
+        assert _key(self._GEMINI) != _key("gemini:gemini-2.5-flash")
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_cache_key_ignores_opik_trace_headers(self, cached_task) -> None:
+        """Story 4: an unchanged LLM still hits the cache — trace headers move
+        every run and must not buy a billable call."""
+
+        policy = cached_task.cache_policy
+        inputs = {**self._KEY_INPUTS[cached_task.name], "llm_identity": self._GEMINI}
+
+        first = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-1"}},
+            flow_parameters={},
+        )
+        second = policy.compute_key(
+            task_ctx=None,
+            inputs={**inputs, "opik_trace_headers": {"x-trace": "run-2"}},
+            flow_parameters={},
+        )
+
+        assert first == second
+
+    @pytest.mark.parametrize(
+        ("task_fn", "other_args"),
+        [
+            (
+                _llm_extract_entities,
+                (
+                    ChunkedDocument(
+                        document_id="d1", source_uri="u1", source_type="huggingface"
+                    ),
+                    _USER_ID,
+                ),
+            ),
+            (_summarise_cluster, (["a"], 0, "v1")),
+        ],
+        ids=["llm-extract-entities", "summarise-cluster"],
+    )
+    def test_task_body_requires_llm_identity(self, task_fn, other_args) -> None:
+        """Story 5: a new call site that forgets the kwarg is a loud
+        ``TypeError``, never a silently shared cache key."""
+
+        params = inspect.signature(task_fn).parameters
+
+        assert params["llm_identity"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["llm_identity"].default is inspect.Parameter.empty
+        # Raised at CALL time (before the coroutine exists), so no await here.
+        with pytest.raises(TypeError, match="llm_identity"):
+            task_fn(*other_args)
+
+    @pytest.mark.parametrize(
+        "cached_task",
+        [llm_extract_entities_task, summarise_cluster_task],
+        ids=lambda t: t.name,
+    )
+    def test_llm_identity_is_not_excluded_from_the_key(self, cached_task) -> None:
+        # ``_INPUTS_NO_HEADERS`` drops only the trace headers; excluding the
+        # identity too would re-open the bug this task closes.
+        assert "llm_identity" not in (cached_task.cache_policy.exclude or [])
+
 
 # ---------------------------------------------------------------------------
 # Flow registration
@@ -1601,11 +1882,16 @@ class TestIndexingFlowReturnsEmbeddedCount:
 
 
 class TestEntityEmbeddableText:
-    """``_entity_embeddable_text`` mirrors ``add_entity._embeddable_text``."""
+    """Task ④ pre-computes its texts with ``prospective_entity_embedding_text``.
+
+    The same function ``add_entity`` calls inline — these cases pin what the
+    pipeline's ``embeddable_text_by_key`` (and therefore the
+    ``_CachedSingleEmbedding`` lookup key) holds per node type.
+    """
 
     def test_generic_type_returns_node_text(self) -> None:
         properties = {"role": "researcher"}
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",
@@ -1625,7 +1911,7 @@ class TestEntityEmbeddableText:
     def test_generic_type_strips_aliases_and_confidence(self) -> None:
         # ``aliases`` / ``confidence`` are top-level columns on the stored
         # row, so they must not leak into the embeddable node-text.
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",
@@ -1636,7 +1922,7 @@ class TestEntityEmbeddableText:
         assert "researcher" in text
 
     def test_preference_returns_statement(self) -> None:
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PREFERENCE,
             name="prefers-dark-mode",
             canonical_name="prefers-dark-mode",
@@ -1645,7 +1931,7 @@ class TestEntityEmbeddableText:
         assert text == "prefers dark mode"
 
     def test_fact_returns_object(self) -> None:
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.FACT,
             name="france-capital",
             canonical_name="france-capital",
@@ -1655,7 +1941,7 @@ class TestEntityEmbeddableText:
 
     def test_preference_without_statement_falls_back_to_node_text(self) -> None:
         # A malformed preference (no statement) is still embeddable.
-        text = _entity_embeddable_text(
+        text = prospective_entity_embedding_text(
             entity_type=NodeType.PREFERENCE,
             name="prefers-dark-mode",
             canonical_name="prefers-dark-mode",
@@ -1697,7 +1983,7 @@ class TestDispatchEntityWriteReusesVector:
             match_type="exact",
         )
         key = make_entity_key("d1", NodeType.PERSON, "Andrej Karpathy")
-        node_text = _entity_embeddable_text(
+        node_text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
             canonical_name="Andrej Karpathy",
@@ -1774,6 +2060,10 @@ class TestFlowEmbeddingModelSplit:
     (persisted node vector). The two MUST be distinct objects so the
     operator can later swap a lighter resolution model without touching the
     persisted-vector space.
+
+    Also the home of the worker's cache-identity wiring (ADR-009 decision 6):
+    the embedding identity and the LLM identity are resolved once per run and
+    handed to every cached task that must not replay another model's output.
     """
 
     @pytest.fixture
@@ -1826,13 +2116,13 @@ class TestFlowEmbeddingModelSplit:
             "tree.memory.pipeline.clean_and_chunk_task",
             new=AsyncMock(return_value=chunked),
         )
-        mocker.patch(
+        embed_children = mocker.patch(
             "tree.memory.pipeline.embed_children_task", new=AsyncMock(return_value={})
         )
         mocker.patch(
             "tree.memory.pipeline.load_rag_rows_task", new=AsyncMock(return_value=0)
         )
-        mocker.patch(
+        llm_extract_entities = mocker.patch(
             "tree.memory.pipeline.llm_extract_entities_task",
             new=AsyncMock(return_value=raw),
         )
@@ -1841,7 +2131,17 @@ class TestFlowEmbeddingModelSplit:
         )
         mocker.patch("tree.memory.pipeline.redirect_first_person", return_value=[])
         mocker.patch("tree.memory.pipeline.canonicalize_preference_names")
-        mocker.patch("tree.memory.pipeline.get_llm", return_value=MagicMock())
+        # ``spec=BaseLLM`` so the double carries the LLM contract and NOTHING
+        # else: an unspec'd MagicMock answers to ``ensure_warm`` as well, which
+        # makes the **Pre-warm** mistake it for a Modal client (the embedding
+        # doubles above are already spec'd for the same reason).
+        # BOTH namespaces: the worker's graph half calls the pipeline-level
+        # name, the pre-warm seam calls ``get_model``'s own (through
+        # ``modal_backed_models``). Without the second one a test that flips
+        # ``models.llm.provider`` to ``modal`` builds a REAL ``ModalLLM`` and
+        # the pre-warm polls Modal for a server that does not exist.
+        for target in ("tree.memory.pipeline.get_llm", "tree.models.get_model.get_llm"):
+            mocker.patch(target, return_value=MagicMock(spec=BaseLLM))
         supersession = mocker.patch(
             "tree.memory.pipeline.resolve_supersessions", new=AsyncMock()
         )
@@ -1852,7 +2152,7 @@ class TestFlowEmbeddingModelSplit:
             "tree.memory.pipeline.resolve_entities_task",
             new=AsyncMock(return_value=ResolutionOutput()),
         )
-        mocker.patch(
+        embed_entities = mocker.patch(
             "tree.memory.pipeline.embed_entities_task", new=AsyncMock(return_value={})
         )
         mocker.patch(
@@ -1869,6 +2169,9 @@ class TestFlowEmbeddingModelSplit:
             "build_resolver": build_resolver,
             "supersession": supersession,
             "apply_writes": apply_writes,
+            "embed_children": embed_children,
+            "embed_entities": embed_entities,
+            "llm_extract_entities": llm_extract_entities,
         }
 
     async def test_builds_the_resolver_from_the_resolution_model(
@@ -1904,6 +2207,40 @@ class TestFlowEmbeddingModelSplit:
         assert (
             stubbed_graph_stages["resolution_model"] not in apply_writes.await_args.args
         )
+
+    async def test_both_embed_tasks_receive_the_embedding_identity(
+        self, stubbed_graph_stages
+    ) -> None:
+        """ADR-009 decision 6: EVERY call site passes the identity, otherwise
+        the cached-vector guard is only half-installed."""
+
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        identity = search_embedding_identity()
+        for task_name in ("embed_children", "embed_entities"):
+            kwargs = stubbed_graph_stages[task_name].await_args.kwargs
+            assert kwargs["embedding_identity"] == identity
+
+    async def test_worker_passes_the_llm_identity_to_extraction(
+        self, mocker, stubbed_graph_stages
+    ) -> None:
+        """Story 1: the operator flips ``models.llm`` to their own Modal
+        server — the extraction task's 30-day cache key must move with it
+        instead of replaying Gemini's JSON."""
+
+        mocker.patch(
+            "tree.models.get_model.app_config.models.llm",
+            LLMConfig(provider="modal", model="LiquidAI/LFM2.5-350M"),
+        )
+
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        kwargs = stubbed_graph_stages["llm_extract_entities"].await_args.kwargs
+        assert kwargs["llm_identity"] == "modal:LiquidAI/LFM2.5-350M"
 
     async def test_rag_mode_never_builds_the_graph_model_handles(
         self, mocker, monkeypatch, stubbed_graph_stages
@@ -2379,6 +2716,263 @@ async def _run_worker(
         document_ids=[str(document.id)],
         log=logging.getLogger("test.worker"),
     )
+
+
+# --- The **Pre-warm** seam (ADR-009 §11) -----------------------------------
+
+
+class _StopAtFirstStage(Exception):
+    """Tripwire: ends the run at stage ① so the test observes only the seam."""
+
+
+def _install_prewarm_tripwire(
+    mocker, *, error: Exception | None = None
+) -> tuple[list[str], list[tuple[object, ...]]]:
+    """Record the pre-warm / first-stage ORDER and stop the run at stage ①.
+
+    Returns ``(trace, warmed)``: the ordered stage labels and the model tuples
+    the worker handed to the pre-warm.
+    """
+
+    trace: list[str] = []
+    warmed: list[tuple[object, ...]] = []
+
+    async def _prewarm(*models: object) -> None:
+        trace.append("prewarm")
+        warmed.append(models)
+        if error is not None:
+            raise error
+
+    async def _split(*_args: Any, **_kwargs: Any) -> list[ChunkedDocument]:
+        trace.append("split")
+        raise _StopAtFirstStage
+
+    mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+    mocker.patch("tree.memory.pipeline._split_documents", new=_split)
+    return trace, warmed
+
+
+async def _run_worker_for_prewarm(
+    mocker,
+    monkeypatch,
+    *,
+    mode: str,
+    test_database: Any,
+    user_id: PydanticObjectId,
+    document_ids: list[str],
+) -> WriteSummary:
+    """Drive the worker body far enough to observe the pre-warm seam.
+
+    The models the seam may build come from the ``modal_seam`` fixture: the
+    gate calls the ``tree.models.get_model`` factories, so a pipeline-level
+    patch never reaches it.
+    """
+
+    monkeypatch.setenv("TREE_MEMORY__MODE", mode)
+    mocker.patch(
+        "tree.memory.pipeline.init_mongodb",
+        new=AsyncMock(return_value=_ClientToTestDatabase(test_database)),
+    )
+
+    return await _run_extraction_worker_body(
+        user_id=user_id,
+        document_ids=document_ids,
+        log=logging.getLogger("test.worker"),
+    )
+
+
+class TestWorkerPrewarm:
+    """Before document 1, after the zero-documents guard (ADR-009 §11)."""
+
+    async def test_worker_prewarms_before_the_first_stage(
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
+    ) -> None:
+        user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode="graphrag",
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [("LLM", "RESOLUTION-EMBEDDING", "SEARCH-EMBEDDING")]
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    async def test_worker_seam_builds_nothing_for_sentence_transformers(
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam, mode
+    ) -> None:
+        """Story 1 (#149 QA, finding 2): a ``sentence-transformers`` run must not
+        load torch weights for a model that has nothing to warm — in EITHER
+        mode, and even when every document is already in the embed cache."""
+
+        user, document = ingested_document
+        modal_seam.providers(
+            llm="gemini",
+            resolution="sentence-transformers",
+            search="sentence-transformers",
+        )
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode=mode,
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [()]
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "mode,expected",
+        [
+            ("graphrag", ("LLM", "SEARCH-EMBEDDING")),
+            # No LLM and no resolution model run in ``rag`` — warming them would
+            # wake a GPU the run never calls.
+            ("rag", ("SEARCH-EMBEDDING",)),
+        ],
+    )
+    async def test_worker_seam_builds_the_modal_blocks_only(
+        self,
+        mocker,
+        monkeypatch,
+        test_database,
+        ingested_document,
+        modal_seam,
+        mode: str,
+        expected: tuple[str, ...],
+    ) -> None:
+        """Story 2: the LLM and the search embedding on Modal, resolution on
+        Voyage — the Voyage client is never even constructed by the seam."""
+
+        user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="voyage", search="modal")
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        with pytest.raises(_StopAtFirstStage):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode=mode,
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        assert trace == ["prewarm", "split"]
+        assert warmed == [expected]
+        assert modal_seam.embedding.call_count == 1
+
+    async def test_zero_documents_never_wakes_a_gpu(
+        self, mocker, monkeypatch, test_database, modal_seam
+    ) -> None:
+        """The guard comes FIRST: an empty run must not warm anything — nor
+        BUILD anything, with every block on Modal."""
+
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
+        trace, warmed = _install_prewarm_tripwire(mocker)
+
+        summary = await _run_worker_for_prewarm(
+            mocker,
+            monkeypatch,
+            mode="graphrag",
+            test_database=test_database,
+            user_id=_USER_ID,
+            document_ids=[str(PydanticObjectId())],
+        )
+
+        assert summary == WriteSummary(documents_processed=0)
+        assert trace == []
+        assert warmed == []
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
+
+    async def test_dead_server_fails_the_run_with_zero_documents_attempted(
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
+    ) -> None:
+        """One ``ModelError`` before stage ① — not N failed documents."""
+
+        user, document = ingested_document
+        modal_seam.providers(llm="modal", resolution="modal", search="modal")
+        dead = ModelError(
+            "Failed to resolve Modal server ep-tree-lfm2-5-350m/Server. Is the "
+            "model deployed?"
+        )
+        trace, _ = _install_prewarm_tripwire(mocker, error=dead)
+        embed_children = mocker.patch(
+            "tree.memory.pipeline.embed_children_task", new=AsyncMock()
+        )
+        load_rag_rows = mocker.patch(
+            "tree.memory.pipeline.load_rag_rows_task", new=AsyncMock()
+        )
+
+        with pytest.raises(ModelError, match="ep-tree-lfm2-5-350m"):
+            await _run_worker_for_prewarm(
+                mocker,
+                monkeypatch,
+                mode="graphrag",
+                test_database=test_database,
+                user_id=user.id,
+                document_ids=[str(document.id)],
+            )
+
+        # Nothing was attempted: the first stage never ran, so no document can
+        # be counted — failed or otherwise.
+        assert trace == ["prewarm"]
+        embed_children.assert_not_called()
+        load_rag_rows.assert_not_called()
+
+    @pytest.mark.usefixtures("fixed_two_by_three_chunking")
+    async def test_worker_prewarm_is_a_noop_on_default_providers(
+        self, mocker, monkeypatch, test_database, ingested_document, modal_seam
+    ) -> None:
+        """Voyage + Gemini, as shipped: no task, no latency, no behaviour change.
+
+        Runs the REAL helper over the models the seam hands it (none, now that
+        the gate reads the provider first) and counts the tasks created across
+        that call alone — the worker itself creates plenty. The seam builds
+        NOTHING: the shipped providers have no ``ensure_warm``, so constructing
+        a client for the pre-warm would be pure cost.
+        """
+
+        user, document = ingested_document
+        created: list[set[asyncio.Task]] = []
+        warmed: list[tuple[object, ...]] = []
+
+        async def _counting_prewarm(*models: object) -> None:
+            before = asyncio.all_tasks()
+            await prewarm_models(*models)
+            created.append(asyncio.all_tasks() - before)
+            warmed.append(models)
+
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_counting_prewarm)
+
+        summary = await _run_worker(
+            mocker,
+            monkeypatch,
+            mode="rag",
+            test_database=test_database,
+            user=user,
+            document=document,
+        )
+
+        assert summary.documents_processed == 1
+        assert created == [set()]
+        assert warmed == [()]
+        modal_seam.llm.assert_not_called()
+        modal_seam.embedding.assert_not_called()
 
 
 @pytest.mark.usefixtures("fixed_two_by_three_chunking")
@@ -3033,6 +3627,152 @@ class TestMemoryClusteringFailsOpenPerCluster:
             await memory_clustering(user_id=_USER_ID)
 
         assert "summarise-cluster failed for cluster 0" in caplog.text
+
+
+class TestSummariseClustersPrewarm:
+    """The cluster-summary seam pre-warms, but keeps ADR-007 §4's fail-open."""
+
+    async def test_the_llm_is_prewarmed_once_before_the_fan_out(
+        self, mocker, modal_seam
+    ) -> None:
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
+        trace: list[str] = []
+        warmed: list[tuple[object, ...]] = []
+
+        async def _prewarm(*models: object) -> None:
+            trace.append("prewarm")
+            warmed.append(models)
+
+        async def _one_summary(*_args: Any, **_kwargs: Any) -> ClusterSummary:
+            trace.append("summarise")
+            return _summary()
+
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+        mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(side_effect=_one_summary),
+        )
+
+        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
+
+        assert trace == ["prewarm", "summarise", "summarise"]
+        assert warmed == [("LLM",)]
+        assert failed == 0
+
+    @pytest.mark.parametrize("provider,expected", [("gemini", ()), ("modal", ("LLM",))])
+    async def test_summary_seam_builds_the_llm_only_under_modal(
+        self, mocker, modal_seam, provider: str, expected: tuple[str, ...]
+    ) -> None:
+        """Under ``gemini`` the seam builds nothing — the instance exists only to
+        be warmed, and a Gemini client has no gate. The summaries run either way.
+        """
+
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm=provider)
+        warmed: list[tuple[object, ...]] = []
+
+        async def _prewarm(*models: object) -> None:
+            warmed.append(models)
+
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(return_value=_summary()),
+        )
+
+        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
+
+        assert warmed == [expected]
+        assert modal_seam.llm.call_count == len(expected)
+        assert (summarise.await_count, failed) == (2, 0)
+
+    async def test_a_missing_proxy_token_fails_the_run(
+        self, mocker, modal_seam
+    ) -> None:
+        """Construction stays OUTSIDE the ``try``: a configuration error must
+        fail the run loudly. Only the WARM fails open."""
+
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
+        modal_seam.llm.side_effect = ModelError(
+            "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET are required"
+        )
+        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
+
+        with pytest.raises(ModelError, match="MODAL_PROXY_TOKEN_ID"):
+            await _summarise_clusters({0: ["a"]}, config)
+
+        prewarm.assert_not_called()
+
+    async def test_no_clusters_never_wakes_a_gpu(self, mocker, modal_seam) -> None:
+        config = load_app_config().memory.clustering
+        modal_seam.providers(llm="modal")
+        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
+
+        summaries, failed = await _summarise_clusters({}, config)
+
+        assert (summaries, failed) == ({}, 0)
+        prewarm.assert_not_called()
+        modal_seam.llm.assert_not_called()
+
+    async def test_cluster_summaries_fail_open_when_the_llm_is_dead(
+        self, mocker, modal_seam, caplog
+    ) -> None:
+        """ONE warning and the fallback labels — not N x 600 s of polling."""
+
+        config = load_app_config().memory.clustering
+        samples_by_cluster = {0: ["a"], 1: ["b"], 2: ["c"]}
+        modal_seam.providers(llm="modal")
+        mocker.patch(
+            "tree.memory.pipeline.prewarm_models",
+            new=AsyncMock(
+                side_effect=ModelError(
+                    "Health poll of https://ep-tree-lfm2-5-350m.modal.run/health "
+                    "returned HTTP 403 — not a cold start."
+                )
+            ),
+        )
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task", new=AsyncMock()
+        )
+
+        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
+            summaries, failed = await _summarise_clusters(samples_by_cluster, config)
+
+        assert failed == len(samples_by_cluster)
+        assert [summaries[cid].label for cid in sorted(samples_by_cluster)] == [
+            fallback_summary(cid).label for cid in sorted(samples_by_cluster)
+        ]
+        summarise.assert_not_called()
+        skipped = [
+            r for r in caplog.records if "Cluster summaries skipped" in r.getMessage()
+        ]
+        assert len(skipped) == 1
+        assert "HTTP 403" in caplog.text
+
+
+class TestSummariseClustersLLMIdentity:
+    """Story 2: the LLM identity rides into EVERY cluster's cache key, so a
+    model upgrade re-labels the clusters instead of replaying 40-day-old
+    labels for another 50 days."""
+
+    async def test_summaries_pass_the_llm_identity_to_every_cluster(
+        self, mocker
+    ) -> None:
+        config = load_app_config().memory.clustering
+        mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
+        summarise = mocker.patch(
+            "tree.memory.pipeline.summarise_cluster_task",
+            new=AsyncMock(return_value=_summary()),
+        )
+
+        await _summarise_clusters({0: ["a"], 1: ["b"], 2: ["c"]}, config)
+
+        assert summarise.await_count == 3
+        identities = {call.kwargs["llm_identity"] for call in summarise.await_args_list}
+        # ONE identity for the whole fan-out — resolved once, not per cluster.
+        assert identities == {llm_identity()}
 
 
 class TestSummariseClustersParallelization:

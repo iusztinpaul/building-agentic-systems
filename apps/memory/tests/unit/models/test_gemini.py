@@ -1,4 +1,5 @@
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -151,3 +152,98 @@ class TestGeminiEmbeddingModel:
 
         with pytest.raises(ExtractionError, match="Gemini embedding call failed"):
             await model.embed(["hello"])
+
+
+class TestTaskType:
+    """The **Embedding role** maps to Gemini's ``task_type`` (ADR-009 §5).
+
+    Source (read 2026-09-19): https://ai.google.dev/gemini-api/docs/embeddings
+    — ``RETRIEVAL_QUERY`` / ``RETRIEVAL_DOCUMENT`` are supported task types for
+    ``gemini-embedding-001``, while "you cannot use the ``task_type`` field for
+    the ``gemini-embedding-2`` model". ``google-genai`` 1.65.0 types
+    ``EmbedContentConfig.task_type`` as a free-form ``Optional[str]``.
+
+    The field is nonetheless sent for EVERY model id, ``gemini-embedding-2``
+    included. Verified live on 2026-09-19: that model ACCEPTS the field and
+    IGNORES it (the ``RETRIEVAL_QUERY`` and role-less vectors are identical,
+    cosine 1.000000) — the server already implements "cannot honour → ignore,
+    never raise", so a client-side list of supporting ids would buy nothing
+    and would silently drop the role on the next id Google ships
+    (``gemini-embedding-2-preview`` is already live). Do NOT "fix" this back
+    into a guard without re-running that check.
+    """
+
+    async def _config_for(self, mock_genai_client, *, model: str, **kwargs) -> dict:
+        embedding = MagicMock()
+        embedding.values = [0.1]
+        response = MagicMock()
+        response.embeddings = [embedding]
+        mock_genai_client.aio.models.embed_content = AsyncMock(return_value=response)
+
+        gemini = GeminiEmbeddingModel(api_key="fake-key", model=model, dimensions=256)
+        await gemini.embed(["hello"], **kwargs)
+
+        return mock_genai_client.aio.models.embed_content.call_args.kwargs["config"]
+
+    @pytest.mark.parametrize("model", ["gemini-embedding-001", "gemini-embedding-2"])
+    @pytest.mark.parametrize(
+        "role,expected",
+        [("query", "RETRIEVAL_QUERY"), ("document", "RETRIEVAL_DOCUMENT")],
+    )
+    async def test_role_maps_to_retrieval_task_type(
+        self, mock_genai_client, model: str, role: str, expected: str
+    ) -> None:
+        config = await self._config_for(mock_genai_client, model=model, input_type=role)
+
+        assert config["task_type"] == expected
+        assert config["output_dimensionality"] == 256
+
+    async def test_no_role_omits_the_task_type_key(self, mock_genai_client) -> None:
+        config = await self._config_for(
+            mock_genai_client, model="gemini-embedding-001", input_type=None
+        )
+
+        assert "task_type" not in config
+        assert config["output_dimensionality"] == 256
+
+    async def test_default_call_omits_the_task_type_key(
+        self, mock_genai_client
+    ) -> None:
+        """User story 3: a caller that passes no role sends today's config."""
+
+        config = await self._config_for(mock_genai_client, model="gemini-embedding-001")
+
+        assert "task_type" not in config
+        assert config["output_dimensionality"] == 256
+
+    async def test_unknown_role_is_ignored(self, mock_genai_client) -> None:
+        """A role outside ``{"query", "document", None}`` must be IGNORED, not
+        raised on (ADR-009 §5: "a provider that cannot honour a role ignores
+        it — it never raises"). Reachable from an operator override or a role
+        this provider has no mapping for yet; a bare ``KeyError`` there would
+        fail an ingestion run over a retrieval HINT.
+        """
+
+        unknown: Any = "clustering"
+
+        config = await self._config_for(
+            mock_genai_client, model="gemini-embedding-001", input_type=unknown
+        )
+
+        assert "task_type" not in config
+        assert config["output_dimensionality"] == 256
+
+    async def test_output_dimensionality_survives_a_role(
+        self, mock_genai_client
+    ) -> None:
+        """The Matryoshka truncation is dimension-coupled to the live vector
+        index — a role must never displace it."""
+
+        config = await self._config_for(
+            mock_genai_client, model="gemini-embedding-001", input_type="document"
+        )
+
+        assert config == {
+            "output_dimensionality": 256,
+            "task_type": "RETRIEVAL_DOCUMENT",
+        }

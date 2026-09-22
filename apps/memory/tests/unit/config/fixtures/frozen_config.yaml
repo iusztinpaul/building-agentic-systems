@@ -48,11 +48,11 @@ models:
     model: gemini-3.1-flash-lite
   resolution_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   search_embedding:
     provider: voyage
-    model: voyage-3.5
+    model: voyage-4
     dimensions: 1024
   embedding_batch:
     max_inputs: 1000
@@ -88,11 +88,11 @@ query:
   embedding_batch_size: 64
   # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion; $text
   # hits are never gated. Atlas normalises cosine to (1 + cos) / 2, so this is
-  # an absolute similarity (the RRF score is not). PROVISIONAL — pinned by the
-  # two live queries in tasks/125's log (nonsense query top=0.728, on-topic
-  # top=0.882, so ADR-008 §4's proposed 0.65 let EVERY candidate through) and
-  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
-  min_vector_score: 0.75
+  # an absolute similarity (the RRF score is not). PROVISIONAL and owned by
+  # Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # re-pinned on voyage-4, 2026-09 — tasks/141 Log (nonsense top=0.649,
+  # on-topic top=0.735; the voyage-3.5 pin of 0.75 kept nothing on topic).
+  min_vector_score: 0.70
 
 dream:
   enabled: true
@@ -118,3 +118,54 @@ observability:
   enabled: true
   embedding_price_per_1m_tokens:
     voyage-3.5: 0.06
+
+# The Modal catalog (ADR-009 §2/§3). Mirrors the SHAPE of the shipped
+# configs/default.yaml — the seed VALUES (revisions, prompts) are asserted
+# against the real file, not against this fixture. The ENGINE PINS are the one
+# exception (`test_engine_pins`): a bump that moves the YAML and the code
+# default but forgets this file would leave the fixture describing an image
+# nobody builds.
+modal:
+  autoinference_utils_version: "0.2.6"
+  engines:
+    vllm:
+      version: "0.26.0"
+    sglang:
+      version: "v0.5.18"
+  warmup_deadline_s: 600
+  # Waiting for ONE answer, not for a cold server (ADR-009 §11).
+  request_timeout_s: 300
+  embedding_models:
+    # A minimal entry: a repo id, a revision and the measured vector width —
+    # nothing about HOW it is served.
+    - repo_id: Qwen/Qwen3-Embedding-0.6B
+      revision: 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      native_dimensions: 1024
+    # An entry carrying the App fields, which only the App scripts read.
+    - repo_id: voyageai/voyage-4-nano
+      revision: 67fabc9bef010dabc5f6024aa1b1b6b93410426f
+      gpu: A10
+      cpu: 4
+      memory_mb: 16384
+      native_dimensions: 2048
+      matryoshka_dimensions: [256, 512, 1024, 2048]
+      max_model_len: 32768
+      query_prompt: "Represent the query for retrieving supporting documents: "
+      document_prompt: "Represent the document for retrieval: "
+      extra_server_args:
+        "--convert": embed
+        "--pooler-config": '{"pooling_type":"MEAN"}'
+  llm_models:
+    # The LLM half of the catalog: the same entry minus the embedding facts,
+    # plus `n_gpus` (SGLang's tp) and the two client-side request knobs.
+    - repo_id: Qwen/Qwen3.5-0.8B
+      revision: 2fc06364715b967f1860aea9cf38778875588b17
+      max_tokens: 4096
+      chat_template_kwargs:
+        enable_thinking: false
+    - repo_id: LiquidAI/LFM2.5-350M
+      revision: 9e6c6ccf47cd318696e137d381a7ded8fe4df09f
+      gpu: A10
+      n_gpus: 1
+      max_tokens: 4096
+      max_model_len: 32768

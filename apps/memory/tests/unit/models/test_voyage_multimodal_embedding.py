@@ -46,12 +46,10 @@ class TestVoyageMultimodalInit:
         m = VoyageMultimodalEmbeddingModel(
             api_key="key",
             model="voyage-multimodal-3.5",
-            input_type="document",
             output_dimension=512,
         )
 
         assert m._model == "voyage-multimodal-3.5"
-        assert m._input_type == "document"
         assert m._output_dimension == 512
 
 
@@ -101,7 +99,6 @@ class TestVoyageMultimodalEmbed:
         m = VoyageMultimodalEmbeddingModel(
             api_key="key",
             model="voyage-multimodal-3.5",
-            input_type="query",
             output_dimension=256,
         )
         response_data = {"data": [{"embedding": [0.1]}]}
@@ -110,7 +107,7 @@ class TestVoyageMultimodalEmbed:
 
         with patch("aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = mock_session
-            await m.embed(["test"])
+            await m.embed(["test"], input_type="query")
 
         call_kwargs = mock_post.call_args
         payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
@@ -458,3 +455,48 @@ class TestVoyageMultimodalRateLimitChokepoint:
 
         assert result == []
         rate_limit.assert_not_awaited()
+
+
+class TestInputType:
+    """The **Embedding role** is per CALL, never per instance (ADR-009 §5).
+
+    Mirrors ``test_voyage_embedding.TestInputType``: the same two literals map
+    to the same API ``input_type`` field, only the payload shape differs
+    (``inputs: [{content: [...]}]`` here, flat ``input: [str]`` there).
+    """
+
+    async def _payload_for(
+        self, model: VoyageMultimodalEmbeddingModel, **kwargs
+    ) -> dict:
+        response_data = {"data": [{"embedding": [0.1]}]}
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, mock_post = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            await model.embed(["q"], **kwargs)
+
+        return mock_post.call_args.kwargs["json"]
+
+    @pytest.mark.parametrize("role", ["query", "document"])
+    async def test_role_is_sent_as_the_api_input_type(self, model, role: str) -> None:
+        payload = await self._payload_for(model, input_type=role)
+
+        assert payload["input_type"] == role
+
+    async def test_no_role_omits_the_key(self, model) -> None:
+        payload = await self._payload_for(model, input_type=None)
+
+        assert "input_type" not in payload
+
+    async def test_default_call_omits_the_key(self, model) -> None:
+        """User story 3: an existing caller that passes no role sends exactly
+        today's body."""
+
+        payload = await self._payload_for(model)
+
+        assert "input_type" not in payload
+
+    def test_constructor_rejects_input_type(self) -> None:
+        with pytest.raises(TypeError):
+            VoyageMultimodalEmbeddingModel(api_key="k", input_type="query")  # type: ignore[call-arg]

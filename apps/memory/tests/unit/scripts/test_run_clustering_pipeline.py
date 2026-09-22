@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -125,6 +126,29 @@ class TestRunClusteringPipeline:
         # It is a hint, not a gate: the run still dispatches.
         mock_dispatch_offline.assert_awaited_once()
 
+    async def test_it_warns_when_a_model_override_is_set_in_this_shell(
+        self,
+        cli_module,
+        mock_resolve_user,
+        mock_dispatch_offline,
+        mock_wait_for_dispatch,
+        mock_flush_opik,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        # Cluster summaries run on `models.llm` — including a Modal one, which
+        # the summary fan-out Pre-warms — so the same trap applies here (#159).
+        monkeypatch.setenv("TREE_MODELS__LLM__PROVIDER", "modal")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            await cli_module._run(None, None)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("TREE_MODELS__LLM__PROVIDER" in message for message in messages)
+        assert any("TREE_MODAL__REQUEST_TIMEOUT_S" in message for message in messages)
+        mock_dispatch_offline.assert_awaited_once()
+
     async def test_a_clean_shell_dispatches_without_a_warning(
         self,
         cli_module,
@@ -135,9 +159,15 @@ class TestRunClusteringPipeline:
         monkeypatch,
         caplog,
     ) -> None:
-        monkeypatch.delenv(
-            "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE", raising=False
-        )
+        # Hermetic: `make` exports `.env`, which may itself carry an override.
+        for name in [
+            name
+            for name in os.environ
+            if name.startswith(
+                ("TREE_MEMORY__CLUSTERING__", "TREE_MODELS__", "TREE_MODAL__")
+            )
+        ]:
+            monkeypatch.delenv(name, raising=False)
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
             await cli_module._run(None, None)

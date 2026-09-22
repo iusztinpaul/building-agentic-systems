@@ -1,113 +1,249 @@
-"""Deploy voyageai/voyage-4-nano as an OpenAI-compatible embedding server on Modal via vLLM."""
+"""Serve ONE **Modal catalog** embedding model with vLLM — the `app` route.
 
+EMBEDDING models from Hugging Face, nothing else (ADR-009 §2): vLLM in pooling
+mode (`--runner pooling`), shaped after the `serve.py` Modal generates for its
+own embedding endpoints (`Qwen/Qwen3-Embedding-0.6B` and `-8B`, read
+2026-09-20) — the same CUDA base, the same `autoinference-utils` helpers, the
+same one-request probe before the container serves traffic. The server always
+returns its NATIVE vector width and the client truncates + renormalises
+(ADR-009 §3): Modal's 8B recipe flags `is_matryoshka` server-side while its
+0.6B recipe does not, so server-side `dimensions` support differs between two
+managed recipes of one model family — which is why no entry of ours asks a
+server for a width, here or anywhere.
+
+Glue only: every decision — GPU, engine pin, revision, server flags — is
+resolved by `tree.models.modal_catalog` on the operator's machine and crosses
+into the container as ONE env var baked into the image
+(`EMBEDDING_DEPLOY_SPEC`, ADR-009 §3), because Modal re-imports this file
+INSIDE the container, where the `tree` package is NOT installed. Hence the
+`modal.is_local()` split below: nothing under `tree` may be imported outside it.
+
+That env var holds the BASE64 of the spec's JSON — `base64 -d` reads a
+deployed layer back. Modal renders an image env var as a Dockerfile
+`ENV {key}={shlex.quote(value)}` (modal 1.5.5, `_image.py:2821`) and the image
+build unescaped every backslash of the value, so the raw JSON of a spec whose
+values are themselves JSON (`--pooler-config`, `--hf-overrides`) arrived
+corrupted and this container died at import (live, 2026-09-21). Base64's
+alphabet leaves no quote, backslash or `$` for any quoting layer to interpret.
+
+The app is `ep-<endpoint_name>` with `class Server` — the same SHAPE
+(`ep-<name>`, class `Server`) a Dedicated endpoint has, inside our `tree-`
+namespace, so ONE `modal.Server.from_name(app_name, "Server")` lookup resolves
+both routes and the client stays path-blind. The shape is what the lookup
+needs; the prefix is what keeps this deploy off an endpoint the operator
+created by hand (`ep-<model>`, ADR-009 §3), and the driver's existence guard
+refuses before it writes over anything.
+Auth is Modal **Proxy tokens** only (`unauthenticated=False`) — the edge answers
+401 before a GPU wakes, so the engine needs no key of its own.
+
+Where this file deviates from Modal's own template, on purpose:
+
+* weights by `repo_id` + `revision` into the shared `huggingface-cache` Volume
+  — Modal's `MODEL_PATH` is a snapshot inside the endpoint's own volume, which
+  nothing outside that endpoint can mount;
+* `unauthenticated=False` spelled as a literal, never `not REQUIRE_AUTH`;
+* the stdlib logger instead of `print`, so nothing but one boolean about the
+  Hugging Face token can reach `modal app logs`;
+* GPU, CPU and memory come from the catalog entry instead of the per-recipe
+  module constants Modal bakes in.
+
+Deployed by the driver, never by hand:
+
+    make memory-deploy-model MODEL=voyageai/voyage-4-nano
+"""
+
+import base64
 import json
+import logging
 import os
-import subprocess
 
 import modal
 
-MODEL_NAME = "voyageai/voyage-4-nano"
-MODEL_REVISION = "main"
-
+# Seconds, so `5 * MINUTES` reads as a duration in the decorator below.
 MINUTES = 60
-VLLM_PORT = 8000
 
-vllm_image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
+# The port the engine listens on and the one Modal proxies to; they must match.
+PORT = 8000
+
+# Modal terminates a container that is not serving after `startup_timeout`.
+# The engine's own health wait is strictly SHORTER, so a model that cannot load
+# fails with vLLM's message in `modal app logs` instead of an opaque Modal
+# termination at the same instant. Both are the ENGINE's budget for starting
+# up, unrelated to `modal.warmup_deadline_s`, which is how long a CLIENT polls
+# a cold server from outside (ADR-009 §11).
+STARTUP_TIMEOUT = 20 * MINUTES
+HEALTH_TIMEOUT = 18 * MINUTES
+
+# Where the shared `huggingface-cache` Volume mounts, and the root the image
+# env derives every Hugging Face cache path from. NOT the default cache under
+# the home directory: Modal refuses with `cannot mount volume on non-empty
+# path` when an image already ships files there — the official SGLang image
+# COPYs a kernels cache into it (live, 2026-09-21). ONE path for both engines,
+# so ONE Volume layout: its root holds `hub/`, where `HF_HOME` puts it again.
+HF_CACHE_DIR = "/cache/huggingface"
+
+# The env var the resolved catalog entry crosses into the container in. The
+# name is `tree.models.modal_catalog.EMBEDDING_DEPLOY_SPEC_ENV`, spelled out
+# because `tree` is not importable here on the container side (a unit test pins
+# the two together).
+DEPLOY_SPEC_ENV = "EMBEDDING_DEPLOY_SPEC"
+
+# What the container says when that variable does not decode. A corrupted
+# value is a TRANSPORT failure, so the import dies naming the variable instead
+# of falling back to a default nobody deployed — the crash-loop that made this
+# transport base64 was diagnosed from exactly such an import traceback.
+SPEC_DECODE_ERROR = (
+    "EMBEDDING_DEPLOY_SPEC does not hold the base64 of a JSON object "
+    "(tree.models.modal_catalog.encode_deploy_spec writes it). Redeploy with "
+    "`make memory-deploy-model MODEL=<repo_id>`."
+)
+
+# Two texts for the one request `@modal.enter` makes before declaring the
+# server up: a request that returns well-shaped vectors proves far more than a
+# 200 on /health. Ranking quality is the driver's smoke test, not this.
+PROBES = ["what does this server embed?", "It embeds text into vectors."]
+
+if modal.is_local():
+    from tree.logging import init_logger
+    from tree.models.modal_catalog import (
+        build_deploy_spec,
+        encode_deploy_spec,
+        hf_token_env,
+    )
+
+    init_logger()
+    # The engine is the SCRIPT's: an entry names no engine, and the router
+    # sends every embedding model Modal refuses to this file.
+    RESOLVED_SPEC = build_deploy_spec(os.environ["MODAL_MODEL"])
+    SPEC = RESOLVED_SPEC.model_dump()
+    # ONE name on both sides of the split, and the container ECHOES the string
+    # it was given rather than re-encoding `SPEC`: Pydantic's
+    # `model_dump_json()` and a hand-rolled serialisation differ in separators,
+    # so recomputing the value on the re-import would change the image
+    # definition Modal compares.
+    SPEC_ENV_VALUE = encode_deploy_spec(RESOLVED_SPEC)
+    # The Hugging Face token (optional, ADR-009 §9) travels as an EPHEMERAL
+    # Secret built here, on the operator's machine — never in the image env
+    # beside the spec, because image layers are cached and inspectable. It is
+    # the only Secret this app has, and it is empty unless `.env` sets one.
+    HF_SECRET = modal.Secret.from_dict(hf_token_env())
+else:
+    # `force=True`: Modal's runtime imports its own client before re-importing
+    # this file, so the root logger may already carry a handler — plain
+    # `basicConfig` would then be a no-op, root would stay at WARNING and the
+    # one boolean line ADR-009 §9 rests on would never reach `modal app logs`.
+    logging.basicConfig(level=logging.INFO, force=True)
+    SPEC_ENV_VALUE = os.environ["EMBEDDING_DEPLOY_SPEC"]
+    # `validate=True`: a value corrupted in transit must RAISE here, not be
+    # silently stripped of the bytes that are not base64 and then parsed into
+    # some other spec.
+    try:
+        SPEC = json.loads(base64.b64decode(SPEC_ENV_VALUE, validate=True))
+    except ValueError as error:
+        raise RuntimeError(SPEC_DECODE_ERROR) from error
+    if not isinstance(SPEC, dict):
+        raise RuntimeError(SPEC_DECODE_ERROR)
+    # Re-import inside the container: the local dict was already inlined into
+    # the deployed Secret, so this side must only match its SHAPE (one element).
+    HF_SECRET = modal.Secret.from_dict({})
+
+logger = logging.getLogger(__name__)
+
+image = (
+    modal.Image.from_registry("nvidia/cuda:13.0.2-devel-ubuntu22.04", add_python="3.12")
     .entrypoint([])
     .uv_pip_install(
-        "vllm==0.17.1",
-        "huggingface-hub>=0.34.0,<1.0",
+        f"vllm=={SPEC['engine_version']}",
+        f"autoinference-utils=={SPEC['autoinference_utils_version']}",
+        "httpx",
+        "huggingface-hub",
     )
-    .env({"HF_XET_HIGH_PERFORMANCE": "1"})
+    # `HF_HUB_CACHE` as well as `HF_HOME`: it names the same directory but
+    # OUTRANKS both `HF_HOME` and the legacy `HUGGINGFACE_HUB_CACHE`
+    # (`huggingface_hub/constants.py`), so an image that sets a cache variable
+    # of its own cannot move the weights off the Volume.
+    .env(
+        {
+            "HF_XET_HIGH_PERFORMANCE": "1",
+            "HF_HOME": HF_CACHE_DIR,
+            "HF_HUB_CACHE": f"{HF_CACHE_DIR}/hub",
+            DEPLOY_SPEC_ENV: SPEC_ENV_VALUE,
+        }
+    )
 )
 
-hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
-
-app = modal.App("vllm-embedding-models")
+app = modal.App(SPEC["app_name"])
 
 
-@app.function(
-    name="voyageai-voyage-4-nano",
-    image=vllm_image,
-    gpu="A10G",
-    scaledown_window=15 * MINUTES,
-    timeout=10 * MINUTES,
-    secrets=[modal.Secret.from_name("vllm-embedding-api-key")],
+@app.server(
+    image=image,
+    gpu=SPEC["gpu"],
+    cpu=SPEC["cpu"],
+    memory=SPEC["memory_mb"],
+    min_containers=0,
+    scaledown_window=5 * MINUTES,
+    port=PORT,
+    routing_region="eu-west",
+    unauthenticated=False,
+    exit_grace_period=25,
+    startup_timeout=STARTUP_TIMEOUT,
+    target_concurrency=16,
+    secrets=[HF_SECRET],
     volumes={
-        "/root/.cache/huggingface": hf_cache_vol,
-        "/root/.cache/vllm": vllm_cache_vol,
+        HF_CACHE_DIR: modal.Volume.from_name(
+            "huggingface-cache", create_if_missing=True
+        )
     },
 )
-@modal.concurrent(max_inputs=64)
-@modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
-def voyageai_voyage_4_nano():
-    api_key = os.environ["MODAL_EMBEDDING_API_KEY"]
+class Server:
+    """The vLLM process this container exists to keep alive."""
 
-    cmd = [
-        "vllm",
-        "serve",
-        MODEL_NAME,
-        "--revision",
-        MODEL_REVISION,
-        "--served-model-name",
-        MODEL_NAME,
-        "--runner",
-        "pooling",
-        "--convert",
-        "embed",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(VLLM_PORT),
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "32768",
-        "--enforce-eager",
-        "--api-key",
-        api_key,
-        "--pooler-config",
-        json.dumps({"pooling_type": "MEAN"}),
-        "--hf-overrides",
-        json.dumps({"architectures": ["VoyageQwen3BidirectionalEmbedModel"]}),
-        "--uvicorn-log-level=info",
-    ]
+    @modal.enter()
+    def start(self) -> None:
+        """Start vLLM and prove it embeds before the container serves traffic."""
 
-    print("Starting vLLM embedding server:", " ".join(cmd))
-    subprocess.Popen(cmd)
+        # FIRST line: the ONE observable proof the Secret arrived — the
+        # boolean, never the value. `False` next to a 401/403 from
+        # huggingface.co in `modal app logs` is the gated-repo diagnosis, and
+        # logging it before any import keeps it readable even when the image
+        # itself is broken.
+        logger.info("HF_TOKEN set in container: %s", bool(os.environ.get("HF_TOKEN")))
 
-
-@app.local_entrypoint()
-async def test():
-    import aiohttp
-
-    api_key = os.environ.get("MODAL_EMBEDDING_API_KEY", "")
-    if not api_key:
-        raise SystemExit(
-            "Set MODAL_EMBEDDING_API_KEY env var (same value as the Modal secret) to run this test."
+        # `autoinference-utils` lives only inside this image, so it is imported
+        # at container start — not at module level, where the deploying machine
+        # would have to have it installed.
+        from autoinference_utils.endpoint import (
+            VLLMEndpoint,
+            validate_embeddings_endpoint,
         )
 
-    url = await voyageai_voyage_4_nano.get_web_url.aio()
-    headers = {"Authorization": f"Bearer {api_key}"}
+        self.endpoint = VLLMEndpoint(
+            model=SPEC["repo_id"],
+            worker_port=PORT,
+            extra_server_args=SPEC["server_args"],
+            health_timeout=float(HEALTH_TIMEOUT),
+            health_poll_interval=5.0,
+        )
+        self.endpoint.start()
 
-    async with aiohttp.ClientSession(base_url=url, headers=headers) as session:
-        print(f"Health check: {url}")
-        async with session.get(
-            "/health", timeout=aiohttp.ClientTimeout(total=5 * MINUTES)
-        ) as resp:
-            assert resp.status == 200, f"Health check failed: {resp.status}"
-        print("Health check passed")
+        validate_embeddings_endpoint(
+            port=PORT,
+            payload={
+                "model": SPEC["repo_id"],
+                "input": PROBES,
+                "encoding_format": "float",
+            },
+            request_timeout=60.0,
+        )
+        logger.info(
+            "vLLM serving %s (revision %s) on port %d",
+            SPEC["repo_id"],
+            SPEC["revision"],
+            PORT,
+        )
 
-        payload = {
-            "model": MODEL_NAME,
-            "input": ["Hello, world!", "How are you?"],
-        }
-        async with session.post("/v1/embeddings", json=payload) as resp:
-            result = await resp.json()
-            assert result["object"] == "list", f"Unexpected response: {result}"
-            for item in result["data"]:
-                dim = len(item["embedding"])
-                print(f"  index={item['index']} dims={dim}")
-        print("Embedding test passed")
+    @modal.exit()
+    def stop(self) -> None:
+        """Terminate the engine so a scaled-down container stops billing."""
+
+        self.endpoint.stop()

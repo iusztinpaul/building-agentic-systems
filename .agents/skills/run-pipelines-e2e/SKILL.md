@@ -71,4 +71,31 @@ By default, use the "Paul Iusztin" user when testing.
 
    Expect: under 60 s (Claude Code's raised `SessionEnd` budget), one `Ingested session claude-session://e2e-1 duplicate=False flow_run_id=…` line, exit 0. Re-run it for `duplicate=True`. After the run indexes, a phrase from the transcript must come back through `search_memory` / `make memory-query-graph`. Every failure path is a skip + exit 0 by design, so read the LOG, not the exit code.
 
-4. **Clean up.** Stop the serve process and any MCP server you started, and remove stray artefacts (`.tree/graphs/*.html`) so the worktree stays clean.
+4. **After changing the embedding model (or the Embedding role).** Rows carry no model stamp, so nothing detects a half-migrated database: until you re-embed, stored voyage-3.5 vectors are scored against voyage-4 query vectors and `min_vector_score` may hide everything. Run the **Embedding reset** once per user, then the two phases that refill it:
+
+   ```bash
+   make memory-reset-embeddings                      # DRY RUN — prints the row count it would empty
+   make memory-reset-embeddings CONFIRM=yes          # empties child-chunk + entity vectors, clears cluster_id/viz
+   make memory-run-indexing-pipeline                 # re-embeds with the CURRENT models.search_embedding
+   make memory-run-clustering-pipeline               # re-maps; without it the embedding map stays stale
+   ```
+
+   Without `CONFIRM=yes` it changes nothing — that is the dry run, and the count it prints is what `Embedded N nodes` must match afterwards. It is idempotent and per user (`USER_IDENTIFIER=` / `USER_ID=`). Between the reset and the indexing run, search runs on the text leg only.
+
+5. **Models on Modal.** One target family serves both kinds — embedding models and LLMs — and takes the Hugging Face `repo_id` of a **Modal catalog** entry (`modal.embedding_models` / `modal.llm_models` in `configs/default.yaml`):
+
+   ```bash
+   make memory-deploy-model MODEL=Qwen/Qwen3-Embedding-0.6B    # deploy
+   make memory-deploy-model-test MODEL=Qwen/Qwen3-Embedding-0.6B  # smoke test
+   make memory-deploy-model-stop MODEL=Qwen/Qwen3-Embedding-0.6B  # stop — ALWAYS, a GPU bills while it is up
+   ```
+
+   You never pick how it is served. The driver asks Modal first and logs ONE `Routing …` line that records the decision and its reason — `Routing Qwen/Qwen3-Embedding-0.6B: Modal accepted it → Dedicated endpoint tree-qwen3-embedding-0-6b`, or `Routing voyageai/voyage-4-nano: not in Modal's endpoint catalog, no catalog base → vLLM App`. That line and `modal endpoint list` / `modal app list` are the only record of the route; no file holds it. `SERVING=endpoint|app` pins one path for ONE command — an ops escape hatch, never configuration. The smoke test is path-blind too, and the entry's kind picks it: vectors and a ranking for an embedding model, one JSON-mode chat completion for an LLM, a 401 without the Proxy token on both.
+
+   `HF_TOKEN` in `.env` is needed ONLY for a private or gated Hugging Face repo; empty (the default) changes no command. Every name this project creates starts with `tree-` (the app is `ep-tree-<slug>`), a deploy refuses a name that is already live, and a stop is only ever issued for a prefixed name — so an endpoint you made by hand in the dashboard is never touched.
+
+   A cold start is waited out, not failed on: a scaled-to-zero server answers `/health` with 503 in about a second, and the poller keeps going (`Still cold (HTTP 503) at … — 55s/600s`) until `Warm: … answered HTTP 200 after 104s`. For a slow first boot — a big model downloading its weights — raise the budget for that one command with `TREE_MODAL__WARMUP_DEADLINE_S=1200`. A **Dedicated endpoint** additionally reports `provisioning` in `modal endpoint list --json` for a few minutes after `create` returns; `-test` waits that out itself (`Provisioning: … — 120s/1800s`) before it polls `/health`.
+
+   To see what a `make memory-deploy-model*` target would run WITHOUT deploying, add `DRY_RUN=yes`: it logs the redacted `modal` command and exits 0 without starting `modal`. That is the only safe way — a fake `modal` on `PATH` does NOT work under `make` / `uv run`, because `.venv/bin` comes first and the real CLI runs (on 2026-09-20 this deployed over a live endpoint).
+
+6. **Clean up.** Stop the serve process and any MCP server you started, stop every Modal model you deployed, and remove stray artefacts (`.tree/graphs/*.html`) so the worktree stays clean.

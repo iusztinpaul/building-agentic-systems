@@ -20,7 +20,10 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.entities.memory import NodeType
-from tree.memory.embedding_text import node_to_embedding_text
+from tree.memory.embedding_text import (
+    node_to_embedding_text,
+    prospective_entity_embedding_text,
+)
 from tree.memory.graph.add_entity import add_entity
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
@@ -28,6 +31,10 @@ from tree.memory.graph.dedup import (
     MergeStrategy,
 )
 from tree.memory.graph.resolution.types import ResolvedEntity
+from tree.memory.pipeline import _CachedSingleEmbedding
+from tree.memory.rag.cleaning import strip_invalid_chars
+from tree.memory.rag.indexing import node_embedding_text
+from tree.models.base import EmbeddingRole
 
 
 # A stable user_id used across the suite. Real ``PydanticObjectId`` so
@@ -515,6 +522,7 @@ class _RecordingEmbeddingModel:
 
     def __init__(self) -> None:
         self.embedded_texts: list[str] = []
+        self.roles: list[EmbeddingRole | None] = []
 
     @property
     def dimensions(self) -> int:
@@ -525,8 +533,11 @@ class _RecordingEmbeddingModel:
         h = abs(hash(text))
         return [((h >> (i * 4)) & 0xF) / 15.0 for i in range(8)]
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
         self.embedded_texts.extend(texts)
+        self.roles.append(input_type)
         return [self._vec(t) for t in texts]
 
 
@@ -831,7 +842,7 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         )
         database, _collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
-        real_model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        real_model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         sess = _make_mock_voyage_session()
         mocker.patch("aiohttp.ClientSession", return_value=sess)
 
@@ -851,3 +862,209 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         text_rate_limit.assert_awaited_once_with(
             "voyage-embeddings", occupy=1, strict=False
         )
+
+
+# ---------------------------------------------------------------------------
+# Embedding role on the dedup / persisted vector (ADR-009 decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingRole:
+    """``add_entity`` embeds as ``document`` — forced, not chosen (ADR-009 §5).
+
+    The vector it computes is BOTH the dedup query vector and the vector the
+    non-merged path persists ("dedup vector == persisted vector, computed
+    once"). A persisted vector is a ``document`` vector, so a ``query`` role
+    here would either store a query vector or force a second embed call.
+    """
+
+    async def test_dedup_embed_uses_the_document_role(self, mocker) -> None:
+        database, _collection = _make_database(mocker)
+        model = _RecordingEmbeddingModel()
+        _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Andrej Karpathy"),
+            user_id=_USER_ID,
+            name="Andrej Karpathy",
+            entity_type=NodeType.PERSON,
+            properties={"role": "researcher"},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        assert model.roles == ["document"]
+
+    async def test_cached_vector_is_persisted_unchanged(self, mocker) -> None:
+        """The extraction hot path injects ``_CachedSingleEmbedding`` (task ④'s
+        already-computed ``document`` vector). Passing a role must not make
+        ``add_entity`` recompute or alter it — the invariant is unchanged."""
+
+        database, collection = _make_database(mocker)
+        cached_vector = [0.25] * 8
+        model = _CachedSingleEmbedding(cached_vector)
+        dedupe = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
+
+        await add_entity(
+            database=database,
+            embedding_model=model,
+            resolver=_make_resolver(canonical_name="Prefect Technologies"),
+            user_id=_USER_ID,
+            name="Prefect Technologies",
+            entity_type=NodeType.ORGANIZATION,
+            properties={},
+            source_id="src1",
+            dedup_config=DeduplicationConfig(),
+        )
+
+        # The dedup lookup and the persisted row hold the SAME cached vector.
+        assert dedupe.await_args.kwargs["embedding"] == cached_vector
+        node_call = collection.update_one.call_args_list[0]
+        set_stage = node_call.args[1][0]["$set"]
+        assert set_stage["embedding"]["$ifNull"][1] == cached_vector
+
+
+@pytest.mark.parametrize(
+    "entity_type,properties,expected",
+    [
+        (
+            NodeType.PREFERENCE,
+            {"statement": "prefers dark mode", "polarity": "like"},
+            "prefers dark mode",
+        ),
+        (NodeType.FACT, {"subject": "paul", "object": "Bucharest"}, "Bucharest"),
+        # Legacy column name, still read.
+        (NodeType.FACT, {"subject": "paul", "object_": "Bucharest"}, "Bucharest"),
+    ],
+)
+def test_inline_and_backfill_text_agree_for_preference_and_fact(
+    entity_type: NodeType, properties: dict[str, Any], expected: str
+) -> None:
+    """The inline writer and the indexing backfill must build the SAME text.
+
+    They are two different functions reached from two different layers, and
+    after an **Embedding reset** (ADR-009 §7) the backfill re-embeds EVERY
+    preference and fact. If it used the generic node-text there, supersession
+    would compare a statement vector against a node-text vector and silently
+    stop matching — the reset would corrupt exactly what it was meant to
+    migrate. Both now route through ``embedding_text.entity_embedding_text``.
+    """
+
+    inline = prospective_entity_embedding_text(
+        entity_type=entity_type,
+        name="prefers dark mode",
+        canonical_name="prefers dark mode",
+        properties=properties,
+    )
+    stored_row = {
+        "type": entity_type.value,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+
+    assert inline == node_embedding_text(stored_row)
+    assert inline == expected
+
+
+def test_inline_and_backfill_agree_on_the_generic_fallback() -> None:
+    """A malformed preference falls back to the node-text — on BOTH sides."""
+
+    properties = {"statement": "   "}
+
+    inline = prospective_entity_embedding_text(
+        entity_type=NodeType.PREFERENCE,
+        name="malformed",
+        canonical_name="malformed",
+        properties=properties,
+    )
+    stored_row = {
+        "type": "preference",
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+
+    assert inline == node_embedding_text(stored_row)
+    assert inline == node_to_embedding_text(stored_row)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # C0 control character.
+        "prefers\x00 dark mode",
+        # Lone (unpaired) surrogate.
+        "prefers\ud800 dark mode",
+    ],
+    ids=["control-char", "lone-surrogate"],
+)
+def test_preference_text_is_sanitized_identically_on_both_paths(
+    statement: str,
+) -> None:
+    """Invalid characters are stripped from the statement — on BOTH paths.
+
+    Voyage 400s on control characters and lone surrogates. The generic node-text
+    has always been run through ``strip_invalid_chars``; the PREFERENCE / FACT
+    branch must be too, otherwise a single bad statement is sent raw by the
+    inline writers AND by the backfill after an **Embedding reset** (ADR-009 §7).
+    Sanitizing inside ``entity_embedding_text`` moves both together, so the
+    ``_CachedSingleEmbedding`` key and the persisted vector's text stay identical
+    to each other — just clean. (The two inline writers are now literally ONE
+    function, ``prospective_entity_embedding_text``; that identity is asserted in
+    ``tests/unit/memory/test_embedding_text.py``.)
+    """
+
+    properties = {"statement": statement, "polarity": "like"}
+    kwargs: dict[str, Any] = {
+        "entity_type": NodeType.PREFERENCE,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+    stored_row = {
+        "type": NodeType.PREFERENCE.value,
+        "name": "prefers dark mode",
+        "canonical_name": "prefers dark mode",
+        "properties": properties,
+    }
+
+    inline = prospective_entity_embedding_text(**kwargs)
+    backfill = node_embedding_text(stored_row)
+
+    assert inline == backfill
+    # Clean, and identical to the same statement without the bad character.
+    assert inline == "prefers dark mode"
+    assert strip_invalid_chars(inline) == inline
+
+
+def test_all_invalid_chars_statement_falls_back_to_the_generic_text() -> None:
+    """A statement that sanitizes to blank falls back like a blank one does.
+
+    Sanitize-then-strip, not strip-then-sanitize: ``"\\x00 \\x00"`` survives
+    ``.strip()`` intact, so checking emptiness before sanitizing would embed a
+    single space. The row must never be embedded on a blank string.
+    """
+
+    properties = {"statement": "\x00 \ud800"}
+    kwargs: dict[str, Any] = {
+        "entity_type": NodeType.PREFERENCE,
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+    stored_row = {
+        "type": NodeType.PREFERENCE.value,
+        "name": "malformed",
+        "canonical_name": "malformed",
+        "properties": properties,
+    }
+
+    inline = prospective_entity_embedding_text(**kwargs)
+    backfill = node_embedding_text(stored_row)
+
+    assert inline == backfill
+    assert inline == node_to_embedding_text(stored_row)
+    assert strip_invalid_chars(inline) == inline

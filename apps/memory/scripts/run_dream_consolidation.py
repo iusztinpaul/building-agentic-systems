@@ -26,6 +26,7 @@ import click
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 
+from tree.cli import warn_ignored_config_overrides
 from tree.logging import init_logger
 
 init_logger()
@@ -36,6 +37,9 @@ POLL_INTERVAL_SECONDS = 2
 
 
 async def _run() -> None:
+    # The dream / model / Modal knobs — `dream.dry_run` included — are read by
+    # the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_DREAM__", "TREE_MODELS__", "TREE_MODAL__")
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(DEPLOYMENT_NAME)
 

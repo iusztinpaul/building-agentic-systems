@@ -9,13 +9,15 @@ Resolution order:
     2. configs/default.yaml (memory app root: ``apps/memory/``)
 """
 
+import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,16 @@ _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
 
 
 class LLMConfig(BaseModel):
+    """Which LLM every ``generate_json`` call goes to (ADR-009 §10).
+
+    ``provider: gemini | modal``, switched in YAML exactly like the two
+    embedding blocks; Gemini stays the default. Under ``modal``, ``model`` is a
+    **Modal catalog** ``repo_id`` from ``modal.llm_models`` (deploy it first
+    with ``make memory-deploy-model MODEL=<repo_id>``) — an id that is unknown,
+    or that names an embedding entry, fails at construction before any GPU
+    wakes.
+    """
+
     provider: str = "gemini"
     model: str = "gemini-2.5-flash-lite"
 
@@ -46,7 +58,12 @@ class EmbeddingConfig(BaseModel):
     """
 
     provider: str = Field(default="voyage")
-    model: str = Field(default="voyage-3.5")
+    # ADR-009 decision 1: the 4 series is Voyage's current text family.
+    # ``voyage-4`` is 1024-d and $0.06/1M — the same dimension and price as the
+    # legacy ``voyage-3.5`` it replaces, so the mongot ``vector_index`` is
+    # untouched by the swap. Legacy ids still resolve (see the dimension table
+    # in :mod:`tree.models.voyage_embedding`).
+    model: str = Field(default="voyage-4")
     dimensions: int = Field(default=1024)
 
 
@@ -297,17 +314,18 @@ class QueryConfig(BaseModel):
     ``min_vector_score`` is the bar the VECTOR leg of the hybrid search must
     clear before fusion (ADR-008 §3): Atlas normalises cosine similarity to
     ``(1 + cos) / 2``, so it is an absolute score, unlike the rank-based RRF
-    one. ``0.75`` is PROVISIONAL — ADR-008 §4 proposed 0.65, and the live pin in
-    ``tasks/125``'s log moved it up one step: a nonsense query still scored
-    0.728 against the local corpus, an on-topic one 0.882. Owned by Chapter 7's
-    evals; override per shell with ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
+    one. ``0.70`` is PROVISIONAL — re-pinned on voyage-4, 2026-09 (``tasks/141``
+    Log): the model scores lower than voyage-3.5, for which ``tasks/125`` pinned
+    0.75, and at 0.75 an ON-TOPIC query kept nothing (top=0.735) while nonsense
+    peaked at 0.649. Owned by Chapter 7's evals; override per shell with
+    ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
     """
 
     top_k: int = 10
     max_hops: int = 1
     rrf_k: int = 60
     embedding_batch_size: int = 64
-    min_vector_score: float = Field(0.75, ge=0.0, le=1.0)
+    min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
 
 
 class ObservabilityConfig(BaseModel):
@@ -320,17 +338,24 @@ class ObservabilityConfig(BaseModel):
     * ``embedding_price_per_1m_tokens`` — per-model USD price per 1,000,000
       tokens, used to compute the manual ``total_cost`` on Voyage embedding
       spans (Opik does not natively cost Voyage). Prices verified against
-      https://docs.voyageai.com/docs/pricing (June 2026): voyage-3.5 $0.06,
-      voyage-3 $0.06, voyage-3.5-lite $0.02, voyage-3-large $0.18,
-      voyage-3-lite $0.02, voyage-code-3 $0.18, voyage-multimodal-3 $0.12,
-      voyage-finance-2 $0.12, voyage-law-2 $0.12. A model absent from the map
-      yields ``total_cost=0`` (token usage is still recorded) rather than an
-      error — telemetry is fail-open.
+      https://docs.voyageai.com/docs/pricing (September 2026): voyage-4-large
+      $0.12, voyage-4 $0.06, voyage-4-lite $0.02, voyage-code-4 $0.12, and the
+      LEGACY but still-served voyage-3.5 $0.06, voyage-3 $0.06,
+      voyage-3.5-lite $0.02, voyage-3-large $0.18, voyage-3-lite $0.02,
+      voyage-code-3 $0.18, voyage-multimodal-3 $0.12, voyage-finance-2 $0.12,
+      voyage-law-2 $0.12. A model absent from the map yields ``total_cost=0``
+      (token usage is still recorded) rather than an error — telemetry is
+      fail-open. Keep this map in lockstep with the YAML one
+      (``test_yaml_price_map_matches_code_default`` pins them identical).
     """
 
     enabled: bool = True
     embedding_price_per_1m_tokens: dict[str, float] = Field(
         default_factory=lambda: {
+            "voyage-4-large": 0.12,
+            "voyage-4": 0.06,
+            "voyage-4-lite": 0.02,
+            "voyage-code-4": 0.12,
             "voyage-3.5": 0.06,
             "voyage-3": 0.06,
             "voyage-3.5-lite": 0.02,
@@ -630,6 +655,461 @@ class MemoryConfig(BaseModel):
     clustering: ClusteringConfig = ClusteringConfig()
 
 
+ModelKind = Literal["embedding", "llm"]
+"""What a **Modal catalog** entry IS, and therefore which App can serve it.
+
+It comes from WHICH LIST the entry lives in (``modal.embedding_models`` ->
+``embedding``, ``modal.llm_models`` -> ``llm``), never from guessing at the
+model, and it selects the App script the router falls back to (ADR-009 §2):
+``embedding`` -> ``deploy/modal_vllm_embedding.py``, ``llm`` ->
+``deploy/modal_sglang_llm.py``.
+
+It is NOT the **Serving path** (``endpoint`` | ``app``): that is a RUNTIME
+decision of the deploy driver and has no config field at all.
+"""
+
+MODAL_NAME_PREFIX = "tree"
+"""The namespace EVERY Modal name this project creates carries (ADR-009 §3).
+
+Modal names the app of a Dedicated endpoint an operator creates by hand
+``ep-<slug of the model name>`` — exactly what our first derivation produced,
+so on 2026-09-20 an accidental ``modal deploy`` silently overwrote a hand-made
+``ep-qwen3-embedding-0-6b``. With the prefix our names are ``tree-<slug>`` /
+``ep-tree-<slug>``, so the collision is impossible BY CONSTRUCTION, and the
+prefix doubles as the ownership mark: ``deploy`` and ``stop`` refuse any name
+without it (``tree.models.modal_cli.assert_owned_name``).
+
+ONE constant beside the ONE derivation, not a YAML knob: a second project
+deploying into the same Modal workspace is what would justify configuring it.
+"""
+
+MODAL_APP_NAME_MAX_LENGTH = 63
+"""Longest ``app_name`` we accept, checked at load time (ADR-009 §3).
+
+Modal's own rule is ``len(name) <= 64`` while its error text says "shorter than
+64" (pinned client, modal 1.5.5: ``modal/_utils/name_utils.py:19-27`` and
+``:64``); 63 satisfies both readings. ``modal endpoint create --name`` adds no
+stricter limit — it sends the name unvalidated (``modal/cli/endpoint.py:255``),
+and https://modal.com/docs/cli/latest/endpoint.md documents none (read
+2026-09-20). With ``ep-tree-`` = 8 characters a slug may be at most 55.
+"""
+
+# `<org>/<name>` — the Hugging Face repo id shape.
+_REPO_ID_PATTERN = r"^[\w.-]+/[\w.-]+$"
+
+# A commit sha, a tag or a branch (`refs/pr/3` is legal on the Hub). Word
+# characters, `.`, `-` and `/` only — deliberately NO whitespace: the revision
+# travels as one element of the `modal` argv the deploy driver logs with a
+# plain `" ".join(...)`, and a value carrying a space would split into two
+# tokens in the log an operator is meant to be able to re-run.
+_REVISION_PATTERN = r"^[\w.\-/]+$"
+
+# Server args the deploy builder owns on every model, so ONE entry can run
+# under either App script: the launcher's own identity/networking flags, the
+# per-engine mode flag and the parallelism the builder derives from `n_gpus`
+# (ADR-009 §3).
+_BUILDER_OWNED_SERVER_ARGS = frozenset(
+    {
+        "--model",
+        "--model-path",
+        "--host",
+        "--port",
+        "--revision",
+        "--served-model-name",
+        "--max-model-len",
+        "--context-length",
+        "--runner",
+        "--is-embedding",
+        "--tp",
+        "--tp-size",
+        "--tensor-parallel-size",
+    }
+)
+
+
+class ModalEngineConfig(BaseModel):
+    """The pinned version of ONE serving engine, used by the App scripts.
+
+    Per ENGINE, not per model (ADR-009 §3): promote to a per-entry override
+    only when two catalog models need different engine versions.
+
+    What a ``version`` IS differs per engine, because the two Apps install the
+    engine differently (both after Modal's own recipe): ``vllm`` is a PyPI
+    version (``vllm==0.26.0`` on a CUDA base), ``sglang`` is a DOCKER TAG of
+    ``lmsysorg/sglang`` (``lmsysorg/sglang:v0.5.18``, the official image, which
+    ships the engine already built).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+
+
+class ModalModelConfig(BaseModel):
+    """What EVERY **Modal catalog** entry says, whatever its kind (ADR-009 §3).
+
+    The YAML names the Hugging Face model and the facts about it — never HOW
+    it is served. There is no ``serving`` and no ``base_model`` field: the
+    **Serving path** is a runtime decision of the deploy driver, which asks
+    Modal (ADR-009 §2).
+
+    ``repo_id`` is all a minimal entry needs. The App fields (``gpu``,
+    ``cpu``, ``memory_mb``, ``max_model_len``, ``extra_server_args``) are
+    optional-with-defaults on every entry rather than required: the router
+    needs them the MOMENT Modal refuses the model, and nobody can predict that
+    refusal when writing the entry. A **Dedicated endpoint** simply never
+    reads them.
+
+    Subclassed rather than duplicated so the name derivation, the two name
+    checks and the server-arg validator exist ONCE for embeddings and LLMs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_id: str = Field(
+        pattern=_REPO_ID_PATTERN,
+        description="Hugging Face repo id of the weights, e.g. voyageai/voyage-4-nano.",
+    )
+    revision: str = Field(
+        default="main",
+        pattern=_REVISION_PATTERN,
+        description=(
+            "Commit sha (preferred) or branch of the weights. Pinning a sha is "
+            "what makes a re-deploy reproducible. Word characters, `.`, `-` "
+            "and `/` only: it travels as ONE argv element."
+        ),
+    )
+    gpu: str = Field(
+        default="A10",
+        description="App scripts only. A Modal GPU string, e.g. A10, L40S, H100.",
+    )
+    cpu: float = Field(default=4, gt=0, description="App scripts only.")
+    memory_mb: int = Field(default=16384, gt=0, description="App scripts only.")
+    max_model_len: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "App scripts only. Context window to serve; null leaves the "
+            "engine's own default in place."
+        ),
+    )
+    extra_server_args: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "App scripts only: model-specific engine flags, `--flag` -> "
+            'value (`""` for a bare flag). A Dedicated endpoint never sees '
+            "them. Values may not contain whitespace — autoinference-utils "
+            "splits them into argv tokens."
+        ),
+    )
+
+    kind: ClassVar[ModelKind]
+    """Which LIST this entry lives in — set by the subclass, never by YAML.
+
+    A ``ClassVar``, so ``extra="forbid"`` rejects a YAML ``kind:`` line: the
+    kind is a fact about the list, not a value an operator may assert about a
+    model.
+    """
+
+    @property
+    def name_slug(self) -> str:
+        """The part of ``repo_id`` after ``/``, lower-cased, every run of
+        non-``[a-z0-9]`` characters collapsed to a single ``-``.
+
+        ``voyageai/voyage-4-nano`` -> ``voyage-4-nano``;
+        ``Qwen/Qwen3-Embedding-0.6B`` -> ``qwen3-embedding-0-6b``.
+
+        The derived charset ``[a-z0-9-]`` is inside Modal's object-name charset
+        ``[a-zA-Z0-9-_.]``, so only the LENGTH can make a legal slug illegal.
+        """
+
+        suffix = self.repo_id.split("/")[-1].lower()
+        return re.sub(r"[^a-z0-9]+", "-", suffix).strip("-")
+
+    @property
+    def endpoint_name(self) -> str:
+        """The Dedicated endpoint's name: ``tree-<slug>``.
+
+        The ``tree-`` namespace (``MODAL_NAME_PREFIX``) is what keeps a deploy
+        of ours off an endpoint the operator made by hand — Modal would name
+        that one's app ``ep-<slug>``, ours is ``ep-tree-<slug>``.
+
+        ``voyageai/voyage-4-nano`` -> ``tree-voyage-4-nano``;
+        ``Qwen/Qwen3-Embedding-0.6B`` -> ``tree-qwen3-embedding-0-6b``.
+        """
+
+        return f"{MODAL_NAME_PREFIX}-{self.name_slug}"
+
+    @property
+    def app_name(self) -> str:
+        """The Modal app serving this model, on BOTH Serving paths.
+
+        ASSUMPTION H1, proven live in ``tasks/141``: ``modal endpoint create
+        --name N`` yields the Modal app ``ep-N``. H1 needs the ``ep-<N>``
+        SHAPE, not a particular ``N``, so the prefix costs it nothing. The
+        derivation lives in this ONE place so a wrong assumption costs a
+        one-line change.
+
+        ``voyageai/voyage-4-nano`` -> ``ep-tree-voyage-4-nano``.
+        """
+
+        return f"ep-{self.endpoint_name}"
+
+    @field_validator("extra_server_args")
+    @classmethod
+    def _check_server_args(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, arg in value.items():
+            if not key.startswith("--"):
+                raise ValueError(
+                    f"extra_server_args key {key!r} must start with '--' "
+                    f"(e.g. --{key.lstrip('-')})"
+                )
+            if key in _BUILDER_OWNED_SERVER_ARGS:
+                raise ValueError(
+                    f"extra_server_args key {key!r} is owned by the deploy "
+                    "builder — remove it. Builder-owned keys: "
+                    f"{', '.join(sorted(_BUILDER_OWNED_SERVER_ARGS))}."
+                )
+            if arg != arg.strip() or any(char.isspace() for char in arg):
+                raise ValueError(
+                    f"value for {key} contains whitespace — use compact JSON, "
+                    'e.g. {"pooling_type":"MEAN"}'
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _check_the_derived_names_are_not_empty(self) -> "ModalModelConfig":
+        """``repo_id`` may legally end in punctuation (``a/---`` matches the
+        pattern), but every such character is dropped by the name derivation —
+        leaving the endpoint nameless and the Modal app a bare ``ep-tree-``.
+
+        It checks the SLUG, not ``endpoint_name``: the prefix is always there,
+        so a prefixed name is never empty and would mask the mistake."""
+
+        if not self.name_slug:
+            raise ValueError(
+                f"repo_id {self.repo_id!r} derives an empty endpoint name: the "
+                "part after '/' must contain at least one ASCII letter or digit "
+                "(everything else is collapsed away)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_the_app_name_fits_modal(self) -> "ModalModelConfig":
+        """Modal rejects an object name longer than its limit, and it would do
+        so at ``modal deploy`` time — after the operator waited for an image
+        build. A load-time error costs nothing and names the fix."""
+
+        if len(self.app_name) > MODAL_APP_NAME_MAX_LENGTH:
+            raise ValueError(
+                f"repo_id {self.repo_id!r} derives the Modal app name "
+                f"{self.app_name!r} ({len(self.app_name)} characters); Modal "
+                f"allows at most {MODAL_APP_NAME_MAX_LENGTH}."
+            )
+        return self
+
+
+class ModalEmbeddingModelConfig(ModalModelConfig):
+    """One entry of ``modal.embedding_models`` — the **Modal catalog**'s
+    embedding half (ADR-009 §3).
+
+    Adds what only an embedding model has: how wide its vectors are and what
+    prefix each **Embedding role** prepends. Read by BOTH the deploy driver
+    and ``ModalEmbeddingModel``, so names and dimensions cannot drift apart.
+    """
+
+    native_dimensions: int = Field(
+        gt=0,
+        description="Vector width the server returns when no truncation is asked for.",
+    )
+    matryoshka_dimensions: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Output widths the model can be truncated to (MRL). Empty means "
+            "'this model cannot truncate' — the client then refuses a "
+            "`dimensions` that differs from `native_dimensions`."
+        ),
+    )
+    query_prompt: str = Field(
+        default="",
+        description=(
+            "Prefix prepended client-side to a USER-QUESTION text. Its BYTES "
+            "are the contract (trailing space or not) — copy the model card."
+        ),
+    )
+    document_prompt: str = Field(
+        default="",
+        description="Prefix prepended client-side to a PERSISTED text.",
+    )
+
+    kind: ClassVar[ModelKind] = "embedding"
+
+
+class ModalLLMModelConfig(ModalModelConfig):
+    """One entry of ``modal.llm_models`` — the **Modal catalog**'s LLM half
+    (ADR-009 §3/§10).
+
+    Adds ``n_gpus`` — SGLang's tensor parallelism, which is also the ``:N`` of
+    the Modal GPU string — and the two optional REQUEST knobs of ADR-009 §10,
+    ``max_tokens`` and ``chat_template_kwargs``. The knobs are the only fields
+    here that a **Dedicated endpoint** also honours: they are client-side
+    request fields, sent by ``ModalLLM`` and by the chat smoke test from one
+    helper, so changing one needs no redeploy. Everything else an LLM needs is
+    already on the shared base.
+    """
+
+    n_gpus: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "App scripts only: how many GPUs of `gpu` the App runs on. It "
+            "becomes SGLang's `tp` and the `:N` suffix of the GPU string, "
+            "which is why `--tp` and its aliases are builder-owned."
+        ),
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Request knob, CLIENT-side: the completion budget sent on every "
+            "chat request, on BOTH Serving paths and with no redeploy. Null "
+            "sends no `max_tokens` at all, leaving the server's own default."
+        ),
+    )
+    chat_template_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Request knob, CLIENT-side: a JSON object passed to the served "
+            "model's chat template, e.g. {enable_thinking: false} for a "
+            "thinking model. Every value must be JSON — quote a YAML date, "
+            'e.g. cutoff: "2026-01-01". Empty sends no key at all; identical '
+            "on BOTH Serving paths, and changing it needs no redeploy."
+        ),
+    )
+
+    kind: ClassVar[ModelKind] = "llm"
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def _check_the_template_kwargs_go_on_the_wire(
+        cls, value: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Every key names a variable of the served model's chat template, so
+        an empty one (`"": false`, a YAML typo) can only be ignored by the
+        server — silently, on a booted GPU.
+
+        And every VALUE is POSTed inside a JSON object by both chat paths, so
+        one that `json.dumps` cannot write is not a knob at all: an UNQUOTED
+        YAML date (`cutoff: 2026-01-01`) parses to a `datetime.date`, which
+        crashes the smoke test before its POST while the OpenAI client quietly
+        sends `"2026-01-01"` — the two paths would no longer send the same
+        request, which is the whole point of the knobs living here. `NaN` and
+        `Infinity` are refused with them (`allow_nan=False`): Python writes
+        them, JSON has no syntax for them, and a strict server rejects them.
+
+        Each value is dumped on its OWN so the message names the top-level key
+        an operator edits, even when the offender is nested under it.
+        """
+
+        for key, knob in value.items():
+            if not key.strip():
+                raise ValueError(
+                    "chat_template_kwargs keys must be non-empty names, e.g. "
+                    "{enable_thinking: false}"
+                )
+            try:
+                json.dumps(knob, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"chat_template_kwargs value for {key!r} is not JSON "
+                    f"({exc}) — it is POSTed inside a JSON object, so give it "
+                    f'a JSON value or quote it, e.g. {key}: "2026-01-01" for '
+                    "an unquoted YAML date"
+                ) from exc
+        return value
+
+
+class ModalConfig(BaseModel):
+    """The **Modal catalog** plus the pins the App scripts build with.
+
+    The code default is an EMPTY catalog: the YAML seeds it, so a checkout
+    without a ``modal:`` section boots (and every non-Modal provider keeps
+    working) with no catalog at all.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    autoinference_utils_version: str = Field(
+        default="0.2.6",
+        description="App scripts only: the pinned `autoinference-utils` version.",
+    )
+    engines: dict[Literal["sglang", "vllm"], ModalEngineConfig] = Field(
+        default_factory=lambda: {
+            "vllm": ModalEngineConfig(version="0.26.0"),
+            "sglang": ModalEngineConfig(version="v0.5.18"),
+        },
+        description=(
+            "App scripts only: the pinned version of each engine — a PyPI "
+            "version for vllm, a docker tag of lmsysorg/sglang for sglang."
+        ),
+    )
+    embedding_models: list[ModalEmbeddingModelConfig] = Field(
+        default_factory=list,
+        description="The Modal catalog's embedding half — one entry per model.",
+    )
+    llm_models: list[ModalLLMModelConfig] = Field(
+        default_factory=list,
+        description="The Modal catalog's LLM half — one entry per model.",
+    )
+    warmup_deadline_s: float = Field(
+        default=600.0,
+        ge=1.0,
+        description="Total budget (seconds) polling ONE cold Modal server's "
+        "/health before failing; per server.",
+    )
+    request_timeout_s: float = Field(
+        default=300.0,
+        ge=1.0,
+        description="Bound (seconds) on ONE request to a Modal server — the "
+        "`timeout` of both clients' AsyncOpenAI (with `max_retries=0`) and of "
+        "the chat smoke test's POST. The twin of warmup_deadline_s: that one "
+        "waits for a COLD server, this one waits for ONE answer.",
+    )
+
+    @model_validator(mode="after")
+    def _check_entries_are_unique(self) -> "ModalConfig":
+        """One model, one entry, one Modal app — ACROSS BOTH LISTS.
+
+        A duplicate ``repo_id`` makes the ONE lookup over both lists
+        order-dependent (and its `kind` a coin toss); two entries deriving the
+        SAME ``app_name`` would silently share one Modal app, so deploying one
+        would stop the other. Spanning both lists is what makes
+        ``get_catalog_entry`` a total function of the id.
+        """
+
+        seen_repo_ids: set[str] = set()
+        seen_app_names: dict[str, str] = {}
+        for entry in [*self.embedding_models, *self.llm_models]:
+            if entry.repo_id in seen_repo_ids:
+                raise ValueError(
+                    f"duplicate repo_id {entry.repo_id!r} across "
+                    "modal.embedding_models and modal.llm_models — one entry "
+                    "per model."
+                )
+            seen_repo_ids.add(entry.repo_id)
+
+            owner = seen_app_names.get(entry.app_name)
+            if owner is not None:
+                raise ValueError(
+                    f"{owner!r} and {entry.repo_id!r} both derive the Modal "
+                    f"app name {entry.app_name!r} across "
+                    "modal.embedding_models and modal.llm_models — one app "
+                    "per model, so rename one of them."
+                )
+            seen_app_names[entry.app_name] = entry.repo_id
+        return self
+
+
 class AppConfig(BaseModel):
     memory: MemoryConfig = MemoryConfig()
     models: ModelsConfig = ModelsConfig()
@@ -641,6 +1121,7 @@ class AppConfig(BaseModel):
     prefect: PrefectConfig = PrefectConfig()
     observability: ObservabilityConfig = ObservabilityConfig()
     youtube: YouTubeConfig = YouTubeConfig()
+    modal: ModalConfig = ModalConfig()
 
 
 _BOOL_TRUE = {"1", "true", "yes", "on"}

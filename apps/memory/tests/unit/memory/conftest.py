@@ -73,7 +73,7 @@ _QUERYABLE_VECTOR_INDEX: dict[str, Any] = {
 
 
 # What a row scores when it does not say otherwise: a clear match, well above
-# ``query.min_vector_score`` (0.75 today), so only a test that CARES about the
+# ``query.min_vector_score`` (0.70 today), so only a test that CARES about the
 # gate has to spell a score out.
 _DEFAULT_SEARCH_SCORE = 0.9
 

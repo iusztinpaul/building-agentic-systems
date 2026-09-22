@@ -7,10 +7,10 @@ the text-endpoint payload shape (``input: list[str]``, NOT the multimodal
 ``ExtractionError.status_code`` discriminator that
 ``tree.memory.embedding_text._embed_chunk_resilient`` keys off.
 
-Regression context: routing ``voyage-3``/``voyage-3.5`` (the #048 default) to
-the multimodal endpoint is rejected with ``HTTP 400: Model voyage-3 is not
-supported``. This module pins the text client's contract; the routing fix is
-covered in :mod:`tests.unit.models.test_get_model`.
+Regression context: routing a text id such as ``voyage-4`` (the shipped
+default) to the multimodal endpoint is rejected with ``HTTP 400: Model
+voyage-4 is not supported``. This module pins the text client's contract;
+the routing fix is covered in :mod:`tests.unit.models.test_get_model`.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -43,7 +43,7 @@ def _mock_aiohttp_session(mock_resp: AsyncMock):
 
 @pytest.fixture
 def model() -> VoyageTextEmbeddingModel:
-    return VoyageTextEmbeddingModel(api_key="test-key", model="voyage-3.5")
+    return VoyageTextEmbeddingModel(api_key="test-key", model="voyage-4")
 
 
 class TestVoyageTextInit:
@@ -51,48 +51,62 @@ class TestVoyageTextInit:
         with pytest.raises(ModelError, match="Voyage API key is required"):
             VoyageTextEmbeddingModel(api_key="")
 
-    def test_defaults_to_voyage_3_5(self) -> None:
+    def test_defaults_to_voyage_4(self) -> None:
         m = VoyageTextEmbeddingModel(api_key="key")
 
-        assert m._model == "voyage-3.5"
+        assert m._model == "voyage-4"
 
     def test_stores_config(self) -> None:
         m = VoyageTextEmbeddingModel(
             api_key="key",
             model="voyage-3",
-            input_type="document",
             output_dimension=512,
         )
 
         assert m._model == "voyage-3"
-        assert m._input_type == "document"
         assert m._output_dimension == 512
 
 
-class TestVoyageTextDimensions:
-    def test_native_voyage_3_5_is_1024(self) -> None:
-        m = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+class TestNativeDimensions:
+    """``_MODEL_NATIVE_DIMENSIONS`` GAINED the 4 series and KEPT every legacy id
+    (ADR-009 decision 1) — ``voyage-3.x`` is still served and the
+    ``TREE_MODELS__SEARCH_EMBEDDING__MODEL`` escape hatch must keep resolving.
+    """
+
+    def test_default_model_is_1024(self) -> None:
+        # No explicit model: the ctor default (``voyage-4``) must resolve.
+        m = VoyageTextEmbeddingModel(api_key="k")
 
         assert m.dimensions == 1024
 
-    def test_native_voyage_3_is_1024(self) -> None:
-        m = VoyageTextEmbeddingModel(api_key="key", model="voyage-3")
+    @pytest.mark.parametrize(
+        "model_id",
+        ["voyage-4-large", "voyage-4", "voyage-4-lite", "voyage-code-4"],
+    )
+    def test_voyage_4_series_is_1024(self, model_id: str) -> None:
+        m = VoyageTextEmbeddingModel(api_key="key", model=model_id)
 
         assert m.dimensions == 1024
 
-    def test_native_voyage_3_lite_is_512(self) -> None:
-        m = VoyageTextEmbeddingModel(api_key="key", model="voyage-3-lite")
+    @pytest.mark.parametrize(
+        "model_id,expected",
+        [
+            ("voyage-3.5", 1024),
+            ("voyage-3", 1024),
+            ("voyage-3-lite", 512),
+            ("voyage-code-3", 1024),
+        ],
+    )
+    def test_legacy_ids_keep_their_native_dimension(
+        self, model_id: str, expected: int
+    ) -> None:
+        m = VoyageTextEmbeddingModel(api_key="key", model=model_id)
 
-        assert m.dimensions == 512
-
-    def test_native_voyage_code_3_is_1024(self) -> None:
-        m = VoyageTextEmbeddingModel(api_key="key", model="voyage-code-3")
-
-        assert m.dimensions == 1024
+        assert m.dimensions == expected
 
     def test_explicit_output_dimension_wins(self) -> None:
         m = VoyageTextEmbeddingModel(
-            api_key="key", model="voyage-3.5", output_dimension=256
+            api_key="key", model="voyage-4", output_dimension=256
         )
 
         assert m.dimensions == 256
@@ -100,7 +114,7 @@ class TestVoyageTextDimensions:
     def test_unknown_model_without_output_dimension_raises(self) -> None:
         m = VoyageTextEmbeddingModel(api_key="key", model="voyage-future-7")
 
-        with pytest.raises(ModelError, match="no explicit `output_dimension`"):
+        with pytest.raises(ModelError, match="_MODEL_NATIVE_DIMENSIONS"):
             _ = m.dimensions
 
 
@@ -144,7 +158,7 @@ class TestVoyageTextEmbed:
         payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
 
         assert url == "https://ai.mongodb.com/v1/embeddings"
-        assert payload["model"] == "voyage-3.5"
+        assert payload["model"] == "voyage-4"
         assert payload["input"] == ["hello"]
         assert "inputs" not in payload  # not the multimodal shape
         assert payload["truncation"] is True
@@ -152,8 +166,7 @@ class TestVoyageTextEmbed:
     async def test_embed_sends_optional_params(self) -> None:
         m = VoyageTextEmbeddingModel(
             api_key="key",
-            model="voyage-3.5",
-            input_type="query",
+            model="voyage-4",
             output_dimension=256,
         )
         response_data = {"data": [{"embedding": [0.1]}]}
@@ -162,7 +175,7 @@ class TestVoyageTextEmbed:
 
         with patch("aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = mock_session
-            await m.embed(["test"])
+            await m.embed(["test"], input_type="query")
 
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get(
             "json"
@@ -170,6 +183,53 @@ class TestVoyageTextEmbed:
 
         assert payload["input_type"] == "query"
         assert payload["output_dimension"] == 256
+
+
+class TestInputType:
+    """The **Embedding role** is per CALL, never per instance (ADR-009 §5).
+
+    One model instance serves both the indexing path (``document``) and the
+    query path (``query``), so the role cannot live on the constructor — the
+    old constructor argument is DELETED, not deprecated.
+    """
+
+    async def _payload_for(self, model: VoyageTextEmbeddingModel, **kwargs) -> dict:
+        response_data = {"data": [{"embedding": [0.1]}]}
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, mock_post = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            await model.embed(["q"], **kwargs)
+
+        return mock_post.call_args.kwargs["json"]
+
+    @pytest.mark.parametrize("role", ["query", "document"])
+    async def test_role_is_sent_as_the_api_input_type(
+        self, model: VoyageTextEmbeddingModel, role: str
+    ) -> None:
+        payload = await self._payload_for(model, input_type=role)
+
+        assert payload["input_type"] == role
+
+    async def test_no_role_omits_the_key(self, model: VoyageTextEmbeddingModel) -> None:
+        payload = await self._payload_for(model, input_type=None)
+
+        assert "input_type" not in payload
+
+    async def test_default_call_omits_the_key(
+        self, model: VoyageTextEmbeddingModel
+    ) -> None:
+        """User story 3: an existing caller that passes no role sends exactly
+        today's body."""
+
+        payload = await self._payload_for(model)
+
+        assert "input_type" not in payload
+
+    def test_constructor_rejects_input_type(self) -> None:
+        with pytest.raises(TypeError):
+            VoyageTextEmbeddingModel(api_key="k", input_type="query")  # type: ignore[call-arg]
 
     async def test_embed_sends_auth_header(
         self, model: VoyageTextEmbeddingModel
@@ -279,7 +339,7 @@ class TestVoyageTextEmbed:
 
         m = VoyageTextEmbeddingModel(
             api_key="key",
-            model="voyage-3.5",
+            model="voyage-4",
             rate_limit_backoff_seconds=(0.1, 0.2, 0.4),
         )
 
@@ -322,7 +382,7 @@ class TestVoyageTextEmbed:
 
         m = VoyageTextEmbeddingModel(
             api_key="key",
-            model="voyage-3.5",
+            model="voyage-4",
             rate_limit_backoff_seconds=(0.1, 0.1),  # only 2 retries
         )
 
@@ -405,7 +465,7 @@ class TestVoyageTextRateLimitChokepoint:
         )
         m = VoyageTextEmbeddingModel(
             api_key="key",
-            model="voyage-3.5",
+            model="voyage-4",
             rate_limit_backoff_seconds=(0.1, 0.2, 0.4),
         )
         responses = [
@@ -494,7 +554,7 @@ class TestVoyageTextComposesWithEmbeddingTextResilience:
 
     async def test_mocked_400_single_input_is_skipped_to_placeholder(self) -> None:
         # Arrange: a real text client whose endpoint 400s on the middle input.
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
 
         with patch("aiohttp.ClientSession") as mock_cls:
             mock_cls.side_effect = self._session_factory(poison={"bad"})
@@ -516,7 +576,7 @@ class TestVoyageTextComposesWithEmbeddingTextResilience:
         )
         model = VoyageTextEmbeddingModel(
             api_key="key",
-            model="voyage-3.5",
+            model="voyage-4",
             rate_limit_backoff_seconds=(0.01, 0.01),
         )
 

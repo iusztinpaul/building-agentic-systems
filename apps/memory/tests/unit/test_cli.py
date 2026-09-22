@@ -9,6 +9,7 @@ the real pipelines (see AGENTS.md "Running pipelines & E2E"), not unit-tested.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -131,5 +132,46 @@ class TestWarnIgnoredConfigOverrides:
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
             warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
+
+        assert caplog.records == []
+
+    def test_several_prefixes_are_one_warning_naming_all_of_them(
+        self, caplog, monkeypatch
+    ) -> None:
+        """Every dispatcher warns for 2-3 sections; one call, one line."""
+
+        monkeypatch.setenv("TREE_MODELS__LLM__PROVIDER", "modal")
+        monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__")
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "TREE_MODELS__LLM__PROVIDER" in message
+        assert "TREE_MODAL__REQUEST_TIMEOUT_S" in message
+
+    def test_the_suite_s_single_underscore_dry_run_rail_is_not_an_override(
+        self, caplog, monkeypatch
+    ) -> None:
+        """``TREE_MODAL_DRY_RUN`` is a CLI rail, not a ``TREE_MODAL__`` key.
+
+        Every unit test runs with it set (``tests/unit/conftest.py``'s
+        ``_modal_dry_run``), and operators set it for a dry deploy — one
+        underscore short of the section prefix. A warning here would fire on
+        every clean shell and train the reader to ignore the line.
+        """
+
+        monkeypatch.setenv("TREE_MODAL_DRY_RUN", "1")
+        # Hermetic: `make` exports `.env`, which may itself carry an override.
+        for name in [
+            name
+            for name in os.environ
+            if name.startswith(("TREE_MODELS__", "TREE_MODAL__"))
+        ]:
+            monkeypatch.delenv(name, raising=False)
+
+        with caplog.at_level(logging.WARNING, logger="tree.cli"):
+            warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__")
 
         assert caplog.records == []

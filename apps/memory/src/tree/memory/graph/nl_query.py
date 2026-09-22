@@ -440,7 +440,10 @@ async def _replace_embedding_placeholder(
                     "$vectorSearch has __EMBED__ placeholder but no queryText field"
                 )
 
-            vectors = await embedding_model.embed([query_text])
+            # ``queryText`` is the user's question, so it embeds under the
+            # ``query`` **Embedding role** (ADR-009 §5) — same role as the
+            # ``rag/search.py`` leg, same corpus of ``document`` vectors.
+            vectors = await embedding_model.embed([query_text], input_type="query")
             vs["queryVector"] = vectors[0]
 
     return pipeline

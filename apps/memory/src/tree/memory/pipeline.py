@@ -82,7 +82,10 @@ from tree.entities.memory import (
 )
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.entities.users import User
-from tree.memory.embedding_text import embed_in_batches, node_to_embedding_text
+from tree.memory.embedding_text import (
+    embed_in_batches,
+    prospective_entity_embedding_text,
+)
 from tree.memory.graph.add_entity import add_entity
 from tree.memory.graph.extraction import build_structural_entries, extract_entities
 from tree.memory.graph.dedup import (
@@ -167,12 +170,17 @@ from tree.memory.types import (
     make_entity_key,
     make_type_name_key,
 )
-from tree.models.base import BaseEmbeddingModel, BaseLLM
+from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
+from tree.models.exceptions import ModelError
 from tree.models.get_model import (
     get_embedding_model,
     get_llm,
     get_resolution_embedding_model,
     get_search_embedding_model,
+    llm_identity,
+    modal_backed_models,
+    prewarm_models,
+    search_embedding_identity,
 )
 from tree.config.constants import TAGS_CLUSTERING, TAGS_EXTRACTION, TAGS_INDEXING
 from tree.observability import (
@@ -286,45 +294,6 @@ def _build_dedup_config() -> DeduplicationConfig:
         match_same_type_only=cfg.match_same_type_only,
         merge_strategy=MergeStrategy(cfg.merge_strategy),
     )
-
-
-def _entity_embeddable_text(
-    *, entity_type: NodeType, name: str, canonical_name: str, properties: dict[str, Any]
-) -> str:
-    """Embeddable text for one extracted entity.
-
-    Mirrors :func:`tree.memory.graph.add_entity._embeddable_text` so
-    the vector task ④ pre-computes (that ⑤ deduplicates against and ⑥
-    persists) is byte-for-byte the text ``add_entity`` would build for the
-    same node — GENERIC types embed their node-text, PREFERENCE / FACT embed
-    ``properties.statement`` / ``properties.object``. Keeping the two
-    builders in lock-step is what lets ``_CachedSingleEmbedding`` reuse the
-    vector and makes the indexing backfill a no-op for dedup-created nodes.
-    """
-
-    if entity_type == NodeType.PREFERENCE:
-        statement = (properties or {}).get("statement")
-        if isinstance(statement, str) and statement.strip():
-            return statement.strip()
-    elif entity_type == NodeType.FACT:
-        obj = (properties or {}).get("object") or (properties or {}).get("object_")
-        if isinstance(obj, str) and obj.strip():
-            return obj.strip()
-
-    # ``aliases`` / ``confidence`` are top-level columns on the persisted
-    # row, never under ``properties`` — strip them so this text matches
-    # both ``add_entity._embeddable_text`` and the indexing backfill text.
-    node = {
-        "type": entity_type.value,
-        "name": name,
-        "canonical_name": canonical_name,
-        "properties": {
-            k: v
-            for k, v in (properties or {}).items()
-            if k not in {"aliases", "confidence"}
-        },
-    }
-    return node_to_embedding_text(node)
 
 
 def _build_resolver(embedding_model: BaseEmbeddingModel) -> CompositeResolver:
@@ -474,7 +443,10 @@ def child_embedding_texts(chunked_docs: list[ChunkedDocument]) -> list[str]:
 
 
 async def _embed_children(
-    texts: list[str], opik_trace_headers: dict[str, str] | None = None
+    texts: list[str],
+    *,
+    embedding_identity: str,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> dict[str, list[float]]:
     """Embed every **Child chunk** text of the run in as few requests as possible.
 
@@ -488,6 +460,15 @@ async def _embed_children(
     Returns a ``text -> vector`` map the loader indexes by the same text it
     rebuilds per child, so a missing vector degrades to ``embedding=[]`` (the
     indexing backfill picks it up) instead of misaligning rows.
+
+    Embeds under the ``document`` **Embedding role**: these vectors are
+    PERSISTED on the child rows and later retrieved by a ``query`` vector
+    (ADR-009 decision 5).
+
+    ``embedding_identity`` (``provider:model:dimensions:role``, from
+    :func:`tree.models.get_model.search_embedding_identity`) is NOT used by the
+    body — it rides in the ``INPUTS`` cache key so this task's 90-day cache can
+    never replay vectors from a previous embedding space (ADR-009 decision 6).
     """
 
     log = _get_run_logger()
@@ -499,9 +480,12 @@ async def _embed_children(
         if not texts:
             return {}
 
-        vectors = await embed_in_batches(texts, get_search_embedding_model())
+        vectors = await embed_in_batches(
+            texts, get_search_embedding_model(), input_type="document"
+        )
         log.info(
-            "embed_children: n_texts=%d dim=%d",
+            "embed_children: identity=%s n_texts=%d dim=%d",
+            embedding_identity,
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
@@ -587,6 +571,8 @@ async def _llm_extract_entities(
     chunked: ChunkedDocument,
     user_id: PydanticObjectId,
     llm: BaseLLM | None = None,
+    *,
+    llm_identity: str,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> RawExtraction:
     """Invoke the LLM once per **Parent chunk** and merge the extractions.
@@ -599,6 +585,12 @@ async def _llm_extract_entities(
 
     ``llm`` is optional so a caller that already holds a handle can inject it.
     When omitted the flow uses the default ``get_llm()`` factory.
+
+    ``llm_identity`` (``provider:model``, from
+    :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
+    rides in the ``INPUTS`` cache key so this task's 30-day cache can never
+    replay the JSON of a previous LLM after a ``models.llm`` switch (ADR-009
+    decision 6's rule applied to decision 10's provider switch).
 
     ``opik_trace_headers`` attaches this task's span to the flow's trace. The
     nested Gemini LLM spans (with native usage + cost) attach to THIS span via
@@ -640,8 +632,9 @@ async def _llm_extract_entities(
             merged = merged.merge(piece)
 
         log.info(
-            "llm_extract_entities: doc_id=%s n_parents=%d n_entities_raw=%d "
+            "llm_extract_entities: llm=%s doc_id=%s n_parents=%d n_entities_raw=%d "
             "n_edges_raw=%d",
+            llm_identity,
             chunked.document_id,
             len(chunked.parents),
             len(merged.nodes),
@@ -1110,7 +1103,7 @@ async def _resolve_entities(
                     # has picked a canonical_name. Generic types → node-text;
                     # PREFERENCE/FACT → statement/object.
                     node = node_by_key.get(key)
-                    embeddable_text_by_key[key] = _entity_embeddable_text(
+                    embeddable_text_by_key[key] = prospective_entity_embedding_text(
                         entity_type=etype,
                         name=name,
                         canonical_name=resolved.canonical_name,
@@ -1149,7 +1142,10 @@ resolve_entities_task = task(
 
 
 async def _embed_entities(
-    texts: list[str], opik_trace_headers: dict[str, str] | None = None
+    texts: list[str],
+    *,
+    embedding_identity: str,
+    opik_trace_headers: dict[str, str] | None = None,
 ) -> dict[str, list[float]]:
     """Embed every embeddable text for the run in one batched call.
 
@@ -1160,13 +1156,20 @@ async def _embed_entities(
     positionally aligned, so we zip them to their texts and return a
     ``text -> vector`` map that task ⑤/⑥ index by embeddable text.
 
-    Caches on ``INPUTS`` (the whole text list), so an identical re-run of the
-    same document set is a cache hit; partial-overlap re-runs re-embed.
-    Per-run dedup of identical texts happens upstream (the flow embeds
-    ``sorted(set(...))``).
+    Caches on ``INPUTS`` (the whole text list PLUS ``embedding_identity``), so
+    an identical re-run of the same document set against the SAME embedding
+    space is a cache hit; partial-overlap re-runs and model swaps re-embed.
+    ``embedding_identity`` (``provider:model:dimensions:role``, from
+    :func:`tree.models.get_model.search_embedding_identity`) is unused by the
+    body and exists only to keep the 90-day cache from replaying vectors from
+    a previous embedding space (ADR-009 decision 6). Per-run dedup of identical
+    texts happens upstream (the flow embeds ``sorted(set(...))``).
 
-    Uses the **search** model — the persisted, index-coupled vector. The 429
-    backoff is untouched: it lives inside ``.embed()``, called once per chunk.
+    Uses the **search** model — the persisted, index-coupled vector — under the
+    ``document`` **Embedding role**: the vector this task computes is BOTH the
+    dedup query vector and the vector ``add_entity`` persists (ADR-009
+    decision 5). The 429 backoff is untouched: it lives inside ``.embed()``,
+    called once per chunk.
 
     ``opik_trace_headers`` attaches this task's span to the flow's trace; the
     nested Voyage/Modal embed spans (usage + cost) nest under it via contextvars.
@@ -1183,9 +1186,10 @@ async def _embed_entities(
             return {}
 
         embedding_model = get_search_embedding_model()
-        vectors = await embed_in_batches(texts, embedding_model)
+        vectors = await embed_in_batches(texts, embedding_model, input_type="document")
         log.info(
-            "embed_entities: n_texts=%d dim=%d",
+            "embed_entities: identity=%s n_texts=%d dim=%d",
+            embedding_identity,
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
@@ -1569,9 +1573,17 @@ async def _dispatch_entity_write(
     # vector up by the same embeddable-text key and wrap it in
     # ``_CachedSingleEmbedding`` so ``add_entity``'s internal
     # ``embedding_model.embed([...])`` returns it WITHOUT a second embed call.
-    # ``add_entity`` rebuilds the identical text via its own
-    # ``_embeddable_text`` and persists this same vector on the non-merged
-    # path — dedup vector == persisted vector, computed once.
+    # ``add_entity`` rebuilds the identical text through the SAME
+    # ``prospective_entity_embedding_text`` and persists this vector on the
+    # non-merged path — dedup vector == persisted vector, computed once.
+    #
+    # THIS INVARIANT FORCES THE **EMBEDDING ROLE** (ADR-009 decision 5): the
+    # vector dedup searches with is the vector we store, so it must be a
+    # ``document`` vector — hence every persisted vector is ``document``, and
+    # task ④ embeds under that role. Giving dedup a ``query`` vector would
+    # either persist a query vector or cost a second embed call; both break
+    # the invariant. Entity-vs-entity stays symmetric: both sides are
+    # ``document`` vectors.
     key = make_entity_key(source_document_id, node.type, node.name)
     canonical = (
         resolved_entity.canonical_name if resolved_entity is not None else node.name
@@ -1634,6 +1646,11 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     Used inside ``apply_writes`` so ``add_entity``'s internal
     ``embedding_model.embed([name])`` reuses the vector task ④ already
     computed instead of paying for it twice.
+
+    The cached vector IS a ``document`` vector — task ④ embeds every persisted
+    text under that **Embedding role** (ADR-009 §5) — so replaying it for a
+    caller that asks for ``"document"`` returns exactly what a fresh call
+    would.
     """
 
     def __init__(self, vector: list[float]) -> None:
@@ -1643,7 +1660,16 @@ class _CachedSingleEmbedding(BaseEmbeddingModel):
     def dimensions(self) -> int:
         return len(self._vector)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        """Replay the seeded vector. The **Embedding role** is ignored.
+
+        The vector was already computed as a ``document`` vector by task ④;
+        this wrapper never calls a provider, so a role here has nothing to act
+        on.
+        """
+
         return [self._vector for _ in texts]
 
 
@@ -1971,6 +1997,26 @@ async def _run_extraction_worker_body(
     if not docs:
         return WriteSummary(documents_processed=0)
 
+    # ----- Pre-warm every Modal-backed model, before document 1 -------------
+    # ADR-009 §11. AFTER the zero-documents guard (an empty run must never wake
+    # a GPU) and BEFORE the first stage, so a cold start is paid ONCE here
+    # instead of once per model instance the tasks build below — and a DEAD
+    # server fails this run with zero documents attempted rather than counting
+    # as N failed documents. A no-op for Voyage / Gemini / sentence-transformers
+    # / mock, which have no ``ensure_warm`` — and ``modal_backed_models`` builds
+    # NOTHING for them (#149 QA: a ``sentence-transformers`` run used to pay a
+    # torch weight load here for a model the pre-warm then skipped). These
+    # instances are throw-aways: what the tasks inherit is the warm SERVER, not
+    # the object. Plain awaited helper, never a Prefect task — a cached "warm"
+    # is the "warm at t0" fallacy, and task retries would multiply the poller's
+    # deadline.
+    if mode == "rag":
+        await prewarm_models(*modal_backed_models("search_embedding"))
+    else:
+        await prewarm_models(
+            *modal_backed_models("llm", "resolution_embedding", "search_embedding")
+        )
+
     # ----- Task ① — clean + chunk (per-doc fan-out) -------------------------
     # Fans out under a bounded semaphore sized by ``doc_concurrency`` (#059 R7,
     # default 1 = serial-equivalent). gather preserves order so ``chunked_docs``
@@ -1982,8 +2028,20 @@ async def _run_extraction_worker_body(
     )
 
     # ----- Task ② — embed every child's contextual-header text --------------
+    # The identity of the persisted embedding space rides into BOTH embed tasks
+    # as a cache-key input (ADR-009 decision 6), so their 90-day cache cannot
+    # serve vectors embedded by a previous model. Resolved once per run, at run
+    # time, so an env-override of the model moves it too.
+    embedding_identity = search_embedding_identity()
+    # Same rule for the LLM behind the cached extraction task (ADR-009 decision
+    # 6 applied to the decision-10 ``models.llm`` switch): without it, a
+    # gemini -> modal flip REPLAYS the old model's JSON out of the 30-day
+    # cache. Resolved once per run, next to the embedding identity.
+    extraction_llm_identity = llm_identity()
     child_vectors = await embed_children_task(
-        child_embedding_texts(chunked_docs), opik_trace_headers=headers
+        child_embedding_texts(chunked_docs),
+        embedding_identity=embedding_identity,
+        opik_trace_headers=headers,
     )
 
     # ----- Task ③ — load the document / parent / child rows -----------------
@@ -2035,7 +2093,10 @@ async def _run_extraction_worker_body(
     for chunked in chunked_docs:
         raws.append(
             await llm_extract_entities_task(
-                chunked, user_id, opik_trace_headers=headers
+                chunked,
+                user_id,
+                llm_identity=extraction_llm_identity,
+                opik_trace_headers=headers,
             )
         )
 
@@ -2099,7 +2160,11 @@ async def _run_extraction_worker_body(
     # ``embed_entities_task`` packs them into as few synchronous requests as
     # the 1000-input / 320K-token caps allow.
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
-    vectors = await embed_entities_task(embeddable_texts, opik_trace_headers=headers)
+    vectors = await embed_entities_task(
+        embeddable_texts,
+        embedding_identity=embedding_identity,
+        opik_trace_headers=headers,
+    )
     embeddings = EmbeddingMap(vectors=vectors)
 
     # ----- Task ⑦ — dedup --------------------------------------------------
@@ -2174,6 +2239,12 @@ async def _embed_nodes(
     with span(
         "embed_nodes_task", tags=_INDEXING_TAGS, trace_headers=opik_trace_headers
     ):
+        # NOT pre-warmed, on purpose (ADR-009 §11): ONE model, sequential
+        # batches, and whether there is anything to backfill is known only
+        # inside ``embed_nodes``. The Warm gate warms at use — the first
+        # ``embed()`` waits out the cold start and a dead server fails this task
+        # before any write — while a pre-warm at the top of the flow would wake
+        # a GPU for a backfill that usually has nothing to do.
         embedding_model = get_embedding_model()
         return await embed_nodes(client, database, embedding_model, user_id)
 
@@ -2452,6 +2523,8 @@ async def _summarise_cluster(
     samples: list[str],
     cluster_id: int,
     prompt_version: str,
+    *,
+    llm_identity: str,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> ClusterSummary:
     """Name and describe ONE **Memory cluster** from its sampled members.
@@ -2463,6 +2536,12 @@ async def _summarise_cluster(
 
     ``get_llm()`` is built INSIDE the task: Prefect may run it in another
     thread/process, where a handle created at flow scope is not reusable.
+
+    ``llm_identity`` (``provider:model``, from
+    :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
+    rides in the ``INPUTS`` cache key so this task's 90-day cache can never
+    replay the labels of a previous LLM after a ``models.llm`` switch (ADR-009
+    decision 6's rule applied to decision 10's provider switch).
     """
 
     log = _get_run_logger()
@@ -2472,7 +2551,8 @@ async def _summarise_cluster(
         trace_headers=opik_trace_headers,
     ):
         log.info(
-            "summarise_cluster: cluster_id=%d n_samples=%d prompt_version=%s",
+            "summarise_cluster: llm=%s cluster_id=%d n_samples=%d prompt_version=%s",
+            llm_identity,
             cluster_id,
             len(samples),
             prompt_version,
@@ -2515,6 +2595,11 @@ async def _summarise_clusters(
 
     log = _get_run_logger()
     semaphore = asyncio.Semaphore(config.summaries.llm_concurrency)
+    # ADR-009 §6: the identity of the LLM rides into every cluster's cache key,
+    # so a ``models.llm`` switch re-labels the clusters instead of replaying the
+    # old model's labels for the rest of the 90-day window. Resolved ONCE before
+    # the fan-out, at run time, so an env override moves it too.
+    cluster_llm_identity = llm_identity()
 
     async def _one(cluster_id: int) -> ClusterSummary:
         async with semaphore:
@@ -2522,10 +2607,29 @@ async def _summarise_clusters(
                 samples_by_cluster[cluster_id],
                 cluster_id,
                 SUMMARY_PROMPT_VERSION,
+                llm_identity=cluster_llm_identity,
                 opik_trace_headers=opik_trace_headers,
             )
 
     ordered = sorted(samples_by_cluster)
+    if ordered:
+        # Pre-warm before the fan-out (ADR-009 §11): without it a dead Modal
+        # LLM costs every cluster its own 600 s poll. The CONSTRUCTION sits
+        # OUTSIDE the ``try`` — a missing Proxy token is a configuration error
+        # and must fail the run loudly; only the WARM fails open, per ADR-007
+        # §4: ONE warning and the existing fallback label for every cluster,
+        # with no LLM call attempted. ``ModelError`` is the warm path's closed
+        # set: a fail-fast 4xx raises it directly, a spent deadline raises its
+        # ``ExtractionError`` subclass — nothing else escapes a warm. Under
+        # ``llm.provider != modal`` nothing is built at all: the instance exists
+        # only to be warmed (the fan-out builds its own inside each task).
+        llms = modal_backed_models("llm")
+        try:
+            await prewarm_models(*llms)
+        except ModelError as exc:
+            log.warning("Cluster summaries skipped: %s", exc)
+            return {cid: fallback_summary(cid) for cid in ordered}, len(ordered)
+
     outcomes = await asyncio.gather(
         *[_one(cluster_id) for cluster_id in ordered], return_exceptions=True
     )

@@ -147,7 +147,9 @@ async def _vector_search(
     Candidates that ran clear :func:`_gate_vector_candidates` before fusion.
     """
 
-    query_vector = (await embedding_model.embed([query]))[0]
+    # ``query`` is the user's question — the QUERY side of retrieval, searched
+    # against a corpus of ``document`` vectors (ADR-009 §5).
+    query_vector = (await embedding_model.embed([query], input_type="query"))[0]
 
     pipeline = [
         {

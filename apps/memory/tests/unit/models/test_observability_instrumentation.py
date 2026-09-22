@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tree.models.modal_embedding import ModalEmbeddingModel
+from tree.models.modal_warmup import WarmGate
 from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 from tree.models.voyage_multimodal_embedding import VoyageMultimodalEmbeddingModel
 
@@ -44,9 +45,9 @@ def _mock_aiohttp_session(mock_resp: AsyncMock):
 
 class TestVoyageTextCostRecording:
     async def test_records_usage_and_nonzero_cost(self, mocker) -> None:
-        # Arrange — 1,000,000 tokens of voyage-3.5 at $0.06/1M → $0.06.
+        # Arrange — 1,000,000 tokens of voyage-4 at $0.06/1M → $0.06.
         rec = mocker.patch("tree.models.voyage_embedding.record_embedding_usage")
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {
             "data": [{"embedding": [0.1]}],
             "usage": {"total_tokens": 1_000_000},
@@ -60,14 +61,14 @@ class TestVoyageTextCostRecording:
         rec.assert_called_once()
         kwargs = rec.call_args.kwargs
         assert kwargs["provider"] == "voyage"
-        assert kwargs["model"] == "voyage-3.5"
+        assert kwargs["model"] == "voyage-4"
         assert kwargs["total_tokens"] == 1_000_000
         assert kwargs["total_cost"] == pytest.approx(0.06)
 
     async def test_missing_usage_records_zero_cost(self, mocker) -> None:
         # Arrange — response without a usage block (defensive).
         rec = mocker.patch("tree.models.voyage_embedding.record_embedding_usage")
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {"data": [{"embedding": [0.1]}]}
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
         mock_session, _ = _mock_aiohttp_session(mock_resp)
@@ -86,7 +87,7 @@ class TestVoyageTextCostRecording:
             "tree.models.voyage_embedding.record_embedding_usage",
             side_effect=RuntimeError("opik down"),
         )
-        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-3.5")
+        model = VoyageTextEmbeddingModel(api_key="key", model="voyage-4")
         response_data = {
             "data": [{"embedding": [0.1, 0.2]}],
             "usage": {"total_tokens": 10},
@@ -128,22 +129,28 @@ class TestVoyageMultimodalCostRecording:
 
 
 class TestModalUsageRecording:
+    """The FAKE proxy token ``wk-1.ws-2`` and a response of the entry's NATIVE
+    width (voyage-4-nano: 2048), because the client asserts that width before
+    it returns anything."""
+
     def _model(self) -> ModalEmbeddingModel:
-        m = ModalEmbeddingModel(api_key="key", model="voyageai/voyage-4-nano")
-        # Bypass lazy Modal URL resolution + health check.
+        m = ModalEmbeddingModel(proxy_token="wk-1.ws-2", model="voyageai/voyage-4-nano")
+        # A REAL Warm gate over a no-op warm body: the call path (single
+        # flight + cold-start recovery) stays exercised, while the URL lookup,
+        # the health poll and the served-model discovery are bypassed.
         m._client = MagicMock()
-        m._ensure_initialised = AsyncMock()  # type: ignore[method-assign]
+        m._gate = WarmGate(AsyncMock(), label="ep-tree-voyage-4-nano")
         return m
 
     async def test_records_token_usage_with_zero_cost(self, mocker) -> None:
-        # Arrange — vLLM returns a usage object; self-hosted → cost 0.
+        # Arrange — the server returns a usage object; self-hosted → cost 0.
         rec = mocker.patch("tree.models.modal_embedding.record_embedding_usage")
         model = self._model()
         usage = MagicMock()
         usage.total_tokens = 42
         response = MagicMock()
         response.usage = usage
-        response.data = [MagicMock(embedding=[0.1, 0.2])]
+        response.data = [MagicMock(embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -160,7 +167,7 @@ class TestModalUsageRecording:
         model = self._model()
         response = MagicMock()
         response.usage = None
-        response.data = [MagicMock(embedding=[0.1])]
+        response.data = [MagicMock(embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -176,11 +183,12 @@ class TestModalUsageRecording:
             side_effect=RuntimeError("opik down"),
         )
         model = self._model()
+        vector = [0.9] * 2048
         response = MagicMock()
         response.usage = MagicMock(total_tokens=5)
-        response.data = [MagicMock(embedding=[0.9])]
+        response.data = [MagicMock(embedding=vector)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         result = await model.embed(["hello"])
 
-        assert result == [[0.9]]
+        assert result == [vector]
