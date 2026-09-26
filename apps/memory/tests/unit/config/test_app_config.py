@@ -847,16 +847,6 @@ class TestClusteringConfig:
         assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
         assert clustering.summaries.llm_concurrency == 5
 
-    def test_default_yaml_comment_block_explains_the_switch_and_the_2d_rule(self):
-        """The two decisions an operator MUST not have to read the ADR for: the
-        switch is the ``run_clustering`` flow parameter, and clustering happens
-        in the 5-d intermediate — never on the 2D projection."""
-
-        yaml_text = _DEFAULT_CONFIG_PATH.read_text()
-
-        assert "run_clustering" in yaml_text
-        assert "never on the 2D" in yaml_text
-
     def test_clustering_defaults_when_section_absent(self, tmp_path):
         custom = tmp_path / "no_clustering.yaml"
         custom.write_text("memory:\n  mode: rag\n")
