@@ -56,7 +56,7 @@ from uuid import uuid4
 import numpy as np
 from beanie import PydanticObjectId
 from prefect import flow, get_run_logger, task
-from prefect.cache_policies import INPUTS, NO_CACHE
+from prefect.cache_policies import INPUTS, NO_CACHE, TASK_SOURCE
 from prefect.deployments import run_deployment
 from prefect.runtime import flow_run as prefect_flow_run
 from pydantic import BaseModel, Field
@@ -213,6 +213,10 @@ _EXTRACTION_METADATA = pipeline_metadata("extraction")
 # Cache policy for the cached tasks: INPUTS minus the per-run trace-header param,
 # so changing trace headers between runs is NOT a cache miss (Prefect 3).
 _INPUTS_NO_HEADERS = INPUTS - "opik_trace_headers"
+# Task ① also keys on its own source: its output is persisted as rows, so a
+# splitting change (e.g. the summary fallback) must re-chunk instead of serving
+# a 30-day-old payload built by the old code.
+_INPUTS_AND_SOURCE_NO_HEADERS = _INPUTS_NO_HEADERS + TASK_SOURCE
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +339,10 @@ async def _clean_and_chunk(
 
     ``opik_trace_headers`` (passed by the flow) attaches this task's span to the
     flow's trace across the Prefect task boundary; excluded from the cache key.
+
+    A document with no ``content`` falls back to its ``summary``: metadata-only
+    sources (an arXiv dataset row ingested with ``fetch_content: false``) carry
+    the abstract there, and without it the document would be unsearchable.
     """
 
     log = _get_run_logger()
@@ -343,7 +351,7 @@ async def _clean_and_chunk(
         tags=_EXTRACTION_TAGS,
         trace_headers=opik_trace_headers,
     ):
-        content = clean_text(document.content or "")
+        content = clean_text(document.content or document.summary or "")
         parents = split_document(content, chunking) if content else []
         chunked = ChunkedDocument(
             document_id=str(document.id),
@@ -372,7 +380,7 @@ def _reference_uris(document: Document) -> list[str]:
 clean_and_chunk_task = task(
     _clean_and_chunk,
     name="clean-and-chunk",
-    cache_policy=_INPUTS_NO_HEADERS,
+    cache_policy=_INPUTS_AND_SOURCE_NO_HEADERS,
     cache_expiration=timedelta(days=30),
     retries=1,
 )

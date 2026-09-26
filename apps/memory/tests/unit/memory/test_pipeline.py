@@ -146,6 +146,7 @@ def _make_document(
     content: str = "Alice ships ML pipelines.",
     source_uri: str = "https://example.com/a",
     title: str | None = "A Title",
+    summary: str | None = None,
 ) -> Any:
     """Build a minimal Document-like object that ``_clean_and_chunk`` accepts."""
 
@@ -156,8 +157,18 @@ def _make_document(
     doc.title = title
     doc.date = None
     doc.content = content
+    doc.summary = summary
     doc.references = []
     return doc
+
+
+def _inputs_exclude(policy: Any) -> list[str]:
+    """The ``Inputs`` exclude list, also when it sits inside a compound policy."""
+
+    for member in getattr(policy, "policies", [policy]):
+        if hasattr(member, "exclude"):
+            return member.exclude or []
+    return []
 
 
 def _chunking(**overrides: Any) -> ChunkingConfig:
@@ -213,6 +224,35 @@ class TestCleanAndChunkTask:
         chunked = await _clean_and_chunk(doc, _chunking())
 
         assert chunked.parents == []
+
+    async def test_empty_content_falls_back_to_the_summary(self) -> None:
+        # An arXiv row ingested with ``fetch_content: false`` has only its
+        # abstract; without the fallback it would never become searchable.
+        doc = _make_document(content="", summary="We study memory for agents.")
+
+        chunked = await _clean_and_chunk(doc, _chunking())
+
+        assert [parent.content for parent in chunked.parents] == [
+            "We study memory for agents."
+        ]
+
+    async def test_content_wins_over_the_summary(self) -> None:
+        doc = _make_document(content="Full article body.", summary="Short teaser.")
+
+        chunked = await _clean_and_chunk(doc, _chunking())
+
+        joined = "".join(parent.content for parent in chunked.parents)
+        assert "Full article body." in joined
+        assert "Short teaser." not in joined
+
+    async def test_the_cache_key_includes_the_task_source(self) -> None:
+        # A splitting change must re-chunk, not serve a cached pre-change payload.
+        policy_names = {
+            type(policy).__name__
+            for policy in clean_and_chunk_task.cache_policy.policies
+        }
+
+        assert "TaskSource" in policy_names
 
     async def test_carries_document_metadata_for_the_downstream_stages(self) -> None:
         doc = _make_document(content="some content " * 50, title="Memory for Agents")
@@ -360,7 +400,7 @@ class TestChunkingConfigIsPartOfTheCacheKey:
 
         assert "chunking" in params
         assert params["chunking"].annotation in (ChunkingConfig, "ChunkingConfig")
-        assert "chunking" not in (clean_and_chunk_task.cache_policy.exclude or [])
+        assert "chunking" not in _inputs_exclude(clean_and_chunk_task.cache_policy)
 
 
 # ---------------------------------------------------------------------------
@@ -2554,8 +2594,7 @@ class TestTraceHeadersCacheExclusion:
     def test_cache_policy_excludes_trace_headers(self, cached_task) -> None:
         # The task's cache policy is ``INPUTS - "opik_trace_headers"`` — i.e. an
         # ``Inputs`` policy whose exclude list contains the headers param.
-        policy = cached_task.cache_policy
-        assert "opik_trace_headers" in (policy.exclude or [])
+        assert "opik_trace_headers" in _inputs_exclude(cached_task.cache_policy)
 
     def test_task_fn_accepts_trace_headers_kwarg(self) -> None:
         # Every instrumented task body accepts the optional headers kwarg so the
