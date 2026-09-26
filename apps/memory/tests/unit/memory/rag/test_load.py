@@ -167,7 +167,6 @@ class TestBuildRagRowOps:
         row = _by_id(_ops(1))[document_row_id(_USER_ID, _URI)]
 
         assert row["type"] == "document"
-        assert row["name"] == _URI
         assert row["subtype"] is None
         assert row["parent_id"] is None
         assert row["chunk_index"] is None
@@ -254,26 +253,14 @@ class TestBuildRagRowOps:
     def test_every_op_is_an_upsert(self) -> None:
         assert all(op._upsert for op in _ops(2, 2))
 
-    def test_chunk_rows_store_no_name_and_unset_a_legacy_one(self) -> None:
-        # A URI-shaped ``name`` is tokenised by the ``$text`` index, so every
-        # chunk of a document would match a query through its URL.
-        for op in _ops(1, 1)[1:]:
-            assert "name" not in _set_stage(op)
-            assert "name" in _unset_stage(op)
-
-    def test_document_row_keeps_its_name(self) -> None:
-        op = _ops()[0]
-
-        assert _set_stage(op)["name"] == _URI
-        assert "name" not in _unset_stage(op)
-
-    def test_no_row_carries_entity_resolution_fields(self) -> None:
+    def test_no_row_carries_entity_naming_fields(self) -> None:
         # Positional ``_id``s are never resolved or merged, so these fields
-        # would only hold filler defaults; the ``$unset`` strips legacy ones.
-        resolution_fields = {"canonical_name", "aliases", "confidence"}
+        # would only hold filler or duplicated values (a URI-shaped ``name`` is
+        # also tokenised by ``$text``); the ``$unset`` strips legacy ones.
+        naming_fields = {"name", "canonical_name", "aliases", "confidence"}
         for op in _ops(1, 1):
-            assert resolution_fields.isdisjoint(_set_stage(op))
-            assert resolution_fields <= set(_unset_stage(op))
+            assert naming_fields.isdisjoint(_set_stage(op))
+            assert naming_fields <= set(_unset_stage(op))
 
 
 class TestRagNodeTypeGuard:
@@ -290,7 +277,6 @@ class TestRagNodeTypeGuard:
                 user_id=_USER_ID,
                 node_id="x",
                 node_type="person",
-                name="alice",
                 subtype=None,
                 parent_id=None,
                 chunk_index=None,
@@ -317,7 +303,6 @@ class TestRagNodeTypeGuard:
                 user_id=_USER_ID,
                 node_id="x",
                 node_type=node_type.value,
-                name="whatever",
                 subtype=None,
                 parent_id=None,
                 chunk_index=None,
@@ -335,7 +320,6 @@ class TestRagNodeTypeGuard:
                 user_id=_USER_ID,
                 node_id="x",
                 node_type="part_of",
-                name="child -> parent",
                 subtype=None,
                 parent_id=None,
                 chunk_index=None,

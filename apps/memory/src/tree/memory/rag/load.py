@@ -21,12 +21,12 @@ Row contract (the loader writes these rows in BOTH memory modes):
 Both chunk levels denormalise ``title`` and ``heading_path`` onto the row so the
 indexing backfill rebuilds a byte-identical embedding text without a join.
 
-The rows carry no entity-resolution fields (``canonical_name`` / ``aliases`` /
-``confidence``): their ``_id`` is derived from ``source_uri`` + position, so
-nothing ever resolves or merges them. Chunk rows carry no ``name`` either — the
-chunk names below only seed the ``_id``, and a stored URI-shaped ``name`` would be
-tokenised by the ``$text`` index, letting a query match every chunk of a
-document through its URL instead of its content. Lineage back to the
+The rows carry no ``name`` and no entity-resolution fields (``canonical_name`` /
+``aliases`` / ``confidence``): their ``_id`` is derived from ``source_uri`` +
+position, so nothing ever resolves or merges them, and the names below only seed
+that ``_id``. A stored URI-shaped ``name`` would also be tokenised by the
+``$text`` index, letting a query match a document through its URL instead of its
+content; the URI already lives in ``properties.source_uri``. Lineage back to the
 ``Document`` collection is ``sources``.
 
 The loader writes node types in :data:`tree.entities.memory.RAG_NODE_TYPES` and
@@ -47,9 +47,14 @@ from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_node_i
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.types import ParentChunk
 
-# Entity-resolution fields: a RAG row's ``_id`` is positional, so it is never
-# resolved or merged and these would only ever hold filler defaults.
-_UNUSED_RAG_FIELDS: tuple[str, ...] = ("canonical_name", "aliases", "confidence")
+# Entity-naming fields: a RAG row's ``_id`` is positional, so it is never
+# resolved or merged and these would only ever hold filler or duplicated values.
+_UNUSED_RAG_FIELDS: tuple[str, ...] = (
+    "name",
+    "canonical_name",
+    "aliases",
+    "confidence",
+)
 
 
 def parent_chunk_name(source_uri: str, parent_index: int) -> str:
@@ -121,7 +126,6 @@ def build_rag_row_ops(
             user_id=user_id,
             node_id=doc_id,
             node_type="document",
-            name=source_uri,
             subtype=None,
             parent_id=None,
             chunk_index=None,
@@ -144,7 +148,6 @@ def build_rag_row_ops(
                 user_id=user_id,
                 node_id=pid,
                 node_type="chunk",
-                name=None,
                 subtype="parent",
                 parent_id=doc_id,
                 chunk_index=parent.index,
@@ -174,7 +177,6 @@ def build_rag_row_ops(
                         user_id, source_uri, parent.index, child.index
                     ),
                     node_type="chunk",
-                    name=None,
                     subtype="child",
                     parent_id=pid,
                     chunk_index=child.index,
@@ -226,7 +228,6 @@ def _build_node_op(
     user_id: PydanticObjectId,
     node_id: str,
     node_type: str,
-    name: str | None,
     subtype: str | None,
     parent_id: str | None,
     chunk_index: int | None,
@@ -254,8 +255,8 @@ def _build_node_op(
     wrapper, for the same reason, as ``add_entity._per_key_merge_expr``.
 
     The trailing ``$unset`` stage drops the fields a RAG row never carries
-    (:data:`_UNUSED_RAG_FIELDS`, plus ``name`` when ``name`` is ``None``), so a
-    re-run also strips them from rows written before they were removed.
+    (:data:`_UNUSED_RAG_FIELDS`), so a re-run also strips them from rows written
+    before they were removed.
     """
 
     if node_type not in RAG_NODE_TYPES:
@@ -263,22 +264,14 @@ def _build_node_op(
             f"the RAG loader only writes {sorted(RAG_NODE_TYPES)} rows; "
             f"got type={node_type!r}"
         )
-    set_fields: dict[str, Any] = {
-        "user_id": user_id,
-        "kind": "node",
-        "type": node_type,
-    }
-    unset_fields = list(_UNUSED_RAG_FIELDS)
-    if name is None:
-        unset_fields.append("name")
-    else:
-        set_fields["name"] = name
     return UpdateOne(
         {"_id": node_id},
         [
             {
                 "$set": {
-                    **set_fields,
+                    "user_id": user_id,
+                    "kind": "node",
+                    "type": node_type,
                     "subtype": subtype,
                     "parent_id": parent_id,
                     "chunk_index": chunk_index,
@@ -294,7 +287,7 @@ def _build_node_op(
                     "updated_at": now,
                 }
             },
-            {"$unset": unset_fields},
+            {"$unset": list(_UNUSED_RAG_FIELDS)},
         ],
         upsert=True,
     )

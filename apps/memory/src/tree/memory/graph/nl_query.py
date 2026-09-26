@@ -116,7 +116,8 @@ All nodes and edges live in a single collection.
 - `_id`: string, format `"type:name"` (e.g. `"person:alice"`)
 - `kind`: `"node"`
 - `type`: one of the node types below
-- `name`: string
+- `name`: string. Absent on `document` and `chunk` rows — match those on \
+`properties.title` / `properties.source_uri` instead.
 - `properties`: dict (schema varies by node type)
 - `embedding`: vector (float array) — do NOT return this field
 - `subtype`: string, present on some rows. On a `chunk` row it is exactly \
