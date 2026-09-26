@@ -85,6 +85,12 @@ def _set_stage(op: Any) -> dict[str, Any]:
     return op._doc[0]["$set"]
 
 
+def _unset_stage(op: Any) -> list[str]:
+    """The ``$unset`` field list of an aggregation-pipeline ``UpdateOne``."""
+
+    return op._doc[1]["$unset"]
+
+
 def _by_id(ops: list[Any]) -> dict[str, dict[str, Any]]:
     return {op._filter["_id"]: _set_stage(op) for op in ops}
 
@@ -247,6 +253,27 @@ class TestBuildRagRowOps:
 
     def test_every_op_is_an_upsert(self) -> None:
         assert all(op._upsert for op in _ops(2, 2))
+
+    def test_chunk_rows_store_no_name_and_unset_a_legacy_one(self) -> None:
+        # A URI-shaped ``name`` is tokenised by the ``$text`` index, so every
+        # chunk of a document would match a query through its URL.
+        for op in _ops(1, 1)[1:]:
+            assert "name" not in _set_stage(op)
+            assert "name" in _unset_stage(op)
+
+    def test_document_row_keeps_its_name(self) -> None:
+        op = _ops()[0]
+
+        assert _set_stage(op)["name"] == _URI
+        assert "name" not in _unset_stage(op)
+
+    def test_no_row_carries_entity_resolution_fields(self) -> None:
+        # Positional ``_id``s are never resolved or merged, so these fields
+        # would only hold filler defaults; the ``$unset`` strips legacy ones.
+        resolution_fields = {"canonical_name", "aliases", "confidence"}
+        for op in _ops(1, 1):
+            assert resolution_fields.isdisjoint(_set_stage(op))
+            assert resolution_fields <= set(_unset_stage(op))
 
 
 class TestRagNodeTypeGuard:
@@ -455,3 +482,28 @@ class TestPropertiesAreReplacedInMongo:
         assert row["created_at"] == created_at
         assert row["updated_at"] > created_at
         assert set(row["sources"]) == {earlier_source, PydanticObjectId(_DOCUMENT_ID)}
+
+    async def test_legacy_name_and_resolution_fields_are_stripped_on_re_upsert(
+        self, database
+    ) -> None:
+        # A child row written before the RAG rows dropped these fields.
+        row_id = child_row_id(_USER_ID, _URI, 0, 0)
+        await database[MEMORY_COLLECTION].insert_one(
+            {
+                "_id": row_id,
+                "user_id": _USER_ID,
+                "kind": "node",
+                "type": "chunk",
+                "name": child_chunk_name(_URI, 0, 0),
+                "canonical_name": child_chunk_name(_URI, 0, 0),
+                "aliases": [],
+                "confidence": 1.0,
+                "sources": [PydanticObjectId(_DOCUMENT_ID)],
+            }
+        )
+
+        await load_rag_rows(database=database, ops=_ops(1))
+
+        row = await database[MEMORY_COLLECTION].find_one({"_id": row_id})
+        assert {"name", "canonical_name", "aliases", "confidence"}.isdisjoint(row)
+        assert row["sources"] == [PydanticObjectId(_DOCUMENT_ID)]

@@ -3124,13 +3124,13 @@ class TestWorkerRowShape:
         assert parent["subtype"] == "parent"
         assert parent["parent_id"] == document_row_id(user.id, uri)
         assert parent["chunk_index"] == 1
-        assert parent["name"] == parent_chunk_name(uri, 1)
+        assert "name" not in parent
 
         child = await collection.find_one({"_id": child_row_id(user.id, uri, 1, 2)})
         assert child["subtype"] == "child"
         assert child["parent_id"] == parent_row_id(user.id, uri, 1)
         assert child["chunk_index"] == 2
-        assert child["name"] == child_chunk_name(uri, 1, 2)
+        assert "name" not in child
         # Denormalised so the indexing backfill needs no join.
         assert child["properties"]["title"] == document.title
         assert (
