@@ -1,6 +1,6 @@
 # ADR-001: Data Model and Ontology for the Knowledge-Graph Memory
 
-- **Status:** Accepted — Decision §1 collection name (`knowledge_graph`) superseded by [006](006_rag_graphrag_memory_modes.md) (renamed `memory`); every other decision stands
+- **Status:** Accepted — Decision §1 collection name (`knowledge_graph`) superseded by [006](006_rag_graphrag_memory_modes.md) (renamed `memory`); the `documents` unique key named in §2 Consequences and §4 superseded by [010](010_document_natural_key.md) (`(user_id, source_uri)`, `source_type` dropped from the key); every other decision stands
 - **Date:** 2026-05-16
 - **Deciders:** Paul (project owner)
 - **Context references:**
