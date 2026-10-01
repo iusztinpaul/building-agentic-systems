@@ -60,8 +60,10 @@ Six related choices, one design:
    clears; dragging a selected node moves the whole selection keeping offsets; every dragged node
    carries its unpinned direct `part_of` children (one level, child → parent direction of the
    stored edge) by the same delta so a star keeps its shape, and those children resume settling on
-   drop; user-pinned nodes are never carried. `setCustomBBox` freezes the viewport for the duration
-   of any drag or marquee.
+   drop; user-pinned nodes are never carried. The first drag or marquee freezes the viewport with
+   `setCustomBBox`, and it STAYS frozen after release so a dropped node lands where the cursor let
+   go; only the zoom-fit button clears it (`setCustomBBox(null)` + `animatedReset`). A press must
+   move 3 px before it pins, reheats or freezes; only the left button starts a drag.
 
 5. **One 2D overlay canvas for everything sigma cannot draw.** The hull canvas (`#hulls-layer`)
    becomes `#overlay` and draws, per `afterRender`, in order: cluster hulls, pin dots, selection
@@ -71,7 +73,7 @@ Six related choices, one design:
    lag — then move markers into a node program.
 
 6. **Python decides, the JS obeys.** `to_graph_payload` resolves a per-node `size` by role
-   (`document 12 > parent chunk 8 > entities 6 > child chunk 4`) and ships
+   (`document 10 > parent chunk 7 > entities 6 > child chunk 4`) and ships
    `controls: {forces, display}` defaults; `to_embedding_map_payload` ships per-node `size: 4` and
    `controls: {display}`. The panel's sliders are multipliers/switches over those values; the
    template contains no default of its own. Nothing is persisted (no localStorage/URL state) —

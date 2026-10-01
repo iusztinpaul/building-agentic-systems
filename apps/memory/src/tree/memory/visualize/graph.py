@@ -24,10 +24,13 @@ What lives here:
 The UI is themed after the "Tree Memory" design: a header with live counts +
 node search, a per-type legend, and zoom controls. Node labels show only the
 name; hovering a node or edge shows a tooltip with its name / relationship type
-plus a curated metadata card. Clicking a node only highlights it. The layout is
-LIVE (ADR-011): d3-force keeps ticking until it cools; dragging a node pulls its
-neighbours along and DROPS it as a **Pinned node** (dark centre dot), which a
-double-click unpins.
+plus a curated metadata card. The layout is LIVE (ADR-011): d3-force keeps
+ticking until it cools; dragging a node pulls its neighbours along and DROPS it
+as a **Pinned node** (dark centre dot), which a double-click unpins. A click
+selects a node (orange ring), Shift+click toggles, Shift+drag on the stage
+box-selects, Esc or a stage click clears; dragging a selected node moves the
+whole selection, and every dragged node carries its unpinned direct
+``part_of`` children rigidly.
 
 Needs network at VIEW time (the libraries load from the CDN rather than being
 vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
@@ -92,7 +95,7 @@ _D3_FORCE_CDN = "https://cdn.jsdelivr.net/npm/d3-force@3.0.0/+esm"
 # which outrank the child chunks they split into, so a document→chunk star
 # reads at a glance. Keys are ``type`` or ``type:subtype``; only a chunk's
 # subtype is a role, so an entity is looked up by its bare type.
-_NODE_SIZES: dict[str, int] = {"document": 12, "chunk:parent": 8, "chunk:child": 4}
+_NODE_SIZES: dict[str, int] = {"document": 10, "chunk:parent": 7, "chunk:child": 4}
 _DEFAULT_NODE_SIZE = 6  # entities, ``unknown`` endpoints, a role-less chunk
 
 # What the template seeds the live d3-force simulation and its reducers with
@@ -585,8 +588,9 @@ _RENDER_JS = """\
         });
       }
 
-      // Interaction state, applied via reducers.
-      const state = { search: "", selected: null, hovered: null, hoveredEdge: null };
+      // Interaction state, applied via reducers. `selection` is a Set of node
+      // ids: what a drag moves together (pinning is separate — the fx/fy above).
+      const state = { search: "", selection: new Set(), hovered: null, hoveredEdge: null };
 
       const renderer = new Sigma(graph, container, {
         renderEdgeLabels: display.edgeLabels,   // relationship labels
@@ -602,13 +606,20 @@ _RENDER_JS = """\
           const res = Object.assign({}, data);
           res.size = data.size * display.nodeSize;
           const searching = state.search && !(data.label || "").toLowerCase().includes(state.search);
+          const selected = state.selection.has(node);
+          // Selected nodes get the highlighted label box (the single-click
+          // look) — except a chunk in a multi-selection: a box drawn over a
+          // document star would stack dozens of chunk label boxes. Its ring
+          // marks it instead.
+          const lone = selected && state.selection.size === 1;
           // Chunks are the most numerous nodes; hide their labels unless the
-          // node is hovered or selected (full name still shows in the tooltip).
+          // node is hovered or the lone selection (full name in the tooltip).
           const quietChunk = !state.search && data.nodeType === "chunk"
-            && state.hovered !== node && state.selected !== node;
+            && state.hovered !== node && !lone;
           if (searching) { res.color = "#d5d8de"; res.label = ""; }
           else if (quietChunk) { res.label = ""; }
-          if (state.selected === node) { res.highlighted = true; res.zIndex = 2; }
+          if (selected) res.zIndex = 2;
+          if (lone || (selected && data.nodeType !== "chunk")) res.highlighted = true;
           return res;
         },
         edgeReducer: (edge, data) => {
@@ -632,16 +643,31 @@ _RENDER_JS = """\
         sim.on("end", () => { document.body.dataset.sim = "settled"; });
       }
 
-      // A drag ends in a trailing click; it must not change the selection.
-      let wasDragged = false;
+      // A drag or a marquee ends in a trailing click: Sigma does not count a
+      // move whose default we prevented, so it emits `click` on whatever lies
+      // under the release — node or stage. That click must not change the
+      // selection. Reset on every press (a release off-canvas fires no click).
+      let pointerMoved = false;
 
-      // --- Click only highlights a node; all details are shown on hover. ---
-      renderer.on("clickNode", ({ node }) => {
-        if (wasDragged) return;
-        state.selected = node;
+      // --- Selection: click selects one node, Shift+click toggles it, a
+      //     click on the empty stage or Esc clears. Details show on hover. ---
+      renderer.on("clickNode", ({ node, event }) => {
+        if (pointerMoved) return;
+        if (!event.original.shiftKey) state.selection = new Set([node]);
+        else if (!state.selection.delete(node)) state.selection.add(node);
         renderer.refresh();
       });
-      renderer.on("clickStage", () => { state.selected = null; renderer.refresh(); });
+      // A Shift+click that misses a node keeps the selection being built.
+      renderer.on("clickStage", ({ event }) => {
+        if (pointerMoved || event.original.shiftKey) return;
+        state.selection.clear();
+        renderer.refresh();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape" || !state.selection.size) return;
+        state.selection.clear();
+        renderer.refresh();
+      });
 
       // --- Hover tooltip: full name + type/subtype + curated metadata. ---
       // Shared by node hover and edge hover; positioned at the node, or at the
@@ -713,52 +739,138 @@ _RENDER_JS = """\
       const camera = renderer.getCamera();
       document.getElementById("zoom-in").onclick = () => camera.animatedZoom();
       document.getElementById("zoom-out").onclick = () => camera.animatedUnzoom();
-      document.getElementById("zoom-fit").onclick = () => camera.animatedReset();
+      // Fit is the ONE place that hands the viewport back to Sigma (see freezeViewport).
+      document.getElementById("zoom-fit").onclick = () => { renderer.setCustomBBox(null); camera.animatedReset(); };
 
       // Redraw when the window resizes (Sigma tracks the container; this keeps
       // the standalone-file view crisp as the window grows/shrinks).
       window.addEventListener("resize", () => renderer.refresh());
 
-      // --- Drag: hold, pull the neighbours along live, PIN on drop ---
-      // d3's idiom (pulse): the held node is fixed with fx/fy while
-      // alphaTarget(0.3) keeps the simulation hot, so its unpinned neighbours
-      // follow live. On release the node KEEPS fx/fy — a Pinned node — unless
-      // it never moved (a plain click pins nothing). The map has no
-      // simulation, so there the held node is the only thing that moves.
-      let dragged = null;
-      let wasPinned = false;
-      renderer.on("downNode", (e) => {
-        dragged = simById.get(e.node) || null;
-        wasDragged = false;
-        if (!dragged) return;
-        wasPinned = dragged.fx != null;
-        // Freeze the viewport so a node dragged past the extent does not rescale the scene.
+      // --- Drag, group drag and the marquee (ADR-011 §4) ---
+      // A press becomes a gesture only once the pointer travels DRAG_THRESHOLD
+      // px, so a plain click neither pins, reheats nor freezes anything. The
+      // first gesture freezes the viewport and it STAYS frozen: handing it
+      // back to Sigma on release re-fits the extent and the dropped node lands
+      // 60-100 px away from the cursor. Only the fit button releases it.
+      const DRAG_THRESHOLD = 3;   // px — Sigma's own draggedEventsTolerance
+      function freezeViewport() {
         if (!renderer.getCustomBBox()) renderer.setCustomBBox(renderer.getBBox());
-        const at = graph.getNodeAttributes(e.node);
-        dragged.fx = at.x;
-        dragged.fy = at.y;
-        if (sim) sim.alphaTarget(0.3).restart();
+      }
+
+      // The drag set of one press. HELD = the selection when the pressed node
+      // is in it, else the pressed node alone (dragging never changes the
+      // selection); held nodes pin on drop. CARRIED = every held node's direct
+      // unpinned `part_of` children — the sources of its in-edges (child chunk
+      // -> parent chunk -> document, one level) — moved rigidly by the same
+      // delta and released on drop. A user-pinned node is never carried.
+      function dragSetFor(nodeId) {
+        const held = state.selection.has(nodeId) ? new Set(state.selection) : new Set([nodeId]);
+        const carried = new Set();
+        for (const id of held) {
+          graph.forEachInEdge(id, (edge, attrs, source) => {
+            if (attrs.relType === "part_of" && !held.has(source)
+              && simById.get(source).fx == null) carried.add(source);
+          });
+        }
+        return { held, carried };
+      }
+
+      let press = null;     // { node, x, y }: a node press, until mouseup
+      let drag = null;      // { carried, members, anchor }: once that press moved
+      let marquee = null;   // { x0, y0, x1, y1 } in viewport px: a Shift+press on the stage
+      // Left button only: Sigma reports a press for EVERY button but its
+      // captor's mouseup only after a left one, so a right-click press would
+      // stay open and the node would follow the bare pointer.
+      renderer.on("downNode", (e) => {
+        if (e.event.original.button !== 0) return;
+        pointerMoved = false;
+        press = { node: e.node, x: e.event.x, y: e.event.y };
       });
-      renderer.getMouseCaptor().on("mousemovebody", (e) => {
-        if (!dragged) return;
-        const pos = renderer.viewportToGraph(e);
-        dragged.fx = pos.x;
-        dragged.fy = pos.y;
-        dragged.x = pos.x;
-        dragged.y = pos.y;
-        graph.mergeNodeAttributes(dragged.id, { x: pos.x, y: pos.y });
-        wasDragged = true;
-        e.preventSigmaDefault();          // no camera pan while a node is held
+      function startMarquee(e) {
+        if (e.event.original.button !== 0) return;
+        pointerMoved = false;
+        if (!e.event.original.shiftKey) return;   // a plain stage drag still pans
+        marquee = { x0: e.event.x, y0: e.event.y, x1: e.event.x, y1: e.event.y };
+      }
+      renderer.on("downStage", startMarquee);
+      renderer.on("downEdge", startMarquee);       // a press on an edge line is a stage press too
+
+      // d3's idiom (pulse): every member is held with fx/fy while
+      // alphaTarget(0.3) keeps the simulation hot, so the set cannot be pulled
+      // apart and its unpinned neighbours follow live. The map has no
+      // simulation, so there only the drag set moves.
+      function startDrag() {
+        freezeViewport();
+        const { held, carried } = dragSetFor(press.node);
+        const members = [...held, ...carried].map((id) => {
+          const s = simById.get(id);
+          const at = graph.getNodeAttributes(id);
+          s.fx = at.x;
+          s.fy = at.y;
+          return { s, x0: at.x, y0: at.y, carried: carried.has(id) };
+        });
+        drag = { carried, members, anchor: renderer.viewportToGraph({ x: press.x, y: press.y }) };
+        if (sim) sim.alphaTarget(0.3).restart();
+      }
+
+      const captor = renderer.getMouseCaptor();
+      captor.on("mousemovebody", (e) => {
+        if (!press && !marquee) return;
+        e.preventSigmaDefault();          // no camera pan under a held node or a marquee
         e.original.preventDefault();
         e.original.stopPropagation();
+        const from = press || { x: marquee.x0, y: marquee.y0 };
+        if (!pointerMoved && Math.hypot(e.x - from.x, e.y - from.y) < DRAG_THRESHOLD) return;
+        if (!pointerMoved) {
+          pointerMoved = true;
+          if (press) startDrag(); else freezeViewport();
+        }
+        if (marquee) {
+          marquee.x1 = e.x;
+          marquee.y1 = e.y;
+          drawOverlay();                  // the camera is still, so Sigma renders nothing
+          return;
+        }
+        // Every member moves by the pointer's delta: relative offsets hold.
+        const pos = renderer.viewportToGraph(e);
+        const dx = pos.x - drag.anchor.x, dy = pos.y - drag.anchor.y;
+        for (const m of drag.members) {
+          m.s.fx = m.s.x = m.x0 + dx;
+          m.s.fy = m.s.y = m.y0 + dy;
+          graph.mergeNodeAttributes(m.s.id, { x: m.s.x, y: m.s.y });
+        }
       });
-      renderer.getMouseCaptor().on("mouseup", () => {
-        if (!dragged) return;
-        if (!wasDragged && !wasPinned) { dragged.fx = null; dragged.fy = null; }
-        dragged = null;
-        if (sim) sim.alphaTarget(0);
-        // Hand the viewport back to Sigma, or it keeps the frozen extent forever.
-        renderer.setCustomBBox(null);
+
+      // REPLACE semantics: the box IS the new selection (Shift only starts it).
+      function selectInside(box) {
+        const left = Math.min(box.x0, box.x1), right = Math.max(box.x0, box.x1);
+        const top = Math.min(box.y0, box.y1), bottom = Math.max(box.y0, box.y1);
+        const inside = new Set();
+        graph.forEachNode((id, a) => {
+          const shown = renderer.getNodeDisplayData(id);
+          if (!shown || shown.hidden) return;
+          const vp = renderer.graphToViewport({ x: a.x, y: a.y });
+          if (vp.x >= left && vp.x <= right && vp.y >= top && vp.y <= bottom) inside.add(id);
+        });
+        state.selection = inside;
+        renderer.refresh();
+      }
+
+      captor.on("mouseup", () => {
+        if (marquee) {
+          const box = marquee;
+          marquee = null;
+          if (pointerMoved) selectInside(box); else drawOverlay();
+        }
+        if (drag) {
+          // HELD nodes keep fx/fy — Pinned nodes; the CARRIED children are
+          // released to keep settling (on the map they stay where they were left).
+          for (const m of drag.members) if (m.carried) { m.s.fx = null; m.s.fy = null; }
+          if (sim) sim.alphaTarget(0);
+          drag = null;
+          drawOverlay();                  // the map re-renders nothing by itself
+        }
+        press = null;
       });
 
       // --- Double-click a Pinned node to unpin it; on an unpinned node the
@@ -844,8 +956,8 @@ _RENDER_JS = """\
       // --- The overlay: everything Sigma cannot draw (ADR-011 §5) ---
       // ONE 2D canvas on top of Sigma's (pointer-events: none), redrawn in
       // VIEWPORT coordinates on every render so it stays glued to the nodes
-      // through pan, zoom, drag and simulation ticks: hulls first, then the
-      // pin dots.
+      // through pan, zoom, drag and simulation ticks: hulls, pin dots,
+      // selection rings, then the marquee.
       const overlay = document.getElementById("overlay");
       const overlayCtx = overlay.getContext("2d");
       function drawOverlay() {
@@ -879,9 +991,10 @@ _RENDER_JS = """\
           }
         }
         // Pin dots: a dark centre disc on every Pinned node still on screen.
+        // Carried children hold fx/fy only while they ride along — not pins.
         overlayCtx.fillStyle = "#1f2430";
         for (const s of simNodes) {
-          if (s.fx == null) continue;
+          if (s.fx == null || (drag && drag.carried.has(s.id))) continue;
           const shown = renderer.getNodeDisplayData(s.id);
           if (!shown || shown.hidden) continue;
           const a = graph.getNodeAttributes(s.id);
@@ -889,6 +1002,29 @@ _RENDER_JS = """\
           overlayCtx.beginPath();
           overlayCtx.arc(vp.x, vp.y, 0.35 * renderer.scaleSize(shown.size), 0, 2 * Math.PI);
           overlayCtx.fill();
+        }
+        // Selection rings: a 2 px accent ring 3 px outside every selected node.
+        overlayCtx.strokeStyle = "#ea580c";
+        overlayCtx.lineWidth = 2;
+        for (const id of state.selection) {
+          const shown = renderer.getNodeDisplayData(id);
+          if (!shown || shown.hidden) continue;
+          const a = graph.getNodeAttributes(id);
+          const vp = renderer.graphToViewport({ x: a.x, y: a.y });
+          overlayCtx.beginPath();
+          overlayCtx.arc(vp.x, vp.y, renderer.scaleSize(shown.size) + 3, 0, 2 * Math.PI);
+          overlayCtx.stroke();
+        }
+        // The marquee while Shift+dragging: a faint fill, a 1 px dashed border.
+        if (marquee) {
+          const x = Math.min(marquee.x0, marquee.x1), y = Math.min(marquee.y0, marquee.y1);
+          const w = Math.abs(marquee.x1 - marquee.x0), h = Math.abs(marquee.y1 - marquee.y0);
+          overlayCtx.fillStyle = "rgba(234,88,12,0.08)";
+          overlayCtx.fillRect(x, y, w, h);
+          overlayCtx.lineWidth = 1;
+          overlayCtx.setLineDash([4, 3]);
+          overlayCtx.strokeRect(x + 0.5, y + 0.5, w, h);
+          overlayCtx.setLineDash([]);
         }
       }
       renderer.on("afterRender", drawOverlay);   // pan / zoom / drag / tick / refresh

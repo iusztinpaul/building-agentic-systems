@@ -299,6 +299,14 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "dataset.layout",
         "dataset.sim",
         "function drawOverlay",
+        "state.selection",  # selection, marquee and group drag (task 163)
+        "shiftKey",
+        '"Escape"',
+        '"downStage"',
+        'relType === "part_of"',
+        "function dragSetFor(nodeId)",
+        "#ea580c",
+        "setLineDash([4, 3])",
     ],
 )
 @pytest.mark.parametrize(
@@ -330,6 +338,14 @@ def test_both_variants_import_d3_force_and_no_other_layout_engine(
     assert "atlas" not in variant.lower()
     for gone in ("hulls-layer", "drawHulls", "Math.random()"):
         assert gone not in variant
+
+
+@pytest.mark.parametrize(
+    "variant", [_GRAPH_HTML, _FILE_HTML_BASE], ids=["iframe", "file"]
+)
+def test_both_variants_drop_the_single_selected_id(variant: str) -> None:
+    # Assert: the Set-based selection replaced the single id everywhere.
+    assert "state.selected" not in variant
 
 
 def test_the_iframe_variant_only_adds_the_ext_apps_runtime() -> None:

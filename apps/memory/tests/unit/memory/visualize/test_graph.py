@@ -255,8 +255,8 @@ def test_empty_result_yields_empty_payload() -> None:
 @pytest.mark.parametrize(
     ("node_type", "subtype", "expected_size"),
     [
-        ("document", None, 12),
-        ("chunk", "parent", 8),
+        ("document", None, 10),
+        ("chunk", "parent", 7),
         ("chunk", "child", 4),
         ("chunk", None, 6),  # a chunk with no role reads as an entity
         ("person", None, 6),
@@ -753,15 +753,6 @@ def test_self_loops_never_become_simulation_links() -> None:
     assert "e.source !== e.target" in _RENDER_JS
 
 
-def test_a_drag_without_movement_does_not_pin() -> None:
-    # Assert (source-level): only a node DROPPED after a drag becomes a Pinned
-    # node (glossary); a plain click restores the pin state it had before.
-    assert (
-        "if (!wasDragged && !wasPinned) { dragged.fx = null; dragged.fy = null; }"
-        in (_RENDER_JS)
-    )
-
-
 def test_reducers_apply_the_display_multipliers() -> None:
     # Assert (source-level): display values scale what Python resolved.
     assert "res.size = data.size * display.nodeSize;" in _RENDER_JS
@@ -769,3 +760,185 @@ def test_reducers_apply_the_display_multipliers() -> None:
     assert 'res.type = display.arrows ? "arrow" : "line";' in _RENDER_JS
     assert "renderEdgeLabels: display.edgeLabels," in _RENDER_JS
     assert "labelRenderedSizeThreshold: display.labelFade," in _RENDER_JS
+
+
+# ---------------------------------------------------------------------------
+# Selection, marquee and group drag (ADR-011 §4) — the template's JS contract
+# ---------------------------------------------------------------------------
+
+
+def _js_block(start: str) -> str:
+    """The render-level JS statement opening with ``start``, up to its closing line.
+
+    Statements directly inside ``render()`` sit at a 6-space indent, so the
+    first ``\n      }`` after ``start`` closes the handler / function.
+    """
+
+    begin = _RENDER_JS.index(start)
+    return _RENDER_JS[begin : _RENDER_JS.index("\n      }", begin)]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "state.selection",  # a Set of node ids replaces the single id
+        "shiftKey",  # Shift+click toggles, Shift+drag boxes
+        '"Escape"',  # Esc clears the selection
+        '"downStage"',  # the marquee starts on the stage
+        "forEachInEdge",  # rigid children = sources of part_of in-edges
+        "function dragSetFor(nodeId)",
+        "function drawOverlay",
+        "#ea580c",  # the selection ring / marquee stroke (--accent1)
+        "rgba(234,88,12,0.08)",  # the marquee fill
+        "setLineDash([4, 3])",  # the dashed marquee border
+    ],
+)
+def test_template_carries_the_selection_and_group_drag_machinery(token: str) -> None:
+    assert token in _FILE_HTML_BASE
+
+
+def test_the_single_selected_id_is_gone() -> None:
+    # Assert: one selection model — the Set — so no code path can disagree.
+    assert "state.selected" not in _FILE_HTML_BASE
+
+
+def test_rigid_children_are_the_unpinned_part_of_sources_in_one_place() -> None:
+    body = _js_block("function dragSetFor(nodeId)")
+
+    # Assert: the part_of literal lives ONLY in the drag-set expansion; a
+    # child is carried only if it is not held and not user-pinned (fx == null).
+    assert _RENDER_JS.count('relType === "part_of"') == 1
+    assert 'relType === "part_of"' in body
+    assert "graph.forEachInEdge(id, (edge, attrs, source) =>" in body
+    assert "!held.has(source)" in body
+    assert "simById.get(source).fx == null" in body
+
+
+def test_dragging_a_node_outside_the_selection_moves_only_that_node() -> None:
+    body = _js_block("function dragSetFor(nodeId)")
+
+    # Assert: the held set is the selection only when the pressed node is in
+    # it — and dragSetFor never writes the selection.
+    assert (
+        "state.selection.has(nodeId) ? new Set(state.selection) : new Set([nodeId])"
+        in body
+    )
+    assert "state.selection =" not in body
+
+
+def test_a_press_without_movement_neither_pins_reheats_nor_freezes() -> None:
+    body = _js_block('renderer.on("downNode"')
+
+    # Assert: the press only records where it started; pinning, the reheat
+    # and the viewport freeze all wait for DRAG_THRESHOLD px of travel.
+    assert ".fx =" not in body
+    assert "alphaTarget(0.3)" not in body
+    assert "setCustomBBox" not in body
+    assert "freezeViewport" not in body
+    assert "const DRAG_THRESHOLD = 3;" in _RENDER_JS
+    assert "< DRAG_THRESHOLD) return;" in _RENDER_JS
+    assert "alphaTarget(0.3)" in _js_block("function startDrag()")
+
+
+def test_the_viewport_stays_frozen_after_a_drop_until_fit() -> None:
+    # Assert (added by orchestrator): releasing a drag or marquee never hands
+    # the viewport back to Sigma — a re-fit would land the dropped node away
+    # from the cursor. The fit button is the ONE place that releases it.
+    assert _RENDER_JS.count("setCustomBBox(null)") == 1
+    assert (
+        'document.getElementById("zoom-fit").onclick = () => '
+        "{ renderer.setCustomBBox(null); camera.animatedReset(); };"
+    ) in _RENDER_JS
+    assert "setCustomBBox" not in _js_block('captor.on("mouseup"')
+
+
+def test_on_drop_held_nodes_stay_pinned_and_carried_children_are_released() -> None:
+    body = _js_block('captor.on("mouseup"')
+
+    # Assert: only the carried passengers lose fx/fy; the held set keeps them.
+    assert "if (m.carried) { m.s.fx = null; m.s.fy = null; }" in body
+    assert "if (sim) sim.alphaTarget(0);" in body
+
+
+@pytest.mark.parametrize(
+    "handler", ['renderer.on("clickNode"', 'renderer.on("clickStage"']
+)
+def test_the_trailing_click_of_a_drag_or_marquee_never_changes_the_selection(
+    handler: str,
+) -> None:
+    # Assert: sigma does not count a move whose default we prevented, so it
+    # emits a click after every drag / marquee — on a node OR on the stage.
+    assert "if (pointerMoved" in _js_block(handler)
+
+
+def test_every_press_resets_the_trailing_click_guard() -> None:
+    # Assert: a release outside the canvas fires no click, so a stale guard
+    # would swallow the next real click.
+    assert "pointerMoved = false;" in _js_block('renderer.on("downNode"')
+    assert "pointerMoved = false;" in _js_block("function startMarquee(e)")
+    assert 'renderer.on("downStage", startMarquee);' in _RENDER_JS
+    assert 'renderer.on("downEdge", startMarquee);' in _RENDER_JS
+
+
+def test_a_plain_stage_drag_still_pans() -> None:
+    # Assert: only a Shift+press starts a marquee; without one the move
+    # handler leaves sigma's default (the pan) alone.
+    assert "if (!e.event.original.shiftKey) return;" in _js_block(
+        "function startMarquee(e)"
+    )
+    assert "if (!press && !marquee) return;" in _js_block('captor.on("mousemovebody"')
+
+
+def test_the_marquee_replaces_the_selection_with_the_nodes_inside_it() -> None:
+    body = _js_block("function selectInside(box)")
+
+    assert "renderer.graphToViewport({ x: a.x, y: a.y })" in body
+    assert "state.selection = inside;" in body
+
+
+def test_selected_nodes_are_highlighted_except_chunks_in_a_group() -> None:
+    body = _js_block("nodeReducer: (node, data) =>")
+
+    # Assert: every selected node draws on top with Sigma's highlighted label
+    # box (the single-click look) — except a chunk in a MULTI-selection: a
+    # marquee over a document star would otherwise stack dozens of chunk
+    # label boxes over it. Its ring marks it instead.
+    assert "const lone = selected && state.selection.size === 1;" in body
+    assert "if (selected) res.zIndex = 2;" in body
+    assert (
+        'if (lone || (selected && data.nodeType !== "chunk")) res.highlighted = true;'
+        in body
+    )
+    assert "&& state.hovered !== node && !lone;" in body
+
+
+def test_the_overlay_draws_hulls_pins_rings_then_the_marquee() -> None:
+    body = _js_block("function drawOverlay()")
+
+    # Assert: ADR-011 §5's draw order, and the ring sits 3 px outside the node.
+    order = [
+        body.index("convexHull("),
+        body.index("// Pin dots"),
+        body.index("// Selection rings"),
+        body.index("if (marquee)"),
+    ]
+    assert order == sorted(order)
+    assert "renderer.scaleSize(shown.size) + 3" in body
+
+
+def test_carried_children_show_no_pin_dot_mid_drag() -> None:
+    # Assert: passengers hold fx/fy only while carried, so they are not pins.
+    assert "drag && drag.carried.has(s.id)" in _js_block("function drawOverlay()")
+
+
+@pytest.mark.parametrize(
+    "press", ['renderer.on("downNode"', "function startMarquee(e)"]
+)
+def test_only_a_left_button_press_starts_a_drag_or_a_marquee(press: str) -> None:
+    # Assert (regression): Sigma emits downNode / downStage for EVERY button
+    # but its captor's mouseup only after a LEFT press — a right-click used to
+    # leave the press open, so the node then followed the bare pointer.
+    body = _js_block(press)
+    assert body.index("if (e.event.original.button !== 0) return;") < body.index(
+        "pointerMoved = false;"
+    )
