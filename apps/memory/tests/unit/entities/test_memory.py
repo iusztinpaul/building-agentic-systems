@@ -16,6 +16,7 @@ from tree.entities.memory import (
     NodeType,
     build_edge_id,
     build_node_id,
+    build_rag_row_id,
 )
 from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES, NODE_REGISTRY
@@ -32,19 +33,46 @@ class TestBuildNodeId:
             f"{user_id}:person:alice"
         )
 
+
+class TestBuildRagRowId:
+    _URI = "https://example.com/a"
+
     def test_builds_document_id(self):
         user_id = PydanticObjectId()
         assert (
-            build_node_id(user_id, NodeType.DOCUMENT, "https://example.com")
-            == f"{user_id}:document:https://example.com"
+            build_rag_row_id(user_id, NodeType.DOCUMENT, self._URI)
+            == f"{user_id}:document:{self._URI}"
         )
 
-    def test_builds_chunk_id(self):
+    def test_builds_parent_chunk_id(self):
         user_id = PydanticObjectId()
         assert (
-            build_node_id(user_id, NodeType.CHUNK, "https://example.com#chunk-0")
-            == f"{user_id}:chunk:https://example.com#chunk-0"
+            build_rag_row_id(user_id, NodeType.CHUNK, self._URI, 2)
+            == f"{user_id}:chunk:{self._URI}:p2"
         )
+
+    def test_builds_child_chunk_id(self):
+        user_id = PydanticObjectId()
+        assert (
+            build_rag_row_id(user_id, NodeType.CHUNK, self._URI, 2, 5)
+            == f"{user_id}:chunk:{self._URI}:p2:c5"
+        )
+
+    def test_slug_equivalent_uris_get_distinct_ids(self):
+        # ``a/b`` and ``a-b`` would slugify to one string; the raw URI keeps them apart.
+        user_id = PydanticObjectId()
+        assert build_rag_row_id(
+            user_id, "document", "https://x.com/a/b"
+        ) != build_rag_row_id(user_id, "document", "https://x.com/a-b")
+
+    def test_same_uri_under_two_users_yields_distinct_ids(self):
+        assert build_rag_row_id(
+            PydanticObjectId(), "document", self._URI
+        ) != build_rag_row_id(PydanticObjectId(), "document", self._URI)
+
+    def test_child_index_without_parent_index_raises(self):
+        with pytest.raises(ValueError, match="child_index requires parent_index"):
+            build_rag_row_id(PydanticObjectId(), "chunk", self._URI, child_index=0)
 
 
 class TestBuildEdgeId:

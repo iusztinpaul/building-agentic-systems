@@ -178,6 +178,36 @@ def build_node_id(
     return f"{user_id}:{node_type}:{name}"
 
 
+def build_rag_row_id(
+    user_id: PydanticObjectId,
+    row_type: NodeType | str,
+    source_uri: str,
+    parent_index: int | None = None,
+    child_index: int | None = None,
+) -> str:
+    """Build a RAG row ``_id``: ``"{user_id}:{type}:{source_uri}[:p{i}[:c{j}]]"``.
+
+    RAG rows (``document`` / ``chunk``) carry no ``name``, so unlike
+    :func:`build_node_id` they are keyed on the (already cleaned)
+    ``source_uri`` + position. Position, not content, keeps re-runs upserting
+    the same rows. Collision-free: the suffix is parsed from the right and an
+    index holds only digits, so ``:p{i}`` / ``:c{j}`` are never ambiguous.
+
+    Pass neither index for the document row, ``parent_index`` for a parent
+    chunk, and both for a child chunk.
+    """
+
+    if child_index is not None and parent_index is None:
+        raise ValueError("child_index requires parent_index")
+
+    row_id = f"{user_id}:{row_type}:{source_uri}"
+    if parent_index is not None:
+        row_id += f":p{parent_index}"
+    if child_index is not None:
+        row_id += f":c{child_index}"
+    return row_id
+
+
 def build_edge_id(
     source_node_id: str,
     edge_type: EdgeType | str,

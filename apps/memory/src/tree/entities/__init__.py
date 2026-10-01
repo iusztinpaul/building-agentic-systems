@@ -13,6 +13,7 @@ from tree.entities.memory import (
     NodeType,
     build_edge_id,
     build_node_id,
+    build_rag_row_id,
 )
 from tree.entities.meta_state import (
     KnowledgeGraphMetaState,
@@ -37,4 +38,5 @@ __all__ = [
     "build_edge_id",
     "build_meta_state_id",
     "build_node_id",
+    "build_rag_row_id",
 ]

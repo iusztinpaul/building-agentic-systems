@@ -9,7 +9,7 @@ into the ``UpdateOne`` upserts that materialise the hierarchy
 inside the ONE :data:`tree.entities.memory.MEMORY_COLLECTION` collection, and
 :func:`load_rag_rows` flushes every op of a run in ONE
 ``bulk_write(ordered=False)``. Ordering is irrelevant: the ``_id``s are
-deterministic (``build_node_id`` over deterministic names) and distinct, so a
+deterministic (``build_rag_row_id`` over ``source_uri`` + position) and distinct, so a
 re-run of the same document rewrites the same rows instead of duplicating them.
 
 Row contract (the loader writes these rows in BOTH memory modes):
@@ -23,10 +23,11 @@ indexing backfill rebuilds a byte-identical embedding text without a join.
 
 The rows carry no ``name`` and no entity-resolution fields (``canonical_name`` /
 ``aliases`` / ``confidence``): their ``_id`` is derived from ``source_uri`` +
-position, so nothing ever resolves or merges them, and the names below only seed
-that ``_id``. A stored URI-shaped ``name`` would also be tokenised by the
-``$text`` index, letting a query match a document through its URL instead of its
-content; the URI already lives in ``properties.source_uri``. Lineage back to the
+position, so nothing ever resolves or merges them. The names below are only the
+graphrag extractor's edge-endpoint keys, remapped to these ``_id``s. A stored
+URI-shaped ``name`` would also be tokenised by the ``$text`` index, letting a
+query match a document through its URL instead of its content; the URI already
+lives in ``properties.source_uri``. Lineage back to the
 ``Document`` collection is ``sources``.
 
 The loader writes node types in :data:`tree.entities.memory.RAG_NODE_TYPES` and
@@ -43,7 +44,7 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo import UpdateOne
 
-from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_node_id
+from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_rag_row_id
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.types import ParentChunk
 
@@ -58,21 +59,21 @@ _UNUSED_RAG_FIELDS: tuple[str, ...] = (
 
 
 def parent_chunk_name(source_uri: str, parent_index: int) -> str:
-    """Deterministic ``_id`` seed of a **Parent chunk** row: ``"{uri}#parent-{i}"``."""
+    """Extractor endpoint name of a **Parent chunk** row: ``"{uri}#parent-{i}"``."""
 
     return f"{source_uri}#parent-{parent_index}"
 
 
 def child_chunk_name(source_uri: str, parent_index: int, child_index: int) -> str:
-    """Deterministic ``_id`` seed of a **Child chunk** row: ``"{uri}#parent-{i}#child-{j}"``."""
+    """Extractor endpoint name of a **Child chunk** row: ``"{uri}#parent-{i}#child-{j}"``."""
 
     return f"{parent_chunk_name(source_uri, parent_index)}#child-{child_index}"
 
 
 def document_row_id(user_id: PydanticObjectId, source_uri: str) -> str:
-    """``_id`` of the ``document`` row — unchanged from the pre-ADR-006 pipeline."""
+    """``_id`` of the ``document`` row."""
 
-    return build_node_id(user_id, "document", source_uri)
+    return build_rag_row_id(user_id, "document", source_uri)
 
 
 def parent_row_id(user_id: PydanticObjectId, source_uri: str, parent_index: int) -> str:
@@ -83,7 +84,7 @@ def parent_row_id(user_id: PydanticObjectId, source_uri: str, parent_index: int)
     so an extracted entity points back at a row that actually exists.
     """
 
-    return build_node_id(user_id, "chunk", parent_chunk_name(source_uri, parent_index))
+    return build_rag_row_id(user_id, "chunk", source_uri, parent_index)
 
 
 def child_row_id(
@@ -91,9 +92,7 @@ def child_row_id(
 ) -> str:
     """``_id`` of a child-chunk row."""
 
-    return build_node_id(
-        user_id, "chunk", child_chunk_name(source_uri, parent_index, child_index)
-    )
+    return build_rag_row_id(user_id, "chunk", source_uri, parent_index, child_index)
 
 
 def build_rag_row_ops(

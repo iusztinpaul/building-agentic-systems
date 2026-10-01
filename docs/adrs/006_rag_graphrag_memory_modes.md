@@ -64,8 +64,9 @@ Eight related choices, one design:
    tokens, embedded). Every chunk row carries top-level `parent_id` (the `_id` of its parent
    row) and `chunk_index`. The level marker is the EXISTING `subtype` column (closed set
    `{parent, child}` on the `chunk` registry entry) rather than a new `level` field — it is
-   already indexed (`user_kind_type_subtype`) and validated. Names are deterministic
-   (`{uri}#parent-{i}`, `{uri}#parent-{i}#child-{j}`) so upserts stay idempotent, and the
+   already indexed (`user_kind_type_subtype`) and validated. Row `_id`s are deterministic
+   (`build_rag_row_id`: `{user_id}:{type}:{source_uri}[:p{i}[:c{j}]]`, keyed on
+   position, never content) so upserts stay idempotent, and the
    parent row `_id` replaces `uuid4()` as the LLM-provenance `chunk_id`. Retrieval
    (`tree.memory.rag.retrieval.retrieve_parents`): hybrid search (vector + text, RRF as
    today) over children only (`$vectorSearch.filter {user_id, kind, type:"chunk",

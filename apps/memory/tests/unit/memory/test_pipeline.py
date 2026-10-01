@@ -2563,7 +2563,7 @@ class TestApplyWritesBulkBatching:
         ops = edge_call.args[0]
         edge_ids = [op._filter["_id"] for op in ops]
         mentions_id = build_edge_id(
-            build_node_id(_USER_ID, NodeType.DOCUMENT, "https://example.com/a"),
+            document_row_id(_USER_ID, "https://example.com/a"),
             "mentions",
             build_node_id(_USER_ID, NodeType.PERSON, "Alice"),
         )

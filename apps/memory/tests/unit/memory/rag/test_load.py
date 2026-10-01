@@ -26,7 +26,7 @@ from tree.entities.memory import (
     MEMORY_COLLECTION,
     RAG_NODE_TYPES,
     NodeType,
-    build_node_id,
+    build_rag_row_id,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.load import (
@@ -119,15 +119,15 @@ class TestRowNames:
     def test_child_name_nests_under_its_parent(self) -> None:
         assert child_chunk_name(_URI, 2, 5) == f"{_URI}#parent-2#child-5"
 
-    def test_ids_are_tenant_scoped_node_ids(self) -> None:
-        assert document_row_id(_USER_ID, _URI) == build_node_id(
+    def test_ids_are_tenant_scoped_rag_row_ids(self) -> None:
+        assert document_row_id(_USER_ID, _URI) == build_rag_row_id(
             _USER_ID, "document", _URI
         )
-        assert parent_row_id(_USER_ID, _URI, 0) == build_node_id(
-            _USER_ID, "chunk", f"{_URI}#parent-0"
+        assert parent_row_id(_USER_ID, _URI, 0) == build_rag_row_id(
+            _USER_ID, "chunk", _URI, 0
         )
-        assert child_row_id(_USER_ID, _URI, 0, 1) == build_node_id(
-            _USER_ID, "chunk", f"{_URI}#parent-0#child-1"
+        assert child_row_id(_USER_ID, _URI, 0, 1) == build_rag_row_id(
+            _USER_ID, "chunk", _URI, 0, 1
         )
 
     def test_ids_are_stable_across_calls(self) -> None:
