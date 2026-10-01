@@ -24,6 +24,7 @@ from tree.memory.visualize.embeddings import (
     to_embedding_map_payload,
     unclustered_warning,
 )
+from tree.memory.visualize.graph import _DEFAULT_DISPLAY
 
 
 def _cluster(cluster_id: int, label: str, size: int) -> MemoryClusterInfo:
@@ -146,7 +147,32 @@ def test_payload_draws_one_fixed_node_per_point() -> None:
     assert len(payload["nodes"]) == 47
     assert payload["edges"] == []
     assert payload["layout"] == "fixed"
-    assert payload["nodeSize"] == 4
+
+
+def test_payload_sizes_every_point_per_node() -> None:
+    payload = to_embedding_map_payload(_map())
+
+    # Assert: ONE sizing mechanism (per node, like the graph) — no
+    # payload-wide ``nodeSize`` key any more.
+    assert "nodeSize" not in payload
+    assert {n["size"] for n in payload["nodes"]} == {4}
+
+
+def test_payload_ships_display_controls_but_no_forces() -> None:
+    payload = to_embedding_map_payload(_map())
+
+    # Assert: no ``forces`` is how the template knows there is nothing to
+    # simulate (with ``layout: "fixed"``) — the UMAP coordinates stay put.
+    assert payload["controls"] == {"display": _DEFAULT_DISPLAY}
+    assert "forces" not in payload["controls"]
+
+
+def test_payload_display_controls_are_a_copy_of_the_graph_defaults() -> None:
+    payload = to_embedding_map_payload(_map())
+
+    payload["controls"]["display"]["arrows"] = False
+
+    assert _DEFAULT_DISPLAY["arrows"] is True
 
 
 def test_payload_colours_nodes_by_cluster_and_noise_grey() -> None:
@@ -279,13 +305,14 @@ def test_render_embedding_map_file_embeds_the_fixed_layout_and_hull_machinery(
     html = out.read_text(encoding="utf-8")
     # The payload keys reach the browser…
     assert '"layout": "fixed"' in html
-    assert '"nodeSize": 4' in html
+    assert '"size": 4' in html
+    assert '"nodeSize": 4' not in html
     # …and so does everything that consumes them.
     assert "convexHull" in html
     assert "hulls-toggle" in html
     assert "graphToViewport" in html
-    assert 'renderer.on("afterRender", drawHulls)' in html
-    assert 'renderer.on("resize", drawHulls)' in html
+    assert 'renderer.on("afterRender", drawOverlay)' in html
+    assert 'renderer.on("resize", drawOverlay)' in html
 
 
 def test_render_embedding_map_file_carries_the_warning_and_every_cluster_label(

@@ -1,8 +1,8 @@
 """The Graph renderer: draw a knowledge-graph ``QueryResult`` as interactive HTML.
 
-Single home of the **Graph renderer** (ADR-005): the browser-side graphology
-(graph model) + graphology-layout-forceatlas2 (layout) + Sigma.js (WebGL)
-stack, loaded as pinned ESM from jsdelivr. Every graph surface — the
+Single home of the **Graph renderer** (ADR-005, ADR-011): the browser-side
+graphology (graph model) + d3-force (live layout) + Sigma.js (WebGL) stack,
+loaded as pinned ESM from jsdelivr. Every graph surface — the
 ``query_graph.py`` CLI, the ``visualize_memory_graph`` MCP App, the
 ``query_memory`` / ``search_memory`` tools — consumes the same **Graph
 payload** built here and the same HTML templates; no surface owns rendering
@@ -11,8 +11,9 @@ code of its own.
 What lives here:
 
 * :func:`to_graph_payload` — ``QueryResult`` → the renderer-agnostic
-  ``{nodes, edges}`` **Graph payload** (curated hover metadata, palette
-  colours, every edge endpoint materialised as a node).
+  ``{nodes, edges, controls}`` **Graph payload** (curated hover metadata,
+  palette colours, a per-role node ``size``, every edge endpoint materialised
+  as a node, and the force / display defaults the template seeds from).
 * :data:`_GRAPH_STYLE` / :data:`_BODY_MARKUP` / :data:`_RENDER_JS` +
   :func:`_resolve_static` — the shared CSS / DOM / JS spliced into a template.
 * :func:`_render_graph_file` — write a self-contained HTML file (data embedded
@@ -23,10 +24,13 @@ What lives here:
 The UI is themed after the "Tree Memory" design: a header with live counts +
 node search, a per-type legend, and zoom controls. Node labels show only the
 name; hovering a node or edge shows a tooltip with its name / relationship type
-plus a curated metadata card. Clicking a node only highlights it.
+plus a curated metadata card. Clicking a node only highlights it. The layout is
+LIVE (ADR-011): d3-force keeps ticking until it cools; dragging a node pulls its
+neighbours along and DROPS it as a **Pinned node** (dark centre dot), which a
+double-click unpins.
 
-Needs network at VIEW time (the three libraries load from the CDN rather than
-being vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
+Needs network at VIEW time (the libraries load from the CDN rather than being
+vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
 
 Dependency direction is memory ← mcp: this module imports NOTHING from
 ``tree.mcp``. MCP-only concerns (the tools, the ``ui://`` / ``graphs://``
@@ -35,10 +39,10 @@ resources, CSP wiring, the ext-apps iframe runtime) live in
 
 The template also draws the **Embedding map** (ADR-007 §2) through four
 OPTIONAL payload keys — ``layout: "fixed"`` (use each node's ``x``/``y`` and
-skip ForceAtlas2), ``legend`` (explicit rows instead of the per-type one),
-``warning`` (an amber banner) and ``hulls`` (the convex-hull overlay), plus
-``nodeSize``. A payload without them renders exactly the graph it did before;
-the map payload builder is :mod:`tree.memory.visualize.embeddings`.
+build no simulation; drag, pin and the display knobs still work), ``legend``
+(explicit rows instead of the per-type one), ``warning`` (an amber banner) and
+``hulls`` (the convex-hull overlay). A payload without them renders the live
+graph; the map payload builder is :mod:`tree.memory.visualize.embeddings`.
 """
 
 import json
@@ -76,12 +80,39 @@ _NODE_COLOURS: dict[str, str] = {
     "fact": Colours.BLUE_LEVEL_4,
 }
 
-# Browser deps, pinned. graphology-layout-forceatlas2 ships CJS-only and Sigma
-# v3 declares no UMD global, so all three load as ESM via jsdelivr's +esm
-# endpoint (which also dedupes graphology across them).
+# Browser deps, pinned (ADR-011 §2). Sigma v3 declares no UMD global, so every
+# dep loads as ESM via jsdelivr's +esm endpoint. The d3-force bundle imports
+# its own three deps (d3-quadtree / d3-dispatch / d3-timer) from jsdelivr, so
+# ONE import line replaces the four ordered UMD <script> tags pulse needs.
 _GRAPHOLOGY_CDN = "https://cdn.jsdelivr.net/npm/graphology@0.26.0/+esm"
 _SIGMA_CDN = "https://cdn.jsdelivr.net/npm/sigma@3.0.3/+esm"
-_FA2_CDN = "https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm"
+_D3_FORCE_CDN = "https://cdn.jsdelivr.net/npm/d3-force@3.0.0/+esm"
+
+# Node radius by role (ADR-011 §6): a document outranks its parent chunks,
+# which outrank the child chunks they split into, so a document→chunk star
+# reads at a glance. Keys are ``type`` or ``type:subtype``; only a chunk's
+# subtype is a role, so an entity is looked up by its bare type.
+_NODE_SIZES: dict[str, int] = {"document": 12, "chunk:parent": 8, "chunk:child": 4}
+_DEFAULT_NODE_SIZE = 6  # entities, ``unknown`` endpoints, a role-less chunk
+
+# What the template seeds the live d3-force simulation and its reducers with
+# (ADR-011 §6 — Python decides, the JS obeys). ``forces`` mirror pulse's
+# sliders (repel is multiplied by the template's REPEL_SCALE = 30);
+# ``display`` values are MULTIPLIERS / switches over what Python resolved
+# (``nodeSize: 1.0`` draws each node's ``size`` as is).
+_DEFAULT_FORCES: dict[str, float] = {
+    "centre": 0.2,
+    "repel": 8.0,
+    "link": 0.3,
+    "linkDistance": 80,
+}
+_DEFAULT_DISPLAY: dict[str, float | bool] = {
+    "nodeSize": 1.0,
+    "linkThickness": 1.0,
+    "labelFade": 1,
+    "arrows": True,
+    "edgeLabels": True,
+}
 
 
 # Curated metadata surfaced on node / edge hover + the dashboard table. Kept
@@ -122,8 +153,16 @@ def _curated_meta(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any
     return meta
 
 
-def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
-    """Flatten a ``QueryResult`` into a graph ``{nodes, edges}`` payload.
+def _node_size(node_type: str, subtype: str | None) -> int:
+    """The radius a node is drawn at, by role (see ``_NODE_SIZES``)."""
+
+    if node_type == "chunk" and subtype:
+        return _NODE_SIZES.get(f"chunk:{subtype}", _DEFAULT_NODE_SIZE)
+    return _NODE_SIZES.get(node_type, _DEFAULT_NODE_SIZE)
+
+
+def to_graph_payload(result: QueryResult) -> dict[str, Any]:
+    """Flatten a ``QueryResult`` into a graph ``{nodes, edges, controls}`` payload.
 
     Every edge endpoint is guaranteed to also exist as a node — partial graphs
     may reference nodes that were not in the seed set, and the renderer drops
@@ -134,6 +173,10 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
     Each node and edge carries a curated ``meta`` dict (see ``_curated_meta``)
     surfaced on hover and in the dashboard table; nodes materialised only from a
     dangling edge endpoint get an empty ``meta``.
+
+    Each node also carries its drawn ``size`` by role (:func:`_node_size`), and
+    ``controls`` ships the force / display defaults the template seeds its live
+    layout and reducers from.
     """
 
     nodes: list[dict[str, Any]] = []
@@ -144,6 +187,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
         node_type: str,
         props: dict[str, Any],
         meta: dict[str, Any] | None = None,
+        subtype: str | None = None,
     ) -> None:
         if not node_id or node_id in seen:
             return
@@ -156,6 +200,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
                 "name": name,  # full, untruncated — shown on hover / click
                 "label": _truncate(name, 40),  # shown on the canvas
                 "color": _NODE_COLOURS.get(node_type, _FALLBACK_COLOUR),
+                "size": _node_size(node_type, subtype),
                 "meta": meta or {},
             }
         )
@@ -166,6 +211,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
             node.get("type", "unknown"),
             node.get("properties") or {},
             _curated_meta(node, _NODE_META_FIELDS),
+            node.get("subtype"),
         )
 
     edges: list[dict[str, Any]] = []
@@ -185,7 +231,14 @@ def to_graph_payload(result: QueryResult) -> dict[str, list[dict[str, Any]]]:
             }
         )
 
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "controls": {
+            "forces": dict(_DEFAULT_FORCES),
+            "display": dict(_DEFAULT_DISPLAY),
+        },
+    }
 
 
 def _slugify(text: str, max_len: int = 48) -> str:
@@ -229,7 +282,7 @@ def _render_graph_file(
 
     Takes any payload the ONE template understands: a **Graph payload** or an
     **Embedding map** payload (the same ``{nodes, edges}`` plus the optional
-    ``layout`` / ``legend`` / ``warning`` / ``hulls`` / ``nodeSize`` keys).
+    ``layout`` / ``legend`` / ``warning`` / ``hulls`` keys).
 
     Used as the fallback when the client does not render MCP App UIs, or when
     the caller explicitly asks for an openable file. The HTML carries its data
@@ -365,9 +418,10 @@ _GRAPH_STYLE = """\
     /* Graph stage */
     #stage { position: relative; flex: 1; min-height: 0; }
     #sigma-container { width: 100%; height: 100%; }
-    /* Cluster hulls are drawn ON TOP of Sigma's canvases (Sigma has no hull
-       primitive) but must never swallow a hover / drag — hence pointer-events. */
-    #hulls-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+    /* The overlay (cluster hulls, pin dots) is drawn ON TOP of Sigma's
+       canvases (Sigma has no primitive for either) but must never swallow a
+       hover / drag — hence pointer-events. */
+    #overlay { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
 
     /* Legend */
     #legend { position: absolute; top: 10px; right: 12px; font-size: 11px; z-index: 2;
@@ -414,7 +468,7 @@ _BODY_MARKUP = """\
     </div>
     <div id="stage">
       <div id="sigma-container"></div>
-      <canvas id="hulls-layer"></canvas>
+      <canvas id="overlay"></canvas>
       <div id="legend"></div>
       <div id="tooltip"></div>
       <div id="zoom">
@@ -425,8 +479,9 @@ _BODY_MARKUP = """\
     </div>
   </div>"""
 
-# graphology + Sigma + ForceAtlas2 render. Defines render(payload). Expects
-# Graph / Sigma / forceAtlas2 imported above, and the _BODY_MARKUP DOM present.
+# graphology + Sigma + d3-force render. Defines render(payload). Expects Graph /
+# Sigma / forceSimulation / forceLink / forceManyBody / forceCenter imported
+# above, and the _BODY_MARKUP DOM present.
 _RENDER_JS = """\
     const countsEl = document.getElementById("counts");
 
@@ -452,11 +507,16 @@ _RENDER_JS = """\
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
 
-      // Optional Embedding-map keys. Absent (a Graph payload) => today's graph:
-      // random start + ForceAtlas2, per-type legend, no banner, no hulls.
+      // Optional Embedding-map keys. Absent (a Graph payload) => the live
+      // d3-force layout, per-type legend, no banner, no hulls.
       const isFixed = payload.layout === "fixed";
-      const nodeSize = typeof payload.nodeSize === "number" ? payload.nodeSize : 6;
       const legendRows = Array.isArray(payload.legend) ? payload.legend : null;
+      // Display knobs: multipliers / switches over what Python resolved. Both
+      // payload builders ship them; a hand-made fixed-layout payload without
+      // `controls` simply draws as is.
+      const display = Object.assign(
+        { nodeSize: 1, linkThickness: 1, labelFade: 1, arrows: true, edgeLabels: true },
+        payload.controls && payload.controls.display);
 
       // Header counts. A map has no edges, so "N nodes · 0 edges" would read as
       // a broken graph; its payload summary already counts the two things that
@@ -467,54 +527,80 @@ _RENDER_JS = """\
       const hullsEnabled = legendRows !== null && typeof payload.hulls === "boolean";
 
       const nodeById = new Map(nodes.map((n) => [n.id, n]));
+      // Only an edge whose two endpoints exist is drawn — or simulated.
+      const drawnEdges = edges.filter((e) => nodeById.has(e.source) && nodeById.has(e.target));
+
+      // Pin state lives on the d3 node object on BOTH layouts: numeric fx/fy =
+      // a Pinned node, null = free. A fixed layout seeds the STORED
+      // coordinates; the live layout leaves x/y undefined so forceSimulation
+      // places every node on its phyllotaxis spiral.
+      const simNodes = nodes.map((n) => ({
+        id: n.id,
+        x: isFixed ? n.x : undefined,
+        y: isFixed ? n.y : undefined,
+        fx: null,
+        fy: null,
+      }));
+      const simById = new Map(simNodes.map((s) => [s.id, s]));
+
+      // Live layout (ADR-011): d3 owns the positions and ticks them into
+      // graphology, which is what Sigma redraws from; it cools to a stop on
+      // d3's default alphaDecay. NOT on a fixed layout: an Embedding map's
+      // coordinates come from the stored UMAP projection, and a force pass
+      // would drift every point off the position it was clustered at.
+      const REPEL_SCALE = 30;   // pulse's repel slider -> d3 manyBody strength (8 -> -240)
+      const forces = isFixed ? null : payload.controls.forces;
+      // A self-loop has zero length — a division by zero inside forceLink.
+      const links = drawnEdges.filter((e) => e.source !== e.target)
+        .map((e) => ({ source: e.source, target: e.target }));
+      let sim = null;
+      if (!isFixed) {
+        sim = forceSimulation(simNodes)
+          .force("centre", forceCenter(0, 0).strength(forces.centre))
+          .force("repel", forceManyBody().strength(-forces.repel * REPEL_SCALE))
+          .force("link", forceLink(links).id((s) => s.id)
+            .strength(forces.link).distance(forces.linkDistance));
+      }
 
       // Build the graphology graph. Multi + directed so parallel edges and
       // self-loops don't throw, and edges can carry arrowheads.
       const graph = new Graph({ type: "directed", multi: true });
       for (const n of nodes) {
+        const s = simById.get(n.id);
         graph.addNode(n.id, {
           label: n.label,            // labels in-view show ONLY the name
           nodeType: n.type,          // (Sigma reserves "type" for the program)
           color: n.color,
-          size: nodeSize,
-          // A fixed layout draws the STORED coordinates (Sigma throws on a
-          // non-numeric x/y); otherwise ForceAtlas2 needs distinct starts.
-          x: isFixed ? n.x : Math.random(),
-          y: isFixed ? n.y : Math.random(),
+          size: n.size,              // by role, resolved in Python
+          // Sigma throws on a non-numeric x/y: the live layout's start comes
+          // from d3 (placed synchronously above), a map's is the stored one.
+          x: s.x,
+          y: s.y,
         });
       }
-      for (const e of edges) {
-        if (graph.hasNode(e.source) && graph.hasNode(e.target)) {
-          graph.addEdge(e.source, e.target, {
-            label: e.type, type: "arrow", size: 1.2, color: "#c2c8d2",
-            relType: e.type, meta: e.meta || {},   // carried for the edge hover card
-          });
-        }
-      }
-
-      // Layout. ForceAtlas2 runs ONLY when layout !== "fixed": an Embedding
-      // map's coordinates come from the stored UMAP projection, and a force
-      // pass would drift every point off the position it was clustered at.
-      if (!isFixed) {
-        const settings = forceAtlas2.inferSettings(graph);
-        forceAtlas2.assign(graph, { iterations: 300, settings });
+      for (const e of drawnEdges) {
+        graph.addEdge(e.source, e.target, {
+          label: e.type, type: "arrow", size: 1.2, color: "#c2c8d2",
+          relType: e.type, meta: e.meta || {},   // carried for the edge hover card
+        });
       }
 
       // Interaction state, applied via reducers.
       const state = { search: "", selected: null, hovered: null, hoveredEdge: null };
 
       const renderer = new Sigma(graph, container, {
-        renderEdgeLabels: true,        // relationship labels
+        renderEdgeLabels: display.edgeLabels,   // relationship labels
         enableEdgeEvents: true,        // needed for enterEdge / leaveEdge hover
         defaultEdgeType: "arrow",
         labelColor: { color: "#1f2430" },
         edgeLabelColor: { color: "#6b7280" },
         labelSize: 11,
         edgeLabelSize: 9,
-        labelRenderedSizeThreshold: 1,
+        labelRenderedSizeThreshold: display.labelFade,
         labelDensity: 0.7,
         nodeReducer: (node, data) => {
           const res = Object.assign({}, data);
+          res.size = data.size * display.nodeSize;
           const searching = state.search && !(data.label || "").toLowerCase().includes(state.search);
           // Chunks are the most numerous nodes; hide their labels unless the
           // node is hovered or selected (full name still shows in the tooltip).
@@ -527,13 +613,34 @@ _RENDER_JS = """\
         },
         edgeReducer: (edge, data) => {
           const res = Object.assign({}, data);
+          res.size = data.size * display.linkThickness;
+          // Sigma 3 registers both edge programs by default.
+          res.type = display.arrows ? "arrow" : "line";
           if (state.search) res.color = "#e6e8ec";   // dim edges while searching
           return res;
         },
       });
+      document.body.dataset.layout = isFixed ? "fixed" : "live";
+
+      // Headless evidence + debugging only: "running" while d3 ticks (again
+      // after a reheat), "settled" once it has cooled to a stop.
+      if (sim) {
+        sim.on("tick", () => {
+          for (const s of simNodes) graph.mergeNodeAttributes(s.id, { x: s.x, y: s.y });
+          if (document.body.dataset.sim !== "running") document.body.dataset.sim = "running";
+        });
+        sim.on("end", () => { document.body.dataset.sim = "settled"; });
+      }
+
+      // A drag ends in a trailing click; it must not change the selection.
+      let wasDragged = false;
 
       // --- Click only highlights a node; all details are shown on hover. ---
-      renderer.on("clickNode", ({ node }) => { state.selected = node; renderer.refresh(); });
+      renderer.on("clickNode", ({ node }) => {
+        if (wasDragged) return;
+        state.selected = node;
+        renderer.refresh();
+      });
       renderer.on("clickStage", () => { state.selected = null; renderer.refresh(); });
 
       // --- Hover tooltip: full name + type/subtype + curated metadata. ---
@@ -612,19 +719,59 @@ _RENDER_JS = """\
       // the standalone-file view crisp as the window grows/shrinks).
       window.addEventListener("resize", () => renderer.refresh());
 
-      // --- Node dragging (Sigma camera-based pattern) ---
+      // --- Drag: hold, pull the neighbours along live, PIN on drop ---
+      // d3's idiom (pulse): the held node is fixed with fx/fy while
+      // alphaTarget(0.3) keeps the simulation hot, so its unpinned neighbours
+      // follow live. On release the node KEEPS fx/fy — a Pinned node — unless
+      // it never moved (a plain click pins nothing). The map has no
+      // simulation, so there the held node is the only thing that moves.
       let dragged = null;
-      renderer.on("downNode", (e) => { dragged = e.node; });
+      let wasPinned = false;
+      renderer.on("downNode", (e) => {
+        dragged = simById.get(e.node) || null;
+        wasDragged = false;
+        if (!dragged) return;
+        wasPinned = dragged.fx != null;
+        // Freeze the viewport so a node dragged past the extent does not rescale the scene.
+        if (!renderer.getCustomBBox()) renderer.setCustomBBox(renderer.getBBox());
+        const at = graph.getNodeAttributes(e.node);
+        dragged.fx = at.x;
+        dragged.fy = at.y;
+        if (sim) sim.alphaTarget(0.3).restart();
+      });
       renderer.getMouseCaptor().on("mousemovebody", (e) => {
         if (!dragged) return;
         const pos = renderer.viewportToGraph(e);
-        graph.setNodeAttribute(dragged, "x", pos.x);
-        graph.setNodeAttribute(dragged, "y", pos.y);
-        e.preventSigmaDefault();
+        dragged.fx = pos.x;
+        dragged.fy = pos.y;
+        dragged.x = pos.x;
+        dragged.y = pos.y;
+        graph.mergeNodeAttributes(dragged.id, { x: pos.x, y: pos.y });
+        wasDragged = true;
+        e.preventSigmaDefault();          // no camera pan while a node is held
         e.original.preventDefault();
         e.original.stopPropagation();
       });
-      renderer.getMouseCaptor().on("mouseup", () => { dragged = null; });
+      renderer.getMouseCaptor().on("mouseup", () => {
+        if (!dragged) return;
+        if (!wasDragged && !wasPinned) { dragged.fx = null; dragged.fy = null; }
+        dragged = null;
+        if (sim) sim.alphaTarget(0);
+        // Hand the viewport back to Sigma, or it keeps the frozen extent forever.
+        renderer.setCustomBBox(null);
+      });
+
+      // --- Double-click a Pinned node to unpin it; on an unpinned node the
+      //     double-click keeps Sigma's default zoom. ---
+      renderer.on("doubleClickNode", (e) => {
+        const s = simById.get(e.node);
+        if (!s || s.fx == null) return;
+        s.fx = null;
+        s.fy = null;
+        e.preventSigmaDefault();
+        if (sim) sim.alpha(0.5).restart();   // drift back into the layout
+        drawOverlay();                       // the map re-renders nothing by itself
+      });
 
       // --- Legend: the payload's own rows (Embedding map), else one swatch
       //     per node type present (Graph payload). ---
@@ -652,85 +799,101 @@ _RENDER_JS = """\
         warningEl.hidden = false;
       }
 
-      // --- Cluster hulls (Embedding map only) ---
-      // Sigma has no hull primitive, so the hulls are a plain <canvas> overlay
-      // drawn in VIEWPORT coordinates: the hull of each cluster is computed once
-      // in graph space, then mapped through graphToViewport on every render, so
-      // it stays glued to its points through pan and zoom.
+      // --- Cluster hulls (Embedding map only): membership is fixed once,
+      //     positions are not — each hull is rebuilt from the CURRENT graph
+      //     coordinates on every draw, so it follows a dragged point. ---
+      const checkbox = document.getElementById("hulls");
+      const byCluster = new Map();
       if (hullsEnabled) {
         const toggle = document.getElementById("hulls-toggle");
-        const checkbox = document.getElementById("hulls");
         toggle.hidden = false;
         checkbox.checked = payload.hulls;
-
-        const byCluster = new Map();
+        checkbox.onchange = drawOverlay;
         for (const n of nodes) {
           // Noise (-1) is a residue, not a group: it never gets a hull.
           if (typeof n.cluster_id !== "number" || n.cluster_id < 0) continue;
           let entry = byCluster.get(n.cluster_id);
-          if (!entry) { entry = { color: n.color, points: [] }; byCluster.set(n.cluster_id, entry); }
-          entry.points.push([n.x, n.y]);
+          if (!entry) { entry = { color: n.color, ids: [] }; byCluster.set(n.cluster_id, entry); }
+          entry.ids.push(n.id);
         }
-        // Andrew's monotone chain: sort by (x, y), then walk the lower and the
-        // upper hull, popping any point that does not turn counter-clockwise.
-        function convexHull(points) {
-          const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-          const cross = (o, a, b) =>
-            (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-          const build = (seq) => {
-            const out = [];
-            for (const p of seq) {
-              while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
-              out.push(p);
-            }
-            out.pop();
-            return out;
-          };
-          return build(pts).concat(build(pts.slice().reverse()));
-        }
-        // Fewer than 3 points cannot bound an area — those clusters draw nothing.
-        const hulls = [...byCluster.values()]
-          .filter((c) => c.points.length >= 3)
-          .map((c) => ({ color: c.color, hull: convexHull(c.points) }))
-          .filter((h) => h.hull.length >= 3);
+      }
+      // Andrew's monotone chain: sort by (x, y), then walk the lower and the
+      // upper hull, popping any point that does not turn counter-clockwise.
+      function convexHull(points) {
+        const pts = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const cross = (o, a, b) =>
+          (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const build = (seq) => {
+          const out = [];
+          for (const p of seq) {
+            while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+            out.push(p);
+          }
+          out.pop();
+          return out;
+        };
+        return build(pts).concat(build(pts.slice().reverse()));
+      }
+      function rgba(hex, alpha) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex));
+        if (!m) return hex;
+        const v = parseInt(m[1], 16);
+        return "rgba(" + ((v >> 16) & 255) + "," + ((v >> 8) & 255) + "," + (v & 255) + "," + alpha + ")";
+      }
 
-        function rgba(hex, alpha) {
-          const m = /^#?([0-9a-f]{6})$/i.exec(String(hex));
-          if (!m) return hex;
-          const v = parseInt(m[1], 16);
-          return "rgba(" + ((v >> 16) & 255) + "," + ((v >> 8) & 255) + "," + (v & 255) + "," + alpha + ")";
-        }
-
-        const layer = document.getElementById("hulls-layer");
-        const hullCtx = layer.getContext("2d");
-        function drawHulls() {
-          const dpr = window.devicePixelRatio || 1;
-          const width = container.offsetWidth, height = container.offsetHeight;
-          layer.width = Math.round(width * dpr);      // also clears the canvas
-          layer.height = Math.round(height * dpr);
-          layer.style.width = width + "px";
-          layer.style.height = height + "px";
-          hullCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          if (!checkbox.checked) return;              // unchecked => cleared
-          for (const { color, hull } of hulls) {
-            hullCtx.beginPath();
+      // --- The overlay: everything Sigma cannot draw (ADR-011 §5) ---
+      // ONE 2D canvas on top of Sigma's (pointer-events: none), redrawn in
+      // VIEWPORT coordinates on every render so it stays glued to the nodes
+      // through pan, zoom, drag and simulation ticks: hulls first, then the
+      // pin dots.
+      const overlay = document.getElementById("overlay");
+      const overlayCtx = overlay.getContext("2d");
+      function drawOverlay() {
+        const dpr = window.devicePixelRatio || 1;
+        const width = container.offsetWidth, height = container.offsetHeight;
+        overlay.width = Math.round(width * dpr);      // also clears the canvas
+        overlay.height = Math.round(height * dpr);
+        overlay.style.width = width + "px";
+        overlay.style.height = height + "px";
+        overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (hullsEnabled && checkbox.checked) {
+          for (const { color, ids } of byCluster.values()) {
+            // Fewer than 3 points cannot bound an area — those clusters draw nothing.
+            if (ids.length < 3) continue;
+            const hull = convexHull(ids.map((id) => {
+              const a = graph.getNodeAttributes(id);
+              return [a.x, a.y];
+            }));
+            if (hull.length < 3) continue;
+            overlayCtx.beginPath();
             hull.forEach((p, i) => {
               const vp = renderer.graphToViewport({ x: p[0], y: p[1] });
-              if (i === 0) hullCtx.moveTo(vp.x, vp.y); else hullCtx.lineTo(vp.x, vp.y);
+              if (i === 0) overlayCtx.moveTo(vp.x, vp.y); else overlayCtx.lineTo(vp.x, vp.y);
             });
-            hullCtx.closePath();
-            hullCtx.fillStyle = rgba(color, 0.12);
-            hullCtx.fill();
-            hullCtx.lineWidth = 1.5;
-            hullCtx.strokeStyle = rgba(color, 0.6);
-            hullCtx.stroke();
+            overlayCtx.closePath();
+            overlayCtx.fillStyle = rgba(color, 0.12);
+            overlayCtx.fill();
+            overlayCtx.lineWidth = 1.5;
+            overlayCtx.strokeStyle = rgba(color, 0.6);
+            overlayCtx.stroke();
           }
         }
-        checkbox.onchange = drawHulls;
-        renderer.on("afterRender", drawHulls);   // pan / zoom / drag / refresh
-        renderer.on("resize", drawHulls);        // container size changed
-        drawHulls();
+        // Pin dots: a dark centre disc on every Pinned node still on screen.
+        overlayCtx.fillStyle = "#1f2430";
+        for (const s of simNodes) {
+          if (s.fx == null) continue;
+          const shown = renderer.getNodeDisplayData(s.id);
+          if (!shown || shown.hidden) continue;
+          const a = graph.getNodeAttributes(s.id);
+          const vp = renderer.graphToViewport({ x: a.x, y: a.y });
+          overlayCtx.beginPath();
+          overlayCtx.arc(vp.x, vp.y, 0.35 * renderer.scaleSize(shown.size), 0, 2 * Math.PI);
+          overlayCtx.fill();
+        }
       }
+      renderer.on("afterRender", drawOverlay);   // pan / zoom / drag / tick / refresh
+      renderer.on("resize", drawOverlay);        // container size changed
+      drawOverlay();
     }"""
 
 # Self-contained file: data embedded inline, no ext-apps round-trip.
@@ -747,7 +910,7 @@ __BODY__
   <script type="module">
     import Graph from "__GRAPHOLOGY_CDN__";
     import Sigma from "__SIGMA_CDN__";
-    import forceAtlas2 from "__FA2_CDN__";
+    import { forceSimulation, forceLink, forceManyBody, forceCenter } from "__D3_FORCE_CDN__";
 
 __RENDER_JS__
 
@@ -776,7 +939,7 @@ def _resolve_static(template: str, app_height: str) -> str:
         .replace("__RENDER_JS__", _RENDER_JS)
         .replace("__GRAPHOLOGY_CDN__", _GRAPHOLOGY_CDN)
         .replace("__SIGMA_CDN__", _SIGMA_CDN)
-        .replace("__FA2_CDN__", _FA2_CDN)
+        .replace("__D3_FORCE_CDN__", _D3_FORCE_CDN)
     )
 
 

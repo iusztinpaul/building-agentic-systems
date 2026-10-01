@@ -249,7 +249,7 @@ __BODY__
     import { App } from "__EXT_APPS_CDN__";
     import Graph from "__GRAPHOLOGY_CDN__";
     import Sigma from "__SIGMA_CDN__";
-    import forceAtlas2 from "__FA2_CDN__";
+    import { forceSimulation, forceLink, forceManyBody, forceCenter } from "__D3_FORCE_CDN__";
 
 __RENDER_JS__
 

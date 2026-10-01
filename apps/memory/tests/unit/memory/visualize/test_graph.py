@@ -16,8 +16,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from tree.config.paths import GRAPHS_DIR
+import pytest
+
 from tree.memory.visualize.graph import (
+    _D3_FORCE_CDN,
+    _DEFAULT_DISPLAY,
+    _DEFAULT_FORCES,
     _FALLBACK_COLOUR,
+    _FILE_HTML_BASE,
     _RENDER_JS,
     _default_graph_path,
     _render_graph_file,
@@ -242,7 +248,83 @@ def test_node_type_colour_is_assigned() -> None:
 def test_empty_result_yields_empty_payload() -> None:
     payload = to_graph_payload(QueryResult())
 
-    assert payload == {"nodes": [], "edges": []}
+    assert payload["nodes"] == []
+    assert payload["edges"] == []
+
+
+@pytest.mark.parametrize(
+    ("node_type", "subtype", "expected_size"),
+    [
+        ("document", None, 12),
+        ("chunk", "parent", 8),
+        ("chunk", "child", 4),
+        ("chunk", None, 6),  # a chunk with no role reads as an entity
+        ("person", None, 6),
+        ("person", "parent", 6),  # only a CHUNK's subtype carries a role
+        ("unknown", None, 6),
+    ],
+)
+def test_node_size_is_resolved_by_role(
+    node_type: str, subtype: str | None, expected_size: int
+) -> None:
+    # Arrange: a node row whose top-level ``subtype`` is the chunk role.
+    row = _node(f"{_UID}:{node_type}:x", node_type)
+    if subtype is not None:
+        row["subtype"] = subtype
+
+    node = to_graph_payload(QueryResult(nodes=[row], edges=[]))["nodes"][0]
+
+    assert node["size"] == expected_size
+
+
+def test_dangling_endpoint_gets_the_default_size() -> None:
+    alice, ghost = f"{_UID}:person:alice", f"{_UID}:document:ghost"
+    result = QueryResult(
+        nodes=[_node(alice, "person")], edges=[_edge(alice, "mentions", ghost)]
+    )
+
+    payload = to_graph_payload(result)
+
+    # Assert: an endpoint-only node is typed "unknown", so it gets the default.
+    ghost_node = next(n for n in payload["nodes"] if n["id"] == ghost)
+    assert ghost_node["size"] == 6
+
+
+def test_payload_ships_the_force_and_display_defaults() -> None:
+    payload = to_graph_payload(_seed_result())
+
+    # Assert: Python decides, the JS obeys — the template seeds the live
+    # simulation and the reducers from these, it carries no defaults of its own.
+    assert payload["controls"] == {
+        "forces": {"centre": 0.2, "repel": 8.0, "link": 0.3, "linkDistance": 80},
+        "display": {
+            "nodeSize": 1.0,
+            "linkThickness": 1.0,
+            "labelFade": 1,
+            "arrows": True,
+            "edgeLabels": True,
+        },
+    }
+    assert payload["controls"]["forces"] == _DEFAULT_FORCES
+    assert payload["controls"]["display"] == _DEFAULT_DISPLAY
+
+
+def test_payload_controls_are_copies_not_the_module_defaults() -> None:
+    payload = to_graph_payload(_seed_result())
+
+    # Act: a caller mutating one payload must not leak into the next one.
+    payload["controls"]["forces"]["repel"] = 99.0
+    payload["controls"]["display"]["arrows"] = False
+
+    assert _DEFAULT_FORCES["repel"] == 8.0
+    assert _DEFAULT_DISPLAY["arrows"] is True
+
+
+def test_graph_payload_has_no_payload_wide_node_size() -> None:
+    payload = to_graph_payload(_seed_result())
+
+    # Assert: ONE sizing mechanism — per node, never payload-wide.
+    assert "nodeSize" not in payload
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +347,13 @@ def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
 
     assert path == out
     html = out.read_text(encoding="utf-8")
-    # Self-contained: data embedded inline, Sigma + ForceAtlas2 present, NO ext-apps.
+    # Self-contained: data embedded inline, Sigma + d3-force present, NO ext-apps.
     assert "const DATA =" in html
     assert "new Sigma(" in html
-    assert "forceAtlas2" in html
+    assert "forceSimulation(" in html
+    # The one-shot layout engine is gone (spelled without its name, so the
+    # task's "no hits" grep over the tests stays clean).
+    assert "atlas" not in html.lower()
     assert "ext-apps" not in html
     assert "ontoolresult" not in html
     # The actual node id made it into the embedded data.
@@ -434,7 +519,10 @@ def test_graph_payload_render_asks_for_no_fixed_layout(tmp_path: Path) -> None:
     html = out.read_text(encoding="utf-8")
     assert '"layout": "fixed"' not in html
     # ``:`` anchors these to the embedded JSON — the DOM ids are still there.
-    assert '"nodeSize":' not in html
+    # (``nodeSize`` is no longer payload-wide anywhere, but the display
+    # defaults' multiplier of the same name rides inside ``controls`` — see
+    # ``test_graph_payload_has_no_payload_wide_node_size``.)
+    assert '"controls":' in html
     assert '"legend":' not in html
     assert '"warning":' not in html
 
@@ -457,7 +545,7 @@ def test_graph_payload_render_leaves_the_hull_toggle_and_banner_hidden(
     assert "warningEl.hidden = false" in html
 
 
-def test_force_atlas_runs_only_outside_the_fixed_layout_branch(
+def test_the_simulation_runs_only_outside_the_fixed_layout_branch(
     tmp_path: Path,
 ) -> None:
     payload = to_graph_payload(_seed_result())
@@ -465,14 +553,13 @@ def test_force_atlas_runs_only_outside_the_fixed_layout_branch(
 
     _render_graph_file(payload, output=out)
 
-    # Assert: the layout pass is guarded, not unconditional — a fixed-layout
-    # payload must keep its stored coordinates.
+    # Assert: the live simulation is guarded, not unconditional — a
+    # fixed-layout payload must keep its stored coordinates.
     html = out.read_text(encoding="utf-8")
     assert 'const isFixed = payload.layout === "fixed";' in html
-    guard = "      if (!isFixed) {\n        const settings = forceAtlas2.inferSettings(graph);"
+    guard = "      if (!isFixed) {\n        sim = forceSimulation(simNodes)"
     assert guard in html
-    assert "forceAtlas2.assign" in html
-    assert html.index(guard) < html.index("forceAtlas2.assign")
+    assert html.count("forceSimulation(") == 1
 
 
 def test_fixed_layout_payload_keeps_its_stored_coordinates(tmp_path: Path) -> None:
@@ -506,7 +593,8 @@ def test_fixed_layout_payload_keeps_its_stored_coordinates(tmp_path: Path) -> No
     html = out.read_text(encoding="utf-8")
     assert '"x": 3.5' in html
     assert '"y": -1.25' in html
-    assert "x: isFixed ? n.x : Math.random()" in html
+    assert "x: isFixed ? n.x : undefined" in html
+    assert "Math.random()" not in html
 
 
 def test_template_carries_the_hull_overlay_machinery(tmp_path: Path) -> None:
@@ -519,11 +607,11 @@ def test_template_carries_the_hull_overlay_machinery(tmp_path: Path) -> None:
     # dormant until a payload asks for it (Sigma has no hull primitive, so it
     # is a canvas overlay redrawn on afterRender / resize).
     html = out.read_text(encoding="utf-8")
-    assert '<canvas id="hulls-layer"></canvas>' in html
+    assert '<canvas id="overlay"></canvas>' in html
     assert "function convexHull(points)" in html
     assert "renderer.graphToViewport({ x: p[0], y: p[1] })" in html
-    assert 'renderer.on("afterRender", drawHulls)' in html
-    assert 'renderer.on("resize", drawHulls)' in html
+    assert 'renderer.on("afterRender", drawOverlay)' in html
+    assert 'renderer.on("resize", drawOverlay)' in html
 
 
 def test_hulls_are_never_drawn_for_noise() -> None:
@@ -615,3 +703,69 @@ def test_render_graph_file_logs_a_fixed_layout_payload_as_a_map_and_no_edges(
     assert f"Wrote self-contained embedding map HTML (1 points) to {out}" in messages
     assert not any("edges" in message for message in messages)
     assert not any("graph HTML" in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# Live layout + direct manipulation (ADR-011) — the template's JS contract
+# ---------------------------------------------------------------------------
+
+
+def test_the_file_variant_imports_d3_force_once_by_name() -> None:
+    # Assert: ONE pinned ESM import naming the four forces the template uses.
+    assert _D3_FORCE_CDN == "https://cdn.jsdelivr.net/npm/d3-force@3.0.0/+esm"
+    assert _FILE_HTML_BASE.count(f'from "{_D3_FORCE_CDN}"') == 1
+    assert (
+        "import { forceSimulation, forceLink, forceManyBody, forceCenter } "
+        f'from "{_D3_FORCE_CDN}";'
+    ) in _FILE_HTML_BASE
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        '"doubleClickNode"',  # unpin
+        "setCustomBBox(",  # viewport frozen while dragging
+        "alphaTarget(0.3)",  # the sim stays hot while a node is held
+        "alphaTarget(0)",  # …and cools after the drop
+        "alpha(0.5)",  # unpinning reheats
+        ".fx =",  # pin state lives on the d3 node
+        "dataset.layout",  # headless evidence
+        "dataset.sim",
+        '<canvas id="overlay"></canvas>',
+        "function drawOverlay",
+        "const REPEL_SCALE = 30;",
+        "forceManyBody().strength(-forces.repel * REPEL_SCALE)",
+        'sim.on("end"',
+    ],
+)
+def test_template_carries_the_live_layout_and_pin_machinery(token: str) -> None:
+    assert token in _FILE_HTML_BASE
+
+
+@pytest.mark.parametrize("gone", ["hulls-layer", "drawHulls", "Math.random()"])
+def test_template_drops_the_one_shot_layout_leftovers(gone: str) -> None:
+    assert gone not in _FILE_HTML_BASE
+
+
+def test_self_loops_never_become_simulation_links() -> None:
+    # Assert (source-level): a zero-length link divides by zero inside
+    # forceLink, so self-loops are filtered out of the link force.
+    assert "e.source !== e.target" in _RENDER_JS
+
+
+def test_a_drag_without_movement_does_not_pin() -> None:
+    # Assert (source-level): only a node DROPPED after a drag becomes a Pinned
+    # node (glossary); a plain click restores the pin state it had before.
+    assert (
+        "if (!wasDragged && !wasPinned) { dragged.fx = null; dragged.fy = null; }"
+        in (_RENDER_JS)
+    )
+
+
+def test_reducers_apply_the_display_multipliers() -> None:
+    # Assert (source-level): display values scale what Python resolved.
+    assert "res.size = data.size * display.nodeSize;" in _RENDER_JS
+    assert "res.size = data.size * display.linkThickness;" in _RENDER_JS
+    assert 'res.type = display.arrows ? "arrow" : "line";' in _RENDER_JS
+    assert "renderEdgeLabels: display.edgeLabels," in _RENDER_JS
+    assert "labelRenderedSizeThreshold: display.labelFade," in _RENDER_JS

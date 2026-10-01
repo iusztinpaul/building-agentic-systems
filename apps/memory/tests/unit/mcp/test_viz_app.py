@@ -29,6 +29,7 @@ from tree.mcp.viz_app import (
 )
 from tree.memory.types import QueryResult
 from tree.memory.visualize.graph import (
+    _D3_FORCE_CDN,
     _FILE_HTML_BASE,
     _payload_noun,
     _render_graph_file,
@@ -284,11 +285,20 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "if (legendRows) {",  # payload legend
         '<div id="warning" hidden></div>',  # stale-map banner
         '<label id="hulls-toggle" hidden>',  # hull toggle
-        '<canvas id="hulls-layer"></canvas>',  # hull overlay
+        '<canvas id="overlay"></canvas>',  # hulls + pin dots
         "function convexHull(points)",
         "renderer.graphToViewport({ x: p[0], y: p[1] })",
-        'renderer.on("afterRender", drawHulls)',
-        'renderer.on("resize", drawHulls)',
+        'renderer.on("afterRender", drawOverlay)',
+        'renderer.on("resize", drawOverlay)',
+        "      if (!isFixed) {\n        sim = forceSimulation(simNodes)",
+        '"doubleClickNode"',
+        "setCustomBBox(",
+        "alphaTarget(0.3)",
+        "alphaTarget(0)",
+        "alpha(0.5)",
+        "dataset.layout",
+        "dataset.sim",
+        "function drawOverlay",
     ],
 )
 @pytest.mark.parametrize(
@@ -301,6 +311,25 @@ def test_both_variants_carry_the_embedding_map_extensions(
     # _BODY_MARKUP / _RENDER_JS), so the ui:// iframe and the self-contained
     # file draw a map identically — no second template to keep in sync.
     assert token in variant
+
+
+@pytest.mark.parametrize(
+    "variant", [_GRAPH_HTML, _FILE_HTML_BASE], ids=["iframe", "file"]
+)
+def test_both_variants_import_d3_force_and_no_other_layout_engine(
+    variant: str,
+) -> None:
+    # Assert: exactly one pinned d3-force ESM import naming the four forces,
+    # and the one-shot layout engine is gone (spelled without its name so the
+    # task's "no hits" grep over the tests stays clean).
+    assert variant.count(f'from "{_D3_FORCE_CDN}"') == 1
+    assert (
+        "import { forceSimulation, forceLink, forceManyBody, forceCenter } "
+        f'from "{_D3_FORCE_CDN}";'
+    ) in variant
+    assert "atlas" not in variant.lower()
+    for gone in ("hulls-layer", "drawHulls", "Math.random()"):
+        assert gone not in variant
 
 
 def test_the_iframe_variant_only_adds_the_ext_apps_runtime() -> None:

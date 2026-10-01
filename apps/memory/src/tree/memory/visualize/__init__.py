@@ -6,7 +6,7 @@ A NEUTRAL package, like ``clustering/``: it may import ``rag/`` types and
 — ``graph/`` and the MCP layer may import it, it imports neither.
 
 ``graph.py`` is the renderer itself: the **Graph payload** builder, the one
-graphology + Sigma.js + ForceAtlas2 HTML template shared by every surface, and
+graphology + d3-force + Sigma.js HTML template shared by every surface, and
 the self-contained-file writer. ``embeddings.py`` builds the **Embedding map**
 payload the same template renders with fixed coordinates.
 

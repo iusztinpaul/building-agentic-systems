@@ -354,8 +354,8 @@ TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its
 stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
 legend and the document title / heading path / snippet in the tooltip. Same renderer as the graph
-(fixed coordinates, ForceAtlas2 skipped) — and identical in both memory modes, because the map has
-no edges to miss.
+(fixed coordinates, no simulation — drag, pin and the Display knobs still work) — and identical in
+both memory modes, because the map has no edges to miss.
 
 ```bash
 make memory-visualize-embeddings                        # open the latest map

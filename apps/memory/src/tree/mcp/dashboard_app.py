@@ -42,7 +42,7 @@ _EXT_APPS_CDN = "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with
 
 async def _fetch_payload(
     ctx: Context, query: str, top_k: int, max_hops: int
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     """Run the structured query (or full-graph fetch) → {nodes, edges} payload."""
 
     lc = ctx.lifespan_context
@@ -65,7 +65,7 @@ async def _fetch_payload(
     return to_graph_payload(result)
 
 
-def _summary(payload: dict[str, list[dict[str, Any]]], label: str) -> str:
+def _summary(payload: dict[str, Any], label: str) -> str:
     """One-line model-facing summary (so non-UI clients still get context)."""
 
     counts = Counter(n["type"] for n in payload["nodes"])

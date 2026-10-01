@@ -3,9 +3,9 @@
 The map is the graph's twin, not its cousin (ADR-007 §2): the SAME
 ``{nodes, edges}`` **Graph payload** shape and the SAME template
 (:mod:`tree.memory.visualize.graph`), with a handful of optional keys the
-template understands — ``layout: "fixed"`` (draw the stored coordinates, skip
-ForceAtlas2), ``legend`` (cluster rows instead of node types), ``hulls``,
-``warning`` and ``nodeSize``. No second renderer, no second template.
+template understands — ``layout: "fixed"`` (draw the stored coordinates, run
+no simulation), ``legend`` (cluster rows instead of node types), ``hulls`` and
+``warning``. No second renderer, no second template.
 
 Pure and synchronous: it takes the :class:`~tree.memory.clustering.types.\
 EmbeddingMap` a surface already READ (``clustering.store.load_embedding_map``)
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from tree.memory.clustering.types import EmbeddingMap
-from tree.memory.visualize.graph import _render_graph_file
+from tree.memory.visualize.graph import _DEFAULT_DISPLAY, _render_graph_file
 
 CLUSTER_PALETTE: tuple[str, ...] = (
     "#1f77b4",
@@ -73,8 +73,9 @@ NO_CLUSTERING_RUN_MESSAGE = (
 """What a surface says instead of drawing an empty map (ADR-007 §8)."""
 
 _MAP_NODE_SIZE = 4
-"""Node radius for the map. Smaller than the graph's 6: a map plots hundreds of
-chunks where a graph plots dozens, and at size 6 the clusters read as blobs."""
+"""Node radius for every map point. Smaller than a graph entity's 6: a map plots
+hundreds of chunks where a graph plots dozens, and at size 6 the clusters read
+as blobs."""
 
 _UNTITLED = "(untitled)"
 
@@ -115,9 +116,10 @@ def to_embedding_map_payload(
 ) -> dict[str, Any]:
     """Flatten an **Embedding map** into the payload the ONE template renders.
 
-    Every point becomes a node at its STORED coordinates (``layout: "fixed"``
-    tells the template to skip ForceAtlas2); there are no edges — the map's
-    structure is proximity, not relationships.
+    Every point becomes a node at its STORED coordinates (``layout: "fixed"``,
+    and ``controls`` carrying no ``forces``, tell the template to build no
+    simulation); there are no edges — the map's structure is proximity, not
+    relationships. Dragging, pinning and the display knobs still apply.
 
     Args:
         embedding_map: The map a surface read from storage; never computed here.
@@ -125,7 +127,7 @@ def to_embedding_map_payload(
             than leaving the key out) is what SHOWS the toggle at all.
 
     Returns:
-        ``{nodes, edges, layout, nodeSize, hulls, legend, warning, summary}``.
+        ``{nodes, edges, layout, controls, hulls, legend, warning, summary}``.
     """
 
     labels = {cluster.cluster_id: cluster.label for cluster in embedding_map.clusters}
@@ -145,6 +147,7 @@ def to_embedding_map_payload(
                 "y": point.y,
                 "cluster_id": point.cluster_id,
                 "color": cluster_colour(point.cluster_id),
+                "size": _MAP_NODE_SIZE,
                 "meta": {
                     "cluster": _cluster_label(labels, point.cluster_id),
                     "document": title,
@@ -161,7 +164,7 @@ def to_embedding_map_payload(
         "nodes": nodes,
         "edges": [],
         "layout": "fixed",
-        "nodeSize": _MAP_NODE_SIZE,
+        "controls": {"display": dict(_DEFAULT_DISPLAY)},
         "hulls": hulls,
         "legend": legend,
         "warning": unclustered_warning(embedding_map),
