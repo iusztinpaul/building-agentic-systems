@@ -156,9 +156,10 @@ async def load_document(doc: Document, raw_entry: dict) -> Document | None:
         try:
             await doc.insert()
         except DuplicateKeyError:
-            # Concurrent insert of the same (user_id, source_type, source_uri) — e.g.
-            # the same article resolved from both a feed and a single source in one
-            # flattened batch. The unique index lets one win; this attempt is a clean
+            # Concurrent insert of the same (user_id, source_uri) — e.g. the same
+            # article resolved from both a feed and a single source in one
+            # flattened batch, or a LATENT placeholder racing the real row for the
+            # same URI. The unique index lets one win; this attempt is a clean
             # skip, not a failure.
             logger.debug("Skipping concurrent duplicate: %s", doc.source_uri)
             return None

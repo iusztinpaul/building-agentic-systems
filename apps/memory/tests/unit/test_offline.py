@@ -286,6 +286,28 @@ class TestSourceUris:
         )
         extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
 
+    async def test_resolves_one_id_per_uri_in_caller_order(self, mocker) -> None:
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        # ``(user_id, source_uri)`` is unique (ADR-010), so each URI owns ONE
+        # row; the cursor returns them in the opposite order to the selector.
+        _patch_document_lookup(
+            mocker,
+            [
+                _document(_OTHER_DOC_ID, _OTHER_SOURCE_URI),
+                _document(_DOC_ID, _SOURCE_URI),
+            ],
+        )
+
+        await offline_pipeline(
+            user_id=_USER_ID,
+            source_uris=[_SOURCE_URI, _OTHER_SOURCE_URI],
+            run_data=False,
+        )
+
+        extract.assert_awaited_once_with(
+            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID], num_shards=1
+        )
+
     async def test_unions_with_document_ids(self, mocker) -> None:
         _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
         # Cursor order is NOT the selector order — the resolved ids follow the

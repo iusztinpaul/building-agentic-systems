@@ -211,7 +211,7 @@ class TestSourceUriDerivation:
         self, mocker
     ) -> None:
         # Both queries return None — distinct source_uris mean distinct
-        # rows under the (user_id, source_type, source_uri) unique index.
+        # rows under the (user_id, source_uri) unique index.
         mocker.patch(
             "tree.data.conversation.conversation.Document.find_one",
             new_callable=AsyncMock,

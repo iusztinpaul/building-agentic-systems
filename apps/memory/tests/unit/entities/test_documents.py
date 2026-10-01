@@ -112,27 +112,37 @@ class TestDocumentIngestError:
 
 
 class TestDocumentCompoundUniqueIndex:
-    """The legacy single-field unique on ``source_uri`` becomes a compound
-    unique on ``(user_id, source_type, source_uri)`` — same URI is allowed
-    for different tenants; same (user_id, type, uri) is not.
+    """The **Document**'s natural key ``(user_id, source_uri)`` is the ONE
+    compound unique index (ADR-010) — the same URI is allowed for different
+    tenants; the same ``(user_id, source_uri)`` is not, whatever its
+    ``source_type``.
     """
 
-    def test_settings_declares_compound_unique_index(self) -> None:
+    def test_settings_declares_the_natural_key_as_the_only_unique_index(
+        self,
+    ) -> None:
         index_models: list[IndexModel] = list(Document.Settings.indexes)
 
-        # There must be at least one compound unique index keyed by
-        # (user_id, source_type, source_uri).
-        target_key = [("user_id", 1), ("source_type", 1), ("source_uri", 1)]
-        matching = [
-            im
-            for im in index_models
-            if list(im.document.get("key", {}).items()) == target_key
-            and im.document.get("unique") is True
+        unique = [im for im in index_models if im.document.get("unique") is True]
+
+        assert len(unique) == 1, f"Expected one unique index; got {index_models}"
+        assert list(unique[0].document["key"].items()) == [
+            ("user_id", 1),
+            ("source_uri", 1),
         ]
-        assert matching, (
-            f"Expected compound unique index on {target_key} in "
-            f"Document.Settings.indexes; got {index_models}"
-        )
+        assert unique[0].document["name"] == "user_source_uri_unique"
+
+    def test_source_type_is_not_part_of_any_index_key(self) -> None:
+        # A ``LATENT`` placeholder is upgraded IN PLACE by rewriting its
+        # ``source_type``, so with it in the key a LATENT and a real row for
+        # the same URI could coexist (ADR-010).
+        index_models: list[IndexModel] = list(Document.Settings.indexes)
+
+        indexed_keys = {
+            key for im in index_models for key in im.document.get("key", {})
+        }
+
+        assert "source_type" not in indexed_keys
 
     def test_no_inline_unique_on_source_uri(self) -> None:
         # The previous ``Indexed(str, unique=True)`` annotation has been

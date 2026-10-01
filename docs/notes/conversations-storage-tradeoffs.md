@@ -71,7 +71,7 @@ Both options assume the input is structured: a `list[{role, content, ...}]` we c
 Once you accept that constraint, the question dissolves: a conversation is *just text*, and we already have a perfectly good place for "raw text from a named source" — `documents`. So:
 
 - **Conversation = `Document(source_type=CONVERSATION, content=raw_transcript)`.** No envelope-and-payload split.
-- **Idempotency** via the existing `(user_id, source_type, source_uri)` unique index on `documents`. `source_uri` is a caller-supplied session id, or a content hash if none.
+- **Idempotency** via the existing `(user_id, source_uri)` unique index on `documents`. `source_uri` is a caller-supplied session id, or a content hash if none.
 - **Provenance** at chunk granularity — same as articles. KG entries' `sources` list chunk ids; chunks point back at the parent conversation Document via `PART_OF`.
 - **No new collections, no new node types, no new pipelines beyond the existing `ingest_conversation` Prefect entry point.**
 

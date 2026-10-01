@@ -118,11 +118,12 @@ def _validate_single_tenant_scope(
     BOTH selectors are single-tenant: fanned across ALL active users (the
     ``user_id=None`` nightly-cron semantics) an id set would extract another
     tenant's documents or fail deep inside a worker, and a URI set would resolve
-    against another tenant's ``documents`` rows (``(user_id, source_type,
-    source_uri)`` is unique per TENANT, so the same URI legitimately exists for
-    several users). Checked at BOTH edges — the flow and the fire-and-forget
-    dispatcher — because a dispatcher-side run surfaces errors only as a remote
-    flow-run failure (same rationale as ``tree.online.validate_online_source``).
+    against another tenant's ``documents`` rows (``(user_id, source_uri)`` is
+    unique per TENANT, so the same URI legitimately exists for several users).
+
+    Checked at BOTH edges — the flow and the fire-and-forget dispatcher —
+    because a dispatcher-side run surfaces errors only as a remote flow-run
+    failure (same rationale as ``tree.online.validate_online_source``).
 
     The message names the offending selector, since an operator passing
     ``SOURCE_URIS=`` must not be told to fix ``DOC_IDS=``.
@@ -157,9 +158,9 @@ async def _resolve_source_uris(
     runs before the data phase, so a URI this run would ingest does not resolve.
     Use ``make memory-run-pipeline MODE=online SOURCE=<uri>`` to ingest.
 
-    Order follows the URIs the caller passed, not the cursor (Mongo guarantees
-    none), and a URI matching several rows (the same URI under two
-    ``source_type``s) yields all of them.
+    ``(user_id, source_uri)`` is unique (ADR-010), so each URI resolves to ONE
+    id. Order follows the URIs the caller passed, not the cursor (Mongo
+    guarantees none).
 
     Raises:
         ValueError: a URI with no document for this user — a typo must fail loud,
@@ -173,14 +174,14 @@ async def _resolve_source_uris(
     documents = await Document.find(
         {"user_id": user_id, "source_uri": {"$in": source_uris}}
     ).to_list()
-    ids_by_uri: dict[str, list[str]] = {}
-    for document in documents:
-        ids_by_uri.setdefault(document.source_uri, []).append(str(document.id))
+    ids_by_uri: dict[str, str] = {
+        document.source_uri: str(document.id) for document in documents
+    }
     resolved: list[str] = []
     for uri in source_uris:
         if uri not in ids_by_uri:
             raise ValueError(f"No document for source_uri {uri} (user {user_id})")
-        resolved.extend(ids_by_uri[uri])
+        resolved.append(ids_by_uri[uri])
     return resolved
 
 

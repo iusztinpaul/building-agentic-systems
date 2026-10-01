@@ -82,7 +82,7 @@ async def load_conversation_document(
     ``"openai-thread://thread_..."``), else a ``conversation://`` content hash.
 
     Dedup is scoped to ``user_id`` via the
-    ``(user_id, source_type, source_uri)`` compound unique index, so two
+    ``(user_id, source_uri)`` compound unique index, so two
     users can ingest the same transcript independently and two callers
     passing distinct ``session_uri``s on byte-identical text produce two
     distinct Documents.

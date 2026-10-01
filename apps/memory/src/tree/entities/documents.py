@@ -48,11 +48,12 @@ class Document(BeanieDocument):
     class Settings:
         name = "documents"
         indexes = [
-            # Tenant-scoped uniqueness: the same (source_type, source_uri)
-            # may be ingested independently by different users; only the
-            # full (user_id, source_type, source_uri) triple is unique.
+            # Tenant-scoped uniqueness: the same source_uri may be ingested
+            # independently by different users; only (user_id, source_uri) is
+            # unique. source_type is a row attribute a LATENT upgrade
+            # rewrites, not part of the key (ADR-010).
             IndexModel(
-                [("user_id", 1), ("source_type", 1), ("source_uri", 1)],
+                [("user_id", 1), ("source_uri", 1)],
                 unique=True,
                 name="user_source_uri_unique",
             ),

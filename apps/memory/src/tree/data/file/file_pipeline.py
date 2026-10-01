@@ -28,7 +28,7 @@ _FILE_METADATA = pipeline_metadata("file")
 
 
 # Tier F — free replay: the body is ONE idempotent Mongo write (deduped on
-# ``(user_id, source_type, source_uri)``), so retries live on the FLOW and there
+# ``(user_id, source_uri)``), so retries live on the FLOW and there
 # are NO tasks (ADR-002 amendment #097, superseding #096 rule 3b). Accepted cost:
 # a retried attempt emits its own Opik trace — a trace per real retry is signal.
 @flow(name="ingest-file-etl", log_prints=True, retries=3, retry_delay_seconds=5)
