@@ -15,8 +15,12 @@ current-session user; override with ``USER_ID=<ObjectId>`` or
 :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Usage:
-    # Visualize the entire graph for the current-session user (graphrag)
+    # Visualize the Full graph for the current-session user (graphrag): the 500
+    # most-recent documents embedded, a Documents slider shows 100 of them
     make memory-query-graph
+
+    # Embed only the 50 most-recent documents
+    make memory-query-graph MAX_DOCS=50
 
     # Query: a subgraph in graphrag, ranked parent chunks in rag
     make memory-query-graph QUERY="What does Paul work on?"
@@ -112,6 +116,7 @@ async def _run(
     query: str | None,
     top_k: int,
     max_hops: int,
+    max_docs: int,
     output: str | None,
     no_open: bool,
 ) -> None:
@@ -171,7 +176,9 @@ async def _run(
             logger.info(
                 "No query provided — loading full graph for user_id=%s", user_id
             )
-            result = await fetch_full_graph(client, database, user_id)
+            result = await fetch_full_graph(
+                client, database, user_id, max_docs=max_docs
+            )
     except SearchUnavailableError as exc:
         click.echo(SEARCH_UNAVAILABLE_LINE.format(message=exc))
         raise SystemExit(1) from exc
@@ -226,6 +233,16 @@ async def _run(
     help="Max hops for graph expansion. Ignored in rag mode (no edges).",
 )
 @click.option(
+    "--max-docs",
+    type=click.IntRange(min=1),
+    default=app_config.query.full_graph_max_docs,
+    show_default=True,
+    help=(
+        "Most-recent documents embedded in the full graph (no --query); the "
+        "browser's Documents slider reveals up to this many. Ignored with --query."
+    ),
+)
+@click.option(
     "--output",
     "-o",
     default=None,
@@ -246,12 +263,17 @@ def main(
     query: str | None,
     top_k: int,
     max_hops: int,
+    max_docs: int,
     output: str | None,
     no_open: bool,
 ) -> None:
     """Query the memory for the resolved user, in the configured memory mode."""
 
-    asyncio.run(_run(user_id, user_identifier, query, top_k, max_hops, output, no_open))
+    asyncio.run(
+        _run(
+            user_id, user_identifier, query, top_k, max_hops, max_docs, output, no_open
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -240,6 +240,74 @@ class TestGraphragModeUnchanged:
         full_graph.assert_awaited_once()
         mocked_boundaries.assert_called_once()
 
+    def test_max_docs_is_forwarded_to_the_full_graph_read(
+        self, mocker, cli_module, graphrag_mode, mocked_boundaries
+    ) -> None:
+        full_graph = mocker.patch.object(
+            cli_module,
+            "fetch_full_graph",
+            new_callable=AsyncMock,
+            return_value=QueryResult(nodes=[{"_id": "p1"}], edges=[]),
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--max-docs", "7", "--no-open"])
+
+        assert result.exit_code == 0
+        assert full_graph.await_args.kwargs == {"max_docs": 7}
+
+    def test_max_docs_defaults_to_the_configured_cap(
+        self, mocker, cli_module, graphrag_mode, mocked_boundaries
+    ) -> None:
+        full_graph = mocker.patch.object(
+            cli_module,
+            "fetch_full_graph",
+            new_callable=AsyncMock,
+            return_value=QueryResult(nodes=[{"_id": "p1"}], edges=[]),
+        )
+
+        CliRunner().invoke(cli_module.main, ["--no-open"])
+
+        assert full_graph.await_args.kwargs == {
+            "max_docs": cli_module.app_config.query.full_graph_max_docs
+        }
+        option = next(o for o in cli_module.main.params if o.name == "max_docs")
+        assert option.default == cli_module.app_config.query.full_graph_max_docs
+        assert option.show_default is True
+
+    def test_max_docs_below_one_is_a_usage_error(
+        self, mocker, cli_module, graphrag_mode, mocked_boundaries
+    ) -> None:
+        full_graph = mocker.patch.object(
+            cli_module, "fetch_full_graph", new_callable=AsyncMock
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--max-docs", "0", "--no-open"])
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--max-docs'" in result.output
+        full_graph.assert_not_awaited()
+
+    def test_max_docs_never_reaches_a_query(
+        self, mocker, cli_module, graphrag_mode, mocked_boundaries
+    ) -> None:
+        full_graph = mocker.patch.object(
+            cli_module, "fetch_full_graph", new_callable=AsyncMock
+        )
+        query = mocker.patch.object(
+            cli_module,
+            "query_memory",
+            new_callable=AsyncMock,
+            return_value=QueryResult(nodes=[{"_id": "p1"}], edges=[]),
+        )
+
+        result = CliRunner().invoke(
+            cli_module.main, ["--query", "q", "--max-docs", "7", "--no-open"]
+        )
+
+        assert result.exit_code == 0
+        full_graph.assert_not_awaited()
+        assert "max_docs" not in query.await_args.kwargs
+
     def test_an_empty_graph_exits_one(
         self, mocker, cli_module, graphrag_mode, mocked_boundaries
     ) -> None:

@@ -318,6 +318,98 @@ async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:
     assert "your full memory" in result.content[0].text
 
 
+def _ranked_result(n_documents: int) -> QueryResult:
+    """A **Full graph** result: every row stamped ``doc_rank`` 1..n."""
+
+    nodes = [
+        {"_id": f"doc{rank}", "kind": "node", "type": "document", "doc_rank": rank}
+        for rank in range(1, n_documents + 1)
+    ]
+    return QueryResult(nodes=nodes, edges=[])
+
+
+async def test_visualize_forwards_max_docs_to_the_full_graph_read(mocker) -> None:
+    full_graph_mock = mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_ranked_result(3)),
+    )
+
+    await visualize_memory_graph(_make_graph_ctx(ui_supported=True), max_docs=7)
+
+    assert full_graph_mock.await_args.kwargs["max_docs"] == 7
+
+
+async def test_visualize_without_max_docs_leaves_the_cap_to_config(mocker) -> None:
+    full_graph_mock = mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_ranked_result(3)),
+    )
+
+    await visualize_memory_graph(_make_graph_ctx(ui_supported=True))
+
+    # None -> fetch_full_graph reads query.full_graph_max_docs itself.
+    assert full_graph_mock.await_args.kwargs["max_docs"] is None
+
+
+@pytest.mark.parametrize("max_docs", [0, -3])
+async def test_visualize_refuses_max_docs_below_one_before_any_read(
+    mocker, max_docs: int
+) -> None:
+    full_graph_mock = mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph", new=AsyncMock()
+    )
+    query_mock = mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory", new=AsyncMock()
+    )
+
+    result = await visualize_memory_graph(
+        _make_graph_ctx(ui_supported=True), max_docs=max_docs
+    )
+
+    assert json.loads(result) == {
+        "error_type": "invalid_input",
+        "retryable": False,
+        "message": "max_docs must be ≥ 1",
+    }
+    full_graph_mock.assert_not_awaited()
+    query_mock.assert_not_awaited()
+
+
+async def test_visualize_never_forwards_max_docs_with_a_query(mocker) -> None:
+    query_mock = mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    full_graph_mock = mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph", new=AsyncMock()
+    )
+
+    result = await visualize_memory_graph(
+        _make_graph_ctx(ui_supported=True), query="alice", max_docs=7
+    )
+
+    assert "max_docs" not in query_mock.await_args.kwargs
+    full_graph_mock.assert_not_awaited()
+    assert "most-recent documents" not in result.content[0].text
+
+
+async def test_visualize_full_graph_summary_says_how_many_documents_show(
+    mocker,
+) -> None:
+    mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_ranked_result(3)),
+    )
+
+    result = await visualize_memory_graph(_make_graph_ctx(ui_supported=True))
+
+    # Assert: the model reads that the view is capped, not "everything".
+    assert result.content[0].text.startswith(
+        "Knowledge graph for your full memory: 3 of 3 most-recent documents "
+        "shown by default, 3 nodes, 0 edges"
+    )
+
+
 async def test_visualize_fallback_returns_path_and_resource_link(
     mocker, tmp_path: Path
 ) -> None:

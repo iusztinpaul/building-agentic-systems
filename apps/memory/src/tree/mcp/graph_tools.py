@@ -132,12 +132,14 @@ async def visualize_memory_graph(
     top_k: int = 15,
     max_hops: int = 2,
     as_html_file: bool = False,
+    max_docs: int | None = None,
 ) -> str | ToolResult:
     """Visualize the knowledge graph as an interactive graph.
 
     With a ``query``, runs semantic + text search with graph expansion (same
     engine as ``search_memory``) and visualizes that subgraph. With NO query
-    (the default), visualizes the user's ENTIRE memory graph. Renders read-only
+    (the default), visualizes the user's memory graph built from its most-recent
+    documents (the Full graph). Renders read-only
     in an interactive Sigma.js force-directed view — use this when the user wants
     to *see* the graph rather than read node/edge JSON.
 
@@ -156,10 +158,16 @@ async def visualize_memory_graph(
             with no query.
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
+        max_docs: With no ``query``: how many most-recent documents to embed
+            (default from config, 500); the inline view shows the 100 most
+            recent and a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
     ``retryable`` is true.
     """
+
+    if max_docs is not None and max_docs < 1:
+        return tool_error("invalid_input", "max_docs must be ≥ 1", retryable=False)
 
     lc = ctx.lifespan_context
     try:
@@ -181,6 +189,7 @@ async def visualize_memory_graph(
                 client=lc["client"],
                 database=lc["database"],
                 user_id=lc["user_id"],
+                max_docs=max_docs,
             )
             label = "your full memory"
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -188,7 +197,14 @@ async def visualize_memory_graph(
 
     payload = to_graph_payload(result)
     n_nodes, n_edges = len(payload["nodes"]), len(payload["edges"])
-    summary = f"Knowledge graph for {label}: {n_nodes} nodes, {n_edges} edges"
+    counts = f"{n_nodes} nodes, {n_edges} edges"
+    documents = payload["controls"].get("documents")
+    if documents:
+        counts = (
+            f"{documents['shown']} of {documents['total']} most-recent documents "
+            f"shown by default, {counts}"
+        )
+    summary = f"Knowledge graph for {label}: {counts}"
 
     return _graph_tool_result(
         ctx, payload, summary, query=query, as_html_file=as_html_file

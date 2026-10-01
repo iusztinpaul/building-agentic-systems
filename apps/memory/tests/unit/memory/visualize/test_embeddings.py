@@ -165,6 +165,9 @@ def test_payload_ships_display_controls_but_no_forces() -> None:
     # simulate (with ``layout: "fixed"``) — the UMAP coordinates stay put.
     assert payload["controls"] == {"display": _DEFAULT_DISPLAY}
     assert "forces" not in payload["controls"]
+    # No Documents slider either: that gate belongs to the Full graph alone.
+    assert "documents" not in payload["controls"]
+    assert all("docRank" not in node for node in payload["nodes"])
 
 
 def test_payload_display_controls_are_a_copy_of_the_graph_defaults() -> None:

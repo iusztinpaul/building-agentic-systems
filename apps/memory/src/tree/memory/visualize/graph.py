@@ -32,7 +32,9 @@ box-selects, Esc or a stage click clears; dragging a selected node moves the
 whole selection, and every dragged node carries its unpinned direct
 ``part_of`` children rigidly. A collapsible Controls panel (top-left), seeded
 from ``payload["controls"]``, tunes the forces (reheat), the display (redraw
-only) and offers Pause / Unpin all / Reset to defaults.
+only) and offers Pause / Unpin all / Reset to defaults. On the **Full graph**
+(``controls.documents``) its first section is a ``Documents`` slider that hides
+nodes beyond the N most-recent documents in Sigma AND in the simulation.
 
 Needs network at VIEW time (the libraries load from the CDN rather than being
 vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
@@ -58,6 +60,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from tree.config.app_config import app_config
 from tree.config.paths import GRAPHS_DIR
 from tree.entities.colours import Colours
 from tree.memory.types import QueryResult
@@ -102,11 +105,17 @@ _DEFAULT_NODE_SIZE = 6  # entities, ``unknown`` endpoints, a role-less chunk
 
 # What the template seeds the live d3-force simulation and its reducers with
 # (ADR-011 §6 — Python decides, the JS obeys). ``forces`` mirror pulse's
-# sliders (repel is multiplied by the template's REPEL_SCALE = 30);
+# sliders (repel is multiplied by the template's REPEL_SCALE = 30); ``gravity``
+# is the strength of the forceX(0) / forceY(0) pair (ADR-011 §1): a compact
+# layout (the real full graph's extent 4511 -> 1669 at 0.05, no overlaps) with
+# edge-less nodes held near the stars — 0 disables it. It does NOT keep a
+# reveal inside a frozen viewport (it shrinks that viewport too, task 165 Log):
+# the one auto-fit after a Documents reveal does;
 # ``display`` values are MULTIPLIERS / switches over what Python resolved
 # (``nodeSize: 1.0`` draws each node's ``size`` as is).
 _DEFAULT_FORCES: dict[str, float] = {
     "centre": 0.2,
+    "gravity": 0.05,
     "repel": 8.0,
     "link": 0.3,
     "linkDistance": 80,
@@ -182,6 +191,13 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
     Each node also carries its drawn ``size`` by role (:func:`_node_size`), and
     ``controls`` ships the force / display defaults the template seeds its live
     layout and reducers from.
+
+    A **Full graph** row stamped ``doc_rank`` (:func:`fetch_full_graph`) gives
+    its node a ``docRank``, and then ``controls.documents`` = ``{shown, total}``
+    — the gate for the renderer's ``Documents`` slider, ``shown`` being
+    ``query.full_graph_shown_docs`` clamped to ``query.full_graph_max_docs`` and
+    to ``total`` (the deepest rank).
+    A query payload carries neither.
     """
 
     nodes: list[dict[str, Any]] = []
@@ -193,22 +209,24 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
         props: dict[str, Any],
         meta: dict[str, Any] | None = None,
         subtype: str | None = None,
+        doc_rank: int | None = None,
     ) -> None:
         if not node_id or node_id in seen:
             return
         seen.add(node_id)
         name = _extract_display_name(node_id, node_type, props)
-        nodes.append(
-            {
-                "id": node_id,
-                "type": node_type,
-                "name": name,  # full, untruncated — shown on hover / click
-                "label": _truncate(name, 40),  # shown on the canvas
-                "color": _NODE_COLOURS.get(node_type, _FALLBACK_COLOUR),
-                "size": _node_size(node_type, subtype),
-                "meta": meta or {},
-            }
-        )
+        node: dict[str, Any] = {
+            "id": node_id,
+            "type": node_type,
+            "name": name,  # full, untruncated — shown on hover / click
+            "label": _truncate(name, 40),  # shown on the canvas
+            "color": _NODE_COLOURS.get(node_type, _FALLBACK_COLOUR),
+            "size": _node_size(node_type, subtype),
+            "meta": meta or {},
+        }
+        if doc_rank is not None:
+            node["docRank"] = doc_rank
+        nodes.append(node)
 
     for node in result.nodes:
         _add_node(
@@ -217,6 +235,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
             node.get("properties") or {},
             _curated_meta(node, _NODE_META_FIELDS),
             node.get("subtype"),
+            node.get("doc_rank"),
         )
 
     edges: list[dict[str, Any]] = []
@@ -236,14 +255,18 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
             }
         )
 
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "controls": {
-            "forces": dict(_DEFAULT_FORCES),
-            "display": dict(_DEFAULT_DISPLAY),
-        },
+    controls: dict[str, Any] = {
+        "forces": dict(_DEFAULT_FORCES),
+        "display": dict(_DEFAULT_DISPLAY),
     }
+    ranks = [node["docRank"] for node in nodes if "docRank" in node]
+    if ranks:
+        total = max(ranks)
+        query = app_config.query
+        shown = min(query.full_graph_shown_docs, query.full_graph_max_docs, total)
+        controls["documents"] = {"shown": shown, "total": total}
+
+    return {"nodes": nodes, "edges": edges, "controls": controls}
 
 
 def _slugify(text: str, max_len: int = 48) -> str:
@@ -309,11 +332,15 @@ def _render_graph_file(
     # A map has no edges BY DESIGN, so "0 edges" would read as a broken render
     # (the same reasoning as the template's header counts).
     noun = _payload_noun(payload)
-    counts = (
-        f"{len(payload['nodes'])} points"
-        if noun == "embedding map"
-        else f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
-    )
+    documents = (payload.get("controls") or {}).get("documents")
+    counts = f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
+    if noun == "embedding map":
+        counts = f"{len(payload['nodes'])} points"
+    elif documents:
+        counts = (
+            f"{documents['shown']} of {documents['total']} documents shown by "
+            f"default, {counts}"
+        )
     logger.info("Wrote self-contained %s HTML (%s) to %s", noun, counts, path)
     return path
 
@@ -538,6 +565,7 @@ _RENDER_JS = """\
       // rows (bound to the previous renderer) from this payload.
       const panelBody = document.getElementById("panel-body");
       panelBody.textContent = "";
+      delete document.body.dataset.docs;   // set again below on a Full graph only
       document.getElementById("panel").hidden = !nodes.length;
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
@@ -565,6 +593,16 @@ _RENDER_JS = """\
       // Only an edge whose two endpoints exist is drawn — or simulated.
       const drawnEdges = edges.filter((e) => nodeById.has(e.source) && nodeById.has(e.target));
 
+      // The Documents slider (ADR-011 §7). A Full graph ranks every node by
+      // its most recent document (`docRank`) and shows the first `docLimit`
+      // documents; an unranked node (every node of a query view) always shows.
+      const documents = payload.controls && payload.controls.documents;
+      let docLimit = documents ? documents.shown : Infinity;
+      function isVisible(id) {
+        const rank = nodeById.get(id).docRank;
+        return rank == null || rank <= docLimit;
+      }
+
       // Pin state lives on the d3 node object on BOTH layouts: numeric fx/fy =
       // a Pinned node, null = free. A fixed layout seeds the STORED
       // coordinates; the live layout leaves x/y undefined so forceSimulation
@@ -585,15 +623,25 @@ _RENDER_JS = """\
       // would drift every point off the position it was clustered at.
       const REPEL_SCALE = 30;   // pulse's repel slider -> d3 manyBody strength (8 -> -240)
       const forces = isFixed ? null : payload.controls.forces;
-      // A self-loop has zero length — a division by zero inside forceLink.
-      const links = drawnEdges.filter((e) => e.source !== e.target)
+      // The simulation owns the VISIBLE nodes only, so a hidden node is absent
+      // from the first tick on. Links join two visible nodes and are rebuilt
+      // as fresh ids every time: forceLink swaps them for node objects, and a
+      // reused link would keep pointing at a hidden node. A self-loop has zero
+      // length — a division by zero inside forceLink.
+      const visibleSimNodes = () => simNodes.filter((s) => isVisible(s.id));
+      const visibleLinks = () => drawnEdges
+        .filter((e) => e.source !== e.target && isVisible(e.source) && isVisible(e.target))
         .map((e) => ({ source: e.source, target: e.target }));
       let sim = null;
       if (!isFixed) {
-        sim = forceSimulation(simNodes)
+        sim = forceSimulation(visibleSimNodes())
           .force("centre", forceCenter(0, 0).strength(forces.centre))
+          // Gravity: one forceX/forceY pair pulling every node gently to the
+          // origin — a compact layout, edge-less nodes kept near the stars.
+          .force("gravityX", forceX(0).strength(forces.gravity))
+          .force("gravityY", forceY(0).strength(forces.gravity))
           .force("repel", forceManyBody().strength(-forces.repel * REPEL_SCALE))
-          .force("link", forceLink(links).id((s) => s.id)
+          .force("link", forceLink(visibleLinks()).id((s) => s.id)
             .strength(forces.link).distance(forces.linkDistance));
       }
       // Every reheat (a force slider, an unpin, Unpin all, Resume) goes
@@ -608,15 +656,20 @@ _RENDER_JS = """\
       const graph = new Graph({ type: "directed", multi: true });
       for (const n of nodes) {
         const s = simById.get(n.id);
+        const shown = isVisible(n.id);
         graph.addNode(n.id, {
           label: n.label,            // labels in-view show ONLY the name
           nodeType: n.type,          // (Sigma reserves "type" for the program)
           color: n.color,
           size: n.size,              // by role, resolved in Python
+          // Sigma skips a hidden node and every edge touching it.
+          hidden: !shown,
           // Sigma throws on a non-numeric x/y: the live layout's start comes
           // from d3 (placed synchronously above), a map's is the stored one.
-          x: s.x,
-          y: s.y,
+          // It also fits its camera to EVERY node, hidden ones included, so a
+          // hidden node is parked at the origin (forceCenter's centre).
+          x: shown ? s.x : 0,
+          y: shown ? s.y : 0,
         });
       }
       for (const e of drawnEdges) {
@@ -670,15 +723,22 @@ _RENDER_JS = """\
         },
       });
       document.body.dataset.layout = isFixed ? "fixed" : "live";
+      // One auto-fit after a Documents REVEAL (ADR-011 §4/§7): armed by
+      // applyDocumentLimit, run when the reheated layout settles, cancelled by
+      // a drag or marquee (the user is placing things).
+      let fitOnSettle = false;
 
       // Headless evidence + debugging only: "running" while d3 ticks (again
       // after a reheat), "settled" once it has cooled to a stop.
       if (sim) {
         sim.on("tick", () => {
-          for (const s of simNodes) graph.mergeNodeAttributes(s.id, { x: s.x, y: s.y });
+          for (const s of sim.nodes()) graph.mergeNodeAttributes(s.id, { x: s.x, y: s.y });
           if (document.body.dataset.sim !== "running") document.body.dataset.sim = "running";
         });
-        sim.on("end", () => { document.body.dataset.sim = "settled"; });
+        sim.on("end", () => {
+          document.body.dataset.sim = "settled";
+          if (fitOnSettle) { fitOnSettle = false; autoFit(); }
+        });
       }
 
       // A drag or a marquee ends in a trailing click: Sigma does not count a
@@ -791,7 +851,16 @@ _RENDER_JS = """\
       document.getElementById("zoom-in").onclick = () => camera.animatedZoom();
       document.getElementById("zoom-out").onclick = () => camera.animatedUnzoom();
       // Fit is the ONE place that hands the viewport back to Sigma (see freezeViewport).
-      document.getElementById("zoom-fit").onclick = () => { renderer.setCustomBBox(null); camera.animatedReset(); };
+      // fitView() is the ONE place that hands the viewport back to Sigma (see
+      // freezeViewport). refresh() re-indexes the extent from the CURRENT
+      // positions: a settled simulation no longer ticks, so Sigma would fit
+      // to a stale one. Returns the camera animation's promise.
+      function fitView() {
+        renderer.setCustomBBox(null);
+        renderer.refresh();
+        return camera.animatedReset();
+      }
+      document.getElementById("zoom-fit").onclick = () => { fitView(); };
 
       // Redraw when the window resizes (Sigma tracks the container; this keeps
       // the standalone-file view crisp as the window grows/shrinks).
@@ -813,14 +882,15 @@ _RENDER_JS = """\
       // selection); held nodes pin on drop. CARRIED = every held node's direct
       // unpinned `part_of` children — the sources of its in-edges (child chunk
       // -> parent chunk -> document, one level) — moved rigidly by the same
-      // delta and released on drop. A user-pinned node is never carried.
+      // delta and released on drop. A user-pinned or a hidden node is never carried.
       function dragSetFor(nodeId) {
         const held = state.selection.has(nodeId) ? new Set(state.selection) : new Set([nodeId]);
         const carried = new Set();
         for (const id of held) {
           graph.forEachInEdge(id, (edge, attrs, source) => {
             if (attrs.relType === "part_of" && !held.has(source)
-              && simById.get(source).fx == null) carried.add(source);
+              && simById.get(source).fx == null
+              && !graph.getNodeAttribute(source, "hidden")) carried.add(source);
           });
         }
         return { held, carried };
@@ -880,6 +950,7 @@ _RENDER_JS = """\
         if (!pointerMoved && Math.hypot(e.x - from.x, e.y - from.y) < DRAG_THRESHOLD) return;
         if (!pointerMoved) {
           pointerMoved = true;
+          fitOnSettle = false;            // a gesture cancels an armed auto-fit
           if (press) startDrag(); else freezeViewport();
         }
         if (marquee) {
@@ -1111,7 +1182,8 @@ _RENDER_JS = """\
       }
       // A labelled slider with a live readout; `apply` gets the number on
       // every move and on Reset.
-      function rangeRow(section, label, min, max, step, value, decimals, apply) {
+      function rangeRow(section, label, min, max, step, value, decimals, apply,
+        format = (v) => v.toFixed(decimals)) {
         const row = document.createElement("div");
         row.className = "panel-row";
         const head = document.createElement("div");
@@ -1124,7 +1196,7 @@ _RENDER_JS = """\
         input.min = min;    // bounds first: a range input clamps its value to them
         input.max = max;
         input.step = step;
-        const show = (v) => { input.value = v; readout.textContent = v.toFixed(decimals); };
+        const show = (v) => { input.value = v; readout.textContent = format(v); };
         show(value);
         input.oninput = () => { const v = parseFloat(input.value); show(v); apply(v); };
         resets.push(() => { show(value); apply(value); });
@@ -1154,11 +1226,120 @@ _RENDER_JS = """\
         return button;
       }
 
+      // --- Documents (ADR-011 §7): the slider hides what the read already
+      //     embedded — it never re-fetches. ---
+      function showDocumentCounts() {
+        let shownNodes = 0, shownEdges = 0;
+        for (const n of nodes) if (isVisible(n.id)) shownNodes++;
+        for (const e of drawnEdges) if (isVisible(e.source) && isVisible(e.target)) shownEdges++;
+        countsEl.textContent = docLimit + " of " + documents.total + " documents · "
+          + shownNodes + " nodes · " + shownEdges + " edges";
+        document.body.dataset.docs = docLimit + "/" + documents.total;   // headless evidence
+      }
+      // Where a revealed document's nodes start. d3 would put a never-placed
+      // node on its spiral around the centre, scattered through the stars
+      // already there, so each newly revealed document is seeded as a small
+      // spiral of its own around one point: one link distance outside the
+      // layout while the camera auto-fits, or — once a gesture froze the
+      // camera (it stays frozen) — on a ring inside the CURRENT viewport, so
+      // the new stars land on screen. With a frozen camera a re-revealed
+      // node whose last position is off screen is re-seeded too; a Pinned
+      // node always keeps its spot.
+      const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));   // d3's phyllotaxis angle
+      function seedRevealed() {
+        const owned = new Set(sim.nodes());
+        const frozen = renderer.getCustomBBox() != null;
+        let cx = 0, cy = 0, rx, ry, inView = () => true;
+        if (frozen) {
+          const { width, height } = renderer.getDimensions();
+          const a = renderer.viewportToGraph({ x: 0, y: 0 });
+          const b = renderer.viewportToGraph({ x: width, y: height });
+          const [x0, x1] = [Math.min(a.x, b.x), Math.max(a.x, b.x)];
+          const [y0, y1] = [Math.min(a.y, b.y), Math.max(a.y, b.y)];
+          cx = (x0 + x1) / 2; cy = (y0 + y1) / 2;
+          rx = (x1 - x0) / 4; ry = (y1 - y0) / 4;   // halfway to the viewport edge
+          inView = (s) => s.x >= x0 && s.x <= x1 && s.y >= y0 && s.y <= y1;
+        } else {
+          let radius = 0;
+          for (const s of owned) radius = Math.max(radius, Math.hypot(s.x, s.y));
+          rx = ry = radius + forces.linkDistance;
+        }
+        const byRank = new Map();
+        for (const s of simNodes) {
+          if (owned.has(s) || !isVisible(s.id) || s.fx != null) continue;
+          if (s.x != null && inView(s)) continue;
+          const rank = nodeById.get(s.id).docRank;
+          if (!byRank.has(rank)) byRank.set(rank, []);
+          byRank.get(rank).push(s);
+        }
+        for (const [rank, group] of byRank) {
+          const at = rank * GOLDEN_ANGLE;
+          group.forEach((s, i) => {
+            const r = 10 * Math.sqrt(0.5 + i), a = i * GOLDEN_ANGLE;
+            s.x = cx + rx * Math.cos(at) + r * Math.cos(a);
+            s.y = cy + ry * Math.sin(at) + r * Math.sin(a);
+            s.vx = 0; s.vy = 0;
+          });
+        }
+      }
+      // The reveal's auto-fit: the Fit button's path, then — if a gesture had
+      // frozen the camera — freeze it again on the new extent once the camera
+      // has animated, so later drags still never refit. Only the camera moves.
+      function autoFit() {
+        const wasFrozen = renderer.getCustomBBox() != null;
+        fitView().then(() => { if (wasFrozen) freezeViewport(); });
+      }
+      function applyDocumentLimit(n) {
+        const revealing = n > docLimit;
+        docLimit = n;
+        // A hidden node leaves the selection and the hover; its pin stays.
+        for (const id of [...state.selection]) if (!isVisible(id)) state.selection.delete(id);
+        if (state.hovered && !isVisible(state.hovered)) {
+          state.hovered = null;
+          tooltip.classList.remove("show");
+        }
+        if (state.hoveredEdge && !graph.extremities(state.hoveredEdge).every(isVisible)) {
+          state.hoveredEdge = null;
+          tooltip.classList.remove("show");
+        }
+        // Live layout: nodes BEFORE links — d3 throws on a link to a node it
+        // does not own. A revealed node never shown before is placed here.
+        if (sim) {
+          seedRevealed();
+          sim.nodes(visibleSimNodes());
+          sim.force("link").links(visibleLinks());
+        }
+        // One graph event for the whole pass. A shown node takes its d3
+        // position back (a pinned one: where it was pinned); a hidden one is
+        // parked at the origin so the camera fits only what is drawn.
+        graph.updateEachNodeAttributes((id, attrs) => {
+          const s = simById.get(id), visible = isVisible(id);
+          return Object.assign(attrs, { hidden: !visible, x: visible ? s.x : 0, y: visible ? s.y : 0 });
+        });
+        reheat();                            // paused: the sim stays stopped
+        showDocumentCounts();
+        renderer.refresh();
+        // Hiding never fits. A reveal fits once the layout settles — at once
+        // when there is no running simulation to wait for (paused, or a map).
+        if (revealing) {
+          if (sim && !paused) fitOnSettle = true;
+          else autoFit();
+        }
+      }
+      // Documents — the Full graph only (the gate: controls.documents), FIRST.
+      if (documents) {
+        rangeRow(panelSection("Documents"), "Documents", 1, documents.total, 1, documents.shown, 0,
+          applyDocumentLimit, (v) => v + " of " + documents.total);
+        showDocumentCounts();                // the boot already hid the rest
+      }
+
       // Forces — a live layout only (the Embedding map ships no forces).
       if (forces) {
         const section = panelSection("Forces");
         rangeRow(section, "Centre force", 0, 1, 0.01, forces.centre, 2,
           (v) => { sim.force("centre").strength(v); reheat(); });
+        rangeRow(section, "Gravity", 0, 0.5, 0.01, forces.gravity, 2,
+          (v) => { sim.force("gravityX").strength(v); sim.force("gravityY").strength(v); reheat(); });
         rangeRow(section, "Repel force", 0, 20, 0.01, forces.repel, 2,
           (v) => { sim.force("repel").strength(-v * REPEL_SCALE); reheat(); });
         rangeRow(section, "Link force", 0, 1, 0.01, forces.link, 2,
@@ -1222,7 +1403,7 @@ __BODY__
   <script type="module">
     import Graph from "__GRAPHOLOGY_CDN__";
     import Sigma from "__SIGMA_CDN__";
-    import { forceSimulation, forceLink, forceManyBody, forceCenter } from "__D3_FORCE_CDN__";
+    import { forceSimulation, forceLink, forceManyBody, forceCenter, forceX, forceY } from "__D3_FORCE_CDN__";
 
 __RENDER_JS__
 

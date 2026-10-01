@@ -93,6 +93,10 @@ query:
   # re-pinned on voyage-4, 2026-09 — tasks/141 Log (nonsense top=0.649,
   # on-topic top=0.735; the voyage-3.5 pin of 0.75 kept nothing on topic).
   min_vector_score: 0.70
+  # Full graph (no query): documents one read embeds / the Documents slider shows
+  # on load, most-recent first; `properties.date`, else `created_at`.
+  full_graph_max_docs: 500
+  full_graph_shown_docs: 100
 
 dream:
   enabled: true

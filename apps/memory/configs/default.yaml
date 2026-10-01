@@ -113,6 +113,10 @@ query:
   # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
   # for the first (0 kept) and found for the second (7 of 10 kept).
   min_vector_score: 0.70
+  # Full graph (no query): documents one read embeds / the Documents slider shows
+  # on load, most-recent first; `properties.date`, else `created_at`.
+  full_graph_max_docs: 500
+  full_graph_shown_docs: 100
 
 dream:
   enabled: true

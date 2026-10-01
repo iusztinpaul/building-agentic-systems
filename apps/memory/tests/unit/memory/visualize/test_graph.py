@@ -18,6 +18,7 @@ from pathlib import Path
 from tree.config.paths import GRAPHS_DIR
 import pytest
 
+from tree.config.app_config import app_config
 from tree.memory.visualize.graph import (
     _D3_FORCE_CDN,
     _DEFAULT_DISPLAY,
@@ -298,7 +299,13 @@ def test_payload_ships_the_force_and_display_defaults() -> None:
     # Assert: Python decides, the JS obeys — the template seeds the live
     # simulation and the reducers from these, it carries no defaults of its own.
     assert payload["controls"] == {
-        "forces": {"centre": 0.2, "repel": 8.0, "link": 0.3, "linkDistance": 80},
+        "forces": {
+            "centre": 0.2,
+            "gravity": 0.05,
+            "repel": 8.0,
+            "link": 0.3,
+            "linkDistance": 80,
+        },
         "display": {
             "nodeSize": 1.0,
             "linkThickness": 1.0,
@@ -559,7 +566,7 @@ def test_the_simulation_runs_only_outside_the_fixed_layout_branch(
     # fixed-layout payload must keep its stored coordinates.
     html = out.read_text(encoding="utf-8")
     assert 'const isFixed = payload.layout === "fixed";' in html
-    guard = "      if (!isFixed) {\n        sim = forceSimulation(simNodes)"
+    guard = "      if (!isFixed) {\n        sim = forceSimulation(visibleSimNodes())"
     assert guard in html
     assert html.count("forceSimulation(") == 1
 
@@ -717,7 +724,7 @@ def test_the_file_variant_imports_d3_force_once_by_name() -> None:
     assert _D3_FORCE_CDN == "https://cdn.jsdelivr.net/npm/d3-force@3.0.0/+esm"
     assert _FILE_HTML_BASE.count(f'from "{_D3_FORCE_CDN}"') == 1
     assert (
-        "import { forceSimulation, forceLink, forceManyBody, forceCenter } "
+        "import { forceSimulation, forceLink, forceManyBody, forceCenter, forceX, forceY } "
         f'from "{_D3_FORCE_CDN}";'
     ) in _FILE_HTML_BASE
 
@@ -845,13 +852,27 @@ def test_a_press_without_movement_neither_pins_reheats_nor_freezes() -> None:
 def test_the_viewport_stays_frozen_after_a_drop_until_fit() -> None:
     # Assert (added by orchestrator): releasing a drag or marquee never hands
     # the viewport back to Sigma — a re-fit would land the dropped node away
-    # from the cursor. The fit button is the ONE place that releases it.
+    # from the cursor. fitView() — the fit button and the one auto-fit after a
+    # Documents reveal — is the ONE place that releases it.
     assert _RENDER_JS.count("setCustomBBox(null)") == 1
+    assert "renderer.setCustomBBox(null)" in _js_block("function fitView()")
     assert (
-        'document.getElementById("zoom-fit").onclick = () => '
-        "{ renderer.setCustomBBox(null); camera.animatedReset(); };"
-    ) in _RENDER_JS
+        'document.getElementById("zoom-fit").onclick = () => { fitView(); };'
+        in _RENDER_JS
+    )
     assert "setCustomBBox" not in _js_block('captor.on("mouseup"')
+
+
+def test_fit_re_indexes_the_extent_before_resetting_the_camera() -> None:
+    # Assert (added by orchestrator after QA 165): once the simulation has
+    # settled nothing re-processes the graph, so Sigma would fit to the STALE
+    # extent of the frozen bbox; refresh() recomputes it from the current
+    # positions before the camera animates back.
+    body = _js_block("function fitView()")
+    assert body.index("setCustomBBox(null)") < body.index("renderer.refresh()")
+    assert body.index("renderer.refresh()") < body.index(
+        "return camera.animatedReset()"
+    )
 
 
 def test_on_drop_held_nodes_stay_pinned_and_carried_children_are_released() -> None:
@@ -1092,6 +1113,7 @@ def test_the_panel_markup_is_a_toggle_and_a_body_at_the_top_left() -> None:
         "function rangeRow",
         "function checkboxRow",
         '"Centre force"',
+        '"Gravity"',
         '"Repel force"',
         '"Link force"',
         '"Link distance"',
@@ -1135,7 +1157,13 @@ def test_the_forces_pause_and_force_reset_are_gated_on_controls_forces() -> None
     # Forces section, no Pause/Resume and no force rows for Reset to restore;
     # Display and Unpin all are emitted for every payload.
     assert "const forces = isFixed ? null : payload.controls.forces;" in _RENDER_JS
-    for label in ('"Centre force"', '"Repel force"', '"Link force"', '"Link distance"'):
+    for label in (
+        '"Centre force"',
+        '"Gravity"',
+        '"Repel force"',
+        '"Link force"',
+        '"Link distance"',
+    ):
         assert label in gated
     assert '"Pause"' in gated
     assert '"Resume"' in gated
@@ -1150,7 +1178,7 @@ def test_forces_callbacks_reheat_and_display_callbacks_only_refresh() -> None:
 
     # Assert: pulse's split — a force change re-settles the layout, a display
     # change only redraws it.
-    assert gated.count("reheat(); }") == 4
+    assert gated.count("reheat(); }") == 5
     assert "reheat" not in display
     assert display.count("renderer.refresh();") == 3
     assert display.count("renderer.setSetting(") == 2
@@ -1160,6 +1188,7 @@ def test_forces_callbacks_reheat_and_display_callbacks_only_refresh() -> None:
     "apply",
     [
         'sim.force("centre").strength(v)',
+        'sim.force("gravityX").strength(v); sim.force("gravityY").strength(v)',
         'sim.force("repel").strength(-v * REPEL_SCALE)',
         'sim.force("link").strength(v)',
         'sim.force("link").distance(v)',
@@ -1178,6 +1207,7 @@ def test_the_slider_defaults_are_read_from_the_payload() -> None:
     # appears as a literal in the panel code.
     for ref in (
         "forces.centre, 2,",
+        "forces.gravity, 2,",
         "forces.repel, 2,",
         "forces.link, 2,",
         "forces.linkDistance, 0,",
@@ -1188,6 +1218,7 @@ def test_the_slider_defaults_are_read_from_the_payload() -> None:
         "display.edgeLabels,",
     ):
         assert ref in panel
+    # (gravity 0.05 is also Node size's step — no usable probe either)
     for literal in ("80", "0.3", "8.0", "8,"):
         assert literal not in panel
 
@@ -1198,7 +1229,8 @@ def test_a_slider_sets_its_bounds_before_its_value() -> None:
     # Assert: a range input clamps to its CURRENT bounds (default 0-100), so a
     # Link distance of 300 set before max = 500 would read 100.
     assert body.index("input.max = max;") < body.index("show(value);")
-    assert "readout.textContent = v.toFixed(decimals);" in body
+    assert "format = (v) => v.toFixed(decimals)" in body
+    assert "readout.textContent = format(v);" in body
 
 
 def test_every_restart_goes_through_the_pause_guard() -> None:
@@ -1246,3 +1278,351 @@ def test_reset_restores_every_control_but_neither_unpins_nor_resumes() -> None:
     assert "resets.push(() => { input.checked = checked; apply(checked); });" in (
         _js_block("function checkboxRow(")
     )
+
+
+# ---------------------------------------------------------------------------
+# Full graph: docRank + the Documents slider (task 165, ADR-011 §7)
+# ---------------------------------------------------------------------------
+
+
+def _ranked_result(n_documents: int) -> QueryResult:
+    """A **Full graph** result: one document + one entity per rank, an edge each."""
+
+    nodes, edges = [], []
+    for rank in range(1, n_documents + 1):
+        doc = {**_node(f"{_UID}:document:d{rank}", "document"), "doc_rank": rank}
+        entity = {**_node(f"{_UID}:person:p{rank}", "person"), "doc_rank": rank}
+        edge = {**_edge(entity["_id"], "mentions", doc["_id"]), "doc_rank": rank}
+        nodes += [doc, entity]
+        edges.append(edge)
+    return QueryResult(nodes=nodes, edges=edges)
+
+
+def test_a_ranked_row_carries_doc_rank_and_an_unranked_one_does_not() -> None:
+    ranked = {**_node(f"{_UID}:document:d1", "document"), "doc_rank": 3}
+    unranked = _node(f"{_UID}:person:alice", "person")
+
+    payload = to_graph_payload(QueryResult(nodes=[ranked, unranked], edges=[]))
+
+    by_id = {n["id"]: n for n in payload["nodes"]}
+    assert by_id[ranked["_id"]]["docRank"] == 3
+    assert "docRank" not in by_id[unranked["_id"]]
+
+
+def test_a_full_graph_payload_ships_the_documents_control(mocker) -> None:
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", 5)
+
+    payload = to_graph_payload(_ranked_result(12))
+
+    # Assert: Python decides how many show on load; total = the deepest rank.
+    assert payload["controls"]["documents"] == {"shown": 5, "total": 12}
+
+
+def test_shown_clamps_to_the_configured_embed_cap(mocker) -> None:
+    # TREE_QUERY__FULL_GRAPH_MAX_DOCS=50 alone: shown (100) > max (50) shows 50.
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", 100)
+    mocker.patch.object(app_config.query, "full_graph_max_docs", 50)
+
+    payload = to_graph_payload(_ranked_result(60))
+
+    assert payload["controls"]["documents"] == {"shown": 50, "total": 60}
+
+
+def test_shown_clamps_to_the_documents_that_exist(mocker) -> None:
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", 100)
+
+    payload = to_graph_payload(_ranked_result(4))
+
+    assert payload["controls"]["documents"] == {"shown": 4, "total": 4}
+
+
+def test_a_query_payload_has_neither_doc_rank_nor_a_documents_control() -> None:
+    payload = to_graph_payload(_seed_result())
+
+    # Assert: no rank -> no slider gate; query payloads are as before 165.
+    assert "documents" not in payload["controls"]
+    assert set(payload["controls"]) == {"forces", "display"}
+    assert all("docRank" not in n for n in payload["nodes"])
+
+
+def test_render_graph_file_logs_the_documents_shown_on_a_full_graph(
+    mocker, tmp_path: Path, caplog
+) -> None:
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", 5)
+    payload = to_graph_payload(_ranked_result(12))
+    out = tmp_path / "graph.html"
+
+    with caplog.at_level(logging.INFO, logger="tree.memory.visualize.graph"):
+        _render_graph_file(payload, output=out)
+
+    assert (
+        "Wrote self-contained graph HTML (5 of 12 documents shown by default, "
+        f"24 nodes, 12 edges) to {out}"
+    ) in caplog.messages
+
+
+def _documents_js() -> str:
+    """The Documents section of the panel: from its comment to the Forces one."""
+
+    panel = _panel_js()
+    return panel[panel.index("// Documents") : panel.index("// Forces")]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        '"Documents"',
+        "controls.documents",
+        "function applyDocumentLimit",
+        "sim.nodes(",
+        ".links(",
+        '"hidden"',
+        "dataset.docs",
+        '" of "',
+        '" documents · "',
+    ],
+)
+def test_template_carries_the_documents_slider(token: str) -> None:
+    assert token in _FILE_HTML_BASE
+
+
+def test_the_documents_section_is_gated_and_built_before_forces() -> None:
+    documents = _documents_js()
+
+    # Assert: only a payload with controls.documents (the Full graph) gets the
+    # section, it is the panel's FIRST, and its slider spans 1..total from
+    # the payload's `shown` — read from Python, never a literal.
+    assert "const documents = payload.controls && payload.controls.documents;" in (
+        _RENDER_JS
+    )
+    assert "if (documents) {" in documents
+    assert (
+        'rangeRow(panelSection("Documents"), "Documents", 1, documents.total, 1,'
+        " documents.shown, 0,"
+    ) in documents
+    assert "applyDocumentLimit" in documents
+    assert '(v) => v + " of " + documents.total' in documents
+    assert _panel_js().index('panelSection("Documents")') < _panel_js().index(
+        'panelSection("Forces")'
+    )
+
+
+def test_the_panel_code_contains_no_shown_default_of_its_own() -> None:
+    # Assert: the 100 comes from query.full_graph_shown_docs, via the payload.
+    assert "100" not in _panel_js()
+    assert "100" not in _js_block("function applyDocumentLimit(n)")
+
+
+def test_an_unranked_node_is_always_visible() -> None:
+    body = _js_block("function isVisible(id)")
+
+    assert "return rank == null || rank <= docLimit;" in body
+    assert "let docLimit = documents ? documents.shown : Infinity;" in _RENDER_JS
+
+
+def test_hidden_nodes_never_enter_the_first_simulation() -> None:
+    # Assert: the boot builds the simulation from the SAME visibility
+    # predicate the slider uses, so a hidden node is absent from tick one.
+    assert "const visibleSimNodes = () => simNodes.filter((s) => isVisible(s.id));" in (
+        _RENDER_JS
+    )
+    assert "forceSimulation(visibleSimNodes())" in _RENDER_JS
+    assert "forceLink(visibleLinks())" in _RENDER_JS
+    # The tick writes back only what the simulation owns.
+    assert "for (const s of sim.nodes()) graph.mergeNodeAttributes(" in _RENDER_JS
+
+
+def test_simulation_links_join_two_visible_nodes_and_are_rebuilt_fresh() -> None:
+    body = _js_block("const visibleLinks = () => drawnEdges")
+
+    # Assert: forceLink swaps source/target ids for node objects, so the
+    # links are rebuilt from ids every time; self-loops still never link.
+    assert "e.source !== e.target && isVisible(e.source) && isVisible(e.target)" in body
+    assert ".map((e) => ({ source: e.source, target: e.target }))" in body
+
+
+def test_a_hidden_node_starts_hidden_and_parked_in_sigma() -> None:
+    body = _js_block("for (const n of nodes) {")
+
+    # Assert: Sigma fits its camera to EVERY node, hidden ones included, and
+    # throws on a non-numeric x/y, so a hidden node is parked at the origin.
+    assert "hidden: !shown," in body
+    assert "x: shown ? s.x : 0," in body
+    assert "y: shown ? s.y : 0," in body
+
+
+def test_apply_document_limit_hides_prunes_resyncs_then_counts() -> None:
+    body = _js_block("function applyDocumentLimit(n)")
+
+    # Assert: nodes are re-synced BEFORE links (d3 throws on a link to a node
+    # it does not own), positions are written after the re-sync (a revealed
+    # node gets its d3 position), and the one reheat goes through the pause
+    # guard.
+    assert "docLimit = n;" in body
+    order = [
+        "state.selection.delete(id)",
+        "seedRevealed();",
+        "sim.nodes(visibleSimNodes());",
+        'sim.force("link").links(visibleLinks());',
+        "graph.updateEachNodeAttributes(",
+        "reheat();",
+        "showDocumentCounts();",
+        "renderer.refresh();",
+    ]
+    positions = [body.index(token) for token in order]
+    assert positions == sorted(positions)
+    assert "if (sim) {" in body
+    assert ".restart()" not in body
+
+
+def test_hiding_drops_the_hover_and_the_tooltip() -> None:
+    body = _js_block("function applyDocumentLimit(n)")
+
+    assert "if (state.hovered && !isVisible(state.hovered))" in body
+    assert "state.hovered = null;" in body
+    assert 'tooltip.classList.remove("show");' in body
+    assert "state.hoveredEdge = null;" in body
+
+
+def test_a_hidden_node_keeps_its_pin_and_its_position() -> None:
+    body = _js_block("function applyDocumentLimit(n)")
+
+    # Assert: hiding never touches fx/fy; a shown node takes its d3 position
+    # back, a hidden one is parked.
+    assert "fx" not in body
+    assert "visible ? s.x : 0" in body
+    assert "visible ? s.y : 0" in body
+
+
+def test_the_header_reads_documents_shown_and_the_visible_counts() -> None:
+    body = _js_block("function showDocumentCounts()")
+
+    assert (
+        'countsEl.textContent = docLimit + " of " + documents.total + " documents · "'
+        in body
+    )
+    assert '" nodes · "' in body
+    assert '" edges"' in body
+    assert 'document.body.dataset.docs = docLimit + "/" + documents.total;' in body
+    # The boot paints the same header (no reheat: the first layout keeps d3's
+    # full alpha), and the slider's apply repaints it.
+    assert "showDocumentCounts();" in _documents_js()
+
+
+def test_a_hidden_node_is_never_carried_nor_marquee_selected() -> None:
+    assert '!graph.getNodeAttribute(source, "hidden")' in _js_block(
+        "function dragSetFor(nodeId)"
+    )
+    assert "if (!shown || shown.hidden) return;" in _js_block(
+        "function selectInside(box)"
+    )
+
+
+def test_unpin_all_still_frees_hidden_nodes_too() -> None:
+    panel = _panel_js()
+    body = panel[panel.index('"Unpin all"') : panel.index('"Reset to defaults"')]
+
+    # Assert: one rule — every d3 node, shown or hidden.
+    assert "for (const s of simNodes) { s.fx = null; s.fy = null; }" in body
+
+
+def test_a_first_reveal_seeds_each_document_as_its_own_star() -> None:
+    body = _js_block("function seedRevealed()")
+
+    # Assert: only revealed (not yet simulated), visible, unpinned nodes are
+    # seeded, grouped by their document, deterministically (golden angle, no
+    # Math.random); while the camera auto-fits, one link distance outside the
+    # current layout.
+    assert "if (owned.has(s) || !isVisible(s.id) || s.fx != null) continue;" in body
+    assert "nodeById.get(s.id).docRank" in body
+    assert "radius = Math.max(radius, Math.hypot(s.x, s.y));" in body
+    assert "rx = ry = radius + forces.linkDistance;" in body
+    assert "GOLDEN_ANGLE" in body
+    assert "Math.random" not in body
+
+
+def test_with_a_frozen_camera_revealed_stars_land_inside_the_viewport() -> None:
+    body = _js_block("function seedRevealed()")
+
+    # Assert: a gesture froze the camera (and it stays frozen), so new stars
+    # are seeded on a ring inside the CURRENT viewport's graph bounds, and a
+    # re-revealed node last seen off screen is re-seeded there too.
+    assert "const frozen = renderer.getCustomBBox() != null;" in body
+    assert "renderer.viewportToGraph({ x: width, y: height })" in body
+    assert "if (s.x != null && inView(s)) continue;" in body
+    assert "setCustomBBox" not in body
+
+
+def test_a_rerender_drops_the_previous_documents_marker() -> None:
+    # Assert: the iframe calls render() per tool result; a query result after a
+    # Full graph must not keep data-docs on the body.
+    assert _RENDER_JS.index("delete document.body.dataset.docs;") < _RENDER_JS.index(
+        "if (!nodes.length)"
+    )
+
+
+def test_gravity_is_one_forcex_forcey_pair_on_the_live_layout_only() -> None:
+    # Assert (added by orchestrator — human decision): a weak pull to the
+    # origin, seeded from controls.forces.gravity, built inside the
+    # live-layout branch only (the Embedding map never simulates).
+    sim = _RENDER_JS[
+        _RENDER_JS.index("      if (!isFixed) {\n        sim = forceSimulation(") :
+    ]
+    sim = sim[: sim.index("\n      }")]
+    assert '.force("gravityX", forceX(0).strength(forces.gravity))' in sim
+    assert '.force("gravityY", forceY(0).strength(forces.gravity))' in sim
+    assert _RENDER_JS.count("forceX(") == 1
+    assert _RENDER_JS.count("forceY(") == 1
+
+
+def test_the_gravity_row_sits_after_centre_force_and_resets_like_any_row() -> None:
+    gated = _forces_gated_js()
+
+    # Assert: 0..0.5 by 0.01, reheats, and — being a rangeRow — registers the
+    # reset closure that Reset to defaults replays.
+    assert 'rangeRow(section, "Gravity", 0, 0.5, 0.01, forces.gravity, 2,' in gated
+    assert (
+        gated.index('"Centre force"')
+        < gated.index('"Gravity"')
+        < gated.index('"Repel force"')
+    )
+
+
+# --- Auto-fit on reveal (added by orchestrator — human decision) ---
+
+
+def test_a_reveal_arms_one_auto_fit_and_hiding_never_fits() -> None:
+    body = _js_block("function applyDocumentLimit(n)")
+
+    # Assert: only n > previous n arms it; a running sim fits when it settles,
+    # no running sim (paused / map) fits at once.
+    assert "const revealing = n > docLimit;" in body
+    assert body.index("const revealing = n > docLimit;") < body.index("docLimit = n;")
+    assert "if (revealing) {" in body
+    assert "if (sim && !paused) fitOnSettle = true;" in body
+    assert "else autoFit();" in body
+
+
+def test_the_armed_fit_runs_once_when_the_layout_settles() -> None:
+    end = _RENDER_JS[_RENDER_JS.index('sim.on("end"') :]
+    end = end[: end.index("});")]
+    assert "if (fitOnSettle) { fitOnSettle = false; autoFit(); }" in end
+
+
+def test_the_auto_fit_moves_only_the_camera_and_re_freezes_it() -> None:
+    body = _js_block("function autoFit()")
+
+    # Assert: the Fit button's path; if a gesture had frozen the camera, it
+    # is frozen again on the new extent after the animation (later drags
+    # still never refit); no node position or pin is written.
+    assert "const wasFrozen = renderer.getCustomBBox() != null;" in body
+    assert "fitView().then(() => { if (wasFrozen) freezeViewport(); });" in body
+    for untouched in ("fx", ".x =", "mergeNodeAttributes", "updateEachNodeAttributes"):
+        assert untouched not in body
+
+
+def test_a_drag_or_marquee_cancels_an_armed_auto_fit() -> None:
+    body = _js_block('captor.on("mousemovebody"')
+
+    gesture = body[body.index("if (!pointerMoved) {") :]
+    assert "fitOnSettle = false;" in gesture[: gesture.index("}")]

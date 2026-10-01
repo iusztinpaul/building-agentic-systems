@@ -673,6 +673,71 @@ class TestQueryConfig:
         assert load_app_config(custom).query.min_vector_score == 0.70
 
 
+class TestFullGraphCaps:
+    """ADR-011 §7: ``query.full_graph_max_docs`` (how many most-recent documents
+    a **Full graph** read embeds) and ``query.full_graph_shown_docs`` (how many
+    the ``Documents`` slider shows on load)."""
+
+    def test_both_caps_load_from_the_frozen_yaml(self, frozen_config_path) -> None:
+        query = load_app_config(frozen_config_path).query
+
+        assert query.full_graph_max_docs == 500
+        assert query.full_graph_shown_docs == 100
+
+    def test_the_shipped_yaml_agrees_with_the_typed_defaults(self) -> None:
+        shipped = load_app_config(_DEFAULT_CONFIG_PATH).query
+
+        assert (
+            (shipped.full_graph_max_docs, shipped.full_graph_shown_docs)
+            == (
+                QueryConfig().full_graph_max_docs,
+                QueryConfig().full_graph_shown_docs,
+            )
+            == (500, 100)
+        )
+
+    def test_defaults_when_the_keys_are_absent(self, tmp_path) -> None:
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        query = load_app_config(custom).query
+
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (500, 100)
+
+    def test_showing_more_than_is_embedded_loads(self) -> None:
+        # Orchestrator decision: a config error must never take down every
+        # entry point; shown > max is clamped at use (to_graph_payload).
+        query = QueryConfig(full_graph_max_docs=50, full_graph_shown_docs=100)
+
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (50, 100)
+
+    @pytest.mark.parametrize("key", ["full_graph_max_docs", "full_graph_shown_docs"])
+    def test_a_cap_below_one_is_refused(self, key: str) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            QueryConfig(**{key: 0})
+
+        assert key in str(excinfo.value)
+
+    def test_the_escape_hatch_lowers_the_cap_alone(self, tmp_path, monkeypatch) -> None:
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+        monkeypatch.setenv("TREE_QUERY__FULL_GRAPH_MAX_DOCS", "50")
+
+        query = load_app_config(custom).query
+
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (50, 100)
+
+    def test_the_escape_hatch_lowers_both_caps(self, tmp_path, monkeypatch) -> None:
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+        monkeypatch.setenv("TREE_QUERY__FULL_GRAPH_MAX_DOCS", "50")
+        monkeypatch.setenv("TREE_QUERY__FULL_GRAPH_SHOWN_DOCS", "20")
+
+        query = load_app_config(custom).query
+
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (50, 20)
+
+
 class TestChunkingConfig:
     """ADR-006 §6 / #107: the two-level (parent/child) chunking knobs.
 

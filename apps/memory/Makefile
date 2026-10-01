@@ -191,8 +191,8 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-query-graph: # Query memory for one user: an HTML graph in `graphrag`, ranked parent chunks as text in `rag`. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search; omit QUERY for the full graph (graphrag only).
-	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",)
+query-graph: # Query memory for one user: an HTML graph in `graphrag`, ranked parent chunks as text in `rag`. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>. Pass QUERY="your query" for search; omit QUERY for the full graph (graphrag only): the 500 most-recent documents, MAX_DOCS=N to embed fewer.
+	uv run python scripts/query_graph.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(QUERY),--query "$(QUERY)",) $(if $(MAX_DOCS),--max-docs "$(MAX_DOCS)",)
 
 visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
 	uv run python scripts/visualize_embeddings.py $(USER_FLAGS) $(if $(filter true,$(HULLS)),--hulls,) $(if $(OUTPUT),--output "$(OUTPUT)",)

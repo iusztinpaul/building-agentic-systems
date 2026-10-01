@@ -341,18 +341,26 @@ retrieved parents (score, document title, heading path, a 300-char excerpt and t
 count) as text — and a full-graph run with no `QUERY` exits 1 with an explanatory message.
 
 ```bash
-# graphrag: visualize the entire graph
+# graphrag: visualize the full graph (the 500 most-recent documents)
 make memory-query-graph
+make memory-query-graph MAX_DOCS=50     # embed only the 50 most recent
 
 # Query a specific topic — HTML graph in graphrag, retrieved parents as text in rag
 make memory-query-graph QUERY="Paul Iusztin"
 TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 ```
 
+The full graph embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
+documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
+shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider at the top of
+the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive, and once the
+revealed stars settle the view fits itself once (only on a reveal, never on hiding; a drag meanwhile
+cancels it). A `QUERY` view has no slider.
+
 **Interacting with a graph.** The layout is live: nodes keep settling under d3-force. Dragging a
 node pins it where you drop it (dark centre dot); a double-click unpins it. Shift+click or
 Shift+drag on the stage selects (orange rings), a selection drags as a group, Esc clears. The
-Controls panel (top-left) has Forces sliders that re-settle the layout, Display knobs (node size,
+Controls panel (top-left) has Forces sliders (centre, gravity, repel, link) that re-settle the layout, Display knobs (node size,
 link thickness, label fade, arrows, edge labels) that only redraw, and Pause / Unpin all / Reset to
 defaults. Nothing is saved: a reload starts fresh. The embedding map runs no simulation, but the
 same selection, pins and Display knobs work there.

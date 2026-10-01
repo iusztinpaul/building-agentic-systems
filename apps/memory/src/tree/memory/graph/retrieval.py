@@ -19,6 +19,7 @@ gets to read.
 """
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -210,22 +211,166 @@ def _seed_ids(hits: list[ScoredHit]) -> list[Any]:
     return seed_ids
 
 
+# What a document with neither ``properties.date`` nor ``created_at`` ranks by:
+# behind every dated one.
+_UNDATED = datetime.min.replace(tzinfo=UTC)
+
+# Node reads never need the vector: the payload draws no embedding, and a full
+# graph would otherwise haul every child chunk's vector across the wire.
+_NO_EMBEDDING = {"embedding": 0}
+
+
+def _as_utc(value: Any) -> datetime | None:
+    """An ISO string or a datetime as a tz-aware datetime (naive = UTC), else None."""
+
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+def _document_recency(row: dict[str, Any]) -> datetime:
+    """When a document row is from: ``properties.date``, else ``created_at``."""
+
+    return (
+        _as_utc((row.get("properties") or {}).get("date"))
+        or _as_utc(row.get("created_at"))
+        or _UNDATED
+    )
+
+
+def _rank_by_provenance(
+    row: dict[str, Any], provenance_rank: dict[str, int]
+) -> int | None:
+    """The rank of the most recent kept document among ``row["sources"]``."""
+
+    ranks = [
+        provenance_rank[str(source)]
+        for source in row.get("sources") or []
+        if str(source) in provenance_rank
+    ]
+    return min(ranks, default=None)
+
+
 async def fetch_full_graph(
     client: AsyncMongoClient,
     database: str,
     user_id: PydanticObjectId,
+    *,
+    max_docs: int | None = None,
 ) -> QueryResult:
-    """Load the ENTIRE materialized knowledge graph for ``user_id``.
+    """Load the **Full graph**: the ``max_docs`` most-recent documents' subgraphs.
 
-    Unlike :func:`query_memory` (semantic + text search expanded around seed
-    nodes), this returns every node and edge the user owns — the "show me
-    everything" view used when no search query is given. Scoped to ``user_id``,
-    so it never returns another tenant's rows. graphrag-only: in ``rag`` mode the
-    collection holds no edges, so the CLI refuses this view instead of rendering
-    a graph of isolated dots.
+    The no-query view (ADR-011 §7). Document rows are ranked by
+    ``properties.date`` (ISO string), else ``created_at``, newest first, ties on
+    ``_id``; the first ``max_docs`` (default ``query.full_graph_max_docs``) are
+    kept, and with them every node and edge whose ``sources`` provenance names
+    one of them, plus the endpoints those edges reach that no EXCLUDED document
+    owns, plus every no-provenance edge (``sources: []``) between two included
+    nodes (ranked with the more recent endpoint). Every returned row is a
+    copy stamped ``doc_rank`` — the 1-based rank of its most recent kept
+    document — which the **Graph renderer**'s ``Documents`` slider reveals by.
+    Only edges whose two endpoints are included are returned.
+
+    Four batched reads whatever ``max_docs`` is (documents → nodes → edges →
+    unreached endpoints), every one scoped to ``user_id``, node reads without
+    the ``embedding``. Ranking happens here, not in a ``$sort``: the two dates
+    are a string and a BSON date, and the document rows are the smallest set in
+    the collection. graphrag-only: in ``rag`` mode there are no edges, so the
+    CLI refuses this view instead of rendering isolated dots.
     """
 
+    max_docs = (
+        max_docs if max_docs is not None else app_config.query.full_graph_max_docs
+    )
     collection = client[database][MEMORY_COLLECTION]
-    nodes = [doc async for doc in collection.find({"user_id": user_id, "kind": "node"})]
-    edges = [doc async for doc in collection.find({"user_id": user_id, "kind": "edge"})]
-    return QueryResult(nodes=nodes, edges=edges)
+
+    # 1. Rank the documents.
+    documents = [
+        row
+        async for row in collection.find(
+            {"user_id": user_id, "kind": "node", "type": "document"}, _NO_EMBEDDING
+        )
+    ]
+    by_id = sorted(documents, key=lambda row: str(row["_id"]))
+    kept = sorted(by_id, key=_document_recency, reverse=True)[:max_docs]
+
+    nodes: dict[Any, dict[str, Any]] = {}
+    # Keyed on the hex string: ``add_entity`` writes an entity's ``sources`` as
+    # the STRING of the document id, every other row holds the ObjectId.
+    provenance_rank: dict[str, int] = {}
+    provenance: list[Any] = []
+    for rank, row in enumerate(kept, start=1):
+        nodes[row["_id"]] = {**row, "doc_rank": rank}
+        if not row.get("sources"):
+            logger.debug("Document %s has no sources: embedded alone", row["_id"])
+            continue
+        source = row["sources"][0]
+        provenance_rank.setdefault(str(source), rank)
+        provenance.extend(dict.fromkeys([source, str(source)]))
+
+    # 2. Their subgraph nodes: chunks, and every entity extracted from them.
+    async for row in collection.find(
+        {"user_id": user_id, "kind": "node", "sources": {"$in": provenance}},
+        _NO_EMBEDDING,
+    ):
+        if row["_id"] not in nodes:
+            rank = _rank_by_provenance(row, provenance_rank)
+            nodes[row["_id"]] = {**row, "doc_rank": rank}
+
+    # 3. Their edges, plus every edge with no provenance at all (hand-made or
+    #    merge rows such as `same_as`): those are kept below only when both
+    #    endpoints are already in, and never reach a new endpoint.
+    edges = [
+        {**row, "doc_rank": _rank_by_provenance(row, provenance_rank)}
+        async for row in collection.find(
+            {
+                "user_id": user_id,
+                "kind": "edge",
+                "$or": [{"sources": {"$in": provenance}}, {"sources": []}],
+            }
+        )
+    ]
+
+    # 4. Endpoints no kept document owns (a hand-added entity, a `referenced`
+    #    target): hydrated with the best rank among the edges reaching them.
+    endpoint_rank: dict[Any, int] = {}
+    for edge in edges:
+        if edge["doc_rank"] is None:
+            continue
+        for endpoint in (edge.get("source_node_id"), edge.get("target_node_id")):
+            if endpoint not in nodes:
+                endpoint_rank[endpoint] = min(
+                    endpoint_rank.get(endpoint, edge["doc_rank"]), edge["doc_rank"]
+                )
+    async for row in collection.find(
+        {"user_id": user_id, "kind": "node", "_id": {"$in": list(endpoint_rank)}},
+        _NO_EMBEDDING,
+    ):
+        # An edge can name a kept AND an excluded document; a row owned only
+        # by excluded documents stays out (and with it, that edge).
+        if row.get("sources") and _rank_by_provenance(row, provenance_rank) is None:
+            continue
+        nodes[row["_id"]] = {**row, "doc_rank": endpoint_rank[row["_id"]]}
+
+    included: list[dict[str, Any]] = []
+    for edge in edges:
+        source, target = edge.get("source_node_id"), edge.get("target_node_id")
+        if source not in nodes or target not in nodes:
+            continue
+        if edge["doc_rank"] is None:
+            edge["doc_rank"] = min(nodes[source]["doc_rank"], nodes[target]["doc_rank"])
+        included.append(edge)
+    edges = included
+    logger.info(
+        "Full graph: embedded %d of %d documents (most recent first) → %d nodes, %d edges",
+        len(kept),
+        len(documents),
+        len(nodes),
+        len(edges),
+    )
+    return QueryResult(nodes=list(nodes.values()), edges=edges)

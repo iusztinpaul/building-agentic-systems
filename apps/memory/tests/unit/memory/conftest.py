@@ -4,9 +4,11 @@ The retrieval tests need two things a plain ``MagicMock`` can't give at once:
 the EXACT aggregate pipelines that hit Mongo (so filter shapes are pinned) and
 rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
-evaluates the handful of operators our pipelines use — equality, ``$in``,
-``$nor``, ``$text`` (substring), ``$limit`` — stamps the ``_search_score`` both
-legs read off ``$meta``, and records every call.
+evaluates the handful of operators our pipelines use — equality, ``$or``, ``$in``
+(against a scalar, or ANY element of a list field, as Mongo does for
+``sources``), ``$nor``, ``$text`` (substring), ``$limit`` — plus exclusion
+projections (``{"embedding": 0}``), stamps the ``_search_score`` both legs read
+off ``$meta``, and records every call.
 
 It is deliberately NOT a Mongo emulator: anything beyond those operators raises,
 so a future pipeline that grows a new stage fails loudly here instead of being
@@ -15,9 +17,11 @@ silently ignored by the double.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import pytest
+from beanie import PydanticObjectId
 
 
 class FakeCursor:
@@ -43,6 +47,9 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
         if key == "$nor":
             if any(matches(row, sub) for sub in expected):
                 return False
+        elif key == "$or":
+            if not any(matches(row, sub) for sub in expected):
+                return False
         elif key == "$text":
             haystack = " ".join(
                 [
@@ -55,7 +62,12 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
         elif isinstance(expected, dict):
             if set(expected) != {"$in"}:
                 raise NotImplementedError(f"unsupported operator: {expected}")
-            if row.get(key) not in expected["$in"]:
+            value = row.get(key)
+            # Mongo array semantics: ``$in`` on a list field matches when ANY
+            # element is in the list. Python equality keeps an ObjectId and
+            # its hex string apart, exactly like Mongo's BSON comparison.
+            candidates = value if isinstance(value, list) else [value]
+            if not any(candidate in expected["$in"] for candidate in candidates):
                 return False
         elif row.get(key) != expected:
             return False
@@ -89,6 +101,7 @@ class FakeMemoryCollection:
         self.rows = list(rows or [])
         self.pipelines: list[list[dict[str, Any]]] = []
         self.find_filters: list[dict[str, Any]] = []
+        self.find_projections: list[dict[str, Any] | None] = []
         # ``search_indexes=[]`` is the never-indexed / dropped-index state;
         # ``[{"status": "BUILDING", "queryable": False}]`` the mid-build one.
         self.search_indexes = (
@@ -115,9 +128,19 @@ class FakeMemoryCollection:
             ]
         )
 
-    def find(self, query: dict[str, Any]) -> FakeCursor:
+    def find(
+        self, query: dict[str, Any], projection: dict[str, Any] | None = None
+    ) -> FakeCursor:
         self.find_filters.append(query)
-        return FakeCursor([row for row in self.rows if matches(row, query)])
+        self.find_projections.append(projection)
+        rows = [row for row in self.rows if matches(row, query)]
+        if projection:
+            if set(projection.values()) != {0}:
+                raise NotImplementedError(f"unsupported projection: {projection}")
+            rows = [
+                {k: v for k, v in row.items() if k not in projection} for row in rows
+            ]
+        return FakeCursor(rows)
 
     @property
     def vector_pipeline(self) -> list[dict[str, Any]]:
@@ -205,13 +228,31 @@ def _node_row(user_id: Any, node_id: str, node_type: str, **overrides: Any) -> d
 
 @pytest.fixture
 def make_document_row():
-    """A ``document`` row: metadata root, never embedded."""
+    """A ``document`` row: metadata root, never embedded.
 
-    def _make(user_id: Any, node_id: str = "doc1", **properties: Any) -> dict:
+    ``sources`` defaults to one fresh ObjectId (the ``documents`` row it was
+    loaded from), so every document carries the provenance the **Full graph**
+    keys on; ``created_at`` is set only when a test passes one.
+    """
+
+    def _make(
+        user_id: Any,
+        node_id: str = "doc1",
+        *,
+        created_at: datetime | None = None,
+        sources: list[Any] | None = None,
+        **properties: Any,
+    ) -> dict:
+        extra: dict[str, Any] = {
+            "sources": [PydanticObjectId()] if sources is None else sources
+        }
+        if created_at is not None:
+            extra["created_at"] = created_at
         return _node_row(
             user_id,
             node_id,
             "document",
+            **extra,
             properties={
                 "source_type": "file",
                 "source_uri": f"file://{node_id}",

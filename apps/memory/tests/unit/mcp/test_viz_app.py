@@ -290,7 +290,7 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "renderer.graphToViewport({ x: p[0], y: p[1] })",
         'renderer.on("afterRender", drawOverlay)',
         'renderer.on("resize", drawOverlay)',
-        "      if (!isFixed) {\n        sim = forceSimulation(simNodes)",
+        "      if (!isFixed) {\n        sim = forceSimulation(visibleSimNodes())",
         '"doubleClickNode"',
         "setCustomBBox(",
         "alphaTarget(0.3)",
@@ -312,6 +312,9 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "function rangeRow",
         "function checkboxRow",
         '"Centre force"',
+        '"Gravity"',
+        "forceX(",
+        "forceY(",
         '"Repel force"',
         '"Link force"',
         '"Link distance"',
@@ -332,6 +335,19 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "clickOnNode(e.node, shiftKey)",
         "marquee.cancelled = true",
         "if (e.original.buttons === 0) { captor.handleUp(e.original); return; }",
+        '"Documents"',  # the Full graph's Documents slider (task 165)
+        "const documents = payload.controls && payload.controls.documents;",
+        "if (documents) {",
+        "function applyDocumentLimit(n)",
+        "sim.nodes(visibleSimNodes());",
+        'sim.force("link").links(visibleLinks());',
+        '"hidden"',
+        "document.body.dataset.docs",
+        '" of "',
+        '" documents · "',
+        "function fitView()",
+        "function autoFit()",
+        "if (fitOnSettle) { fitOnSettle = false; autoFit(); }",
     ],
 )
 @pytest.mark.parametrize(
@@ -357,7 +373,7 @@ def test_both_variants_import_d3_force_and_no_other_layout_engine(
     # task's "no hits" grep over the tests stays clean).
     assert variant.count(f'from "{_D3_FORCE_CDN}"') == 1
     assert (
-        "import { forceSimulation, forceLink, forceManyBody, forceCenter } "
+        "import { forceSimulation, forceLink, forceManyBody, forceCenter, forceX, forceY } "
         f'from "{_D3_FORCE_CDN}";'
     ) in variant
     assert "atlas" not in variant.lower()

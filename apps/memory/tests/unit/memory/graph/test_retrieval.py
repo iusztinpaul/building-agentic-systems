@@ -8,11 +8,14 @@ through untouched. ``expand_graph`` itself is unchanged by this task, so its
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
 from beanie import PydanticObjectId
 
+from tree.config.app_config import app_config
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.memory.graph.retrieval import expand_graph, fetch_full_graph, query_memory
 from tree.memory.rag.types import HybridSearchResult, ScoredHit
@@ -226,27 +229,434 @@ class TestExpandGraph:
         }
 
 
+def _with_sources(row: dict, *sources: object) -> dict:
+    """``row`` with its ``sources`` provenance set (the builders leave it out)."""
+
+    return {**row, "sources": list(sources)}
+
+
+def _graph_edge(
+    edge_id: str,
+    source: str,
+    target: str,
+    *sources: object,
+    edge_type: str = "mentions",
+) -> dict:
+    return {
+        "_id": edge_id,
+        "user_id": _USER,
+        "kind": "edge",
+        "type": edge_type,
+        "source_node_id": source,
+        "target_node_id": target,
+        "sources": list(sources),
+    }
+
+
+def _ids(rows: list[dict]) -> list:
+    return [row["_id"] for row in rows]
+
+
+def _rank_of(rows: list[dict]) -> dict:
+    return {row["_id"]: row["doc_rank"] for row in rows}
+
+
+@pytest.fixture
+def seven_documents(make_document_row) -> list[dict]:
+    """Seven document rows with mixed ISO ``properties.date`` strings.
+
+    Most recent first: d-new (Z suffix), d-tie-a / d-tie-b (same instant,
+    written with different offsets), d-naive (no offset = UTC), d-mid,
+    d-old, d-oldest.
+    """
+
+    return [
+        make_document_row(_USER, "d-mid", date="2026-05-01T00:00:00+00:00"),
+        make_document_row(_USER, "d-tie-b", date="2026-08-01T12:00:00+00:00"),
+        make_document_row(_USER, "d-oldest", date="2024-01-01"),
+        make_document_row(_USER, "d-new", date="2026-09-30T08:00:00Z"),
+        make_document_row(_USER, "d-tie-a", date="2026-08-01T14:00:00+02:00"),
+        make_document_row(_USER, "d-old", date="2025-07-22T07:01:17.640000+00:00"),
+        make_document_row(_USER, "d-naive", date="2026-07-01T00:00:00"),
+    ]
+
+
 class TestFetchFullGraph:
-    async def test_returns_every_node_and_edge_of_the_user(
-        self, make_collection, make_parent_row
+    """The **Full graph** (ADR-011 §7): the ``max_docs`` most-recent documents'
+    subgraphs, every row stamped ``doc_rank``, in four batched reads."""
+
+    async def test_keeps_the_most_recent_documents_ranked_from_one(
+        self, make_collection, seven_documents
     ) -> None:
-        edge = {
-            "_id": "edge1",
-            "user_id": _USER,
-            "kind": "edge",
-            "source_node_id": "p1",
-            "target_node_id": "doc1",
-        }
-        collection = make_collection([make_parent_row(_USER, "p1"), edge])
+        collection = make_collection(seven_documents)
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=3
+        )
+
+        # Assert: newest first; the two rows at the same instant tie-break on
+        # ``_id`` ascending, so the order is deterministic.
+        assert _ids(result.nodes) == ["d-new", "d-tie-a", "d-tie-b"]
+        assert [row["doc_rank"] for row in result.nodes] == [1, 2, 3]
+
+    async def test_ranks_all_documents_when_the_cap_exceeds_them(
+        self, make_collection, seven_documents
+    ) -> None:
+        collection = make_collection(seven_documents)
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=500
+        )
+
+        assert _ids(result.nodes) == [
+            "d-new",
+            "d-tie-a",
+            "d-tie-b",
+            "d-naive",
+            "d-mid",
+            "d-old",
+            "d-oldest",
+        ]
+
+    async def test_a_missing_date_falls_back_to_created_at_then_ranks_last(
+        self, make_collection, make_document_row
+    ) -> None:
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d-neither", date=None),
+                make_document_row(
+                    _USER,
+                    "d-naive-created",
+                    date=None,
+                    # A naive datetime is treated as UTC and must not raise.
+                    created_at=datetime(2026, 3, 1, 9, 0),
+                ),
+                make_document_row(
+                    _USER,
+                    "d-unparsable",
+                    date="last tuesday",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                make_document_row(_USER, "d-dated", date="2026-02-01T00:00:00+00:00"),
+            ]
+        )
 
         result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
 
-        assert [node["_id"] for node in result.nodes] == ["p1"]
-        assert [e["_id"] for e in result.edges] == ["edge1"]
-        assert collection.find_filters == [
-            {"user_id": _USER, "kind": "node"},
-            {"user_id": _USER, "kind": "edge"},
-        ]
+        assert _rank_of(result.nodes) == {
+            "d-naive-created": 1,
+            "d-dated": 2,
+            "d-unparsable": 3,
+            "d-neither": 4,
+        }
+
+    async def test_returns_the_subgraph_of_kept_documents_only(
+        self,
+        make_collection,
+        make_document_row,
+        make_parent_row,
+        make_child_row,
+        make_entity_row,
+    ) -> None:
+        new_src, mid_src, old_src = (
+            PydanticObjectId(),
+            PydanticObjectId(),
+            PydanticObjectId(),
+        )
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
+                make_document_row(_USER, "d2", date="2026-08-01", sources=[mid_src]),
+                make_document_row(_USER, "d3", date="2026-07-01", sources=[old_src]),
+                _with_sources(make_parent_row(_USER, "p1", document_id="d1"), new_src),
+                _with_sources(make_child_row(_USER, "c1", parent_id="p1"), new_src),
+                _with_sources(make_parent_row(_USER, "p3", document_id="d3"), old_src),
+                # Shared across the newest and the oldest document.
+                _with_sources(make_entity_row(_USER, "e-shared"), old_src, new_src),
+                _with_sources(make_entity_row(_USER, "e-old-only"), old_src),
+            ]
+        )
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=2
+        )
+
+        # Assert: d1's parent, child and entities come along; nothing that
+        # belongs only to d3 (beyond the cap of 2) does.
+        assert _rank_of(result.nodes) == {
+            "d1": 1,
+            "d2": 2,
+            "p1": 1,
+            "c1": 1,
+            "e-shared": 1,
+        }
+
+    async def test_a_shared_entity_ranks_with_its_most_recent_document(
+        self, make_collection, make_document_row, make_entity_row
+    ) -> None:
+        srcs = [PydanticObjectId() for _ in range(3)]
+        collection = make_collection(
+            [
+                make_document_row(
+                    _USER, f"d{i + 1}", date=f"2026-0{9 - i}-01", sources=[src]
+                )
+                for i, src in enumerate(srcs)
+            ]
+            + [_with_sources(make_entity_row(_USER, "e-shared"), srcs[2], srcs[0])]
+        )
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert _rank_of(result.nodes)["e-shared"] == 1
+
+    async def test_an_entity_whose_provenance_is_a_hex_string_still_belongs(
+        self, make_collection, make_document_row, make_entity_row
+    ) -> None:
+        """Regression: ``add_entity`` writes ``sources`` as the hex STRING of the
+        document id while document / chunk / edge rows hold the ObjectId, and
+        Mongo's ``$in`` never matches one against the other."""
+
+        new_src, old_src = PydanticObjectId(), PydanticObjectId()
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
+                make_document_row(_USER, "d2", date="2026-08-01", sources=[old_src]),
+                _with_sources(
+                    make_entity_row(_USER, "e-shared"), str(old_src), str(new_src)
+                ),
+            ]
+        )
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert _rank_of(result.nodes)["e-shared"] == 1
+
+    async def test_edges_carry_a_rank_and_need_both_endpoints(
+        self, make_collection, make_document_row, make_parent_row, make_entity_row
+    ) -> None:
+        new_src, old_src, beyond_src = (
+            PydanticObjectId(),
+            PydanticObjectId(),
+            PydanticObjectId(),
+        )
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
+                make_document_row(_USER, "d2", date="2026-08-01", sources=[old_src]),
+                make_document_row(_USER, "d3", date="2026-01-01", sources=[beyond_src]),
+                _with_sources(make_parent_row(_USER, "p1", document_id="d1"), new_src),
+                _with_sources(make_parent_row(_USER, "p2", document_id="d2"), old_src),
+                # Hand-added: no provenance, but an included edge reaches it.
+                _with_sources(make_entity_row(_USER, "e-hand"), *[]),
+                # Hand-added and nothing links it to a kept document.
+                _with_sources(make_entity_row(_USER, "e-orphan"), *[]),
+                # Extracted from d3 only, beyond the cap of 2.
+                _with_sources(make_entity_row(_USER, "e-beyond"), beyond_src),
+                _graph_edge("part1", "p1", "d1", new_src, edge_type="part_of"),
+                _graph_edge("part2", "p2", "d2", old_src, edge_type="part_of"),
+                _graph_edge("cross", "p2", "e-hand", old_src, new_src),
+                _graph_edge("to-beyond", "p2", "e-beyond", old_src),
+                _graph_edge("dangling", "p1", "ghost", new_src),
+                _graph_edge("beyond", "e-beyond", "d3", beyond_src),
+            ]
+        )
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=2
+        )
+
+        # Assert: edge rank = min over its kept provenance; an endpoint only an
+        # edge reaches is hydrated with that edge's rank — unless an excluded
+        # document owns it (e-beyond, d3), which drops that edge too; an edge
+        # whose endpoint does not exist is dropped, so the payload
+        # materialises no `unknown`.
+        assert _rank_of(result.edges) == {"part1": 1, "part2": 2, "cross": 1}
+        nodes = _rank_of(result.nodes)
+        assert nodes["e-hand"] == 1
+        assert "e-beyond" not in nodes
+        assert "e-orphan" not in nodes
+        assert "ghost" not in nodes
+        assert "d3" not in nodes
+
+    async def test_an_edge_shared_with_an_excluded_document_never_pulls_it_in(
+        self, make_collection, make_document_row, make_parent_row, make_entity_row
+    ) -> None:
+        """Regression (QA 165): an edge whose ``sources`` name a kept AND an
+        excluded document is read in step 3; step 4 must not hydrate the
+        excluded document's rows through it."""
+
+        a_src, b_src = PydanticObjectId(), PydanticObjectId()
+        collection = make_collection(
+            [
+                make_document_row(_USER, "doc-a", date="2026-09-01", sources=[a_src]),
+                make_document_row(_USER, "doc-b", date="2026-08-01", sources=[b_src]),
+                _with_sources(make_parent_row(_USER, "pa", document_id="doc-a"), a_src),
+                _with_sources(make_parent_row(_USER, "pb", document_id="doc-b"), b_src),
+                _with_sources(make_entity_row(_USER, "e-b"), str(b_src)),
+                _with_sources(make_entity_row(_USER, "e-hand"), *[]),
+                _graph_edge("pa-a", "pa", "doc-a", a_src, edge_type="part_of"),
+                # B's star, but both documents' provenance on the edge rows.
+                _graph_edge("pb-b", "pb", "doc-b", a_src, b_src, edge_type="part_of"),
+                _graph_edge("pb-e", "pb", "e-b", a_src, b_src),
+                _graph_edge("pa-hand", "pa", "e-hand", a_src),
+            ]
+        )
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=1
+        )
+
+        assert _rank_of(result.nodes) == {"doc-a": 1, "pa": 1, "e-hand": 1}
+        assert _rank_of(result.edges) == {"pa-a": 1, "pa-hand": 1}
+        assert len(collection.find_filters) == 4
+
+    async def test_a_no_provenance_edge_joins_included_nodes_only(
+        self, make_collection, make_document_row, make_entity_row
+    ) -> None:
+        new_src, old_src, beyond_src = (
+            PydanticObjectId(),
+            PydanticObjectId(),
+            PydanticObjectId(),
+        )
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
+                make_document_row(_USER, "d2", date="2026-08-01", sources=[old_src]),
+                make_document_row(_USER, "d3", date="2026-01-01", sources=[beyond_src]),
+                _with_sources(make_entity_row(_USER, "e1"), str(new_src)),
+                _with_sources(make_entity_row(_USER, "e2"), str(old_src)),
+                _with_sources(make_entity_row(_USER, "e3"), str(beyond_src)),
+                _with_sources(make_entity_row(_USER, "e-orphan"), *[]),
+                # Hand-made / merge edges carry no provenance at all.
+                _graph_edge("same", "e1", "e2", edge_type="same_as"),
+                _graph_edge("to-beyond", "e1", "e3", edge_type="same_as"),
+                _graph_edge("to-orphan", "e2", "e-orphan", edge_type="same_as"),
+                _graph_edge("dangling", "e1", "ghost", edge_type="same_as"),
+            ]
+        )
+
+        result = await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=2
+        )
+
+        # Assert: kept when both endpoints are already included, ranked with
+        # the more recent one; it never hydrates an endpoint of its own.
+        assert _rank_of(result.edges) == {"same": 1}
+        nodes = _rank_of(result.nodes)
+        assert "e3" not in nodes
+        assert "e-orphan" not in nodes
+        assert len(collection.find_filters) == 4
+
+    @pytest.mark.parametrize("n_documents", [1, 7])
+    async def test_reads_in_four_batched_finds_whatever_the_document_count(
+        self, make_collection, make_document_row, make_entity_row, n_documents: int
+    ) -> None:
+        srcs = [PydanticObjectId() for _ in range(n_documents)]
+        collection = make_collection(
+            [
+                make_document_row(
+                    _USER, f"d{i}", date=f"2026-01-{i + 1:02d}", sources=[src]
+                )
+                for i, src in enumerate(srcs)
+            ]
+            + [
+                _with_sources(make_entity_row(_USER, f"e{i}"), src)
+                for i, src in enumerate(srcs)
+            ]
+            + [
+                _graph_edge(f"m{i}", f"e{i}", f"d{i}", src)
+                for i, src in enumerate(srcs)
+            ]
+        )
+
+        await fetch_full_graph(
+            _client(collection), _DATABASE, _USER, max_docs=n_documents
+        )
+
+        # Assert: documents -> nodes -> edges -> unreached endpoints, never one
+        # read per document; every filter leads with the tenant.
+        filters = collection.find_filters
+        assert len(filters) == 4
+        assert all(next(iter(f)) == "user_id" for f in filters)
+        assert filters[0] == {"user_id": _USER, "kind": "node", "type": "document"}
+        assert filters[1]["kind"] == "node"
+        assert filters[2]["kind"] == "edge"
+        assert filters[3]["kind"] == "node"
+        assert filters[3]["_id"] == {"$in": []}
+        # Node reads never haul vectors across the wire.
+        projections = collection.find_projections
+        assert [projections[i] for i in (0, 1, 3)] == [{"embedding": 0}] * 3
+        # The provenance lists are exactly the kept ids, in both forms (an
+        # entity's `sources` holds the hex string, see the regression above).
+        expected = {src for src in srcs} | {str(src) for src in srcs}
+        assert set(filters[1]["sources"]["$in"]) == expected
+        # Edges: the kept provenance, OR no provenance at all (hand-made rows).
+        provenance_leg, no_provenance_leg = filters[2]["$or"]
+        assert set(provenance_leg["sources"]["$in"]) == expected
+        assert no_provenance_leg == {"sources": []}
+
+    async def test_no_returned_node_carries_an_embedding(
+        self, make_collection, make_document_row, make_child_row
+    ) -> None:
+        src = PydanticObjectId()
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d1", sources=[src]),
+                _with_sources(make_child_row(_USER, "c1"), src),
+            ]
+        )
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert _ids(result.nodes) == ["d1", "c1"]
+        assert all("embedding" not in row for row in result.nodes)
+
+    async def test_a_document_without_provenance_is_still_ranked_and_embedded(
+        self, make_collection, make_document_row
+    ) -> None:
+        collection = make_collection(
+            [
+                make_document_row(_USER, "d-bare", date="2026-09-01", sources=[]),
+                make_document_row(_USER, "d1", date="2026-08-01"),
+            ]
+        )
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert _rank_of(result.nodes) == {"d-bare": 1, "d1": 2}
+
+    async def test_max_docs_defaults_to_the_configured_cap(
+        self, mocker, make_collection, seven_documents
+    ) -> None:
+        mocker.patch.object(app_config.query, "full_graph_max_docs", 2)
+        collection = make_collection(seven_documents)
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert _ids(result.nodes) == ["d-new", "d-tie-a"]
+
+    async def test_rows_are_stamped_on_copies(
+        self, make_collection, make_document_row
+    ) -> None:
+        row = make_document_row(_USER, "d1")
+        collection = make_collection([row])
+
+        await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert "doc_rank" not in row
+
+    async def test_logs_how_many_documents_were_embedded(
+        self, make_collection, seven_documents, caplog
+    ) -> None:
+        collection = make_collection(seven_documents)
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.graph.retrieval"):
+            await fetch_full_graph(_client(collection), _DATABASE, _USER, max_docs=3)
+
+        assert (
+            "Full graph: embedded 3 of 7 documents (most recent first) → 3 nodes, 0 edges"
+            in caplog.messages
+        )
 
 
 def _empty_cursor():
