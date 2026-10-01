@@ -349,6 +349,14 @@ make memory-query-graph QUERY="Paul Iusztin"
 TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 ```
 
+**Interacting with a graph.** The layout is live: nodes keep settling under d3-force. Dragging a
+node pins it where you drop it (dark centre dot); a double-click unpins it. Shift+click or
+Shift+drag on the stage selects (orange rings), a selection drags as a group, Esc clears. The
+Controls panel (top-left) has Forces sliders that re-settle the layout, Display knobs (node size,
+link thickness, label fade, arrows, edge labels) that only redraw, and Pause / Unpin all / Reset to
+defaults. Nothing is saved: a reload starts fresh. The embedding map runs no simulation, but the
+same selection, pins and Display knobs work there.
+
 #### Embedding map
 
 The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its

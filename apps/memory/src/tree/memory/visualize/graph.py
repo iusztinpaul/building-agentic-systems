@@ -30,7 +30,9 @@ as a **Pinned node** (dark centre dot), which a double-click unpins. A click
 selects a node (orange ring), Shift+click toggles, Shift+drag on the stage
 box-selects, Esc or a stage click clears; dragging a selected node moves the
 whole selection, and every dragged node carries its unpinned direct
-``part_of`` children rigidly.
+``part_of`` children rigidly. A collapsible Controls panel (top-left), seeded
+from ``payload["controls"]``, tunes the forces (reheat), the display (redraw
+only) and offers Pause / Unpin all / Reset to defaults.
 
 Needs network at VIEW time (the libraries load from the CDN rather than being
 vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
@@ -436,6 +438,27 @@ _GRAPH_STYLE = """\
     #legend span.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     #legend span.size { margin-left: auto; padding-left: 10px; color: var(--muted); }
 
+    /* Controls panel: top-left (the legend owns the top-right). The toggle
+       hides #panel-body, leaving just the button. */
+    #panel { position: absolute; top: 10px; left: 12px; z-index: 2; width: 190px;
+      box-sizing: border-box; font-size: 11px; background: rgba(255,255,255,0.92);
+      border: 1px solid var(--border); padding: 6px 10px; border-radius: 10px;
+      max-height: calc(100% - 20px); overflow: auto; }
+    #panel:has(#panel-body[hidden]) { width: auto; }   /* collapsed: hug the button */
+    #panel button { padding: 3px 8px; border-radius: 6px; cursor: pointer; font-size: 11px;
+      background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+    #panel button:hover { border-color: var(--accent1); }
+    #panel .panel-title { color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px;
+      font-size: 9px; margin: 8px 0 3px; }
+    #panel .panel-row { padding: 2px 0; }
+    #panel .panel-head { display: flex; justify-content: space-between; gap: 8px; }
+    #panel .panel-head span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+    #panel .panel-check { display: flex; align-items: center; justify-content: space-between;
+      padding: 2px 0; cursor: pointer; }
+    #panel input { margin: 2px 0 0; accent-color: var(--accent1); }
+    #panel input[type=range] { width: 100%; }
+    #panel .panel-buttons { display: flex; flex-wrap: wrap; gap: 5px; }
+
     /* Hover tooltip: full, untruncated name + type/subtype + curated metadata. */
     #tooltip { position: absolute; z-index: 5; display: none; pointer-events: none;
       max-width: 300px; background: rgba(255,255,255,0.97); border: 1px solid var(--border);
@@ -472,6 +495,10 @@ _BODY_MARKUP = """\
     <div id="stage">
       <div id="sigma-container"></div>
       <canvas id="overlay"></canvas>
+      <div id="panel">
+        <button id="panel-toggle" type="button">Controls</button>
+        <div id="panel-body"></div>
+      </div>
       <div id="legend"></div>
       <div id="tooltip"></div>
       <div id="zoom">
@@ -507,6 +534,11 @@ _RENDER_JS = """\
       const { nodes, edges } = payload;
       const container = document.getElementById("sigma-container");
       container.innerHTML = "";
+      // The iframe calls render() once per tool result: rebuild the panel's
+      // rows (bound to the previous renderer) from this payload.
+      const panelBody = document.getElementById("panel-body");
+      panelBody.textContent = "";
+      document.getElementById("panel").hidden = !nodes.length;
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
 
@@ -563,6 +595,12 @@ _RENDER_JS = """\
           .force("repel", forceManyBody().strength(-forces.repel * REPEL_SCALE))
           .force("link", forceLink(links).id((s) => s.id)
             .strength(forces.link).distance(forces.linkDistance));
+      }
+      // Every reheat (a force slider, an unpin, Unpin all, Resume) goes
+      // through here, so Pause holds until the operator resumes.
+      let paused = false;
+      function reheat() {
+        if (sim && !paused) sim.alpha(0.5).restart();
       }
 
       // Build the graphology graph. Multi + directed so parallel edges and
@@ -651,20 +689,33 @@ _RENDER_JS = """\
 
       // --- Selection: click selects one node, Shift+click toggles it, a
       //     click on the empty stage or Esc clears. Details show on hover. ---
-      renderer.on("clickNode", ({ node, event }) => {
-        if (pointerMoved) return;
-        if (!event.original.shiftKey) state.selection = new Set([node]);
-        else if (!state.selection.delete(node)) state.selection.add(node);
+      // ONE click path per target, shared with the double-click handlers below.
+      function clickOnNode(node, shiftKey) {
+        if (shiftKey) { if (!state.selection.delete(node)) state.selection.add(node); }
+        else state.selection = new Set([node]);
         renderer.refresh();
-      });
+      }
       // A Shift+click that misses a node keeps the selection being built.
-      renderer.on("clickStage", ({ event }) => {
-        if (pointerMoved || event.original.shiftKey) return;
+      function clickOnStage(shiftKey) {
+        if (shiftKey) return;
         state.selection.clear();
         renderer.refresh();
+      }
+      renderer.on("clickNode", ({ node, event }) => {
+        if (pointerMoved) return;
+        clickOnNode(node, event.original.shiftKey);
       });
+      renderer.on("clickStage", ({ event }) => {
+        if (pointerMoved) return;
+        clickOnStage(event.original.shiftKey);
+      });
+      // Esc mid-marquee cancels the box and keeps the selection. The button is
+      // still held, so the box is only MARKED cancelled: its moves stay
+      // swallowed (no pan) until the release.
       document.addEventListener("keydown", (e) => {
-        if (e.key !== "Escape" || !state.selection.size) return;
+        if (e.key !== "Escape") return;
+        if (marquee) { marquee.cancelled = true; drawOverlay(); return; }
+        if (!state.selection.size) return;
         state.selection.clear();
         renderer.refresh();
       });
@@ -810,7 +861,7 @@ _RENDER_JS = """\
           return { s, x0: at.x, y0: at.y, carried: carried.has(id) };
         });
         drag = { carried, members, anchor: renderer.viewportToGraph({ x: press.x, y: press.y }) };
-        if (sim) sim.alphaTarget(0.3).restart();
+        if (sim && !paused) sim.alphaTarget(0.3).restart();   // paused: only the drag set moves
       }
 
       const captor = renderer.getMouseCaptor();
@@ -819,6 +870,12 @@ _RENDER_JS = """\
         e.preventSigmaDefault();          // no camera pan under a held node or a marquee
         e.original.preventDefault();
         e.original.stopPropagation();
+        // A lost mouseup (focus loss, an OS dialog): the button is no longer
+        // held, so release sigma's captor — its stuck press would pan the
+        // camera under the bare pointer — which emits the mouseup below and
+        // ends the gesture where it was last held.
+        if (e.original.buttons === 0) { captor.handleUp(e.original); return; }
+        if (marquee && marquee.cancelled) return;
         const from = press || { x: marquee.x0, y: marquee.y0 };
         if (!pointerMoved && Math.hypot(e.x - from.x, e.y - from.y) < DRAG_THRESHOLD) return;
         if (!pointerMoved) {
@@ -860,7 +917,7 @@ _RENDER_JS = """\
         if (marquee) {
           const box = marquee;
           marquee = null;
-          if (pointerMoved) selectInside(box); else drawOverlay();
+          if (pointerMoved && !box.cancelled) selectInside(box); else drawOverlay();
         }
         if (drag) {
           // HELD nodes keep fx/fy — Pinned nodes; the CARRIED children are
@@ -873,16 +930,26 @@ _RENDER_JS = """\
         press = null;
       });
 
-      // --- Double-click a Pinned node to unpin it; on an unpinned node the
-      //     double-click keeps Sigma's default zoom. ---
+      // --- Double clicks. Sigma reads ANY two clicks <300 ms apart as a
+      //     double-click (a drag's trailing click counts as the first) and
+      //     emits no click for the second one. So its zoom never runs and the
+      //     second click acts as a click — except a plain one on a Pinned
+      //     node, which unpins it. ---
       renderer.on("doubleClickNode", (e) => {
+        e.preventSigmaDefault();
+        if (pointerMoved) return;            // the second click IS a drag's trailing click
+        const shiftKey = e.event.original.shiftKey;
         const s = simById.get(e.node);
-        if (!s || s.fx == null) return;
+        if (shiftKey || !s || s.fx == null) { clickOnNode(e.node, shiftKey); return; }
         s.fx = null;
         s.fy = null;
-        e.preventSigmaDefault();
-        if (sim) sim.alpha(0.5).restart();   // drift back into the layout
+        reheat();                            // drift back into the layout
         drawOverlay();                       // the map re-renders nothing by itself
+      });
+      renderer.on("doubleClickStage", (e) => {
+        e.preventSigmaDefault();
+        if (pointerMoved) return;
+        clickOnStage(e.event.original.shiftKey);
       });
 
       // --- Legend: the payload's own rows (Embedding map), else one swatch
@@ -1016,7 +1083,7 @@ _RENDER_JS = """\
           overlayCtx.stroke();
         }
         // The marquee while Shift+dragging: a faint fill, a 1 px dashed border.
-        if (marquee) {
+        if (marquee && !marquee.cancelled) {
           const x = Math.min(marquee.x0, marquee.x1), y = Math.min(marquee.y0, marquee.y1);
           const w = Math.abs(marquee.x1 - marquee.x0), h = Math.abs(marquee.y1 - marquee.y0);
           overlayCtx.fillStyle = "rgba(234,88,12,0.08)";
@@ -1027,6 +1094,115 @@ _RENDER_JS = """\
           overlayCtx.setLineDash([]);
         }
       }
+      // --- Controls panel (ADR-011 §6): every row starts from payload.controls
+      //     — the template has no default of its own. A section is a titled
+      //     block appended to #panel-body in build order. Force rows reheat
+      //     the layout; Display rows only redraw it. ---
+      document.getElementById("panel-toggle").onclick = () => { panelBody.hidden = !panelBody.hidden; };
+      const resets = [];   // one per row: restore its load value and apply it
+      function panelSection(title) {
+        const section = document.createElement("div");
+        const head = document.createElement("div");
+        head.className = "panel-title";
+        head.textContent = title;
+        section.appendChild(head);
+        panelBody.appendChild(section);
+        return section;
+      }
+      // A labelled slider with a live readout; `apply` gets the number on
+      // every move and on Reset.
+      function rangeRow(section, label, min, max, step, value, decimals, apply) {
+        const row = document.createElement("div");
+        row.className = "panel-row";
+        const head = document.createElement("div");
+        head.className = "panel-head";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const readout = document.createElement("span");
+        const input = document.createElement("input");
+        input.type = "range";
+        input.min = min;    // bounds first: a range input clamps its value to them
+        input.max = max;
+        input.step = step;
+        const show = (v) => { input.value = v; readout.textContent = v.toFixed(decimals); };
+        show(value);
+        input.oninput = () => { const v = parseFloat(input.value); show(v); apply(v); };
+        resets.push(() => { show(value); apply(value); });
+        head.append(name, readout);
+        row.append(head, input);
+        section.appendChild(row);
+      }
+      function checkboxRow(section, label, checked, apply) {
+        const row = document.createElement("label");
+        row.className = "panel-check";
+        const name = document.createElement("span");
+        name.textContent = label;
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = checked;
+        input.onchange = () => apply(input.checked);
+        resets.push(() => { input.checked = checked; apply(checked); });
+        row.append(name, input);
+        section.appendChild(row);
+      }
+      function actionButton(row, label, onClick) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.onclick = onClick;
+        row.appendChild(button);
+        return button;
+      }
+
+      // Forces — a live layout only (the Embedding map ships no forces).
+      if (forces) {
+        const section = panelSection("Forces");
+        rangeRow(section, "Centre force", 0, 1, 0.01, forces.centre, 2,
+          (v) => { sim.force("centre").strength(v); reheat(); });
+        rangeRow(section, "Repel force", 0, 20, 0.01, forces.repel, 2,
+          (v) => { sim.force("repel").strength(-v * REPEL_SCALE); reheat(); });
+        rangeRow(section, "Link force", 0, 1, 0.01, forces.link, 2,
+          (v) => { sim.force("link").strength(v); reheat(); });
+        rangeRow(section, "Link distance", 0, 500, 1, forces.linkDistance, 0,
+          (v) => { sim.force("link").distance(v); reheat(); });
+      }
+
+      // Display — every payload; redraw only, never reheat.
+      const displaySection = panelSection("Display");
+      rangeRow(displaySection, "Node size", 0.2, 3, 0.05, display.nodeSize, 2,
+        (v) => { display.nodeSize = v; renderer.refresh(); });
+      rangeRow(displaySection, "Link thickness", 0.2, 3, 0.05, display.linkThickness, 2,
+        (v) => { display.linkThickness = v; renderer.refresh(); });
+      rangeRow(displaySection, "Label fade", 0, 12, 0.5, display.labelFade, 1,
+        (v) => renderer.setSetting("labelRenderedSizeThreshold", v));
+      checkboxRow(displaySection, "Arrows", display.arrows,
+        (on) => { display.arrows = on; renderer.refresh(); });
+      checkboxRow(displaySection, "Edge labels", display.edgeLabels,
+        (on) => renderer.setSetting("renderEdgeLabels", on));
+
+      // Actions. Reset restores every row (the force rows' reheats land in
+      // one synchronous burst = one reheat); it neither unpins nor resumes.
+      const actionRow = document.createElement("div");
+      actionRow.className = "panel-buttons";
+      panelSection("Actions").appendChild(actionRow);
+      if (forces) {
+        const pause = actionButton(actionRow, "Pause", () => {
+          paused = !paused;
+          pause.textContent = paused ? "Resume" : "Pause";
+          // Resume REHEATS: a bare restart ticks once on a cooled layout.
+          if (paused) { sim.stop(); document.body.dataset.sim = "paused"; }
+          else reheat();
+        });
+      }
+      actionButton(actionRow, "Unpin all", () => {
+        for (const s of simNodes) { s.fx = null; s.fy = null; }
+        drawOverlay();                       // the map re-renders nothing by itself
+        reheat();
+      });
+      actionButton(actionRow, "Reset to defaults", () => {
+        for (const reset of resets) reset();
+      });
+
       renderer.on("afterRender", drawOverlay);   // pan / zoom / drag / tick / refresh
       renderer.on("resize", drawOverlay);        // container size changed
       drawOverlay();

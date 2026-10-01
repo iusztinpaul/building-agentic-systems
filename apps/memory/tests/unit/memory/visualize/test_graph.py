@@ -23,7 +23,9 @@ from tree.memory.visualize.graph import (
     _DEFAULT_DISPLAY,
     _DEFAULT_FORCES,
     _FALLBACK_COLOUR,
+    _BODY_MARKUP,
     _FILE_HTML_BASE,
+    _GRAPH_STYLE,
     _RENDER_JS,
     _default_graph_path,
     _render_graph_file,
@@ -920,7 +922,7 @@ def test_the_overlay_draws_hulls_pins_rings_then_the_marquee() -> None:
         body.index("convexHull("),
         body.index("// Pin dots"),
         body.index("// Selection rings"),
-        body.index("if (marquee)"),
+        body.index("if (marquee && !marquee.cancelled)"),
     ]
     assert order == sorted(order)
     assert "renderer.scaleSize(shown.size) + 3" in body
@@ -941,4 +943,306 @@ def test_only_a_left_button_press_starts_a_drag_or_a_marquee(press: str) -> None
     body = _js_block(press)
     assert body.index("if (e.event.original.button !== 0) return;") < body.index(
         "pointerMoved = false;"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fast clicks, Esc on a marquee, a lost mouseup (added by orchestrator, 164)
+# ---------------------------------------------------------------------------
+
+
+def test_a_double_click_never_zooms() -> None:
+    # Assert: Sigma reads ANY two clicks <300 ms apart as a double-click, so
+    # its default zoom would fire on fast clicks — both handlers prevent it
+    # before anything else.
+    for handler in ('renderer.on("doubleClickNode"', 'renderer.on("doubleClickStage"'):
+        body = _js_block(handler)
+        assert body.index("e.preventSigmaDefault();") < body.index("if (pointerMoved)")
+
+
+def test_clicks_and_double_clicks_share_one_click_path() -> None:
+    # Assert (amended by orchestrator): the second click of a fast pair acts
+    # as a click — through the SAME helper clickNode / clickStage use.
+    assert "clickOnNode(node, event.original.shiftKey);" in _js_block(
+        'renderer.on("clickNode"'
+    )
+    assert "clickOnStage(event.original.shiftKey);" in _js_block(
+        'renderer.on("clickStage"'
+    )
+    assert "clickOnStage(e.event.original.shiftKey);" in _js_block(
+        'renderer.on("doubleClickStage"'
+    )
+
+
+def test_a_double_click_acts_as_a_click_unless_it_unpins() -> None:
+    body = _js_block('renderer.on("doubleClickNode"')
+
+    # Assert: Shift, or an unpinned node, takes the click path; only a plain
+    # double-click on a Pinned node unpins it.
+    assert (
+        "if (shiftKey || !s || s.fx == null) { clickOnNode(e.node, shiftKey); return; }"
+        in body
+    )
+    assert body.index("clickOnNode(e.node, shiftKey)") < body.index("s.fx = null;")
+    assert "reheat();" in body
+    assert ".restart(" not in body  # Pause holds: the reheat helper is guarded
+
+
+@pytest.mark.parametrize(
+    "handler", ['renderer.on("doubleClickNode"', 'renderer.on("doubleClickStage"']
+)
+def test_a_drags_trailing_click_never_completes_a_double_click(handler: str) -> None:
+    # Assert: the press that starts the second click resets the guard, so only
+    # a pair whose second click IS a drag's trailing click is ignored (no
+    # instant unpin of a just-dropped node, no selection change).
+    assert "if (pointerMoved) return;" in _js_block(handler)
+
+
+def test_esc_cancels_an_active_marquee_and_keeps_the_selection() -> None:
+    body = _js_block('document.addEventListener("keydown"')
+
+    # Assert: the marquee check runs first and returns before the selection
+    # is cleared; the button is still held, so the box is MARKED cancelled
+    # (moves stay swallowed — no pan) rather than dropped.
+    assert "if (marquee) { marquee.cancelled = true; drawOverlay(); return; }" in body
+    assert body.index("marquee.cancelled = true") < body.index(
+        "state.selection.clear()"
+    )
+
+
+def test_a_cancelled_marquee_is_neither_drawn_nor_applied() -> None:
+    assert "if (marquee && !marquee.cancelled)" in _js_block("function drawOverlay()")
+    assert "if (pointerMoved && !box.cancelled) selectInside(box);" in _js_block(
+        'captor.on("mouseup"'
+    )
+    assert "if (marquee && marquee.cancelled) return;" in _js_block(
+        'captor.on("mousemovebody"'
+    )
+
+
+def test_a_lost_mouseup_ends_the_gesture_at_the_last_held_position() -> None:
+    body = _js_block('captor.on("mousemovebody"')
+
+    # Assert: a buttonless move releases sigma's captor too (its stuck press
+    # would otherwise pan the camera under the bare pointer), which emits the
+    # ONE mouseup our handler already listens to — before this move's
+    # coordinates are applied.
+    guard = "if (e.original.buttons === 0) { captor.handleUp(e.original); return; }"
+    assert guard in body
+    assert body.index("e.preventSigmaDefault();") < body.index(guard)
+    assert body.index(guard) < body.index("marquee.x1 = e.x;")
+    assert body.index(guard) < body.index("renderer.viewportToGraph(e)")
+
+
+# ---------------------------------------------------------------------------
+# Controls panel (task 164, ADR-011 §6) — Forces · Display · Actions
+# ---------------------------------------------------------------------------
+
+
+def _panel_js() -> str:
+    """The panel-building JS: from its section header comment to the end of render()."""
+
+    begin = _RENDER_JS.index("// --- Controls panel")
+    return _RENDER_JS[
+        begin : _RENDER_JS.index('renderer.on("afterRender", drawOverlay)')
+    ]
+
+
+def _display_js() -> str:
+    """The Display section: every row between its title and the Actions comment."""
+
+    panel = _panel_js()
+    return panel[panel.index('panelSection("Display")') : panel.index("// Actions.")]
+
+
+def _forces_gated_js() -> str:
+    """Every ``if (forces) {`` block of the panel, concatenated."""
+
+    panel = _panel_js()
+    blocks, at = [], panel.find("if (forces) {")
+    while at != -1:
+        blocks.append(panel[at : panel.index("\n      }", at)])
+        at = panel.find("if (forces) {", at + 1)
+    return "\n".join(blocks)
+
+
+def test_the_panel_markup_is_a_toggle_and_a_body_at_the_top_left() -> None:
+    # Assert: one button + one body, so a section can be prepended to the
+    # body (task 165's Documents slider) without touching the toggle.
+    assert (
+        '<div id="panel">\n'
+        '        <button id="panel-toggle" type="button">Controls</button>\n'
+        '        <div id="panel-body"></div>\n'
+        "      </div>"
+    ) in _BODY_MARKUP
+    assert (
+        "#panel { position: absolute; top: 10px; left: 12px; z-index: 2; width: 190px;"
+        in _GRAPH_STYLE
+    )
+    assert "accent-color: var(--accent1);" in _GRAPH_STYLE
+    # Collapsed, the card hugs the button instead of staying 190 px wide.
+    assert "#panel:has(#panel-body[hidden]) { width: auto; }" in _GRAPH_STYLE
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        'id="panel"',
+        'id="panel-toggle"',
+        "function rangeRow",
+        "function checkboxRow",
+        '"Centre force"',
+        '"Repel force"',
+        '"Link force"',
+        '"Link distance"',
+        '"Node size"',
+        '"Link thickness"',
+        '"Label fade"',
+        '"Arrows"',
+        '"Edge labels"',
+        '"Pause"',
+        '"Resume"',
+        '"Unpin all"',
+        '"Reset to defaults"',
+        'renderer.setSetting("labelRenderedSizeThreshold", v)',
+        'renderer.setSetting("renderEdgeLabels", on)',
+        'document.body.dataset.sim = "paused"',
+    ],
+)
+def test_template_carries_the_controls_panel(token: str) -> None:
+    assert token in _FILE_HTML_BASE
+
+
+def test_the_toggle_collapses_the_body_to_just_the_button() -> None:
+    assert (
+        'document.getElementById("panel-toggle").onclick = () => '
+        "{ panelBody.hidden = !panelBody.hidden; };"
+    ) in _panel_js()
+
+
+def test_the_panel_is_rebuilt_per_render() -> None:
+    # Assert: the iframe calls render() once per tool result — the old rows
+    # (bound to the previous renderer) are cleared before the early return.
+    assert _RENDER_JS.index('panelBody.textContent = "";') < _RENDER_JS.index(
+        "if (!nodes.length)"
+    )
+
+
+def test_the_forces_pause_and_force_reset_are_gated_on_controls_forces() -> None:
+    gated = _forces_gated_js()
+
+    # Assert: a payload without controls.forces (the Embedding map) gets no
+    # Forces section, no Pause/Resume and no force rows for Reset to restore;
+    # Display and Unpin all are emitted for every payload.
+    assert "const forces = isFixed ? null : payload.controls.forces;" in _RENDER_JS
+    for label in ('"Centre force"', '"Repel force"', '"Link force"', '"Link distance"'):
+        assert label in gated
+    assert '"Pause"' in gated
+    assert '"Resume"' in gated
+    for ungated in ('"Node size"', '"Arrows"', '"Unpin all"', '"Reset to defaults"'):
+        assert ungated not in gated
+        assert ungated in _panel_js()
+
+
+def test_forces_callbacks_reheat_and_display_callbacks_only_refresh() -> None:
+    gated = _forces_gated_js()
+    display = _display_js()
+
+    # Assert: pulse's split — a force change re-settles the layout, a display
+    # change only redraws it.
+    assert gated.count("reheat(); }") == 4
+    assert "reheat" not in display
+    assert display.count("renderer.refresh();") == 3
+    assert display.count("renderer.setSetting(") == 2
+
+
+@pytest.mark.parametrize(
+    "apply",
+    [
+        'sim.force("centre").strength(v)',
+        'sim.force("repel").strength(-v * REPEL_SCALE)',
+        'sim.force("link").strength(v)',
+        'sim.force("link").distance(v)',
+    ],
+)
+def test_each_force_slider_drives_its_force(apply: str) -> None:
+    assert apply in _forces_gated_js()
+
+
+def test_the_slider_defaults_are_read_from_the_payload() -> None:
+    panel = _panel_js()
+
+    # Assert: every row starts from payload.controls (ADR-011 §6 — the
+    # template has no default of its own); none of the Python defaults
+    # (centre 0.2 is also Node size's min, so it is not a usable probe)
+    # appears as a literal in the panel code.
+    for ref in (
+        "forces.centre, 2,",
+        "forces.repel, 2,",
+        "forces.link, 2,",
+        "forces.linkDistance, 0,",
+        "display.nodeSize, 2,",
+        "display.linkThickness, 2,",
+        "display.labelFade, 1,",
+        "display.arrows,",
+        "display.edgeLabels,",
+    ):
+        assert ref in panel
+    for literal in ("80", "0.3", "8.0", "8,"):
+        assert literal not in panel
+
+
+def test_a_slider_sets_its_bounds_before_its_value() -> None:
+    body = _js_block("function rangeRow(")
+
+    # Assert: a range input clamps to its CURRENT bounds (default 0-100), so a
+    # Link distance of 300 set before max = 500 would read 100.
+    assert body.index("input.max = max;") < body.index("show(value);")
+    assert "readout.textContent = v.toFixed(decimals);" in body
+
+
+def test_every_restart_goes_through_the_pause_guard() -> None:
+    # Assert: sliders, unpin, Unpin all and Resume reheat through ONE guarded
+    # helper; a drag while paused moves only the drag set.
+    assert "if (sim && !paused) sim.alpha(0.5).restart();" in _js_block(
+        "function reheat()"
+    )
+    assert "if (sim && !paused) sim.alphaTarget(0.3).restart();" in _js_block(
+        "function startDrag()"
+    )
+    assert _RENDER_JS.count(".restart()") == 2
+
+
+def test_pause_stops_the_simulation_and_resume_reheats_it() -> None:
+    gated = _forces_gated_js()
+
+    # Assert: Resume REHEATS rather than sim.restart(): a cooled simulation
+    # (alpha < alphaMin) would tick once and stop.
+    assert "paused = !paused;" in gated
+    assert 'pause.textContent = paused ? "Resume" : "Pause";' in gated
+    assert 'if (paused) { sim.stop(); document.body.dataset.sim = "paused"; }' in gated
+    assert "else reheat();" in gated
+
+
+def test_unpin_all_frees_every_node_redraws_and_reheats() -> None:
+    panel = _panel_js()
+    body = panel[panel.index('"Unpin all"') : panel.index('"Reset to defaults"')]
+
+    assert "for (const s of simNodes) { s.fx = null; s.fy = null; }" in body
+    assert "drawOverlay();" in body
+    assert "reheat();" in body
+
+
+def test_reset_restores_every_control_but_neither_unpins_nor_resumes() -> None:
+    panel = _panel_js()
+    body = panel[panel.index('"Reset to defaults"') :]
+
+    assert "for (const reset of resets) reset();" in body
+    assert "fx" not in body
+    assert "paused" not in body
+    assert "resets.push(() => { show(value); apply(value); });" in _js_block(
+        "function rangeRow("
+    )
+    assert "resets.push(() => { input.checked = checked; apply(checked); });" in (
+        _js_block("function checkboxRow(")
     )
