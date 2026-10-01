@@ -1,6 +1,6 @@
 # ADR-005: Single Browser-Side Graph Rendering Stack
 
-- **Status:** Accepted — Decision 3's module paths amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (renderer in `tree.memory.visualize.graph`, dual-delivery helper in `tree.mcp.viz_app`); the single-renderer decision stands and now also draws the Embedding map
+- **Status:** Accepted — Decision 3's module paths amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (renderer in `tree.memory.visualize.graph`, dual-delivery helper in `tree.mcp.viz_app`); the single-renderer decision stands and now also draws the Embedding map; Decision 1's layout library and Decision 2's import list are amended by [011](011_live_force_layout_and_direct_manipulation.md) (graphology-layout-forceatlas2 → d3-force, live simulation); the single-renderer and CDN decisions stand
 - **Date:** 2026-08-26
 - **Deciders:** Paul (project owner)
 - **Context references:**
