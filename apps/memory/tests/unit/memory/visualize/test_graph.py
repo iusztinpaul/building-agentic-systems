@@ -11,6 +11,7 @@ result channels, ``graphs://`` resource) live in
 ``tests/unit/mcp/test_viz_app.py``.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -905,11 +906,14 @@ def test_every_press_resets_the_trailing_click_guard() -> None:
 
 def test_a_plain_stage_drag_still_pans() -> None:
     # Assert: only a Shift+press starts a marquee; without one the move
-    # handler leaves sigma's default (the pan) alone.
-    assert "if (!e.event.original.shiftKey) return;" in _js_block(
+    # handler leaves sigma's default (the pan) alone — the plain press is only
+    # remembered (task 166) and its branch returns before preventSigmaDefault.
+    assert "if (!e.event.original.shiftKey) { pan = " in _js_block(
         "function startMarquee(e)"
     )
-    assert "if (!press && !marquee) return;" in _js_block('captor.on("mousemovebody"')
+    move = _js_block('captor.on("mousemovebody"')
+    assert "if (!press && !marquee) return;" in move
+    assert move.index("if (pan) {") < move.index("preventSigmaDefault")
 
 
 def test_the_marquee_replaces_the_selection_with_the_nodes_inside_it() -> None:
@@ -1594,13 +1598,27 @@ def test_the_gravity_row_sits_after_centre_force_and_resets_like_any_row() -> No
 def test_a_reveal_arms_one_auto_fit_and_hiding_never_fits() -> None:
     body = _js_block("function applyDocumentLimit(n)")
 
-    # Assert: only n > previous n arms it; a running sim fits when it settles,
-    # no running sim (paused / map) fits at once.
+    # Assert: only n > previous n arms it; a live layout fits when it
+    # settles, no running sim (paused / map) fits at once.
     assert "const revealing = n > docLimit;" in body
     assert body.index("const revealing = n > docLimit;") < body.index("docLimit = n;")
     assert "if (revealing) {" in body
-    assert "if (sim && !paused) fitOnSettle = true;" in body
-    assert "else autoFit();" in body
+    assert "if (sim) fitOnSettle = true;" in body
+    assert "if (!sim || paused) autoFit();" in body
+
+
+def test_a_paused_reveal_fits_now_and_again_at_the_settle_after_resume() -> None:
+    # added by orchestrator (task 166): Pause -> reveal -> Resume must not
+    # drift off screen once the resumed layout expands past the first fit.
+    body = _js_block("function applyDocumentLimit(n)")
+    reveal = body[body.index("if (revealing) {") :]
+
+    # Assert: a paused live layout BOTH fits at once AND stays armed — the
+    # sim.on("end") after Resume's reheat runs the second (and last) fit.
+    assert reveal.index("if (sim) fitOnSettle = true;") < reveal.index(
+        "if (!sim || paused) autoFit();"
+    )
+    assert "else autoFit();" not in reveal
 
 
 def test_the_armed_fit_runs_once_when_the_layout_settles() -> None:
@@ -1626,3 +1644,86 @@ def test_a_drag_or_marquee_cancels_an_armed_auto_fit() -> None:
 
     gesture = body[body.index("if (!pointerMoved) {") :]
     assert "fitOnSettle = false;" in gesture[: gesture.index("}")]
+
+
+def test_a_plain_stage_press_is_remembered_as_a_pan() -> None:
+    body = _js_block("function startMarquee(e)")
+
+    # Assert: an unshifted stage (or edge) press records where it started and
+    # still leaves the camera pan to Sigma.
+    assert (
+        "if (!e.event.original.shiftKey) { pan = { x: e.event.x, y: e.event.y }; return; }"
+        in body
+    )
+
+
+def test_a_plain_pan_cancels_an_armed_auto_fit_and_keeps_its_camera() -> None:
+    # added by orchestrator (task 166): the user's pan wins over the fit.
+    body = _js_block('captor.on("mousemovebody"')
+    pan = body[body.index("if (pan) {") : body.index("if (!press && !marquee) return;")]
+
+    # Assert: checked BEFORE the early return; past the drag threshold it
+    # disarms the fit; a lost mouseup drops it; Sigma's pan is never prevented.
+    assert "if (e.original.buttons === 0) pan = null;" in pan
+    assert (
+        "else if (Math.hypot(e.x - pan.x, e.y - pan.y) >= DRAG_THRESHOLD) "
+        "{ fitOnSettle = false; pan = null; }" in pan
+    )
+    assert "preventSigmaDefault" not in pan
+
+
+def test_a_release_ends_the_pan() -> None:
+    body = _js_block('captor.on("mouseup"')
+
+    assert "pan = null;" in body
+
+
+# --- Hidden child count (task 166, ADR-011 §8) ---
+
+
+def test_only_a_stamped_parent_carries_child_count() -> None:
+    stamped = {**_node(f"{_UID}:chunk:p1", "chunk"), "child_count": 23}
+    plain = _node(f"{_UID}:chunk:p2", "chunk")
+
+    payload = to_graph_payload(QueryResult(nodes=[stamped, plain], edges=[]))
+
+    by_id = {n["id"]: n for n in payload["nodes"]}
+    assert by_id[stamped["_id"]]["childCount"] == 23
+    assert "childCount" not in by_id[plain["_id"]]
+
+
+def test_an_unstamped_payload_is_unchanged_by_the_child_count() -> None:
+    payload = to_graph_payload(_seed_result())
+
+    assert all("childCount" not in node for node in payload["nodes"])
+
+
+def test_the_hover_card_ends_with_the_hidden_child_count() -> None:
+    body = _js_block('renderer.on("enterNode"')
+
+    # Assert: one extra row through metaRows, after the curated meta, only
+    # when the payload carries the count.
+    line = 'if (n.childCount != null) card["child chunks"] = n.childCount + " (not shown)";'
+    assert line in body
+    assert (
+        body.index("const card = Object.assign({ type: n.type }, n.meta);")
+        < body.index(line)
+        < body.index("metaRows(card)")
+    )
+
+
+@pytest.mark.parametrize("token", ["childCount", '"child chunks"', '" (not shown)"'])
+def test_template_carries_the_child_count_row(token: str) -> None:
+    assert token in _FILE_HTML_BASE
+
+
+def test_the_closure_marker_never_reaches_the_payload() -> None:
+    marked = {**_node(f"{_UID}:document:d1", "document"), "_closure_added": True}
+    edge = {
+        **_edge(f"{_UID}:chunk:p1", "part_of", marked["_id"]),
+        "_closure_added": True,
+    }
+
+    payload = to_graph_payload(QueryResult(nodes=[marked], edges=[edge]))
+
+    assert "_closure_added" not in json.dumps(payload)

@@ -54,6 +54,7 @@ from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
 from tree.memory.graph.nl_query import execute_nl_query
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
+from tree.memory.graph.retrieval import ranked_rows
 from tree.memory.visualize.graph import to_graph_payload
 from tree.memory.graph.review import (
     MergeStrategy,
@@ -319,7 +320,8 @@ async def search_memory(
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
         return _retrieval_error("search_memory", exc)
-    docs = result.nodes + result.edges
+    # Hop rows first, the part_of closure after them (ADR-011 §8).
+    docs = ranked_rows(result)
     if len(docs) > max_results:
         docs = docs[:max_results]
     output = _serialize(docs)

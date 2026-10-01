@@ -12,7 +12,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from contextlib import nullcontext
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from bson import ObjectId
@@ -30,9 +31,13 @@ from tree.mcp.graph_tools import (
     search_memory,
     visualize_memory_graph,
 )
+from tests.unit.memory.conftest import FakeMemoryCollection, chunk_star_rows
+from tree.entities.memory import MEMORY_COLLECTION
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import GRAPH_VIEW_URI
 from tree.memory.rag.search import SearchUnavailableError
+from tree.memory.graph import retrieval
+from tree.memory.graph.retrieval import expand_graph
 from tree.memory.types import QueryResult
 
 
@@ -250,6 +255,77 @@ class TestGraphToolsDualDelivery:
         assert not isinstance(result, ToolResult)
         assert result.startswith(_serialize(docs))
         assert "Visualization skipped" in result
+
+
+# --- search_memory keeps ranking first under truncation (task 166, ADR-011 §8):
+# the REAL expand_graph over the star fixture — 6 hop nodes + 5 hop edges, the
+# part_of closure adds p3 and 3 edges — with the closure on vs patched off.
+
+
+async def _no_closure(collection, user_id, nodes, edges):
+    return nodes, edges
+
+
+async def _star_search(
+    mocker, max_results: int, *, closure: bool = True, **kwargs: Any
+) -> str | ToolResult:
+    client = {
+        "test_db": {
+            MEMORY_COLLECTION: FakeMemoryCollection(chunk_star_rows(_GRAPH_UID))
+        }
+    }
+
+    async def _query(**call: Any) -> QueryResult:
+        return await expand_graph(
+            client, "test_db", ["p1", "c1b"], call["user_id"], max_hops=1
+        )
+
+    mocker.patch("tree.mcp.graph_tools.structured_query_memory", new=_query)
+    closure_off = patch.object(retrieval, "_attach_part_of_closure", _no_closure)
+    with nullcontext() if closure else closure_off:
+        return await search_memory(
+            query="q",
+            ctx=_make_graph_ctx(ui_supported=True),
+            max_results=max_results,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize("max_results", [3, 6, 8, 10])
+async def test_search_memory_answers_the_same_rows_with_the_closure(
+    mocker, max_results: int
+) -> None:
+    without = await _star_search(mocker, max_results, closure=False)
+
+    with_closure = await _star_search(mocker, max_results)
+
+    # Assert: 11 original rows >= max_results, so the answer is byte-identical.
+    assert with_closure == without
+
+
+async def test_search_memory_appends_the_closure_after_every_original_row(
+    mocker,
+) -> None:
+    without = json.loads(await _star_search(mocker, 20, closure=False))
+
+    with_closure = await _star_search(mocker, 20)
+
+    ids = [row["_id"] for row in json.loads(with_closure)]
+    assert ids[: len(without)] == [row["_id"] for row in without]
+    # The closure's node, then its edges (in the order Mongo returned them).
+    assert ids[len(without)] == "p3"
+    assert set(ids[len(without) + 1 :]) == {"p2>doc1", "c3a>p3", "p3>doc1"}
+    assert "_closure_added" not in with_closure
+
+
+async def test_search_memory_never_leaks_the_closure_marker_to_the_graph(
+    mocker,
+) -> None:
+    result = await _star_search(mocker, 20, visualize=True)
+
+    assert isinstance(result, ToolResult)
+    assert all("_closure_added" not in block.text for block in result.content)
+    assert "_closure_added" not in json.dumps(result.structured_content, default=str)
 
 
 # ---------------------------------------------------------------------------

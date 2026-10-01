@@ -15,9 +15,16 @@ from unittest.mock import AsyncMock
 import pytest
 from beanie import PydanticObjectId
 
+from tests.unit.memory.conftest import chunk_star_rows
 from tree.config.app_config import app_config
 from tree.entities.memory import MEMORY_COLLECTION
-from tree.memory.graph.retrieval import expand_graph, fetch_full_graph, query_memory
+from tree.memory.graph.retrieval import (
+    CLOSURE_ADDED,
+    expand_graph,
+    fetch_full_graph,
+    query_memory,
+    ranked_rows,
+)
 from tree.memory.rag.types import HybridSearchResult, ScoredHit
 from tree.models.fake_model import FakeEmbeddingModel
 
@@ -227,6 +234,226 @@ class TestExpandGraph:
         assert pipeline[3]["$project"] == {
             "edges": {"$setUnion": ["$outgoing", "$incoming"]}
         }
+
+
+def _part_of(source: str, target: str) -> dict:
+    return _graph_edge(f"{source}>{target}", source, target, edge_type="part_of")
+
+
+def _next(source: str, target: str) -> dict:
+    return _graph_edge(f"{source}>{target}", source, target, edge_type="next")
+
+
+@pytest.fixture(name="chunk_star_rows")
+def _chunk_star_rows() -> list[dict]:
+    """The shared star (``tests/unit/memory/conftest.py::chunk_star_rows``)."""
+
+    return chunk_star_rows(_USER)
+
+
+# The one-hop walk from p1 and c1b ($graphLookup is direction-consistent per
+# pass, so c3a is reached through c1b's OUTGOING `next`, never from p1 alone).
+_SEEDS = ["p1", "c1b"]
+_HOP_NODE_IDS = {"p1", "p2", "doc1", "c1a", "c1b", "c3a"}
+_HOP_EDGE_IDS = {"p1>doc1", "p1>p2", "c1a>p1", "c1b>p1", "c1b>c3a"}
+_CLOSURE_EDGE_IDS = {"p2>doc1", "c3a>p3", "p3>doc1"}
+
+
+async def _expand(collection, seeds: list = _SEEDS, max_hops: int = 1):
+    return await expand_graph(
+        _client(collection), _DATABASE, seeds, _USER, max_hops=max_hops
+    )
+
+
+def _child_counts(result) -> dict:
+    return {
+        node["_id"]: node["child_count"]
+        for node in result.nodes
+        if "child_count" in node
+    }
+
+
+class TestPartOfClosure:
+    async def test_every_chunk_hangs_off_its_parent_and_document(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        result = await _expand(make_collection(chunk_star_rows))
+
+        node_ids = set(_ids(result.nodes))
+        assert node_ids == _HOP_NODE_IDS | {"p3"}
+        assert set(_ids(result.edges)) == _HOP_EDGE_IDS | _CLOSURE_EDGE_IDS
+        up = {
+            edge["source_node_id"]
+            for edge in result.edges
+            if edge["type"] == "part_of" and edge["target_node_id"] in node_ids
+        }
+        chunks = {node["_id"] for node in result.nodes if node["type"] == "chunk"}
+        assert chunks <= up
+
+    async def test_a_pulled_in_childs_parent_and_document_come_in_two_reads(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        collection = make_collection(chunk_star_rows)
+
+        await _expand(collection)
+
+        # Assert: the hop's hydration, then exactly two closure reads — the
+        # lookahead brings c3a's parent p3 AND p3's edge to doc1 in one pass.
+        assert len(collection.find_filters) == 3
+
+    async def test_closure_reads_are_batched_and_tenant_scoped_first(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        collection = make_collection(chunk_star_rows)
+
+        await _expand(collection)
+
+        edge_read, node_read = collection.find_filters[1:]
+        assert next(iter(edge_read)) == next(iter(node_read)) == "user_id"
+        assert {k: v for k, v in edge_read.items() if k != "$or"} == {
+            "user_id": _USER,
+            "kind": "edge",
+            "type": "part_of",
+        }
+        up, down = edge_read["$or"]
+        assert set(up["source_node_id"]["$in"]) == {
+            "p1",
+            "p2",
+            "c1a",
+            "c1b",
+            "c3a",
+            "p3",
+        }
+        assert set(down["target_node_id"]["$in"]) == {"p1", "p2", "p3"}
+        assert {k: v for k, v in node_read.items() if k != "_id"} == {
+            "user_id": _USER,
+            "kind": "node",
+        }
+        assert set(node_read["_id"]["$in"]) == {"p3"}
+
+    async def test_a_result_without_chunks_issues_no_extra_read(
+        self, make_collection, make_entity_row
+    ) -> None:
+        collection = make_collection(
+            [
+                make_entity_row(_USER, "e1"),
+                make_entity_row(_USER, "e2", name="bob"),
+                _graph_edge("e1>e2", "e1", "e2"),
+            ]
+        )
+
+        result = await _expand(collection, ["e1"])
+
+        assert set(_ids(result.nodes)) == {"e1", "e2"}
+        assert len(collection.find_filters) == 1
+
+    async def test_the_zero_hop_path_also_closes_the_chain(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        collection = make_collection(chunk_star_rows)
+
+        result = await _expand(collection, ["p2"], max_hops=0)
+
+        assert _ids(result.nodes) == ["p2", "doc1"]
+        assert _ids(result.edges) == ["p2>doc1"]
+        assert len(collection.find_filters) == 3
+
+    async def test_existing_rows_keep_their_order_and_closure_rows_follow(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        collection = make_collection(chunk_star_rows)
+
+        result = await _expand(collection)
+
+        node_ids, edge_ids = _ids(result.nodes), _ids(result.edges)
+        assert set(node_ids[:-1]) == _HOP_NODE_IDS
+        assert node_ids[-1] == "p3"
+        assert set(edge_ids[: len(_HOP_EDGE_IDS)]) == _HOP_EDGE_IDS
+        assert set(edge_ids[len(_HOP_EDGE_IDS) :]) == _CLOSURE_EDGE_IDS
+        assert len(edge_ids) == len(set(edge_ids))
+
+    async def test_no_parent_with_a_drawn_child_or_no_child_is_stamped(
+        self, make_collection, chunk_star_rows, make_child_row
+    ) -> None:
+        # p1: both children drawn; p2: no children; p3: c3a drawn, c3b not.
+        rows = [
+            *chunk_star_rows,
+            make_child_row(_USER, "c3b", parent_id="p3", chunk_index=1),
+            _part_of("c3b", "p3"),
+        ]
+
+        result = await _expand(make_collection(rows))
+
+        assert _child_counts(result) == {}
+
+    async def test_a_parent_whose_children_are_all_absent_reports_their_count(
+        self, make_collection, chunk_star_rows, make_child_row
+    ) -> None:
+        rows = [
+            *chunk_star_rows,
+            make_child_row(_USER, "c2a", parent_id="p2"),
+            make_child_row(_USER, "c2b", parent_id="p2", chunk_index=1),
+            _part_of("c2a", "p2"),
+            _part_of("c2b", "p2"),
+        ]
+
+        result = await _expand(make_collection(rows))
+
+        # Assert: counted, never pulled in.
+        assert _child_counts(result) == {"p2": 2}
+        assert not {"c2a", "c2b"} & set(_ids(result.nodes))
+        assert not {"c2a>p2", "c2b>p2"} & set(_ids(result.edges))
+
+    async def test_stamps_a_copy_never_the_row_read(
+        self, make_collection, chunk_star_rows, make_child_row
+    ) -> None:
+        rows = [
+            *chunk_star_rows,
+            make_child_row(_USER, "c2a", parent_id="p2"),
+            _part_of("c2a", "p2"),
+        ]
+        collection = make_collection(rows)
+
+        await _expand(collection)
+
+        assert all("child_count" not in row for row in collection.rows)
+
+    async def test_only_the_rows_the_closure_appended_are_marked(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        result = await _expand(make_collection(chunk_star_rows))
+
+        marked = [
+            row["_id"] for row in result.nodes + result.edges if row.get(CLOSURE_ADDED)
+        ]
+        assert set(marked) == {"p3"} | _CLOSURE_EDGE_IDS
+
+    async def test_ranked_rows_put_every_hop_row_before_the_closure_unmarked(
+        self, make_collection, chunk_star_rows
+    ) -> None:
+        result = await _expand(make_collection(chunk_star_rows))
+
+        rows = ranked_rows(result)
+
+        # Assert: hop nodes, hop edges, closure nodes, closure edges — each in
+        # its own order — and the transient marker never leaves this module.
+        hop_nodes = [r["_id"] for r in result.nodes if not r.get(CLOSURE_ADDED)]
+        hop_edges = [r["_id"] for r in result.edges if not r.get(CLOSURE_ADDED)]
+        added_edges = [r["_id"] for r in result.edges if r.get(CLOSURE_ADDED)]
+        assert _ids(rows) == [*hop_nodes, *hop_edges, "p3", *added_edges]
+        assert all(CLOSURE_ADDED not in row for row in rows)
+
+    async def test_logs_what_the_closure_added_at_debug(
+        self, make_collection, chunk_star_rows, caplog
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="tree.memory.graph.retrieval")
+
+        await _expand(make_collection(chunk_star_rows))
+
+        assert (
+            "part_of closure: +1 node(s), +3 edge(s), 0 parent(s) with hidden children"
+            in caplog.messages
+        )
 
 
 def _with_sources(row: dict, *sources: object) -> dict:

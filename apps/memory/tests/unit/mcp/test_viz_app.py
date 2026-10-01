@@ -348,6 +348,11 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "function fitView()",
         "function autoFit()",
         "if (fitOnSettle) { fitOnSettle = false; autoFit(); }",
+        "if (!sim || paused) autoFit();",  # task 166: paused reveal re-arms
+        "{ fitOnSettle = false; pan = null; }",  # a plain pan cancels the fit
+        "n.childCount",  # the hidden child count (ADR-011 §8)
+        '"child chunks"',
+        '" (not shown)"',
     ],
 )
 @pytest.mark.parametrize(

@@ -74,9 +74,10 @@ Eight related choices, one design:
    `setCustomBBox`, and it STAYS frozen after release so a dropped node lands where the cursor let
    go; only the zoom-fit button clears it (`setCustomBBox(null)` + `refresh()` + `animatedReset`). One
    exception (added by orchestrator — human decision, task 165): a `Documents` slider REVEAL arms ONE
-   auto-fit through the same path when the reheated layout settles (at once when paused), then re-freezes
-   the camera on the new extent if a gesture had frozen it; hiding never fits, a drag or marquee before
-   the settle cancels it, and only the camera moves (no position or pin changes). A press must
+   auto-fit through the same path when the reheated layout settles (at once when paused, and again at the
+   settle after Resume — added by orchestrator, task 166), then re-freezes the camera on the new extent if a
+   gesture had frozen it; hiding never fits, a drag, marquee or plain camera pan (pan added by orchestrator,
+   task 166) before the settle cancels it, and only the camera moves (no position or pin changes). A press must
    move 3 px before it pins, reheats or freezes; only the left button starts a drag.
 
 5. **One 2D overlay canvas for everything sigma cannot draw.** The hull canvas (`#hulls-layer`)
@@ -105,6 +106,16 @@ Eight related choices, one design:
    triggers: a tenant whose document rows alone scan slowly (~50k) → an aggregation; a measured slow
    `sources` scan → a `(user_id, sources)` index; a human asking to page beyond the cap → server-side paging.
 
+8. **Query views are `part_of`-complete.** After expansion, two batched reads
+   attach every chunk's `part_of` edge and target (child → parent → document, one-level lookahead so both
+   levels come in one pass) and stamp `child_count` on parents whose children were not pulled in; the
+   payload carries `childCount` and the hover card reads `child chunks  N (not shown)`. Rows are appended,
+   never reordered, each marked with a transient `_closure_added` key; `ranked_rows` hands the model hop
+   nodes, hop edges, then the closure's nodes and edges, marker stripped, so `search_memory`'s `max_results`
+   truncation (and `deep_search_memory`'s index) keeps every hop row ahead of the closure, and the marker
+   never reaches a serialized row, a file or the payload (changed by orchestrator after QA). Nothing about
+   seeds, `rag` mode or `QueryResult`'s shape changes.
+
 **Verification stance (not a design choice, recorded so it is not re-litigated per task):** the
 repo has no browser test suite and this feature does not add one. Unit tests pin the HTML/JS
 contract (tokens in BOTH template variants, payload keys); the Tester runs a headless-Chrome
@@ -121,6 +132,7 @@ flowchart TD
         MP["to_embedding_map_payload<br/>layout: fixed · nodes[].size=4 · controls{display}"]
         TPL["ONE template<br/>_GRAPH_STYLE · _BODY_MARKUP · _RENDER_JS"]
         FG["fetch_full_graph<br/>4 reads keyed on sources · doc_rank"] --> GP
+        EX["expand_graph + part_of closure<br/>2 reads · child_count"] --> GP
     end
 
     subgraph js["Browser — the Graph renderer (obeys)"]
@@ -156,7 +168,7 @@ flowchart TD
     classDef pyNode fill:#d3f9d8,stroke:#2f9e44,color:#000;
     classDef jsNode fill:#d0ebff,stroke:#1c7ed6,color:#000;
     classDef extNode fill:#fff3bf,stroke:#f08c00,color:#000;
-    class GP,MP,TPL,FG pyNode;
+    class GP,MP,TPL,FG,EX pyNode;
     class SIM,G,SG,OV,PANEL,DRAG,DOCS jsNode;
     class CDN extNode;
 ```
@@ -187,3 +199,5 @@ flowchart TD
   so (`100 of 342 documents`). The dashboard's own template inherits the cap without a slider.
 - **Payload contract grows again, all surfaces at once:** `docRank`, `controls.documents`, `childCount`;
   tests pin them in both template variants.
+- **Two more reads per query view, a few more rows.** Chunks never float;
+  `search_memory` answers can be slightly larger before truncation.

@@ -198,6 +198,10 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
     ``query.full_graph_shown_docs`` clamped to ``query.full_graph_max_docs`` and
     to ``total`` (the deepest rank).
     A query payload carries neither.
+
+    A parent chunk a query view stamped ``child_count`` (its children exist but
+    none was pulled in, ADR-011 §8) gives its node a ``childCount``, which the
+    hover card shows; every other node has no such key.
     """
 
     nodes: list[dict[str, Any]] = []
@@ -210,6 +214,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
         meta: dict[str, Any] | None = None,
         subtype: str | None = None,
         doc_rank: int | None = None,
+        child_count: int | None = None,
     ) -> None:
         if not node_id or node_id in seen:
             return
@@ -226,6 +231,8 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
         }
         if doc_rank is not None:
             node["docRank"] = doc_rank
+        if child_count is not None:
+            node["childCount"] = child_count
         nodes.append(node)
 
     for node in result.nodes:
@@ -236,6 +243,7 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
             _curated_meta(node, _NODE_META_FIELDS),
             node.get("subtype"),
             node.get("doc_rank"),
+            node.get("child_count"),
         )
 
     edges: list[dict[str, Any]] = []
@@ -725,7 +733,7 @@ _RENDER_JS = """\
       document.body.dataset.layout = isFixed ? "fixed" : "live";
       // One auto-fit after a Documents REVEAL (ADR-011 §4/§7): armed by
       // applyDocumentLimit, run when the reheated layout settles, cancelled by
-      // a drag or marquee (the user is placing things).
+      // a drag, a marquee or a camera pan (the user is placing things).
       let fitOnSettle = false;
 
       // Headless evidence + debugging only: "running" while d3 ticks (again
@@ -812,6 +820,8 @@ _RENDER_JS = """\
         if (!n) return;
         // Lead with type (+ subtype, already in meta), then the rest of the meta.
         const card = Object.assign({ type: n.type }, n.meta);
+        // A parent whose children were not pulled in says how many exist.
+        if (n.childCount != null) card["child chunks"] = n.childCount + " (not shown)";
         tooltip.innerHTML = '<div class="tt-title">' + esc(n.name) + "</div>" + metaRows(card);
         tooltip.classList.add("show");
         state.hovered = node;
@@ -899,6 +909,7 @@ _RENDER_JS = """\
       let press = null;     // { node, x, y }: a node press, until mouseup
       let drag = null;      // { carried, members, anchor }: once that press moved
       let marquee = null;   // { x0, y0, x1, y1 } in viewport px: a Shift+press on the stage
+      let pan = null;       // { x, y }: a plain stage press — Sigma pans the camera
       // Left button only: Sigma reports a press for EVERY button but its
       // captor's mouseup only after a left one, so a right-click press would
       // stay open and the node would follow the bare pointer.
@@ -910,7 +921,7 @@ _RENDER_JS = """\
       function startMarquee(e) {
         if (e.event.original.button !== 0) return;
         pointerMoved = false;
-        if (!e.event.original.shiftKey) return;   // a plain stage drag still pans
+        if (!e.event.original.shiftKey) { pan = { x: e.event.x, y: e.event.y }; return; }
         marquee = { x0: e.event.x, y0: e.event.y, x1: e.event.x, y1: e.event.y };
       }
       renderer.on("downStage", startMarquee);
@@ -936,6 +947,13 @@ _RENDER_JS = """\
 
       const captor = renderer.getMouseCaptor();
       captor.on("mousemovebody", (e) => {
+        // A plain stage drag is Sigma's camera pan: never prevented, but once
+        // it really moves the user owns the camera — an armed auto-fit is off.
+        if (pan) {
+          if (e.original.buttons === 0) pan = null;
+          else if (Math.hypot(e.x - pan.x, e.y - pan.y) >= DRAG_THRESHOLD) { fitOnSettle = false; pan = null; }
+          return;
+        }
         if (!press && !marquee) return;
         e.preventSigmaDefault();          // no camera pan under a held node or a marquee
         e.original.preventDefault();
@@ -999,6 +1017,7 @@ _RENDER_JS = """\
           drawOverlay();                  // the map re-renders nothing by itself
         }
         press = null;
+        pan = null;
       });
 
       // --- Double clicks. Sigma reads ANY two clicks <300 ms apart as a
@@ -1321,9 +1340,11 @@ _RENDER_JS = """\
         renderer.refresh();
         // Hiding never fits. A reveal fits once the layout settles — at once
         // when there is no running simulation to wait for (paused, or a map).
+        // Paused, it stays armed too: Resume expands the layout past that
+        // first fit, so the settle after Resume fits once more.
         if (revealing) {
-          if (sim && !paused) fitOnSettle = true;
-          else autoFit();
+          if (sim) fitOnSettle = true;
+          if (!sim || paused) autoFit();
         }
       }
       // Documents — the Full graph only (the gate: controls.documents), FIRST.

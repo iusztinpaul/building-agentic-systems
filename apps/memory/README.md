@@ -354,8 +354,10 @@ The full graph embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) 
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
 shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider at the top of
 the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive, and once the
-revealed stars settle the view fits itself once (only on a reveal, never on hiding; a drag meanwhile
-cancels it). A `QUERY` view has no slider.
+revealed stars settle the view fits itself once (only on a reveal, never on hiding; a drag, box
+select or pan meanwhile cancels it; while paused it fits at once and again after Resume). A `QUERY`
+view has no slider; there, a parent chunk drawn without its children says how many it has on hover
+(`child chunks  N (not shown)`).
 
 **Interacting with a graph.** The layout is live: nodes keep settling under d3-force. Dragging a
 node pins it where you drop it (dark centre dot); a double-click unpins it. Shift+click or

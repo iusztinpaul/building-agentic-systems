@@ -15,10 +15,13 @@ same helper **Parent-document retrieval** uses) before expansion runs, so
 ``QueryResult.nodes`` carries parents — never the 256-token children that
 matched. Expansion therefore starts from ``distinct parent ids ∪ non-chunk seed
 ids``, and the ``part_of`` / ``next`` edges around a parent are what the caller
-gets to read.
+gets to read — with every chunk's ``part_of`` chain to its document always
+complete (:func:`_attach_part_of_closure`, ADR-011 §8), however the last hop
+reached it.
 """
 
 import logging
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +38,11 @@ from tree.models.base import BaseEmbeddingModel
 from tree.observability import track
 
 logger = logging.getLogger(__name__)
+
+# Transient top-level key on every row the ``part_of`` closure appended (like
+# ``_search_score``): :func:`ranked_rows` orders by it and strips it, so it
+# never reaches the model, a file or the Graph payload.
+CLOSURE_ADDED = "_closure_added"
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +82,10 @@ async def expand_graph(
                 }
             ):
                 all_nodes.append(node)
-        return QueryResult(nodes=all_nodes, edges=[])
+        all_nodes, all_edges = await _attach_part_of_closure(
+            collection, user_id, all_nodes, []
+        )
+        return QueryResult(nodes=all_nodes, edges=all_edges)
 
     # $graphLookup maxDepth is 0-indexed: 0 = direct edges, 1 = two hops, etc.
     depth = max_hops - 1
@@ -138,6 +149,10 @@ async def expand_graph(
         ):
             all_nodes.append(node)
 
+    all_nodes, all_edges = await _attach_part_of_closure(
+        collection, user_id, all_nodes, all_edges
+    )
+
     logger.info(
         "Graph expansion: %d seed(s) → %d nodes, %d edges (%d hops)",
         len(node_ids),
@@ -147,6 +162,116 @@ async def expand_graph(
     )
 
     return QueryResult(nodes=all_nodes, edges=all_edges)
+
+
+async def _attach_part_of_closure(
+    collection: Any,
+    user_id: PydanticObjectId,
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Give every chunk in the result its ``part_of`` chain up to its document.
+
+    ``$graphLookup`` stops at ``max_hops``: a chunk found on the last hop (a
+    parent via ``next``, a child via ``next``) arrives without its ``part_of``
+    edge. Two batched reads close that (ADR-011 §8):
+
+    1. every ``part_of`` edge UP from a chunk in the result, or from a child's
+       parent that is not in it yet (one-level lookahead, so child → parent →
+       document comes in one pass), plus every edge DOWN into a parent, read
+       only to count its children;
+    2. the UP targets not in the result (those parents and their documents).
+
+    Rows are APPENDED — hydrated nodes, then each UP edge whose two endpoints
+    are now present — as copies marked ``CLOSURE_ADDED``, never reordered, so
+    :func:`ranked_rows` can keep every hop row ahead of them. Absent children
+    are never pulled in; a parent with children none of which is drawn gets a
+    copy stamped ``child_count``. No chunk in the result → no read.
+    """
+
+    chunks = [row for row in nodes if row.get("type") == "chunk"]
+    if not chunks:
+        return nodes, edges
+
+    node_ids = {row["_id"] for row in nodes}
+    lookahead = {
+        row["parent_id"]
+        for row in chunks
+        if row.get("subtype") == "child" and row.get("parent_id") is not None
+    } - node_ids
+    up_sources = {row["_id"] for row in chunks} | lookahead
+    parent_ids = {
+        row["_id"] for row in chunks if row.get("subtype") == "parent"
+    } | lookahead
+    walked = [
+        edge
+        async for edge in collection.find(
+            {
+                "user_id": user_id,
+                "kind": "edge",
+                "type": "part_of",
+                "$or": [
+                    {"source_node_id": {"$in": list(up_sources)}},
+                    {"target_node_id": {"$in": list(parent_ids)}},
+                ],
+            }
+        )
+    ]
+    up = [edge for edge in walked if edge["source_node_id"] in up_sources]
+
+    missing = {edge["target_node_id"] for edge in up} - node_ids
+    hydrated = [
+        {**row, CLOSURE_ADDED: True}
+        async for row in collection.find(
+            {"user_id": user_id, "kind": "node", "_id": {"$in": list(missing)}}
+        )
+    ]
+    node_ids |= {row["_id"] for row in hydrated}
+    edge_ids = {edge["_id"] for edge in edges}
+    added = [
+        {**edge, CLOSURE_ADDED: True}
+        for edge in up
+        if edge["_id"] not in edge_ids
+        and edge["source_node_id"] in node_ids
+        and edge["target_node_id"] in node_ids
+    ]
+
+    children = Counter(
+        edge["target_node_id"]
+        for edge in walked
+        if edge["target_node_id"] in parent_ids
+    )
+    all_nodes = [*nodes, *hydrated]
+    drawn = {row.get("parent_id") for row in all_nodes if row.get("subtype") == "child"}
+    stamped = 0
+    for i, row in enumerate(all_nodes):
+        count = children[row["_id"]]
+        if row.get("subtype") == "parent" and count and row["_id"] not in drawn:
+            all_nodes[i] = {**row, "child_count": count}
+            stamped += 1
+
+    logger.debug(
+        "part_of closure: +%d node(s), +%d edge(s), %d parent(s) with hidden children",
+        len(hydrated),
+        len(added),
+        stamped,
+    )
+    return all_nodes, [*edges, *added]
+
+
+def ranked_rows(result: QueryResult) -> list[dict[str, Any]]:
+    """``nodes + edges`` the way the model reads them, ranking first.
+
+    Hop nodes, hop edges, then the ``part_of`` closure's nodes and edges
+    (a stable sort on :data:`CLOSURE_ADDED`), with that marker stripped — so
+    truncating to ``max_results`` keeps exactly the rows it kept before the
+    closure existed (ADR-011 §8).
+    """
+
+    rows = sorted(
+        [*result.nodes, *result.edges], key=lambda row: bool(row.get(CLOSURE_ADDED))
+    )
+    return [{k: v for k, v in row.items() if k != CLOSURE_ADDED} for row in rows]
 
 
 # ---------------------------------------------------------------------------

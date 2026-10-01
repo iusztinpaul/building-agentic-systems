@@ -6,7 +6,9 @@ rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
 evaluates the handful of operators our pipelines use — equality, ``$or``, ``$in``
 (against a scalar, or ANY element of a list field, as Mongo does for
-``sources``), ``$nor``, ``$text`` (substring), ``$limit`` — plus exclusion
+``sources``), ``$nor``, ``$text`` (substring), ``$limit``, ``$graphLookup``
+(breadth-first, ``restrictSearchWithMatch`` applied) and a ``$setUnion``
+``$project`` — plus exclusion
 projections (``{"embedding": 0}``), stamps the ``_search_score`` both legs read
 off ``$meta``, and records every call.
 
@@ -176,7 +178,39 @@ class FakeMemoryCollection:
             for stage in pipeline:
                 if "$limit" in stage:
                     rows = rows[: stage["$limit"]]
+                elif "$graphLookup" in stage:
+                    lookup = stage["$graphLookup"]
+                    rows = [
+                        {**row, lookup["as"]: self._walk(row, lookup)} for row in rows
+                    ]
+                elif "$project" in stage and _is_set_union(stage["$project"]):
+                    rows = [_project_set_union(row, stage["$project"]) for row in rows]
         return [self._score(row) for row in rows]
+
+    def _walk(
+        self, start: dict[str, Any], lookup: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``$graphLookup``: breadth-first over ``self.rows`` up to ``maxDepth``.
+
+        Depth 0 matches ``connectToField == startWith``; every hop after that
+        matches ``connectToField`` against the ``connectFromField`` values just
+        found. ``restrictSearchWithMatch`` filters every candidate; each row is
+        returned once.
+        """
+
+        frontier = {start[lookup["startWith"].removeprefix("$")]}
+        found: dict[Any, dict[str, Any]] = {}
+        for _depth in range(lookup["maxDepth"] + 1):
+            hits = [
+                row
+                for row in self.rows
+                if row["_id"] not in found
+                and row.get(lookup["connectToField"]) in frontier
+                and matches(row, lookup.get("restrictSearchWithMatch", {}))
+            ]
+            found.update((row["_id"], row) for row in hits)
+            frontier = {row.get(lookup["connectFromField"]) for row in hits}
+        return list(found.values())
 
     @staticmethod
     def _score(row: dict[str, Any]) -> dict[str, Any]:
@@ -195,6 +229,28 @@ class FakeMemoryCollection:
             "_search_score": row.get("_search_score", _DEFAULT_SEARCH_SCORE),
             **row,
         }
+
+
+def _is_set_union(projection: dict[str, Any]) -> bool:
+    return all(
+        isinstance(spec, dict) and set(spec) == {"$setUnion"}
+        for spec in projection.values()
+    )
+
+
+def _project_set_union(
+    row: dict[str, Any], projection: dict[str, Any]
+) -> dict[str, Any]:
+    """``{"$project": {key: {"$setUnion": ["$a", "$b"]}}}``, deduplicated on ``_id``."""
+
+    projected: dict[str, Any] = {"_id": row["_id"]}
+    for key, spec in projection.items():
+        union: dict[Any, dict[str, Any]] = {}
+        for field in spec["$setUnion"]:
+            for item in row.get(field.removeprefix("$"), []):
+                union.setdefault(item["_id"], item)
+        projected[key] = list(union.values())
+    return projected
 
 
 @pytest.fixture
@@ -224,6 +280,50 @@ def _node_row(user_id: Any, node_id: str, node_type: str, **overrides: Any) -> d
     }
     row.update(overrides)
     return row
+
+
+def chunk_star_rows(user_id: Any) -> list[dict]:
+    """``doc1`` with parents p1..p3; p1's children c1a/c1b, p3's child c3a.
+
+    ``p1 -next-> p2`` and ``c1b -next-> c3a`` make p2 and c3a reachable WITHOUT
+    their ``part_of`` edges on the last hop (seed ``["p1", "c1b"]``, one hop):
+    the hop is 6 nodes + 5 edges, the ``part_of`` closure adds p3 and 3 edges.
+    A plain function so ``tests/unit/mcp`` can run the real ``expand_graph``.
+    """
+
+    def edge(source: str, target: str, edge_type: str = "part_of") -> dict:
+        return {
+            "_id": f"{source}>{target}",
+            "user_id": user_id,
+            "kind": "edge",
+            "type": edge_type,
+            "source_node_id": source,
+            "target_node_id": target,
+            "sources": [],
+        }
+
+    def chunk(node_id: str, subtype: str, parent_id: str) -> dict:
+        return _node_row(
+            user_id, node_id, "chunk", subtype=subtype, parent_id=parent_id
+        )
+
+    return [
+        _node_row(user_id, "doc1", "document"),
+        chunk("p1", "parent", "doc1"),
+        chunk("p2", "parent", "doc1"),
+        chunk("p3", "parent", "doc1"),
+        chunk("c1a", "child", "p1"),
+        chunk("c1b", "child", "p1"),
+        chunk("c3a", "child", "p3"),
+        edge("p1", "doc1"),
+        edge("p2", "doc1"),
+        edge("p3", "doc1"),
+        edge("c1a", "p1"),
+        edge("c1b", "p1"),
+        edge("c3a", "p3"),
+        edge("p1", "p2", "next"),
+        edge("c1b", "c3a", "next"),
+    ]
 
 
 @pytest.fixture

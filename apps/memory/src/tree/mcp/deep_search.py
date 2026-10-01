@@ -16,6 +16,7 @@ from uuid import uuid4
 import yaml
 
 from tree.config.paths import MEMORY_DIR
+from tree.memory.graph.retrieval import ranked_rows
 from tree.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,7 @@ def write_deep_search_results(
     session_dir = MEMORY_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    docs = results.nodes + results.edges
+    docs = ranked_rows(results)  # hop rows first, the part_of closure after
     index_entries: list[dict[str, Any]] = []
 
     for doc in docs:
