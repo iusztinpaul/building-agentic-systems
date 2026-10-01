@@ -40,6 +40,11 @@ that exists only to tolerate the mismatch.
 3. **One Document per URI, by construction.** `_resolve_source_uris` resolves ONE id per
    `source_uri`; the "several rows per URI" handling is deleted rather than kept "just in
    case" — the index now makes that state impossible.
+4. **`source_uri` is stored clean.** A `Document` validator runs every URI through
+   `tree.entities.documents.clean_source_uri`: for `http(s)` only, it lowercases the scheme and
+   host, drops the `#fragment` and tracking params (`utm_*`, `fbclid`, `gclid`, `si`, …), and
+   keeps identity params byte-identical (`watch?v=abc`, `item?id=4012`). Every lookup keys on
+   the same function, so `https://x.com/p?utm_source=a` and `https://x.com/p` are ONE Document.
 
 What would justify revisiting: a source whose identity genuinely needs `source_type`
 (the same URI meaning two different things for one user). None exists; the LATENT upgrade

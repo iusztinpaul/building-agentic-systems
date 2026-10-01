@@ -25,7 +25,7 @@ from tree.config.sources import default_configured_sources
 from tree.data.conversation.conversation import conversation_source_uri
 from tree.data.file.file import file_source_uri
 from tree.data.youtube.youtube import canonical_video_url, extract_video_id
-from tree.entities.documents import Document
+from tree.entities.documents import Document, clean_source_uri
 from tree.config.constants import TAGS_DATA_ONLINE
 from tree.observability import (
     configure_opik,
@@ -267,7 +267,8 @@ def source_uri_for(source: OnlineSource) -> str:
     * :class:`UrlSource` — a YouTube video URL canonicalises to
       ``https://www.youtube.com/watch?v=<id>`` (what the YouTube leaf stores);
       every other URL, including a YouTube URL with no extractable video id, is
-      stored verbatim by the substack / web leaves.
+      stored cleaned (:func:`tree.entities.documents.clean_source_uri`) by the
+      substack / web leaves.
     * :class:`FileSource` — :func:`tree.data.file.file.file_source_uri`.
     * :class:`ConversationSource` —
       :func:`tree.data.conversation.conversation.conversation_source_uri`.
@@ -284,7 +285,7 @@ def source_uri_for(source: OnlineSource) -> str:
                 video_id = extract_video_id(source.uri)
                 if video_id is not None:
                     return canonical_video_url(video_id)
-            return source.uri
+            return clean_source_uri(source.uri)
         case FileSource():
             return file_source_uri(source.path)
         case ConversationSource():

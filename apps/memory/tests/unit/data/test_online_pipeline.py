@@ -495,6 +495,13 @@ class TestSourceUriFor:
         # no extractable video id has nothing to canonicalise.
         assert source_uri_for(UrlSource(uri=url)) == url
 
+    def test_url_is_cleaned_like_the_stored_row(self) -> None:
+        # The pre-flight lookup must key on the same clean form the Document
+        # validator stores, or a tracked link misses its existing row.
+        source = UrlSource(uri="https://example.com/post?utm_source=x#top")
+
+        assert source_uri_for(source) == "https://example.com/post"
+
     def test_file_source_uses_the_file_scheme(self) -> None:
         source = FileSource(path="/tmp/a.md", content="body")
 

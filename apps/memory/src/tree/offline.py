@@ -60,7 +60,7 @@ from prefect.deployments import run_deployment
 from tree.config.settings import settings
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.db import init_mongodb
-from tree.entities.documents import Document
+from tree.entities.documents import Document, clean_source_uri
 from tree.flow_runs import flow_run_status
 from tree.memory.pipeline import (
     ClusteringStats,
@@ -159,7 +159,8 @@ async def _resolve_source_uris(
     Use ``make memory-run-pipeline MODE=online SOURCE=<uri>`` to ingest.
 
     ``(user_id, source_uri)`` is unique (ADR-010), so each URI resolves to ONE
-    id. Order follows the URIs the caller passed, not the cursor (Mongo
+    id. URIs are cleaned first, so a pasted link with tracking params still
+    resolves. Order follows the URIs the caller passed, not the cursor (Mongo
     guarantees none).
 
     Raises:
@@ -171,17 +172,18 @@ async def _resolve_source_uris(
         settings.mongo.mongo_uri.get_secret_value(),
         settings.mongo.mongo_initdb_database,
     )
+    clean_uris = [clean_source_uri(uri) for uri in source_uris]
     documents = await Document.find(
-        {"user_id": user_id, "source_uri": {"$in": source_uris}}
+        {"user_id": user_id, "source_uri": {"$in": clean_uris}}
     ).to_list()
     ids_by_uri: dict[str, str] = {
         document.source_uri: str(document.id) for document in documents
     }
     resolved: list[str] = []
-    for uri in source_uris:
-        if uri not in ids_by_uri:
+    for uri, clean_uri in zip(source_uris, clean_uris, strict=True):
+        if clean_uri not in ids_by_uri:
             raise ValueError(f"No document for source_uri {uri} (user {user_id})")
-        resolved.append(ids_by_uri[uri])
+        resolved.append(ids_by_uri[clean_uri])
     return resolved
 
 

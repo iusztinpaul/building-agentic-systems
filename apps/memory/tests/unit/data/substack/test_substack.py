@@ -17,6 +17,7 @@ from tree.data.substack.substack import (
     html_to_plain_text,
     load_document,
     parse_date,
+    resolve_references,
 )
 from tree.entities.documents import Document, SourceType
 
@@ -279,6 +280,31 @@ class TestLoadDocument:
         result = await load_document(doc, {"content": [{"value": ""}]})
 
         assert result is None
+
+
+class TestResolveReferences:
+    async def test_tracked_link_resolves_to_the_existing_clean_row(self, mocker):
+        # The stored row holds the clean URI; a reference link carrying
+        # tracking params must look it up by that same clean form.
+        existing = Document(
+            source_type=SourceType.WEB,
+            source_uri="https://example.com/post",
+            user_id=_USER_ID,
+        )
+        find_one = mocker.patch(
+            "tree.data.substack.substack.Document.find_one",
+            new_callable=mocker.AsyncMock,
+            return_value=existing,
+        )
+
+        result = await resolve_references(
+            ["https://example.com/post?utm_source=substack"], _USER_ID
+        )
+
+        assert result == [existing]
+        find_one.assert_awaited_once_with(
+            {"user_id": _USER_ID, "source_uri": "https://example.com/post"}
+        )
 
 
 class TestExtractMeta:

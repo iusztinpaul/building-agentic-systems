@@ -5,7 +5,7 @@ from beanie import PydanticObjectId
 from pydantic import ValidationError
 from pymongo import IndexModel
 
-from tree.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType, clean_source_uri
 
 
 def _user_id() -> PydanticObjectId:
@@ -150,3 +150,64 @@ class TestDocumentCompoundUniqueIndex:
         annotation = Document.model_fields["source_uri"].annotation
         # The plain ``str`` annotation has no Beanie ``Indexed`` metadata.
         assert annotation is str
+
+
+class TestCleanSourceUri:
+    @pytest.mark.parametrize(
+        ("raw", "clean"),
+        [
+            (
+                "https://X.com/Post?utm_source=x&id=7#top",
+                "https://x.com/Post?id=7",
+            ),
+            ("https://x.com/p?utm_medium=a&UTM_campaign=b", "https://x.com/p"),
+            ("https://x.com/p?fbclid=1&gclid=2", "https://x.com/p"),
+            ("https://youtu.be/abc?si=share", "https://youtu.be/abc"),
+            ("  https://x.com/p  ", "https://x.com/p"),
+        ],
+        ids=["mixed", "utm-any-case", "click-ids", "youtube-share", "whitespace"],
+    )
+    def test_drops_tracking_params_fragment_and_host_case(
+        self, raw: str, clean: str
+    ) -> None:
+        assert clean_source_uri(raw) == clean
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "https://www.youtube.com/watch?v=abc123",
+            "https://news.ycombinator.com/item?id=4012",
+            "https://x.com/search?q=a%20b&flag&empty=",
+            "https://x.com/CaseSensitive/Path",
+        ],
+        ids=["youtube-video-id", "hn-item-id", "encoding-and-blank-params", "path"],
+    )
+    def test_keeps_identity_params_and_path_byte_identical(self, uri: str) -> None:
+        assert clean_source_uri(uri) == uri
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "file:///notes/plan#1.md",
+            "conversation://0123456789abcdef",
+            "claude-session://abc?utm_source=x",
+            "/tmp/a.md",
+        ],
+        ids=["file-with-hash", "conversation", "custom-scheme", "bare-path"],
+    )
+    def test_leaves_non_http_uris_unchanged(self, uri: str) -> None:
+        assert clean_source_uri(uri) == uri
+
+    def test_is_idempotent(self) -> None:
+        once = clean_source_uri("HTTPS://X.com/p?utm_source=x&id=7#top")
+
+        assert clean_source_uri(once) == once
+
+    def test_document_stores_the_clean_form(self) -> None:
+        doc = Document(
+            source_type=SourceType.WEB,
+            source_uri="https://x.com/p?utm_source=newsletter#intro",
+            user_id=_user_id(),
+        )
+
+        assert doc.source_uri == "https://x.com/p"

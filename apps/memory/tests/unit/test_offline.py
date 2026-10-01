@@ -286,6 +286,21 @@ class TestSourceUris:
         )
         extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
 
+    async def test_resolves_a_tracked_uri_through_its_clean_form(self, mocker) -> None:
+        _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        find = _patch_document_lookup(mocker, [_document(_DOC_ID, _SOURCE_URI)])
+
+        await offline_pipeline(
+            user_id=_USER_ID,
+            source_uris=[f"{_SOURCE_URI}&utm_source=x"],
+            run_data=False,
+        )
+
+        find.assert_called_once_with(
+            {"user_id": _USER_ID, "source_uri": {"$in": [_SOURCE_URI]}}
+        )
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+
     async def test_resolves_one_id_per_uri_in_caller_order(self, mocker) -> None:
         _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
         # ``(user_id, source_uri)`` is unique (ADR-010), so each URI owns ONE

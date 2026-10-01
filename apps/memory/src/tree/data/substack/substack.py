@@ -18,7 +18,7 @@ from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 from pymongo.errors import DuplicateKeyError
 
-from tree.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType, clean_source_uri
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,8 @@ async def resolve_references(
     """Find or create LATENT Documents for each reference URI under ``user_id``."""
 
     ref_docs: list[Document] = []
-    for uri in uris:
+    for raw_uri in uris:
+        uri = clean_source_uri(raw_uri)
         existing = await Document.find_one({"user_id": user_id, "source_uri": uri})
         if existing:
             ref_docs.append(existing)

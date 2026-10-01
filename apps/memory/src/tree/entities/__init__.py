@@ -5,7 +5,7 @@ from tree.entities.clusters import (
     build_cluster_id,
 )
 from tree.entities.colours import Colours
-from tree.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType, clean_source_uri
 from tree.entities.memory import (
     ChunkViz,
     EdgeType,
@@ -39,4 +39,5 @@ __all__ = [
     "build_meta_state_id",
     "build_node_id",
     "build_rag_row_id",
+    "clean_source_uri",
 ]

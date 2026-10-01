@@ -12,7 +12,7 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo.errors import DuplicateKeyError
 
-from tree.entities.documents import Document, SourceType
+from tree.entities.documents import Document, SourceType, clean_source_uri
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def conversation_source_uri(text: str, session_uri: str | None) -> str:
     pre-flight duplicate lookup keys on), so the two can never disagree about
     the natural key (ADR-008 §1).
 
-    ``session_uri`` is used verbatim when supplied; otherwise the URI falls back
+    ``session_uri`` is used, cleaned, when supplied; otherwise the URI falls back
     to ``conversation://<16-hex content hash>``.
 
     Raises:
@@ -44,7 +44,7 @@ def conversation_source_uri(text: str, session_uri: str | None) -> str:
             "session_uri must not be empty when supplied; pass None to fall "
             "back to the content-hash source_uri."
         )
-    return session_uri
+    return clean_source_uri(session_uri)
 
 
 def _normalize_session_started_at(value: datetime) -> datetime:
