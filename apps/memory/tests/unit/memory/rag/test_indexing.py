@@ -20,6 +20,7 @@ from tree.entities.memory import (
     MemoryEntry,
     NodeType,
     memory_indexes,
+    TEXT_INDEX_NAME,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
@@ -27,8 +28,6 @@ from tree.memory.rag.indexing import (
     _build_vector_index_definition,
     _reset_filter,
     _ensure_vector_index,
-    _TEXT_INDEX_FIELDS,
-    _TEXT_INDEX_NAME,
     _VECTOR_INDEX_FILTER_PATHS,
     VECTOR_INDEX_NAME,
     _VECTOR_INDEX_POLL_S,
@@ -171,9 +170,9 @@ def _wire_client(collection: MagicMock) -> MagicMock:
 
 
 class TestEnsureIndexes:
-    async def test_creates_only_the_text_index(self) -> None:
-        """Beanie owns every classic index (ADR-012); ``ensure_indexes``
-        creates the ``$text`` index alone."""
+    async def test_creates_no_classic_index(self) -> None:
+        """Beanie owns every classic index, ``$text`` included (ADR-012);
+        ``ensure_indexes`` creates only the mongot vector index."""
 
         collection = _make_collection()
         client = _wire_client(collection)
@@ -185,8 +184,8 @@ class TestEnsureIndexes:
             user_id=_TEST_USER_ID,
         )
 
-        collection.create_index.assert_awaited_once()
-        assert collection.create_index.await_args.kwargs["name"] == _TEXT_INDEX_NAME
+        collection.create_index.assert_not_awaited()
+        collection.create_search_index.assert_awaited_once()
 
     async def test_vector_index_includes_filter_fields(self) -> None:
         """The created vector index must declare ``user_id``, ``kind``,
@@ -235,30 +234,6 @@ class TestEnsureIndexes:
             f for f in model["definition"]["fields"] if f.get("type") == "vector"
         )
         assert vector_field["numDimensions"] == 42
-
-    async def test_text_index_covers_top_level_aliases(self) -> None:
-        """The text index definition must cover both ``aliases``
-        (top-level) and ``properties.aliases`` (legacy/back-compat)."""
-
-        collection = _make_collection()
-        client = _wire_client(collection)
-
-        await ensure_indexes(
-            client,
-            "test_db",
-            embedding_model=FakeEmbeddingModel(dimensions=8),
-            user_id=_TEST_USER_ID,
-        )
-
-        text_call = next(
-            call
-            for call in collection.create_index.call_args_list
-            if call.kwargs.get("name") == _TEXT_INDEX_NAME
-        )
-        fields = text_call.args[0]
-        paths = {path for path, _ in fields}
-        assert "aliases" in paths
-        assert "properties.aliases" in paths
 
     async def test_dimension_mismatch_drops_and_recreates_with_warning(
         self, caplog: pytest.LogCaptureFixture
@@ -309,8 +284,7 @@ class TestEnsureIndexes:
     ) -> None:
         """When the live vector index already has the target dimension AND
         every required filter path, the reconcile logic must NOT drop or
-        recreate it (search-index ops only — classic indexes are still
-        re-asserted because ``create_index`` is itself idempotent)."""
+        recreate it."""
 
         existing = {
             "name": VECTOR_INDEX_NAME,
@@ -449,7 +423,7 @@ _LEGACY_SET = (
         "_id_",
         "user_kind_type_subtype",
         "user_type_name",
-        _TEXT_INDEX_NAME,
+        TEXT_INDEX_NAME,
     }
 )
 # What ``init_mongodb`` + ``ensure_indexes`` leave on a graphrag collection
@@ -458,7 +432,7 @@ _POST_169_GRAPHRAG_SET = {
     "_id_",
     "user_kind_type_subtype",
     "user_type_name",
-    _TEXT_INDEX_NAME,
+    TEXT_INDEX_NAME,
 } | _GRAPH_ONLY
 
 
@@ -476,7 +450,7 @@ class TestIndexRetirement:
         retired = set(retired_index_names(mode))
 
         assert _ALWAYS_RETIRED <= retired
-        assert retired.isdisjoint({"_id_", _TEXT_INDEX_NAME, VECTOR_INDEX_NAME})
+        assert retired.isdisjoint({"_id_", TEXT_INDEX_NAME, VECTOR_INDEX_NAME})
 
     def test_graph_indexes_are_retired_in_rag_only(self) -> None:
         assert _GRAPH_ONLY <= set(retired_index_names("rag"))
@@ -537,7 +511,7 @@ class TestIndexRetirement:
         collection = _make_collection()
         kept = {im.document["name"] for im in memory_indexes(mode)}
         collection.index_information = AsyncMock(
-            return_value={name: {} for name in kept | {"_id_", _TEXT_INDEX_NAME}}
+            return_value={name: {} for name in kept | {"_id_", TEXT_INDEX_NAME}}
         )
 
         await ensure_indexes(
@@ -712,12 +686,6 @@ class TestVectorIndexDefinition:
         }
         assert _VECTOR_INDEX_FILTER_PATHS[0] == "user_id"
         assert set(_VECTOR_INDEX_FILTER_PATHS).issubset(filter_paths)
-
-    def test_text_index_fields_constant(self) -> None:
-        paths = {path for path, _ in _TEXT_INDEX_FIELDS}
-        assert "name" in paths
-        assert "aliases" in paths
-        assert "properties.aliases" in paths
 
 
 # ---------------------------------------------------------------------------

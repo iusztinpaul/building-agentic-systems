@@ -19,6 +19,7 @@ from tree.entities.memory import (
     build_node_id,
     build_rag_row_id,
     memory_indexes,
+    TEXT_INDEX_FIELDS,
 )
 from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES, NODE_REGISTRY
@@ -152,7 +153,7 @@ class TestMemoryEntry:
             )
 
 
-_BASE_INDEX_NAMES = {"user_kind_type_subtype", "user_type_name"}
+_BASE_INDEX_NAMES = {"text_index", "user_kind_type_subtype", "user_type_name"}
 _GRAPH_INDEX_NAMES = {"active_user", "user_kind_source_node", "user_kind_target_node"}
 
 
@@ -178,9 +179,20 @@ class TestMemoryIndexes:
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     def test_every_compound_index_leads_with_user_id(self, mode: str) -> None:
         for name, im in _by_name(mode).items():
-            if name == "active_user":
+            if name in {"active_user", "text_index"}:
                 continue
             assert next(iter(im.document["key"].items())) == ("user_id", 1), name
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_text_index_covers_names_aliases_and_content(self, mode: str) -> None:
+        # Beanie owns the $text index too (task 171), so lexical search works
+        # from the first boot. Top-level AND legacy nested aliases are covered.
+        key = _by_name(mode)["text_index"].document["key"]
+
+        assert list(key.items()) == TEXT_INDEX_FIELDS
+        assert {"name", "aliases", "properties.content", "properties.aliases"} == set(
+            key
+        )
 
     def test_compound_keys(self) -> None:
         indexes = _by_name("graphrag")

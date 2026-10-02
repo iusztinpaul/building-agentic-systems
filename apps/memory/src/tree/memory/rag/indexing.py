@@ -8,7 +8,7 @@ modes (ADR-006 decision 4):
    Parents and documents are never selected: they are deliberately vector-less,
    so embedding them would pull them into ``$vectorSearch`` results and break
    parent-document retrieval.
-2. Ensure the text and vector search indexes exist; reconcile the vector index's
+2. Ensure the vector search index exists; reconcile the vector index's
    ``numDimensions`` against the live embedding model on every call; retire the
    classic indexes the current **Memory mode** no longer declares (ADR-012).
 
@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 
 
 # Index names (shared with query module).
-_TEXT_INDEX_NAME = "text_index"
 VECTOR_INDEX_NAME = "vector_index"
 
 # How long ``_ensure_vector_index`` waits for a freshly created index to answer
@@ -349,18 +348,6 @@ async def reset_embeddings(
 # ---------------------------------------------------------------------------
 
 
-# Fields included in the text index, in the order they should appear in the
-# composite definition. ``aliases`` is the top-level array of alternate
-# surface forms introduced by the resolution/dedup port (#007);
-# ``properties.aliases`` is kept for backward compat with documents that
-# still carry the old nested shape.
-_TEXT_INDEX_FIELDS: list[tuple[str, str]] = [
-    ("name", "text"),
-    ("aliases", "text"),
-    ("properties.content", "text"),
-    ("properties.aliases", "text"),
-]
-
 # Filter paths the vector-search index must expose so $vectorSearch
 # queries can prune candidates server-side. ``user_id`` is first — every
 # tenant-scoped $vectorSearch carries a ``user_id`` filter; ``merged_into``
@@ -385,12 +372,12 @@ async def ensure_indexes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
 ) -> None:
-    """Ensure the text and vector search indexes; retire stale classic indexes.
+    """Ensure the vector search index; retire stale classic indexes.
 
-    The classic indexes are NOT created here: Beanie creates the mode's set
-    (:func:`tree.entities.memory.memory_indexes`) on every ``init_mongodb``.
-    This function owns only what Beanie cannot express — the ``$text`` index
-    and the mongot vector index — plus the retirement of every name in
+    The classic indexes, ``$text`` included, are NOT created here: Beanie
+    creates the mode's set (:func:`tree.entities.memory.memory_indexes`) on
+    every ``init_mongodb``. This function owns only what Beanie cannot
+    express — the mongot vector index — plus the retirement of every name in
     :func:`retired_index_names` for the configured mode (ADR-012). ``user_id``
     is passed so the signature mirrors the other pipeline entry points.
 
@@ -426,18 +413,6 @@ async def ensure_indexes(
 
     # --- Retire classic indexes this mode no longer declares (idempotent) ---
     await _drop_legacy_compound_indexes(collection)
-
-    # --- Text index ---
-
-    # No readiness poll here, unlike the vector index below.
-    # create_index is synchronous: the standard $text index is built by mongod
-    # itself and the await returns only once it can serve queries. Only the
-    # Atlas Search indexes mongot builds out-of-band need polling.
-    await collection.create_index(
-        _TEXT_INDEX_FIELDS,
-        name=_TEXT_INDEX_NAME,
-    )
-    logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, MEMORY_COLLECTION)
 
     # --- Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)

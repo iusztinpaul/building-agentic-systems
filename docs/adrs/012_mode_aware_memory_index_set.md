@@ -43,8 +43,11 @@ prod usage evidence exists, and the decision rests on the audit.
    `init_beanie`, so every entry point (flows, scripts, MCP, CLI, the unit-test session) creates
    exactly that mode's set. `Settings.indexes` is initialised from `app_config.memory.mode` at import
    (the YAML loads before any model; no database is needed) and re-bound by `init_mongodb` right before
-   `init_beanie`, so a mode changed after import (tests) still binds the right set. `ensure_indexes` owns only what Beanie cannot express:
-   the `$text` index, the mongot `vector_index`, and retirement (3). `MemoryEntry.kind` is a plain `str`.
+   `init_beanie`, so a mode changed after import (tests) still binds the right set. This includes the
+   `$text` `text_index` (an ordinary `IndexModel` with `"text"` keys; it moved here from
+   `ensure_indexes` in task 171, so lexical search works from the first boot, before any indexing run).
+   `ensure_indexes` owns only what Beanie truly cannot express, the mongot `vector_index`, plus
+   retirement (3). `MemoryEntry.kind` is a plain `str`.
    `Indexed(str)` would make Beanie recreate `kind_1` on every boot.
 2. **The set is per mode.**
 
@@ -54,7 +57,7 @@ prod usage evidence exists, and the decision rests on the audit.
    | `user_kind_type_subtype` | `(user_id, kind, type, subtype)` | ✓ | ✓ |
    | `user_type_name` | `(user_id, type, name)` | ✓ | ✓ |
    | `active_user` | `(properties.is_active_user)`, partial on `{"properties.is_active_user": true}` | — | ✓ |
-   | `text_index` | `$text` (unchanged) | ✓ | ✓ |
+   | `text_index` | `$text` on `name`, `aliases`, `properties.content`, `properties.aliases` | ✓ | ✓ |
    | `vector_index` | mongot (unchanged) | ✓ | ✓ |
    | `user_kind_source_node` | `(user_id, kind, source_node_id)` | — | ✓ |
    | `user_kind_target_node` | `(user_id, kind, target_node_id)` | — | ✓ |
@@ -107,32 +110,31 @@ flowchart LR
   MODE["app_config.memory.mode<br/>rag | graphrag"]:::cfg
 
   subgraph Boot["init_mongodb — EVERY entry point"]
-    MI["memory_indexes(mode)<br/>user_kind_type_subtype · user_type_name<br/>+ active_user · user_kind_source/target_node (graphrag)"]:::beanie
+    MI["memory_indexes(mode)<br/>text_index · user_kind_type_subtype · user_type_name<br/>+ active_user · user_kind_source/target_node (graphrag)"]:::beanie
     IB["init_beanie<br/>creates, never drops"]:::beanie
   end
 
   subgraph Idx["ensure_indexes — indexing phase + MCP boot"]
     RT["retired_index_names(mode)<br/>drop if present (idempotent)"]:::retire
-    TX["text_index ($text)"]:::search
     VX["vector_index (mongot)"]:::search
   end
 
   MODE --> MI --> IB
   MODE --> RT
-  RT --> TX --> VX
+  RT --> VX
   MI -. "disjoint by test" .- RT
 ```
 
 ## Consequences
 
-- **Fewer indexes per write.** Each upsert maintains 4 classic indexes in `rag` and 7 in `graphrag`,
+- **Fewer indexes per write.** Each upsert maintains 4 classic indexes in `rag` and 7 in `graphrag` (`_id_` and `text_index` included),
   down from 11. The largest index (`user_kind_embedding`) never reaches prod. M0 capacity before the
   first prod memory run still needs its own measurement, because ~200 MB of embedded rows remains.
 - **Boot creates, indexing retires.** A database that still carries the old set keeps its stale
   indexes until the first indexing run after the upgrade, which logs one
   `Dropped legacy compound index '<name>'` line per retired name. Later runs log none.
-- **Single source of truth per index.** Classic indexes are declared ONLY in `memory_indexes` and
-  search indexes ONLY in `ensure_indexes`. The double declaration of `user_type_semantic_type` is
+- **Single source of truth per index.** Classic indexes, `$text` included, are declared ONLY in
+  `memory_indexes`, and the mongot vector index ONLY in `ensure_indexes`. The double declaration of `user_type_semantic_type` is
   gone.
 - **Slower backfill read.** Backfill docs-examined rises from "rows still missing a vector" to "every
   embeddable node of the user". (4) records the upgrade path.

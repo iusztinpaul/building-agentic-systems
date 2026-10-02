@@ -273,13 +273,30 @@ fan-out query) and the ``active_user`` partial index, so the index's
 """
 
 
+TEXT_INDEX_NAME = "text_index"
+TEXT_INDEX_FIELDS: list[tuple[str, str]] = [
+    ("name", "text"),
+    ("aliases", "text"),
+    ("properties.content", "text"),
+    ("properties.aliases", "text"),
+]
+"""The fields of the ONE ``$text`` index a collection may carry, read by the
+lexical leg of hybrid search. ``aliases`` is the top-level array of alternate
+surface forms (#007); ``properties.aliases`` is kept for documents that still
+carry the old nested shape."""
+
+
 def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
     """Every classic index of the ``memory`` collection for ``mode`` (ADR-012).
 
-    Beanie owns these; ``tree.memory.rag.indexing.ensure_indexes`` owns only the
-    ``$text`` and vector search indexes plus the retirement of the names
+    Beanie creates these on every ``init_mongodb``;
+    ``tree.memory.rag.indexing.ensure_indexes`` owns only the mongot vector index
+    plus the retirement of the names
     :func:`tree.memory.rag.indexing.retired_index_names` lists. A per-mode set is
     safe because switching modes requires dropping ``memory`` (ADR-006).
+
+    * ``text_index`` — the ``$text`` index behind lexical search
+      (:data:`TEXT_INDEX_FIELDS`).
 
     * ``user_kind_type_subtype`` — every tenant-scoped ``kind``/``type`` read
       (its prefix serves ``(user_id, kind, type)``).
@@ -295,6 +312,7 @@ def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
     """
 
     indexes = [
+        IndexModel(TEXT_INDEX_FIELDS, name=TEXT_INDEX_NAME),
         IndexModel(
             [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)],
             name="user_kind_type_subtype",
