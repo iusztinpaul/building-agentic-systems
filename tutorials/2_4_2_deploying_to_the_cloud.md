@@ -124,6 +124,20 @@ As with the local setup, you can use MongoDB Compass GUI or mongosh CLI to look 
 
 ![Figure 2.23 The database visualized in MongoDB Compass](assets/2_4_2_mongodb_compass.png)
 
+**Final step: drop the `sample_mflix` database.** A new Atlas cluster can come preloaded with MongoDB's `sample_mflix` sample dataset, which takes about 128 MB on disk — a quarter of M0's 512 MB cap. Left in place, it is what pushes a full backfill over the cap. Drop it once, right after the cluster is up:
+
+```bash
+set -a && . ./.env.prod && set +a
+mongosh "$MONGO_CONNECTION_STRING" --quiet --eval 'printjson(db.getSiblingDB("sample_mflix").dropDatabase())'
+# → { ok: 1, dropped: 'sample_mflix' }
+```
+
+Then confirm only Tree's database (plus `admin` / `local`) remains:
+
+```bash
+mongosh "$MONGO_CONNECTION_STRING" --quiet --eval 'db.adminCommand({listDatabases: 1, nameOnly: true}).databases.map(d => d.name)'
+```
+
 <details>
 <summary><strong>MongoDB Atlas gotchas</strong></summary>
 
