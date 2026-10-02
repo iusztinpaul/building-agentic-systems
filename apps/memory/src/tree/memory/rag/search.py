@@ -8,7 +8,7 @@ results are fused client-side with reciprocal rank fusion, exactly as the
 pre-ADR-006 ``search_nodes`` did.
 
 **A Parent chunk is NEVER a seed, in either mode.** Parents carry no vector
-(``embedding: []``), so the vector stage cannot return one; the text stage
+(no ``embedding`` field), so the vector stage cannot return one; the text stage
 excludes them explicitly with ``$nor`` because a `$text` query has no such
 guard. That invariant lives HERE, unconditionally, rather than in each caller's
 ``node_filter`` — a caller that forgets it would silently start seeding graph
@@ -140,7 +140,7 @@ async def _vector_search(
     ``text_only``, so the empty answer is confirmed against
     :func:`_vector_index_is_queryable` before it counts as "no matches".
 
-    No parent exclusion here: parents are written with ``embedding: []`` and so
+    No parent exclusion here: parents are written without an ``embedding`` and so
     are absent from the vector index — adding a filter clause for them would
     cost a pre-filter on every query to exclude rows that cannot be returned.
 

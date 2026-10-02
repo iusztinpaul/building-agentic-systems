@@ -20,8 +20,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from beanie import PydanticObjectId
 from bson import ObjectId
+from bson.binary import Binary
 
-from tree.entities.memory import NodeType
+from tree.entities.memory import NodeType, from_stored_vector
 from tree.memory.embedding_text import (
     node_to_embedding_text,
     prospective_entity_embedding_text,
@@ -766,9 +767,11 @@ class TestAddEntityNodeTextEmbedding:
         # The persisted embedding equals the dedup-query vector.
         node_call = collection.update_one.call_args_list[0]
         set_stage = node_call.args[1][0]["$set"]
-        # ``embedding`` is written via ``$ifNull`` so unwrap the literal.
+        # ``embedding`` is written via ``$ifNull`` so unwrap the literal; it is
+        # a float32 ``binData`` vector (task 175).
         persisted = set_stage["embedding"]["$ifNull"][1]
-        assert persisted == expected_vec
+        assert isinstance(persisted, Binary)
+        assert from_stored_vector(persisted) == pytest.approx(expected_vec)
 
     async def test_preference_embeds_statement_not_node_text(self, mocker) -> None:
         database, _collection = _make_database(mocker)
@@ -865,7 +868,7 @@ class TestAddEntityRoutesThroughChokepoint:
         # returns the aligned empty placeholder ``[[]]`` (Voyage 400 skip). The
         # previous inline behavior degraded such a result to ``embedding = []``;
         # that must be preserved now that the call routes through the chokepoint.
-        database, _collection = _make_database(mocker)
+        database, collection = _make_database(mocker)
         model = _make_embedding_model()
         dedupe = _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
         mocker.patch(
@@ -888,6 +891,10 @@ class TestAddEntityRoutesThroughChokepoint:
         # Assert — the empty placeholder degraded to embedding = [] (unchanged
         # behavior), and dedupe still ran with that empty embedding.
         assert dedupe.await_args.kwargs["embedding"] == []
+        # ... and the node row is written WITHOUT an ``embedding`` (pending for
+        # the backfill), never with an empty vector (task 175).
+        set_stage = collection.update_one.call_args_list[0].args[1][0]["$set"]
+        assert "embedding" not in set_stage
 
     async def test_empty_chokepoint_result_also_degrades_to_empty(self, mocker) -> None:
         # Arrange — defensive: a falsy result (``[]``) must also degrade to
@@ -1080,7 +1087,8 @@ class TestEmbeddingRole:
         assert dedupe.await_args.kwargs["embedding"] == cached_vector
         node_call = collection.update_one.call_args_list[0]
         set_stage = node_call.args[1][0]["$set"]
-        assert set_stage["embedding"]["$ifNull"][1] == cached_vector
+        persisted = set_stage["embedding"]["$ifNull"][1]
+        assert from_stored_vector(persisted) == pytest.approx(cached_vector)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from typing import Any
 
 from beanie import Document as BeanieDocument
 from beanie import PydanticObjectId
+from bson.binary import Binary, BinaryVectorDtype
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import IndexModel
 
@@ -256,6 +257,76 @@ writes anything else" test.
 """
 
 
+# --- Stored vectors (task 175) ---
+#
+# ``embedding`` is persisted as BSON float32 ``binData`` (subtype 9), not as an
+# array of doubles: a 1024-d vector costs ~4 KB instead of ~13 KB, which is what
+# lets a real corpus fit the Atlas M0 512 MB cap. Atlas Vector Search indexes
+# float32 ``binData`` with the SAME index definition, and ``queryVector`` stays a
+# plain ``list[float]``. Everything in Python (Prefect task outputs, caches,
+# ``EmbeddingMap``) keeps ``list[float]``; only the Mongo write converts.
+#
+# A row WITHOUT a vector has no ``embedding`` field (or ``null``) — never an
+# empty vector. Pending query: ``{"embedding": None}`` (matches absent + null);
+# embedded query: ``{"embedding": STORED_VECTOR_QUERY}``.
+
+STORED_VECTOR_QUERY: dict[str, Any] = {"$type": "binData"}
+"""The ``embedding`` predicate that selects rows carrying a stored vector."""
+
+
+def to_stored_vector(vector: list[float]) -> Binary:
+    """Encode ``vector`` for the ``embedding`` field: float32 ``binData``.
+
+    The ONE write boundary — every persisted vector goes through here. Raises
+    ``ValueError`` on an empty vector: a row without a vector omits the field.
+    """
+
+    if len(vector) == 0:
+        raise ValueError(
+            "cannot store an empty embedding; omit the field instead "
+            "(a pending row has no embedding)"
+        )
+    return Binary.from_vector(vector, BinaryVectorDtype.FLOAT32)
+
+
+def from_stored_vector(
+    value: Binary | bytes | bytearray | memoryview | list[float] | None,
+) -> list[float]:
+    """Decode a stored ``embedding`` into ``list[float]``; absent → ``[]``.
+
+    The ONE read boundary for Python code that uses the numbers. A plain list
+    passes through (in-memory rows, test doubles). A ``Binary`` that is not a
+    float32 vector raises instead of decoding into garbage — iterating a
+    ``Binary`` yields BYTES, not floats. Raw ``bytes`` / ``bytearray`` /
+    ``memoryview`` raise for the same reason: PyMongo decodes binData subtype 0
+    to plain ``bytes``, and :data:`STORED_VECTOR_QUERY` matches every subtype,
+    so such a row reaches here — a loud failure beats a vector of byte ints.
+    """
+
+    if value is None:
+        return []
+    if isinstance(value, (bytes, bytearray, memoryview)) and not isinstance(
+        value, Binary
+    ):
+        raise ValueError(
+            "embedding is raw binData (subtype 0), expected a float32 vector "
+            "(subtype 9)"
+        )
+    if not isinstance(value, Binary):
+        return [float(x) for x in value]
+    if value.subtype != 9:
+        raise ValueError(
+            f"embedding is a Binary with subtype {value.subtype}, expected the "
+            "vector subtype 9"
+        )
+    decoded = value.as_vector()
+    if decoded.dtype != BinaryVectorDtype.FLOAT32:
+        raise ValueError(
+            f"embedding is a {decoded.dtype.name} vector, expected FLOAT32"
+        )
+    return [float(x) for x in decoded.data]
+
+
 ACTIVE_USER_FILTER: dict[str, Any] = {"properties.is_active_user": True}
 """The predicate that marks a user's ``person:self`` node as an active user (graphrag).
 
@@ -298,8 +369,9 @@ def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
     * ``graphrag`` only: ``user_kind_source_node`` / ``user_kind_target_node``,
       the ``connectToField`` of the two ``$graphLookup`` passes.
 
-    Never a multikey index over ``embedding`` (~16 KB per embedded row); if the
-    backfill ever needs one, index a scalar ``embedding_pending: true`` marker.
+    Never a classic index over ``embedding`` (a ~4 KB ``binData`` key per
+    embedded row); if the backfill ever needs one, index a scalar
+    ``embedding_pending: true`` marker.
     """
 
     indexes = [
@@ -359,7 +431,10 @@ class MemoryEntry(BeanieDocument):
     # rule lands at the envelope-validator pipeline in #030.
     subtype: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
-    embedding: list[float] = Field(default_factory=list)
+    # Stored as float32 ``binData`` (see :func:`to_stored_vector`); decoded to
+    # ``list[float]`` on read by ``_decode_stored_embedding``. ``None`` = no
+    # vector (documents, parents, unembedded rows).
+    embedding: list[float] | None = None
 
     # --- ADR-006 decision 2: the two-level chunk hierarchy ---
     #
@@ -541,6 +616,17 @@ class MemoryEntry(BeanieDocument):
                 f"{sorted(spec.subtypes)} for node type {self.type!r}"
             )
         return self
+
+    @field_validator("embedding", mode="before")
+    @classmethod
+    def _decode_stored_embedding(cls, value: Any) -> Any:
+        """Decode a stored float32 ``binData`` vector so every Beanie read
+        (``find`` / ``model_validate``) exposes ``list[float]``; raw binData
+        (any ``bytes``-like value) raises via :func:`from_stored_vector`."""
+
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return from_stored_vector(value)
+        return value
 
     @model_validator(mode="after")
     def _check_cluster_fields_are_child_only(self) -> "MemoryEntry":

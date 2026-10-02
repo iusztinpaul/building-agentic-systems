@@ -147,7 +147,8 @@ class User(BeanieDocument):
             "name": "self",
             "canonical_name": canonical_name,
             "properties": properties,
-            "embedding": [],
+            # No ``embedding``: the self node is pending for the indexing
+            # backfill (task 175 — never an empty vector).
             "aliases": [],
             "confidence": 1.0,
             "sources": [],

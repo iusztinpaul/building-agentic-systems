@@ -18,7 +18,7 @@ The sweep iterates over ``(user_id, type)`` partitions. Within each:
 * The **driving set** — the nodes we iterate over and call
   :func:`tree.memory.graph.dedup.dedupe_entity` for — is
   **watermark-filtered**: non-tombstoned (``merged_into`` absent/null),
-  embedded (non-empty ``embedding``), AND ``updated_at > last_run_at``.
+  embedded (a stored ``embedding`` vector), AND ``updated_at > last_run_at``.
 * The **search space** — the ``$vectorSearch`` comparison target inside
   ``dedupe_entity`` — is the **FULL graph** (tombstone-excluded only), NOT
   watermark-filtered. We never add a watermark filter to ``dedupe_entity``'s
@@ -61,7 +61,13 @@ from prefect.context import get_run_context
 from tree.config.app_config import load_app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
-from tree.entities.memory import EdgeType, MEMORY_COLLECTION, NodeType
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    STORED_VECTOR_QUERY,
+    EdgeType,
+    NodeType,
+    from_stored_vector,
+)
 from tree.entities.ontology import NODE_REGISTRY
 from tree.entities.users import select_active_user_ids
 from tree.memory.graph.consolidation.meta_state import load_watermark, record_dream_run
@@ -316,7 +322,8 @@ async def _iter_driving_nodes(
     """Fetch the watermark-filtered driving set for one ``(user_id, type)``.
 
     The driving set is non-tombstoned (``merged_into`` absent/null/empty),
-    embedded (non-empty ``embedding``), and ``updated_at > last_run_at``.
+    embedded (a stored float32 ``binData`` ``embedding``), and
+    ``updated_at > last_run_at``.
     This is the ONLY place the watermark filter is applied — the search
     space inside ``dedupe_entity`` stays the full graph.
     """
@@ -328,7 +335,7 @@ async def _iter_driving_nodes(
             "kind": "node",
             "type": entity_type.value,
             "merged_into": {"$in": [None, "", False]},
-            "embedding": {"$exists": True, "$not": {"$size": 0}},
+            "embedding": STORED_VECTOR_QUERY,
             "updated_at": {"$gt": last_run_at},
         }
     )
@@ -391,7 +398,8 @@ async def _collect_dream_candidates(
                 break
 
             self_id = str(node["_id"])
-            embedding = node.get("embedding") or []
+            # Decoded so ``dedupe_entity`` keeps its ``list[float]`` contract.
+            embedding = from_stored_vector(node.get("embedding"))
             if not embedding:
                 # Defensive: the driving query already excludes unembedded
                 # nodes, but never feed an empty vector to $vectorSearch.

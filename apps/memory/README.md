@@ -257,7 +257,9 @@ make memory-run-memory-pipeline MODE=online SOURCE_URIS="https://www.youtube.com
 
 The indexing **Offline phase** (`memory-indexing-etl`) — works in both memory modes.
 `embed-kg-nodes` backfills the vectors that are missing on the rows that are supposed to carry one
-(child chunks always; entity nodes in `graphrag`), and `ensure-kg-indexes` asserts the text index
+(child chunks always; entity nodes in `graphrag`). Vectors are stored as BSON float32 `binData`
+(≈4 KB per 1024-d row instead of ≈13 KB as an array of doubles, so a real corpus fits the Atlas M0
+512 MB cap); a row still waiting for one has no `embedding` field. `ensure-kg-indexes` asserts the text index
 and the vector index (filter paths `user_id`, `kind`, `type`, `subtype`, `merged_into`) on
 `memory`. Running it alone dispatches ONE `offline-pipeline` run with `run_data=False,
 run_extraction=False` — so it needs served workflows, like every other pipeline command:
@@ -269,7 +271,7 @@ make memory-run-indexing-pipeline
 #### Changing the embedding model
 
 `memory` rows carry **no embedding-model stamp**, and the backfill only fills vectors that are
-EMPTY — so switching `models.search_embedding` (or changing the **Embedding role** rule) leaves
+MISSING — so switching `models.search_embedding` (or changing the **Embedding role** rule) leaves
 every old vector in place, in a space the new ones don't share. Measured on live voyage-4, the same
 text embedded role-less (the legacy way) scores cos=0.983 against its `query` embedding but only
 0.774 against its `document` one: old vectors aren't merely older, they're incomparable, and hybrid
@@ -278,7 +280,7 @@ vectors, then let the existing phases refill them (ADR-009 §7):
 
 ```bash
 make memory-reset-embeddings                  # DRY RUN: counts, writes nothing, exits 1
-make memory-reset-embeddings CONFIRM=yes      # empties them
+make memory-reset-embeddings CONFIRM=yes      # removes them
 make memory-run-indexing-pipeline             # re-embeds with the CURRENT model
 make memory-run-clustering-pipeline           # only if you use the Embedding map
 ```
@@ -287,7 +289,7 @@ Three things to know:
 
 - **It is per user.** The reset resolves ONE tenant (`USER_ID` / `USER_IDENTIFIER`, like every other
   command here); on a multi-user environment, loop over your users — there is no `--all-users`.
-- **Between step 1 and step 2, search runs on the text leg.** The emptied rows carry no vector, so
+- **Between step 1 and step 2, search runs on the text leg.** The reset rows carry no vector, so
   `$vectorSearch` returns nothing for them and retrieval reports `text_only` / fewer hits. Run the
   indexing pipeline right after, and re-run it if it fails: both the reset and the backfill are
   idempotent (a second reset matches 0 rows and writes nothing).

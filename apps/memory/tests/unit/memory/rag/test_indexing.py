@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, call, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary
 
 from tests.unit.conftest import TEST_DATABASE
 from tree.config.app_config import app_config
@@ -19,6 +20,8 @@ from tree.entities.memory import (
     MEMORY_COLLECTION,
     MemoryEntry,
     NodeType,
+    from_stored_vector,
+    to_stored_vector,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
@@ -604,7 +607,12 @@ class TestBackfillSelection:
 
         assert query["user_id"] == _TEST_USER_ID
         assert query["kind"] == "node"
-        assert query["embedding"] == {"$in": [[], None]}
+        # ``None`` matches an absent field AND ``null`` — the pending marker
+        # since vectors are stored as float32 ``binData`` (task 175).
+        assert query["embedding"] is None
+
+    def test_reset_filter_selects_stored_vectors(self) -> None:
+        assert _reset_filter(_TEST_USER_ID)["embedding"] == {"$type": "binData"}
 
     @pytest.mark.parametrize("build_filter", [_backfill_filter, _reset_filter])
     def test_rag_selects_child_chunks_only(self, monkeypatch, build_filter) -> None:
@@ -695,8 +703,8 @@ class TestNodeEmbeddingText:
 
 class TestEmbedNodesIsBackfillOnly:
     async def test_skips_nodes_with_non_empty_embedding(self, mocker) -> None:
-        """Nodes with a non-empty ``embedding`` must NOT be re-embedded —
-        the query filter is ``embedding in [[], None]`` so anything else is
+        """Nodes with a stored vector must NOT be re-embedded — the query
+        filter is ``embedding: None`` (absent or null) so anything else is
         skipped."""
 
         # Arrange — only the "empty" node should make it through the query.
@@ -705,7 +713,6 @@ class TestEmbedNodesIsBackfillOnly:
             "type": "person",
             "kind": "node",
             "properties": {},
-            "embedding": [],
         }
         # The filled node is excluded by the query filter — we should never
         # see it in the fetched docs list.
@@ -740,7 +747,6 @@ class TestEmbedNodesIsBackfillOnly:
             "kind": "node",
             "type": "chunk",
             "subtype": "child",
-            "embedding": [],
             "properties": {
                 "title": "Memory for AI Agents",
                 "heading_path": ["Retrieval"],
@@ -751,7 +757,6 @@ class TestEmbedNodesIsBackfillOnly:
             "_id": "u:person:alice",
             "kind": "node",
             "type": "person",
-            "embedding": [],
             "properties": {},
             "name": "alice",
         }
@@ -802,7 +807,7 @@ class TestEmbedNodesIsBackfillOnly:
         """A ``[]`` placeholder (Voyage content rejection) must NOT be written.
 
         The skipped node stays unembedded (``embedding`` untouched, i.e. still
-        ``[]``/``None``) so a later backfill run retries it — the resilience
+        absent) so a later backfill run retries it — the resilience
         contract from this change. We assert the bulk_write op set excludes the
         skipped doc and the returned count reflects only the persisted node, and
         that the summary log surfaces the skip gap for ops visibility.
@@ -814,7 +819,6 @@ class TestEmbedNodesIsBackfillOnly:
             "_id": "person:alice",
             "type": "person",
             "kind": "node",
-            "embedding": [],
         }
         skipped = {
             "_id": "chunk:poison",
@@ -822,7 +826,6 @@ class TestEmbedNodesIsBackfillOnly:
             "subtype": "child",
             "kind": "node",
             "properties": {"content": "poison"},
-            "embedding": [],
         }
         collection = AsyncMock()
         collection.find = MagicMock(
@@ -847,6 +850,10 @@ class TestEmbedNodesIsBackfillOnly:
         assert len(bulk_ops) == 1
         written_id = bulk_ops[0]._filter["_id"]
         assert written_id == "person:alice"
+        # Persisted as float32 ``binData`` (task 175), never as a float array.
+        written = bulk_ops[0]._doc["$set"]["embedding"]
+        assert isinstance(written, Binary)
+        assert from_stored_vector(written) == pytest.approx([0.1, 0.2, 0.3, 0.4])
 
         # Assert: the summary log surfaces the skipped (retriable) node so the
         # "Embedded N" count is not misread as "all fetched nodes are done".
@@ -875,7 +882,6 @@ class TestEmbeddingRoles:
             "_id": "u:person:alice",
             "kind": "node",
             "type": "person",
-            "embedding": [],
             "properties": {},
             "name": "alice",
         }
@@ -926,6 +932,19 @@ def tenant() -> PydanticObjectId:
     return PydanticObjectId()
 
 
+async def _store_vector(row_id: str) -> None:
+    """Give ``row_id`` a float32 ``binData`` vector, the way production writes it.
+
+    Beanie's ``insert`` would persist ``MemoryEntry.embedding`` as a float array,
+    which no production writer does since task 175 — so the fixtures insert the
+    row vector-less and set the stored vector raw.
+    """
+
+    await MemoryEntry.get_pymongo_collection().update_one(
+        {"_id": row_id}, {"$set": {"embedding": to_stored_vector(_VECTOR)}}
+    )
+
+
 async def _seed_embedded_child(
     user_id: PydanticObjectId, row_id: str, *, clustered: bool = True
 ) -> None:
@@ -939,12 +958,12 @@ async def _seed_embedded_child(
         subtype="child",
         name=row_id,
         properties={"content": "a passage", "title": "Memory", "heading_path": ["R"]},
-        embedding=list(_VECTOR),
         cluster_id=2 if clustered else None,
         viz=ChunkViz(x=1.0, y=2.0, run_id="run-1") if clustered else None,
         created_at=_RESET_NOW,
         updated_at=_RESET_NOW,
     ).insert()
+    await _store_vector(row_id)
 
 
 async def _seed_vectorless_row(
@@ -964,7 +983,6 @@ async def _seed_vectorless_row(
         subtype=subtype,
         name=row_id,
         properties={"content": "not embedded"},
-        embedding=[],
         created_at=_RESET_NOW,
         updated_at=_RESET_NOW,
     ).insert()
@@ -986,10 +1004,10 @@ async def _seed_embedded_entity(
         type=node_type,
         name=row_id,
         properties=properties or {},
-        embedding=list(_VECTOR),
         created_at=_RESET_NOW,
         updated_at=_RESET_NOW,
     ).insert()
+    await _store_vector(row_id)
 
 
 async def _seed_user_with_six_embedded_rows(user_id: PydanticObjectId) -> None:
@@ -1045,7 +1063,9 @@ class TestResetEmbeddings:
         rows = await collection.find({"user_id": tenant}).to_list()
         emptied = [row for row in rows if row["_id"] in _resettable_ids(tenant)]
         assert len(emptied) == 6
-        assert all(row["embedding"] == [] for row in emptied)
+        # The vector is REMOVED (``$unset``), never emptied in place: the
+        # pending marker is an absent field (task 175).
+        assert all("embedding" not in row for row in emptied)
         # The children lose their map coordinates too, so the Embedding map
         # warns instead of drawing points from the old embedding space.
         children = [row for row in emptied if row.get("subtype") == "child"]
@@ -1153,3 +1173,53 @@ def _resettable_ids(user_id: PydanticObjectId) -> set[str]:
         f"{user_id}:person:bob",
         f"{user_id}:preference:dark-mode",
     }
+
+
+class TestStoredVectorMarkersLive:
+    """Task 175, against a real MongoDB: pending = absent / null, embedded = binData."""
+
+    @pytest.fixture(autouse=True)
+    def _rag_mode(self, monkeypatch) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "rag")
+
+    async def test_backfill_selects_absent_and_null_children_only(
+        self, reset_client, tenant
+    ) -> None:
+        await _seed_embedded_child(tenant, f"{tenant}:chunk:embedded")
+        await _seed_vectorless_row(
+            tenant, f"{tenant}:chunk:absent", node_type=NodeType.CHUNK, subtype="child"
+        )
+        await _seed_vectorless_row(
+            tenant, f"{tenant}:chunk:parent", node_type=NodeType.CHUNK, subtype="parent"
+        )
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+        await collection.update_one(
+            {"_id": f"{tenant}:chunk:absent"}, {"$unset": {"embedding": ""}}
+        )
+        await _seed_vectorless_row(
+            tenant, f"{tenant}:chunk:null", node_type=NodeType.CHUNK, subtype="child"
+        )
+
+        selected = await collection.find(_backfill_filter(tenant)).to_list()
+
+        assert {row["_id"] for row in selected} == {
+            f"{tenant}:chunk:absent",
+            f"{tenant}:chunk:null",
+        }
+
+    async def test_backfill_writes_bindata_and_reset_then_backfill_round_trips(
+        self, reset_client, tenant
+    ) -> None:
+        for index in range(2):
+            await _seed_embedded_child(tenant, f"{tenant}:chunk:child-{index}")
+        collection = reset_client[TEST_DATABASE][MEMORY_COLLECTION]
+
+        reset = await reset_embeddings(reset_client, TEST_DATABASE, tenant)
+        refilled = await embed_nodes(
+            reset_client, TEST_DATABASE, FakeEmbeddingModel(dimensions=4), tenant
+        )
+
+        assert reset == refilled == 2
+        rows = await collection.find({"user_id": tenant}).to_list()
+        assert all(isinstance(row["embedding"], Binary) for row in rows)
+        assert all(len(from_stored_vector(row["embedding"])) == 4 for row in rows)

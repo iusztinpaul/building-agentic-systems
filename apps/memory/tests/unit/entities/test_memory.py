@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timezone
 
+import numpy as np
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary, BinaryVectorDtype
 from pydantic import ValidationError
 from pymongo import IndexModel
 
@@ -10,6 +12,7 @@ from tree.db import ALL_DOCUMENT_MODELS
 from tree.entities.memory import (
     MEMORY_COLLECTION,
     RAG_NODE_TYPES,
+    STORED_VECTOR_QUERY,
     ChunkViz,
     EdgeType,
     ExtractorInfo,
@@ -18,8 +21,10 @@ from tree.entities.memory import (
     build_edge_id,
     build_node_id,
     build_rag_row_id,
+    from_stored_vector,
     memory_indexes,
     TEXT_INDEX_FIELDS,
+    to_stored_vector,
 )
 from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES, NODE_REGISTRY
@@ -108,7 +113,7 @@ class TestMemoryEntry:
         assert entry.id == f"{user_id}:person:alice"
         assert entry.user_id == user_id
         assert entry.kind == "node"
-        assert entry.embedding == []
+        assert entry.embedding is None
         assert entry.source_node_id is None
 
     async def test_edge_entry(self):
@@ -1419,3 +1424,128 @@ class TestChunkClusterFields:
         )
 
         assert description and description.strip()
+
+
+class TestStoredVector:
+    """Task 175: ``memory.embedding`` is stored as BSON float32 ``binData``.
+
+    ``to_stored_vector`` is the ONE write boundary and ``from_stored_vector`` the
+    ONE read boundary; a 1024-d vector costs ~4 KB instead of ~13 KB as an array
+    of doubles (the Atlas M0 512 MB cap is what forced it).
+    """
+
+    def test_to_stored_vector_writes_float32_bindata(self) -> None:
+        stored = to_stored_vector([0.1, -0.2, 1.5])
+
+        assert isinstance(stored, Binary)
+        assert stored.subtype == 9
+        assert stored.as_vector().dtype == BinaryVectorDtype.FLOAT32
+
+    def test_to_stored_vector_costs_four_bytes_per_dimension(self) -> None:
+        stored = to_stored_vector([0.5] * 1024)
+
+        # 2-byte header (dtype + padding) + 4 bytes per float32.
+        assert len(stored) == 2 + 4 * 1024
+
+    def test_round_trip_preserves_floats_within_float32_precision(self) -> None:
+        vector = [0.123456789, -0.987654321, 3.14159265, 0.0, 1e-7]
+
+        decoded = from_stored_vector(to_stored_vector(vector))
+
+        assert decoded == pytest.approx(vector, rel=1e-6, abs=1e-9)
+        assert all(isinstance(value, float) for value in decoded)
+
+    def test_to_stored_vector_rejects_an_empty_vector(self) -> None:
+        # Pending is an ABSENT field, never an empty vector.
+        with pytest.raises(ValueError, match="empty"):
+            to_stored_vector([])
+
+    @pytest.mark.parametrize("value", [None, []], ids=["none", "empty-list"])
+    def test_from_stored_vector_reads_missing_as_empty(self, value) -> None:
+        assert from_stored_vector(value) == []
+
+    def test_from_stored_vector_passes_a_float_list_through(self) -> None:
+        assert from_stored_vector([0.1, 0.2]) == [0.1, 0.2]
+
+    def test_from_stored_vector_rejects_a_non_vector_binary(self) -> None:
+        with pytest.raises(ValueError, match="subtype"):
+            from_stored_vector(Binary(b"\x01\x02\x03\x04", 0))
+
+    @pytest.mark.parametrize(
+        "raw",
+        [b"\x01\x02", bytearray(b"\x01\x02"), memoryview(b"\x01\x02")],
+        ids=["bytes", "bytearray", "memoryview"],
+    )
+    def test_from_stored_vector_rejects_raw_bindata(self, raw) -> None:
+        # PyMongo decodes binData subtype 0 to plain ``bytes`` (not ``Binary``);
+        # iterating it yields byte ints, so ``b"\x01\x02"`` must not become
+        # ``[1.0, 2.0]``.
+        with pytest.raises(ValueError, match="raw binData"):
+            from_stored_vector(raw)
+
+    def test_to_stored_vector_accepts_a_numpy_array(self) -> None:
+        stored = to_stored_vector(np.array([0.25, -0.5], dtype=np.float32))
+
+        assert from_stored_vector(stored) == [0.25, -0.5]
+
+    def test_to_stored_vector_rejects_an_empty_numpy_array(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            to_stored_vector(np.array([], dtype=np.float32))
+
+    async def test_model_validate_rejects_a_raw_bindata_embedding(self) -> None:
+        user_id = _user_id()
+        row = {
+            "_id": f"{user_id}:person:bob",
+            "user_id": user_id,
+            "kind": "node",
+            "type": "person",
+            "name": "bob",
+            "embedding": b"\x01\x02\x03\x04",
+            "created_at": datetime(2025, 12, 1, tzinfo=UTC),
+            "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
+        }
+
+        with pytest.raises(ValidationError, match="raw binData"):
+            MemoryEntry.model_validate(row)
+
+    def test_from_stored_vector_rejects_a_non_float32_vector(self) -> None:
+        int8 = Binary.from_vector([1, 2, 3], BinaryVectorDtype.INT8)
+
+        with pytest.raises(ValueError, match="FLOAT32"):
+            from_stored_vector(int8)
+
+    def test_stored_vector_query_selects_bindata(self) -> None:
+        assert STORED_VECTOR_QUERY == {"$type": "binData"}
+
+    async def test_model_validate_decodes_a_binary_embedding(self) -> None:
+        user_id = _user_id()
+        row = {
+            "_id": f"{user_id}:person:bob",
+            "user_id": user_id,
+            "kind": "node",
+            "type": "person",
+            "name": "bob",
+            "embedding": to_stored_vector([0.25, -0.5, 0.75]),
+            "created_at": datetime(2025, 12, 1, tzinfo=UTC),
+            "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
+        }
+
+        entry = MemoryEntry.model_validate(row)
+
+        assert entry.embedding == [0.25, -0.5, 0.75]
+
+    async def test_model_validate_reads_an_absent_embedding_as_none(self) -> None:
+        user_id = _user_id()
+        row = {
+            "_id": f"{user_id}:chunk:p0",
+            "user_id": user_id,
+            "kind": "node",
+            "type": "chunk",
+            "subtype": "parent",
+            "created_at": datetime(2025, 12, 1, tzinfo=UTC),
+            "updated_at": datetime(2025, 12, 2, tzinfo=UTC),
+        }
+
+        entry = MemoryEntry.model_validate(row)
+
+        assert entry.embedding is None

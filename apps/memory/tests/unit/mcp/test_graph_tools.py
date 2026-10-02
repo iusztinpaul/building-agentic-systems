@@ -32,7 +32,7 @@ from tree.mcp.graph_tools import (
     visualize_memory_structure,
 )
 from tests.unit.memory.conftest import FakeMemoryCollection, chunk_star_rows
-from tree.entities.memory import MEMORY_COLLECTION
+from tree.entities.memory import MEMORY_COLLECTION, to_stored_vector
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import GRAPH_VIEW_URI
 from tree.memory.rag.search import SearchUnavailableError
@@ -53,6 +53,16 @@ class TestSerialize:
         assert "embedding" not in result
         assert "Alice" in result
         assert "Bob" in result
+
+    def test_strips_a_stored_bindata_embedding(self):
+        # Task 175: rows straight from Mongo carry a float32 ``binData`` vector;
+        # it must never reach the model as a base64 blob.
+        docs = [{"_id": "person:alice", "embedding": to_stored_vector([0.1, 0.2])}]
+
+        result = _serialize(docs)
+
+        assert "embedding" not in result
+        assert "$binary" not in result
 
     def test_handles_objectid(self):
         oid = ObjectId("507f1f77bcf86cd799439011")

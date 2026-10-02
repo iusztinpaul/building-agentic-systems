@@ -1,6 +1,6 @@
 # ADR-006: Modular Memory — Vanilla RAG Mode and GraphRAG Mode over One `memory` Collection
 
-- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes) — §3 amended and §5 YAML default flipped to `rag` by task 170 (`person:self` graphrag-only) — §5 tool sets amended by task 173: `visualize_memory_structure` registers in both modes (`rag` 8 tools, `graphrag` 14; six graph-only); rag `search_memory` keeps `(query, top_k)`.
+- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes) — §3 amended and §5 YAML default flipped to `rag` by task 170 (`person:self` graphrag-only) — §5 tool sets amended by task 173: `visualize_memory_structure` registers in both modes (`rag` 8 tools, `graphrag` 14; six graph-only); rag `search_memory` keeps `(query, top_k)` — §4 amended by task 175: `embedding` stored as BSON float32 `binData`; pending = field absent/null, not `[]`.
 - **Date:** 2026-09-05
 - **Deciders:** Paul (project owner)
 - **Context references:**
@@ -98,7 +98,10 @@ Eight related choices, one design:
    denormalised onto the child row (as `source_type`/`source_uri`/`date` already are) so the
    indexing backfill rebuilds the identical text without a join. Child vectors are computed
    inline by the worker (`embed_children_task`, `INPUTS`-cached); `embed_nodes` in indexing
-   backfills only unembedded children and LLM-extractable entity nodes. One vector index
+   backfills only unembedded children and LLM-extractable entity nodes. Vectors are stored as
+   BSON float32 `binData` (≈4 KB per 1024-d row instead of ≈13 KB as doubles — task 175, the
+   Atlas M0 512 MB cap); a row without a vector has NO `embedding` field (pending =
+   `{"embedding": None}`, embedded = `{"embedding": {"$type": "binData"}}`). One vector index
    (filter paths `user_id, kind, type, subtype, merged_into`) and one text index; the
    dimension gate `assert_settings_match_live_vector_index` is unchanged. In graphrag the LLM
    extracts entities over PARENT chunks (one call per parent).

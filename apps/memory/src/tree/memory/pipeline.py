@@ -466,8 +466,8 @@ async def _embed_children(
     into request-sized batches; the 429 backoff lives inside ``.embed()``.
 
     Returns a ``text -> vector`` map the loader indexes by the same text it
-    rebuilds per child, so a missing vector degrades to ``embedding=[]`` (the
-    indexing backfill picks it up) instead of misaligning rows.
+    rebuilds per child, so a missing vector degrades to a row without an
+    ``embedding`` (the indexing backfill picks it up) instead of misaligning rows.
 
     Embeds under the ``document`` **Embedding role**: these vectors are
     PERSISTED on the child rows and later retrieved by a ``query`` vector

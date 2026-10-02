@@ -16,7 +16,10 @@ Row contract (the loader writes these rows in BOTH memory modes):
 
 * ``document`` — metadata root. Never embedded.
 * ``chunk/parent`` — the retrieval + LLM-extraction unit. Never embedded.
-* ``chunk/child`` — the search unit. Carries the **Contextual header** vector.
+* ``chunk/child`` — the search unit. Carries the **Contextual header** vector,
+  stored as float32 ``binData`` (:func:`tree.entities.memory.to_stored_vector`).
+
+Rows without a vector have NO ``embedding`` field (task 175) — never an empty one.
 
 Both chunk levels denormalise ``title`` and ``heading_path`` onto the row so the
 indexing backfill rebuilds a byte-identical embedding text without a join.
@@ -44,7 +47,12 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo import UpdateOne
 
-from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_rag_row_id
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    RAG_NODE_TYPES,
+    build_rag_row_id,
+    to_stored_vector,
+)
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.types import ParentChunk
 
@@ -101,7 +109,7 @@ def build_rag_row_ops(
 
     ``child_vectors`` maps the **Contextual header** text (the key task ②
     embedded) to its vector; a child whose text is absent from the map is
-    written with ``embedding=[]`` so the indexing backfill picks it up on the
+    written without an ``embedding`` so the indexing backfill picks it up on the
     next run rather than failing the load.
 
     A document with no parents still yields its ``document`` row: the row is the
@@ -125,7 +133,7 @@ def build_rag_row_ops(
                 "title": title,
                 "date": date,
             },
-            embedding=[],
+            embedding=None,
             source_document_id=document_id,
             now=now,
         )
@@ -149,7 +157,7 @@ def build_rag_row_ops(
                     heading_path=parent.heading_path,
                     content=parent.content,
                 ),
-                embedding=[],
+                embedding=None,
                 source_document_id=document_id,
                 now=now,
             )
@@ -178,7 +186,7 @@ def build_rag_row_ops(
                         heading_path=parent.heading_path,
                         content=child.content,
                     ),
-                    embedding=child_vectors.get(text, []),
+                    embedding=child_vectors.get(text),
                     source_document_id=document_id,
                     now=now,
                 )
@@ -222,7 +230,7 @@ def _build_node_op(
     parent_id: str | None,
     chunk_index: int | None,
     properties: dict[str, Any],
-    embedding: list[float],
+    embedding: list[float] | None,
     source_document_id: str,
     now: datetime,
 ) -> UpdateOne:
@@ -243,6 +251,11 @@ def _build_node_op(
     written under an older chunking config survives forever. ``$literal`` makes
     the dict a constant, which overwrites the sub-document wholesale — the same
     wrapper, for the same reason, as ``add_entity._per_key_merge_expr``.
+
+    ``embedding`` is a float32 ``binData`` constant (no ``$literal`` needed: a
+    ``Binary`` is not an expression) or ``$$REMOVE`` when there is no vector, so
+    a re-run that lost a child's vector leaves it pending for the backfill
+    instead of keeping a stale one.
 
     The entity-naming fields (``name`` / ``canonical_name`` / ``aliases`` /
     ``confidence``) are never written: a RAG row's ``_id`` is positional, so it
@@ -266,7 +279,9 @@ def _build_node_op(
                     "parent_id": parent_id,
                     "chunk_index": chunk_index,
                     "properties": {"$literal": properties},
-                    "embedding": embedding,
+                    "embedding": (
+                        to_stored_vector(embedding) if embedding else "$$REMOVE"
+                    ),
                     "sources": {
                         "$setUnion": [
                             {"$ifNull": ["$sources", []]},

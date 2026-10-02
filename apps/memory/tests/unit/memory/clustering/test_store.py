@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary
 
 from tests.unit.conftest import TEST_DATABASE
 from tree.config.settings import settings
@@ -28,7 +29,13 @@ from tree.entities.clusters import (
     ClusterCentroid,
     MemoryCluster,
 )
-from tree.entities.memory import MEMORY_COLLECTION, ChunkViz, MemoryEntry, NodeType
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    ChunkViz,
+    MemoryEntry,
+    NodeType,
+    to_stored_vector,
+)
 from tree.memory.clustering.store import (
     ChildEmbeddingRow,
     load_child_embeddings,
@@ -72,7 +79,12 @@ async def _insert_child(
     cluster_id: int | None = None,
     viz: ChunkViz | None = None,
 ) -> MemoryEntry:
-    """Insert one **Child chunk** row through the ODM."""
+    """Insert one **Child chunk** row through the ODM, its vector as ``binData``.
+
+    Beanie would persist ``embedding`` as a float array, which no production
+    writer does (task 175), so the vector is set raw after the insert;
+    ``embedding=[]`` leaves the child pending (``null``).
+    """
 
     entry = MemoryEntry(
         id=chunk_id,
@@ -86,13 +98,17 @@ async def _insert_child(
             "title": title,
             "heading_path": heading_path or ["Retrieval"],
         },
-        embedding=[0.1, 0.2, 0.3, 0.4] if embedding is None else embedding,
         cluster_id=cluster_id,
         viz=viz,
         created_at=_NOW,
         updated_at=_NOW,
     )
     await entry.insert()
+    vector = [0.1, 0.2, 0.3, 0.4] if embedding is None else embedding
+    if vector:
+        await MemoryEntry.get_pymongo_collection().update_one(
+            {"_id": chunk_id}, {"$set": {"embedding": to_stored_vector(vector)}}
+        )
     return entry
 
 
@@ -107,7 +123,6 @@ async def _insert_parent(user_id: PydanticObjectId, chunk_id: str) -> None:
         subtype="parent",
         name=chunk_id,
         properties={"content": "parent content"},
-        embedding=[],
         created_at=_NOW,
         updated_at=_NOW,
     ).insert()
@@ -121,7 +136,6 @@ async def _insert_document(user_id: PydanticObjectId, chunk_id: str) -> None:
         type=NodeType.DOCUMENT,
         name=chunk_id,
         properties={"title": "Memory for AI Agents"},
-        embedding=[],
         created_at=_NOW,
         updated_at=_NOW,
     ).insert()
@@ -249,7 +263,7 @@ class TestLoadChildEmbeddings:
             "kind": "node",
             "type": "chunk",
             "subtype": "child",
-            "embedding.0": {"$exists": True},
+            "embedding": {"$type": "binData"},
         }
 
     async def test_projects_only_the_fields_the_run_reads(
@@ -291,11 +305,51 @@ class TestLoadChildEmbeddings:
 
         assert rows[0] == ChildEmbeddingRow(
             chunk_id="c1",
-            embedding=[0.1, 0.2, 0.3, 0.4],
+            embedding=rows[0].embedding,
             title="Memory for AI Agents",
             heading_path=["Memory", "Retrieval"],
             content="Agents remember what they read.",
         )
+        assert rows[0].embedding == pytest.approx([0.1, 0.2, 0.3, 0.4])
+
+    async def test_decodes_the_stored_bindata_into_floats(
+        self, mongo_client, user_id
+    ) -> None:
+        # ``list(Binary)`` yields BYTE ints (18 of them for a 4-d vector), not
+        # the vector — the load must go through ``from_stored_vector``.
+        await _insert_child(user_id, "c1", embedding=[0.5, -0.25, 0.125, 1.0])
+
+        rows = await load_child_embeddings(mongo_client, TEST_DATABASE, user_id)
+
+        assert rows[0].embedding == [0.5, -0.25, 0.125, 1.0]
+
+    async def test_a_raw_subtype_0_vector_fails_loudly(
+        self, mongo_client, user_id
+    ) -> None:
+        # ``$type: binData`` matches every subtype, and PyMongo hands subtype 0
+        # back as plain ``bytes`` — decoded naively a 16-byte value is a 16-d
+        # "vector" of byte ints, and the run would cluster garbage.
+        await _insert_child(user_id, "c1")
+        await _insert_child(user_id, "c2")
+        await MemoryEntry.get_pymongo_collection().update_one(
+            {"_id": "c2"}, {"$set": {"embedding": Binary(bytes(range(16)), 0)}}
+        )
+
+        with pytest.raises(ValueError, match="raw binData"):
+            await load_child_embeddings(mongo_client, TEST_DATABASE, user_id)
+
+    async def test_skips_a_child_whose_vector_is_absent(
+        self, mongo_client, user_id
+    ) -> None:
+        await _insert_child(user_id, "c1")
+        await _insert_child(user_id, "c2")
+        await MemoryEntry.get_pymongo_collection().update_one(
+            {"_id": "c2"}, {"$unset": {"embedding": ""}}
+        )
+
+        rows = await load_child_embeddings(mongo_client, TEST_DATABASE, user_id)
+
+        assert [row.chunk_id for row in rows] == ["c1"]
 
     async def test_another_tenants_children_are_invisible(
         self, mongo_client, user_id

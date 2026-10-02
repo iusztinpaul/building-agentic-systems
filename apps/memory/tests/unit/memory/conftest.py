@@ -6,7 +6,7 @@ rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
 evaluates the handful of operators our pipelines use — equality, ``$or``, ``$in``
 (against a scalar, or ANY element of a list field, as Mongo does for
-``sources``), ``$nor``, ``$text`` (substring), ``$limit``, ``$graphLookup``
+``sources``), ``$type: "binData"`` (a stored vector), ``$nor``, ``$text`` (substring), ``$limit``, ``$graphLookup``
 (breadth-first, ``restrictSearchWithMatch`` applied) and a ``$setUnion``
 ``$project`` — plus exclusion
 projections (``{"embedding": 0}``), stamps the ``_search_score`` both legs read
@@ -25,6 +25,9 @@ from typing import Any
 import pytest
 from beanie import PydanticObjectId
 from bson import ObjectId
+from bson.binary import Binary
+
+from tree.entities.memory import to_stored_vector
 
 
 class FakeCursor:
@@ -61,6 +64,10 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
                 ]
             ).lower()
             if expected["$search"].lower() not in haystack:
+                return False
+        elif expected == {"$type": "binData"}:
+            # A stored vector is float32 ``binData`` (task 175).
+            if not isinstance(row.get(key), Binary):
                 return False
         elif isinstance(expected, dict):
             if set(expected) != {"$in"}:
@@ -175,7 +182,7 @@ class FakeMemoryCollection:
         if "$vectorSearch" in head:
             stage = head["$vectorSearch"]
             # Rows without a vector are absent from the vector index — which is
-            # exactly why parent chunks (``embedding: []``) can't be seeds.
+            # exactly why parent chunks (no ``embedding``) can't be seeds.
             rows = [
                 row
                 for row in self.rows
@@ -285,7 +292,6 @@ def _node_row(user_id: Any, node_id: str, node_type: str, **overrides: Any) -> d
         "parent_id": None,
         "chunk_index": None,
         "properties": {},
-        "embedding": [],
     }
     row.update(overrides)
     return row
@@ -429,7 +435,7 @@ def make_child_row():
             parent_id=parent_id,
             chunk_index=chunk_index,
             properties={"content": content},
-            embedding=[0.1, 0.2, 0.3, 0.4],
+            embedding=to_stored_vector([0.1, 0.2, 0.3, 0.4]),
         )
 
     return _make
@@ -452,7 +458,7 @@ def make_entity_row():
             node_type,
             name=name,
             properties={"content": name},
-            embedding=[0.1, 0.2, 0.3, 0.4],
+            embedding=to_stored_vector([0.1, 0.2, 0.3, 0.4]),
         )
 
     return _make

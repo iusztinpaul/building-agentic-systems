@@ -15,9 +15,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from bson.binary import Binary
 from beanie import PydanticObjectId
 
-from tree.entities.memory import EdgeType, NodeType, build_node_id
+from tree.entities.memory import (
+    EdgeType,
+    NodeType,
+    build_node_id,
+    from_stored_vector,
+    to_stored_vector,
+)
 from tree.memory.embedding_text import entity_embedding_text
 from tree.memory.graph.preference_supersession import (
     canonicalize_preference_names,
@@ -254,7 +261,7 @@ def _seed_preference_row(
         "type": NodeType.PREFERENCE.value,
         "name": name,
         "properties": {"statement": statement, "category": category},
-        "embedding": embedding,
+        "embedding": to_stored_vector(embedding),
         "valid_from": valid_from,
         "valid_until": None,
         "created_at": created_at,
@@ -621,8 +628,12 @@ class TestPreferenceSupersessionWritePayload:
         assert new_row["properties"]["statement"] == "prefers light mode"
         assert new_row["properties"]["category"] == "ui"
         assert new_row["properties"]["strength"] == "moderate"
-        # embedding is the statement embedding (not the slug embedding)
-        assert new_row["embedding"] == [0.7, 0.7, 0.1]
+        # embedding is the statement embedding (not the slug embedding), stored
+        # as float32 ``binData`` (task 175)
+        assert isinstance(new_row["embedding"], Binary)
+        assert from_stored_vector(new_row["embedding"]) == pytest.approx(
+            [0.7, 0.7, 0.1]
+        )
 
 
 class TestSupersessionEmbedsSanitisedText:
@@ -674,7 +685,9 @@ class TestSupersessionEmbedsSanitisedText:
         new_id = build_node_id(_USER_ID, NodeType.PREFERENCE, "prefers-light-mode")
         new_row = collection.rows[new_id]
         assert new_row["properties"]["statement"] == raw_statement
-        assert new_row["embedding"] == [0.7, 0.7, 0.1]
+        assert from_stored_vector(new_row["embedding"]) == pytest.approx(
+            [0.7, 0.7, 0.1]
+        )
 
     async def test_supersession_skips_the_embed_for_a_blank_statement(self) -> None:
         # Arrange: a statement of nothing but invalid characters and spaces —
@@ -707,13 +720,13 @@ class TestSupersessionEmbedsSanitisedText:
 
         # Assert: a blank string is NEVER embedded — the model is not called at
         # all, and the supersession is still written, just without a vector
-        # (``_backfill_filter`` treats a missing/empty ``embedding`` alike, so
-        # the indexing backfill picks the row up).
+        # (``_backfill_filter`` selects a missing ``embedding``, so the
+        # indexing backfill picks the row up).
         assert embedding_model.texts == []
         assert decisions[0].superseded is True
         new_id = build_node_id(_USER_ID, NodeType.PREFERENCE, "malformed-preference")
         new_row = collection.rows[new_id]
-        assert not new_row.get("embedding")
+        assert "embedding" not in new_row
         assert new_row["valid_until"] is None
 
     async def test_supersession_text_equals_backfill_text(self) -> None:
@@ -769,7 +782,7 @@ class TestFactWithoutObject:
                 "predicate": "lives_in",
                 "object": "Paris",
             },
-            "embedding": [1.0, 0.0, 0.0],
+            "embedding": to_stored_vector([1.0, 0.0, 0.0]),
             "valid_from": None,
             "valid_until": None,
         }
@@ -820,7 +833,7 @@ class TestFactSupersession:
                 "predicate": "orbits",
                 "object": "sun",
             },
-            "embedding": [1.0, 0.0, 0.0],
+            "embedding": to_stored_vector([1.0, 0.0, 0.0]),
             "valid_from": None,
             "valid_until": None,
         }

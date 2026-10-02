@@ -466,7 +466,7 @@ flowchart LR
 
     subgraph ops["Operator commands — ONE target family for both kinds"]
         direction TB
-        RESET["make memory-reset-embeddings CONFIRM=yes<br/>embedding=[] · children cluster_id/viz cleared"]
+        RESET["make memory-reset-embeddings CONFIRM=yes<br/>embedding unset · children cluster_id/viz cleared"]
         IDX["make memory-run-indexing-pipeline<br/>backfill re-embeds (document)"]
         CLU["make memory-run-clustering-pipeline"]
         DEP["make memory-deploy-model MODEL=repo_id · -stop (path-blind)<br/>driver scripts/modal_model.py + tree.models.modal_router<br/>looks first: refuses a live foreign name (exit 3, FORCE=yes) · refuses any name without tree-<br/>logs ONE Routing line · unknown failure aborts, never falls back<br/>DRY_RUN=yes: redacted argv, no modal process · SERVING=endpoint|app = escape hatch"]

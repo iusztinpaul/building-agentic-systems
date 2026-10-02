@@ -34,7 +34,11 @@ from pydantic import BaseModel, Field
 from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.entities.clusters import MEMORY_CLUSTERS_COLLECTION, build_cluster_id
-from tree.entities.memory import MEMORY_COLLECTION
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    STORED_VECTOR_QUERY,
+    from_stored_vector,
+)
 from tree.memory.clustering.core import NOISE_LABEL
 from tree.memory.clustering.types import (
     EmbeddingMap,
@@ -56,10 +60,10 @@ _CHILD_ROW_FILTER: dict[str, Any] = {
 
 _CHILD_FILTER: dict[str, Any] = {
     **_CHILD_ROW_FILTER,
-    # ``embedding.0`` exists <=> the array is non-empty. Cheaper and more exact
-    # than ``$ne: []`` (which also matches a missing field) and it is the same
-    # population the backfill in ``rag/indexing.py`` fills.
-    "embedding.0": {"$exists": True},
+    # A stored float32 ``binData`` vector (task 175); a pending child has no
+    # ``embedding`` at all. The complement of the backfill's ``{"embedding":
+    # None}`` in ``rag/indexing.py``.
+    "embedding": STORED_VECTOR_QUERY,
 }
 """The ONE definition of "a chunk a **Clustering run** may cluster"."""
 
@@ -131,6 +135,11 @@ async def load_child_embeddings(
     Returns:
         The rows sorted by ``_id`` — the deterministic input order the recipe's
         reproducibility rests on.
+
+    Raises:
+        ValueError: A child's ``embedding`` is binData but not a float32 vector
+            (e.g. raw subtype 0). The run fails loudly rather than skipping the
+            row or clustering its bytes as floats.
     """
 
     collection = client[database][MEMORY_COLLECTION]
@@ -161,7 +170,8 @@ def _to_child_row(document: dict[str, Any]) -> ChildEmbeddingRow:
     properties = document.get("properties") or {}
     return ChildEmbeddingRow(
         chunk_id=str(document["_id"]),
-        embedding=list(document.get("embedding") or []),
+        # ``list(Binary)`` would yield BYTE ints — decode the float32 vector.
+        embedding=from_stored_vector(document.get("embedding")),
         title=properties.get("title"),
         heading_path=list(properties.get("heading_path") or []),
         content=properties.get("content") or "",

@@ -21,9 +21,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary
 
 from tree.config.app_config import app_config
-from tree.entities.memory import EdgeType, NodeType
+from tree.entities.memory import EdgeType, NodeType, to_stored_vector
 from tree.memory.graph.consolidation import dream as dream_mod
 from tree.memory.graph.consolidation.dream import (
     _collect_dream_candidates,
@@ -75,8 +76,10 @@ class _FakeCollection:
     ) -> None:
         self._nodes = nodes
         self._edges = edges or []
+        self.find_queries: list[dict[str, Any]] = []
 
     def find(self, query: dict[str, Any], *args: Any, **kwargs: Any) -> _FakeCursor:
+        self.find_queries.append(query)
         etype = query["type"]
         gt = query["updated_at"]["$gt"]
         matched = [
@@ -84,7 +87,8 @@ class _FakeCollection:
             for n in self._nodes
             if n.get("type") == etype
             and n.get("merged_into") in (None, "", False)
-            and n.get("embedding")
+            # ``{"$type": "binData"}``: only a stored float32 vector drives.
+            and isinstance(n.get("embedding"), Binary)
             and n.get("updated_at") > gt
         ]
         return _FakeCursor(matched)
@@ -128,7 +132,9 @@ def _node(
         "kind": "node",
         "type": node_type.value,
         "name": name,
-        "embedding": embedding if embedding is not None else [1.0, 0.0],
+        "embedding": to_stored_vector(
+            embedding if embedding is not None else [1.0, 0.0]
+        ),
         "merged_into": merged_into,
         "updated_at": updated_at,
         "created_at": updated_at,
@@ -559,7 +565,35 @@ class TestTwoSetRule:
         assert len(pairs) == 1
         # The driving node's stored embedding was passed straight to
         # dedupe_entity — never recomputed.
+        # Decoded from the stored float32 ``binData`` into a plain float list.
         assert dream_mod.dedupe_entity.call_args.kwargs["embedding"] == [1.0, 0.0]
+
+    async def test_driving_query_selects_stored_vectors_only(self, mocker) -> None:
+        """Task 175: "embedded" is a float32 ``binData`` vector, not ``$size``."""
+
+        nodes = [
+            _node(node_id="person:fresh", name="paul", updated_at=_FRESH),
+            {
+                **_node(node_id="person:pending", name="ana", updated_at=_FRESH),
+                "embedding": None,
+            },
+        ]
+        collection = _FakeCollection(nodes)
+        mocker.patch(
+            "tree.memory.graph.consolidation.dream.dedupe_entity",
+            return_value=DeduplicationResult(action="none"),
+        )
+
+        _pairs, stats = await _collect_dream_candidates(
+            database=_FakeDatabase(collection),
+            user_id=_USER_ID,
+            last_run_at=_LAST_RUN,
+            dedup_config=_CONFIG,
+            max_pairs=10000,
+        )
+
+        assert collection.find_queries[0]["embedding"] == {"$type": "binData"}
+        assert stats.nodes_driven == 1
 
 
 # ---------------------------------------------------------------------------

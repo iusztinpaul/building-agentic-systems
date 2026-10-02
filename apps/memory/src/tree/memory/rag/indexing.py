@@ -33,7 +33,11 @@ from typing import Any
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
 
-from tree.entities.memory import MEMORY_COLLECTION
+from tree.entities.memory import (
+    MEMORY_COLLECTION,
+    STORED_VECTOR_QUERY,
+    to_stored_vector,
+)
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
 from tree.config.app_config import MemoryMode, app_config
 from tree.memory.embedding_text import embed_texts, entity_embedding_text
@@ -68,7 +72,7 @@ async def embed_nodes(
     """Backfill embeddings for ``user_id``'s rows that should carry one and don't.
 
     Selection rule (ADR-006 decision 4) — a row is embedded when its
-    ``embedding`` is missing / ``None`` / ``[]`` **and** it is either
+    ``embedding`` is missing / ``None`` **and** it is either
 
     * a **Child chunk** (``type="chunk"``, ``subtype="child"``), embedded on its
       **Contextual header** text rebuilt from its OWN denormalised
@@ -140,7 +144,9 @@ def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
     return {
         "user_id": user_id,
         "kind": "node",
-        "embedding": {"$in": [[], None]},
+        # Absent OR null: a row without a vector never stores an empty one
+        # (task 175 — vectors are float32 ``binData``).
+        "embedding": None,
         "$or": _embeddable_row_clause(app_config.memory.mode),
     }
 
@@ -197,7 +203,9 @@ async def _embed_batch(
     # Skip inputs the batcher could not embed (empty placeholder from a Voyage
     # content rejection) — leave the node unembedded so a later run retries it.
     ops = [
-        UpdateOne({"_id": doc["_id"]}, {"$set": {"embedding": vector}})
+        UpdateOne(
+            {"_id": doc["_id"]}, {"$set": {"embedding": to_stored_vector(vector)}}
+        )
         for doc, vector in zip(docs, vectors)
         if vector
     ]
@@ -216,15 +224,15 @@ def _reset_filter(user_id: PydanticObjectId) -> dict[str, Any]:
     """The mirror image of :func:`_backfill_filter`: rows that HAVE a vector.
 
     Same tenant, same ``kind``, same eligibility ``$or`` — only the
-    ``embedding`` clause is inverted. ``$exists`` plus ``$nin: [[], None]``
-    because an already-reset row stores ``[]``, which is what makes a second
+    ``embedding`` clause is inverted: a stored float32 ``binData`` vector. An
+    already-reset row has no ``embedding`` field, which is what makes a second
     reset match nothing.
     """
 
     return {
         "user_id": user_id,
         "kind": "node",
-        "embedding": {"$exists": True, "$nin": [[], None]},
+        "embedding": STORED_VECTOR_QUERY,
         "$or": _embeddable_row_clause(app_config.memory.mode),
     }
 
@@ -250,7 +258,7 @@ async def reset_embeddings(
     makes the rows stop matching :func:`_reset_filter`, so a filter-keyed second
     write would silently match zero rows):
 
-    1. every matched row → ``embedding: []`` + a fresh ``updated_at``;
+    1. every matched row → ``embedding`` unset + a fresh ``updated_at``;
     2. the **Child chunk** subset → also ``cluster_id: None``, ``viz: None``.
 
     (2) exists because ``load_embedding_map`` reads a child as CURRENT when
@@ -296,7 +304,7 @@ async def reset_embeddings(
 
     await collection.update_many(
         {"_id": {"$in": ids}},
-        {"$set": {"embedding": [], "updated_at": datetime.now(UTC)}},
+        {"$unset": {"embedding": ""}, "$set": {"updated_at": datetime.now(UTC)}},
     )
     if child_ids:
         await collection.update_many(

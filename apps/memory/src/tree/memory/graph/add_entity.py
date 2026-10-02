@@ -38,6 +38,7 @@ from tree.entities.memory import (
     ExtractorInfo,
     MEMORY_COLLECTION,
     NodeType,
+    to_stored_vector,
     build_edge_id,
     build_node_id,
 )
@@ -352,7 +353,8 @@ async def _upsert_node(
 
     Does NOT touch ``aliases`` on an existing row (the merge handlers do
     that). On insert, ``aliases`` is initialized to ``[]``. ``embedding``
-    is only written when ``embedding`` is non-empty.
+    is only written when ``embedding`` is non-empty, as float32 ``binData``
+    (task 175), and never overwrites a vector the row already carries.
     """
 
     # Strip ``aliases`` and ``confidence`` from the caller's properties dict
@@ -383,8 +385,10 @@ async def _upsert_node(
         "created_at": {"$ifNull": ["$created_at", now]},
         "updated_at": now,
     }
-    if embedding is not None:
-        set_stage["embedding"] = {"$ifNull": ["$embedding", embedding]}
+    if embedding:
+        set_stage["embedding"] = {
+            "$ifNull": ["$embedding", to_stored_vector(embedding)]
+        }
     if extractor is not None:
         # #030: stamp provenance on every LLM-extracted node row.
         # Structural rows (document / chunk) pass ``extractor=None``

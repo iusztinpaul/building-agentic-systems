@@ -151,6 +151,17 @@ class TestAfterInsertHook:
         assert set_on_insert["created_at"].tzinfo is not None
         assert set_on_insert["updated_at"].tzinfo is not None
 
+    async def test_self_node_is_seeded_without_an_embedding(self, mocker):
+        # Task 175: pending = an ABSENT ``embedding`` (the backfill selects
+        # ``{"embedding": None}``), never an empty vector.
+        _user, fake_collection = await self._run_hook(
+            mocker, identifier="paul@example.com", attributes={}
+        )
+
+        set_on_insert = fake_collection.update_one.call_args.args[1]["$setOnInsert"]
+
+        assert "embedding" not in set_on_insert
+
     async def test_canonical_name_falls_back_to_identifier_when_no_name(self, mocker):
         user, fake_collection = await self._run_hook(
             mocker,

@@ -67,6 +67,7 @@ from tree.entities.memory import (
     EdgeType,
     MEMORY_COLLECTION,
     NodeType,
+    to_stored_vector,
     build_edge_id,
     build_node_id,
 )
@@ -540,7 +541,7 @@ async def _write_supersession(
         "properties": properties,
     }
     if new_vector:
-        set_payload["embedding"] = new_vector
+        set_payload["embedding"] = to_stored_vector(new_vector)
 
     await collection.update_one(
         {"_id": new_node_id},

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary
 
 from tests.unit.conftest import TEST_DATABASE
 from tree.config.settings import settings
@@ -25,8 +26,10 @@ from tree.db import init_mongodb
 from tree.entities.memory import (
     MEMORY_COLLECTION,
     RAG_NODE_TYPES,
+    STORED_VECTOR_QUERY,
     NodeType,
     build_rag_row_id,
+    from_stored_vector,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.load import (
@@ -164,7 +167,8 @@ class TestBuildRagRowOps:
         assert row["subtype"] is None
         assert row["parent_id"] is None
         assert row["chunk_index"] is None
-        assert row["embedding"] == []
+        # No vector -> the field is REMOVED, never an empty vector (task 175).
+        assert row["embedding"] == "$$REMOVE"
         assert _properties(row) == {
             "source_type": "web",
             "source_uri": _URI,
@@ -181,7 +185,7 @@ class TestBuildRagRowOps:
         assert row["chunk_index"] == 1
         # Parents are NEVER embedded — a vector here would surface them as
         # search hits and defeat parent-document retrieval.
-        assert row["embedding"] == []
+        assert row["embedding"] == "$$REMOVE"
         assert _properties(row) == {
             "source_type": "web",
             "source_uri": _URI,
@@ -214,13 +218,17 @@ class TestBuildRagRowOps:
             child_row_id(_USER_ID, _URI, 0, 0)
         ]
 
-        assert row["embedding"] == vector
+        # Stored as float32 ``binData`` (task 175), the same floats decoded.
+        assert isinstance(row["embedding"], Binary)
+        assert row["embedding"].subtype == 9
+        assert from_stored_vector(row["embedding"]) == vector
 
     def test_child_without_a_vector_is_written_unembedded(self) -> None:
-        # Left for the indexing backfill instead of failing the load.
+        # Left for the indexing backfill instead of failing the load: the field
+        # is removed, so the backfill's ``{"embedding": None}`` selects it.
         row = _by_id(_ops(1, child_vectors={}))[child_row_id(_USER_ID, _URI, 0, 0)]
 
-        assert row["embedding"] == []
+        assert row["embedding"] == "$$REMOVE"
 
     def test_rows_preserve_created_at_and_union_sources_on_re_upsert(self) -> None:
         row = _by_id(_ops(1))[document_row_id(_USER_ID, _URI)]
@@ -274,7 +282,7 @@ class TestRagNodeTypeGuard:
                 parent_id=None,
                 chunk_index=None,
                 properties={},
-                embedding=[],
+                embedding=None,
                 source_document_id=_DOCUMENT_ID,
                 now=None,
             )
@@ -300,7 +308,7 @@ class TestRagNodeTypeGuard:
                 parent_id=None,
                 chunk_index=None,
                 properties={},
-                embedding=[],
+                embedding=None,
                 source_document_id=_DOCUMENT_ID,
                 now=None,
             )
@@ -317,7 +325,7 @@ class TestRagNodeTypeGuard:
                 parent_id=None,
                 chunk_index=None,
                 properties={},
-                embedding=[],
+                embedding=None,
                 source_document_id=_DOCUMENT_ID,
                 now=None,
             )
@@ -457,3 +465,56 @@ class TestPropertiesAreReplacedInMongo:
         assert row["created_at"] == created_at
         assert row["updated_at"] > created_at
         assert set(row["sources"]) == {earlier_source, PydanticObjectId(_DOCUMENT_ID)}
+
+
+class TestStoredVectorsInMongo:
+    """Task 175, against a real MongoDB: what the loader's pipeline ``$set`` stores.
+
+    ``"$$REMOVE"`` and a bare ``Binary`` inside an aggregation-pipeline update are
+    server semantics, so the op-shape tests above cannot settle them.
+    """
+
+    @pytest.fixture
+    async def database(self) -> Any:
+        client = await init_mongodb(
+            settings.mongo.mongo_uri.get_secret_value(), TEST_DATABASE
+        )
+        database = client[TEST_DATABASE]
+        yield database
+        await database[MEMORY_COLLECTION].delete_many({})
+
+    async def test_only_the_embedded_child_stores_a_bindata_vector(
+        self, database
+    ) -> None:
+        text = child_embedding_text(
+            title=_TITLE, heading_path=["Memory", "Section 0"], content="child 0.0"
+        )
+        vector = [0.125, -0.25, 0.5]
+
+        await load_rag_rows(
+            database=database, ops=_ops(2, child_vectors={text: vector})
+        )
+
+        collection = database[MEMORY_COLLECTION]
+        embedded = await collection.find({"embedding": STORED_VECTOR_QUERY}).to_list()
+        assert [row["_id"] for row in embedded] == [child_row_id(_USER_ID, _URI, 0, 0)]
+        assert from_stored_vector(embedded[0]["embedding"]) == vector
+        # Document, parent and the unembedded child carry NO ``embedding`` field.
+        others = await collection.find({"embedding": None}).to_list()
+        assert len(others) == 3
+        assert all("embedding" not in row for row in others)
+
+    async def test_a_re_upsert_without_a_vector_removes_the_stale_one(
+        self, database
+    ) -> None:
+        text = child_embedding_text(
+            title=_TITLE, heading_path=["Memory", "Section 0"], content="child 0.0"
+        )
+        await load_rag_rows(database=database, ops=_ops(1, child_vectors={text: [0.5]}))
+
+        await load_rag_rows(database=database, ops=_ops(1, child_vectors={}))
+
+        row = await database[MEMORY_COLLECTION].find_one(
+            {"_id": child_row_id(_USER_ID, _URI, 0, 0)}
+        )
+        assert "embedding" not in row

@@ -119,7 +119,8 @@ All nodes and edges live in a single collection.
 - `name`: string. Absent on `document` and `chunk` rows — match those on \
 `properties.title` / `properties.source_uri` instead.
 - `properties`: dict (schema varies by node type)
-- `embedding`: vector (float array) — do NOT return this field
+- `embedding`: vector (BSON float32 binData, NOT an array — never filter on it with \
+`$size` or `embedding.0`; absent on rows without a vector) — do NOT return this field
 - `subtype`: string, present on some rows. On a `chunk` row it is exactly \
 `"parent"` (large, ~4096 tokens, what a reader wants to read, never embedded) \
 or `"child"` (small, ~256 tokens, the embedded search unit). ALWAYS filter on \

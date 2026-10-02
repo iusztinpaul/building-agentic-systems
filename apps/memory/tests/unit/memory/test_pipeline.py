@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 from beanie import PydanticObjectId
+from bson.binary import Binary
 from prefect.cache_policies import NO_CACHE
 
 from tests.unit.conftest import TEST_DATABASE
@@ -36,6 +37,7 @@ from tree.entities.memory import (
     NodeType,
     build_edge_id,
     build_node_id,
+    from_stored_vector,
 )
 from tree.entities.users import User
 from tree.memory.graph.dedup import DeduplicationConfig, DeduplicationResult
@@ -3183,12 +3185,15 @@ class TestWorkerRowShape:
             document=document,
         )
 
+        # Task 175: a child's vector is float32 ``binData``; parents and
+        # documents carry NO ``embedding`` field at all.
         async for row in collection.find({"subtype": "child"}):
-            assert len(row["embedding"]) == _EMBEDDING_DIMENSIONS
+            assert isinstance(row["embedding"], Binary)
+            assert len(from_stored_vector(row["embedding"])) == _EMBEDDING_DIMENSIONS
         async for row in collection.find(
             {"$or": [{"subtype": "parent"}, {"type": "document"}]}
         ):
-            assert row["embedding"] == []
+            assert "embedding" not in row
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     async def test_hierarchy_columns_and_denormalised_properties(

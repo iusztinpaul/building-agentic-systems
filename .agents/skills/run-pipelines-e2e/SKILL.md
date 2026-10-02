@@ -33,7 +33,7 @@ By default, use the "Paul Iusztin" user when testing.
 
    **Clustering (optional, after indexing).** `make memory-run-clustering-pipeline` runs the fourth phase alone — it needs embeddings, so run it after indexing, and it is off everywhere else including the nightly cron. Two gotchas that look like failures and are not: the first run on a fresh env spends ~40 s compiling umap's numba kernels before it clusters anything, and a corpus below `min_cluster_size` (default 15) is skipped with a log line naming the knob — for a small local corpus export `TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE=5` in the SERVING shell (the flow reads it inside the serve process, not in yours).
 
-3. **Verify the result.** Count what landed with `mongosh` over the `memory` collection, grouped by `kind` / `type` / `subtype` (in `rag`: `edge` count 0, parents with `embedding: []`, children with a 1024-length vector), then read it back:
+3. **Verify the result.** Count what landed with `mongosh` over the `memory` collection, grouped by `kind` / `type` / `subtype` (in `rag`: `edge` count 0, parents and documents with NO `embedding` field, children with `{$type: "binData"}` — a float32 vector of 4098 bytes for 1024 dimensions), then read it back:
 
    ```bash
    make memory-search QUERY="test query"
