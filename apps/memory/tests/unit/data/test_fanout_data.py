@@ -334,3 +334,63 @@ async def test_fan_out_data_omits_headers_when_none(mocker) -> None:
     )
 
     assert all("opik_trace_headers" not in p for _name, p in calls)
+
+
+class TestItemFailuresInsideAShard:
+    """A worker that failed ONLY on items ran its whole shard (#174)."""
+
+    async def test_counts_the_shard_succeeded_and_its_items_failed(
+        self, mocker
+    ) -> None:
+        user_id = PydanticObjectId()
+        shards = _partition_into_shards(
+            [_shard(f"https://e{i}.example") for i in range(2)], 2
+        )
+        outcomes = {
+            "https://e0.example": completed_flow_run(),
+            "https://e1.example": flow_run_in_state(
+                StateType.FAILED,
+                "Flow run encountered an exception: PartialIngestError: "
+                "items_failed=3; first: ConnectError: dns",
+            ),
+        }
+
+        async def _fake_run_deployment(name, parameters=None, **kwargs):
+            return outcomes[(parameters or {})["sources"][0]["uri"]]
+
+        runner = mocker.AsyncMock(side_effect=_fake_run_deployment)
+
+        stats = await _fan_out_data(
+            user_id=user_id, shards=shards, run_deployment=runner
+        )
+
+        assert (stats.succeeded, stats.failed, stats.failures) == (2, 0, {})
+        assert stats.items_failed == 3
+        assert set(stats.item_failures) == {"1"}
+        assert "ConnectError: dns" in stats.item_failures["1"]
+
+    @pytest.mark.parametrize(
+        ("state_type", "message"),
+        [
+            (StateType.CRASHED, "OOM while items_failed=0"),
+            (
+                StateType.FAILED,
+                "Flow run encountered an exception: PartialIngestError: "
+                "items_failed=0; first: None",
+            ),
+        ],
+        ids=["crash-mentioning-the-token", "zero-count"],
+    )
+    async def test_a_message_without_a_real_item_count_is_a_failed_shard(
+        self, mocker, state_type: StateType, message: str
+    ) -> None:
+        shards = _partition_into_shards([_shard("https://e0.example")], 1)
+        runner = mocker.AsyncMock(return_value=flow_run_in_state(state_type, message))
+
+        stats = await _fan_out_data(
+            user_id=PydanticObjectId(), shards=shards, run_deployment=runner
+        )
+
+        assert (stats.succeeded, stats.failed) == (0, 1)
+        assert (stats.items_failed, stats.item_failures) == (0, {})
+        assert message in stats.failures["0"]

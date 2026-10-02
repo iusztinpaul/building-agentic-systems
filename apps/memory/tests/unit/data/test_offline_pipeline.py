@@ -30,12 +30,29 @@ from tree.config.sources import (
     YouTubeRssSource,
     YouTubeVideoSource,
 )
+from tree.data.batch import gather_isolated
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     ARXIV_DATASET_ID as _ARXIV_DATASET_ID,
 )
 from tree.data.offline_pipeline import _PLATFORM_PIPELINES, data_etl_worker
+from tree.flow_runs import PartialIngestError
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+async def _drop_unreachable(url: str) -> str:
+    if "unreachable" in url:
+        raise ConnectionError(f"cannot reach {url}")
+    return url
+
+
+async def _platform_dropping_one_feed(
+    entries: list[SourceEntry], user_id: PydanticObjectId
+) -> list:
+    """A platform flow whose feed-level ``gather_isolated`` drops one feed."""
+
+    await gather_isolated([e.uri for e in entries], _drop_unreachable)
+    return []
 
 
 class TestDataWorker:
@@ -269,3 +286,59 @@ class TestDataWorker:
             ),
             _USER_ID,
         )
+
+
+class TestDataWorkerItemFailures:
+    """A shard that dropped items is a partial ingest — the run says so (#174)."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_boundaries(self, mocker) -> None:
+        mocker.patch(
+            "tree.data.offline_pipeline.assert_settings_match_live_vector_index",
+            new_callable=AsyncMock,
+        )
+        mocker.patch("tree.data.offline_pipeline.init_mongodb", new_callable=AsyncMock)
+
+    @pytest.fixture
+    def _web(self, mocker) -> AsyncMock:
+        """Substack drops items for real (via ``gather_isolated``); Web is a mock."""
+
+        web = AsyncMock(return_value=[])
+        batch_fns = {"Substack": _platform_dropping_one_feed, "Web": web}
+        mocker.patch(
+            "tree.data.offline_pipeline._PLATFORM_PIPELINES",
+            [
+                dataclasses.replace(p, batch_fn=batch_fns.get(p.label, p.batch_fn))
+                for p in _PLATFORM_PIPELINES
+            ],
+        )
+        return web
+
+    async def test_failed_items_fail_the_run_after_the_whole_shard_ran(
+        self, _web
+    ) -> None:
+        sources: list[SourceEntry] = [
+            SubstackRssSource(uri="https://unreachable.example/feed"),
+            SubstackRssSource(uri="https://ok.example/feed"),
+            WebSource(uri="https://ok.example/post"),
+        ]
+
+        with pytest.raises(PartialIngestError) as error:
+            await data_etl_worker(_USER_ID, sources)
+
+        # The platform after the failing one still ran: isolation is kept.
+        _web.assert_awaited_once()
+        assert str(error.value) == (
+            "items_failed=1; first: ConnectionError: cannot reach "
+            "https://unreachable.example/feed"
+        )
+
+    async def test_a_clean_shard_returns_its_documents(self, _web) -> None:
+        sources: list[SourceEntry] = [
+            SubstackRssSource(uri="https://ok.example/feed"),
+            WebSource(uri="https://ok.example/post"),
+        ]
+
+        result = await data_etl_worker(_USER_ID, sources)
+
+        assert result == []

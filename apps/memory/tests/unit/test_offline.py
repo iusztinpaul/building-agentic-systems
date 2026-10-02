@@ -6,8 +6,9 @@ target user, then — on request only — one ``memory_clustering`` subflow per
 target user) without re-implementing any of them; these tests pin that
 composition contract: pass-through of source selectors, the per-user fan-out of
 each phase, the sequential phase blocks (every user extracted BEFORE any user is
-indexed), and per-user failure isolation. The phase bodies themselves are covered
-in their own suites.
+indexed), per-user failure isolation, and the partial-ingest verdict (#174): any
+isolated failure fails the run AFTER every phase ran. The phase bodies
+themselves are covered in their own suites.
 
 They also pin the single-step surface — the ``run_data`` / ``run_extraction`` /
 ``run_indexing`` / ``run_clustering`` phase flags (#098, extended by ADR-007
@@ -31,6 +32,7 @@ import pytest
 from beanie import PydanticObjectId
 from prefect.client.schemas.objects import State, StateType
 
+from tree.flow_runs import PartialIngestError
 from tree.memory.pipeline import ClusteringStats
 from tree.offline import dispatch_offline_pipeline, offline_pipeline
 
@@ -45,10 +47,14 @@ _OTHER_SOURCE_URI = "file:///tmp/a.md"
 
 @dataclass
 class _FakeStats:
+    """Both coordinators' fan-out stats (the item fields are the data one's)."""
+
     shards_total: int = 1
     succeeded: int = 1
     failed: int = 0
     failures: dict = field(default_factory=dict)
+    items_failed: int = 0
+    item_failures: dict = field(default_factory=dict)
 
 
 # The embedded-row count a stubbed ``memory_indexing`` phase reports back.
@@ -158,17 +164,19 @@ class TestEtlOffline:
         assert set(result["extraction"]) == {str(_USER_ID), str(_OTHER_USER_ID)}
 
     async def test_one_users_extraction_failure_is_isolated(self, mocker) -> None:
-        _data, extract, _index, _cluster, users = _patch_coordinators(mocker)
+        _data, extract, index, _cluster, users = _patch_coordinators(mocker)
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         extract.side_effect = [RuntimeError("llm down"), _FakeStats()]
 
-        result = await offline_pipeline(user_id=None)
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=None)
 
         # Mirror of the shard-isolation convention: the first user's blown
-        # extraction is recorded, the second still runs.
+        # extraction is recorded, the second still runs — and both are indexed
+        # before the run reports the failure.
         assert extract.await_count == 2
-        assert result["extraction"][str(_USER_ID)] == {"error": "llm down"}
-        assert result["extraction"][str(_OTHER_USER_ID)]["succeeded"] == 1
+        assert index.await_count == 2
+        assert f"extraction user={_USER_ID} failed (llm down)" in str(error.value)
 
 
 class TestOfflinePipelinePhaseFlags:
@@ -471,13 +479,15 @@ class TestOfflineIndexingPhase:
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         index.side_effect = [RuntimeError("boom"), _EMBEDDED]
 
-        result = await offline_pipeline(user_id=None)
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=None)
 
         # Same convention as the extraction phase: one tenant's blown index
-        # (e.g. mongot down for its namespace) never sinks the nightly run.
+        # (e.g. mongot down for its namespace) never stops the next tenant —
+        # but the run then fails naming it.
         assert index.await_count == 2
-        assert result["indexing"][str(_USER_ID)] == {"error": "boom"}
-        assert result["indexing"][str(_OTHER_USER_ID)] == {"embedded": _EMBEDDED}
+        assert f"indexing user={_USER_ID} failed (boom)" in str(error.value)
+        assert str(_OTHER_USER_ID) not in str(error.value)
 
     def test_the_phase_flags_read_in_execution_order(self) -> None:
         """Parameter ORDER is the contract: phases read as 1 → 2 → 3 → 4."""
@@ -571,13 +581,13 @@ class TestOfflineClusteringPhase:
         users.return_value = [_USER_ID, _OTHER_USER_ID]
         cluster.side_effect = [RuntimeError("umap blew up"), _CLUSTERING_STATS]
 
-        result = await offline_pipeline(user_id=None, run_clustering=True)
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=None, run_clustering=True)
 
         # Same convention as the other per-user phases: one tenant's blown
-        # clustering never sinks the run for everyone else.
+        # clustering never stops the next tenant — the run fails afterwards.
         assert cluster.await_count == 2
-        assert result["clustering"][str(_USER_ID)] == {"error": "umap blew up"}
-        assert result["clustering"][str(_OTHER_USER_ID)]["clusters"] == 2
+        assert f"clustering user={_USER_ID} failed (umap blew up)" in str(error.value)
 
     async def test_the_result_is_json_safe(self, mocker) -> None:
         """The flow-run result is serialized by Prefect — no Pydantic models."""
@@ -697,7 +707,7 @@ class TestOfflinePhaseLogLines:
         index.side_effect = RuntimeError("mongot down")
         cluster.side_effect = RuntimeError("umap blew up")
 
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.INFO), pytest.raises(PartialIngestError):
             await offline_pipeline(
                 user_id=_USER_ID,
                 run_data=False,
@@ -721,6 +731,145 @@ class TestOfflinePhaseLogLines:
             message.startswith(("indexing: user_id", "clustering: user_id"))
             for message in self._messages(caplog)
         )
+
+
+class TestPartialIngestFailsTheRun:
+    """Any partial ingest fails the run, AFTER every phase ran (#174).
+
+    The prod symptom: an extraction shard died (``AutoReconnect``), the run
+    logged ``failed=1`` and still finished Completed, so ``make
+    memory-run-pipeline`` printed success over a half-ingested backfill.
+    """
+
+    async def test_a_failed_extraction_shard_is_indexed_then_fails_the_run(
+        self, mocker
+    ) -> None:
+        _data, extract, index, _cluster, _users = _patch_coordinators(mocker)
+        extract.return_value = _FakeStats(
+            shards_total=1,
+            succeeded=0,
+            failed=1,
+            failures={"0": "AutoReconnect: connection closed"},
+        )
+
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=_USER_ID)
+
+        # Indexing still embeds what DID land before the run fails.
+        index.assert_awaited_once_with(user_id=_USER_ID)
+        assert str(error.value) == (
+            "offline-pipeline finished with failures: extraction "
+            f"user={_USER_ID} 1/1 shards failed "
+            "(shard=0: AutoReconnect: connection closed)"
+        )
+
+    async def test_failed_items_in_a_data_shard_fail_the_run_after_every_phase(
+        self, mocker
+    ) -> None:
+        data, extract, index, _cluster, _users = _patch_coordinators(mocker)
+        data.return_value = _FakeStats(
+            shards_total=3,
+            succeeded=3,
+            items_failed=3,
+            item_failures={f"{_USER_ID}:2": "items_failed=3; first: ConnectError: dns"},
+        )
+
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=_USER_ID)
+
+        extract.assert_awaited_once()
+        index.assert_awaited_once()
+        assert str(error.value) == (
+            "offline-pipeline finished with failures: data 3 items failed "
+            f"(user={_USER_ID} shard=2: items_failed=3; first: ConnectError: dns)"
+        )
+
+    async def test_a_failed_data_shard_fails_the_run(self, mocker) -> None:
+        data, _extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        data.return_value = _FakeStats(
+            shards_total=2,
+            succeeded=1,
+            failed=1,
+            failures={f"{_USER_ID}:1": "flow run finished in state Crashed"},
+        )
+
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=_USER_ID)
+
+        assert (
+            f"data 1/2 shards failed (user={_USER_ID} shard=1: flow run finished "
+            "in state Crashed)"
+        ) in str(error.value)
+
+    async def test_the_message_names_every_failing_phase(self, mocker) -> None:
+        data, extract, index, cluster, _users = _patch_coordinators(mocker)
+        data.return_value = _FakeStats(
+            items_failed=1, item_failures={f"{_USER_ID}:0": "items_failed=1"}
+        )
+        extract.side_effect = RuntimeError("llm down")
+        index.side_effect = RuntimeError("mongot down")
+        cluster.side_effect = RuntimeError("umap blew up")
+
+        with pytest.raises(PartialIngestError) as error:
+            await offline_pipeline(user_id=_USER_ID, run_clustering=True)
+
+        message = str(error.value)
+        # Every phase, in execution order.
+        positions = [
+            message.index(phrase)
+            for phrase in (
+                "data 1 items failed",
+                "extraction user=",
+                "indexing user=",
+                "clustering user=",
+            )
+        ]
+        assert positions == sorted(positions)
+
+    async def test_the_flow_run_ends_failed(self, mocker) -> None:
+        _data, _extract, index, _cluster, _users = _patch_coordinators(mocker)
+        index.side_effect = RuntimeError("mongot down")
+
+        state = await offline_pipeline(user_id=_USER_ID, return_state=True)
+
+        assert state.is_failed()
+        assert "indexing user=" in state.message
+
+    async def test_a_clean_run_with_a_clustering_skip_returns_its_result(
+        self, mocker
+    ) -> None:
+        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
+        cluster.return_value = ClusteringStats(
+            run_id="run-2",
+            chunks_total=3,
+            summaries_failed=0,
+            skipped_reason="3 child embeddings < min_cluster_size 15",
+        )
+
+        result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
+
+        assert result["clustering"][str(_USER_ID)]["skipped_reason"]
+
+    async def test_a_cluster_summary_fallback_is_not_a_failure(self, mocker) -> None:
+        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
+        cluster.return_value = _CLUSTERING_STATS.model_copy(
+            update={"summaries_failed": 1}
+        )
+
+        result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
+
+        assert result["clustering"][str(_USER_ID)]["summaries_failed"] == 1
+
+    async def test_zero_pending_documents_and_zero_sources_complete(
+        self, mocker
+    ) -> None:
+        data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
+        data.return_value = _FakeStats(shards_total=0, succeeded=0)
+        extract.return_value = _FakeStats(shards_total=0, succeeded=0)
+
+        result = await offline_pipeline(user_id=_USER_ID)
+
+        assert result["extraction"][str(_USER_ID)]["shards_total"] == 0
 
 
 class TestDispatchOfflineIngest:

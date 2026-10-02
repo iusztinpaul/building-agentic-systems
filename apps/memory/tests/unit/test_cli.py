@@ -1,9 +1,9 @@
 """Unit tests for :mod:`tree.cli` — the shared script glue.
 
-Only the logic-bearing helpers: ``build_online_source`` (URL vs file detect)
-and ``wait_for_dispatch`` (blocking on a submitted run). The Prefect client
-plumbing (``wait_for_flow_run``) is infrastructure and is exercised by running
-the real pipelines (see AGENTS.md "Running pipelines & E2E"), not unit-tested.
+Only the logic-bearing helpers: ``build_online_source`` (URL vs file detect),
+``wait_for_dispatch`` (blocking on a submitted run) and ``wait_for_flow_run``'s
+terminal verdict (exit code + message), with the Prefect client faked at its
+boundary. Log streaming itself is exercised by running the real pipelines.
 """
 
 from __future__ import annotations
@@ -11,14 +11,17 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prefect.client.schemas.objects import State, StateType
 
 from tree.cli import (
     build_online_source,
-    warn_ignored_config_overrides,
     wait_for_dispatch,
+    wait_for_flow_run,
+    warn_ignored_config_overrides,
 )
 from tree.data.online_pipeline import FileSource, UrlSource
 from tree.online import IngestReceipt
@@ -92,6 +95,56 @@ class TestWaitForDispatch:
             "Already ingested: file:///tmp/notes.md (document 507f1f77bcf86cd799439012)"
             in caplog.text
         )
+
+
+_FLOW_RUN_ID = "0c8e6f5e-6a0b-4f3e-9d6c-2f1f4b0f9a11"
+
+
+def _patch_prefect_client(mocker, state: State) -> None:
+    """Fake ``get_client()``: no logs, and a flow run already in ``state``."""
+
+    client = MagicMock()
+    client.api_url = "http://localhost:4200/api"
+    client.read_logs = AsyncMock(return_value=[])
+    client.read_flow_run = AsyncMock(return_value=SimpleNamespace(state=state))
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    mocker.patch("tree.cli.get_client", return_value=context)
+
+
+class TestWaitForFlowRun:
+    """The terminal verdict an operator reads after ``make memory-run-*``."""
+
+    async def test_a_failed_run_exits_non_zero_with_its_failure_message(
+        self, mocker, caplog
+    ) -> None:
+        message = (
+            "Flow run encountered an exception: PartialIngestError: "
+            "offline-pipeline finished with failures: extraction user=u1 1/1 "
+            "shards failed (shard=0: AutoReconnect)"
+        )
+        _patch_prefect_client(
+            mocker, State(type=StateType.FAILED, name="Failed", message=message)
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.cli"):
+            with pytest.raises(SystemExit) as exit_info:
+                await wait_for_flow_run(_FLOW_RUN_ID)
+
+        assert exit_info.value.code == 1
+        assert message in caplog.text
+        assert "Flow completed successfully" not in caplog.text
+
+    async def test_a_completed_run_reports_success_without_exiting(
+        self, mocker, caplog
+    ) -> None:
+        _patch_prefect_client(mocker, State(type=StateType.COMPLETED))
+
+        with caplog.at_level(logging.INFO, logger="tree.cli"):
+            await wait_for_flow_run(_FLOW_RUN_ID)
+
+        assert "Done. Flow completed successfully." in caplog.text
 
 
 class TestWarnIgnoredConfigOverrides:

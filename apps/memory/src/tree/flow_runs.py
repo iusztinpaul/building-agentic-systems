@@ -8,10 +8,24 @@ as :mod:`tree.sharding`). It cannot live in :mod:`tree.orchestrator` (that
 module imports BOTH dispatch modules — importing back would cycle) nor in
 :mod:`tree.cli`, which is CLI glue for ``scripts/`` and sits ABOVE them.
 
+It is also the home of :class:`PartialIngestError`, the ONE error a pipeline run
+raises when it finished with isolated failures: the data worker (``tree.data``)
+and ``offline_pipeline`` (``tree.offline``) both raise it, and only a neutral
+top-level module can be imported by both.
+
 Pure functions only: no Prefect API calls, no ``@flow``.
 """
 
 from typing import Any
+
+
+class PartialIngestError(RuntimeError):
+    """A run ingested only PART of its work: some shard, item or phase failed.
+
+    Raised AFTER every isolated unit ran (one bad shard never stops the
+    others), so the flow run ends Failed instead of reading green over a
+    half-ingested backfill (#174). The message names what failed.
+    """
 
 
 def flow_run_status(flow_run: Any) -> str:

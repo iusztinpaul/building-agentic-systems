@@ -172,7 +172,14 @@ async def wait_for_flow_run(flow_run_id: str) -> None:
                 if run.state.is_completed():
                     logger.info("Done. Flow completed successfully.")
                 else:
-                    logger.error("Flow finished with state: %s", run.state.name)
+                    # The state message carries the run's error (e.g. the
+                    # offline pipeline's partial-ingest summary), so the
+                    # operator reads WHY without opening the Prefect UI.
+                    logger.error(
+                        "Flow finished with state: %s — %s",
+                        run.state.name,
+                        run.state.message or "no message",
+                    )
                     sys.exit(1)
                 break
             await asyncio.sleep(POLL_INTERVAL_SECONDS)

@@ -61,7 +61,7 @@ from tree.config.settings import settings
 from tree.data.offline_pipeline import data_etl_coordinator, resolve_target_user_ids
 from tree.db import init_mongodb
 from tree.entities.documents import Document, clean_source_uri
-from tree.flow_runs import flow_run_status
+from tree.flow_runs import PartialIngestError, flow_run_status
 from tree.memory.pipeline import (
     ClusteringStats,
     memory_clustering,
@@ -215,6 +215,69 @@ def _log_clustering_outcome(
     )
 
 
+def _shard_label(key: str) -> str:
+    """``"<user_id>:<shard>"`` (the data coordinator's key) → ``user=… shard=…``."""
+
+    user, _, shard = key.rpartition(":")
+    return f"user={user} shard={shard}"
+
+
+def _partial_ingest_failures(result: dict[str, Any]) -> list[str]:
+    """Every isolated failure in an ``offline_pipeline`` result, one line each.
+
+    Reads the plain-dict result the flow returns, so what fails the run is
+    exactly what the run reports. A failure is:
+
+    * data — a failed shard, or failed items inside a shard that ran;
+    * extraction — a failed shard (``failed > 0``) or a per-user exception;
+    * indexing / clustering — a per-user exception.
+
+    NOT failures: a clustering skip (``skipped_reason``), a clustering run that
+    fell back on a summary (``summaries_failed``), and a phase with zero work.
+    Each line names the phase, the user, the count and the first message per
+    shard. ``[]`` means a clean run.
+    """
+
+    failures: list[str] = []
+    data = result["data"]
+    if data is not None:
+        if data["failed"]:
+            details = "; ".join(
+                f"{_shard_label(key)}: {message}"
+                for key, message in data["failures"].items()
+            )
+            failures.append(
+                f"data {data['failed']}/{data['shards_total']} shards failed "
+                f"({details})"
+            )
+        if data["items_failed"]:
+            details = "; ".join(
+                f"{_shard_label(key)}: {message}"
+                for key, message in data["item_failures"].items()
+            )
+            failures.append(f"data {data['items_failed']} items failed ({details})")
+
+    for uid, stats in result["extraction"].items():
+        if "error" in stats:
+            failures.append(f"extraction user={uid} failed ({stats['error']})")
+        elif stats["failed"]:
+            details = "; ".join(
+                f"shard={shard}: {message}"
+                for shard, message in stats["failures"].items()
+            )
+            failures.append(
+                f"extraction user={uid} {stats['failed']}/{stats['shards_total']} "
+                f"shards failed ({details})"
+            )
+
+    for phase in ("indexing", "clustering"):
+        for uid, stats in result[phase].items():
+            if "error" in stats:
+                failures.append(f"{phase} user={uid} failed ({stats['error']})")
+
+    return failures
+
+
 @flow(name="offline-pipeline", log_prints=True)
 async def offline_pipeline(
     user_id: PydanticObjectId | None = None,
@@ -270,10 +333,19 @@ async def offline_pipeline(
 
     All phases disabled is a LOGGED no-op, not an error: the run completes and
     returns the empty result, so a misconfigured caller gets a Completed flow
-    run it can read rather than a crash.
+    run it can read rather than a crash. So is a run with nothing to do (zero
+    sources, zero pending documents) and a clustering SKIP.
 
-    Every per-user phase logs ONE line at THIS flow's level once it returns
-    (``extraction: user_id=… shards=…`` / ``indexing: user_id=… embedded=N`` /
+    Isolated, never forgotten (#174): a failure is isolated so every phase
+    still runs for every user (indexing still embeds what DID land), and then
+    the run RAISES :class:`~tree.flow_runs.PartialIngestError` naming every
+    failure (:func:`_partial_ingest_failures`) — any partial ingest ends the
+    flow run Failed, so ``make memory-run-pipeline`` exits non-zero instead of
+    printing success over a half-ingested backfill.
+
+    Every phase logs ONE line at THIS flow's level once it returns
+    (``data: shards=… items_failed=…`` / ``extraction: user_id=… shards=…`` /
+    ``indexing: user_id=… embedded=N`` /
     ``clustering: user_id=… clusters=k …``, or ``clustering SKIPPED:
     user_id=… reason=…``). ``tree.cli.wait_for_flow_run`` streams the PARENT
     run's logs only, so a subflow's own summary never reaches the terminal the
@@ -284,14 +356,20 @@ async def offline_pipeline(
     contextvars), so the end-to-end run renders as ONE trace.
 
     Returns ``{"data": <DataFanOutStats | None>, "extraction": {user_id:
-    <FanOutStats | {"error": ...}>}, "indexing": {user_id: {"embedded": <int>} |
-    {"error": ...}}, "clustering": {user_id: <ClusteringStats | {"error":
-    ...}>}}`` as plain dicts (JSON-safe for the flow-run result).
+    <FanOutStats>}, "indexing": {user_id: {"embedded": <int>}}, "clustering":
+    {user_id: <ClusteringStats>}}`` as plain dicts (JSON-safe for the flow-run
+    result) — ONLY for a run with no failure; a failed unit is recorded as
+    ``{"error": ...}`` internally and turned into the raise below.
 
     Raises:
         ValueError: ``document_ids`` or ``source_uris`` passed without a
             ``user_id``, or a ``source_uris`` entry with no document for this
             user (raised BEFORE any phase runs).
+        PartialIngestError: AFTER every requested phase ran, when any data
+            shard / data item / extraction shard failed, or any user's
+            extraction / indexing / clustering raised. The message is
+            ``offline-pipeline finished with failures: <phase> user=… <count>
+            … (<first message per shard>); …``.
     """
 
     _validate_single_tenant_scope(document_ids, source_uris, user_id)
@@ -331,6 +409,14 @@ async def offline_pipeline(
                     )
                     if run_data
                     else None
+                )
+            if data_stats is not None:
+                log.info(
+                    "data: shards=%d succeeded=%d failed=%d items_failed=%d",
+                    data_stats.shards_total,
+                    data_stats.succeeded,
+                    data_stats.failed,
+                    data_stats.items_failed,
                 )
 
             # Both per-user phases fan across the SAME target users, so resolve
@@ -399,12 +485,18 @@ async def offline_pipeline(
                         )
                         clustering[str(uid)] = {"error": str(exc)}
 
-            return {
+            result = {
                 "data": asdict(data_stats) if data_stats is not None else None,
                 "extraction": extraction,
                 "indexing": indexing,
                 "clustering": clustering,
             }
+            failures = _partial_ingest_failures(result)
+            if failures:
+                raise PartialIngestError(
+                    "offline-pipeline finished with failures: " + "; ".join(failures)
+                )
+            return result
     finally:
         # Fail-open telemetry flush — the worker subprocess exits after the run.
         flush_opik()

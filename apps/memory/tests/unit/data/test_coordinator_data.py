@@ -31,7 +31,9 @@ import inspect
 import pytest
 from beanie import PydanticObjectId
 
-from tests.prefect_doubles import completed_flow_run
+from prefect.client.schemas.objects import StateType
+
+from tests.prefect_doubles import completed_flow_run, flow_run_in_state
 from tree.config.sources import (
     HuggingFaceDatasetSource,
     SourceEntry,
@@ -587,3 +589,33 @@ async def test_explicit_user_id_does_not_enumerate_active_users(mocker) -> None:
     boom.assert_not_awaited()
     assert {p["user_id"] for _n, p in calls} == {str(_USER_ID)}
     assert stats.shards_total == 1
+
+
+async def test_failed_items_are_aggregated_per_user_and_shard(mocker) -> None:
+    """Per-item failures reach ``DataFanOutStats`` keyed ``user_id:shard`` (#174)."""
+
+    user_a = PydanticObjectId("507f1f77bcf86cd799439011")
+    user_b = PydanticObjectId("507f1f77bcf86cd799439012")
+    mocker.patch(
+        "tree.data.offline_pipeline.resolve_target_user_ids",
+        new=mocker.AsyncMock(return_value=[user_a, user_b]),
+    )
+    _patch_default_sources(mocker, [SubstackRssSource(uri="https://a.example/feed")])
+
+    async def _fake_run_deployment(name, parameters=None, **kwargs):
+        return flow_run_in_state(
+            StateType.FAILED,
+            "Flow run encountered an exception: PartialIngestError: "
+            "items_failed=2; first: ConnectError: dns",
+        )
+
+    mocker.patch(
+        "tree.data.offline_pipeline.run_deployment",
+        new=mocker.AsyncMock(side_effect=_fake_run_deployment),
+    )
+
+    stats = await data_etl_coordinator(user_id=None)
+
+    assert (stats.succeeded, stats.failed) == (2, 0)
+    assert stats.items_failed == 4
+    assert set(stats.item_failures) == {f"{user_a}:0", f"{user_b}:0"}

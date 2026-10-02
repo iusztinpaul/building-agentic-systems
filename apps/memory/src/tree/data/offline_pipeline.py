@@ -22,6 +22,11 @@ from tree.config.sources import (
 )
 from tree.config.settings import settings
 from tree.config.sources import default_configured_sources, load_sources
+from tree.data.batch import (
+    item_failures_message,
+    parse_items_failed,
+    track_item_failures,
+)
 from tree.data.huggingface.arxiv_dataset_pipeline import (
     arxiv_window_entries,
     ingest_arxiv_dataset,
@@ -34,6 +39,7 @@ from tree.data.youtube.youtube_pipeline_batch import ingest_youtube_batch
 from tree.db import init_mongodb
 from tree.entities.documents import Document
 from tree.entities.users import select_active_user_ids
+from tree.flow_runs import PartialIngestError
 from tree.memory.rag.indexing import assert_settings_match_live_vector_index
 from tree.config.constants import TAGS_DATA_OFFLINE
 from tree.observability import (
@@ -219,6 +225,12 @@ async def data_etl_worker(
     ``opik_trace_headers`` is forwarded by the data coordinator so the worker
     nests under the coordinator's trace; ``None`` (standalone trigger) starts a
     fresh trace.
+
+    Raises:
+        PartialIngestError: the WHOLE shard ran, but one or more items (an
+            article, video, feed or dataset row) failed inside it — so the run
+            ends Failed, with an ``items_failed=<n>; first: …`` message the data
+            coordinator reads back (:func:`tree.data.batch.parse_items_failed`).
     """
 
     configure_opik()
@@ -253,9 +265,13 @@ async def data_etl_worker(
 
             headers = get_distributed_trace_headers()
             typed_sources = _coerce_sources(sources)
-            return await offline_ingest_batch(
-                typed_sources, user_id, opik_trace_headers=headers
-            )
+            with track_item_failures() as tally:
+                ingested = await offline_ingest_batch(
+                    typed_sources, user_id, opik_trace_headers=headers
+                )
+            if tally.count:
+                raise PartialIngestError(item_failures_message(tally))
+            return ingested
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).
         flush_opik()
@@ -342,12 +358,19 @@ class DataFanOutStats:
     accounting. ``failures`` maps the failing shard index (string) to the
     exception message so one shard's blow-up is logged and isolated, never
     aborting the others.
+
+    ``items_failed`` / ``item_failures`` count the OTHER partial-ingest shape: a
+    shard that ran to the end but dropped items inside it (#174). Such a shard is
+    ``succeeded``, not ``failed``; ``item_failures`` maps it to its worker's
+    failure message (which carries the per-shard count and first error).
     """
 
     shards_total: int = 0
     succeeded: int = 0
     failed: int = 0
     failures: dict[str, str] = field(default_factory=dict)
+    items_failed: int = 0
+    item_failures: dict[str, str] = field(default_factory=dict)
 
 
 async def _fan_out_data(
@@ -370,12 +393,17 @@ async def _fan_out_data(
       worker has no such param). A single shard's exception is caught, logged,
       recorded in ``stats.failures``, and the gather still completes for the
       others (ADR-002 §3).
-    * A shard counts as succeeded ONLY when its flow run comes back COMPLETED
-      (``_shard_failure_reason``, #095). ``run_deployment`` RETURNS a Failed /
+    * A shard counts as succeeded only when its flow run comes back COMPLETED
+      (``_shard_failure_reason``, #095) — or failed solely on items (next
+      bullet). ``run_deployment`` RETURNS a Failed /
       Crashed / Cancelled run instead of raising, so counting "it returned" as
       success let this summary — the operator's main signal that an offline run
       worked — read ``succeeded=1 failed=0`` while two workers had hard-failed
       and their documents were missing.
+    * A worker that failed ONLY because items inside its shard failed (its
+      state message carries ``items_failed=<n>``, see :func:`data_etl_worker`)
+      ran the whole shard, so it counts as succeeded and its ``n`` goes to
+      ``stats.items_failed`` / ``stats.item_failures`` instead (#174).
     * NO trailing/index run — the data pipeline only produces ``documents``;
       there is no index. This function fires EXACTLY ``len(shards)`` worker runs
       and nothing else.
@@ -414,6 +442,18 @@ async def _fan_out_data(
 
     for idx, result in enumerate(results):
         failure = _shard_failure_reason(result)
+        items_failed = parse_items_failed(failure) if failure is not None else None
+        if items_failed is not None:
+            stats.succeeded += 1
+            stats.items_failed += items_failed
+            stats.item_failures[str(idx)] = failure
+            log.error(
+                "data fan-out: shard %d finished with %d failed item(s): %s",
+                idx,
+                items_failed,
+                failure,
+            )
+            continue
         if failure is not None:
             stats.failed += 1
             stats.failures[str(idx)] = failure
@@ -427,10 +467,12 @@ async def _fan_out_data(
         stats.succeeded += 1
 
     log.info(
-        "data fan-out: shards_total=%d succeeded=%d failed=%d (NO indexing)",
+        "data fan-out: shards_total=%d succeeded=%d failed=%d items_failed=%d "
+        "(NO indexing)",
         stats.shards_total,
         stats.succeeded,
         stats.failed,
+        stats.items_failed,
     )
 
     return stats
@@ -529,7 +571,9 @@ async def data_etl_coordinator(
     An empty resolved set ⇒ clean no-op: zero worker dispatch,
     ``DataFanOutStats(shards_total=0)``. One shard's failure is isolated and recorded
     in :class:`DataFanOutStats.failures` (keyed ``user_id:shard_index``) while the
-    others proceed.
+    others proceed; failed items inside a shard land in ``items_failed`` /
+    ``item_failures`` (same keys). The coordinator only records them —
+    ``offline_pipeline`` turns any of them into a Failed run.
     """
 
     # Configure Opik in this flow-run process and own ONE trace whose
@@ -585,8 +629,11 @@ async def data_etl_coordinator(
                 aggregate.shards_total += stats.shards_total
                 aggregate.succeeded += stats.succeeded
                 aggregate.failed += stats.failed
+                aggregate.items_failed += stats.items_failed
                 for shard_idx, message in stats.failures.items():
                     aggregate.failures[f"{uid}:{shard_idx}"] = message
+                for shard_idx, message in stats.item_failures.items():
+                    aggregate.item_failures[f"{uid}:{shard_idx}"] = message
             return aggregate
     finally:
         flush_opik()
