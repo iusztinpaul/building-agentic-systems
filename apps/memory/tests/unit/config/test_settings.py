@@ -92,3 +92,36 @@ class TestMongoUriScheme:
     def test_unknown_scheme_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match="mongo_scheme"):
             MongoSettings(mongo_scheme="postgres")
+
+
+class TestRedactedTarget:
+    """The ONE spelling of "which Mongo am I pointed at" (check-db, reset-mode)."""
+
+    def test_srv_target_is_scheme_and_host_without_port(self) -> None:
+        mongo = MongoSettings(
+            mongo_scheme="mongodb+srv",
+            mongo_host="tree.example.mongodb.net",
+            mongo_port=27017,
+            mongo_initdb_root_username="atlas_user",
+            mongo_initdb_root_password=SecretStr("atlas_pwd"),
+        )
+
+        target = mongo.redacted_target()
+
+        assert target == "mongodb+srv://tree.example.mongodb.net"
+        assert "atlas_pwd" not in target
+        assert "atlas_user" not in target
+
+    def test_plain_target_is_scheme_host_and_port_without_credentials(self) -> None:
+        mongo = MongoSettings(
+            mongo_scheme="mongodb",
+            mongo_host="localhost",
+            mongo_port=27017,
+            mongo_initdb_root_username="tree",
+            mongo_initdb_root_password=SecretStr("s3cret"),
+        )
+
+        target = mongo.redacted_target()
+
+        assert target == "mongodb://localhost:27017"
+        assert "s3cret" not in target

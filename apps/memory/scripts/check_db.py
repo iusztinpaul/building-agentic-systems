@@ -29,20 +29,11 @@ logger = logging.getLogger(__name__)
 _SERVER_SELECTION_TIMEOUT_MS = 8000
 
 
-def _redacted_target() -> str:
-    """Scheme + host (+ port for non-SRV) — never credentials."""
-
-    mongo = settings.mongo
-    if mongo.mongo_scheme == "mongodb+srv":
-        return f"mongodb+srv://{mongo.mongo_host}"
-    return f"mongodb://{mongo.mongo_host}:{mongo.mongo_port}"
-
-
 async def check_db() -> bool:
     """Ping the configured MongoDB target and report what it contains."""
 
     mongo = settings.mongo
-    target = _redacted_target()
+    target = mongo.redacted_target()
     logger.info(
         "Checking MongoDB connectivity: %s (user=%s)",
         target,

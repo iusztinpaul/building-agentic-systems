@@ -9,16 +9,19 @@ By default, use the "Paul Iusztin" user when testing.
 
 0. **Pick the memory mode.** `memory.mode` (ADR-006) decides how much of the pipeline runs: `rag` (the YAML default) writes `document` + parent/child `chunk` rows only, `graphrag` adds structural edges and LLM-extracted entities. Override per shell with `TREE_MEMORY__MODE=graphrag` and pass it to **every** command of the run — serve, pipeline, query, MCP — or the flow and the reader disagree about what is in the collection.
 
-   **Switching modes means dropping the collection first** — both modes start from scratch and there is no migration, so rows left over from the other mode make every count meaningless:
+   **Switching modes means a Mode reset first** — both modes start from scratch and there is no migration, so rows left over from the other mode make every count meaningless. The order:
 
    ```bash
-   mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:$MONGO_PORT/?directConnection=true" \
-     --quiet --eval 'db.getSiblingDB("tree").memory.drop()'
+   export TREE_MEMORY__MODE=graphrag     # ① set the new mode (YAML, or exported in the SERVING shell)
+   make memory-reset-mode                # dry run: prints env target, host, configured mode, row counts; exits 1
+   make memory-reset-mode CONFIRM=yes    # ② drops `memory` + `memory_clusters` for ALL users; keeps `documents` + `users`
+   make memory-serve-workflows &         # ③ re-serve (step 1)
+   make memory-run-pipeline              # ④ every document is pending again, so this rebuilds everything
    ```
 
-   Verifying a change in BOTH modes = run steps 1–3 twice, dropping `memory` in between.
+   Read the dry run's `env target:` before confirming — on prod (or any `mongodb+srv` URI) `CONFIRM=yes` is refused and only `CONFIRM=prod` drops. Paste its row counts into the Log. Verifying a change in BOTH modes = run steps 1–3 twice, with a `make memory-reset-mode CONFIRM=yes` in between.
 
-   `users` survive the drop. A `graphrag` run re-creates each user's `person:self` node at its first extraction (and `make memory-signup` does it for an existing user), so no reseed step is needed after switching from `rag`.
+   `users` survive the reset. A `graphrag` run re-creates each user's `person:self` node at its first extraction (and `make memory-signup` does it for an existing user), so no reseed step is needed after switching from `rag`.
 
 1. **Serve the workflows** in the background to pick up the latest code: `make memory-serve-workflows &`. This process is the in-process Prefect worker — without it, deployments register but nothing executes. If a serve process is already running, kill it first and re-serve.
 

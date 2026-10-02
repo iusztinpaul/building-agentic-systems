@@ -37,6 +37,13 @@ class MongoSettings(BaseSettings):
             f"/?directConnection=true&authSource=admin"
         )
 
+    def redacted_target(self) -> str:
+        """Scheme + host (+ port for non-SRV) — never credentials."""
+
+        if self.mongo_scheme == "mongodb+srv":
+            return f"mongodb+srv://{self.mongo_host}"
+        return f"mongodb://{self.mongo_host}:{self.mongo_port}"
+
 
 class Settings(BaseSettings):
     """Credentials- and infrastructure-only settings.

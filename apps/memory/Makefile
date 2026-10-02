@@ -180,6 +180,9 @@ run-indexing-pipeline: # INDEXING phase only (embeddings backfill, search indexe
 reset-embeddings: # EMBEDDING RESET for one user: empties every persisted vector (child chunks + entity nodes) and clears children's cluster_id/viz so make memory-run-indexing-pipeline re-embeds them with the CURRENT models.search_embedding. Needed after changing the embedding model or the Embedding role — rows carry no model stamp. Dry run unless CONFIRM=yes. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/reset_embeddings.py $(USER_FLAGS) $(if $(filter yes,$(CONFIRM)),--yes,)
 
+reset-mode: # MODE RESET for ALL users (memory.mode is one per deployment, ADR-006): drops `memory` + `memory_clusters` and keeps `documents` + `users`, so every document is pending again and the next make memory-run-pipeline rebuilds the memory in the CONFIGURED mode. Switch the mode FIRST (YAML or TREE_MEMORY__MODE in the serving shell), then run this, then re-serve + run the pipeline. Dry run unless CONFIRM=yes — and CONFIRM=prod on the prod target (prints the target + counts either way).
+	uv run python scripts/reset_mode.py --env-target "$(if $(filter prod,$(ENV_TARGET)),prod,local)" $(if $(CONFIRM),--confirm "$(CONFIRM)",)
+
 run-clustering-pipeline: # CLUSTERING phase only (UMAP + HDBSCAN over child-chunk embeddings, one LLM summary per cluster -> `memory_clusters` + each chunk's cluster_id/viz), as ONE offline-pipeline run with the data + extraction + indexing phases OFF (needs served workflows). Off everywhere else, including the nightly cron. Forwards USER_ID/USER_IDENTIFIER.
 	uv run python scripts/run_clustering_pipeline.py $(USER_FLAGS)
 

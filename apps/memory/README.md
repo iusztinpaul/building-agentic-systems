@@ -27,14 +27,17 @@ ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), 
 | **MCP tools** | 7 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`, `visualize_memory_embeddings`) | those 7 + 7 graph tools (see [MCP server](#mcp-server)) |
 | **`make memory-query-graph`** | prints the retrieved parents as text | writes + opens `.tree/graphs/<slug>-<stamp>.html` |
 
-Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes means dropping the collection and re-ingesting from scratch.
+Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes is a **Mode reset** and a re-ingest from scratch, for ALL users (the mode is one per deployment):
 
 ```bash
-make memory-check-db                      # confirm which Mongo you are pointed at
-mongosh "mongodb://$MONGO_INITDB_ROOT_USERNAME:$MONGO_INITDB_ROOT_PASSWORD@localhost:$MONGO_PORT/?directConnection=true" \
-  --quiet --eval 'db.getSiblingDB("tree").memory.drop()'
-TREE_MEMORY__MODE=rag make memory-run-pipeline MODE=online SOURCE="https://…"
+export TREE_MEMORY__MODE=graphrag         # 1. set the new mode (YAML, or exported in the SERVING shell)
+make memory-reset-mode                    #    DRY RUN: env target, host, configured mode, row counts; exits 1
+make memory-reset-mode CONFIRM=yes        # 2. drops `memory` + `memory_clusters`
+make memory-serve-workflows &             # 3. re-serve
+make memory-run-pipeline                  # 4. every document is pending again -> rebuilt in the new mode
 ```
+
+On the prod target — or any `mongodb+srv` URI, whatever `.env.target` says — `CONFIRM=yes` is refused and only `CONFIRM=prod` drops. The reset keeps `documents` and `users` (and the dream watermark and the extraction audit), so nothing is re-scraped; chunking and child embeddings replay from the Prefect cache, and graphrag re-creates `person:self` by itself.
 
 ## Setup
 
@@ -821,7 +824,7 @@ apps/memory/
   configs/default.yaml  # app tuning
   deploy/               # Modal App deploy scripts (vLLM embeddings, SGLang LLMs), Prefect, Atlas
   scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph,
-                        #   visualize_embeddings, signup, check_db)
+                        #   visualize_embeddings, signup, check_db, reset_mode)
   tests/unit
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)
