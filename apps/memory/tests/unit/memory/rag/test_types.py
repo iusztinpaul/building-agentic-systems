@@ -10,9 +10,11 @@ from __future__ import annotations
 from tree.memory.rag.types import (
     ChildChunk,
     HybridSearchResult,
+    MemoryStructure,
     ParentChunk,
     RetrievalResult,
 )
+from tree.memory.types import QueryResult
 
 
 class TestChildChunk:
@@ -66,3 +68,21 @@ def test_hybrid_search_result_defaults_to_no_hits_in_hybrid_mode() -> None:
 
     assert result.hits == []
     assert result.search_mode == "hybrid"
+
+
+class TestMemoryStructure:
+    def test_nodes_and_edges_default_to_empty(self) -> None:
+        structure = MemoryStructure()
+
+        assert (structure.nodes, structure.edges) == ([], [])
+
+    def test_defaults_are_not_shared_between_instances(self) -> None:
+        first, second = MemoryStructure(), MemoryStructure()
+        first.nodes.append({"_id": "doc1"})
+
+        assert second.nodes == []
+
+    def test_the_graphrag_query_result_is_a_memory_structure(self) -> None:
+        # Every renderer entry point takes a MemoryStructure; the graphrag
+        # QueryResult must keep passing without a conversion.
+        assert isinstance(QueryResult(), MemoryStructure)

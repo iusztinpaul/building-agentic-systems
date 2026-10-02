@@ -5,7 +5,7 @@ tool delivers through (ADR-005, decision 4; payload in a ``content`` JSON block,
 because the App-UI host does not forward ``structuredContent`` to a custom
 iframe) — the file fallback's ``graphs://`` resource link, and both resource
 handlers. The TOOLS that call the helper are tested where they are registered
-(``visualize_memory_graph`` / ``query_memory`` / ``search_memory`` in
+(``visualize_memory_structure`` / ``query_memory`` / ``search_memory`` in
 ``test_graph_tools.py``); the Graph renderer it delegates to
 (``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives in
 ``tree.memory.visualize.graph`` and is tested in

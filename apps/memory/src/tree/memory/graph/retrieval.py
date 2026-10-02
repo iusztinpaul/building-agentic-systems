@@ -22,7 +22,6 @@ reached it.
 
 import logging
 from collections import Counter
-from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -32,6 +31,11 @@ from tree.config.app_config import app_config
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.memory.rag.retrieval import group_children_by_parent
 from tree.memory.rag.search import hybrid_search
+from tree.memory.rag.structure import (
+    NO_EMBEDDING,
+    rank_by_provenance,
+    rank_recent_documents,
+)
 from tree.memory.rag.types import ScoredHit
 from tree.memory.types import QueryResult
 from tree.models.base import BaseEmbeddingModel
@@ -352,7 +356,7 @@ def _rank_by_relevance(result: QueryResult, hits: list[ScoredHit]) -> QueryResul
 
     Every node row a ranked document owns gets a COPY stamped ``doc_rank`` —
     a document its own rank, any other row the best rank among its
-    ``sources`` (:func:`_rank_by_provenance`). A row with no ranked provenance
+    ``sources`` (:func:`rank_by_provenance`). A row with no ranked provenance
     and every edge stay unstamped (always shown). No hit or no document row →
     the result as is. Pure: no read.
     """
@@ -387,9 +391,7 @@ def _rank_by_relevance(result: QueryResult, hits: list[ScoredHit]) -> QueryResul
 
     nodes: list[dict[str, Any]] = []
     for row in result.nodes:
-        rank = document_rank.get(row["_id"]) or _rank_by_provenance(
-            row, provenance_rank
-        )
+        rank = document_rank.get(row["_id"]) or rank_by_provenance(row, provenance_rank)
         nodes.append(row if rank is None else {**row, "doc_rank": rank})
     logger.debug(
         "Relevance rank: %d document(s), %d of %d node rows ranked",
@@ -398,51 +400,6 @@ def _rank_by_relevance(result: QueryResult, hits: list[ScoredHit]) -> QueryResul
         len(nodes),
     )
     return QueryResult(nodes=nodes, edges=result.edges)
-
-
-# What a document with neither ``properties.date`` nor ``created_at`` ranks by:
-# behind every dated one.
-_UNDATED = datetime.min.replace(tzinfo=UTC)
-
-# Node reads never need the vector: the payload draws no embedding, and a full
-# graph would otherwise haul every child chunk's vector across the wire.
-_NO_EMBEDDING = {"embedding": 0}
-
-
-def _as_utc(value: Any) -> datetime | None:
-    """An ISO string or a datetime as a tz-aware datetime (naive = UTC), else None."""
-
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    if not isinstance(value, datetime):
-        return None
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
-
-
-def _document_recency(row: dict[str, Any]) -> datetime:
-    """When a document row is from: ``properties.date``, else ``created_at``."""
-
-    return (
-        _as_utc((row.get("properties") or {}).get("date"))
-        or _as_utc(row.get("created_at"))
-        or _UNDATED
-    )
-
-
-def _rank_by_provenance(
-    row: dict[str, Any], provenance_rank: dict[PydanticObjectId, int]
-) -> int | None:
-    """The best (smallest) document rank among ``row["sources"]``, else None."""
-
-    ranks = [
-        provenance_rank[source]
-        for source in row.get("sources") or []
-        if source in provenance_rank
-    ]
-    return min(ranks, default=None)
 
 
 async def fetch_full_graph(
@@ -469,8 +426,10 @@ async def fetch_full_graph(
     unreached endpoints), every one scoped to ``user_id``, node reads without
     the ``embedding``. Ranking happens here, not in a ``$sort``: the two dates
     are a string and a BSON date, and the document rows are the smallest set in
-    the collection. graphrag-only: in ``rag`` mode there are no edges, so the
-    CLI refuses this view instead of rendering isolated dots.
+    the collection (:func:`~tree.memory.rag.structure.rank_recent_documents`,
+    the ranking the rag **Memory structure** shares). graphrag's reader: in
+    ``rag`` the no-query view is
+    :func:`~tree.memory.rag.structure.fetch_rag_structure`.
     """
 
     max_docs = (
@@ -482,11 +441,10 @@ async def fetch_full_graph(
     documents = [
         row
         async for row in collection.find(
-            {"user_id": user_id, "kind": "node", "type": "document"}, _NO_EMBEDDING
+            {"user_id": user_id, "kind": "node", "type": "document"}, NO_EMBEDDING
         )
     ]
-    by_id = sorted(documents, key=lambda row: str(row["_id"]))
-    kept = sorted(by_id, key=_document_recency, reverse=True)[:max_docs]
+    kept = rank_recent_documents(documents, max_docs)
 
     nodes: dict[Any, dict[str, Any]] = {}
     provenance_rank: dict[PydanticObjectId, int] = {}
@@ -501,17 +459,17 @@ async def fetch_full_graph(
     # 2. Their subgraph nodes: chunks, and every entity extracted from them.
     async for row in collection.find(
         {"user_id": user_id, "kind": "node", "sources": {"$in": provenance}},
-        _NO_EMBEDDING,
+        NO_EMBEDDING,
     ):
         if row["_id"] not in nodes:
-            rank = _rank_by_provenance(row, provenance_rank)
+            rank = rank_by_provenance(row, provenance_rank)
             nodes[row["_id"]] = {**row, "doc_rank": rank}
 
     # 3. Their edges, plus every edge with no provenance at all (hand-made or
     #    merge rows such as `same_as`): those are kept below only when both
     #    endpoints are already in, and never reach a new endpoint.
     edges = [
-        {**row, "doc_rank": _rank_by_provenance(row, provenance_rank)}
+        {**row, "doc_rank": rank_by_provenance(row, provenance_rank)}
         async for row in collection.find(
             {
                 "user_id": user_id,
@@ -534,11 +492,11 @@ async def fetch_full_graph(
                 )
     async for row in collection.find(
         {"user_id": user_id, "kind": "node", "_id": {"$in": list(endpoint_rank)}},
-        _NO_EMBEDDING,
+        NO_EMBEDDING,
     ):
         # An edge can name a kept AND an excluded document; a row owned only
         # by excluded documents stays out (and with it, that edge).
-        if row.get("sources") and _rank_by_provenance(row, provenance_rank) is None:
+        if row.get("sources") and rank_by_provenance(row, provenance_rank) is None:
             continue
         nodes[row["_id"]] = {**row, "doc_rank": endpoint_rank[row["_id"]]}
 

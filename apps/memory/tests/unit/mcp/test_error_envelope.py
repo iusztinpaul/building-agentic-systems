@@ -342,6 +342,7 @@ def test_no_legacy_error_keys(module) -> None:
 # purpose — promising an error shape they never emit would be a lie to the model.
 _ENVELOPE_TOOLS = [
     ("rag:search_memory", tools.search_memory),
+    ("rag:visualize_memory_structure", tools.visualize_memory_structure),
     ("ingest_url", tools.ingest_url),
     ("ingest_file", tools.ingest_file),
     ("ingest_conversation", tools.ingest_conversation),
@@ -350,7 +351,10 @@ _ENVELOPE_TOOLS = [
     ("graphrag:search_memory", graph_tools.search_memory),
     ("query_memory", graph_tools.query_memory),
     ("deep_search_memory", graph_tools.deep_search_memory),
-    ("visualize_memory_graph", graph_tools.visualize_memory_graph),
+    (
+        "graphrag:visualize_memory_structure",
+        graph_tools.visualize_memory_structure,
+    ),
     ("review_list_pending", graph_tools.review_list_pending),
     ("review_confirm", graph_tools.review_confirm),
     ("review_reject", graph_tools.review_reject),
@@ -384,6 +388,11 @@ def test_every_tool_docstring_states_the_error_contract(name: str, tool) -> None
 # count check below.
 _FIRST_AWAIT = {
     "rag:search_memory": (tools.search_memory, {}, "tree.mcp.tools.retrieve_parents"),
+    "rag:visualize_memory_structure": (
+        tools.visualize_memory_structure,
+        {},
+        "tree.mcp.tools.retrieve_parents",
+    ),
     "ingest_url": (
         tools.ingest_url,
         {"url": "https://example.com/post"},
@@ -424,8 +433,8 @@ _FIRST_AWAIT = {
         {},
         "tree.mcp.graph_tools.structured_query_memory",
     ),
-    "visualize_memory_graph": (
-        graph_tools.visualize_memory_graph,
+    "graphrag:visualize_memory_structure": (
+        graph_tools.visualize_memory_structure,
         {},
         "tree.mcp.graph_tools.structured_query_memory",
     ),
@@ -453,7 +462,8 @@ _QUERY_TOOLS = {
     "graphrag:search_memory",
     "query_memory",
     "deep_search_memory",
-    "visualize_memory_graph",
+    "rag:visualize_memory_structure",
+    "graphrag:visualize_memory_structure",
 }
 
 

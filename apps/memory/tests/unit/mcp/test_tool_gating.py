@@ -29,9 +29,10 @@ _SHARED_TOOLS = [
     "search_memory",
     "search_web",
     "visualize_memory_embeddings",
+    "visualize_memory_structure",
 ]
 
-# The seven tools that presuppose edges. Absent — not degraded — in rag mode.
+# The six tools that presuppose edges. Absent — not degraded — in rag mode.
 _GRAPH_ONLY_TOOLS = [
     "deep_search_memory",
     "memory_dashboard",
@@ -39,8 +40,12 @@ _GRAPH_ONLY_TOOLS = [
     "review_confirm",
     "review_list_pending",
     "review_reject",
-    "visualize_memory_graph",
 ]
+
+# The pre-task-173 name of ``visualize_memory_structure``, spelled as a
+# concatenation so this file is not a hit for the stale-name docs guard
+# (``tests/unit/test_structure_view_docs.py``).
+_RETIRED_GRAPH_VIEW_TOOL = "visualize_memory" + "_graph"
 
 # Modules that may only ever be imported by a graphrag server: the graph tool
 # module plus the dashboard MCP App it pulls in as a side-effect import.
@@ -103,6 +108,14 @@ _PROBE = textwrap.dedent(
                 (await server.mcp.get_tool("visualize_memory_embeddings"))
                 .parameters["properties"]
             ),
+            "structure_parameters": sorted(
+                (await server.mcp.get_tool("visualize_memory_structure"))
+                .parameters["properties"]
+            ),
+            "structure_ui": (
+                (await server.mcp.get_tool("visualize_memory_structure")).meta
+                or {{}}
+            ).get("ui", {{}}).get("resourceUri"),
         }}
 
     print("{_MARKER}" + json.dumps(asyncio.run(probe())))
@@ -130,14 +143,19 @@ def _probe(mode: str) -> dict[str, Any]:
 
 
 class TestRegisteredToolSet:
-    def test_rag_mode_registers_only_the_seven_shared_tools(self) -> None:
+    def test_rag_mode_registers_only_the_eight_shared_tools(self) -> None:
         assert _probe("rag")["tools"] == _SHARED_TOOLS
+        assert len(_SHARED_TOOLS) == 8
 
-    def test_graphrag_mode_adds_exactly_the_seven_graph_tools(self) -> None:
+    def test_graphrag_mode_adds_exactly_the_six_graph_tools(self) -> None:
         tools = _probe("graphrag")["tools"]
 
         assert tools == sorted(_SHARED_TOOLS + _GRAPH_ONLY_TOOLS)
         assert len(tools) == 14
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_the_retired_graph_view_tool_is_gone(self, mode: str) -> None:
+        assert _RETIRED_GRAPH_VIEW_TOOL not in _probe(mode)["tools"]
 
     def test_graph_tools_are_unknown_to_a_rag_server(self) -> None:
         # Story 2: the harness calling query_memory on a rag server gets the
@@ -183,6 +201,31 @@ class TestEmbeddingMapToolSignature:
         self, mode: str
     ) -> None:
         assert _probe(mode)["embedding_map_parameters"] == ["as_html_file", "hulls"]
+
+
+class TestStructureToolSignaturePerMode:
+    """One name, two signatures: rag has no ``max_hops`` (ADR-006 §5)."""
+
+    def test_rag_advertises_no_max_hops(self) -> None:
+        assert _probe("rag")["structure_parameters"] == [
+            "as_html_file",
+            "max_docs",
+            "query",
+            "top_k",
+        ]
+
+    def test_graphrag_adds_max_hops(self) -> None:
+        assert _probe("graphrag")["structure_parameters"] == [
+            "as_html_file",
+            "max_docs",
+            "max_hops",
+            "query",
+            "top_k",
+        ]
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_both_modes_deliver_through_the_shared_ui_resource(self, mode: str) -> None:
+        assert _probe(mode)["structure_ui"] == "ui://tree-memory/graph.html"
 
 
 class TestSearchMemorySignaturePerMode:

@@ -14,7 +14,7 @@ Usage::
 
     async with get_cloud_client() as client:
         tools = await client.list_tools()
-        result = await client.call_tool("query_graph", {"query": "..."})
+        result = await client.call_tool("search_memory", {"query": "..."})
 """
 
 from __future__ import annotations

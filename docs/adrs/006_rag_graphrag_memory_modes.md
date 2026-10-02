@@ -1,6 +1,6 @@
 # ADR-006: Modular Memory — Vanilla RAG Mode and GraphRAG Mode over One `memory` Collection
 
-- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes) — §3 amended and §5 YAML default flipped to `rag` by task 170 (`person:self` graphrag-only)
+- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes) — §3 amended and §5 YAML default flipped to `rag` by task 170 (`person:self` graphrag-only) — §5 tool sets amended by task 173: `visualize_memory_structure` registers in both modes (`rag` 8 tools, `graphrag` 14; six graph-only); rag `search_memory` keeps `(query, top_k)`.
 - **Date:** 2026-09-05
 - **Deciders:** Paul (project owner)
 - **Context references:**

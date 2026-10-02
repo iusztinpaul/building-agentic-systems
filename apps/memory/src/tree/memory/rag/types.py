@@ -183,6 +183,19 @@ which legs answered, this says whether the answer is empty.
 """
 
 
+class MemoryStructure(BaseModel):
+    """The row bag every structural view hands the **Graph renderer**.
+
+    ``nodes`` / ``edges`` are raw ``memory`` rows (plus a viz-only ``doc_rank``).
+    In ``rag`` the edges are the ``part_of`` dicts SYNTHESISED from each chunk
+    row's ``parent_id`` by :mod:`tree.memory.rag.structure` — never stored; in
+    ``graphrag`` they are the stored edge rows (``QueryResult`` subclasses this).
+    """
+
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class RetrievalResult(BaseModel):
     """What ``rag`` mode returns instead of a graph: ranked parents, no edges."""
 

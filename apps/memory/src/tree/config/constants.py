@@ -50,7 +50,7 @@ TAGS_INGESTION_BATCH = [TAG_INGESTION, TAG_BATCH]
 # MCP ingest tools (ingest_url / ingest_file / ingest_conversation / search_web).
 TAGS_INGESTION_MCP = [TAG_INGESTION, TAG_MCP]
 # MCP retrieval tools (query_memory / search_memory / deep_search_memory and any
-# utility tool that reads memory, e.g. visualize_memory_graph).
+# utility tool that reads memory, e.g. visualize_memory_structure).
 TAGS_RETRIEVAL_MCP = [TAG_RETRIEVAL, TAG_MCP]
 # MCP utility tools that neither read nor write memory (scrape_web, review_*,
 # memory_dashboard) — just the surface marker.

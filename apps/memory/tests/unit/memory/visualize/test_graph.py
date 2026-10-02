@@ -11,6 +11,7 @@ result channels, ``graphs://`` resource) live in
 ``tests/unit/mcp/test_viz_app.py``.
 """
 
+import hashlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from pathlib import Path
 
 from tree.config.paths import GRAPHS_DIR
 import pytest
+from beanie import PydanticObjectId
 
 from tree.config.app_config import app_config
 from tree.memory.visualize.graph import (
@@ -37,7 +39,10 @@ from tree.memory.visualize.graph import (
     to_graph_payload,
     visualize_query_result,
 )
+from tree.memory.rag.structure import synthesize_part_of_edges
+from tree.memory.rag.types import MemoryStructure
 from tree.memory.types import QueryResult
+from tree.memory.visualize import graph as graph_module
 
 _UID = "65f1a2b3c4d5e6f7a8b9c0d1"
 
@@ -1916,3 +1921,114 @@ def test_the_closure_marker_never_reaches_the_payload() -> None:
     payload = to_graph_payload(QueryResult(nodes=[marked], edges=[edge]))
 
     assert "_closure_added" not in json.dumps(payload)
+
+
+# ---------------------------------------------------------------------------
+# The rag Memory structure (task 173) — same renderer, zero template change
+# ---------------------------------------------------------------------------
+
+# sha256 of each template constant as of main before task 173. The rag tree
+# draws through the template UNCHANGED (its edges are synthesised to fit it), so
+# a JS / CSS / DOM edit made "for rag" turns this red.
+_TEMPLATE_SHA256 = {
+    "_GRAPH_STYLE": "39b6d3020fedea6fe530f6ba671b5ca0a95924e0718d6d0f5fab5c37f214bbca",
+    "_BODY_MARKUP": "eabb61a3b90ddd3cfea41a32ed8d8984b0fc9ceb91dab8d99cbcddbee2e5af6c",
+    "_RENDER_JS": "f0202dbb8c5c2ea463565b601a5bcf7358685c7ca9e155c3f196d063c10abcd6",
+    "_FILE_HTML_TEMPLATE": (
+        "fe65603e2631b89c69651571bc087e00e757ce1e082c2e12380864b035b0423d"
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TEMPLATE_SHA256))
+def test_the_template_constants_are_byte_identical_to_main(name: str) -> None:
+    text = getattr(graph_module, name)
+
+    assert hashlib.sha256(text.encode()).hexdigest() == _TEMPLATE_SHA256[name]
+
+
+def _rag_tree(n_documents: int) -> MemoryStructure:
+    """``n_documents`` × (document → 2 parents → 1 child each), ranked by recency."""
+
+    nodes: list[dict] = []
+    for rank in range(1, n_documents + 1):
+        doc = f"{_UID}:document:d{rank}"
+        nodes.append({**_node(doc, "document"), "doc_rank": rank})
+        for p in range(2):
+            parent = f"{doc}:p{p}"
+            child = f"{parent}:c0"
+            nodes.append(
+                {
+                    **_node(parent, "chunk"),
+                    "subtype": "parent",
+                    "parent_id": doc,
+                    "doc_rank": rank,
+                }
+            )
+            nodes.append(
+                {
+                    **_node(child, "chunk"),
+                    "subtype": "child",
+                    "parent_id": parent,
+                    "doc_rank": rank,
+                }
+            )
+    return MemoryStructure(
+        nodes=nodes, edges=synthesize_part_of_edges(nodes, PydanticObjectId())
+    )
+
+
+def test_a_rag_tree_draws_three_sizes_by_role() -> None:
+    payload = to_graph_payload(_rag_tree(1))
+
+    sizes = {(n["type"], n["meta"].get("subtype")): n["size"] for n in payload["nodes"]}
+    assert sizes == {
+        ("document", None): 10,
+        ("chunk", "parent"): 7,
+        ("chunk", "child"): 4,
+    }
+
+
+def test_a_rag_tree_ships_part_of_edges_and_no_unknown_node() -> None:
+    payload = to_graph_payload(_rag_tree(2))
+
+    assert len(payload["edges"]) == 8  # one per chunk row
+    assert {e["type"] for e in payload["edges"]} == {"part_of"}
+    assert "unknown" not in {n["type"] for n in payload["nodes"]}
+
+
+def test_a_rag_tree_without_a_query_shows_min_100_total_by_recency() -> None:
+    payload = to_graph_payload(_rag_tree(3), document_order="recency")
+
+    assert payload["controls"]["documents"] == {
+        "shown": min(app_config.query.full_graph_shown_docs, 3),
+        "total": 3,
+        "order": "recency",
+    }
+
+
+def test_a_rag_query_view_shows_every_document_by_relevance() -> None:
+    payload = to_graph_payload(_rag_tree(3), document_order="relevance")
+
+    assert payload["controls"]["documents"] == {
+        "shown": 3,
+        "total": 3,
+        "order": "relevance",
+    }
+
+
+def test_an_explicit_document_order_wins_over_the_slug(mocker, tmp_path: Path) -> None:
+    # The rag no-query view is slugged "structure" yet ranked by recency: a
+    # non-empty slug must not flip it to relevance.
+    build = mocker.patch(
+        "tree.memory.visualize.graph.to_graph_payload", wraps=to_graph_payload
+    )
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+
+    path = visualize_query_result(
+        _rag_tree(2), open_browser=False, query="structure", document_order="recency"
+    )
+
+    assert build.call_args.kwargs == {"document_order": "recency"}
+    assert path.name.startswith("structure-")
+    assert '"order": "recency"' in path.read_text(encoding="utf-8")

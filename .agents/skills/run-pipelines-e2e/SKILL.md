@@ -36,10 +36,17 @@ By default, use the "Paul Iusztin" user when testing.
 3. **Verify the result.** Count what landed with `mongosh` over the `memory` collection, grouped by `kind` / `type` / `subtype` (in `rag`: `edge` count 0, parents with `embedding: []`, children with a 1024-length vector), then read it back:
 
    ```bash
-   make memory-query-graph QUERY="test query"
+   make memory-search QUERY="test query"
    ```
 
-   The output follows the mode: `graphrag` writes and opens an interactive HTML graph under `.tree/graphs/<slug>-<UTC-stamp>.html`; **`rag` prints the ranked parent chunks as TEXT** (score, document title, heading path, a 300-char excerpt, matched-children count) and writes no file — a missing HTML file in `rag` is the expected outcome, not a failure. `make memory-query-graph` with no `QUERY` is graphrag-only (in `rag` it exits 1: there are no edges to draw).
+   It prints the ranked parent chunks as TEXT (score, document title, heading path, a 300-char excerpt, matched-children count) identically in both modes, and writes no file. For the picture, in either mode:
+
+   ```bash
+   make memory-visualize-structure                      # no query: the most-recent documents
+   make memory-visualize-structure QUERY="test query"   # narrowed to the search results
+   ```
+
+   It writes and opens `.tree/graphs/<slug>-<UTC-stamp>.html` following the mode: in `rag` the document → parent chunk → child chunk tree (`structure-<stamp>.html` with no query; its `part_of` edges are drawn from `parent_id`, never stored — the `edge` count stays 0), in `graphrag` the knowledge graph (`graph-<stamp>.html`). An empty memory or a query that finds nothing prints one line and exits 1 without a file. To smoke-test a file without a browser, run headless Chrome with `--dump-dom` over it and check the `<body data-layout="live" data-docs="D/D">` markers.
 
    If you clustered, check the **Embedding map** too — the one visual surface that works in BOTH modes:
 
@@ -49,7 +56,7 @@ By default, use the "Paul Iusztin" user when testing.
 
    It writes `.tree/graphs/embedding-map-<UTC-stamp>.html` and opens it; the legend shows one row per cluster. Two expected outcomes, not failures: with no clustering run it prints `No clustering run found for this user …` and exits 1, and after ingesting anything since the last run the FIRST output line is `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` (those points are off the map and counted in the legend). Ingest one document and re-run to see that stale warning appear — then re-cluster to clear it.
 
-   For the MCP surface, serve it in the same mode (e.g. `TREE_MEMORY__MODE=graphrag make memory-serve-mcp TRANSPORT=streamable-http` after a graphrag run) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 7 tools, `graphrag` 14.
+   For the MCP surface, serve it in the same mode (e.g. `TREE_MEMORY__MODE=graphrag make memory-serve-mcp TRANSPORT=streamable-http` after a graphrag run) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 8 tools, `graphrag` 14 — `visualize_memory_structure` in both (no `max_hops` in `rag`).
 
    **The four tool-contract checks (ADR-008).** Every answer is JSON, so read the named field — not the prose:
 
@@ -74,7 +81,7 @@ By default, use the "Paul Iusztin" user when testing.
      | uv --directory apps/memory run python scripts/hook_session_end.py tree-memory-local
    ```
 
-   Expect: under 60 s (Claude Code's raised `SessionEnd` budget), one `Ingested session claude-session://e2e-1 duplicate=False flow_run_id=…` line, exit 0. Re-run it for `duplicate=True`. After the run indexes, a phrase from the transcript must come back through `search_memory` / `make memory-query-graph`. Every failure path is a skip + exit 0 by design, so read the LOG, not the exit code.
+   Expect: under 60 s (Claude Code's raised `SessionEnd` budget), one `Ingested session claude-session://e2e-1 duplicate=False flow_run_id=…` line, exit 0. Re-run it for `duplicate=True`. After the run indexes, a phrase from the transcript must come back through `search_memory` / `make memory-search`. Every failure path is a skip + exit 0 by design, so read the LOG, not the exit code.
 
 4. **After changing the embedding model (or the Embedding role).** Rows carry no model stamp, so nothing detects a half-migrated database: until you re-embed, stored voyage-3.5 vectors are scored against voyage-4 query vectors and `min_vector_score` may hide everything. Run the **Embedding reset** once per user, then the two phases that refill it:
 

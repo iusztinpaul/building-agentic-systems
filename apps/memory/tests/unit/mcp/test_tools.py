@@ -11,8 +11,12 @@ BOTH surfaces. Its payload builder is tested in
 ``tests/unit/memory/visualize/test_embeddings.py`` and its dual delivery in
 ``tests/unit/mcp/test_viz_app.py`` — what is asserted here is the tool's
 contract: read, warn, deliver.
+
+``visualize_memory_structure`` here is the rag form (the document → parent →
+child tree, task 173); its graphrag twin is tested in ``test_graph_tools.py``.
 """
 
+import inspect
 import json
 import logging
 import re
@@ -28,17 +32,25 @@ from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 from tree.data.online_pipeline import UrlSource
 from tree.mcp.tools import (
+    ERROR_CONTRACT,
     _ingest,
     ingest_conversation,
     ingest_file,
     ingest_url,
     search_memory,
     visualize_memory_embeddings,
+    visualize_memory_structure,
 )
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
+from tree.memory.rag.structure import (
+    EMPTY_MEMORY_MESSAGE,
+    NO_RESULTS_MESSAGE,
+    synthesize_part_of_edges,
+)
 from tree.memory.rag.types import (
     DocumentMeta,
     MatchedChild,
+    MemoryStructure,
     RetrievalResult,
     RetrievedParent,
 )
@@ -693,3 +705,217 @@ class TestIngestReceipt:
         # No echo field: the conversation text is not an identifier.
         assert set(payload) == _RECEIPT_KEYS
         assert payload == receipt.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# visualize_memory_structure — the rag form (task 173)
+# ---------------------------------------------------------------------------
+
+
+def _rag_structure() -> MemoryStructure:
+    """One document → one parent → one child, ranked; edges synthesised."""
+
+    nodes = [
+        {"_id": "doc1", "kind": "node", "type": "document", "doc_rank": 1},
+        {
+            "_id": "p1",
+            "kind": "node",
+            "type": "chunk",
+            "subtype": "parent",
+            "parent_id": "doc1",
+            "doc_rank": 1,
+        },
+        {
+            "_id": "c1",
+            "kind": "node",
+            "type": "chunk",
+            "subtype": "child",
+            "parent_id": "p1",
+            "doc_rank": 1,
+        },
+    ]
+    return MemoryStructure(nodes=nodes, edges=synthesize_part_of_edges(nodes, _USER_ID))
+
+
+class TestRagVisualizeMemoryStructure:
+    """The rag tree through the ONE dual path (ADR-005 §4), no ``max_hops``."""
+
+    @pytest.fixture
+    def readers(self, mocker) -> dict[str, AsyncMock]:
+        retrieved = RetrievedParent(
+            parent_id="p1",
+            content="parent",
+            score=0.03,
+            document=DocumentMeta(document_id="doc1"),
+        )
+        return {
+            "retrieve_parents": mocker.patch(
+                "tree.mcp.tools.retrieve_parents",
+                new_callable=AsyncMock,
+                return_value=RetrievalResult(parents=[retrieved]),
+            ),
+            **{
+                name: mocker.patch(
+                    f"tree.mcp.tools.{name}",
+                    new_callable=AsyncMock,
+                    return_value=_rag_structure(),
+                )
+                for name in ("fetch_rag_structure", "fetch_retrieval_structure")
+            },
+        }
+
+    async def test_a_ui_capable_client_gets_the_tree_inline_with_the_summary(
+        self, readers
+    ) -> None:
+        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True))
+
+        assert isinstance(result, ToolResult)
+        summary_block, payload_block = result.content
+        assert summary_block.text.startswith(
+            "Memory structure (rag: document → parent chunk → child chunk) for "
+            "your full memory: 1 of 1 most-recent documents shown by default, "
+            "3 nodes, 2 edges"
+        )
+        assert payload_block.annotations.audience == ["user"]
+        payload = json.loads(payload_block.text)
+        assert {e["type"] for e in payload["edges"]} == {"part_of"}
+        assert payload["controls"]["documents"]["order"] == "recency"
+
+    async def test_no_query_reads_the_recent_tree_with_max_docs(self, readers) -> None:
+        await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True), max_docs=7)
+
+        assert readers["fetch_rag_structure"].await_args.kwargs == {"max_docs": 7}
+        readers["retrieve_parents"].assert_not_awaited()
+
+    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
+        self, mocker, tmp_path, readers
+    ) -> None:
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+
+        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=False))
+
+        text_block, link_block = result.content
+        assert text_block.text.startswith("Memory structure (rag:")
+        assert re.fullmatch(
+            r"graphs://structure-\d{8}-\d{6}\.html", str(link_block.uri)
+        ), link_block.uri
+        assert (tmp_path / link_block.name).is_file()
+
+    async def test_as_html_file_forces_the_file_for_a_ui_client(
+        self, mocker, tmp_path, readers
+    ) -> None:
+        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), as_html_file=True
+        )
+
+        assert result.content[1].type == "resource_link"
+
+    async def test_a_query_retrieves_parents_and_ranks_by_relevance(
+        self, readers
+    ) -> None:
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), query="memory", top_k=4
+        )
+
+        assert readers["retrieve_parents"].await_args.kwargs["top_k"] == 4
+        assert readers["retrieve_parents"].await_args.kwargs["query"] == "memory"
+        retrieval = readers["fetch_retrieval_structure"].await_args.args[-1]
+        assert retrieval.parents[0].parent_id == "p1"
+        readers["fetch_rag_structure"].assert_not_awaited()
+        summary_block, payload_block = result.content
+        assert "for 'memory': 1 of 1 most-relevant documents" in summary_block.text
+        assert json.loads(payload_block.text)["controls"]["documents"]["order"] == (
+            "relevance"
+        )
+
+    async def test_a_whitespace_query_is_the_no_query_view(self, readers) -> None:
+        # Never sent to the embedder as a blank string (its raw 400), and not an
+        # error either: an empty query MEANS "draw the whole memory" here.
+        await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True), query="   ")
+
+        readers["fetch_rag_structure"].assert_awaited_once()
+        readers["retrieve_parents"].assert_not_awaited()
+
+    async def test_nothing_found_answers_the_plain_no_results_line(
+        self, mocker, readers
+    ) -> None:
+        readers["retrieve_parents"].return_value = RetrievalResult(
+            outcome="nothing_found"
+        )
+        deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
+
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), query="zzzq wamble frobnitz"
+        )
+
+        assert result == 'No results for "zzzq wamble frobnitz" — nothing to draw.'
+        assert result == NO_RESULTS_MESSAGE.format(query="zzzq wamble frobnitz")
+        deliver.assert_not_called()
+        readers["fetch_retrieval_structure"].assert_not_awaited()
+
+    async def test_an_empty_memory_answers_the_plain_empty_line(
+        self, mocker, readers
+    ) -> None:
+        readers["fetch_rag_structure"].return_value = MemoryStructure()
+        deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
+
+        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True))
+
+        assert result == EMPTY_MEMORY_MESSAGE
+        deliver.assert_not_called()
+
+    async def test_max_docs_below_one_is_invalid_input(self, readers) -> None:
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), max_docs=0
+        )
+
+        assert json.loads(result) == {
+            "error_type": "invalid_input",
+            "retryable": False,
+            "message": "max_docs must be ≥ 1",
+        }
+        readers["fetch_rag_structure"].assert_not_awaited()
+
+    async def test_top_k_below_one_is_invalid_input(self, readers) -> None:
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), query="q", top_k=0
+        )
+
+        assert json.loads(result) == {
+            "error_type": "invalid_input",
+            "retryable": False,
+            "message": "top_k must be ≥ 1",
+        }
+        readers["retrieve_parents"].assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("reader", "kwargs"),
+        [("retrieve_parents", {"query": "q"}), ("fetch_rag_structure", {})],
+        ids=["query", "no-query"],
+    )
+    async def test_search_unavailable_is_a_retryable_envelope(
+        self, readers, reader: str, kwargs: dict
+    ) -> None:
+        readers[reader].side_effect = SearchUnavailableError("both legs down")
+
+        result = await visualize_memory_structure(
+            ctx=_viz_ctx(ui_supported=True), **kwargs
+        )
+
+        payload = json.loads(result)
+        assert payload["error_type"] == "search_unavailable"
+        assert payload["retryable"] is True
+
+    def test_the_docstring_states_the_error_contract(self) -> None:
+        doc = " ".join((visualize_memory_structure.__doc__ or "").split())
+
+        assert ERROR_CONTRACT in doc
+
+    def test_the_signature_has_no_max_hops(self) -> None:
+        params = set(inspect.signature(visualize_memory_structure).parameters)
+
+        assert params == {"ctx", "query", "top_k", "as_html_file", "max_docs"}

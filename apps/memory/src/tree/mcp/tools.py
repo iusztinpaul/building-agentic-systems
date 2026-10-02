@@ -1,9 +1,9 @@
 """MCP tool handlers registered in BOTH **Memory modes** — thin delegation.
 
-The seven tools here (``search_memory``, ``ingest_url``, ``ingest_file``,
-``ingest_conversation``, ``search_web``, ``scrape_web``,
-``visualize_memory_embeddings``) work with node rows alone, so
-:mod:`tree.mcp.server` imports this module unconditionally. The seven tools that
+The eight tools here (``search_memory``, ``visualize_memory_structure``,
+``ingest_url``, ``ingest_file``, ``ingest_conversation``, ``search_web``,
+``scrape_web``, ``visualize_memory_embeddings``) work with node rows alone, so
+:mod:`tree.mcp.server` imports this module unconditionally. The six tools that
 presuppose edges live in :mod:`tree.mcp.graph_tools`, imported only in
 ``graphrag`` (ADR-006 decision 5).
 
@@ -15,10 +15,12 @@ module imports the MODE-NEUTRAL :mod:`tree.mcp.viz_app` (whose ``ui://`` and
 ``graphs://`` resources therefore exist in rag mode too) and never
 :mod:`tree.mcp.graph_tools`.
 
-``search_memory`` is the one tool whose SIGNATURE depends on the mode — the rag
-version below returns **Parent-document retrieval** results and takes ``top_k``
-only; the graphrag version in :mod:`tree.mcp.graph_tools` keeps its graph
-expansion knobs. Two functions, one registered name, never both: dead
+``search_memory`` and ``visualize_memory_structure`` are the two tools whose
+SIGNATURE depends on the mode — the rag versions below take no graph knob
+(``search_memory`` returns **Parent-document retrieval** results and takes
+``top_k`` only; ``visualize_memory_structure`` draws the document → parent →
+child tree); the graphrag versions in :mod:`tree.mcp.graph_tools` keep their
+graph expansion knobs. Two functions, one registered name, never both: dead
 ``max_hops`` / ``visualize`` parameters that a rag server would have to ignore
 are exactly what this split avoids.
 """
@@ -70,14 +72,21 @@ from tree.mcp.server import MEMORY_MODE, mcp
 # ``ui://`` and ``graphs://`` resources as a side effect and owns the one
 # dual-delivery helper. It imports neither this module nor the graph tools, so
 # there is no cycle and rag mode stays free of graph code.
-from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
+from tree.mcp.viz_app import GRAPH_VIEW_URI, _ORDER_ADJECTIVE, _graph_tool_result
 from tree.memory.clustering.store import load_embedding_map
 from tree.memory.rag.retrieval import retrieve_parents
 from tree.memory.rag.search import SearchUnavailableError
+from tree.memory.rag.structure import (
+    EMPTY_MEMORY_MESSAGE,
+    NO_RESULTS_MESSAGE,
+    fetch_rag_structure,
+    fetch_retrieval_structure,
+)
 from tree.memory.visualize.embeddings import (
     NO_CLUSTERING_RUN_MESSAGE,
     to_embedding_map_payload,
 )
+from tree.memory.visualize.graph import to_graph_payload
 from tree.models.exceptions import ModelError
 from tree.online import dispatch_online_pipeline
 from tree.observability import (
@@ -313,6 +322,123 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
 
 if MEMORY_MODE == "rag":
     mcp.tool(search_memory)
+
+
+# ---------------------------------------------------------------------------
+# Memory structure — rag's form of ``visualize_memory_structure``
+# ---------------------------------------------------------------------------
+
+
+# Same pattern as ``search_memory``: defined unconditionally, REGISTERED below
+# only in rag — in graphrag the name is taken by the knowledge-graph version in
+# :mod:`tree.mcp.graph_tools`, which adds ``max_hops``.
+@track(
+    tags=TAGS_RETRIEVAL_MCP,
+    name="visualize_memory_structure",
+    create_duplicate_root_span=False,
+)
+async def visualize_memory_structure(
+    ctx: Context,
+    query: str = "",
+    top_k: int = 10,
+    as_html_file: bool = False,
+    max_docs: int | None = None,
+) -> str | ToolResult:
+    """Show how the memory is organised: every document and the chunks it was
+    split into, as an interactive tree (document → parent chunk → child chunk).
+    Use when the user wants to *see* the memory's structure rather than read
+    passages. There are no entities or relations in this memory — only
+    documents and their chunks.
+
+    With a ``query``, the view narrows to the passages that matched: the
+    retrieved parent chunks, their documents and all their children, ranked by
+    relevance (the ``Documents`` slider shows every match by default). With NO
+    query (the default), it draws the most-recent documents; the slider shows
+    100 of them and reveals the rest. A query that matches nothing, or an empty
+    memory, answers a plain sentence instead of a picture.
+
+    When the client renders MCP App UIs, the tree appears inline. Otherwise
+    (or when ``as_html_file`` is set) it is written to a self-contained HTML
+    file; the result carries the server-side path AND a ``graphs://`` resource
+    link — do NOT re-author the HTML yourself. If the path exists locally just
+    share it; if the server is remote (cloud), read the linked resource and
+    save its text as a local ``.html`` file.
+
+    Args:
+        query: Search query text — narrows the view to the matching passages.
+            Omit (empty) to draw the whole memory.
+        top_k: Number of parent chunks to retrieve (default 10). Ignored with
+            no query.
+        as_html_file: Set true when the user explicitly asks for a downloadable
+            / openable HTML file instead of the inline interactive view.
+        max_docs: With no ``query``: how many most-recent documents to embed
+            (default from config, 500); the view shows the 100 most recent and
+            a slider reveals the rest. Ignored with a ``query``.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
+    """
+
+    if max_docs is not None and max_docs < 1:
+        return tool_error("invalid_input", "max_docs must be ≥ 1", retryable=False)
+    if top_k is not None and top_k < 1:
+        return tool_error("invalid_input", "top_k must be ≥ 1", retryable=False)
+
+    _set_retrieval_thread(ctx, "visualize_memory_structure")
+    lc = ctx.lifespan_context
+    query = query.strip()
+    try:
+        if query:
+            retrieval = await retrieve_parents(
+                client=lc["client"],
+                database=lc["database"],
+                query=query,
+                embedding_model=lc["embedding_model"],
+                user_id=lc["user_id"],
+                top_k=top_k,
+            )
+            if retrieval.outcome == "nothing_found" or not retrieval.parents:
+                # A plain ``str``: there is no payload to deliver.
+                return NO_RESULTS_MESSAGE.format(query=query)
+            result = await fetch_retrieval_structure(
+                lc["client"], lc["database"], lc["user_id"], retrieval
+            )
+            label = repr(query)
+        else:
+            # The structure read hits the SAME Mongo, so it is inside the same
+            # guard: "the database is down" must not differ by argument.
+            result = await fetch_rag_structure(
+                lc["client"], lc["database"], lc["user_id"], max_docs=max_docs
+            )
+            label = "your full memory"
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("visualize_memory_structure", exc)
+
+    if not result.nodes:
+        return EMPTY_MEMORY_MESSAGE
+
+    payload = to_graph_payload(
+        result, document_order="relevance" if query else "recency"
+    )
+    counts = f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
+    documents = payload["controls"].get("documents")
+    if documents:
+        counts = (
+            f"{documents['shown']} of {documents['total']} "
+            f"{_ORDER_ADJECTIVE[documents['order']]} documents "
+            f"shown by default, {counts}"
+        )
+    summary = (
+        "Memory structure (rag: document → parent chunk → child chunk) for "
+        f"{label}: {counts}"
+    )
+    return _graph_tool_result(
+        ctx, payload, summary, query=query or "structure", as_html_file=as_html_file
+    )
+
+
+if MEMORY_MODE == "rag":
+    mcp.tool(visualize_memory_structure, app=AppConfig(resource_uri=GRAPH_VIEW_URI))
 
 
 # ---------------------------------------------------------------------------

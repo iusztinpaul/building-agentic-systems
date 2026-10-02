@@ -47,10 +47,11 @@ class TestMemoryReadme:
     def test_it_documents_both_map_surfaces(self, needle: str) -> None:
         assert needle in _read(_MEMORY_README)
 
-    @pytest.mark.parametrize("needle", ["*Both modes (7 tools):*", "7 more, 14 total"])
+    @pytest.mark.parametrize("needle", ["*Both modes (8 tools):*", "6 more, 14 total"])
     def test_the_tool_counts_match_the_registered_surface(self, needle: str) -> None:
-        # The map tool is registered in both modes, so rag is 7 and graphrag 14
-        # — asserted against the real servers in ``mcp/test_tool_gating.py``.
+        # The map and structure tools are registered in both modes, so rag is 8
+        # and graphrag 14 — asserted against the real servers in
+        # ``mcp/test_tool_gating.py``.
         assert needle in _read(_MEMORY_README)
 
     def test_the_small_corpus_knob_names_the_process_that_reads_it(self) -> None:

@@ -15,9 +15,9 @@ Two outcomes that are NOT failures of the renderer:
   "N of M chunks have no cluster assignment (or a stale one)"; those points are
   omitted from the map and counted in its legend.
 
-A separate command rather than a flag on ``query_graph.py``: that one is
-query-driven and mode-branching, while the map takes no query and is identical
-in ``rag`` and ``graphrag``.
+A separate command rather than a flag on ``visualize_structure.py``: that one
+draws rows and their links and branches on the mode, while the map draws stored
+coordinates, takes no query and is identical in ``rag`` and ``graphrag``.
 
 Every read is scoped to a ``user_id`` (#020): defaults to the current-session
 user; override with ``USER_ID=<ObjectId>`` or ``USER_IDENTIFIER=<handle>`` (the

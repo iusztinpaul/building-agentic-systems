@@ -10,7 +10,7 @@ For the wider system (harness, end-to-end flow, shared infra) see the repo-root 
 - **Memory pipeline** (`src/tree/memory/pipeline.py`) — the three Prefect flows (extraction worker, coordinator fan-out, indexing). ONE flow body: the `rag/` stages always, the `graph/` stages behind `if mode == "graphrag"`.
   - `src/tree/memory/rag/` — clean → chunk (parent/child) → embed children → load rows, plus hybrid search, parent-document retrieval and the index builder. The complete Chapter-4 system; it never imports `graph/`.
   - `src/tree/memory/graph/` — what Chapter 8 adds: structural edges, LLM entity extraction, resolution, dedup, review, dream consolidation, graph expansion, NL query and the HTML graph renderer.
-- **MCP + query CLI** (`src/tree/mcp/`, `scripts/query_graph.py`) — a FastMCP server exposing the memory tools to any MCP client, and a CLI that prints retrieved parents (`rag`) or renders an interactive HTML graph (`graphrag`).
+- **MCP + structure/search CLIs** (`src/tree/mcp/`, `scripts/visualize_structure.py`, `scripts/search_memory.py`) — a FastMCP server exposing the memory tools to any MCP client, a CLI that renders the **Memory structure** as interactive HTML (the document → chunk tree in `rag`, the knowledge graph in `graphrag`) and one that prints the retrieved parents as text (both modes).
 
 Nodes use `_id = "{user_id}:type:name"`; edges use `_id = "source|type|target"` (both endpoints already carry the user prefix). Everything is upserted into a single mutable `memory` collection.
 
@@ -24,8 +24,8 @@ ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), 
 | **Writes to `memory`** | node rows only: one `document` row, its `chunk`/`parent` rows and its embedded `chunk`/`child` rows | the same rows **plus** `part_of` / `next` / `mentions` / `referenced` edges and entity nodes |
 | **Embedded** | child chunks | child chunks + entity nodes |
 | **Retrieval** | `retrieve_parents` — hybrid search (vector + text, RRF) over children, grouped by `parent_id`, returning whole parents with their document metadata | the same parent resolution, then `expand_graph` from the parent ids ∪ entity seeds |
-| **MCP tools** | 7 (`search_memory`, `ingest_*`, `search_web`, `scrape_web`, `visualize_memory_embeddings`) | those 7 + 7 graph tools (see [MCP server](#mcp-server)) |
-| **`make memory-query-graph`** | prints the retrieved parents as text | writes + opens `.tree/graphs/<slug>-<stamp>.html` |
+| **MCP tools** | 8 (`search_memory`, `visualize_memory_structure`, `ingest_*`, `search_web`, `scrape_web`, `visualize_memory_embeddings`) | those 8 + 6 graph tools (see [MCP server](#mcp-server)) |
+| **`make memory-visualize-structure`** | writes + opens `.tree/graphs/structure-<stamp>.html`: the document → parent chunk → child chunk tree (`part_of` edges drawn from `parent_id`, never stored) | writes + opens `.tree/graphs/graph-<stamp>.html`: the knowledge graph |
 
 Both modes write the SAME `memory` collection with the same row shapes (`parent_id` and `chunk_index` are present in both), so a chunk row is byte-identical across modes. There is **no migration**: switching modes is a **Mode reset** and a re-ingest from scratch, for ALL users (the mode is one per deployment):
 
@@ -337,24 +337,25 @@ stored coordinates, they never cluster. Two notes:
   memory-serve-workflows` and restart it; on Prefect Managed put it in the deployment's
   environment. Then re-run `make memory-run-clustering-pipeline` as usual.
 
-### Query CLI
+### Structure view
 
-The output follows [`memory.mode`](#memory-modes): in `graphrag` it renders an interactive HTML
-graph under `.tree/graphs/` and opens it; in `rag` there is no graph to draw, so it prints the
-retrieved parents (score, document title, heading path, a 300-char excerpt and the matched-children
-count) as text — and a full-graph run with no `QUERY` exits 1 with an explanatory message.
+`make memory-visualize-structure` renders the **Memory structure** as an interactive HTML file under
+`.tree/graphs/` and opens it, following [`memory.mode`](#memory-modes): in `rag` the document →
+parent chunk → child chunk tree (its `part_of` edges are synthesised from each chunk's `parent_id`
+at read time and never stored), in `graphrag` the knowledge graph. An empty memory prints
+`Memory is empty for this user — run make memory-run-pipeline first.` and a query that matches
+nothing `No results for "<query>" — nothing to draw.`; both exit 1 without a file.
 
 ```bash
-# graphrag: visualize the full graph (the 500 most-recent documents)
-make memory-query-graph
-make memory-query-graph MAX_DOCS=50     # embed only the 50 most recent
-
-# Query a specific topic — HTML graph in graphrag, retrieved parents as text in rag
-make memory-query-graph QUERY="Paul Iusztin"
-TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
+make memory-visualize-structure                       # the 500 most-recent documents, 100 shown
+make memory-visualize-structure MAX_DOCS=50           # embed only the 50 most recent
+make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search results
 ```
 
-The full graph embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
+With a `QUERY`, `rag` draws the retrieved parents, their documents and ALL their children;
+`graphrag` the expanded subgraph around the search seeds.
+
+The no-query view embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
 shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider (`Most recent`)
 at the top of the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive,
@@ -362,8 +363,20 @@ and once the revealed stars settle the view fits itself once (only on a reveal, 
 drag, box select or pan meanwhile cancels it; while paused it fits at once and again after Resume). A
 `QUERY` view has the same slider ranked by search relevance (`Most relevant`): every document of the
 result shows by default (`3 of 3`); drag it left to keep only the best-matching documents' stars.
-There, a parent chunk drawn without its children says how many it has on hover
+There, a graphrag parent chunk drawn without its children says how many it has on hover
 (`child chunks  N (not shown)`).
+
+### Search CLI
+
+`make memory-search QUERY="…"` runs **Parent-document retrieval** and prints the ranked parents as
+text — score, document title, heading path, a 300-char excerpt and the matched-children count — in
+BOTH modes, writing no file. A degraded search prints its caveat line first; nothing found prints
+`No results.`.
+
+```bash
+make memory-search QUERY="Paul Iusztin"
+make memory-search QUERY="Paul Iusztin" TOP_K=5
+```
 
 **Interacting with a graph.** The layout is live: nodes keep settling under d3-force. Dragging a
 node pins it where you drop it (dark centre dot); a double-click unpins it. Shift+click or
@@ -412,7 +425,7 @@ The repo-root `.mcp.json` already wires this up — Claude Code and the harness 
 
 **Tools exposed.** The tool set IS the memory mode (`memory.mode`, ADR-006): the server reads it once at boot and registers only what that mode can honour. A graph tool called against a `rag` server returns the standard unknown-tool error — it was never registered.
 
-*Both modes (7 tools):*
+*Both modes (8 tools):*
 
 Every tool answers failures as data, never as an MCP protocol error: `{"error_type": …, "retryable": true|false, "message": …}` (ADR-008 §2). Retry the same call only when `retryable` is true; otherwise change the input or stop.
 
@@ -424,15 +437,15 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
+| `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
 | `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: chunks as points coloured by cluster, `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
 
-*`graphrag` only (7 more, 14 total):*
+*`graphrag` only (6 more, 14 total):*
 
 | Tool | Description |
 |---|---|
 | `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
 | `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
-| `visualize_memory_graph` | Renders the graph (whole graph or one query) as an interactive HTML view. |
 | `memory_dashboard` | Graph-statistics dashboard (node/edge counts by type). |
 | `review_list_pending` / `review_confirm` / `review_reject` | Human review of the flagged `same_as` duplicate queue. |
 
@@ -823,8 +836,9 @@ apps/memory/
     orchestrator.py     # Prefect `serve(...)` registering deployments
   configs/default.yaml  # app tuning
   deploy/               # Modal App deploy scripts (vLLM embeddings, SGLang LLMs), Prefect, Atlas
-  scripts/              # CLI entrypoints (serve_mcp, run_*, query_graph,
-                        #   visualize_embeddings, signup, check_db, reset_mode)
+  scripts/              # CLI entrypoints (serve_mcp, run_*, visualize_structure,
+                        #   search_memory, visualize_embeddings, signup, check_db,
+                        #   reset_mode)
   tests/unit
   docker/Dockerfile     # image used by the compose `prefect-worker`
   Makefile              # app-local targets (see make memory-help)

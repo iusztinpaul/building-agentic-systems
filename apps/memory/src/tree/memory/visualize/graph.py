@@ -1,16 +1,17 @@
-"""The Graph renderer: draw a knowledge-graph ``QueryResult`` as interactive HTML.
+"""The Graph renderer: draw a ``MemoryStructure`` as interactive HTML.
 
 Single home of the **Graph renderer** (ADR-005, ADR-011): the browser-side
 graphology (graph model) + d3-force (live layout) + Sigma.js (WebGL) stack,
 loaded as pinned ESM from jsdelivr. Every graph surface — the
-``query_graph.py`` CLI, the ``visualize_memory_graph`` MCP App, the
-``query_memory`` / ``search_memory`` tools — consumes the same **Graph
-payload** built here and the same HTML templates; no surface owns rendering
-code of its own.
+``visualize_structure.py`` CLI, the ``visualize_memory_structure`` MCP App
+(both modes: the rag **Memory structure** tree and the graphrag knowledge
+graph), the ``query_memory`` / ``search_memory`` tools — consumes the same
+**Graph payload** built here and the same HTML templates; no surface owns
+rendering code of its own.
 
 What lives here:
 
-* :func:`to_graph_payload` — ``QueryResult`` → the renderer-agnostic
+* :func:`to_graph_payload` — ``MemoryStructure`` → the renderer-agnostic
   ``{nodes, edges, controls}`` **Graph payload** (curated hover metadata,
   palette colours, a per-role node ``size``, every edge endpoint materialised
   as a node, and the force / display defaults the template seeds from).
@@ -66,7 +67,7 @@ from typing import Any, Literal
 from tree.config.app_config import app_config
 from tree.config.paths import GRAPHS_DIR
 from tree.entities.colours import Colours
-from tree.memory.types import QueryResult
+from tree.memory.rag.types import MemoryStructure
 
 logger = logging.getLogger(__name__)
 
@@ -179,11 +180,14 @@ def _node_size(node_type: str, subtype: str | None) -> int:
 
 
 def to_graph_payload(
-    result: QueryResult,
+    result: MemoryStructure,
     *,
     document_order: Literal["recency", "relevance"] = "recency",
 ) -> dict[str, Any]:
-    """Flatten a ``QueryResult`` into a graph ``{nodes, edges, controls}`` payload.
+    """Flatten a ``MemoryStructure`` into a graph ``{nodes, edges, controls}`` payload.
+
+    A graphrag ``QueryResult`` is one; so is the rag **Memory structure**, whose
+    ``part_of`` edges were synthesised from ``parent_id``.
 
     Every edge endpoint is guaranteed to also exist as a node — partial graphs
     may reference nodes that were not in the seed set, and the renderer drops
@@ -420,13 +424,14 @@ def _render_graph_file(
 
 
 def visualize_query_result(
-    result: QueryResult,
+    result: MemoryStructure,
     output: str | Path | None = None,
     *,
     open_browser: bool = True,
     query: str = "",
+    document_order: Literal["recency", "relevance"] | None = None,
 ) -> Path:
-    """Render a ``QueryResult`` to a self-contained HTML file and return its path.
+    """Render a ``MemoryStructure`` to a self-contained HTML file and return its path.
 
     The CLI-facing entry point of the **Graph renderer**: builds the **Graph
     payload** and hands it to :func:`_render_graph_file`.
@@ -437,14 +442,18 @@ def visualize_query_result(
             ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
         open_browser: Pop the file open locally. BEST EFFORT — a headless or
             remote host simply gets no browser, never an exception.
-        query: The query text, used for the default filename's slug — and
-            the ranking: a query view's documents rank by relevance, the
-            **Full graph**'s (no query) by recency.
+        query: The query text, used for the default filename's slug — and,
+            unless ``document_order`` is given, the ranking: a query view's
+            documents rank by relevance, the **Full graph**'s (no query) by
+            recency.
+        document_order: The ranking the rows carry, when the slug is not a
+            query (the rag no-query view is slugged ``structure`` yet ranked
+            by recency).
     """
 
-    payload = to_graph_payload(
-        result, document_order="relevance" if query else "recency"
-    )
+    if document_order is None:
+        document_order = "relevance" if query else "recency"
+    payload = to_graph_payload(result, document_order=document_order)
     path = _render_graph_file(
         payload, query=query, output=Path(output) if output else None
     )

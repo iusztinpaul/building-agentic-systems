@@ -167,7 +167,8 @@ make memory-run-data-pipeline              # ingests the default sources (source
 make memory-run-memory-pipeline     # documents → clean → chunk → embed → memory collection (+ LLM nodes + edges in graphrag)
 make memory-run-indexing-pipeline   # embedding backfill, text + vector search indexes
 make memory-run-clustering-pipeline # (optional) cluster child embeddings → embedding map
-make memory-query-graph QUERY="AI agents"  # interactive HTML graph (graphrag) or ranked parents as text (rag)
+make memory-visualize-structure            # interactive HTML (document → chunk tree in rag, knowledge graph in graphrag); MCP: visualize_memory_structure
+make memory-search QUERY="AI agents"       # ranked parent chunks as text (both modes)
 make memory-visualize-embeddings           # the embedding map of the latest clustering run (both modes)
 
 make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user

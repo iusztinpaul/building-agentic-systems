@@ -2,18 +2,19 @@
 
 Imported by :mod:`tree.mcp.server` ONLY when ``app_config.memory.mode ==
 "graphrag"`` (ADR-006 decision 5), so every tool registered here — including
-``visualize_memory_graph`` — plus the side-effect app module it pulls in
+the graph form of ``visualize_memory_structure`` — plus the side-effect app module it pulls in
 (:mod:`tree.mcp.dashboard_app`) is absent from a rag-mode server. That gating
 is the reason this module exists at all: in rag mode the collection holds node
 rows only, so ``max_hops``, edge expansion and the dedup review queue have
 nothing to operate on, and a registered-but-degraded tool would be worse than no
 tool.
 
-The mode-independent six (``search_memory`` in its rag form, the three ingest
-tools, ``search_web``, ``scrape_web``) live in :mod:`tree.mcp.tools`, which this
-module imports for the shared Opik-threading helper. ``search_memory`` is
-declared in BOTH modules — one name, two signatures, exactly one registered per
-mode.
+The tools both modes serve (``search_memory`` and ``visualize_memory_structure``
+in their rag forms, the three ingest tools, ``search_web``, ``scrape_web``,
+``visualize_memory_embeddings``) live in :mod:`tree.mcp.tools`, which this
+module imports for the shared Opik-threading helper. ``search_memory`` and
+``visualize_memory_structure`` are declared in BOTH modules — one name, two
+signatures, exactly one registered per mode.
 """
 
 import json
@@ -50,7 +51,7 @@ from tree.mcp.tools import (
 # viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
 # ``ui://`` and ``graphs://`` resources as a side effect and owns the one
 # dual-delivery helper. It does NOT import this module, so there is no cycle.
-from tree.mcp.viz_app import GRAPH_VIEW_URI, _graph_tool_result
+from tree.mcp.viz_app import GRAPH_VIEW_URI, _ORDER_ADJECTIVE, _graph_tool_result
 from tree.memory.graph.nl_query import execute_nl_query
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
@@ -96,7 +97,7 @@ def _dual_graph_result(
     — both have the same shape (serialized docs + optional graph), so neither
     builds a **Graph payload** nor branches on client capability itself. That
     branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
-    which also serves ``visualize_memory_graph`` (ADR-005, decision 4): inline
+    which also serves ``visualize_memory_structure`` (ADR-005, decision 4): inline
     MCP App iframe when the client renders App UIs, else a self-contained file
     under ``.tree/graphs/`` + a ``graphs://`` resource link.
 
@@ -139,12 +140,8 @@ def _dual_graph_result(
     return _graph_tool_result(ctx, payload, summary, query=query)
 
 
-# How the model-visible summary names the Documents slider's ranking.
-_ORDER_ADJECTIVE = {"recency": "most-recent", "relevance": "most-relevant"}
-
-
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
-async def visualize_memory_graph(
+async def visualize_memory_structure(
     ctx: Context,
     query: str = "",
     top_k: int = 15,
@@ -152,7 +149,7 @@ async def visualize_memory_graph(
     as_html_file: bool = False,
     max_docs: int | None = None,
 ) -> str | ToolResult:
-    """Visualize the knowledge graph as an interactive graph.
+    """Visualize the memory structure — in graphrag this is the knowledge graph.
 
     With a ``query``, runs semantic + text search with graph expansion (same
     engine as ``search_memory``) and visualizes that subgraph; its
@@ -213,7 +210,7 @@ async def visualize_memory_graph(
             )
             label = "your full memory"
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
-        return _retrieval_error("visualize_memory_graph", exc)
+        return _retrieval_error("visualize_memory_structure", exc)
 
     payload = to_graph_payload(
         result, document_order="relevance" if query else "recency"
@@ -249,7 +246,7 @@ async def query_memory(
     and aggregations.
 
     The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_graph`` comes along: inline when the
+    same graph view as ``visualize_memory_structure`` comes along: inline when the
     client renders MCP App UIs, otherwise a self-contained HTML file plus a
     ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
     path exists locally just share it; if the server is remote (cloud), read
@@ -306,7 +303,7 @@ async def search_memory(
     then expands the graph around them. Reliable fallback for semantic similarity.
 
     The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_graph`` comes along: inline when the
+    same graph view as ``visualize_memory_structure`` comes along: inline when the
     client renders MCP App UIs, otherwise a self-contained HTML file plus a
     ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
     path exists locally just share it; if the server is remote (cloud), read

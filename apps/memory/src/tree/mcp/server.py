@@ -17,7 +17,7 @@ needs to change.
 The **Memory mode** is pinned the same way (ADR-006 decision 5): read
 ONCE at import into :data:`MEMORY_MODE`, never per request. It decides
 BOTH which tool modules get imported at the bottom of this file (the
-seven graph tools live in ``tree.mcp.graph_tools`` and are never
+six graph tools live in ``tree.mcp.graph_tools`` and are never
 imported in ``rag`` mode) and which ``instructions`` the server
 advertises.
 """
@@ -230,10 +230,10 @@ async def app_lifespan(server: FastMCP) -> AsyncGenerator[dict[str, Any], None]:
 
 
 # One instructions text per mode: the model must never be told about a tool this
-# server does not register. The rag text therefore names ONLY the seven tools
+# server does not register. The rag text therefore names ONLY the eight tools
 # ``tree.mcp.tools`` registers (the **Embedding map** tool included — clustering
-# is mode-orthogonal) — no ``query_memory``, no ``deep_search_memory``, no graph
-# vocabulary at all.
+# is mode-orthogonal — and the **Memory structure** tree) — no ``query_memory``,
+# no ``deep_search_memory``, no graph vocabulary at all.
 _GRAPHRAG_INSTRUCTIONS = (
     "Query and build a personal knowledge graph of documents, people, tasks, "
     "and preferences. Use 'query_memory' for flexible natural language "
@@ -243,6 +243,9 @@ _GRAPHRAG_INSTRUCTIONS = (
     "Use 'search_web' for on-demand web searches that don't write to memory. "
     "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
     "and 'ingest_conversation' to extract knowledge from conversations. "
+    "Use 'visualize_memory_structure' to show the knowledge graph (documents, "
+    "chunks, entities and their relations) as an interactive view, optionally "
+    "narrowed to a query. "
     "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
     "(clusters of chunk embeddings) when the user asks what the memory holds."
 )
@@ -255,6 +258,8 @@ _RAG_INSTRUCTIONS = (
     "pages inline; neither writes to memory. "
     "Use 'ingest_url' to add web content, 'ingest_file' for local files, "
     "and 'ingest_conversation' to store what a conversation established. "
+    "Use 'visualize_memory_structure' to show how the memory is organised — "
+    "documents and the chunks they split into — optionally narrowed to a query. "
     "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
     "(clusters of chunk embeddings) when the user asks what the memory holds."
 )
@@ -280,8 +285,8 @@ mcp = FastMCP(
 # normal package import path, where ``tree.mcp.server`` is already registered.
 sys.modules.setdefault("tree.mcp.server", sys.modules[__name__])
 
-# The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the seven tools
-# both modes serve; the seven graph tools live behind this ``if`` so that in rag
+# The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the eight tools
+# both modes serve; the six graph tools live behind this ``if`` so that in rag
 # mode ``tree.mcp.graph_tools`` — and, through it, ``dashboard_app`` — never
 # even reach ``sys.modules``. A graph tool called against a rag server gets the
 # standard "unknown tool" error rather than a half-working path.

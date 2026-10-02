@@ -3,7 +3,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from tree.entities.memory import EdgeType, NodeType
-from tree.memory.rag.types import ParentChunk
+from tree.memory.rag.types import MemoryStructure, ParentChunk
 from tree.memory.graph.resolution.types import ResolvedEntity
 
 
@@ -82,11 +82,11 @@ class ExtractionResult(BaseModel):
         )
 
 
-class QueryResult(BaseModel):
-    """Result of a memory query: seed nodes, expanded nodes, and edges."""
+class QueryResult(MemoryStructure):
+    """Result of a memory query: seed nodes, expanded nodes, and edges.
 
-    nodes: list[dict[str, Any]] = Field(default_factory=list)
-    edges: list[dict[str, Any]] = Field(default_factory=list)
+    The graphrag query view; a ``MemoryStructure`` with provenance.
+    """
 
 
 # ---------------------------------------------------------------------------

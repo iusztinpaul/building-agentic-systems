@@ -3,10 +3,11 @@
 What a rendered view needs from MCP, and nothing else (ADR-007 §7): the
 ``ui://`` iframe resource, the ``graphs://`` download resource, and the ONE
 dual-delivery helper every visualization tool returns through. The tools
-themselves live with their mode — ``visualize_memory_graph`` beside the other
-graphrag-only tools in :mod:`tree.mcp.graph_tools`, the **Embedding map** tool
-(both modes) in :mod:`tree.mcp.tools`. So a rag-mode server can import this
-module without pulling a single graph tool in with it.
+themselves live with their mode — ``visualize_memory_structure`` is two
+functions under one name (the rag **Memory structure** tree in
+:mod:`tree.mcp.tools`, the knowledge graph in :mod:`tree.mcp.graph_tools`), the
+**Embedding map** tool (both modes) in :mod:`tree.mcp.tools`. So a rag-mode
+server can import this module without pulling a single graph tool in with it.
 
 The flow follows the low-level MCP Apps pattern
 (https://gofastmcp.com/apps/low-level): a tool runs its query and returns the
@@ -36,7 +37,7 @@ Either way the slow path stays off the model: it never hand-authors HTML.
 **One dual-path helper for every visualization tool (ADR-005, decision 4).**
 :func:`_graph_tool_result` owns the capability check and BOTH branches, and is
 the only place either exists. Every graph-capable MCP tool calls it —
-``visualize_memory_graph`` plus ``query_memory(visualize=True)`` and
+``visualize_memory_structure`` plus ``query_memory(visualize=True)`` and
 ``search_memory(visualize=True)`` (via ``graph_tools._dual_graph_result``) — so
 from a visualization standpoint they behave identically. A new tool builds a
 payload and calls this helper; it never reimplements a branch.
@@ -70,6 +71,10 @@ from tree.memory.visualize.graph import (
 logger = logging.getLogger(__name__)
 
 GRAPH_VIEW_URI = "ui://tree-memory/graph.html"
+
+# How a ranked view's model-visible summary names its Documents slider's
+# ranking — shared by both modes' ``visualize_memory_structure``.
+_ORDER_ADJECTIVE = {"recency": "most-recent", "relevance": "most-relevant"}
 
 # The MCP Apps iframe runtime — an MCP-layer concern, hence spliced in here
 # rather than by ``_resolve_static`` (which the standalone file variant shares).
@@ -196,7 +201,7 @@ def graph_file(name: str) -> str:
     """Self-contained HTML of a previously rendered graph visualization.
 
     Lets clients of a REMOTE server (e.g. Prefect Horizon) download the file
-    ``visualize_memory_graph`` wrote to the server-side ``.tree/graphs/`` dir:
+    ``visualize_memory_structure`` wrote to the server-side ``.tree/graphs/`` dir:
     read this resource and save its text locally as an ``.html`` file.
     """
 
@@ -208,7 +213,7 @@ def graph_file(name: str) -> str:
         raise ValueError(f"Invalid graph file name: {name!r}")
     if not path.is_file():
         raise FileNotFoundError(
-            f"No rendered graph named {name!r} — run visualize_memory_graph first."
+            f"No rendered graph named {name!r} — run visualize_memory_structure first."
         )
     return path.read_text(encoding="utf-8")
 

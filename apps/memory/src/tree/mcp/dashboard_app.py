@@ -6,7 +6,7 @@ searchable/sortable tables of the returned nodes and relationships, each row
 carrying the curated metadata from ``_curated_meta``.
 
 ``memory_dashboard`` follows the same low-level MCP Apps pattern as
-``visualize_memory_graph`` (https://gofastmcp.com/apps/low-level):
+``visualize_memory_structure`` (https://gofastmcp.com/apps/low-level):
 
 * the tool runs the structured query and ships the ``{query, nodes, edges}``
   payload in a ``content`` JSON block (``audience=["user"]``), and
@@ -89,7 +89,7 @@ async def memory_dashboard(
 
     Interactive custom-HTML UI (sortable/searchable tables, bar chart). Use
     when the user wants a *summary* of what's in memory rather than the graph
-    topology (for topology use ``visualize_memory_graph``).
+    topology (for topology use ``visualize_memory_structure``).
 
     With a ``query``, the dashboard covers the matching subgraph; with NO query
     (the default) it covers the user's ENTIRE memory graph.
