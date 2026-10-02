@@ -11,7 +11,7 @@ place that says which rows the RAG layer writes.
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any
 
 from beanie import Document as BeanieDocument
 from beanie import PydanticObjectId
@@ -45,14 +45,8 @@ from tree.config.app_config import MemoryMode, app_config
 class NodeType(StrEnum):
     """Backward-compat shim built from ``NODE_REGISTRY`` (#027, extended #028).
 
-    Members map 1:1 to registered node-type names — **except** ``TASK``,
-    which is retained as a **legacy alias** after #028. The string
-    ``"task"`` is no longer registered as a top-level node type; it's
-    re-routed by :class:`MemoryEntry`'s ``mode="before"``
-    validator to ``(type="object", subtype="task")``. Reading the enum
-    member in consumer code still works (StrEnum -> str), but any
-    ``MemoryEntry`` constructed with ``type=NodeType.TASK``
-    silently re-shapes to the new POLE+O storage form.
+    Members map 1:1 to registered node-type names. A task is not a node type:
+    it is ``(type="object", subtype="task")``.
 
     New code should reference type names as strings or read
     ``NODE_REGISTRY`` directly.
@@ -71,8 +65,6 @@ class NodeType(StrEnum):
     # Island-style: facts participate in no edges (the envelope validator
     # rejects every edge whose source or target is a ``fact``).
     FACT = "fact"
-    # --- Legacy alias (#028) — re-routed at write time ---
-    TASK = "task"
 
 
 class EdgeType(StrEnum):
@@ -476,52 +468,6 @@ class MemoryEntry(BeanieDocument):
                 f"got naive datetime {value!r}"
             )
         return value
-
-    # --- Phase-3 #028: legacy (type=task) → (parent, subtype) ---
-    # Re-routes legacy node rows at construction time so the rest of the
-    # validator chain sees the new POLE+O shape. Runs in ``mode="before"``
-    # because the downstream type-vs-registry check would otherwise
-    # reject ``"task"`` (no longer registered as a top-level node type
-    # after #028).
-    #
-    # Idempotent: a row that already carries ``type="object",
-    # subtype="task"`` is untouched. If the caller has already set
-    # ``subtype`` explicitly, the legacy ``type`` is rewritten but
-    # ``subtype`` is left as the caller provided it.
-    _LEGACY_NODE_REWRITES: ClassVar[dict[str, tuple[str, str]]] = {
-        # legacy type -> (new parent, subtype)
-        "task": ("object", "task"),
-    }
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reroute_legacy_node_types(cls, data: Any) -> Any:
-        """Rewrite legacy ``(type=task)`` to the POLE+O subtype shape.
-
-        Only touches ``kind="node"`` rows. Edge rows keep their legacy
-        ``source_type`` / ``target_type`` columns untouched — those are
-        cleaned up by #029's edge collapse, not here.
-        """
-
-        if not isinstance(data, dict):
-            return data
-        if data.get("kind") != "node":
-            return data
-        raw_type = data.get("type")
-        # ``type`` may arrive as a ``NodeType`` enum member or a plain
-        # str; normalize once for the lookup.
-        type_value = raw_type.value if hasattr(raw_type, "value") else raw_type
-        rewrite = cls._LEGACY_NODE_REWRITES.get(type_value)
-        if rewrite is None:
-            return data
-        new_type, new_subtype = rewrite
-        out = dict(data)
-        out["type"] = new_type
-        # Only fill subtype if the caller didn't already supply one
-        # (defensive — lets a future migration override legacy mappings).
-        if out.get("subtype") is None:
-            out["subtype"] = new_subtype
-        return out
 
     @model_validator(mode="after")
     def _check_type_against_registry(self) -> "MemoryEntry":

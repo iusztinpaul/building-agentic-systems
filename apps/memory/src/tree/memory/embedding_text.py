@@ -234,15 +234,10 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
     """The text ONE entity row is embedded on — the per-type choice, in ONE place.
 
     ``preference`` embeds ``properties.statement`` and ``fact`` embeds
-    ``properties.object`` (``object_`` on rows written before the rename), so
-    supersession's statement<->statement (resp. object<->object) comparison stays
-    apples-to-apples. ``object`` wins whenever the key is PRESENT and not ``None``
-    — the legacy ``object_`` is read only when ``object`` is absent. A present but
-    blank (or non-string, or all-invalid-character) ``object`` therefore falls back
-    to :func:`node_to_embedding_text`, never to the ``object_`` of the same row: a
-    row written across the rename carries the STALE pre-rename value there, and
-    embedding it would silently put the row in the wrong place in vector space.
-    The special text is sanitized with
+    ``properties.object``, so supersession's statement<->statement (resp.
+    object<->object) comparison stays apples-to-apples. A missing, blank,
+    non-string or all-invalid-character special text falls back to
+    :func:`node_to_embedding_text`. The special text is sanitized with
     :func:`~tree.memory.rag.cleaning.strip_invalid_chars` exactly like the generic
     path — Voyage 400s on control characters and lone surrogates, and sanitizing
     HERE (not in each caller) keeps all three call sites on the same bytes, so the
@@ -274,14 +269,7 @@ def entity_embedding_text(node: dict[str, Any]) -> str:
     if node_type == NodeType.PREFERENCE:
         special = properties.get("statement")
     elif node_type == NodeType.FACT:
-        # Presence, not truthiness: a present-but-blank ``object`` must NOT let
-        # the legacy ``object_`` (the stale pre-rename value on the same row)
-        # take over.
-        special = (
-            properties["object"]
-            if properties.get("object") is not None
-            else properties.get("object_")
-        )
+        special = properties.get("object")
     else:
         special = None
 

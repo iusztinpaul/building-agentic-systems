@@ -48,15 +48,6 @@ from tree.entities.memory import MEMORY_COLLECTION, RAG_NODE_TYPES, build_rag_ro
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.types import ParentChunk
 
-# Entity-naming fields: a RAG row's ``_id`` is positional, so it is never
-# resolved or merged and these would only ever hold filler or duplicated values.
-_UNUSED_RAG_FIELDS: tuple[str, ...] = (
-    "name",
-    "canonical_name",
-    "aliases",
-    "confidence",
-)
-
 
 def parent_chunk_name(source_uri: str, parent_index: int) -> str:
     """Extractor endpoint name of a **Parent chunk** row: ``"{uri}#parent-{i}"``."""
@@ -253,9 +244,9 @@ def _build_node_op(
     the dict a constant, which overwrites the sub-document wholesale — the same
     wrapper, for the same reason, as ``add_entity._per_key_merge_expr``.
 
-    The trailing ``$unset`` stage drops the fields a RAG row never carries
-    (:data:`_UNUSED_RAG_FIELDS`), so a re-run also strips them from rows written
-    before they were removed.
+    The entity-naming fields (``name`` / ``canonical_name`` / ``aliases`` /
+    ``confidence``) are never written: a RAG row's ``_id`` is positional, so it
+    is never resolved or merged.
     """
 
     if node_type not in RAG_NODE_TYPES:
@@ -286,7 +277,6 @@ def _build_node_op(
                     "updated_at": now,
                 }
             },
-            {"$unset": list(_UNUSED_RAG_FIELDS)},
         ],
         upsert=True,
     )

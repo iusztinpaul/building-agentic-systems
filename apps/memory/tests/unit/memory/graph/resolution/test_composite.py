@@ -199,7 +199,7 @@ class TestCompositeResolverWithTypes:
             entities=[("Alice", NodeType.PERSON)],
             existing_entities={
                 NodeType.PERSON: [],
-                NodeType.TASK: ["Alice"],
+                NodeType.OBJECT: ["Alice"],
             },
             existing_aliases={},
         )
@@ -215,7 +215,7 @@ class TestCompositeResolverWithTypes:
             entities=[("Alice", NodeType.PERSON)],
             existing_entities={
                 NodeType.PERSON: [],
-                NodeType.TASK: ["Alice"],
+                NodeType.OBJECT: ["Alice"],
             },
             existing_aliases={},
         )

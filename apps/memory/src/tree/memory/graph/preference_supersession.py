@@ -202,22 +202,13 @@ class SupersessionDecision:
 
 
 def _preference_statement(node: ExtractedNode) -> str | None:
-    """Return the canonical statement for a preference row, or None.
-
-    Accepts both the new typed-slot shape (``properties.statement``)
-    and the legacy free-form shape (``properties.content``) for
-    backwards compatibility with cached LLM outputs.
-    """
+    """Return the preference's ``properties.statement``, or None when blank."""
 
     if not node.properties:
         return None
     statement = node.properties.get("statement")
     if isinstance(statement, str) and statement.strip():
         return statement.strip()
-    # Legacy shape fallback (pre-#032 emissions).
-    content = node.properties.get("content")
-    if isinstance(content, str) and content.strip():
-        return content.strip()
     return None
 
 
@@ -233,26 +224,16 @@ def _preference_category(node: ExtractedNode) -> str | None:
 
 
 def _fact_object(node: ExtractedNode) -> str | None:
-    """Return the fact's object string (the typed-slot key is
-    ``"object"``; ``"object_"`` is the Python attribute alias).
+    """Return the fact's ``properties.object`` (the wire key of
+    ``FactProperties.object_``), or None when blank.
 
-    ``object`` wins whenever the key is PRESENT and not ``None``; the legacy
-    ``object_`` is read only when ``object`` is absent. Same presence rule as
-    :func:`tree.memory.embedding_text.entity_embedding_text`, and for the same
-    reason: this string becomes the embed input a few frames down
-    (:func:`_maybe_supersede`), so a present-but-blank ``object`` falling
-    through to the stale pre-rename ``object_`` would write a vector the
-    indexing backfill never rebuilds. A row with no usable ``object`` returns
-    ``None`` and is skipped by the resolver instead.
+    Field validation stores the alias, so a validated row never carries
+    ``object_``. A row with no usable ``object`` is skipped by the resolver.
     """
 
     if not node.properties:
         return None
-    value = (
-        node.properties["object"]
-        if node.properties.get("object") is not None
-        else node.properties.get("object_")
-    )
+    value = node.properties.get("object")
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -368,20 +349,13 @@ async def _find_fact_candidates(
 def _candidate_statement(cand: dict[str, Any]) -> str | None:
     """Return the candidate row's canonical statement string.
 
-    Falls back through the typed-slot keys preference-then-fact:
-    ``properties.statement`` (preferences) → ``properties.content``
-    (legacy preferences) → ``properties.object`` /
-    ``properties.object_`` (facts).
-
-    Deliberately a first-NON-BLANK-value chain, not the first-PRESENT-key rule
-    :func:`_fact_object` uses: this string only ever becomes the OLD statement
-    in the judge PROMPT, never an embed input, and "first present key wins"
-    across a cross-type chain would drop the documented legacy ``content``
-    fallback for preferences written before the typed slots.
+    First non-blank of ``properties.statement`` (preferences) →
+    ``properties.object`` (facts). Only ever becomes the OLD statement in the
+    judge PROMPT, never an embed input.
     """
 
     cand_props = cand.get("properties") or {}
-    for key in ("statement", "content", "object", "object_"):
+    for key in ("statement", "object"):
         value = cand_props.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()

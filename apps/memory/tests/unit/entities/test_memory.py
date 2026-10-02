@@ -547,14 +547,14 @@ class TestTypeFieldValidator:
         user_id = _user_id()
         with pytest.raises(Exception) as excinfo:
             MemoryEntry(
-                id=f"{user_id}:person:alice|owns|{user_id}:task:write",
+                id=f"{user_id}:person:alice|owns|{user_id}:object:write",
                 user_id=user_id,
                 kind="edge",
                 type="owns",
                 source_node_id=f"{user_id}:person:alice",
                 source_type=NodeType.PERSON,
-                target_node_id=f"{user_id}:task:write",
-                target_type=NodeType.TASK,
+                target_node_id=f"{user_id}:object:write",
+                target_type=NodeType.OBJECT,
                 created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 updated_at=datetime(2026, 1, 2, tzinfo=UTC),
             )
@@ -562,11 +562,7 @@ class TestTypeFieldValidator:
         assert "owns" in str(excinfo.value)
 
     async def test_accepts_every_registered_node_type(self):
-        # Phase-3 #028: iterate the **registry**, not the enum. The
-        # ``NodeType.TASK`` legacy alias survives on the enum but it is
-        # no longer a top-level type — its construction triggers the
-        # legacy → POLE+O reroute (covered by
-        # :class:`TestLegacyNodeTypeReroute`).
+        # Phase-3 #028: iterate the **registry**, not the enum.
         from tree.entities.ontology import NODE_REGISTRY
 
         user_id = _user_id()
@@ -788,92 +784,6 @@ class TestMemoryEntrySubtype:
             updated_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
         assert entry.subtype == "whatever"
-
-
-class TestLegacyNodeTypeReroute:
-    """Phase-3 #028: legacy node rows of ``type=task`` are silently
-    re-routed at validator time to the new POLE+O subtype shape —
-    ``type='object', subtype='task'``. This keeps code paths that
-    still construct with ``NodeType.TASK`` working (user prompt
-    explicitly preserves the enum alias for read paths) while
-    ensuring writes always land in the POLE+O storage form. The
-    actual DB-row migration is #033's job."""
-
-    def _build(self, user_id, **overrides):
-        defaults = dict(
-            id=f"{user_id}:object:ship demo",
-            user_id=user_id,
-            kind="node",
-            type=NodeType.TASK,
-            name="ship demo",
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
-        )
-        defaults.update(overrides)
-        return MemoryEntry(**defaults)
-
-    async def test_legacy_task_enum_reroutes_to_object_task(self):
-        user_id = _user_id()
-        entry = self._build(user_id, type=NodeType.TASK)
-        assert entry.type == "object"
-        assert entry.subtype == "task"
-
-    async def test_legacy_task_raw_string_reroutes_to_object_task(self):
-        user_id = _user_id()
-        entry = self._build(user_id, type="task")
-        assert entry.type == "object"
-        assert entry.subtype == "task"
-
-    async def test_explicit_subtype_overrides_default_reroute_value(self):
-        # Defensive: a caller may pre-populate subtype with a richer
-        # value (e.g. a future migration that wants finer-grained
-        # tagging). The reroute must rewrite ``type`` but leave the
-        # explicit ``subtype`` untouched.
-        user_id = _user_id()
-        entry = self._build(
-            user_id,
-            type=NodeType.TASK,
-            subtype="project",  # caller-provided override
-        )
-        assert entry.type == "object"
-        assert entry.subtype == "project"
-
-    async def test_legacy_and_new_shape_produce_equivalent_rows(self):
-        # The core invariant of the user-prompt clause "Tests must
-        # cover both old and new shapes producing equivalent stored
-        # rows".
-        user_id = _user_id()
-        legacy = self._build(user_id, type=NodeType.TASK)
-        explicit = self._build(user_id, type="object", subtype="task")
-
-        # Both rows store with the same logical shape.
-        legacy_dump = legacy.model_dump(exclude={"created_at", "updated_at"})
-        explicit_dump = explicit.model_dump(exclude={"created_at", "updated_at"})
-        assert legacy_dump == explicit_dump
-
-    async def test_reroute_does_not_touch_edge_rows(self):
-        # Edges carry their own ``source_type`` / ``target_type`` columns;
-        # the node-shape rewrite is scoped to ``kind="node"``. After
-        # #029, ``todo`` is no longer a registered edge type — exercise
-        # the "edge rewrite doesn't fire" invariant via the surviving
-        # ``related_to`` umbrella with a legacy-looking ``NodeType.TASK``
-        # endpoint (which still exists as an enum alias).
-        user_id = _user_id()
-        entry = MemoryEntry(
-            id=f"{user_id}:person:alice|related_to|{user_id}:object:write",
-            user_id=user_id,
-            kind="edge",
-            type="related_to",
-            semantic_type="has_task",
-            source_node_id=f"{user_id}:person:alice",
-            source_type=NodeType.PERSON,
-            target_node_id=f"{user_id}:object:write",
-            target_type=NodeType.OBJECT,
-            created_at=datetime(2026, 1, 1, tzinfo=UTC),
-            updated_at=datetime(2026, 1, 2, tzinfo=UTC),
-        )
-        assert entry.type == "related_to"
-        assert entry.target_type == NodeType.OBJECT
 
 
 class TestOntologyTreeExtensionsModuleApplied:

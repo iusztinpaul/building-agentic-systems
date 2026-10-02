@@ -856,7 +856,7 @@
       ]
     },
     "preference": {
-      "description": "A first-person preference, opinion, or pattern of the user (#032).\n\nReplaces the pre-#032 free-form ``content: str`` shape with typed\nslots so retrieval and review tooling can filter / partition\npreferences (e.g. \"show me my UI preferences\", \"supersede this\npreference if I express a contradictory UI preference\").\n\nStrict-mode policy (per `plan.md:461-465`): preferences attribute\nfirst-person opinions only. Third-party preferences (\"Bob prefers\nvegetarian\") are emitted as ``fact`` rows instead \u2014 never as\n``preference`` rows.\n\nMigration: pre-#032 rows carry a ``content`` field and no\n``statement`` / ``category``. The model accepts them at read time\nby re-mapping legacy ``content`` -> ``statement`` and defaulting\n``category=\"other\"``, so the pipeline never crashes on legacy\nrows. The canonical migration that rewrites every preference row\nlands in #033 (wipe-and-rebuild).\n",
+      "description": "A first-person preference, opinion, or pattern of the user (#032).\n\nTyped slots so retrieval and review tooling can filter / partition\npreferences (e.g. \"show me my UI preferences\", \"supersede this\npreference if I express a contradictory UI preference\").\n\nStrict-mode policy (per `plan.md:461-465`): preferences attribute\nfirst-person opinions only. Third-party preferences (\"Bob prefers\nvegetarian\") are emitted as ``fact`` rows instead \u2014 never as\n``preference`` rows.\n",
       "properties": {
         "category": {
           "$ref": "#/$defs/PreferenceCategory",

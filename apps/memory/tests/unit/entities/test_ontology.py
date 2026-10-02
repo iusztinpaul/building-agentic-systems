@@ -332,9 +332,7 @@ class TestRetrofitRegistries:
         # Post-#031: ``fact`` joins the LLM-extractable set as the
         # POLE+O escape-hatch for propositions that don't fit any
         # registered relation semantic.
-        # ``NodeType.TASK`` enum member survives as a legacy alias but is
-        # no longer registered as a top-level extractable type — it lives
-        # as a subtype under object.
+        # ``task`` is a subtype under object, not a node type.
         assert LLM_EXTRACTABLE_NODE_TYPES == {
             NodeType.PERSON,
             NodeType.ORGANIZATION,
@@ -380,18 +378,10 @@ class TestRetrofitRegistries:
 class TestBackwardCompatViews:
     def test_every_registered_node_type_has_properties(self):
         # Post-#028: ``NODE_PROPERTIES`` is built from
-        # :data:`NODE_REGISTRY`, so ``NodeType.TASK`` (which survives
-        # only as a legacy alias) is intentionally absent. Iterate the
-        # registry, not the enum.
+        # :data:`NODE_REGISTRY`.
         for type_name in NODE_REGISTRY:
             node_type = NodeType(type_name)
             assert node_type in NODE_PROPERTIES, f"Missing properties for {node_type}"
-
-    def test_legacy_node_type_aliases_absent_from_properties(self):
-        # The enum still exposes TASK for code-path compat, but
-        # ``NODE_PROPERTIES`` mirrors the registry — which no longer
-        # holds that entry.
-        assert NodeType.TASK not in NODE_PROPERTIES
 
     def test_every_edge_type_has_constraint(self):
         for edge_type in EdgeType:
@@ -420,17 +410,9 @@ class TestBackwardCompatViews:
 
 
 class TestEnumShim:
-    def test_node_type_members_match_node_registry_plus_legacy_aliases(self):
-        # Post-#028: the enum has the registry entries the LLM cares
-        # about (+ DOCUMENT/CHUNK) PLUS one legacy alias — ``TASK`` —
-        # that the :class:`MemoryEntry` mode=before validator
-        # silently re-routes to the new (parent, subtype) shape. The
-        # alias is intentionally NOT in :data:`NODE_REGISTRY`.
-        # Post-#031: ``FACT`` joins the enum + registry as the POLE+O
-        # escape-hatch node type.
+    def test_node_type_members_match_node_registry(self):
         enum_values = {member.value for member in NodeType}
-        legacy_aliases = {"task"}
-        assert enum_values == set(NODE_REGISTRY) | legacy_aliases
+        assert enum_values == set(NODE_REGISTRY)
 
     def test_edge_type_members_match_edge_registry(self):
         enum_values = {member.value for member in EdgeType}
@@ -447,7 +429,6 @@ class TestEnumShim:
             "LOCATION",
             "EVENT",
             "OBJECT",
-            "TASK",
             "PREFERENCE",
             "FACT",
         ]:

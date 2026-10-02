@@ -52,8 +52,8 @@ class TestParseExtraction:
         assert result.edges[0].semantic_type == "has_task"
 
     def test_legacy_todo_reroutes_to_related_to(self):
-        # The parser re-routes legacy LLM emissions so cached examples
-        # / older prompts still produce valid POLE+O edges.
+        # The prompt still names ``EdgeType.TODO`` and lists ``task`` as a
+        # subtype, so the LLM can emit both; the parser normalises them.
         raw = {
             "nodes": [],
             "edges": [
@@ -61,7 +61,7 @@ class TestParseExtraction:
                     "source_node_id": "alice",
                     "source_type": "person",
                     "target_node_id": "write code",
-                    "target_type": "task",  # legacy top-level type
+                    "target_type": "task",  # a subtype emitted as a type
                     "type": "todo",
                 }
             ],

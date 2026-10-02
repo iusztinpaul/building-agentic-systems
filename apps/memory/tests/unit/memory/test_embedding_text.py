@@ -96,24 +96,13 @@ class _OrderEncodingEmbeddingModel(BaseEmbeddingModel):
 
 
 # ---------------------------------------------------------------------------
-# entity_embedding_text — FACT ``object`` vs legacy ``object_`` precedence
+# entity_embedding_text — FACT embeds ``properties.object``
 # ---------------------------------------------------------------------------
 
 
-class TestFactObjectPrecedence:
-    """``object`` wins on PRESENCE, never on truthiness.
-
-    A row written across the ``object_`` → ``object`` rename can carry BOTH: the
-    current value under ``object`` and a STALE pre-rename value under
-    ``object_``. The old ``properties.get("object") or properties.get("object_")``
-    read the stale one whenever the current value was falsy — so the row embedded
-    on text the user has since replaced (and the indexing backfill, reading the
-    same properties, would keep reproducing it after an **Embedding reset**).
-    A blank ``object`` means "this row has no usable object text": it falls back
-    to the generic node-text, which still surfaces every property, including
-    ``object_``, in a labelled line rather than presenting the stale value AS the
-    row's meaning.
-    """
+class TestFactObjectText:
+    """A fact embeds its ``object``; without usable object text it falls back
+    to the generic node-text, never to a blank string."""
 
     def _fact_row(self, properties: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -123,49 +112,22 @@ class TestFactObjectPrecedence:
             "properties": properties,
         }
 
-    def test_current_object_wins_over_the_legacy_one(self) -> None:
-        row = self._fact_row({"object": "new", "object_": "old"})
+    def test_object_is_the_embedded_text(self) -> None:
+        row = self._fact_row({"subject": "paul", "object": "berlin"})
 
-        assert entity_embedding_text(row) == "new"
-
-    def test_legacy_object_is_read_when_object_is_absent(self) -> None:
-        row = self._fact_row({"object_": "old"})
-
-        assert entity_embedding_text(row) == "old"
-
-    def test_legacy_object_is_read_when_object_is_none(self) -> None:
-        # ``None`` is "not written", not "written blank" — the legacy column is
-        # the only value this row has.
-        row = self._fact_row({"object": None, "object_": "old"})
-
-        assert entity_embedding_text(row) == "old"
+        assert entity_embedding_text(row) == "berlin"
 
     @pytest.mark.parametrize(
-        "blank_object",
-        ["", "  ", "\x00", "\x00 \ud800"],
-        ids=["empty", "whitespace", "control-char", "all-invalid"],
+        "properties",
+        [{}, {"object": None}, {"object": ""}, {"object": "  "}, {"object": 0}],
+        ids=["absent", "none", "empty", "whitespace", "non-string"],
     )
-    def test_a_blank_object_falls_back_to_node_text_not_to_the_legacy_one(
-        self, blank_object: str
+    def test_no_usable_object_falls_back_to_node_text(
+        self, properties: dict[str, Any]
     ) -> None:
-        # The regression this class exists for: the stale ``object_`` must NOT
-        # become the embedded text just because the current value is blank.
-        row = self._fact_row({"object": blank_object, "object_": "old"})
+        row = self._fact_row(properties)
 
-        text = entity_embedding_text(row)
-
-        assert text == node_to_embedding_text(row)
-        assert text != "old"
-
-    def test_a_non_string_object_falls_back_to_node_text(self) -> None:
-        # A falsy non-string (``0``, ``False``, ``[]``) is still a PRESENT
-        # value: it may not hand the row over to the legacy column either.
-        row = self._fact_row({"object": 0, "object_": "old"})
-
-        text = entity_embedding_text(row)
-
-        assert text == node_to_embedding_text(row)
-        assert text != "old"
+        assert entity_embedding_text(row) == node_to_embedding_text(row)
 
 
 # ---------------------------------------------------------------------------

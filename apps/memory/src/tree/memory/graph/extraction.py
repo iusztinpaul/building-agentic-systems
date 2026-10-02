@@ -180,12 +180,10 @@ async def extract_entities(
     return result
 
 
-# --- Phase-3 #028: legacy LLM emissions for the pre-POLE+O top-level
-# node type ``task`` are silently re-routed to the new (parent, subtype)
-# shape. The LLM prompt has been updated to emit the new shape directly
-# (with a ``subtype`` field), but this rewrite keeps the parser tolerant
-# of older prompts and saved/cached examples during the staging window
-# between #028 and #033.
+# --- Phase-3 #028: LLM-output normalisation. The prompt's ontology lists
+# ``task`` as a subtype of ``object``, so the LLM still occasionally emits it
+# as the top-level ``type``; re-route that to the (parent, subtype) shape
+# instead of rejecting the node.
 _LEGACY_NODE_TYPE_REWRITES: dict[str, tuple[NodeType, str]] = {
     "task": (NodeType.OBJECT, "task"),
 }
@@ -263,10 +261,11 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
             continue
 
-        # #029: re-route legacy LLM emissions ``todo`` / ``experienced``
-        # to the new umbrella shape. The prompt no longer asks for
-        # those types — this branch keeps the parser tolerant of older
-        # prompts and cached examples during the staging window.
+        # #029: LLM-output normalisation. The ``has_task`` /
+        # ``experienced_by`` semantic descriptions in the prompt still name
+        # ``EdgeType.TODO`` / ``EdgeType.EXPERIENCED``, so the LLM can emit
+        # ``todo`` / ``experienced`` as the edge type; re-route them to the
+        # ``related_to`` umbrella.
         legacy_semantic: str | None = None
         if raw_type == "todo":
             raw_type = "related_to"
@@ -300,8 +299,8 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
             continue
 
-        # #029: re-route the legacy endpoint type ``task`` to its POLE+O
-        # parent now that it no longer exists as a top-level node type.
+        # #029: same normalisation for an endpoint typed ``task`` (a subtype
+        # the LLM mistook for a node type) — edges carry parent type names.
         if src_type_value == "task":
             src_type_value = "object"
         if tgt_type_value == "task":

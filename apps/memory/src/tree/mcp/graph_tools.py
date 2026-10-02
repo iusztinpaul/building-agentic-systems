@@ -462,7 +462,7 @@ async def review_list_pending(
     (e.g. ``"person"``).
 
     Args:
-        entity_type: Optional NodeType value (e.g. "person", "task",
+        entity_type: Optional NodeType value (e.g. "person", "object",
             "preference"). ``None`` returns pairs of every
             type.
         limit: Maximum number of pairs to return (default 50).

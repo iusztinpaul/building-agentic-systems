@@ -450,14 +450,7 @@ async def _handle_confirm(
 
     # Idempotency: if already confirmed, recover state and return.
     if current_status == "confirmed":
-        return await _build_idempotent_confirm_result(
-            collection=collection,
-            user_id=user_id,
-            edge_doc=edge_doc,
-            edge_id=edge_id,
-            src_id=src_id,
-            tgt_id=tgt_id,
-        )
+        return _build_idempotent_confirm_result(edge_doc=edge_doc, edge_id=edge_id)
 
     src_node = await collection.find_one({"_id": src_id, "user_id": user_id})
     tgt_node = await collection.find_one({"_id": tgt_id, "user_id": user_id})
@@ -578,64 +571,37 @@ async def _handle_confirm(
     )
 
 
-async def _build_idempotent_confirm_result(
-    *,
-    collection: Any,
-    user_id: PydanticObjectId,
-    edge_doc: dict[str, Any],
-    edge_id: str,
-    src_id: str,
-    tgt_id: str,
+def _build_idempotent_confirm_result(
+    *, edge_doc: dict[str, Any], edge_id: str
 ) -> ReviewResult:
     """Reconstruct the original confirm's :class:`ReviewResult` from disk.
 
-    Prefers the audit fields written on the SAME_AS edge at confirm time
-    (``properties.winner_node_id``, ``properties.loser_node_id``,
-    ``properties.applied_strategy``, ``properties.edges_transferred``).
-    Falls back to the loser's ``merged_into`` tombstone when the audit
-    fields are missing (older confirms written before this code shipped).
+    Reads the audit fields the confirm stamped on the SAME_AS edge in the same
+    ``$set`` as ``status="confirmed"`` (``properties.winner_node_id``,
+    ``properties.loser_node_id``, ``properties.applied_strategy``,
+    ``properties.edges_transferred``).
     """
 
     props = edge_doc.get("properties") or {}
-    winner_id = props.get("winner_node_id")
-    loser_id = props.get("loser_node_id")
-    applied_strategy_raw = props.get("applied_strategy")
-    edges_transferred = props.get("edges_transferred")
-
-    if winner_id is None or loser_id is None:
-        # Fallback: read the merged_into tombstone on whichever endpoint
-        # was the loser. The remaining endpoint must be the winner.
-        src_node = await collection.find_one(
-            {"_id": src_id, "user_id": user_id}, {"merged_into": 1}
+    audit_keys = (
+        "winner_node_id",
+        "loser_node_id",
+        "applied_strategy",
+        "edges_transferred",
+    )
+    missing = [key for key in audit_keys if props.get(key) is None]
+    if missing:
+        raise ValueError(
+            f"SAME_AS pair {edge_id!r} is marked 'confirmed' but lacks audit "
+            f"fields {missing}; database is in an inconsistent state."
         )
-        tgt_node = await collection.find_one(
-            {"_id": tgt_id, "user_id": user_id}, {"merged_into": 1}
-        )
-        if src_node and src_node.get("merged_into") == tgt_id:
-            loser_id = src_id
-            winner_id = tgt_id
-        elif tgt_node and tgt_node.get("merged_into") == src_id:
-            loser_id = tgt_id
-            winner_id = src_id
-        else:
-            raise ValueError(
-                f"SAME_AS pair {edge_id!r} is marked 'confirmed' but no "
-                "tombstone or audit fields are present; database is in an "
-                "inconsistent state."
-            )
-
-    applied_strategy: MergeStrategy | None
-    if applied_strategy_raw is None:
-        applied_strategy = None
-    else:
-        applied_strategy = MergeStrategy(applied_strategy_raw)
 
     return ReviewResult(
         decision=ReviewDecision.CONFIRM,
-        winner_node_id=str(winner_id),
-        loser_node_id=str(loser_id),
-        applied_strategy=applied_strategy,
-        edges_transferred=int(edges_transferred or 0),
+        winner_node_id=str(props["winner_node_id"]),
+        loser_node_id=str(props["loser_node_id"]),
+        applied_strategy=MergeStrategy(props["applied_strategy"]),
+        edges_transferred=int(props["edges_transferred"]),
         same_as_edge_id=edge_id,
     )
 

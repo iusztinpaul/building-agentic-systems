@@ -30,12 +30,12 @@ class TestBuildNodeIdShape:
 
     def test_user_id_appears_as_leading_segment(self) -> None:
         user_id = PydanticObjectId()
-        result = build_node_id(user_id, NodeType.TASK, "ship it")
+        result = build_node_id(user_id, NodeType.OBJECT, "ship it")
 
         # The id is splittable on ":" and the first segment is exactly user_id.
         head, rest = result.split(":", 1)
         assert head == str(user_id)
-        assert rest == "task:ship it"
+        assert rest == "object:ship it"
 
     def test_chunk_id_round_trip(self) -> None:
         # Chunk names can contain extra colons (URL + "#chunk-N"). The
@@ -69,9 +69,9 @@ class TestNodeIdIsolation:
         user_id = PydanticObjectId()
 
         person_id = build_node_id(user_id, NodeType.PERSON, "ship")
-        task_id = build_node_id(user_id, NodeType.TASK, "ship")
+        object_id = build_node_id(user_id, NodeType.OBJECT, "ship")
 
-        assert person_id != task_id
+        assert person_id != object_id
 
 
 class TestBuildEdgeIdShapePreserved:

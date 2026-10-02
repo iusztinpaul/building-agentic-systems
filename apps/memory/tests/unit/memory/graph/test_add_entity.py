@@ -1092,8 +1092,6 @@ class TestEmbeddingRole:
             "prefers dark mode",
         ),
         (NodeType.FACT, {"subject": "paul", "object": "Bucharest"}, "Bucharest"),
-        # Legacy column name, still read.
-        (NodeType.FACT, {"subject": "paul", "object_": "Bucharest"}, "Bucharest"),
     ],
 )
 def test_inline_and_backfill_text_agree_for_preference_and_fact(

@@ -85,12 +85,6 @@ def _set_stage(op: Any) -> dict[str, Any]:
     return op._doc[0]["$set"]
 
 
-def _unset_stage(op: Any) -> list[str]:
-    """The ``$unset`` field list of an aggregation-pipeline ``UpdateOne``."""
-
-    return op._doc[1]["$unset"]
-
-
 def _by_id(ops: list[Any]) -> dict[str, dict[str, Any]]:
     return {op._filter["_id"]: _set_stage(op) for op in ops}
 
@@ -256,11 +250,10 @@ class TestBuildRagRowOps:
     def test_no_row_carries_entity_naming_fields(self) -> None:
         # Positional ``_id``s are never resolved or merged, so these fields
         # would only hold filler or duplicated values (a URI-shaped ``name`` is
-        # also tokenised by ``$text``); the ``$unset`` strips legacy ones.
+        # also tokenised by ``$text``).
         naming_fields = {"name", "canonical_name", "aliases", "confidence"}
         for op in _ops(1, 1):
             assert naming_fields.isdisjoint(_set_stage(op))
-            assert naming_fields <= set(_unset_stage(op))
 
 
 class TestRagNodeTypeGuard:
@@ -414,7 +407,6 @@ class TestPropertiesAreReplacedInMongo:
                 "user_id": _USER_ID,
                 "kind": "node",
                 "type": "chunk",
-                "name": parent_chunk_name(_URI, 0),
                 "properties": {
                     "content": "text from a previous chunking config",
                     "stale_key": "poison",
@@ -452,7 +444,6 @@ class TestPropertiesAreReplacedInMongo:
                 "user_id": _USER_ID,
                 "kind": "node",
                 "type": "chunk",
-                "name": parent_chunk_name(_URI, 0),
                 "properties": {"content": "text from a previous chunking config"},
                 "sources": [earlier_source],
                 "created_at": created_at,
@@ -466,28 +457,3 @@ class TestPropertiesAreReplacedInMongo:
         assert row["created_at"] == created_at
         assert row["updated_at"] > created_at
         assert set(row["sources"]) == {earlier_source, PydanticObjectId(_DOCUMENT_ID)}
-
-    async def test_legacy_name_and_resolution_fields_are_stripped_on_re_upsert(
-        self, database
-    ) -> None:
-        # A child row written before the RAG rows dropped these fields.
-        row_id = child_row_id(_USER_ID, _URI, 0, 0)
-        await database[MEMORY_COLLECTION].insert_one(
-            {
-                "_id": row_id,
-                "user_id": _USER_ID,
-                "kind": "node",
-                "type": "chunk",
-                "name": child_chunk_name(_URI, 0, 0),
-                "canonical_name": child_chunk_name(_URI, 0, 0),
-                "aliases": [],
-                "confidence": 1.0,
-                "sources": [PydanticObjectId(_DOCUMENT_ID)],
-            }
-        )
-
-        await load_rag_rows(database=database, ops=_ops(1))
-
-        row = await database[MEMORY_COLLECTION].find_one({"_id": row_id})
-        assert {"name", "canonical_name", "aliases", "confidence"}.isdisjoint(row)
-        assert row["sources"] == [PydanticObjectId(_DOCUMENT_ID)]

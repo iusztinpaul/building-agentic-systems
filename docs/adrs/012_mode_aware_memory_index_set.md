@@ -45,7 +45,7 @@ prod usage evidence exists, and the decision rests on the audit.
    (the YAML loads before any model; no database is needed) and re-bound by `init_mongodb` right before
    `init_beanie`, so a mode changed after import (tests) still binds the right set. This includes the
    `$text` `text_index` (an ordinary `IndexModel` with `"text"` keys; it moved here from
-   `ensure_indexes` in task 171, so lexical search works from the first boot, before any indexing run).
+   `ensure_indexes` in commit `9925d86`, so lexical search works from the first boot, before any indexing run).
    `ensure_indexes` owns only what Beanie truly cannot express, the mongot `vector_index`.
    `MemoryEntry.kind` is a plain `str`.
    `Indexed(str)` would make Beanie recreate `kind_1` on every boot.

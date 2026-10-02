@@ -753,19 +753,10 @@ class TestSupersessionEmbedsSanitisedText:
         assert embedding_model.texts[0][0] == entity_embedding_text(persisted_row)
 
 
-class TestFactObjectPresenceRule:
-    """A present-but-blank ``object`` never hands the row to legacy ``object_``.
+class TestFactWithoutObject:
+    """A fact with a blank ``object`` has no statement: the resolver skips it."""
 
-    Same rule as ``embedding_text.entity_embedding_text`` — and here it must
-    hold because ``_fact_object``'s return value becomes the embed input a few
-    frames later. Reading the stale pre-rename ``object_`` would write a vector
-    on text ``entity_embedding_text`` does not produce, i.e. a vector the
-    indexing backfill silently replaces after an **Embedding reset**.
-    """
-
-    async def test_blank_object_is_not_shadowed_by_the_legacy_column(self) -> None:
-        # Arrange: a row carrying both columns — current value blanked, stale
-        # pre-rename value still there.
+    async def test_blank_object_is_skipped(self) -> None:
         existing_id = build_node_id(_USER_ID, NodeType.FACT, "paul-lives-in-paris")
         existing = {
             "_id": existing_id,
@@ -791,7 +782,6 @@ class TestFactObjectPresenceRule:
                 "subject": "paul",
                 "predicate": "lives_in",
                 "object": "",
-                "object_": "Bucharest",
             },
         )
         judge = _StubJudgeLLM(
@@ -807,57 +797,10 @@ class TestFactObjectPresenceRule:
             raws=[_make_raw(new_node)],
         )
 
-        # Assert: the row has no usable object, so it is skipped entirely — the
-        # stale "Bucharest" is neither judged nor embedded.
+        # Assert: no usable object, so nothing is judged or embedded.
         assert decisions == []
         assert judge.calls == 0
         assert embedding_model.texts == []
-
-    async def test_legacy_object_still_read_when_object_is_absent(self) -> None:
-        # The legacy column is NOT dead: a row written before the rename has
-        # only ``object_`` and must still supersede.
-        existing_id = build_node_id(_USER_ID, NodeType.FACT, "paul-lives-in-paris")
-        existing = {
-            "_id": existing_id,
-            "user_id": _USER_ID,
-            "kind": "node",
-            "type": NodeType.FACT.value,
-            "name": "paul-lives-in-paris",
-            "properties": {
-                "subject": "paul",
-                "predicate": "lives_in",
-                "object": "Paris",
-            },
-            "embedding": [1.0, 0.0, 0.0],
-            "valid_from": None,
-            "valid_until": None,
-        }
-        collection = _FakeCollection(seed_rows=[existing])
-        database = _FakeDatabase(collection)
-        new_node = ExtractedNode(
-            name="paul-lives-in-bucharest",
-            type=NodeType.FACT,
-            properties={
-                "subject": "paul",
-                "predicate": "lives_in",
-                "object_": "Bucharest",
-            },
-        )
-        judge = _StubJudgeLLM(
-            {"is_contradiction": True, "confidence": 0.9, "reasoning": "x"}
-        )
-        embedding_model = _FakeEmbedding([0.7, 0.7, 0.1])
-
-        decisions = await resolve_supersessions(
-            database=database,
-            user_id=_USER_ID,
-            llm=judge,  # type: ignore[arg-type]
-            embedding_model=embedding_model,
-            raws=[_make_raw(new_node)],
-        )
-
-        assert decisions[0].superseded is True
-        assert embedding_model.texts == [["Bucharest"]]
 
 
 class TestFactSupersession:

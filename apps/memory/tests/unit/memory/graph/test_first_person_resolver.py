@@ -94,11 +94,11 @@ class TestNoMatch:
         assert out[0].name == "alice"
 
     def test_non_person_node_ignored(self) -> None:
-        """A TASK node named 'paul' is never redirected — the resolver
+        """An OBJECT node named 'paul' is never redirected — the resolver
         scopes to ``NodeType.PERSON``."""
 
         user = _make_user(name="Paul")
-        nodes = [ExtractedNode(name="paul", type=NodeType.TASK, properties={})]
+        nodes = [ExtractedNode(name="paul", type=NodeType.OBJECT, properties={})]
 
         out = redirect_first_person(nodes, user)
 
@@ -164,7 +164,7 @@ class TestMultipleNodes:
         nodes = [
             ExtractedNode(name="paul", type=NodeType.PERSON, properties={}),
             ExtractedNode(name="alice", type=NodeType.PERSON, properties={}),
-            ExtractedNode(name="paul", type=NodeType.TASK, properties={}),
+            ExtractedNode(name="paul", type=NodeType.OBJECT, properties={}),
         ]
 
         out = redirect_first_person(nodes, user)

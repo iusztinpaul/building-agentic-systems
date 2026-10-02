@@ -477,28 +477,6 @@ class ObjectProperties(BaseModel):
     )
 
 
-# --- Retained legacy property schema (kept importable by callers; the
-# top-level ``task`` registration is removed in #028 in favor of a
-# subtype extension on ``object``). ---
-
-
-class TaskProperties(BaseModel):
-    """A task, project, or actionable item associated with a person.
-
-    **Deprecated** as a top-level POLE+O type after #028; ``task`` now
-    lives as a Tree subtype under ``object`` (see
-    :mod:`tree.entities.ontology_tree_extensions`). Kept as an
-    importable schema so legacy call sites compile during the staging
-    window between #028 and #033 (migration).
-    """
-
-    content: str = Field(description="Description of the task or project")
-    date: str | None = Field(
-        default=None,
-        description="Due date or mentioned date (ISO 8601 format)",
-    )
-
-
 class PreferenceCategory(StrEnum):
     """Closed enum of preference categories (#032).
 
@@ -522,8 +500,7 @@ class PreferenceCategory(StrEnum):
 class PreferenceProperties(BaseModel):
     """A first-person preference, opinion, or pattern of the user (#032).
 
-    Replaces the pre-#032 free-form ``content: str`` shape with typed
-    slots so retrieval and review tooling can filter / partition
+    Typed slots so retrieval and review tooling can filter / partition
     preferences (e.g. "show me my UI preferences", "supersede this
     preference if I express a contradictory UI preference").
 
@@ -531,13 +508,6 @@ class PreferenceProperties(BaseModel):
     first-person opinions only. Third-party preferences ("Bob prefers
     vegetarian") are emitted as ``fact`` rows instead — never as
     ``preference`` rows.
-
-    Migration: pre-#032 rows carry a ``content`` field and no
-    ``statement`` / ``category``. The model accepts them at read time
-    by re-mapping legacy ``content`` -> ``statement`` and defaulting
-    ``category="other"``, so the pipeline never crashes on legacy
-    rows. The canonical migration that rewrites every preference row
-    lands in #033 (wipe-and-rebuild).
     """
 
     model_config = ConfigDict(populate_by_name=True)
