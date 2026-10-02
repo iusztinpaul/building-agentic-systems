@@ -8,7 +8,7 @@
   - `docs/notes/plan_mongodb.md` (the code audit + local `explain` / `$indexStats` evidence behind every decision below)
   - `ADR-006` §5 (one `memory.mode` switch) and its Consequences ("Operators switching modes drop the `memory` collection") — relied on, unchanged
   - `docs/glossary.md` — **`memory` collection**, **Memory mode**
-  - `apps/memory/src/tree/entities/memory.py` (`memory_indexes`, `ACTIVE_USER_FILTER`), `apps/memory/src/tree/db.py` (`init_mongodb`), `apps/memory/src/tree/memory/rag/indexing.py` (`ensure_indexes`, `retired_index_names`)
+  - `apps/memory/src/tree/entities/memory.py` (`memory_indexes`, `ACTIVE_USER_FILTER`), `apps/memory/src/tree/db.py` (`init_mongodb`), `apps/memory/src/tree/memory/rag/indexing.py` (`ensure_indexes`)
 
 ## Context
 
@@ -46,8 +46,8 @@ prod usage evidence exists, and the decision rests on the audit.
    `init_beanie`, so a mode changed after import (tests) still binds the right set. This includes the
    `$text` `text_index` (an ordinary `IndexModel` with `"text"` keys; it moved here from
    `ensure_indexes` in task 171, so lexical search works from the first boot, before any indexing run).
-   `ensure_indexes` owns only what Beanie truly cannot express, the mongot `vector_index`, plus
-   retirement (3). `MemoryEntry.kind` is a plain `str`.
+   `ensure_indexes` owns only what Beanie truly cannot express, the mongot `vector_index`.
+   `MemoryEntry.kind` is a plain `str`.
    `Indexed(str)` would make Beanie recreate `kind_1` on every boot.
 2. **The set is per mode.**
 
@@ -65,19 +65,11 @@ prod usage evidence exists, and the decision rests on the audit.
    11 → 5 (`rag`) / 8 (`graphrag`), counting `vector_index`. Two different sets are safe because a deployment runs one mode
    and switching modes drops `memory` (ADR-006). A collection never holds the other mode's rows.
    Every compound index leads with `user_id`, and there is no standalone `user_id` index.
-3. **Retirement is lazy, in code, and needs no migration.** `retired_index_names(mode)` lists every
-   name a mode must not carry:
-   - in both modes: the four pre-#019 names, `user_kind_type`, `kind_1`, `user_kind_embedding`,
-     `user_type_semantic_type` and `user_canonical_name_index`;
-   - in `rag` only: the two `*_node` names and `active_user`.
-
-   `ensure_indexes` drops the listed names that exist, one by one, and treats failures as non-fatal.
-   `ensure_indexes` runs in the memory pipeline's indexing phase (always) and at MCP boot (unless
-   `MCP_SKIP_INDEX_BOOTSTRAP=true`). `init_mongodb` only creates, and `allow_index_dropping` stays
-   off. A stale index costs only write amplification until the next indexing run, so there is no
-   operator step and no script. The declared set and the retired list are disjoint for each mode. A
-   name in both would be dropped by every indexing run and recreated by every boot. A unit test pins
-   the disjointness.
+3. **No retirement code: databases start from scratch.** Nothing drops indexes. `init_beanie` only
+   creates (`allow_index_dropping` stays off) and `ensure_indexes` only reconciles the vector index.
+   A database that carries indexes from an older set is dropped and rebuilt, the same rule ADR-006
+   already applies to a mode switch. (Task 169 shipped an in-code retirement list; it was removed once
+   every environment was rebuilt from scratch.)
 4. **Never a multikey index over `embedding`.** The backfill now reaches its rows through
    `user_kind_type_subtype` and examines every embeddable node of the user once per indexing run.
    That is fine at personal scale. Upgrade trigger, recorded and not built: when that scan measurably
@@ -93,7 +85,7 @@ prod usage evidence exists, and the decision rests on the audit.
    recorded and not built: a `users.active` field + partial index if rag ever needs soft-disabled users.
 
 What would justify revisiting:
-- a new production read that filters on a retired key (`semantic_type`, `canonical_name`), which
+- a new production read that filters on a dropped key (`semantic_type`, `canonical_name`), which
   re-declares that index in `memory_indexes`, never in `ensure_indexes`;
 - a backfill scan that measurably hurts, which triggers (4)'s marker index;
 - a third Memory mode, which extends the per-mode table.
@@ -104,7 +96,6 @@ What would justify revisiting:
 flowchart LR
   classDef beanie fill:#1f6f8b,color:#fff,stroke:#0d3b4a
   classDef search fill:#2e8b57,color:#fff,stroke:#1b5e3a
-  classDef retire fill:#c0392b,color:#fff,stroke:#7b241c
   classDef cfg fill:#e8e8e8,color:#222,stroke:#999
 
   MODE["app_config.memory.mode<br/>rag | graphrag"]:::cfg
@@ -115,14 +106,10 @@ flowchart LR
   end
 
   subgraph Idx["ensure_indexes — indexing phase + MCP boot"]
-    RT["retired_index_names(mode)<br/>drop if present (idempotent)"]:::retire
     VX["vector_index (mongot)"]:::search
   end
 
   MODE --> MI --> IB
-  MODE --> RT
-  RT --> VX
-  MI -. "disjoint by test" .- RT
 ```
 
 ## Consequences
@@ -130,14 +117,12 @@ flowchart LR
 - **Fewer indexes per write.** Each upsert maintains 4 classic indexes in `rag` and 7 in `graphrag` (`_id_` and `text_index` included),
   down from 11. The largest index (`user_kind_embedding`) never reaches prod. M0 capacity before the
   first prod memory run still needs its own measurement, because ~200 MB of embedded rows remains.
-- **Boot creates, indexing retires.** A database that still carries the old set keeps its stale
-  indexes until the first indexing run after the upgrade, which logs one
-  `Dropped legacy compound index '<name>'` line per retired name. Later runs log none.
+- **Changing the set means rebuilding.** Nothing drops a stale index, so removing an index from
+  `memory_indexes` takes effect only on a database rebuilt from scratch.
 - **Single source of truth per index.** Classic indexes, `$text` included, are declared ONLY in
   `memory_indexes`, and the mongot vector index ONLY in `ensure_indexes`. The double declaration of `user_type_semantic_type` is
   gone.
 - **Slower backfill read.** Backfill docs-examined rises from "rows still missing a vector" to "every
   embeddable node of the user". (4) records the upgrade path.
-- **The mode is read twice, from one source.** `init_mongodb` reads it to bind the set, and
-  `ensure_indexes` reads it to retire. Both read `app_config.memory.mode`, so a process cannot create
-  one mode's set and retire the other's.
+- **The mode is read from one source.** `Settings.indexes` and `init_mongodb` both read
+  `app_config.memory.mode`.

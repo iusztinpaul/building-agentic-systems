@@ -290,10 +290,9 @@ def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
     """Every classic index of the ``memory`` collection for ``mode`` (ADR-012).
 
     Beanie creates these on every ``init_mongodb``;
-    ``tree.memory.rag.indexing.ensure_indexes`` owns only the mongot vector index
-    plus the retirement of the names
-    :func:`tree.memory.rag.indexing.retired_index_names` lists. A per-mode set is
-    safe because switching modes requires dropping ``memory`` (ADR-006).
+    ``tree.memory.rag.indexing.ensure_indexes`` owns only the mongot vector
+    index. A per-mode set is safe because switching modes requires dropping
+    ``memory`` (ADR-006).
 
     * ``text_index`` — the ``$text`` index behind lexical search
       (:data:`TEXT_INDEX_FIELDS`).

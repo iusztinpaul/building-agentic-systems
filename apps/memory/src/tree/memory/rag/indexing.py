@@ -9,8 +9,7 @@ modes (ADR-006 decision 4):
    so embedding them would pull them into ``$vectorSearch`` results and break
    parent-document retrieval.
 2. Ensure the vector search index exists; reconcile the vector index's
-   ``numDimensions`` against the live embedding model on every call; retire the
-   classic indexes the current **Memory mode** no longer declares (ADR-012).
+   ``numDimensions`` against the live embedding model on every call.
 
 Plus one operator-triggered inverse of (1): :func:`reset_embeddings`, the
 **Embedding reset** (ADR-009 §7), which empties exactly the vectors the backfill
@@ -54,41 +53,6 @@ VECTOR_INDEX_NAME = "vector_index"
 # retrieval already reports the degraded leg as ``text_only`` (task #124).
 _VECTOR_INDEX_READY_TIMEOUT_S = 300
 _VECTOR_INDEX_POLL_S = 5
-
-# Classic indexes no mode declares any more (ADR-012): the pre-#019 names that
-# lacked the ``user_id`` prefix, plus the ones retired by the index trim.
-# ``ensure_indexes`` drops them idempotently, so no migration is ever needed.
-_RETIRED_INDEX_NAMES: tuple[str, ...] = (
-    "kind_source_node",
-    "kind_target_node",
-    "kind_embedding",
-    "canonical_name_index",
-    "user_kind_type",
-    "kind_1",
-    "user_kind_embedding",
-    "user_type_semantic_type",
-    "user_canonical_name_index",
-)
-# Graph-only indexes ``memory_indexes`` declares in ``graphrag`` alone: the two
-# ``$graphLookup`` keys, and ``active_user`` (``rag`` has no ``person:self`` row).
-_GRAPH_ONLY_INDEX_NAMES: tuple[str, ...] = (
-    "user_kind_source_node",
-    "user_kind_target_node",
-    "active_user",
-)
-
-
-def retired_index_names(mode: MemoryMode) -> tuple[str, ...]:
-    """The classic index names ``mode`` must NOT carry (ADR-012).
-
-    Disjoint from ``memory_indexes(mode)`` by contract — a name in both would be
-    dropped by every indexing run and recreated by every boot.
-    """
-
-    if mode == "rag":
-        return _RETIRED_INDEX_NAMES + _GRAPH_ONLY_INDEX_NAMES
-    return _RETIRED_INDEX_NAMES
-
 
 # ---------------------------------------------------------------------------
 # 1. Embed nodes
@@ -372,14 +336,13 @@ async def ensure_indexes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
 ) -> None:
-    """Ensure the vector search index; retire stale classic indexes.
+    """Ensure the vector search index.
 
     The classic indexes, ``$text`` included, are NOT created here: Beanie
     creates the mode's set (:func:`tree.entities.memory.memory_indexes`) on
     every ``init_mongodb``. This function owns only what Beanie cannot
-    express — the mongot vector index — plus the retirement of every name in
-    :func:`retired_index_names` for the configured mode (ADR-012). ``user_id``
-    is passed so the signature mirrors the other pipeline entry points.
+    express, the mongot vector index (ADR-012). ``user_id`` is passed so the
+    signature mirrors the other pipeline entry points.
 
     Reads ``embedding_model.dimensions`` ONCE and uses it to drive the
     vector-search index's ``numDimensions``. If a ``vector_index`` already
@@ -387,7 +350,7 @@ async def ensure_indexes(
     and drops + recreates it.
 
     Idempotent: every step inspects live state and skips when the desired
-    configuration is already in place; a retired index is dropped once.
+    configuration is already in place.
     """
 
     # ``user_id`` is bound by the caller; ``ensure_indexes`` is parameterised
@@ -411,43 +374,8 @@ async def ensure_indexes(
     # under us mid-call.
     target_dimensions = embedding_model.dimensions
 
-    # --- Retire classic indexes this mode no longer declares (idempotent) ---
-    await _drop_legacy_compound_indexes(collection)
-
     # --- Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)
-
-
-async def _drop_legacy_compound_indexes(collection: Any) -> None:
-    """Drop every classic index :func:`retired_index_names` lists for this mode.
-
-    Retirement is lazy (ADR-012): only ``ensure_indexes`` calls this, so a
-    stale index costs writes until the next indexing run. Safe to call
-    repeatedly: it only targets the known names, and each drop is wrapped so
-    a failure is retried on the next run.
-    """
-
-    try:
-        existing = await collection.index_information()
-    except Exception:  # noqa: BLE001 — never block startup on this
-        logger.warning("Could not list classic indexes; skipping legacy drop")
-        return
-
-    for name in retired_index_names(app_config.memory.mode):
-        if name in existing:
-            try:
-                await collection.drop_index(name)
-                logger.info(
-                    "Dropped legacy compound index '%s' on %s",
-                    name,
-                    MEMORY_COLLECTION,
-                )
-            except Exception:  # noqa: BLE001 — drop failures are non-fatal
-                logger.warning(
-                    "Failed to drop legacy compound index '%s' (will retry next run)",
-                    name,
-                    exc_info=True,
-                )
 
 
 def _build_vector_index_definition(dimensions: int) -> dict[str, Any]:

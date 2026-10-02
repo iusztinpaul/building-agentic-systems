@@ -19,8 +19,6 @@ from tree.entities.memory import (
     MEMORY_COLLECTION,
     MemoryEntry,
     NodeType,
-    memory_indexes,
-    TEXT_INDEX_NAME,
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
@@ -38,7 +36,6 @@ from tree.memory.rag.indexing import (
     index_entry_is_queryable,
     node_embedding_text,
     reset_embeddings,
-    retired_index_names,
 )
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
@@ -131,10 +128,6 @@ def _make_collection(
     desired starting state; subsequent calls (with the index name) return
     a non-empty result so the wait-loop in ``_ensure_vector_index`` exits
     immediately.
-
-    ``index_information`` (used by ``_drop_legacy_compound_indexes``)
-    returns an empty dict so the legacy-drop loop is a no-op by default;
-    individual tests can override.
     """
 
     initial = initial_indexes or []
@@ -151,8 +144,6 @@ def _make_collection(
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock()
     collection.drop_search_index = AsyncMock()
-    collection.index_information = AsyncMock(return_value={})
-    collection.drop_index = AsyncMock()
     return collection
 
 
@@ -401,127 +392,6 @@ class TestEnsureIndexes:
 # ---------------------------------------------------------------------------
 # _ensure_vector_index — readiness poll (#127)
 # ---------------------------------------------------------------------------
-
-
-_ALWAYS_RETIRED = {
-    "user_kind_type",
-    "kind_1",
-    "user_kind_embedding",
-    "user_type_semantic_type",
-    "user_canonical_name_index",
-}
-_NODE_ONLY = {"user_kind_source_node", "user_kind_target_node"}
-# Everything ``graphrag`` declares and ``rag`` must not carry (task 170 added
-# ``active_user``: rag has no ``person:self`` row).
-_GRAPH_ONLY = _NODE_ONLY | {"active_user"}
-# The 11 classic indexes a pre-ADR-012 collection carries (``active_user`` did
-# not exist yet).
-_LEGACY_SET = (
-    _ALWAYS_RETIRED
-    | _NODE_ONLY
-    | {
-        "_id_",
-        "user_kind_type_subtype",
-        "user_type_name",
-        TEXT_INDEX_NAME,
-    }
-)
-# What ``init_mongodb`` + ``ensure_indexes`` leave on a graphrag collection
-# after ADR-012 (task 169): the 5 graphrag classic names + ``_id_`` + ``$text``.
-_POST_169_GRAPHRAG_SET = {
-    "_id_",
-    "user_kind_type_subtype",
-    "user_type_name",
-    TEXT_INDEX_NAME,
-} | _GRAPH_ONLY
-
-
-class TestIndexRetirement:
-    """ADR-012: ``ensure_indexes`` retires what the mode no longer declares."""
-
-    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_retired_names_never_overlap_the_declared_set(self, mode: str) -> None:
-        declared = {im.document["name"] for im in memory_indexes(mode)}
-
-        assert declared.isdisjoint(retired_index_names(mode))
-
-    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_search_and_id_indexes_are_never_retired(self, mode: str) -> None:
-        retired = set(retired_index_names(mode))
-
-        assert _ALWAYS_RETIRED <= retired
-        assert retired.isdisjoint({"_id_", TEXT_INDEX_NAME, VECTOR_INDEX_NAME})
-
-    def test_graph_indexes_are_retired_in_rag_only(self) -> None:
-        assert _GRAPH_ONLY <= set(retired_index_names("rag"))
-        assert _GRAPH_ONLY.isdisjoint(retired_index_names("graphrag"))
-
-    @pytest.mark.parametrize(
-        ("mode", "dropped"),
-        [("rag", _ALWAYS_RETIRED | _NODE_ONLY), ("graphrag", _ALWAYS_RETIRED)],
-    )
-    async def test_drops_exactly_the_retired_names_of_a_legacy_collection(
-        self, monkeypatch, mode: str, dropped: set[str]
-    ) -> None:
-        monkeypatch.setattr(app_config.memory, "mode", mode)
-        collection = _make_collection()
-        collection.index_information = AsyncMock(
-            return_value={name: {} for name in _LEGACY_SET}
-        )
-
-        await ensure_indexes(
-            _wire_client(collection),
-            "test_db",
-            embedding_model=FakeEmbeddingModel(dimensions=8),
-            user_id=_TEST_USER_ID,
-        )
-
-        assert len(_LEGACY_SET) == 11
-        assert {c.args[0] for c in collection.drop_index.await_args_list} == dropped
-        assert collection.drop_index.await_count == len(dropped)
-
-    async def test_rag_on_a_post_169_graphrag_collection_drops_the_graph_names(
-        self, monkeypatch
-    ) -> None:
-        monkeypatch.setattr(app_config.memory, "mode", "rag")
-        collection = _make_collection()
-        collection.index_information = AsyncMock(
-            return_value={name: {} for name in _POST_169_GRAPHRAG_SET}
-        )
-
-        await ensure_indexes(
-            _wire_client(collection),
-            "test_db",
-            embedding_model=FakeEmbeddingModel(dimensions=8),
-            user_id=_TEST_USER_ID,
-        )
-
-        assert {c.args[0] for c in collection.drop_index.await_args_list} == {
-            "user_kind_source_node",
-            "user_kind_target_node",
-            "active_user",
-        }
-        assert collection.drop_index.await_count == 3
-
-    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    async def test_a_collection_already_on_its_set_drops_nothing(
-        self, monkeypatch, mode: str
-    ) -> None:
-        monkeypatch.setattr(app_config.memory, "mode", mode)
-        collection = _make_collection()
-        kept = {im.document["name"] for im in memory_indexes(mode)}
-        collection.index_information = AsyncMock(
-            return_value={name: {} for name in kept | {"_id_", TEXT_INDEX_NAME}}
-        )
-
-        await ensure_indexes(
-            _wire_client(collection),
-            "test_db",
-            embedding_model=FakeEmbeddingModel(dimensions=8),
-            user_id=_TEST_USER_ID,
-        )
-
-        collection.drop_index.assert_not_awaited()
 
 
 class _ScriptedCatalogue:
