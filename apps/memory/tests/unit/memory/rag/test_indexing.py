@@ -6,6 +6,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tests.unit.conftest import TEST_DATABASE
+from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.clusters import (
@@ -13,12 +14,17 @@ from tree.entities.clusters import (
     MEMORY_CLUSTERS_COLLECTION,
     MemoryCluster,
 )
-from tree.entities.memory import ChunkViz, MEMORY_COLLECTION, MemoryEntry, NodeType
+from tree.entities.memory import (
+    ChunkViz,
+    MEMORY_COLLECTION,
+    MemoryEntry,
+    NodeType,
+    memory_indexes,
+)
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
     _backfill_filter,
     _build_vector_index_definition,
-    _CANONICAL_NAME_INDEX,
     _ensure_vector_index,
     _TEXT_INDEX_FIELDS,
     _TEXT_INDEX_NAME,
@@ -32,6 +38,7 @@ from tree.memory.rag.indexing import (
     index_entry_is_queryable,
     node_embedding_text,
     reset_embeddings,
+    retired_index_names,
 )
 from tree.memory.embedding_text import node_to_embedding_text
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
@@ -163,7 +170,10 @@ def _wire_client(collection: MagicMock) -> MagicMock:
 
 
 class TestEnsureIndexes:
-    async def test_creates_compound_indexes(self) -> None:
+    async def test_creates_only_the_text_index(self) -> None:
+        """Beanie owns every classic index (ADR-012); ``ensure_indexes``
+        creates the ``$text`` index alone."""
+
         collection = _make_collection()
         client = _wire_client(collection)
 
@@ -174,22 +184,8 @@ class TestEnsureIndexes:
             user_id=_TEST_USER_ID,
         )
 
-        created_names = {
-            call.kwargs.get("name") for call in collection.create_index.call_args_list
-        }
-
-        # Post-#019: compound indexes carry the ``user_*`` prefix and
-        # ``user_id`` as the leading key.
-        assert "user_kind_source_node" in created_names
-        assert "user_kind_target_node" in created_names
-        assert "user_kind_embedding" in created_names
-        # Verify the leading-key contract for one of them.
-        source_call = next(
-            call
-            for call in collection.create_index.call_args_list
-            if call.kwargs.get("name") == "user_kind_source_node"
-        )
-        assert source_call.args[0][0] == ("user_id", 1)
+        collection.create_index.assert_awaited_once()
+        assert collection.create_index.await_args.kwargs["name"] == _TEXT_INDEX_NAME
 
     async def test_vector_index_includes_filter_fields(self) -> None:
         """The created vector index must declare ``user_id``, ``kind``,
@@ -238,31 +234,6 @@ class TestEnsureIndexes:
             f for f in model["definition"]["fields"] if f.get("type") == "vector"
         )
         assert vector_field["numDimensions"] == 42
-
-    async def test_canonical_name_index_created(self) -> None:
-        """A non-unique, sparse compound (user_id, canonical_name) index
-        must be created."""
-
-        collection = _make_collection()
-        client = _wire_client(collection)
-
-        await ensure_indexes(
-            client,
-            "test_db",
-            embedding_model=FakeEmbeddingModel(dimensions=8),
-            user_id=_TEST_USER_ID,
-        )
-
-        canonical_call = next(
-            call
-            for call in collection.create_index.call_args_list
-            if call.kwargs.get("name") == _CANONICAL_NAME_INDEX
-        )
-        keys = canonical_call.args[0]
-        # user_id is the leading key (post-#019).
-        assert keys == [("user_id", 1), ("canonical_name", 1)]
-        assert canonical_call.kwargs.get("sparse") is True
-        assert canonical_call.kwargs.get("unique") is False
 
     async def test_text_index_covers_top_level_aliases(self) -> None:
         """The text index definition must cover both ``aliases``
@@ -455,6 +426,92 @@ class TestEnsureIndexes:
 # ---------------------------------------------------------------------------
 # _ensure_vector_index — readiness poll (#127)
 # ---------------------------------------------------------------------------
+
+
+_ALWAYS_RETIRED = {
+    "user_kind_type",
+    "kind_1",
+    "user_kind_embedding",
+    "user_type_semantic_type",
+    "user_canonical_name_index",
+}
+_GRAPH_ONLY = {"user_kind_source_node", "user_kind_target_node"}
+# The 11 classic indexes a pre-ADR-012 collection carries.
+_LEGACY_SET = (
+    _ALWAYS_RETIRED
+    | _GRAPH_ONLY
+    | {
+        "_id_",
+        "user_kind_type_subtype",
+        "user_type_name",
+        _TEXT_INDEX_NAME,
+    }
+)
+
+
+class TestIndexRetirement:
+    """ADR-012: ``ensure_indexes`` retires what the mode no longer declares."""
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_retired_names_never_overlap_the_declared_set(self, mode: str) -> None:
+        declared = {im.document["name"] for im in memory_indexes(mode)}
+
+        assert declared.isdisjoint(retired_index_names(mode))
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_search_and_id_indexes_are_never_retired(self, mode: str) -> None:
+        retired = set(retired_index_names(mode))
+
+        assert _ALWAYS_RETIRED <= retired
+        assert retired.isdisjoint({"_id_", _TEXT_INDEX_NAME, VECTOR_INDEX_NAME})
+
+    def test_graph_indexes_are_retired_in_rag_only(self) -> None:
+        assert _GRAPH_ONLY <= set(retired_index_names("rag"))
+        assert _GRAPH_ONLY.isdisjoint(retired_index_names("graphrag"))
+
+    @pytest.mark.parametrize(
+        ("mode", "dropped"),
+        [("rag", _ALWAYS_RETIRED | _GRAPH_ONLY), ("graphrag", _ALWAYS_RETIRED)],
+    )
+    async def test_drops_exactly_the_retired_names_of_a_legacy_collection(
+        self, monkeypatch, mode: str, dropped: set[str]
+    ) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", mode)
+        collection = _make_collection()
+        collection.index_information = AsyncMock(
+            return_value={name: {} for name in _LEGACY_SET}
+        )
+
+        await ensure_indexes(
+            _wire_client(collection),
+            "test_db",
+            embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
+        )
+
+        assert len(_LEGACY_SET) == 11
+        assert {c.args[0] for c in collection.drop_index.await_args_list} == dropped
+        assert collection.drop_index.await_count == len(dropped)
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    async def test_a_collection_already_on_its_set_drops_nothing(
+        self, monkeypatch, mode: str
+    ) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", mode)
+        collection = _make_collection()
+        kept = {im.document["name"] for im in memory_indexes(mode)}
+        collection.index_information = AsyncMock(
+            return_value={name: {} for name in kept | {"_id_", _TEXT_INDEX_NAME}}
+        )
+
+        await ensure_indexes(
+            _wire_client(collection),
+            "test_db",
+            embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
+        )
+
+        collection.drop_index.assert_not_awaited()
 
 
 class _ScriptedCatalogue:

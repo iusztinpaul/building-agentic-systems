@@ -17,6 +17,7 @@ from tree.entities.memory import (
     build_edge_id,
     build_node_id,
     build_rag_row_id,
+    memory_indexes,
 )
 from tree.entities.meta_state import KnowledgeGraphMetaState
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES, NODE_REGISTRY
@@ -150,30 +151,77 @@ class TestMemoryEntry:
             )
 
 
-class TestMemorySettingsIndexes:
-    """#018: the model declares two static compound indexes with
-    ``user_id`` as the leading field. The dynamic indexes
-    (kind_source_node, kind_target_node, kind_embedding, canonical_name)
-    are owned by the indexing pipeline and get their user_id prefix in #019.
-    """
+_BASE_INDEX_NAMES = {"user_kind_type_subtype", "user_type_name", "active_user"}
+_GRAPH_INDEX_NAMES = {"user_kind_source_node", "user_kind_target_node"}
 
-    def test_user_kind_type_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
 
-        target_key = [("user_id", 1), ("kind", 1), ("type", 1)]
-        assert any(
-            list(im.document.get("key", {}).items()) == target_key
-            for im in index_models
-        ), f"Expected compound index on {target_key}; got {index_models}"
+def _by_name(mode: str) -> dict[str, IndexModel]:
+    return {im.document["name"]: im for im in memory_indexes(mode)}
 
-    def test_user_type_name_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
 
-        target_key = [("user_id", 1), ("type", 1), ("name", 1)]
-        assert any(
-            list(im.document.get("key", {}).items()) == target_key
-            for im in index_models
-        ), f"Expected compound index on {target_key}; got {index_models}"
+class TestMemoryIndexes:
+    """ADR-012: the per-mode classic index set Beanie owns."""
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [
+            ("rag", _BASE_INDEX_NAMES),
+            ("graphrag", _BASE_INDEX_NAMES | _GRAPH_INDEX_NAMES),
+        ],
+    )
+    def test_each_mode_declares_exactly_its_set(
+        self, mode: str, expected: set[str]
+    ) -> None:
+        assert set(_by_name(mode)) == expected
+
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_every_compound_index_leads_with_user_id(self, mode: str) -> None:
+        for name, im in _by_name(mode).items():
+            if name == "active_user":
+                continue
+            assert next(iter(im.document["key"].items())) == ("user_id", 1), name
+
+    def test_compound_keys(self) -> None:
+        indexes = _by_name("graphrag")
+
+        assert list(indexes["user_kind_type_subtype"].document["key"].items()) == [
+            ("user_id", 1),
+            ("kind", 1),
+            ("type", 1),
+            ("subtype", 1),
+        ]
+        assert list(indexes["user_type_name"].document["key"].items()) == [
+            ("user_id", 1),
+            ("type", 1),
+            ("name", 1),
+        ]
+        assert list(indexes["user_kind_source_node"].document["key"].items()) == [
+            ("user_id", 1),
+            ("kind", 1),
+            ("source_node_id", 1),
+        ]
+        assert list(indexes["user_kind_target_node"].document["key"].items()) == [
+            ("user_id", 1),
+            ("kind", 1),
+            ("target_node_id", 1),
+        ]
+
+    def test_active_user_is_partial_on_the_active_user_flag(self) -> None:
+        active_user = _by_name("rag")["active_user"].document
+
+        assert list(active_user["key"].items()) == [("properties.is_active_user", 1)]
+        assert active_user["partialFilterExpression"] == {
+            "properties.is_active_user": True
+        }
+
+    def test_no_index_covers_the_embedding_vector(self) -> None:
+        for mode in ("rag", "graphrag"):
+            for im in memory_indexes(mode):
+                assert "embedding" not in im.document["key"]
+
+    def test_kind_carries_no_inline_index(self) -> None:
+        # ``Indexed(str)`` would make Beanie recreate ``kind_1`` on every boot.
+        assert MemoryEntry.model_fields["kind"].annotation is str
 
 
 class TestResolutionDedupFields:
@@ -808,21 +856,6 @@ class TestLegacyNodeTypeReroute:
         assert entry.target_type == NodeType.OBJECT
 
 
-class TestSubtypeIndexDeclared:
-    """The (user_id, kind, type, subtype) compound index ships in
-    #028 so MCP queries like "all object/task for this user" land
-    on an index prefix. Pinned so a future index refactor doesn't
-    silently drop it."""
-
-    def test_user_kind_type_subtype_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
-        target_key = [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)]
-        assert any(
-            list(im.document.get("key", {}).items()) == target_key
-            for im in index_models
-        ), f"Expected compound index on {target_key}; got {index_models}"
-
-
 class TestOntologyTreeExtensionsModuleApplied:
     """Phase-3 #028: importing the Tree-extensions module **mutates**
     the registry — it's the canonical example of an extension consumer
@@ -981,26 +1014,6 @@ class TestRelatedToSemanticValidator:
         msg = str(excinfo.value)
         assert "semantic_type" in msg
         assert "has" in msg
-
-
-class TestSemanticTypeIndex:
-    """The ``(user_id, type, semantic_type)`` partial index is declared
-    on the model so the indexing pipeline picks it up on boot (#029)."""
-
-    def test_user_type_semantic_type_index_declared(self) -> None:
-        index_models: list[IndexModel] = list(MemoryEntry.Settings.indexes)
-        target_key = [("user_id", 1), ("type", 1), ("semantic_type", 1)]
-        match = None
-        for im in index_models:
-            if list(im.document.get("key", {}).items()) == target_key:
-                match = im
-                break
-        assert match is not None, (
-            f"Expected partial compound index on {target_key}; got {index_models}"
-        )
-        # Partial filter must restrict to non-null semantic_type rows.
-        partial = match.document.get("partialFilterExpression")
-        assert partial == {"semantic_type": {"$type": "string"}}
 
 
 class TestStructuralHasEdgeAccepted:

@@ -14,9 +14,11 @@ from enum import StrEnum
 from typing import Any, ClassVar
 
 from beanie import Document as BeanieDocument
-from beanie import Indexed, PydanticObjectId
+from beanie import PydanticObjectId
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import IndexModel
+
+from tree.config.app_config import MemoryMode
 
 
 # --- Enums (backward-compat shims) ---
@@ -262,15 +264,73 @@ writes anything else" test.
 """
 
 
+ACTIVE_USER_FILTER: dict[str, Any] = {"properties.is_active_user": True}
+"""The predicate that marks a user's ``person:self`` node as an active user.
+
+Shared by :func:`tree.entities.users.select_active_user_ids` (the cross-tenant
+fan-out query) and the ``active_user`` partial index, so the index's
+``partialFilterExpression`` always covers the query.
+"""
+
+
+def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
+    """Every classic index of the ``memory`` collection for ``mode`` (ADR-012).
+
+    Beanie owns these; ``tree.memory.rag.indexing.ensure_indexes`` owns only the
+    ``$text`` and vector search indexes plus the retirement of the names
+    :func:`tree.memory.rag.indexing.retired_index_names` lists. A per-mode set is
+    safe because switching modes requires dropping ``memory`` (ADR-006).
+
+    * ``user_kind_type_subtype`` — every tenant-scoped ``kind``/``type`` read
+      (its prefix serves ``(user_id, kind, type)``).
+    * ``user_type_name`` — NL ``query_memory`` filters on ``{type, name}``.
+    * ``active_user`` — partial, one entry per user: the cross-tenant
+      ``select_active_user_ids`` fan-out carries no ``user_id``.
+    * ``graphrag`` only: ``user_kind_source_node`` / ``user_kind_target_node``,
+      the ``connectToField`` of the two ``$graphLookup`` passes.
+
+    Never a multikey index over ``embedding`` (~16 KB per embedded row); if the
+    backfill ever needs one, index a scalar ``embedding_pending: true`` marker.
+    """
+
+    indexes = [
+        IndexModel(
+            [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)],
+            name="user_kind_type_subtype",
+        ),
+        IndexModel(
+            [("user_id", 1), ("type", 1), ("name", 1)],
+            name="user_type_name",
+        ),
+        IndexModel(
+            [("properties.is_active_user", 1)],
+            name="active_user",
+            partialFilterExpression=ACTIVE_USER_FILTER,
+        ),
+    ]
+    if mode == "graphrag":
+        indexes += [
+            IndexModel(
+                [("user_id", 1), ("kind", 1), ("source_node_id", 1)],
+                name="user_kind_source_node",
+            ),
+            IndexModel(
+                [("user_id", 1), ("kind", 1), ("target_node_id", 1)],
+                name="user_kind_target_node",
+            ),
+        ]
+    return indexes
+
+
 class MemoryEntry(BeanieDocument):
     id: str
-    # No standalone single-key index on ``user_id``: every compound
-    # index in ``Settings.indexes`` below (and the dynamic indexes
-    # created in :mod:`tree.memory.rag.indexing`) leads with
-    # ``user_id``, so tenant-scoped queries hit the index prefix
-    # without a redundant single-key maintenance cost per row.
+    # No standalone single-key index on ``user_id``: every compound index
+    # in :func:`memory_indexes` leads with ``user_id``, so tenant-scoped
+    # queries hit the index prefix without a redundant single-key
+    # maintenance cost per row. ``kind`` is deliberately NOT ``Indexed``:
+    # Beanie would recreate ``kind_1`` on every boot (ADR-012).
     user_id: PydanticObjectId
-    kind: Indexed(str)  # type: ignore[valid-type]
+    kind: str
     # Post-#027: ``type`` is a plain string on the wire. A model
     # validator below (``_check_type_against_registry``) rejects
     # construction of node rows whose ``type`` is not in
@@ -352,10 +412,8 @@ class MemoryEntry(BeanieDocument):
     target_type: NodeType | None = None
     # #029: ``semantic_type`` discriminates the new ``related_to`` umbrella
     # edge. Required on every ``type="related_to"`` row (validated below);
-    # MUST be ``None`` on every other edge type. The compound index
-    # ``(user_id, type, semantic_type)`` declared in ``Settings.indexes``
-    # is partial-filtered on ``semantic_type``, so only ``related_to``
-    # rows pay the index cost.
+    # MUST be ``None`` on every other edge type. Not indexed: no query
+    # filters on it (ADR-012).
     semantic_type: str | None = None
     # Provenance
     sources: list[PydanticObjectId] = Field(default_factory=list)
@@ -632,38 +690,7 @@ class MemoryEntry(BeanieDocument):
 
     class Settings:
         name = MEMORY_COLLECTION
-        indexes = [
-            # user_id-prepended compound indexes for fast filtered reads.
-            # The dynamic indexes (kind_source_node, kind_target_node,
-            # kind_embedding, canonical_name) created in
-            # tree.memory.rag.indexing get user_id prepended in #019 —
-            # this declaration only covers the two static compound indexes
-            # the entry model owns directly.
-            IndexModel(
-                [("user_id", 1), ("kind", 1), ("type", 1)],
-                name="user_kind_type",
-            ),
-            IndexModel(
-                [("user_id", 1), ("type", 1), ("name", 1)],
-                name="user_type_name",
-            ),
-            # #028: filter by (type, subtype) for POLE+O — e.g. "all
-            # `object/task` for this user". The `subtype` column is
-            # sparse-by-nature (None on document/chunk and on rows
-            # written before #028), but the index still serves the
-            # explicit-subtype queries the MCP tools issue.
-            IndexModel(
-                [("user_id", 1), ("kind", 1), ("type", 1), ("subtype", 1)],
-                name="user_kind_type_subtype",
-            ),
-            # #029: partial index for the ``related_to`` umbrella edge.
-            # Filtered on ``semantic_type`` non-null so only the new
-            # umbrella rows pay the maintenance cost; queries like
-            # ``find_edges(type='related_to', semantic_type='employed_by')``
-            # land on this index prefix.
-            IndexModel(
-                [("user_id", 1), ("type", 1), ("semantic_type", 1)],
-                name="user_type_semantic_type",
-                partialFilterExpression={"semantic_type": {"$type": "string"}},
-            ),
-        ]
+        # Import-time default so the model is usable without a database;
+        # ``tree.db.init_mongodb`` rebinds it to the configured mode's set
+        # right before ``init_beanie`` (ADR-012).
+        indexes = memory_indexes("graphrag")

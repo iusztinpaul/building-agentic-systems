@@ -626,6 +626,10 @@ class ClusteringConfig(BaseModel):
     )
 
 
+MemoryMode = Literal["rag", "graphrag"]
+"""The two **Memory mode**s (ADR-006). One global setting per deployment."""
+
+
 class MemoryConfig(BaseModel):
     """The ONE memory-mode switch (ADR-006 decision 5).
 
@@ -656,7 +660,7 @@ class MemoryConfig(BaseModel):
     ``memory_clusters`` rows in both modes.
     """
 
-    mode: Literal["rag", "graphrag"] = "graphrag"
+    mode: MemoryMode = "graphrag"
     chunking: ChunkingConfig = ChunkingConfig()
     clustering: ClusteringConfig = ClusteringConfig()
 

@@ -8,7 +8,7 @@ underlying Mongo collection mocked via ``pytest-mock``).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from beanie import PydanticObjectId
 
@@ -16,8 +16,9 @@ from tree.entities.memory import (
     MemoryEntry,
     NodeType,
     build_node_id,
+    memory_indexes,
 )
-from tree.entities.users import User
+from tree.entities.users import User, select_active_user_ids
 
 
 class TestUserModel:
@@ -228,3 +229,31 @@ class TestUserExports:
 class TestUserSettings:
     async def test_collection_name_is_users(self):
         assert User.Settings.name == "users"
+
+
+class TestActiveUserIndexParity:
+    """ADR-012: the partial ``active_user`` index must cover the fan-out query."""
+
+    async def test_query_predicate_equals_the_partial_filter(self) -> None:
+        collection = MagicMock()
+        collection.find = MagicMock(return_value=_EmptyCursor())
+        database = MagicMock()
+        database.__getitem__ = MagicMock(return_value=collection)
+
+        await select_active_user_ids(database=database)
+
+        query = collection.find.call_args.args[0]
+        partial = next(
+            im.document["partialFilterExpression"]
+            for im in memory_indexes("rag")
+            if im.document["name"] == "active_user"
+        )
+        assert {k: query[k] for k in partial} == partial
+
+
+class _EmptyCursor:
+    def __aiter__(self) -> _EmptyCursor:
+        return self
+
+    async def __anext__(self) -> None:
+        raise StopAsyncIteration

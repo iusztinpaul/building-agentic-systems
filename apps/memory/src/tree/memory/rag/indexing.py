@@ -8,7 +8,8 @@ modes (ADR-006 decision 4):
    never selected: they are deliberately vector-less, so embedding them would
    pull them into ``$vectorSearch`` results and break parent-document retrieval.
 2. Ensure the text and vector search indexes exist; reconcile the vector index's
-   ``numDimensions`` against the live embedding model on every call.
+   ``numDimensions`` against the live embedding model on every call; retire the
+   classic indexes the current **Memory mode** no longer declares (ADR-012).
 
 Plus one operator-triggered inverse of (1): :func:`reset_embeddings`, the
 **Embedding reset** (ADR-009 §7), which empties exactly the vectors the backfill
@@ -34,7 +35,7 @@ from pymongo import AsyncMongoClient, UpdateOne
 
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.ontology import LLM_EXTRACTABLE_NODE_TYPES
-from tree.config.app_config import app_config
+from tree.config.app_config import MemoryMode, app_config
 from tree.memory.embedding_text import embed_texts, entity_embedding_text
 from tree.memory.rag.embedding import child_embedding_text
 from tree.models.base import BaseEmbeddingModel
@@ -45,7 +46,6 @@ logger = logging.getLogger(__name__)
 # Index names (shared with query module).
 _TEXT_INDEX_NAME = "text_index"
 VECTOR_INDEX_NAME = "vector_index"
-_CANONICAL_NAME_INDEX = "user_canonical_name_index"
 
 # How long ``_ensure_vector_index`` waits for a freshly created index to answer
 # queries, and how long it sleeps between two catalogue reads. Constants, not
@@ -55,15 +55,37 @@ _CANONICAL_NAME_INDEX = "user_canonical_name_index"
 _VECTOR_INDEX_READY_TIMEOUT_S = 300
 _VECTOR_INDEX_POLL_S = 5
 
-# Legacy compound index names that the ``user_*``-prefixed versions
-# replace. The reconcile loop in :func:`ensure_indexes` drops these on
-# first run so callers don't carry two parallel sets of indexes.
-_LEGACY_COMPOUND_INDEX_NAMES: tuple[str, ...] = (
+# Classic indexes no mode declares any more (ADR-012): the pre-#019 names that
+# lacked the ``user_id`` prefix, plus the ones retired by the index trim.
+# ``ensure_indexes`` drops them idempotently, so no migration is ever needed.
+_RETIRED_INDEX_NAMES: tuple[str, ...] = (
     "kind_source_node",
     "kind_target_node",
     "kind_embedding",
     "canonical_name_index",
+    "user_kind_type",
+    "kind_1",
+    "user_kind_embedding",
+    "user_type_semantic_type",
+    "user_canonical_name_index",
 )
+# Graph-only indexes ``memory_indexes`` declares in ``graphrag`` alone.
+_GRAPH_ONLY_INDEX_NAMES: tuple[str, ...] = (
+    "user_kind_source_node",
+    "user_kind_target_node",
+)
+
+
+def retired_index_names(mode: MemoryMode) -> tuple[str, ...]:
+    """The classic index names ``mode`` must NOT carry (ADR-012).
+
+    Disjoint from ``memory_indexes(mode)`` by contract — a name in both would be
+    dropped by every indexing run and recreated by every boot.
+    """
+
+    if mode == "rag":
+        return _RETIRED_INDEX_NAMES + _GRAPH_ONLY_INDEX_NAMES
+    return _RETIRED_INDEX_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -354,16 +376,14 @@ async def ensure_indexes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId,
 ) -> None:
-    """Create classic and search indexes on the memory collection.
+    """Ensure the text and vector search indexes; retire stale classic indexes.
 
-    ``user_id`` is the **leading key** of every compound index — that
-    pattern matches every tenant-scoped read in this codebase, so a
-    ``find({"user_id": X, ...})`` lookup hits the index prefix without a
-    full collection scan. The actual indexes themselves are global to the
-    collection; ``user_id`` is the first key, not a separate index per
-    tenant. ``user_id`` is passed (rather than read from settings) so the
-    parameter shape mirrors the other pipeline entry points and tests can
-    drive index creation deterministically.
+    The classic indexes are NOT created here: Beanie creates the mode's set
+    (:func:`tree.entities.memory.memory_indexes`) on every ``init_mongodb``.
+    This function owns only what Beanie cannot express — the ``$text`` index
+    and the mongot vector index — plus the retirement of every name in
+    :func:`retired_index_names` for the configured mode (ADR-012). ``user_id``
+    is passed so the signature mirrors the other pipeline entry points.
 
     Reads ``embedding_model.dimensions`` ONCE and uses it to drive the
     vector-search index's ``numDimensions``. If a ``vector_index`` already
@@ -371,13 +391,12 @@ async def ensure_indexes(
     and drops + recreates it.
 
     Idempotent: every step inspects live state and skips when the desired
-    configuration is already in place. Legacy compound indexes
-    (``kind_source_node`` etc.) are dropped on first run.
+    configuration is already in place; a retired index is dropped once.
     """
 
     # ``user_id`` is bound by the caller; ``ensure_indexes`` is parameterised
     # on it so the signature mirrors the rest of the pipeline. The actual
-    # compound indexes are global to the collection (one index covers every
+    # indexes are global to the collection (one index covers every
     # tenant) — the parameter exists for shape consistency and to surface a
     # ``TypeError`` when a caller forgets it. We log it here so the operator
     # can correlate an index-reconcile run with the tenant that triggered it.
@@ -396,10 +415,10 @@ async def ensure_indexes(
     # under us mid-call.
     target_dimensions = embedding_model.dimensions
 
-    # --- Drop legacy non-tenant-prefixed compound indexes (idempotent) ---
+    # --- Retire classic indexes this mode no longer declares (idempotent) ---
     await _drop_legacy_compound_indexes(collection)
 
-    # --- Classic indexes ---
+    # --- Text index ---
 
     # No readiness poll here, unlike the vector index below.
     # create_index is synchronous: the standard $text index is built by mongod
@@ -411,64 +430,26 @@ async def ensure_indexes(
     )
     logger.info("Text index '%s' ensured on %s", _TEXT_INDEX_NAME, MEMORY_COLLECTION)
 
-    # Compound indexes for common query patterns. Every key starts with
-    # ``user_id`` so tenant-scoped reads hit the index prefix.
-    await collection.create_index(
-        [("user_id", 1), ("kind", 1), ("source_node_id", 1)],
-        name="user_kind_source_node",
-    )
-    await collection.create_index(
-        [("user_id", 1), ("kind", 1), ("target_node_id", 1)],
-        name="user_kind_target_node",
-    )
-    await collection.create_index(
-        [("user_id", 1), ("kind", 1), ("embedding", 1)],
-        name="user_kind_embedding",
-    )
-    # Non-unique, sparse index on (user_id, canonical_name) — nodes share
-    # canonicals (alias families collapse onto the same canonical) and
-    # edges have ``canonical_name=None``, so sparse + non-unique is the
-    # right shape for soft-join lookups.
-    await collection.create_index(
-        [("user_id", 1), ("canonical_name", 1)],
-        name=_CANONICAL_NAME_INDEX,
-        sparse=True,
-        unique=False,
-    )
-    # #029: partial index for the ``related_to`` umbrella edge.
-    # Filter ``semantic_type`` non-null so only ``related_to`` rows
-    # carry the index cost. Idempotent on re-create. Also declared on
-    # :class:`tree.entities.memory.MemoryEntry`; the
-    # dynamic create here keeps the indexing-pipeline run-path
-    # authoritative (it's the surface CI/integration tests assert on).
-    # ``$ne: null`` is not a valid partial-filter expression in
-    # MongoDB; ``$type: "string"`` is the supported equivalent (every
-    # ``semantic_type`` value is a string by validator contract).
-    await collection.create_index(
-        [("user_id", 1), ("type", 1), ("semantic_type", 1)],
-        name="user_type_semantic_type",
-        partialFilterExpression={"semantic_type": {"$type": "string"}},
-    )
-    logger.info("Compound indexes ensured on %s", MEMORY_COLLECTION)
-
     # --- Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)
 
 
 async def _drop_legacy_compound_indexes(collection: Any) -> None:
-    """Drop any pre-#019 compound indexes that lacked the ``user_id`` prefix.
+    """Drop every classic index :func:`retired_index_names` lists for this mode.
 
-    Safe to call repeatedly: each drop is wrapped so a missing index is a
-    no-op, and the function only targets the known legacy names.
+    Retirement is lazy (ADR-012): only ``ensure_indexes`` calls this, so a
+    stale index costs writes until the next indexing run. Safe to call
+    repeatedly: it only targets the known names, and each drop is wrapped so
+    a failure is retried on the next run.
     """
 
     try:
         existing = await collection.index_information()
     except Exception:  # noqa: BLE001 — never block startup on this
-        logger.debug("Could not list classic indexes; skipping legacy drop")
+        logger.warning("Could not list classic indexes; skipping legacy drop")
         return
 
-    for name in _LEGACY_COMPOUND_INDEX_NAMES:
+    for name in retired_index_names(app_config.memory.mode):
         if name in existing:
             try:
                 await collection.drop_index(name)

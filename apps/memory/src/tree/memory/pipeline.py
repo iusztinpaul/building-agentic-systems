@@ -2299,8 +2299,9 @@ async def memory_indexing(
     ``user_id`` is required and threaded through both tasks. ``embed_nodes``
     only processes rows belonging to the run's tenant — and only the rows that
     are supposed to carry a vector (child chunks + entity nodes, ADR-006
-    decision 4); ``ensure_indexes`` re-asserts the global compound indexes whose
-    leading key is ``user_id``.
+    decision 4); ``ensure_indexes`` ensures the text + vector search indexes and
+    retires the classic indexes this mode no longer declares (ADR-012) — the
+    classic ones themselves are created by ``init_mongodb``.
 
     Returns the number of rows embedded — the count the flow already computes
     for its final log line — so ``offline_pipeline``'s indexing phase can report

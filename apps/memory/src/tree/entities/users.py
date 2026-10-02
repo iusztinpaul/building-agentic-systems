@@ -33,6 +33,7 @@ from beanie import Indexed, Insert, PydanticObjectId, after_event
 from pydantic import Field
 
 from tree.entities.memory import (
+    ACTIVE_USER_FILTER,
     MEMORY_COLLECTION,
     MemoryEntry,
     NodeType,
@@ -168,7 +169,8 @@ async def select_active_user_ids(
             "kind": "node",
             "type": NodeType.PERSON.value,
             "name": "self",
-            "properties.is_active_user": True,
+            # Served by the partial ``active_user`` index (ADR-012).
+            **ACTIVE_USER_FILTER,
         },
         {"user_id": 1},
     )
