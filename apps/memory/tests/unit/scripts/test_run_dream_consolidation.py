@@ -142,3 +142,12 @@ class TestRunDreamConsolidationIgnoredOverrides:
 
         assert caplog.records == []
         mock_prefect_client.create_flow_run_from_deployment.assert_awaited_once()
+
+
+class TestRunDreamConsolidationDeploymentName:
+    def test_it_targets_a_deployment_the_orchestrator_serves(self, cli_module) -> None:
+        # Regression (task 170): the constant still named the pre-``c597cf4``
+        # ``dream-consolidation-etl`` deployment, so the make target 404'd.
+        from tree.orchestrator import deployment_full_names
+
+        assert cli_module.DEPLOYMENT_NAME in deployment_full_names()

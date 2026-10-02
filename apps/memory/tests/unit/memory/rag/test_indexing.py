@@ -25,6 +25,7 @@ from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
     _backfill_filter,
     _build_vector_index_definition,
+    _reset_filter,
     _ensure_vector_index,
     _TEXT_INDEX_FIELDS,
     _TEXT_INDEX_NAME,
@@ -435,11 +436,15 @@ _ALWAYS_RETIRED = {
     "user_type_semantic_type",
     "user_canonical_name_index",
 }
-_GRAPH_ONLY = {"user_kind_source_node", "user_kind_target_node"}
-# The 11 classic indexes a pre-ADR-012 collection carries.
+_NODE_ONLY = {"user_kind_source_node", "user_kind_target_node"}
+# Everything ``graphrag`` declares and ``rag`` must not carry (task 170 added
+# ``active_user``: rag has no ``person:self`` row).
+_GRAPH_ONLY = _NODE_ONLY | {"active_user"}
+# The 11 classic indexes a pre-ADR-012 collection carries (``active_user`` did
+# not exist yet).
 _LEGACY_SET = (
     _ALWAYS_RETIRED
-    | _GRAPH_ONLY
+    | _NODE_ONLY
     | {
         "_id_",
         "user_kind_type_subtype",
@@ -447,6 +452,14 @@ _LEGACY_SET = (
         _TEXT_INDEX_NAME,
     }
 )
+# What ``init_mongodb`` + ``ensure_indexes`` leave on a graphrag collection
+# after ADR-012 (task 169): the 5 graphrag classic names + ``_id_`` + ``$text``.
+_POST_169_GRAPHRAG_SET = {
+    "_id_",
+    "user_kind_type_subtype",
+    "user_type_name",
+    _TEXT_INDEX_NAME,
+} | _GRAPH_ONLY
 
 
 class TestIndexRetirement:
@@ -471,7 +484,7 @@ class TestIndexRetirement:
 
     @pytest.mark.parametrize(
         ("mode", "dropped"),
-        [("rag", _ALWAYS_RETIRED | _GRAPH_ONLY), ("graphrag", _ALWAYS_RETIRED)],
+        [("rag", _ALWAYS_RETIRED | _NODE_ONLY), ("graphrag", _ALWAYS_RETIRED)],
     )
     async def test_drops_exactly_the_retired_names_of_a_legacy_collection(
         self, monkeypatch, mode: str, dropped: set[str]
@@ -492,6 +505,29 @@ class TestIndexRetirement:
         assert len(_LEGACY_SET) == 11
         assert {c.args[0] for c in collection.drop_index.await_args_list} == dropped
         assert collection.drop_index.await_count == len(dropped)
+
+    async def test_rag_on_a_post_169_graphrag_collection_drops_the_graph_names(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "rag")
+        collection = _make_collection()
+        collection.index_information = AsyncMock(
+            return_value={name: {} for name in _POST_169_GRAPHRAG_SET}
+        )
+
+        await ensure_indexes(
+            _wire_client(collection),
+            "test_db",
+            embedding_model=FakeEmbeddingModel(dimensions=8),
+            user_id=_TEST_USER_ID,
+        )
+
+        assert {c.args[0] for c in collection.drop_index.await_args_list} == {
+            "user_kind_source_node",
+            "user_kind_target_node",
+            "active_user",
+        }
+        assert collection.drop_index.await_count == 3
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     async def test_a_collection_already_on_its_set_drops_nothing(
@@ -709,24 +745,45 @@ class _SpyEmbeddingModel(BaseEmbeddingModel):
         return [[0.1] * self._dimensions for _ in texts]
 
 
+_CHILD_BRANCH = {"type": "chunk", "subtype": "child"}
+
+
 class TestBackfillSelection:
-    """ADR-006 decision 4: the backfill embeds child chunks + entity nodes ONLY.
+    """ADR-006 decision 4: the backfill embeds child chunks (+ entities in graphrag).
 
     The rule lives in the QUERY, so these assert on the filter the function
-    issues — parents and documents are never fetched, let alone embedded.
+    issues — parents and documents are never fetched, let alone embedded. The
+    **Embedding reset** shares the same ``$or`` per mode (reset ⊆ backfill).
     """
 
-    def test_filter_is_scoped_to_the_tenant_and_to_unembedded_rows(self) -> None:
+    @pytest.mark.parametrize("mode", ["rag", "graphrag"])
+    def test_filter_is_scoped_to_the_tenant_and_to_unembedded_rows(
+        self, monkeypatch, mode: str
+    ) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", mode)
+
         query = _backfill_filter(_TEST_USER_ID)
 
         assert query["user_id"] == _TEST_USER_ID
         assert query["kind"] == "node"
         assert query["embedding"] == {"$in": [[], None]}
 
-    def test_filter_selects_child_chunks_and_llm_extractable_entities(self) -> None:
-        child_branch, entity_branch = _backfill_filter(_TEST_USER_ID)["$or"]
+    @pytest.mark.parametrize("build_filter", [_backfill_filter, _reset_filter])
+    def test_rag_selects_child_chunks_only(self, monkeypatch, build_filter) -> None:
+        # A stray ``person:self`` row in an older rag database is never embedded.
+        monkeypatch.setattr(app_config.memory, "mode", "rag")
 
-        assert child_branch == {"type": "chunk", "subtype": "child"}
+        assert build_filter(_TEST_USER_ID)["$or"] == [_CHILD_BRANCH]
+
+    @pytest.mark.parametrize("build_filter", [_backfill_filter, _reset_filter])
+    def test_graphrag_selects_child_chunks_and_llm_extractable_entities(
+        self, monkeypatch, build_filter
+    ) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
+
+        child_branch, entity_branch = build_filter(_TEST_USER_ID)["$or"]
+
+        assert child_branch == _CHILD_BRANCH
         entity_types = entity_branch["type"]["$in"]
         assert "person" in entity_types
         # Structural rows are not LLM-extractable, so no branch can ever match
@@ -834,11 +891,12 @@ class TestEmbedNodesIsBackfillOnly:
         assert len(spy_model.calls[0]) == 1
 
     async def test_embeds_the_child_and_the_entity_of_a_mixed_fixture(
-        self, mocker
+        self, mocker, monkeypatch
     ) -> None:
         """A fixture with one unembedded child, parent, document and person:
-        the child and the person are embedded, on their own texts."""
+        the child and the person are embedded, on their own texts (graphrag)."""
 
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
         child = {
             "_id": "u:chunk:a#parent-0#child-0",
             "kind": "node",
@@ -1126,6 +1184,14 @@ async def _seed_user_with_six_embedded_rows(user_id: PydanticObjectId) -> None:
 
 
 class TestResetEmbeddings:
+    """Live-Mongo reset tests over a graphrag fixture (children + entities)."""
+
+    @pytest.fixture(autouse=True)
+    def _graphrag_mode(self, monkeypatch) -> None:
+        # The eligibility ``$or`` is read per mode at call time; the 6-row
+        # fixture counts the two people and the preference, graphrag rows.
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
+
     async def test_resets_only_this_users_embedded_rows(
         self, reset_client, tenant
     ) -> None:

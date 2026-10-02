@@ -642,9 +642,9 @@ class MemoryConfig(BaseModel):
       extraction over parent chunks, resolution, dedup, ``mentions`` edges and
       graph expansion at retrieval. (What Chapter 8 adds.)
 
-    Defaults to ``graphrag`` so an unchanged checkout behaves exactly as it did
-    before ADR-006. Read ONCE at flow entry / MCP-server boot / CLI start —
-    never per request. Operators flip it without editing YAML through the
+    ``configs/default.yaml`` ships ``rag`` (task 170); the code default — used
+    only when the ``memory`` section is absent — stays ``graphrag``. Read ONCE
+    at flow entry / MCP-server boot / CLI start — never per request. Operators flip it without editing YAML through the
     existing override hatch (``TREE_MEMORY__MODE=rag``, see
     :func:`_apply_env_overrides`); an unknown value is a hard
     ``ValidationError`` at load time, never a silent fallback.

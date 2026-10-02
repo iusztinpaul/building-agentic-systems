@@ -4,9 +4,10 @@ Post-ingestion steps that prepare the collection for querying, in BOTH memory
 modes (ADR-006 decision 4):
 
 1. Backfill embeddings for the rows that are SUPPOSED to carry one and don't —
-   **Child chunk**s and LLM-extractable entity nodes. Parents and documents are
-   never selected: they are deliberately vector-less, so embedding them would
-   pull them into ``$vectorSearch`` results and break parent-document retrieval.
+   **Child chunk**s always; LLM-extractable entity nodes in ``graphrag``.
+   Parents and documents are never selected: they are deliberately vector-less,
+   so embedding them would pull them into ``$vectorSearch`` results and break
+   parent-document retrieval.
 2. Ensure the text and vector search indexes exist; reconcile the vector index's
    ``numDimensions`` against the live embedding model on every call; retire the
    classic indexes the current **Memory mode** no longer declares (ADR-012).
@@ -69,10 +70,12 @@ _RETIRED_INDEX_NAMES: tuple[str, ...] = (
     "user_type_semantic_type",
     "user_canonical_name_index",
 )
-# Graph-only indexes ``memory_indexes`` declares in ``graphrag`` alone.
+# Graph-only indexes ``memory_indexes`` declares in ``graphrag`` alone: the two
+# ``$graphLookup`` keys, and ``active_user`` (``rag`` has no ``person:self`` row).
 _GRAPH_ONLY_INDEX_NAMES: tuple[str, ...] = (
     "user_kind_source_node",
     "user_kind_target_node",
+    "active_user",
 )
 
 
@@ -109,9 +112,9 @@ async def embed_nodes(
       ``properties.title`` / ``properties.heading_path`` — no join back to the
       document, so the text is byte-identical to the one the worker's
       ``embed_children`` task produced; or
-    * an LLM-extractable entity node (``person``, ``organization``, ...),
-      embedded on its generic node-text — EXCEPT ``preference`` and ``fact``,
-      which embed their ``properties.statement`` / ``properties.object``, the
+    * in ``graphrag`` only, an LLM-extractable entity node (``person``,
+      ``organization``, ...), embedded on its generic node-text — EXCEPT
+      ``preference`` and ``fact``, which embed their ``properties.statement`` / ``properties.object``, the
       same text the inline writer uses, so supersession keeps comparing
       statement to statement after an **Embedding reset**. The choice is
       :func:`tree.memory.embedding_text.entity_embedding_text`'s, not this
@@ -148,18 +151,24 @@ async def embed_nodes(
     return embedded_count
 
 
-def _embeddable_row_clause() -> list[dict[str, Any]]:
-    """The ``$or`` naming the rows that are SUPPOSED to carry a vector.
+def _embeddable_row_clause(mode: MemoryMode) -> list[dict[str, Any]]:
+    """The ``$or`` naming the rows that are SUPPOSED to carry a vector in ``mode``.
+
+    **Child chunk**s always; LLM-extractable entity nodes in ``graphrag`` only,
+    so in ``rag`` the backfill and the **Embedding reset** can only ever touch
+    children (ADR-006 §1 — a stray ``person:self`` row is never embedded).
 
     Shared verbatim by :func:`_backfill_filter` and :func:`_reset_filter`, so a
     row the **Embedding reset** empties is BY CONSTRUCTION a row the backfill
     refills — the reset can never strip a vector nothing rebuilds.
     """
 
-    return [
-        {"type": "chunk", "subtype": "child"},
-        {"type": {"$in": sorted(t.value for t in LLM_EXTRACTABLE_NODE_TYPES)}},
-    ]
+    clause: list[dict[str, Any]] = [{"type": "chunk", "subtype": "child"}]
+    if mode == "graphrag":
+        clause.append(
+            {"type": {"$in": sorted(t.value for t in LLM_EXTRACTABLE_NODE_TYPES)}}
+        )
+    return clause
 
 
 def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
@@ -169,7 +178,7 @@ def _backfill_filter(user_id: PydanticObjectId) -> dict[str, Any]:
         "user_id": user_id,
         "kind": "node",
         "embedding": {"$in": [[], None]},
-        "$or": _embeddable_row_clause(),
+        "$or": _embeddable_row_clause(app_config.memory.mode),
     }
 
 
@@ -253,7 +262,7 @@ def _reset_filter(user_id: PydanticObjectId) -> dict[str, Any]:
         "user_id": user_id,
         "kind": "node",
         "embedding": {"$exists": True, "$nin": [[], None]},
-        "$or": _embeddable_row_clause(),
+        "$or": _embeddable_row_clause(app_config.memory.mode),
     }
 
 

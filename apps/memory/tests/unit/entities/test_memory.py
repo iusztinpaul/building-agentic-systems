@@ -5,6 +5,7 @@ from beanie import PydanticObjectId
 from pydantic import ValidationError
 from pymongo import IndexModel
 
+from tree.config.app_config import app_config
 from tree.db import ALL_DOCUMENT_MODELS
 from tree.entities.memory import (
     MEMORY_COLLECTION,
@@ -151,8 +152,8 @@ class TestMemoryEntry:
             )
 
 
-_BASE_INDEX_NAMES = {"user_kind_type_subtype", "user_type_name", "active_user"}
-_GRAPH_INDEX_NAMES = {"user_kind_source_node", "user_kind_target_node"}
+_BASE_INDEX_NAMES = {"user_kind_type_subtype", "user_type_name"}
+_GRAPH_INDEX_NAMES = {"active_user", "user_kind_source_node", "user_kind_target_node"}
 
 
 def _by_name(mode: str) -> dict[str, IndexModel]:
@@ -207,7 +208,7 @@ class TestMemoryIndexes:
         ]
 
     def test_active_user_is_partial_on_the_active_user_flag(self) -> None:
-        active_user = _by_name("rag")["active_user"].document
+        active_user = _by_name("graphrag")["active_user"].document
 
         assert list(active_user["key"].items()) == [("properties.is_active_user", 1)]
         assert active_user["partialFilterExpression"] == {
@@ -218,6 +219,13 @@ class TestMemoryIndexes:
         for mode in ("rag", "graphrag"):
             for im in memory_indexes(mode):
                 assert "embedding" not in im.document["key"]
+
+    def test_settings_indexes_follow_the_configured_mode(self) -> None:
+        # Deliberately NOT monkeypatched: the import-time binding is frozen when
+        # the module loads, so it can only be compared to the configured mode.
+        assert {im.document["name"] for im in MemoryEntry.Settings.indexes} == set(
+            _by_name(app_config.memory.mode)
+        )
 
     def test_kind_carries_no_inline_index(self) -> None:
         # ``Indexed(str)`` would make Beanie recreate ``kind_1`` on every boot.

@@ -2141,9 +2141,12 @@ class TestFlowEmbeddingModelSplit:
     """
 
     @pytest.fixture
-    def stubbed_graph_stages(self, mocker) -> dict[str, Any]:
+    def stubbed_graph_stages(self, mocker, monkeypatch) -> dict[str, Any]:
         """Mock every stage of the worker body except the model wiring."""
 
+        # The worker reloads the config at flow entry, so pin via the env var:
+        # these are graph-stage assertions and the YAML default is ``rag``.
+        monkeypatch.setenv("TREE_MEMORY__MODE", "graphrag")
         resolution_model = MagicMock(spec=BaseEmbeddingModel, name="resolution_model")
         search_model = MagicMock(spec=BaseEmbeddingModel, name="search_model")
         mocker.patch(

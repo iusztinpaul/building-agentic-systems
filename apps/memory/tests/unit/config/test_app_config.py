@@ -569,13 +569,15 @@ class TestMemoryModeConfig:
 
         assert config.memory.mode == "graphrag"
 
-    def test_memory_mode_is_graphrag_in_default_yaml(self):
-        """The real, human-tuned ``configs/default.yaml`` ships the graph mode,
-        so an unchanged checkout behaves exactly as before ADR-006."""
+    def test_memory_mode_is_rag_in_default_yaml(self, monkeypatch):
+        """The real, human-tuned ``configs/default.yaml`` ships ``rag`` (task 170);
+        the code default for an absent section stays ``graphrag`` (below)."""
+
+        monkeypatch.delenv("TREE_MEMORY__MODE", raising=False)
 
         config = load_app_config(_DEFAULT_CONFIG_PATH)
 
-        assert config.memory.mode == "graphrag"
+        assert config.memory.mode == "rag"
 
     def test_memory_mode_defaults_to_graphrag_when_section_absent(self, tmp_path):
         custom = tmp_path / "no_memory.yaml"

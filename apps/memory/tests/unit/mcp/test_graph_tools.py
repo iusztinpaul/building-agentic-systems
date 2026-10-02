@@ -868,7 +868,7 @@ async def test_blank_query_is_invalid_input(
 ) -> None:
     """graphrag's readers reject a blank query exactly like rag's (#126 QA).
 
-    ``graphrag`` is the DEFAULT mode, so without this guard the most common
+    ``graphrag`` was the DEFAULT mode, so without this guard the most common
     server answered a whitespace query with a real (and meaningless) search
     while the rag server answered the envelope — one tool name, two behaviours.
     ``visualize_memory_graph`` is deliberately NOT guarded: an empty query

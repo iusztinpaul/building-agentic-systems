@@ -16,7 +16,7 @@ Nodes use `_id = "{user_id}:type:name"`; edges use `_id = "source|type|target"` 
 
 ## Memory modes
 
-ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), default `graphrag`, overridable per process with `TREE_MEMORY__MODE=rag|graphrag` — decides how much of the memory half runs (ADR-006). It is read ONCE at flow entry, at MCP-server boot and at CLI start; never per request.
+ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), default `rag`, overridable per process with `TREE_MEMORY__MODE=rag|graphrag` — decides how much of the memory half runs (ADR-006). It is read ONCE at flow entry, at MCP-server boot and at CLI start; never per request.
 
 | | `rag` | `graphrag` |
 |---|---|---|
@@ -135,7 +135,8 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, 
 - `online-pipeline`, `offline-pipeline` (the two end-to-end flows in `tree/online.py` /
   `tree/offline.py`; `offline-pipeline` also carries the [nightly cron](#offline--selecting-sources))
 - `dream-consolidation-all-users` (the nightly incremental dedup sweep across every active
-  user, on its own cron — `dream.cron`, `0 4 * * *` UTC)
+  user, on its own cron — `dream.cron`, `0 4 * * *` UTC; a no-op in `rag` mode, which has
+  no entity nodes to dedup)
 
 The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) and the
 indexing step (`memory_indexing` — embeddings backfill, search indexes) are still FLOWS, but

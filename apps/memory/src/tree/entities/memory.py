@@ -18,7 +18,7 @@ from beanie import PydanticObjectId
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import IndexModel
 
-from tree.config.app_config import MemoryMode
+from tree.config.app_config import MemoryMode, app_config
 
 
 # --- Enums (backward-compat shims) ---
@@ -265,7 +265,7 @@ writes anything else" test.
 
 
 ACTIVE_USER_FILTER: dict[str, Any] = {"properties.is_active_user": True}
-"""The predicate that marks a user's ``person:self`` node as an active user.
+"""The predicate that marks a user's ``person:self`` node as an active user (graphrag).
 
 Shared by :func:`tree.entities.users.select_active_user_ids` (the cross-tenant
 fan-out query) and the ``active_user`` partial index, so the index's
@@ -284,8 +284,9 @@ def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
     * ``user_kind_type_subtype`` — every tenant-scoped ``kind``/``type`` read
       (its prefix serves ``(user_id, kind, type)``).
     * ``user_type_name`` — NL ``query_memory`` filters on ``{type, name}``.
-    * ``active_user`` — partial, one entry per user: the cross-tenant
-      ``select_active_user_ids`` fan-out carries no ``user_id``.
+    * ``active_user`` — graphrag only: partial, one entry per user; the
+      cross-tenant ``select_active_user_ids`` fan-out carries no ``user_id``. In
+      ``rag`` there is no ``person:self`` row — the fan-out reads ``users``.
     * ``graphrag`` only: ``user_kind_source_node`` / ``user_kind_target_node``,
       the ``connectToField`` of the two ``$graphLookup`` passes.
 
@@ -302,14 +303,14 @@ def memory_indexes(mode: MemoryMode) -> list[IndexModel]:
             [("user_id", 1), ("type", 1), ("name", 1)],
             name="user_type_name",
         ),
-        IndexModel(
-            [("properties.is_active_user", 1)],
-            name="active_user",
-            partialFilterExpression=ACTIVE_USER_FILTER,
-        ),
     ]
     if mode == "graphrag":
         indexes += [
+            IndexModel(
+                [("properties.is_active_user", 1)],
+                name="active_user",
+                partialFilterExpression=ACTIVE_USER_FILTER,
+            ),
             IndexModel(
                 [("user_id", 1), ("kind", 1), ("source_node_id", 1)],
                 name="user_kind_source_node",
@@ -690,7 +691,8 @@ class MemoryEntry(BeanieDocument):
 
     class Settings:
         name = MEMORY_COLLECTION
-        # Import-time default so the model is usable without a database;
-        # ``tree.db.init_mongodb`` rebinds it to the configured mode's set
-        # right before ``init_beanie`` (ADR-012).
-        indexes = memory_indexes("graphrag")
+        # Import time binds the configured mode's set, so the model never
+        # advertises another mode's indexes; ``tree.db.init_mongodb`` re-binds
+        # it right before ``init_beanie`` (the authoritative bind), honouring a
+        # mode changed after import (ADR-012).
+        indexes = memory_indexes(app_config.memory.mode)

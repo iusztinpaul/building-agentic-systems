@@ -1,6 +1,6 @@
 # ADR-006: Modular Memory — Vanilla RAG Mode and GraphRAG Mode over One `memory` Collection
 
-- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes)
+- **Status:** Accepted — §8 layout extended and §5 tool sets amended by [007](007_embedding_clusters_and_explicit_offline_phases.md) (`clustering/`, `visualize/`; `visualize_memory_embeddings` in both modes) — §3 amended and §5 YAML default flipped to `rag` by task 170 (`person:self` graphrag-only)
 - **Date:** 2026-09-05
 - **Deciders:** Paul (project owner)
 - **Context references:**
@@ -87,6 +87,10 @@ Eight related choices, one design:
    between sibling parents). `mentions` (document→person) and `referenced` stay graphrag-only.
    In rag the collection holds node rows only; `parent_id` carries the hierarchy and is
    present in both modes so chunk rows are byte-identical across modes.
+   The `person:self` seed node (ADR-001 §3) is a graph row too: `User.after_insert`
+   writes it only in `graphrag`; in `rag` the `users` collection is the tenant list for the nightly
+   fan-outs and the dream deployment no-ops. An existing rag database keeps its stray self row until the
+   operator deletes it (`db.memory.deleteOne({_id: "<user_id>:person:self"})`) or drops `memory`.
 
 4. **Embeddings: children always; entities only in graphrag; parents/documents/edges never.**
    Children embed their **Contextual header** text (`"{title}\n{heading path}\n\n{content}"`,
@@ -100,7 +104,7 @@ Eight related choices, one design:
    extracts entities over PARENT chunks (one call per parent).
 
 5. **One switch: `memory.mode: rag | graphrag`** (`AppConfig.memory`, YAML default
-   `graphrag` so an unchanged checkout behaves as before; env override `TREE_MEMORY__MODE`
+   `rag` since task 170 — the code default for an absent section stays `graphrag`; env override `TREE_MEMORY__MODE`
    through the existing hatch). The pipeline reads it once at flow entry, the MCP server once
    at import, the CLI once at start. MCP tool sets: both modes register `search_memory`,
    `ingest_url`, `ingest_file`, `ingest_conversation`, `search_web`, `scrape_web`; graphrag

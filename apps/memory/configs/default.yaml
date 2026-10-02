@@ -14,7 +14,7 @@
 #              (What Chapter 8 adds.)
 
 memory:
-  mode: graphrag
+  mode: rag
   # Two-level chunking (ADR-006 §6). Sizes are tiktoken `cl100k_base` TOKENS.
   #   strategy — the same splitter at both levels:
   #     recursive     markdown headings -> paragraphs -> sentences -> tokens,

@@ -772,6 +772,9 @@ async def dream_consolidation(
     each per-user dream nests under the parent's trace; ``None`` (direct trigger)
     starts a fresh trace. The sweep task span nests under this trace.
 
+    Mode: carries no ``memory.mode`` gate of its own — it is reached only through
+    :func:`dream_consolidation_all_users`, which skips the run in ``rag``.
+
     Returns:
         A :class:`DreamReport` describing the run.
     """
@@ -989,6 +992,10 @@ async def dream_consolidation_all_users() -> FanOutStats:
 
     * Skips the entire run when ``app_config.dream.enabled`` is False (zero
       per-user dreams, zero DB reads beyond the gate).
+    * Skips the entire run in ``rag`` Memory mode, before connecting to Mongo:
+      ``rag`` has no entity nodes to consolidate (ADR-006). This is the ONE
+      gate — the per-user :func:`dream_consolidation` is reached only through
+      this parent flow.
     * Propagates ``app_config.dream.dry_run`` to every per-user run.
     * Isolates failures: one user's exception is logged and recorded; the
       remaining users still run (see :func:`_fan_out_dreams`).
@@ -996,12 +1003,21 @@ async def dream_consolidation_all_users() -> FanOutStats:
 
     log = _get_run_logger()
     configure_opik()
-    dream_cfg = _live_app_config().dream
+    app_cfg = _live_app_config()
+    dream_cfg = app_cfg.dream
 
     if not dream_cfg.enabled:
         log.info(
             "dream_consolidation_all_users: disabled via "
             "app_config.dream.enabled=False — zero per-user dreams"
+        )
+        return FanOutStats(enabled=False)
+
+    if app_cfg.memory.mode != "graphrag":
+        log.info(
+            "dream_consolidation_all_users: skipped — memory.mode=%s has no "
+            "entity nodes to consolidate (ADR-006)",
+            app_cfg.memory.mode,
         )
         return FanOutStats(enabled=False)
 

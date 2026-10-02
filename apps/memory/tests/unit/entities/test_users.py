@@ -7,11 +7,14 @@ underlying Mongo collection mocked via ``pytest-mock``).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from beanie import PydanticObjectId
 
+from tree.config.app_config import app_config
 from tree.entities.memory import (
     MemoryEntry,
     NodeType,
@@ -83,12 +86,18 @@ class TestBuildSelfPersonId:
 
 
 class TestAfterInsertHook:
-    """Verify the payload the hook upserts into ``memory``.
+    """Verify the payload the hook upserts into ``memory`` in ``graphrag``.
 
     We bypass Beanie's real pymongo collection by patching
     ``MemoryEntry.get_pymongo_collection`` to return an ``AsyncMock``
-    and inspect the ``update_one`` call's arguments.
+    and inspect the ``update_one`` call's arguments. The payload tests pin
+    ``graphrag`` (the only mode that writes the self node); ``rag`` writes
+    nothing (task 170).
     """
+
+    @pytest.fixture(autouse=True)
+    def _graphrag_mode(self, monkeypatch) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
 
     async def _run_hook(
         self,
@@ -213,6 +222,24 @@ class TestAfterInsertHook:
         assert filter_b["_id"] == f"{user_b.id}:person:self"
         assert filter_a["_id"] != filter_b["_id"]
 
+    async def test_rag_mode_writes_nothing(self, mocker, monkeypatch, caplog) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "rag")
+
+        with caplog.at_level(logging.INFO, logger="tree.entities.users"):
+            user, fake_collection = await self._run_hook(
+                mocker, identifier="rag@example.com", attributes={"name": "Rag"}
+            )
+
+        fake_collection.update_one.assert_not_awaited()
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "tree.entities.users"
+        ] == [
+            f"Self-person node skipped for user_id={user.id}: memory.mode=rag "
+            "writes document + chunk rows only (ADR-006)"
+        ]
+
 
 class TestUserExports:
     async def test_user_is_exported_from_entities_package(self):
@@ -232,9 +259,10 @@ class TestUserSettings:
 
 
 class TestActiveUserIndexParity:
-    """ADR-012: the partial ``active_user`` index must cover the fan-out query."""
+    """ADR-012: in graphrag the partial ``active_user`` index covers the fan-out."""
 
-    async def test_query_predicate_equals_the_partial_filter(self) -> None:
+    async def test_query_predicate_equals_the_partial_filter(self, monkeypatch) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
         collection = MagicMock()
         collection.find = MagicMock(return_value=_EmptyCursor())
         database = MagicMock()
@@ -245,10 +273,65 @@ class TestActiveUserIndexParity:
         query = collection.find.call_args.args[0]
         partial = next(
             im.document["partialFilterExpression"]
-            for im in memory_indexes("rag")
+            for im in memory_indexes("graphrag")
             if im.document["name"] == "active_user"
         )
         assert {k: query[k] for k in partial} == partial
+
+
+class TestSelectActiveUserIdsRag:
+    """In rag there is no ``person:self`` row: every ``users`` row is a tenant."""
+
+    @pytest.fixture(autouse=True)
+    def _rag_mode(self, monkeypatch) -> None:
+        monkeypatch.setattr(app_config.memory, "mode", "rag")
+
+    async def test_reads_every_users_row_sorted_and_never_memory(self) -> None:
+        ids = [
+            PydanticObjectId("507f1f77bcf86cd799439013"),
+            PydanticObjectId("507f1f77bcf86cd799439011"),
+            PydanticObjectId("507f1f77bcf86cd799439012"),
+        ]
+        database = _RecordingDatabase([{"_id": uid} for uid in ids])
+
+        result = await select_active_user_ids(database=database)
+
+        assert result == sorted(ids, key=str)
+        assert database.opened == ["users"]
+        assert database.collection.find.call_args.args == ({}, {"_id": 1})
+
+    async def test_empty_users_collection_yields_no_tenant(self) -> None:
+        database = _RecordingDatabase([])
+
+        assert await select_active_user_ids(database=database) == []
+        assert database.opened == ["users"]
+
+
+class _RecordingDatabase:
+    """A fake ``AsyncDatabase`` that records every collection name it opens."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.opened: list[str] = []
+        self.collection = MagicMock()
+        self.collection.find = MagicMock(return_value=_ListCursor(rows))
+
+    def __getitem__(self, name: str) -> MagicMock:
+        self.opened.append(name)
+        return self.collection
+
+
+class _ListCursor:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = iter(rows)
+
+    def __aiter__(self) -> _ListCursor:
+        return self
+
+    async def __anext__(self) -> dict:
+        try:
+            return next(self._rows)
+        except StopIteration:
+            raise StopAsyncIteration from None
 
 
 class _EmptyCursor:

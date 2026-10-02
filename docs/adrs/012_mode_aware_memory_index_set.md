@@ -1,6 +1,6 @@
 # ADR-012: A Mode-Aware Classic Index Set on the `memory` Collection, Owned by Beanie
 
-- **Status:** Accepted — relies on [006](006_rag_graphrag_memory_modes.md) (one `memory.mode` per deployment; switching modes drops `memory`); every ADR-006 decision stands.
+- **Status:** Accepted — relies on [006](006_rag_graphrag_memory_modes.md) (one `memory.mode` per deployment; switching modes drops `memory`); every ADR-006 decision stands — `active_user` scoped to `graphrag` by task 170 (`tasks/170-rag-mode-without-person-self.md`)
 - **Date:** 2026-10-02
 - **Deciders:** Paul (project owner)
 - **Context references:**
@@ -41,8 +41,9 @@ prod usage evidence exists, and the decision rests on the audit.
    `tree.entities.memory.memory_indexes(mode)` returns the set. `tree.db.init_mongodb` runs
    `MemoryEntry.Settings.indexes = memory_indexes(app_config.memory.mode)` immediately before
    `init_beanie`, so every entry point (flows, scripts, MCP, CLI, the unit-test session) creates
-   exactly that mode's set. `Settings.indexes` keeps the `graphrag` set as its import-time default
-   so the model imports without a database. `ensure_indexes` owns only what Beanie cannot express:
+   exactly that mode's set. `Settings.indexes` is initialised from `app_config.memory.mode` at import
+   (the YAML loads before any model; no database is needed) and re-bound by `init_mongodb` right before
+   `init_beanie`, so a mode changed after import (tests) still binds the right set. `ensure_indexes` owns only what Beanie cannot express:
    the `$text` index, the mongot `vector_index`, and retirement (3). `MemoryEntry.kind` is a plain `str`.
    `Indexed(str)` would make Beanie recreate `kind_1` on every boot.
 2. **The set is per mode.**
@@ -52,20 +53,20 @@ prod usage evidence exists, and the decision rests on the audit.
    | `_id_` | `_id` | ✓ | ✓ |
    | `user_kind_type_subtype` | `(user_id, kind, type, subtype)` | ✓ | ✓ |
    | `user_type_name` | `(user_id, type, name)` | ✓ | ✓ |
-   | `active_user` | `(properties.is_active_user)`, partial on `{"properties.is_active_user": true}` | ✓ | ✓ |
+   | `active_user` | `(properties.is_active_user)`, partial on `{"properties.is_active_user": true}` | — | ✓ |
    | `text_index` | `$text` (unchanged) | ✓ | ✓ |
    | `vector_index` | mongot (unchanged) | ✓ | ✓ |
    | `user_kind_source_node` | `(user_id, kind, source_node_id)` | — | ✓ |
    | `user_kind_target_node` | `(user_id, kind, target_node_id)` | — | ✓ |
 
-   11 → 6 (`rag`) / 8 (`graphrag`). Two different sets are safe because a deployment runs one mode
+   11 → 5 (`rag`) / 8 (`graphrag`), counting `vector_index`. Two different sets are safe because a deployment runs one mode
    and switching modes drops `memory` (ADR-006). A collection never holds the other mode's rows.
    Every compound index leads with `user_id`, and there is no standalone `user_id` index.
 3. **Retirement is lazy, in code, and needs no migration.** `retired_index_names(mode)` lists every
    name a mode must not carry:
    - in both modes: the four pre-#019 names, `user_kind_type`, `kind_1`, `user_kind_embedding`,
      `user_type_semantic_type` and `user_canonical_name_index`;
-   - in `rag` only: the two `*_node` names.
+   - in `rag` only: the two `*_node` names and `active_user`.
 
    `ensure_indexes` drops the listed names that exist, one by one, and treats failures as non-fatal.
    `ensure_indexes` runs in the memory pipeline's indexing phase (always) and at MCP boot (unless
@@ -79,11 +80,14 @@ prod usage evidence exists, and the decision rests on the audit.
    That is fine at personal scale. Upgrade trigger, recorded and not built: when that scan measurably
    hurts, add a scalar `embedding_pending: true` marker, set on write and unset on embed, plus a
    partial index on it.
-5. **`active_user` replaces `kind_1` for the cross-tenant fan-out.** It has one key per active user.
+5. **`active_user` replaces `kind_1` for the graphrag fan-out.** It has one key per active user.
    The query (`select_active_user_ids`) and the index's `partialFilterExpression` share ONE constant,
    `tree.entities.memory.ACTIVE_USER_FILTER`, so the filter always covers the query. Its `$eq: true`
    satisfies the partial predicate, and FETCH filters `kind/type/name`, which add no selectivity:
-   every active-user entry is `node/person/self`.
+   every active-user entry is `node/person/self`. In `rag` there is no
+   `person:self` row (task 170): `select_active_user_ids` enumerates the `users` collection (every row
+   is a tenant; served by its `_id_` index), so `rag` declares no `active_user` index. Upgrade trigger,
+   recorded and not built: a `users.active` field + partial index if rag ever needs soft-disabled users.
 
 What would justify revisiting:
 - a new production read that filters on a retired key (`semantic_type`, `canonical_name`), which
@@ -103,7 +107,7 @@ flowchart LR
   MODE["app_config.memory.mode<br/>rag | graphrag"]:::cfg
 
   subgraph Boot["init_mongodb — EVERY entry point"]
-    MI["memory_indexes(mode)<br/>user_kind_type_subtype · user_type_name · active_user<br/>+ user_kind_source/target_node (graphrag)"]:::beanie
+    MI["memory_indexes(mode)<br/>user_kind_type_subtype · user_type_name<br/>+ active_user · user_kind_source/target_node (graphrag)"]:::beanie
     IB["init_beanie<br/>creates, never drops"]:::beanie
   end
 
@@ -121,7 +125,7 @@ flowchart LR
 
 ## Consequences
 
-- **Fewer indexes per write.** Each upsert maintains 5 classic indexes in `rag` and 7 in `graphrag`,
+- **Fewer indexes per write.** Each upsert maintains 4 classic indexes in `rag` and 7 in `graphrag`,
   down from 11. The largest index (`user_kind_embedding`) never reaches prod. M0 capacity before the
   first prod memory run still needs its own measurement, because ~200 MB of embedded rows remains.
 - **Boot creates, indexing retires.** A database that still carries the old set keeps its stale

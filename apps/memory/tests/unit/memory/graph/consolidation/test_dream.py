@@ -12,12 +12,17 @@ The Prefect ``@task`` / ``@flow`` wiring is intentionally NOT unit-tested
 
 from __future__ import annotations
 
+import logging
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
 
+from tree.config.app_config import app_config
 from tree.entities.memory import EdgeType, NodeType
 from tree.memory.graph.consolidation import dream as dream_mod
 from tree.memory.graph.consolidation.dream import (
@@ -902,6 +907,11 @@ def _self_person(
 
 
 class TestActiveUserSelection:
+    @pytest.fixture(autouse=True)
+    def _graphrag_mode(self, monkeypatch) -> None:
+        # The fake database serves ``memory`` self rows: the graphrag path.
+        monkeypatch.setattr(app_config.memory, "mode", "graphrag")
+
     async def test_selects_only_active_self_persons(self) -> None:
         active_a = PydanticObjectId("507f1f77bcf86cd799439011")
         active_b = PydanticObjectId("507f1f77bcf86cd799439012")
@@ -924,6 +934,81 @@ class TestActiveUserSelection:
         ids = await dream_mod._select_active_user_ids(database=database)
 
         assert ids == []
+
+
+def _fan_out_config(mode: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        dream=SimpleNamespace(enabled=True, dry_run=True),
+        memory=SimpleNamespace(mode=mode),
+    )
+
+
+class TestAllUsersModeGate:
+    """Task 170: the dream fan-out never runs in rag (no entity nodes exist)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_opik(self, mocker) -> None:
+        mocker.patch.object(dream_mod, "configure_opik")
+        mocker.patch.object(dream_mod, "flush_opik")
+        mocker.patch.object(dream_mod, "span", return_value=nullcontext())
+        mocker.patch.object(dream_mod, "get_distributed_trace_headers", return_value={})
+
+    async def test_all_users_flow_skips_in_rag(self, mocker, caplog) -> None:
+        mocker.patch.object(
+            dream_mod, "_live_app_config", return_value=_fan_out_config("rag")
+        )
+        init_mongodb = mocker.patch.object(
+            dream_mod,
+            "init_mongodb",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("connected to Mongo in rag"),
+        )
+        select = mocker.patch.object(
+            dream_mod,
+            "_select_active_user_ids",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("enumerated users in rag"),
+        )
+
+        with caplog.at_level(logging.INFO, logger=dream_mod.logger.name):
+            stats = await dream_mod.dream_consolidation_all_users.fn()
+
+        assert stats == dream_mod.FanOutStats(enabled=False)
+        init_mongodb.assert_not_awaited()
+        select.assert_not_awaited()
+        assert (
+            "dream_consolidation_all_users: skipped — memory.mode=rag has no "
+            "entity nodes to consolidate (ADR-006)"
+        ) in caplog.messages
+
+    async def test_all_users_flow_fans_out_in_graphrag(self, mocker) -> None:
+        user_id = PydanticObjectId("507f1f77bcf86cd799439011")
+        mocker.patch.object(
+            dream_mod, "_live_app_config", return_value=_fan_out_config("graphrag")
+        )
+        init_mongodb = mocker.patch.object(
+            dream_mod, "init_mongodb", new_callable=AsyncMock, return_value=MagicMock()
+        )
+        select = mocker.patch.object(
+            dream_mod,
+            "_select_active_user_ids",
+            new_callable=AsyncMock,
+            return_value=[user_id],
+        )
+        runner = mocker.patch.object(
+            dream_mod, "dream_consolidation", new_callable=AsyncMock
+        )
+
+        stats = await dream_mod.dream_consolidation_all_users.fn()
+
+        init_mongodb.assert_awaited_once()
+        select.assert_awaited_once()
+        runner.assert_awaited_once_with(
+            user_id=user_id, dry_run=True, opik_trace_headers={}
+        )
+        assert stats.enabled is True
+        assert stats.users_total == 1
+        assert stats.succeeded == 1
 
 
 class TestFanOut:

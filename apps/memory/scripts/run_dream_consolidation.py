@@ -1,13 +1,14 @@
 """
 Trigger the scheduled dream-consolidation fan-out via Prefect.
 
-The ``dream-consolidation-etl`` deployment serves the parent flow
+The ``dream-consolidation-all-users`` deployment serves the parent flow
 ``dream_consolidation_all_users`` (#052). Unlike the per-tenant pipelines
 it takes NO ``user_id`` — the parent flow enumerates active users itself
 and fans out one per-user dream run each (tenant-scoped watermark + cost).
 
 Whether each per-user run mutates the graph or only reports is controlled
-by ``app_config.dream.dry_run`` (YAML), not a CLI flag.
+by ``app_config.dream.dry_run`` (YAML), not a CLI flag. In ``rag`` the run
+completes immediately with a skip line.
 
 Requires:
     - Prefect server running (make local-start)
@@ -32,7 +33,7 @@ from tree.logging import init_logger
 init_logger()
 logger = logging.getLogger(__name__)
 
-DEPLOYMENT_NAME = "dream-consolidation-all-users/dream-consolidation-etl"
+DEPLOYMENT_NAME = "dream-consolidation-all-users/dream-consolidation-all-users"
 POLL_INTERVAL_SECONDS = 2
 
 
@@ -79,7 +80,7 @@ async def _run() -> None:
 
 @click.command()
 def main() -> None:
-    """Trigger the dream-consolidation-etl Prefect deployment (all users)."""
+    """Trigger the dream-consolidation-all-users Prefect deployment (all users)."""
 
     asyncio.run(_run())
 

@@ -7,7 +7,7 @@ description: "Run the memory pipelines end-to-end (serve workflows, then data �
 
 By default, use the "Paul Iusztin" user when testing.
 
-0. **Pick the memory mode.** `memory.mode` (ADR-006) decides how much of the pipeline runs: `rag` writes `document` + parent/child `chunk` rows only, `graphrag` (the YAML default) adds structural edges and LLM-extracted entities. Override per shell with `TREE_MEMORY__MODE=rag` and pass it to **every** command of the run — serve, pipeline, query, MCP — or the flow and the reader disagree about what is in the collection.
+0. **Pick the memory mode.** `memory.mode` (ADR-006) decides how much of the pipeline runs: `rag` (the YAML default) writes `document` + parent/child `chunk` rows only, `graphrag` adds structural edges and LLM-extracted entities. Override per shell with `TREE_MEMORY__MODE=graphrag` and pass it to **every** command of the run — serve, pipeline, query, MCP — or the flow and the reader disagree about what is in the collection.
 
    **Switching modes means dropping the collection first** — both modes start from scratch and there is no migration, so rows left over from the other mode make every count meaningless:
 
@@ -44,7 +44,7 @@ By default, use the "Paul Iusztin" user when testing.
 
    It writes `.tree/graphs/embedding-map-<UTC-stamp>.html` and opens it; the legend shows one row per cluster. Two expected outcomes, not failures: with no clustering run it prints `No clustering run found for this user …` and exits 1, and after ingesting anything since the last run the FIRST output line is `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` (those points are off the map and counted in the legend). Ingest one document and re-run to see that stale warning appear — then re-cluster to clear it.
 
-   For the MCP surface, serve it in the same mode (`TREE_MEMORY__MODE=rag make memory-serve-mcp TRANSPORT=streamable-http`) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 7 tools, `graphrag` 14.
+   For the MCP surface, serve it in the same mode (e.g. `TREE_MEMORY__MODE=graphrag make memory-serve-mcp TRANSPORT=streamable-http` after a graphrag run) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 7 tools, `graphrag` 14.
 
    **The four tool-contract checks (ADR-008).** Every answer is JSON, so read the named field — not the prose:
 

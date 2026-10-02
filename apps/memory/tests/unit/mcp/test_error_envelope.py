@@ -159,7 +159,7 @@ class TestMapping:
     async def test_a_blank_query_is_invalid_input_in_both_modes(
         self, name: str, tool
     ) -> None:
-        # One tool name, one behaviour: ``graphrag`` is the DEFAULT mode, so a
+        # One tool name, one behaviour: ``graphrag`` was the DEFAULT mode, so a
         # guard that only existed in rag left the common server answering a
         # whitespace query with a real search (#126 QA).
         payload = _envelope(await _tool_fn(tool)(query="   ", ctx=_make_ctx()))

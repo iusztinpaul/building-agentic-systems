@@ -4,17 +4,22 @@ Every ``Document`` and ``MemoryEntry`` carries a top-level
 ``user_id`` that references a ``User._id`` (landed in #018). This module
 is intentionally small — it lands the Beanie model and the
 ``after_insert`` hook that auto-creates the user's ``person:self`` node
-in the ``memory`` collection.
+in the ``memory`` collection **in ``graphrag`` only**.
 
-The hook contract (per ``plan.md`` Phase 1, decisions #1 and #3):
+The hook contract (per ``plan.md`` Phase 1, decisions #1 and #3, scoped to
+``graphrag`` by ADR-006 §3 / task 170):
 
-* The active user is represented in the KG by a single ``person`` node
-  with ``_id = "{user_id}:person:self"``.
-* That node carries ``properties.is_active_user=True``. This flag is the
-  **single source of truth** for "who am I?" — there is intentionally no
-  ``User.self_person_id`` field, so the two sources cannot drift.
+* In ``graphrag`` the active user is represented in the KG by a single
+  ``person`` node with ``_id = "{user_id}:person:self"``.
+* That node carries ``properties.is_active_user=True``. In ``graphrag`` this
+  flag is the **single source of truth** for "who am I?" — there is
+  intentionally no ``User.self_person_id`` field, so the two sources cannot
+  drift.
 * The write is an idempotent ``$setOnInsert`` upsert keyed by ``_id``.
   Re-firing the hook on an existing user is a no-op.
+* In ``rag`` the ``memory`` collection holds ``document`` + ``chunk`` rows
+  only, so the hook writes nothing: the user exists only in ``users``, which
+  is also the tenant list for the nightly fan-outs.
 
 Since #018 the node id is built via the canonical
 :func:`tree.entities.memory.build_node_id` (which embeds
@@ -32,6 +37,7 @@ from beanie import Document as BeanieDocument
 from beanie import Indexed, Insert, PydanticObjectId, after_event
 from pydantic import Field
 
+from tree.config.app_config import app_config
 from tree.entities.memory import (
     ACTIVE_USER_FILTER,
     MEMORY_COLLECTION,
@@ -56,11 +62,12 @@ class User(BeanieDocument):
     carries the referencing user's ``_id`` in its ``user_id`` field
     (landing in #018).
 
-    There is intentionally NO ``self_person_id`` field. The user's
-    representation inside their own KG is the node at
+    There is intentionally NO ``self_person_id`` field. In ``graphrag`` the
+    user's representation inside their own KG is the node at
     ``_id = "{user_id}:person:self"``, identified by
     ``properties.is_active_user=True``. Keeping that flag the single
-    source of truth eliminates two-source drift.
+    source of truth eliminates two-source drift. In ``rag`` there is no such
+    node: the user exists only in this collection.
     """
 
     identifier: Indexed(str, unique=True)
@@ -79,9 +86,12 @@ class User(BeanieDocument):
 
     @after_event(Insert)
     async def after_insert(self) -> None:
-        """Idempotent self-person creation.
+        """Idempotent self-person creation — ``graphrag`` only.
 
-        Writes a ``person`` KG node with::
+        In ``rag`` (read from ``app_config.memory.mode`` at call time) it
+        writes nothing and logs the skip: ``rag`` holds ``document`` + ``chunk``
+        rows only (ADR-006). In ``graphrag`` it writes a ``person`` KG node
+        with::
 
             _id          = "{self.id}:person:self"
             kind         = "node"
@@ -94,6 +104,16 @@ class User(BeanieDocument):
         existing user (e.g. via the #021 migration script) is a no-op
         for the self-person node.
         """
+
+        mode = app_config.memory.mode
+        if mode != "graphrag":
+            logger.info(
+                "Self-person node skipped for user_id=%s: memory.mode=%s writes "
+                "document + chunk rows only (ADR-006)",
+                self.id,
+                mode,
+            )
+            return
 
         node_id = build_node_id(self.id, NodeType.PERSON, "self")
         now = datetime.now(UTC)
@@ -150,18 +170,26 @@ async def select_active_user_ids(
 ) -> list[PydanticObjectId]:
     """Return the ``user_id`` of every active user, most-stable order.
 
-    The project's active-user signal is the KG ``person:self`` node carrying
-    ``properties.is_active_user=True`` (one per :class:`User`; see above).
-    Enumerating off that flag — rather than off the raw ``users`` collection —
-    means a user without a materialized self-person node (mid-migration,
-    soft-disabled) is skipped, matching the "who am I?" single-source-of-truth
-    contract.
+    "Active user" depends on ``app_config.memory.mode`` (read at call time):
+
+    * ``graphrag`` — the holder of the KG ``person:self`` node carrying
+      ``properties.is_active_user=True`` (one per :class:`User`; see above).
+      Enumerating off that flag — rather than off the raw ``users`` collection —
+      means a user without a materialized self-person node (mid-migration,
+      soft-disabled) is skipped, matching the "who am I?" single-source-of-truth
+      contract. Served by the partial ``active_user`` index (ADR-012).
+    * ``rag`` — any ``users`` row: there is no self node, and ``User`` has no
+      active/disabled field, so every user is a tenant (ADR-012 §5).
 
     Returned ids are de-duplicated and sorted by their string form so the
     fan-out order is deterministic across runs (handy for tests / logs).
     Shared by the scheduled dream consolidation and the scheduled data pipeline,
     which both fan out per active tenant.
     """
+
+    if app_config.memory.mode == "rag":
+        users = database[User.Settings.name].find({}, {"_id": 1})
+        return sorted([doc["_id"] async for doc in users], key=str)
 
     collection = database[MEMORY_COLLECTION]
     cursor = collection.find(

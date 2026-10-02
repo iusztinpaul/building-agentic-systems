@@ -3,9 +3,9 @@ Query the memory — parent-document search in ``rag``, graph search in ``graphr
 
 Reads ``memory.mode`` ONCE at start (ADR-006 decision 5) and branches:
 
-* ``graphrag`` (default) — unchanged: query → seeds → graph expansion → HTML
+* ``graphrag`` — unchanged: query → seeds → graph expansion → HTML
   graph; no query → the whole graph.
-* ``rag`` — there are no edges, so there is nothing to draw. With a query the
+* ``rag`` (the YAML default) — there are no edges, so there is nothing to draw. With a query the
   command prints the ranked **Parent chunk**s as text and writes no file;
   without one it refuses and exits 1.
 

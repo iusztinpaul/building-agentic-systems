@@ -14,10 +14,11 @@ from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.memory import MEMORY_COLLECTION, MemoryEntry
 
-_BASE = {"user_kind_type_subtype", "user_type_name", "active_user"}
+_BASE = {"user_kind_type_subtype", "user_type_name"}
 _EXPECTED = {
     "rag": _BASE,
-    "graphrag": _BASE | {"user_kind_source_node", "user_kind_target_node"},
+    "graphrag": _BASE
+    | {"active_user", "user_kind_source_node", "user_kind_target_node"},
 }
 
 
