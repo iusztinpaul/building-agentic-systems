@@ -261,19 +261,6 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
             continue
 
-        # #029: LLM-output normalisation. The ``has_task`` /
-        # ``experienced_by`` semantic descriptions in the prompt still name
-        # ``EdgeType.TODO`` / ``EdgeType.EXPERIENCED``, so the LLM can emit
-        # ``todo`` / ``experienced`` as the edge type; re-route them to the
-        # ``related_to`` umbrella.
-        legacy_semantic: str | None = None
-        if raw_type == "todo":
-            raw_type = "related_to"
-            legacy_semantic = "has_task"
-        elif raw_type == "experienced":
-            raw_type = "related_to"
-            legacy_semantic = "experienced_by"
-
         try:
             edge_type = EdgeType(raw_type)
         except ValueError:
@@ -316,10 +303,8 @@ def _parse_extraction(raw: dict[str, Any]) -> ExtractionResult:
             )
             continue
 
-        # Resolve semantic_type for ``related_to`` rows. Legacy
-        # rewrites already populated ``legacy_semantic``; the prompt
-        # surfaces the field as ``semantic_type``.
-        semantic_type = legacy_semantic or e.get("semantic_type")
+        # The prompt surfaces the ``related_to`` discriminator as ``semantic_type``.
+        semantic_type = e.get("semantic_type")
 
         # Per-semantic constraint check for ``related_to``. Constraints
         # for the other edges fall through to the umbrella check below.

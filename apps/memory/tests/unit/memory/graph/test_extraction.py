@@ -1,3 +1,5 @@
+import pytest
+
 from tree.entities.memory import EdgeType, NodeType
 from tree.memory.graph.extraction import (
     _parse_extraction,
@@ -17,10 +19,7 @@ from tree.models.fake_model import FakeLLM
 class TestParseExtraction:
     def test_valid_nodes_and_edges(self):
         # Post-#029: the LLM-extractable wire shape uses ``related_to``
-        # with a ``semantic_type``. The parser also tolerates a legacy
-        # ``"todo"`` emission (re-routed to ``related_to + has_task``);
-        # exercise the canonical new shape here, the legacy re-route is
-        # pinned by ``test_legacy_todo_reroutes_to_related_to``.
+        # with a ``semantic_type``.
         raw = {
             "nodes": [
                 {"name": "Alice", "type": "person", "properties": {"aliases": []}},
@@ -51,9 +50,9 @@ class TestParseExtraction:
         assert result.edges[0].type == EdgeType.RELATED_TO
         assert result.edges[0].semantic_type == "has_task"
 
-    def test_legacy_todo_reroutes_to_related_to(self):
-        # The prompt still names ``EdgeType.TODO`` and lists ``task`` as a
-        # subtype, so the LLM can emit both; the parser normalises them.
+    def test_task_endpoint_type_is_normalised_to_object(self):
+        # The prompt lists ``task`` as a subtype of ``object``, so the LLM can
+        # still emit it as an endpoint type; edges carry parent type names.
         raw = {
             "nodes": [],
             "edges": [
@@ -61,19 +60,18 @@ class TestParseExtraction:
                     "source_node_id": "alice",
                     "source_type": "person",
                     "target_node_id": "write code",
-                    "target_type": "task",  # a subtype emitted as a type
-                    "type": "todo",
+                    "target_type": "task",
+                    "type": "related_to",
+                    "semantic_type": "has_task",
                 }
             ],
         }
         result = _parse_extraction(raw)
         assert len(result.edges) == 1
-        edge = result.edges[0]
-        assert edge.type == EdgeType.RELATED_TO
-        assert edge.semantic_type == "has_task"
-        assert edge.target_type == NodeType.OBJECT
+        assert result.edges[0].target_type == NodeType.OBJECT
 
-    def test_legacy_experienced_reroutes_to_related_to(self):
+    @pytest.mark.parametrize("retired", ["todo", "experienced"])
+    def test_retired_edge_types_are_rejected(self, retired: str):
         raw = {
             "nodes": [],
             "edges": [
@@ -82,16 +80,12 @@ class TestParseExtraction:
                     "source_type": "person",
                     "target_node_id": "first day",
                     "target_type": "event",
-                    "type": "experienced",
+                    "type": retired,
                 }
             ],
         }
         result = _parse_extraction(raw)
-        assert len(result.edges) == 1
-        edge = result.edges[0]
-        assert edge.type == EdgeType.RELATED_TO
-        assert edge.semantic_type == "experienced_by"
-        assert edge.target_type == NodeType.EVENT
+        assert result.edges == []
 
     def test_drops_related_to_with_unknown_semantic(self):
         raw = {
@@ -171,9 +165,8 @@ class TestParseExtraction:
         assert result.edges == []
 
     def test_skips_edge_violating_constraint(self):
-        # The legacy reverse-direction ``todo`` is rewritten to
-        # ``related_to + has_task`` first, then dropped because
-        # (object, person) is not in ``has_task.allowed_pairs``.
+        # Reverse direction: (object, person) is not in
+        # ``has_task.allowed_pairs``, so the edge is dropped.
         raw = {
             "nodes": [],
             "edges": [
@@ -182,7 +175,8 @@ class TestParseExtraction:
                     "source_type": "task",
                     "target_node_id": "alice",
                     "target_type": "person",
-                    "type": "todo",
+                    "type": "related_to",
+                    "semantic_type": "has_task",
                 }
             ],
         }
@@ -243,7 +237,8 @@ class TestExtractEntities:
                             "source_type": "person",
                             "target_node_id": "write code",
                             "target_type": "task",
-                            "type": "todo",
+                            "type": "related_to",
+                            "semantic_type": "has_task",
                         },
                     ],
                 }

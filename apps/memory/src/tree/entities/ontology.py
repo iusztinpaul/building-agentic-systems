@@ -870,8 +870,7 @@ class InvolvedProperties(BaseModel):
 class HasTaskProperties(BaseModel):
     """Properties for the Tree extension ``has_task`` (person → object[task]).
 
-    Tree-only extension that re-routes the legacy ``EdgeType.TODO``
-    semantics into the POLE+O umbrella. Carries ``status`` so MCP /
+    A ``related_to`` semantic of the POLE+O umbrella. Carries ``status`` so MCP /
     UI consumers can filter ``pending`` vs ``done`` tasks without
     cracking the object subtype.
     """
@@ -888,8 +887,7 @@ class HasTaskProperties(BaseModel):
 class ExperiencedByProperties(BaseModel):
     """Properties for the Tree extension ``experienced_by`` (person → event).
 
-    Tree-only extension that re-routes the legacy ``EdgeType.EXPERIENCED``
-    semantics into the POLE+O umbrella. The optional ``role`` mirrors
+    A ``related_to`` semantic of the POLE+O umbrella. The optional ``role`` mirrors
     ``ParticipatedInProperties.role`` for shape-symmetry.
     """
 
@@ -1218,10 +1216,7 @@ register_relation_semantic(
         allowed_pairs=[("person", "object")],
         properties_schema=HasTaskProperties,
         description=(
-            "Tree extension: a person has a task (object with subtype "
-            "``task``). Re-routes the legacy ``EdgeType.TODO`` semantics "
-            "into the POLE+O umbrella so the LLM emits a single "
-            "``related_to`` edge type."
+            "Tree extension: a person has a task (object with subtype ``task``)."
         ),
     )
 )
@@ -1230,10 +1225,7 @@ register_relation_semantic(
         name="experienced_by",
         allowed_pairs=[("person", "event")],
         properties_schema=ExperiencedByProperties,
-        description=(
-            "Tree extension: a person experienced an event. Re-routes the "
-            "legacy ``EdgeType.EXPERIENCED`` semantics."
-        ),
+        description=("Tree extension: a person experienced an event."),
     )
 )
 

@@ -165,7 +165,7 @@
               "event"
             ]
           ],
-          "description": "Tree extension: a person experienced an event. Re-routes the legacy ``EdgeType.EXPERIENCED`` semantics.",
+          "description": "Tree extension: a person experienced an event.",
           "properties": {
             "role": {
               "anyOf": [
@@ -190,7 +190,7 @@
               "object"
             ]
           ],
-          "description": "Tree extension: a person has a task (object with subtype ``task``). Re-routes the legacy ``EdgeType.TODO`` semantics into the POLE+O umbrella so the LLM emits a single ``related_to`` edge type.",
+          "description": "Tree extension: a person has a task (object with subtype ``task``).",
           "properties": {
             "status": {
               "anyOf": [
