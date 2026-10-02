@@ -6,7 +6,11 @@ from a YAML file.  Infrastructure secrets stay in settings.py / .env.
 
 Resolution order:
     1. Path in APP_CONFIG_PATH env var
-    2. configs/default.yaml (memory app root: ``apps/memory/``)
+    2. ``default.yaml`` bundled next to this module (package data of
+       ``tree.config``, so a non-editable install ships it too)
+
+A missing config file is a hard error: silently running on the code defaults
+put prod in ``graphrag`` while the YAML said ``rag``.
 """
 
 import json
@@ -21,8 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
+_DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("default.yaml")
 
 
 # --- Pydantic models for typed access ---
@@ -642,7 +645,7 @@ class MemoryConfig(BaseModel):
       extraction over parent chunks, resolution, dedup, ``mentions`` edges and
       graph expansion at retrieval. (What Chapter 8 adds.)
 
-    ``configs/default.yaml`` ships ``rag`` (task 170); the code default — used
+    ``default.yaml`` ships ``rag`` (task 170); the code default — used
     only when the ``memory`` section is absent — stays ``graphrag``. Read ONCE
     at flow entry / MCP-server boot / CLI start — never per request. Operators flip it without editing YAML through the
     existing override hatch (``TREE_MEMORY__MODE=rag``, see
@@ -1191,7 +1194,10 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
 
     Args:
         path: Explicit path to a YAML file. Falls back to APP_CONFIG_PATH
-              env var, then configs/default.yaml.
+              env var, then the bundled ``default.yaml``.
+
+    Raises:
+        FileNotFoundError: The resolved config file does not exist.
 
     ``TREE_<SECTION>__<KEY>`` env vars override the corresponding YAML keys;
     this lets operators flip a single knob (e.g.
@@ -1202,11 +1208,10 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
 
     config_path = Path(path or os.environ.get("APP_CONFIG_PATH", _DEFAULT_CONFIG_PATH))
 
-    if config_path.exists():
-        with open(config_path) as f:
-            raw = yaml.safe_load(f) or {}
-    else:
-        raw = {}
+    if not config_path.is_file():
+        raise FileNotFoundError(f"App config file not found: {config_path}")
+    with open(config_path) as f:
+        raw = yaml.safe_load(f) or {}
 
     raw = _apply_env_overrides(raw)
     config = AppConfig.model_validate(raw)

@@ -454,7 +454,7 @@ class TestLLMIdentity:
     """
 
     def test_default_identity(self, mocker) -> None:
-        """The shipped ``configs/default.yaml`` renders
+        """The shipped ``default.yaml`` renders
         ``gemini:gemini-3.1-flash-lite``.
 
         The module-level ``_mock_app_config`` fixture installs a ``MagicMock``

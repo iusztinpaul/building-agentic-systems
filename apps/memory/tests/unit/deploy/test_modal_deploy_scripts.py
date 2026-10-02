@@ -277,7 +277,7 @@ _RETIRED_VOCABULARY: dict[str, re.Pattern[str]] = {
     ),
 }
 
-_CONFIGS = _APP_ROOT / "configs" / "default.yaml"
+_CONFIGS = _APP_ROOT / "src" / "tree" / "config" / "default.yaml"
 
 # The decision these two scripts implement. READ here, never written (the PA
 # owns `docs/adrs/`): the mount path and both cache variables are spelled out

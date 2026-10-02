@@ -196,7 +196,7 @@ The harness reads `.mcp.json` at the repo root and auto-spawns the `tree-memory`
 
 ## App guides
 
-- **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`configs/default.yaml` + the `sources/` files), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
+- **Memory app** → [`apps/memory/README.md`](apps/memory/README.md). Configuration (`apps/memory/src/tree/config/default.yaml` + the `sources/` files), every Prefect deployment, the full MCP tool catalogue, Modal embedding deployment, test layout.
 - **Harness app** → [`apps/harness/README.md`](apps/harness/README.md). Modes (CLI vs Ink), native tools, permissions, sub-agents, shell hooks, JSONL sessions.
 
 ## Monitoring

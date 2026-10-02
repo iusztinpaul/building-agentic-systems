@@ -1,7 +1,7 @@
 """Pure read helpers over the **Modal catalog** (ADR-009 §2/§3).
 
 The ONE place that turns ``modal.embedding_models`` / ``modal.llm_models`` in
-``configs/default.yaml`` into the names, flags and prompts the deploy driver,
+``default.yaml`` into the names, flags and prompts the deploy driver,
 the App scripts and the clients all need — so a model's app name, dimensions
 and prompts cannot drift between the thing that deploys it and the thing that
 calls it.
@@ -183,7 +183,7 @@ def get_catalog_entry(model: str) -> ModalModelConfig:
         f"Unknown Modal model {model!r}. "
         f"Modal catalog ids — embeddings: {embeddings}; llms: {llms}. "
         "Add an entry under modal.embedding_models or modal.llm_models in "
-        "configs/default.yaml."
+        "default.yaml."
     )
 
 

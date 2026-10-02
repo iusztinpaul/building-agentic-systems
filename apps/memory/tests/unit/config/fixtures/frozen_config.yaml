@@ -1,5 +1,5 @@
 # Frozen config fixture — STRICTLY for tests. Decoupled from the human-tuned
-# configs/default.yaml (which operators edit freely). Tests assert on the
+# default.yaml (which operators edit freely). Tests assert on the
 # values here, so changes are intentional and local to the test suite.
 # Holds ONLY static memory config — sources moved out to repo-root `sources/`
 # (ADR-003); the source files are covered by test_sources_files.py.
@@ -25,7 +25,7 @@ memory:
   # Embedding clustering (ADR-007 §1): UMAP -> HDBSCAN in the 5-d
   # intermediate -> a separate 2-D UMAP for display -> one LLM summary per
   # cluster. No `enabled` key — the switch is the `run_clustering` flow
-  # parameter. The prose lives in configs/default.yaml.
+  # parameter. The prose lives in default.yaml.
   clustering:
     umap:
       n_neighbors: 15 # local neighbourhood size; clamped to n-1 on small corpora
@@ -124,7 +124,7 @@ observability:
     voyage-3.5: 0.06
 
 # The Modal catalog (ADR-009 §2/§3). Mirrors the SHAPE of the shipped
-# configs/default.yaml — the seed VALUES (revisions, prompts) are asserted
+# default.yaml — the seed VALUES (revisions, prompts) are asserted
 # against the real file, not against this fixture. The ENGINE PINS are the one
 # exception (`test_engine_pins`): a bump that moves the YAML and the code
 # default but forgets this file would leave the fixture describing an image

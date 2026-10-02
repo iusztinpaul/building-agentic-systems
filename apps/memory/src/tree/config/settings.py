@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     * **``.env`` / ``Settings``** — credentials (API keys) and per-environment
       infrastructure endpoints (Mongo host/port, Prefect URL). This module.
-    * **``apps/memory/configs/default.yaml`` / ``app_config``** — behavior
+    * **``apps/memory/src/tree/config/default.yaml`` / ``app_config``** — behavior
       knobs (model names, chunk sizes, dedup thresholds, etc.). See
       :mod:`tree.config.app_config`.
 

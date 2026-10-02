@@ -1,3 +1,5 @@
+# Bundled package data of `tree.config`: every install (editable, wheel, the
+# Prefect Managed pip install, the Docker worker) ships it next to app_config.py.
 # Override per-environment by setting APP_CONFIG_PATH to a different YAML file.
 #
 # This file holds ONLY static memory config (models, extraction, query, dream,

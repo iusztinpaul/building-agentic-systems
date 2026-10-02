@@ -1,7 +1,7 @@
 """Pure-function tests for the **Modal catalog** helpers (ADR-009 §2/§3).
 
 Everything here runs against the REAL shipped catalog
-(``configs/default.yaml``) — it is the object both the deploy driver and the
+(``default.yaml``) — it is the object both the deploy driver and the
 clients read, so a test against a hand-rolled fixture would prove nothing
 about what an operator boots.
 

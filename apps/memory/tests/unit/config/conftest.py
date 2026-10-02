@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-# Frozen config fixture, decoupled from the human-tuned configs/default.yaml so
+# Frozen config fixture, decoupled from the human-tuned default.yaml so
 # operator edits to the real config never break the loader value-assertions.
 _FROZEN_CONFIG_PATH = Path(__file__).parent / "fixtures" / "frozen_config.yaml"
 

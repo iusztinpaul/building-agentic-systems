@@ -94,7 +94,7 @@ By default, use the "Paul Iusztin" user when testing.
 
    Without `CONFIRM=yes` it changes nothing — that is the dry run, and the count it prints is what `Embedded N nodes` must match afterwards. It is idempotent and per user (`USER_IDENTIFIER=` / `USER_ID=`). Between the reset and the indexing run, search runs on the text leg only.
 
-5. **Models on Modal.** One target family serves both kinds — embedding models and LLMs — and takes the Hugging Face `repo_id` of a **Modal catalog** entry (`modal.embedding_models` / `modal.llm_models` in `configs/default.yaml`):
+5. **Models on Modal.** One target family serves both kinds — embedding models and LLMs — and takes the Hugging Face `repo_id` of a **Modal catalog** entry (`modal.embedding_models` / `modal.llm_models` in `apps/memory/src/tree/config/default.yaml`):
 
    ```bash
    make memory-deploy-model MODEL=Qwen/Qwen3-Embedding-0.6B    # deploy

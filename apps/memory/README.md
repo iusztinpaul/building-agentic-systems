@@ -16,7 +16,7 @@ Nodes use `_id = "{user_id}:type:name"`; edges use `_id = "source|type|target"` 
 
 ## Memory modes
 
-ONE switch — `memory.mode` in [`configs/default.yaml`](configs/default.yaml), default `rag`, overridable per process with `TREE_MEMORY__MODE=rag|graphrag` — decides how much of the memory half runs (ADR-006). It is read ONCE at flow entry, at MCP-server boot and at CLI start; never per request.
+ONE switch — `memory.mode` in [`src/tree/config/default.yaml`](src/tree/config/default.yaml), default `rag`, overridable per process with `TREE_MEMORY__MODE=rag|graphrag` — decides how much of the memory half runs (ADR-006). It is read ONCE at flow entry, at MCP-server boot and at CLI start; never per request.
 
 | | `rag` | `graphrag` |
 |---|---|---|
@@ -53,7 +53,7 @@ Three sources of configuration, split by concern:
 
 | Where | What | Override |
 |---|---|---|
-| [`configs/default.yaml`](configs/default.yaml) | Static memory config: model names, chunking, query tuning, dream/concurrency/prefect/MCP defaults | Set `APP_CONFIG_PATH=<path>` to point at a different YAML |
+| [`src/tree/config/default.yaml`](src/tree/config/default.yaml) | Static memory config: model names, chunking, query tuning, dream/concurrency/prefect/MCP defaults | Set `APP_CONFIG_PATH=<path>` to point at a different YAML |
 | Repo-root [`sources/`](../../sources) | Data-ingestion sources (operator data), split by cadence: `backfill.yaml` (one-shot) + `listen.yaml` (polled RSS) | Edit the files; select per-run with `--source-file` / `--uri` |
 | Repo-root `.env` | Secrets + infra (Mongo, Prefect, LLM/embedding keys) | Edit the file |
 
@@ -98,7 +98,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 | `BRIGHTDATA_API_KEY` | no | — | Bright Data API key (Web Unlocker fallback + SERP API) |
 | `BRIGHTDATA_UNLOCKER_ZONE` | no | — | Bright Data Web Unlocker zone (used by the web fallback ingest pipeline) |
 | `BRIGHTDATA_SERP_ZONE` | no | — | Bright Data SERP zone (used by `search_web`) |
-| `APP_CONFIG_PATH` | no | `apps/memory/configs/default.yaml` | Override the YAML config path |
+| `APP_CONFIG_PATH` | no | `src/tree/config/default.yaml` | Override the YAML config path |
 
 ## Running the components
 
@@ -588,7 +588,7 @@ echo '{"session_id":"smoke-1","transcript_path":"tests/unit/mcp/fixtures/session
 
 Serve a model yourself, on your own GPU, instead of calling a hosted API. One
 model = one entry in the **Modal catalog** (`modal.embedding_models` or
-`modal.llm_models` in `configs/default.yaml`) + one command; both the deploy
+`modal.llm_models` in `src/tree/config/default.yaml`) + one command; both the deploy
 driver and the clients read it, so app name, width and prompts cannot drift.
 
 **1. The YAML names the model, never the path.** An entry is a Hugging Face
@@ -627,7 +627,7 @@ version yourself. It is never written down: the clients resolve the same app
 name either way, and `-stop` tries both.
 
 **Your own embedding model is that one entry**, placeholders and all — the two
-seeds in `configs/default.yaml` show the App fields (`gpu`, `cpu`, `memory_mb`,
+seeds in `src/tree/config/default.yaml` show the App fields (`gpu`, `cpu`, `memory_mb`,
 `max_model_len`, `extra_server_args`):
 
 ```yaml
@@ -752,7 +752,7 @@ min/max containers are dashboard-only settings, so stop it and deploy again to
 change them. An App has no such row, so nothing is waited for there.
 
 **4. Point the memory at it.** Set `models.search_embedding` (and, if you want,
-`models.resolution_embedding`) in `configs/default.yaml` to
+`models.resolution_embedding`) in `src/tree/config/default.yaml` to
 `{provider: modal, model: Qwen/Qwen3-Embedding-0.6B, dimensions: 1024}`. The
 client asks the server for the model's native width, then truncates +
 L2-renormalises client-side to `dimensions` — so a wider model (e.g.
@@ -808,7 +808,8 @@ make pre-commit
 ```
 apps/memory/
   src/tree/
-    config/             # Pydantic settings + YAML loader
+    config/             # Pydantic settings + YAML loader + default.yaml
+                        #   (app tuning, bundled as package data)
     entities/           # Beanie ODMs shared across the app
     data/               # one module per ingestion source
       core/             # base flow, URL dispatch, ingest framework
@@ -834,7 +835,6 @@ apps/memory/
                         #   MCP App layer (ui:// + graphs:// + dual delivery)
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
-  configs/default.yaml  # app tuning
   deploy/               # Modal App deploy scripts (vLLM embeddings, SGLang LLMs), Prefect, Atlas
   scripts/              # CLI entrypoints (serve_mcp, run_*, visualize_structure,
                         #   search_memory, visualize_embeddings, signup, check_db,

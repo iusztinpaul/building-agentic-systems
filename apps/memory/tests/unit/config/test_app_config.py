@@ -1,6 +1,7 @@
 import datetime
 import json
 import textwrap
+from pathlib import Path
 
 import pytest
 import yaml
@@ -331,10 +332,24 @@ class TestLoadAppConfig:
         assert config.models.resolution_embedding.model == "voyage-4"
         assert config.models.resolution_embedding.dimensions == 1024
 
-    def test_missing_file_returns_defaults(self, tmp_path):
-        config = load_app_config(tmp_path / "nonexistent.yaml")
+    def test_missing_file_raises(self, tmp_path):
+        # Falling back to the code defaults ran prod in graphrag while the
+        # YAML said rag; a missing file must be loud.
+        with pytest.raises(FileNotFoundError, match="nonexistent.yaml"):
+            load_app_config(tmp_path / "nonexistent.yaml")
 
-        assert config == AppConfig()
+    def test_missing_app_config_path_env_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("APP_CONFIG_PATH", str(tmp_path / "gone.yaml"))
+
+        with pytest.raises(FileNotFoundError, match="gone.yaml"):
+            load_app_config()
+
+    def test_default_config_is_bundled_in_the_package(self):
+        import tree.config
+
+        package_dir = Path(tree.config.__file__).resolve().parent
+        assert _DEFAULT_CONFIG_PATH == package_dir / "default.yaml"
+        assert _DEFAULT_CONFIG_PATH.is_file()
 
     def test_empty_yaml_returns_defaults(self, tmp_path):
         empty = tmp_path / "empty.yaml"
@@ -505,7 +520,7 @@ class TestRunnerGlobalLimitBump:
     typed default on :class:`ConcurrencyConfig` stays at 4."""
 
     def test_default_yaml_raises_runner_global_limit_to_six(self):
-        """The real, human-tuned ``configs/default.yaml`` admits up to 6 runs."""
+        """The real, human-tuned ``default.yaml`` admits up to 6 runs."""
 
         config = load_app_config(_DEFAULT_CONFIG_PATH)
 
@@ -570,7 +585,7 @@ class TestMemoryModeConfig:
         assert config.memory.mode == "graphrag"
 
     def test_memory_mode_is_rag_in_default_yaml(self, monkeypatch):
-        """The real, human-tuned ``configs/default.yaml`` ships ``rag`` (task 170);
+        """The real, human-tuned ``default.yaml`` ships ``rag`` (task 170);
         the code default for an absent section stays ``graphrag`` (below)."""
 
         monkeypatch.delenv("TREE_MEMORY__MODE", raising=False)
@@ -642,7 +657,7 @@ class TestQueryConfig:
 
     def test_min_vector_score_default_override_and_bounds(self, tmp_path, monkeypatch):
         # Default: the typed default, the frozen fixture and the real
-        # configs/default.yaml all agree on the pinned 0.70.
+        # default.yaml all agree on the pinned 0.70.
         assert QueryConfig().min_vector_score == 0.70
         assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_vector_score == 0.70
 
@@ -759,7 +774,7 @@ class TestChunkingConfig:
         assert config.memory.chunking.child.overlap == 32
 
     def test_chunking_block_loaded_from_default_yaml(self):
-        """The real, human-tuned ``configs/default.yaml`` ships the same block,
+        """The real, human-tuned ``default.yaml`` ships the same block,
         so an unchanged checkout chunks the way ADR-006 describes."""
 
         config = load_app_config(_DEFAULT_CONFIG_PATH)
@@ -902,7 +917,7 @@ class TestClusteringConfig:
         assert clustering.summaries.llm_concurrency == 5
 
     def test_clustering_block_loaded_from_default_yaml(self):
-        """The real, human-tuned ``configs/default.yaml`` ships the same recipe,
+        """The real, human-tuned ``default.yaml`` ships the same recipe,
         so an unchanged checkout clusters the way ADR-007 §1 describes."""
 
         clustering = load_app_config(_DEFAULT_CONFIG_PATH).memory.clustering
@@ -1100,7 +1115,7 @@ class TestModalCatalog:
     entry says WHICH model and the facts about it; it never says HOW it is
     served — the **Serving path** is the deploy driver's runtime decision, so
     there is no ``serving`` and no ``base_model`` field to read. The seeds are
-    asserted against the REAL shipped ``configs/default.yaml`` (what an
+    asserted against the REAL shipped ``default.yaml`` (what an
     operator boots), not the frozen fixture.
     """
 
@@ -1258,7 +1273,7 @@ class TestModalCatalog:
         boot measured live (199 s, a 35B LLM)."""
 
         # Default: the typed default, the frozen fixture and the real
-        # configs/default.yaml all agree on 600.
+        # default.yaml all agree on 600.
         assert ModalConfig().warmup_deadline_s == 600.0
         assert load_app_config(frozen_config_path).modal.warmup_deadline_s == 600.0
         assert load_app_config(_DEFAULT_CONFIG_PATH).modal.warmup_deadline_s == 600.0
@@ -1291,7 +1306,7 @@ class TestModalCatalog:
         """
 
         # Default: the typed default, the frozen fixture and the real
-        # configs/default.yaml all agree on 300.
+        # default.yaml all agree on 300.
         assert ModalConfig().request_timeout_s == 300.0
         assert load_app_config(frozen_config_path).modal.request_timeout_s == 300.0
         assert load_app_config(_DEFAULT_CONFIG_PATH).modal.request_timeout_s == 300.0
@@ -1335,7 +1350,7 @@ class TestModalCatalog:
         self, frozen_config_path
     ) -> None:
         """The fixture mirrors the SHAPE of the shipped catalog. A knob that
-        lived only in ``configs/default.yaml`` would leave every test that
+        lived only in ``default.yaml`` would leave every test that
         loads the fixture proving nothing about the request the memory sends."""
 
         qwen_llm, lfm = load_app_config(frozen_config_path).modal.llm_models

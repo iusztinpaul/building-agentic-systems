@@ -688,6 +688,6 @@ async def assert_settings_match_live_vector_index(
             f"app_config.models.search_embedding.dimensions={expected_dim} but "
             f"live vector_index numDimensions={live_dimensions}. Rebuild the "
             f"mongot index (drop + ensure_indexes) so it matches the YAML "
-            f"value, or set apps/memory/configs/default.yaml's "
+            f"value, or set apps/memory/src/tree/config/default.yaml's "
             f"models.search_embedding.dimensions to {live_dimensions}."
         )

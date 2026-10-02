@@ -3,7 +3,7 @@
 After the YAML-as-source-of-truth migration, :class:`tree.config.settings.Settings`
 carries credentials and infrastructure endpoints **only**. Behavior knobs
 (embedding model/dim, dedup thresholds, etc.) live in
-``apps/memory/configs/default.yaml`` and are typed by
+``apps/memory/src/tree/config/default.yaml`` and are typed by
 :mod:`tree.config.app_config`.
 
 These tests pin that contract from both directions:
