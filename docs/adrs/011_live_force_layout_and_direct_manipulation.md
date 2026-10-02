@@ -4,7 +4,7 @@
 - **Date:** 2026-10-01
 - **Deciders:** Paul (project owner)
 - **Context references:**
-  - `tasks/162-d3-force-live-layout-and-pin-on-drop.md`, `tasks/163-multi-select-group-drag-and-rigid-children.md`, `tasks/164-graph-controls-panel.md`, `tasks/165-full-graph-recent-documents-cap-and-slider.md`, `tasks/166-query-view-part-of-closure-and-child-count.md` (this feature's task plan)
+  - `tasks/162-d3-force-live-layout-and-pin-on-drop.md`, `tasks/163-multi-select-group-drag-and-rigid-children.md`, `tasks/164-graph-controls-panel.md`, `tasks/165-full-graph-recent-documents-cap-and-slider.md`, `tasks/166-query-view-part-of-closure-and-child-count.md`, `tasks/168-query-view-relevance-documents-slider.md` (this feature's task plan)
   - `apps/memory/src/tree/memory/visualize/graph.py` (the renderer), `apps/memory/src/tree/memory/visualize/embeddings.py` (the map payload), `apps/memory/src/tree/mcp/viz_app.py` (the `ui://` variant + CSP)
   - Reference implementation: `pulse` (`/Users/pauliusztin/Documents/01-Projects/scrabble/scrabble/src/pulse/viz/static/graph.html`, `assets.py`, `render_html.py`) — ported, not shared code
   - `docs/glossary.md` — **Pinned node** (added), **Full graph** (added), **Graph payload**, **Graph renderer**, **Embedding map** (amended in this feature's grooming commit)
@@ -34,6 +34,8 @@ registers `arrow` and `line` edge programs by default and exposes `setCustomBBox
 The full-graph read loads every node and edge of the tenant, embeddings included, and a
 query view can leave a chunk floating when the last hop found its `next` edge but not its `part_of` one.
 Both are payload problems: the picture is only as good as what Python puts in it.
+A query view had no slider at all (165 scoped it out): a 70-node result with
+several document stars could not be narrowed to the ones that matched.
 
 ## Decision
 
@@ -105,6 +107,16 @@ Eight related choices, one design:
    `created_at` a BSON date, so Mongo would need `$dateFromString` and an in-memory sort anyway. Upgrade
    triggers: a tenant whose document rows alone scan slowly (~50k) → an aggregation; a measured slow
    `sources` scan → a `(user_id, sources)` index; a human asking to page beyond the cap → server-side paging.
+   Query views carry the same slider ranked by SEARCH RELEVANCE (task 168):
+   `query_memory` ranks the result's `document` rows by their best `hybrid_search` hit (RRF score,
+   ties on `_id`; documents pulled in only by expansion rank last) and stamps `doc_rank` on node rows
+   through each row's `sources`; `to_graph_payload(result, document_order=…)` adds
+   `controls.documents.order` (`recency` | `relevance`) and shows every document by default on a
+   query view (`shown = total`) — a query result is `top_k` seeds wide, so the slider narrows, it
+   never caps. The rank is a viz concern: `search_memory`'s text and `deep_search_memory`'s files
+   strip it, and `ranked_rows` is untouched. The hit order rather than a `_search_score` on rows
+   because `expand_graph` re-hydrates every row — the seed list `query_memory` holds is the only
+   relevance signal that survives.
 
 8. **Query views are `part_of`-complete.** After expansion, two batched reads
    attach every chunk's `part_of` edge and target (child → parent → document, one-level lookahead so both
@@ -132,7 +144,7 @@ flowchart TD
         MP["to_embedding_map_payload<br/>layout: fixed · nodes[].size=4 · controls{display}"]
         TPL["ONE template<br/>_GRAPH_STYLE · _BODY_MARKUP · _RENDER_JS"]
         FG["fetch_full_graph<br/>4 reads keyed on sources · doc_rank"] --> GP
-        EX["expand_graph + part_of closure<br/>2 reads · child_count"] --> GP
+        EX["expand_graph + part_of closure<br/>2 reads · child_count · doc_rank by relevance"] --> GP
     end
 
     subgraph js["Browser — the Graph renderer (obeys)"]
@@ -142,7 +154,7 @@ flowchart TD
         OV["#overlay 2D canvas<br/>hulls · pin dots · selection rings · marquee"]
         PANEL["Controls panel (vanilla DOM)<br/>Forces → reheat · Display → refresh<br/>Pause · Unpin all · Reset"]
         DRAG["Drag set = selection ∪ unpinned part_of children<br/>fx/fy held · alphaTarget(0.3) · drop ⇒ Pinned node"]
-        DOCS["Documents slider<br/>hidden in Sigma · sim.nodes()/links re-synced"]
+        DOCS["Documents slider<br/>Most recent | Most relevant (controls.documents.order)<br/>hidden in Sigma · sim.nodes()/links re-synced"]
     end
 
     CDN["jsdelivr (pinned +esm)<br/>graphology 0.26.0 · sigma 3.0.3 · d3-force 3.0.0<br/>(d3-quadtree/dispatch/timer resolved by CDN)"]
@@ -197,7 +209,11 @@ flowchart TD
 - **The full graph is no longer "everything".** Older documents beyond the cap are
   not embedded and rows with no provenance that nothing links to are absent; the summary line and header say
   so (`100 of 342 documents`). The dashboard's own template inherits the cap without a slider.
-- **Payload contract grows again, all surfaces at once:** `docRank`, `controls.documents`, `childCount`;
+- **Payload contract grows again, all surfaces at once:** `docRank`, `controls.documents` (+ `order`, task 168), `childCount`;
   tests pin them in both template variants.
 - **Two more reads per query view, a few more rows.** Chunks never float;
   `search_memory` answers can be slightly larger before truncation.
+- **The slider means two things.** On the Full graph it
+  reveals older documents (default 100 of N); on a query view it narrows to the most relevant
+  (default all of N). The row label (`Most recent` / `Most relevant`) and the summary adjective
+  (`most-recent` / `most-relevant`) say which; the header counts read the same.

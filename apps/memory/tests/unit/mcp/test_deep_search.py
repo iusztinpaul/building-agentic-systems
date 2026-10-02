@@ -57,3 +57,24 @@ def test_the_closure_marker_reaches_no_file(
     written = [path.read_text() for path in (tmp_path / "s1").iterdir()]
     assert len(written) == 5  # 4 rows + index.yaml
     assert all("_closure_added" not in text for text in written)
+
+
+def test_the_relevance_rank_reaches_no_file(mocker, tmp_path: Path) -> None:
+    # Arrange: a query view's rows carry `doc_rank` (task 168) — a viz concern.
+    mocker.patch.object(deep_search, "MEMORY_DIR", tmp_path)
+    ranked = QueryResult(
+        nodes=[{**_row("n1", "node"), "doc_rank": 1}],
+        edges=[_row("e1", "edge")],
+    )
+    plain = QueryResult(nodes=[_row("n1", "node")], edges=[_row("e1", "edge")])
+
+    _, ranked_index = write_deep_search_results("q", ranked, "ranked")
+    _, plain_index = write_deep_search_results("q", plain, "plain")
+
+    # Assert: no file and no index line names it; every row file is
+    # byte-identical to the unranked run's.
+    assert "doc_rank" not in ranked_index
+    for name in ("n1.md", "e1.md"):
+        written = (tmp_path / "ranked" / name).read_text()
+        assert "doc_rank" not in written
+        assert written == (tmp_path / "plain" / name).read_text()

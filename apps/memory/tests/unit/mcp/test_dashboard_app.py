@@ -10,6 +10,7 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastmcp.tools import ToolResult
 
 from tree.mcp.dashboard_app import (
@@ -19,6 +20,7 @@ from tree.mcp.dashboard_app import (
     memory_dashboard,
 )
 from tree.memory.types import QueryResult
+from tree.memory.visualize.graph import to_graph_payload
 
 _UID = "65f1a2b3c4d5e6f7a8b9c0d1"
 
@@ -188,6 +190,39 @@ async def test_dashboard_empty_query_covers_full_graph(mocker) -> None:
     full_graph_mock.assert_awaited_once()
     query_mock.assert_not_awaited()
     assert "your full memory" in result.content[0].text
+
+
+def _ranked_result() -> QueryResult:
+    """Two documents stamped ``doc_rank`` (a query view or a Full graph)."""
+
+    return QueryResult(
+        nodes=[
+            {**_node(f"{_UID}:document:d{rank}", "document"), "doc_rank": rank}
+            for rank in (1, 2)
+        ],
+        edges=[],
+    )
+
+
+@pytest.mark.parametrize(("query", "order"), [("alice", "relevance"), ("", "recency")])
+async def test_dashboard_payload_orders_documents_by_whether_there_is_a_query(
+    mocker, query: str, order: str
+) -> None:
+    for read in ("structured_query_memory", "fetch_full_graph"):
+        mocker.patch(
+            f"tree.mcp.dashboard_app.{read}",
+            new=AsyncMock(return_value=_ranked_result()),
+        )
+    build = mocker.patch(
+        "tree.mcp.dashboard_app.to_graph_payload", wraps=to_graph_payload
+    )
+
+    result = await memory_dashboard(_make_ctx(ui_supported=True), query=query)
+
+    # Assert: the same rule as the graph view (task 168), though the
+    # dashboard's own template never reads docRank.
+    assert build.call_args.kwargs == {"document_order": order}
+    assert _content_payload(result)["controls"]["documents"]["order"] == order
 
 
 # ---------------------------------------------------------------------------

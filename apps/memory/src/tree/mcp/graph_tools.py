@@ -35,7 +35,7 @@ from tree.entities.memory import NodeType
 # dashboard_app: side-effect import — registers the custom-HTML dashboard
 # (memory_dashboard tool + ui:// resource).
 from tree.mcp import dashboard_app  # noqa: F401
-from tree.mcp.deep_search import write_deep_search_results
+from tree.mcp.deep_search import MODEL_HIDDEN_KEYS, write_deep_search_results
 
 from tree.mcp.server import mcp
 from tree.mcp.tools import (
@@ -55,7 +55,7 @@ from tree.memory.graph.nl_query import execute_nl_query
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
 from tree.memory.graph.retrieval import ranked_rows
-from tree.memory.visualize.graph import to_graph_payload
+from tree.memory.visualize.graph import densify_document_ranks, to_graph_payload
 from tree.memory.graph.review import (
     MergeStrategy,
     ReviewDecision,
@@ -73,9 +73,14 @@ logger = logging.getLogger(__name__)
 
 
 def _serialize(docs: list[dict[str, Any]]) -> str:
-    """Serialize MongoDB documents to JSON, stripping embedding fields."""
+    """Serialize MongoDB documents to JSON, stripping embedding fields.
 
-    cleaned = [{k: v for k, v in doc.items() if k != "embedding"} for doc in docs]
+    Also strips the viz-only ``doc_rank`` (task 168, :data:`MODEL_HIDDEN_KEYS`).
+    """
+
+    cleaned = [
+        {k: v for k, v in doc.items() if k not in MODEL_HIDDEN_KEYS} for doc in docs
+    ]
     return json_util.dumps(cleaned, indent=2)
 
 
@@ -118,12 +123,24 @@ def _dual_graph_result(
             "lack 'kind' field."
         )
 
-    payload = to_graph_payload(QueryResult(nodes=nodes, edges=edges))
+    # `search_memory`'s rows carry a relevance rank; an NL pipeline's do not
+    # (no rank -> no Documents slider). The rows may be TRUNCATED to
+    # `max_results`, cutting a ranked document's star: re-key the slider on
+    # the stars actually drawn so position 1 is never an empty view.
+    payload = densify_document_ranks(
+        to_graph_payload(
+            QueryResult(nodes=nodes, edges=edges), document_order="relevance"
+        )
+    )
     summary = (
         f"{serialized}\n\nGraph of these results: "
         f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
     return _graph_tool_result(ctx, payload, summary, query=query)
+
+
+# How the model-visible summary names the Documents slider's ranking.
+_ORDER_ADJECTIVE = {"recency": "most-recent", "relevance": "most-relevant"}
 
 
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
@@ -138,7 +155,9 @@ async def visualize_memory_graph(
     """Visualize the knowledge graph as an interactive graph.
 
     With a ``query``, runs semantic + text search with graph expansion (same
-    engine as ``search_memory``) and visualizes that subgraph. With NO query
+    engine as ``search_memory``) and visualizes that subgraph; its
+    ``Documents`` slider ranks the result's documents by search relevance and
+    shows every one by default (slide left to keep the best matches). With NO query
     (the default), visualizes the user's memory graph built from its most-recent
     documents (the Full graph). Renders read-only
     in an interactive Sigma.js force-directed view — use this when the user wants
@@ -196,13 +215,16 @@ async def visualize_memory_graph(
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
         return _retrieval_error("visualize_memory_graph", exc)
 
-    payload = to_graph_payload(result)
+    payload = to_graph_payload(
+        result, document_order="relevance" if query else "recency"
+    )
     n_nodes, n_edges = len(payload["nodes"]), len(payload["edges"])
     counts = f"{n_nodes} nodes, {n_edges} edges"
     documents = payload["controls"].get("documents")
     if documents:
         counts = (
-            f"{documents['shown']} of {documents['total']} most-recent documents "
+            f"{documents['shown']} of {documents['total']} "
+            f"{_ORDER_ADJECTIVE[documents['order']]} documents "
             f"shown by default, {counts}"
         )
     summary = f"Knowledge graph for {label}: {counts}"

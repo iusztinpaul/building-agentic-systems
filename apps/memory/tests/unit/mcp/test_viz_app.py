@@ -345,6 +345,10 @@ async def test_graph_view_resource_is_registered_by_the_neutral_app_layer() -> N
         "document.body.dataset.docs",
         '" of "',
         '" documents · "',
+        "ORDER_LABEL",  # task 168: the row label names the order
+        '"Most recent"',
+        '"Most relevant"',
+        "ORDER_LABEL[documents.order]",
         "function fitView()",
         "function autoFit()",
         "if (fitOnSettle) { fitOnSettle = false; autoFit(); }",

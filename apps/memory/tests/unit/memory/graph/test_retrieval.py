@@ -26,6 +26,7 @@ from tree.memory.graph.retrieval import (
     ranked_rows,
 )
 from tree.memory.rag.types import HybridSearchResult, ScoredHit
+from tree.memory.types import QueryResult
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -173,6 +174,296 @@ class TestQueryMemoryComposition:
         assert result.nodes == []
         assert result.edges == []
         expand.assert_not_awaited()
+
+
+# Three documents' provenance (task 167: ``sources`` holds Document ObjectIds).
+_SRC_A = PydanticObjectId("6abf6ab76789660069adda0a")
+_SRC_B = PydanticObjectId("6abf6ab76789660069adda0b")
+_SRC_C = PydanticObjectId("6abf6ab76789660069adda0c")
+_SRC_STUB = PydanticObjectId("6abf6ab76789660069adda0f")
+
+
+@pytest.fixture
+def ranked_corpus(
+    make_document_row, make_parent_row, make_child_row, make_entity_row
+) -> list[dict]:
+    """Documents A, B, C; A and B each with a parent and a child chunk.
+
+    ``e-ab`` is extracted from A AND B, ``e-none`` has no provenance, and C is
+    reachable only through ``pB -references-> C`` — no chunk of C is a hit.
+    """
+
+    return [
+        make_document_row(_USER, "A", sources=[_SRC_A]),
+        make_document_row(_USER, "B", sources=[_SRC_B]),
+        make_document_row(_USER, "C", sources=[_SRC_C]),
+        _with_sources(make_parent_row(_USER, "pA", document_id="A"), _SRC_A),
+        _with_sources(make_parent_row(_USER, "pB", document_id="B"), _SRC_B),
+        _with_sources(make_child_row(_USER, "cA", parent_id="pA"), _SRC_A),
+        _with_sources(make_child_row(_USER, "cB", parent_id="pB"), _SRC_B),
+        _with_sources(make_entity_row(_USER, "e-ab"), _SRC_A, _SRC_B),
+        _with_sources(make_entity_row(_USER, "e-none")),
+        _graph_edge("pA>A", "pA", "A", _SRC_A, edge_type="part_of"),
+        _graph_edge("pB>B", "pB", "B", _SRC_B, edge_type="part_of"),
+        _graph_edge("cA>pA", "cA", "pA", _SRC_A, edge_type="part_of"),
+        _graph_edge("cB>pB", "cB", "pB", _SRC_B, edge_type="part_of"),
+        _graph_edge("pA>e-ab", "pA", "e-ab", _SRC_A),
+        _graph_edge("pA>e-none", "pA", "e-none", _SRC_A),
+        _graph_edge("pB>C", "pB", "C", _SRC_B, edge_type="references"),
+    ]
+
+
+def _hit(rows: list[dict], node_id: str, score: float) -> ScoredHit:
+    return ScoredHit(
+        doc=next(row for row in rows if row["_id"] == node_id), score=score
+    )
+
+
+async def _ranked_query(
+    mocker,
+    collection,
+    hits: list[ScoredHit],
+    embedding_model: FakeEmbeddingModel,
+    max_hops: int = 1,
+) -> QueryResult:
+    mocker.patch(
+        "tree.memory.graph.retrieval.hybrid_search",
+        return_value=HybridSearchResult(hits=hits),
+        autospec=True,
+    )
+    return await query_memory(
+        _client(collection), _DATABASE, "q", embedding_model, _USER, max_hops=max_hops
+    )
+
+
+def _doc_ranks(rows: list[dict]) -> dict:
+    return {row["_id"]: row["doc_rank"] for row in rows if "doc_rank" in row}
+
+
+class TestQueryMemoryRelevanceRank:
+    """Task 168: a query view's documents ranked by their best seed hit, the
+    rank stamped as ``doc_rank`` on copies of the node rows they own."""
+
+    async def test_documents_rank_by_their_best_hit_then_expansion_only_last(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model
+        )
+
+        # Assert: B (0.9) before A (0.5); C, reached only by expansion, last.
+        # Each chunk ranks with its document, the shared entity with the more
+        # relevant of its two.
+        assert _doc_ranks(result.nodes) == {
+            "B": 1,
+            "pB": 1,
+            "cB": 1,
+            "A": 2,
+            "pA": 2,
+            "cA": 2,
+            "e-ab": 1,
+            "C": 3,
+        }
+
+    async def test_no_provenance_nodes_and_every_edge_stay_unranked(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model
+        )
+
+        nodes = {row["_id"]: row for row in result.nodes}
+        assert "e-none" in nodes
+        assert "doc_rank" not in nodes["e-none"]
+        assert result.edges
+        assert all("doc_rank" not in edge for edge in result.edges)
+
+    async def test_equal_scores_rank_by_id(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.5), _hit(ranked_corpus, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model
+        )
+
+        ranks = _doc_ranks(result.nodes)
+        assert (ranks["A"], ranks["B"], ranks["C"]) == (1, 2, 3)
+
+    async def test_a_hit_whose_sources_match_no_drawn_document_ranks_nothing(
+        self, mocker, make_collection, ranked_corpus, embedding_model, make_entity_row
+    ) -> None:
+        # An entity hit owned only by a document that is NOT in the result.
+        stray = _with_sources(make_entity_row(_USER, "e-stray"), _SRC_STUB)
+        rows = [*ranked_corpus, stray]
+        hits = [ScoredHit(doc=stray, score=0.99), _hit(rows, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(rows), hits, embedding_model
+        )
+
+        # Assert: the stray hit lifts no document (A, the only one hit, is
+        # first) and the stray entity itself stays unranked.
+        nodes = {row["_id"]: row for row in result.nodes}
+        assert nodes["A"]["doc_rank"] == 1
+        assert "doc_rank" not in nodes["e-stray"]
+
+    async def test_when_no_hit_maps_to_a_drawn_document_all_rank_by_id(
+        self, mocker, make_collection, ranked_corpus, embedding_model, make_entity_row
+    ) -> None:
+        # Arrange: the only hit is owned by a document NOT drawn, yet it
+        # reaches documents B and A through its own edges.
+        stray = _with_sources(make_entity_row(_USER, "e-stray"), _SRC_STUB)
+        rows = [
+            *ranked_corpus,
+            stray,
+            _graph_edge("e-stray>B", "e-stray", "B", _SRC_STUB),
+            _graph_edge("e-stray>A", "e-stray", "A", _SRC_STUB),
+        ]
+
+        result = await _ranked_query(
+            mocker,
+            make_collection(rows),
+            [ScoredHit(doc=stray, score=0.9)],
+            embedding_model,
+        )
+
+        # Assert: every drawn document is still ranked (the slider stays
+        # usable), in `str(_id)` order; the stray entity stays unranked.
+        assert _doc_ranks(result.nodes) == {"A": 1, "B": 2}
+
+    async def test_a_document_with_a_stub_id_beside_the_real_one_still_maps(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        # B's row carries a latent stub id FIRST (167 found such rows live).
+        rows = [
+            {**row, "sources": [_SRC_STUB, _SRC_B]} if row["_id"] == "B" else row
+            for row in ranked_corpus
+        ]
+        hits = [_hit(rows, "cB", 0.9), _hit(rows, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(rows), hits, embedding_model
+        )
+
+        ranks = _doc_ranks(result.nodes)
+        assert (ranks["B"], ranks["cB"], ranks["A"]) == (1, 1, 2)
+
+    async def test_a_document_seed_maps_through_its_own_sources(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "C", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model
+        )
+
+        ranks = _doc_ranks(result.nodes)
+        assert (ranks["C"], ranks["A"]) == (1, 2)
+
+    async def test_the_zero_hop_path_ranks_too(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        result = await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model, max_hops=0
+        )
+
+        # Assert: the seeds' parents + the closure's documents, ranked; C is
+        # unreachable without a hop.
+        assert _doc_ranks(result.nodes) == {"B": 1, "pB": 1, "A": 2, "pA": 2}
+
+    async def test_a_result_without_document_rows_is_left_unstamped(
+        self, mocker, make_collection, make_entity_row, embedding_model
+    ) -> None:
+        entity = _with_sources(make_entity_row(_USER, "e1"), _SRC_A)
+
+        result = await _ranked_query(
+            mocker,
+            make_collection([entity]),
+            [ScoredHit(doc=entity, score=0.9)],
+            embedding_model,
+            max_hops=0,
+        )
+
+        assert [row["_id"] for row in result.nodes] == ["e1"]
+        assert _doc_ranks(result.nodes) == {}
+
+    async def test_stamps_copies_and_keeps_rows_and_order(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        collection = make_collection(ranked_corpus)
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+        unranked = await expand_graph(
+            _client(make_collection(ranked_corpus)),
+            _DATABASE,
+            ["pB", "pA"],
+            _USER,
+            max_hops=1,
+        )
+
+        result = await _ranked_query(mocker, collection, hits, embedding_model)
+
+        # Assert: the same rows in the same order, each equal to the unranked
+        # one but for a trailing doc_rank; the collection's rows untouched.
+        assert [
+            {k: v for k, v in row.items() if k != "doc_rank"} for row in result.nodes
+        ] == unranked.nodes
+        assert all(
+            list(row)[-1] == "doc_rank" for row in result.nodes if "doc_rank" in row
+        )
+        assert result.edges == unranked.edges
+        assert all("doc_rank" not in row for row in collection.rows)
+
+    async def test_ranking_issues_no_extra_read(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        ranked = make_collection(ranked_corpus)
+        plain = make_collection(ranked_corpus)
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        await _ranked_query(mocker, ranked, hits, embedding_model)
+        await expand_graph(_client(plain), _DATABASE, ["pB", "pA"], _USER, max_hops=1)
+
+        # Assert: the search leg is patched, so every read is expansion's own.
+        assert ranked.find_filters == plain.find_filters
+        assert ranked.pipelines == plain.pipelines
+
+    async def test_expansion_still_starts_from_the_same_seed_ids(
+        self, mocker, make_collection, ranked_corpus, embedding_model
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+        expand = mocker.patch(
+            "tree.memory.graph.retrieval.expand_graph",
+            new_callable=AsyncMock,
+            return_value=QueryResult(),
+        )
+
+        await _ranked_query(
+            mocker, make_collection(ranked_corpus), hits, embedding_model
+        )
+
+        assert expand.await_args.args[2] == ["pB", "pA"]
+
+    async def test_logs_the_relevance_rank_at_debug(
+        self, mocker, make_collection, ranked_corpus, embedding_model, caplog
+    ) -> None:
+        hits = [_hit(ranked_corpus, "cB", 0.9), _hit(ranked_corpus, "cA", 0.5)]
+
+        with caplog.at_level(logging.DEBUG, logger="tree.memory.graph.retrieval"):
+            result = await _ranked_query(
+                mocker, make_collection(ranked_corpus), hits, embedding_model
+            )
+
+        assert (
+            f"Relevance rank: 3 document(s), 8 of {len(result.nodes)} node rows ranked"
+            in caplog.messages
+        )
 
 
 class TestExpandGraph:

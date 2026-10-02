@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from bson import ObjectId
+from bson import ObjectId, json_util
 from fastmcp.tools import ToolResult
 
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
@@ -39,6 +39,7 @@ from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.graph import retrieval
 from tree.memory.graph.retrieval import expand_graph
 from tree.memory.types import QueryResult
+from tree.memory.visualize.graph import to_graph_payload
 
 
 class TestSerialize:
@@ -77,6 +78,16 @@ class TestSerialize:
         _serialize(docs)
 
         assert "embedding" in docs[0]
+
+    def test_strips_the_relevance_rank_and_matches_the_unranked_text(self):
+        # Task 168: `doc_rank` is a viz concern; the model's text is unchanged.
+        plain = [{"_id": "chunk:p1", "kind": "node", "sources": ["d1"]}]
+        ranked = [{**plain[0], "doc_rank": 1}]
+
+        result = _serialize(ranked)
+
+        assert "doc_rank" not in result
+        assert result == json_util.dumps(plain, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +495,186 @@ async def test_visualize_full_graph_summary_says_how_many_documents_show(
         "Knowledge graph for your full memory: 3 of 3 most-recent documents "
         "shown by default, 3 nodes, 0 edges"
     )
+
+
+# --- task 168: query views rank documents by relevance -----------------------
+
+
+def _ranked_docs() -> list[dict[str, Any]]:
+    """``_GRAPH_DOCS`` as a seed-based query view stamps them (task 168)."""
+
+    return [
+        {**doc, "doc_rank": 1} if doc["kind"] == "node" else doc for doc in _GRAPH_DOCS
+    ]
+
+
+async def test_search_memory_text_never_carries_the_relevance_rank(mocker) -> None:
+    _patch_query(mocker, "search_memory", _ranked_docs())
+
+    result = await search_memory(query="q", ctx=_make_graph_ctx(ui_supported=True))
+
+    # Assert: byte-identical to the unranked rows' serialization.
+    assert "doc_rank" not in result
+    assert result == json_util.dumps(_GRAPH_DOCS, indent=2)
+
+
+async def test_search_memory_visualize_ranks_its_graph_by_relevance(mocker) -> None:
+    _patch_query(mocker, "search_memory", _ranked_docs())
+    build = mocker.patch(
+        "tree.mcp.graph_tools.to_graph_payload", wraps=to_graph_payload
+    )
+
+    result = await search_memory(
+        query="q", ctx=_make_graph_ctx(ui_supported=True), visualize=True
+    )
+
+    assert build.call_args.kwargs == {"document_order": "relevance"}
+    assert _content_payload(result)["controls"]["documents"] == {
+        "shown": 1,
+        "total": 1,
+        "order": "relevance",
+    }
+    assert "doc_rank" not in result.content[0].text
+
+
+def _truncation_corpus() -> list[dict[str, Any]]:
+    """A query view ranked B=2, C=3 first in the row order, A (rank 1) last —
+    so ``max_results`` truncation cuts the most relevant document's rows."""
+
+    def ranked(node_id: str, node_type: str, rank: int) -> dict[str, Any]:
+        return {**_node(node_id, node_type), "doc_rank": rank}
+
+    return [
+        ranked("b-p0", "chunk", 2),
+        ranked("b-p1", "chunk", 2),
+        ranked("b", "document", 2),
+        ranked("c-p0", "chunk", 3),
+        ranked("c", "document", 3),
+        ranked("a-p0", "chunk", 1),
+        ranked("a", "document", 1),
+    ]
+
+
+def _visible_at_one(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The renderer's ``isVisible`` with the slider at 1."""
+
+    return [n for n in payload["nodes"] if n.get("docRank") in (None, 1)]
+
+
+@pytest.mark.parametrize("max_results", [1, 2, 3, 4, 5, 6, 7])
+async def test_a_truncated_search_view_is_never_empty_at_one(
+    mocker, max_results: int
+) -> None:
+    # Regression (task 168 QA): the cut rows took rank 1's star with them.
+    _patch_query(mocker, "search_memory", _truncation_corpus())
+
+    result = await search_memory(
+        query="q",
+        ctx=_make_graph_ctx(ui_supported=True),
+        max_results=max_results,
+        visualize=True,
+    )
+
+    # Assert: either no slider at all, or one whose total is the stars drawn
+    # and whose position 1 leaves exactly one star (and never an empty view).
+    payload = _content_payload(result)
+    stars = [n for n in payload["nodes"] if n["type"] == "document"]
+    documents = payload["controls"].get("documents")
+    if not stars:
+        assert documents is None
+        assert all("docRank" not in n for n in payload["nodes"])
+        return
+    assert documents["total"] == len(stars)
+    assert sorted(n["docRank"] for n in stars) == list(range(1, len(stars) + 1))
+    visible = _visible_at_one(payload)
+    assert [n["type"] for n in visible].count("document") == 1
+
+
+async def test_a_truncated_search_view_renumbers_the_drawn_stars(mocker) -> None:
+    _patch_query(mocker, "search_memory", _truncation_corpus())
+
+    result = await search_memory(
+        query="q", ctx=_make_graph_ctx(ui_supported=True), max_results=5, visualize=True
+    )
+
+    # Assert: A (rank 1) was cut; B and C are drawn as 1 and 2; the model's
+    # text is the same as before the renumbering.
+    payload = _content_payload(result)
+    ranks = {n["id"].rsplit(":", 1)[1]: n.get("docRank") for n in payload["nodes"]}
+    assert ranks == {"b-p0": 1, "b-p1": 1, "b": 1, "c-p0": 2, "c": 2}
+    assert payload["controls"]["documents"] == {
+        "shown": 2,
+        "total": 2,
+        "order": "relevance",
+    }
+    assert "doc_rank" not in result.content[0].text
+
+
+async def test_an_nl_query_view_carries_no_documents_control(mocker) -> None:
+    _patch_query(mocker, "query_memory", _GRAPH_DOCS)
+
+    result = await query_memory(
+        query="q", ctx=_make_graph_ctx(ui_supported=True), visualize=True
+    )
+
+    # Assert: NL pipeline rows carry no rank, so there is nothing to slide.
+    payload = _content_payload(result)
+    assert "documents" not in payload["controls"]
+    assert all("docRank" not in node for node in payload["nodes"])
+
+
+async def test_visualize_query_summary_says_how_many_relevant_documents_show(
+    mocker,
+) -> None:
+    mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_ranked_result(3)),
+    )
+    build = mocker.patch(
+        "tree.mcp.graph_tools.to_graph_payload", wraps=to_graph_payload
+    )
+
+    result = await visualize_memory_graph(
+        _make_graph_ctx(ui_supported=True), query="memory for ai agents"
+    )
+
+    # Assert: a query view shows every document by default, most relevant first.
+    assert build.call_args.kwargs == {"document_order": "relevance"}
+    assert result.content[0].text.startswith(
+        "Knowledge graph for 'memory for ai agents': 3 of 3 most-relevant "
+        "documents shown by default, 3 nodes, 0 edges"
+    )
+
+
+async def test_visualize_full_graph_ranks_by_recency(mocker) -> None:
+    mocker.patch(
+        "tree.mcp.graph_tools.fetch_full_graph",
+        new=AsyncMock(return_value=_ranked_result(3)),
+    )
+    build = mocker.patch(
+        "tree.mcp.graph_tools.to_graph_payload", wraps=to_graph_payload
+    )
+
+    result = await visualize_memory_graph(_make_graph_ctx(ui_supported=True))
+
+    assert build.call_args.kwargs == {"document_order": "recency"}
+    assert _content_payload(result)["controls"]["documents"]["order"] == "recency"
+
+
+async def test_visualize_an_unranked_query_keeps_the_plain_summary(mocker) -> None:
+    mocker.patch(
+        "tree.mcp.graph_tools.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+
+    result = await visualize_memory_graph(
+        _make_graph_ctx(ui_supported=True), query="alice"
+    )
+
+    assert result.content[0].text.startswith(
+        "Knowledge graph for 'alice': 2 nodes, 1 edges"
+    )
+    assert "documents" not in _content_payload(result)["controls"]
 
 
 async def test_visualize_fallback_returns_path_and_resource_link(

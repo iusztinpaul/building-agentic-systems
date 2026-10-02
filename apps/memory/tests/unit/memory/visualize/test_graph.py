@@ -33,6 +33,7 @@ from tree.memory.visualize.graph import (
     _render_graph_file,
     _slugify,
     _truncate,
+    densify_document_ranks,
     to_graph_payload,
     visualize_query_result,
 )
@@ -491,6 +492,24 @@ def test_visualize_query_result_survives_a_headless_browser_open(
 
     # Assert: the render still succeeded — opening a browser is best-effort.
     assert path.is_file()
+
+
+@pytest.mark.parametrize(
+    ("query", "order"), [("memory for ai agents", "relevance"), ("", "recency")]
+)
+def test_visualize_query_result_orders_documents_by_whether_there_is_a_query(
+    mocker, tmp_path: Path, query: str, order: str
+) -> None:
+    build = mocker.patch(
+        "tree.memory.visualize.graph.to_graph_payload", wraps=to_graph_payload
+    )
+    out = tmp_path / "graph.html"
+
+    visualize_query_result(_ranked_result(3), out, open_browser=False, query=query)
+
+    # Assert: a query view ranks by relevance, the Full graph by recency.
+    assert build.call_args.kwargs == {"document_order": order}
+    assert f'"order": "{order}"' in out.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1318,8 +1337,28 @@ def test_a_full_graph_payload_ships_the_documents_control(mocker) -> None:
 
     payload = to_graph_payload(_ranked_result(12))
 
-    # Assert: Python decides how many show on load; total = the deepest rank.
-    assert payload["controls"]["documents"] == {"shown": 5, "total": 12}
+    # Assert: Python decides how many show on load; total = the deepest rank;
+    # the default order is the Full graph's (165 payloads gain only `order`).
+    assert payload["controls"]["documents"] == {
+        "shown": 5,
+        "total": 12,
+        "order": "recency",
+    }
+
+
+@pytest.mark.parametrize("shown_docs", [1, 5, 100])
+def test_a_relevance_payload_shows_every_document(mocker, shown_docs: int) -> None:
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", shown_docs)
+
+    payload = to_graph_payload(_ranked_result(12), document_order="relevance")
+
+    # Assert: a query view narrows, it never caps — whatever the Full-graph
+    # default is (task 168).
+    assert payload["controls"]["documents"] == {
+        "shown": 12,
+        "total": 12,
+        "order": "relevance",
+    }
 
 
 def test_shown_clamps_to_the_configured_embed_cap(mocker) -> None:
@@ -1329,7 +1368,11 @@ def test_shown_clamps_to_the_configured_embed_cap(mocker) -> None:
 
     payload = to_graph_payload(_ranked_result(60))
 
-    assert payload["controls"]["documents"] == {"shown": 50, "total": 60}
+    assert payload["controls"]["documents"] == {
+        "shown": 50,
+        "total": 60,
+        "order": "recency",
+    }
 
 
 def test_shown_clamps_to_the_documents_that_exist(mocker) -> None:
@@ -1337,16 +1380,145 @@ def test_shown_clamps_to_the_documents_that_exist(mocker) -> None:
 
     payload = to_graph_payload(_ranked_result(4))
 
-    assert payload["controls"]["documents"] == {"shown": 4, "total": 4}
+    assert payload["controls"]["documents"] == {
+        "shown": 4,
+        "total": 4,
+        "order": "recency",
+    }
 
 
-def test_a_query_payload_has_neither_doc_rank_nor_a_documents_control() -> None:
-    payload = to_graph_payload(_seed_result())
+@pytest.mark.parametrize("document_order", ["recency", "relevance"])
+def test_an_unranked_payload_has_neither_doc_rank_nor_a_documents_control(
+    document_order: str,
+) -> None:
+    # Rewritten by task 168: query views ARE ranked now; an unranked result
+    # (an NL `query_memory` pipeline's rows) is what carries no slider.
+    payload = to_graph_payload(_seed_result(), document_order=document_order)
 
-    # Assert: no rank -> no slider gate; query payloads are as before 165.
+    # Assert: no rank -> no slider gate, whatever the order asked for.
     assert "documents" not in payload["controls"]
     assert set(payload["controls"]) == {"forces", "display"}
     assert all("docRank" not in n for n in payload["nodes"])
+
+
+# --- densify_document_ranks: a truncated payload's slider (task 168 QA) -------
+
+
+def _sparse_result(ranks_drawn: dict[str, int]) -> QueryResult:
+    """Ranked rows as a TRUNCATED view draws them: ``{node_id: doc_rank}``,
+    a ``d…`` id being a document row, anything else a chunk."""
+
+    return QueryResult(
+        nodes=[
+            {
+                **_node(
+                    f"{_UID}:{node_id}", "document" if node_id[0] == "d" else "chunk"
+                ),
+                "doc_rank": rank,
+            }
+            for node_id, rank in ranks_drawn.items()
+        ],
+        edges=[],
+    )
+
+
+def _ranks(payload: dict) -> dict:
+    return {n["id"].split(":", 1)[1]: n.get("docRank") for n in payload["nodes"]}
+
+
+def _visible_at(payload: dict, limit: int) -> list[str]:
+    """The renderer's ``isVisible`` at ``docLimit = limit``."""
+
+    return [
+        n["id"]
+        for n in payload["nodes"]
+        if n.get("docRank") is None or n["docRank"] <= limit
+    ]
+
+
+def test_densify_renumbers_the_drawn_documents_from_one() -> None:
+    # Arrange: rank 1's document and its rows were cut; 2 and 4 are drawn.
+    payload = to_graph_payload(
+        _sparse_result({"c2": 2, "d2": 2, "d4": 4, "c4": 4}),
+        document_order="relevance",
+    )
+
+    dense = densify_document_ranks(payload)
+
+    # Assert: 2 -> 1, 4 -> 2, relative order kept; total = stars drawn.
+    assert _ranks(dense) == {"c2": 1, "d2": 1, "d4": 2, "c4": 2}
+    assert dense["controls"]["documents"] == {
+        "shown": 2,
+        "total": 2,
+        "order": "relevance",
+    }
+
+
+def test_densify_never_leaves_the_view_empty_at_one() -> None:
+    payload = to_graph_payload(
+        _sparse_result({"c2a": 2, "c2b": 2, "d3": 3, "c3": 3}),
+        document_order="relevance",
+    )
+
+    dense = densify_document_ranks(payload)
+
+    visible = _visible_at(dense, 1)
+    assert any(":d" in node_id for node_id in visible)
+
+
+def test_densify_unranks_rows_whose_document_star_was_cut() -> None:
+    payload = to_graph_payload(
+        _sparse_result({"c1": 1, "d2": 2, "c2": 2}), document_order="relevance"
+    )
+
+    dense = densify_document_ranks(payload)
+
+    # Assert: c1's document is not drawn, so c1 is always shown.
+    assert _ranks(dense) == {"c1": None, "d2": 1, "c2": 1}
+    assert dense["controls"]["documents"]["total"] == 1
+
+
+def test_densify_drops_the_slider_when_no_document_star_is_drawn() -> None:
+    # The live break: 10 chunks of rank 2, no document row.
+    payload = to_graph_payload(
+        _sparse_result({f"c{i}": 2 for i in range(10)}), document_order="relevance"
+    )
+
+    dense = densify_document_ranks(payload)
+
+    assert "documents" not in dense["controls"]
+    assert all("docRank" not in n for n in dense["nodes"])
+
+
+@pytest.mark.parametrize("document_order", ["recency", "relevance"])
+def test_densify_leaves_a_dense_payload_untouched(document_order: str) -> None:
+    payload = to_graph_payload(_ranked_result(12), document_order=document_order)
+    before = json.dumps(payload)
+
+    dense = densify_document_ranks(payload)
+
+    # Assert: identical, and the input is never mutated.
+    assert json.dumps(dense) == before
+    assert json.dumps(payload) == before
+
+
+def test_densify_keeps_the_same_stars_visible_at_the_default(mocker) -> None:
+    # A recency payload showing ranks <= 3 of a sparse 1, 3, 5, 6.
+    mocker.patch.object(app_config.query, "full_graph_shown_docs", 3)
+    payload = to_graph_payload(
+        _sparse_result({"d1": 1, "d3": 3, "d5": 5, "d6": 6}),
+        document_order="recency",
+    )
+
+    dense = densify_document_ranks(payload)
+
+    # Assert: d1 and d3 shown before and after; shown counts drawn stars.
+    assert dense["controls"]["documents"] == {
+        "shown": 2,
+        "total": 4,
+        "order": "recency",
+    }
+    assert _visible_at(dense, 2) == _visible_at(payload, 3)
 
 
 def test_render_graph_file_logs_the_documents_shown_on_a_full_graph(
@@ -1384,6 +1556,10 @@ def _documents_js() -> str:
         "dataset.docs",
         '" of "',
         '" documents · "',
+        "ORDER_LABEL",
+        '"Most recent"',
+        '"Most relevant"',
+        "ORDER_LABEL[documents.order]",
     ],
 )
 def test_template_carries_the_documents_slider(token: str) -> None:
@@ -1401,14 +1577,27 @@ def test_the_documents_section_is_gated_and_built_before_forces() -> None:
     )
     assert "if (documents) {" in documents
     assert (
-        'rangeRow(panelSection("Documents"), "Documents", 1, documents.total, 1,'
-        " documents.shown, 0,"
+        'rangeRow(panelSection("Documents"), ORDER_LABEL[documents.order], 1,'
+        " documents.total, 1, documents.shown, 0,"
     ) in documents
     assert "applyDocumentLimit" in documents
     assert '(v) => v + " of " + documents.total' in documents
     assert _panel_js().index('panelSection("Documents")') < _panel_js().index(
         'panelSection("Forces")'
     )
+
+
+def test_the_documents_row_label_names_the_order() -> None:
+    # Assert: one lookup beside `documents`, keyed by the payload's order —
+    # the ONE renderer change of task 168.
+    assert (
+        'const ORDER_LABEL = { recency: "Most recent", relevance: "Most relevant" };'
+        in _RENDER_JS
+    )
+    assert _RENDER_JS.index("const ORDER_LABEL") < _RENDER_JS.index(
+        "let docLimit = documents ? documents.shown : Infinity;"
+    )
+    assert "ORDER_LABEL[documents.order]" in _documents_js()
 
 
 def test_the_panel_code_contains_no_shown_default_of_its_own() -> None:

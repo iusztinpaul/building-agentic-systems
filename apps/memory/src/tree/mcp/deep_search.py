@@ -20,6 +20,12 @@ from tree.memory.graph.retrieval import ranked_rows
 from tree.memory.types import QueryResult
 
 logger = logging.getLogger(__name__)
+
+# Row keys that never reach the model: the vector, and the relevance rank a
+# query view stamps for the Graph renderer's Documents slider (task 168) — so
+# deep-search files and `search_memory`'s text stay byte-identical for the
+# same rows.
+MODEL_HIDDEN_KEYS = ("embedding", "doc_rank")
 _CONTEXT_MAX_LEN = 120
 
 
@@ -228,7 +234,7 @@ def write_deep_search_results(
         doc_id = str(doc.get("_id", uuid4().hex[:8]))
         kind = doc.get("kind", "node")
 
-        cleaned = {k: v for k, v in doc.items() if k != "embedding"}
+        cleaned = {k: v for k, v in doc.items() if k not in MODEL_HIDDEN_KEYS}
 
         slug = slugify(doc_id)
         filename = f"{slug}.md"

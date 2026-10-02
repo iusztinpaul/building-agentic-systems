@@ -62,7 +62,8 @@ async def _fetch_payload(
             database=lc["database"],
             user_id=lc["user_id"],
         )
-    return to_graph_payload(result)
+    # The graph view's rule (task 168); this template ignores `docRank` today.
+    return to_graph_payload(result, document_order="relevance" if query else "recency")
 
 
 def _summary(payload: dict[str, Any], label: str) -> str:

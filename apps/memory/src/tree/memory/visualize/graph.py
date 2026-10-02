@@ -19,6 +19,8 @@ What lives here:
 * :func:`_render_graph_file` — write a self-contained HTML file (data embedded
   inline as ``const DATA = …``, so it works as a plain ``file://`` page) under
   the one output convention ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
+* :func:`densify_document_ranks` — re-key a TRUNCATED payload's ``docRank``
+  on the document stars it draws.
 * :func:`visualize_query_result` — the CLI-facing entry point.
 
 The UI is themed after the "Tree Memory" design: a header with live counts +
@@ -32,9 +34,10 @@ box-selects, Esc or a stage click clears; dragging a selected node moves the
 whole selection, and every dragged node carries its unpinned direct
 ``part_of`` children rigidly. A collapsible Controls panel (top-left), seeded
 from ``payload["controls"]``, tunes the forces (reheat), the display (redraw
-only) and offers Pause / Unpin all / Reset to defaults. On the **Full graph**
-(``controls.documents``) its first section is a ``Documents`` slider that hides
-nodes beyond the N most-recent documents in Sigma AND in the simulation.
+only) and offers Pause / Unpin all / Reset to defaults. On a ranked payload
+(``controls.documents``: the **Full graph** by recency, a query view by search
+relevance) its first section is a ``Documents`` slider that hides nodes beyond
+the N best-ranked documents in Sigma AND in the simulation.
 
 Needs network at VIEW time (the libraries load from the CDN rather than being
 vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
@@ -58,7 +61,7 @@ import re
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tree.config.app_config import app_config
 from tree.config.paths import GRAPHS_DIR
@@ -175,7 +178,11 @@ def _node_size(node_type: str, subtype: str | None) -> int:
     return _NODE_SIZES.get(node_type, _DEFAULT_NODE_SIZE)
 
 
-def to_graph_payload(result: QueryResult) -> dict[str, Any]:
+def to_graph_payload(
+    result: QueryResult,
+    *,
+    document_order: Literal["recency", "relevance"] = "recency",
+) -> dict[str, Any]:
     """Flatten a ``QueryResult`` into a graph ``{nodes, edges, controls}`` payload.
 
     Every edge endpoint is guaranteed to also exist as a node — partial graphs
@@ -192,12 +199,17 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
     ``controls`` ships the force / display defaults the template seeds its live
     layout and reducers from.
 
-    A **Full graph** row stamped ``doc_rank`` (:func:`fetch_full_graph`) gives
-    its node a ``docRank``, and then ``controls.documents`` = ``{shown, total}``
-    — the gate for the renderer's ``Documents`` slider, ``shown`` being
-    ``query.full_graph_shown_docs`` clamped to ``query.full_graph_max_docs`` and
-    to ``total`` (the deepest rank).
-    A query payload carries neither.
+    A row stamped ``doc_rank`` — by recency on the **Full graph**
+    (:func:`fetch_full_graph`), by search relevance on a seed-based query view
+    (:func:`~tree.memory.graph.retrieval.query_memory`) — gives its node a
+    ``docRank``, and then ``controls.documents`` = ``{shown, total, order}``:
+    the gate for the renderer's ``Documents`` slider. ``order`` is the
+    caller's ``document_order`` (Python decides which ranking the rows carry);
+    ``total`` is the deepest rank; ``shown`` is ``query.full_graph_shown_docs``
+    clamped to ``query.full_graph_max_docs`` and to ``total`` for ``recency``,
+    and ``total`` for ``relevance`` — a query result is ``top_k`` seeds wide,
+    so its slider narrows, it never caps (task 168). An unranked payload (an
+    NL ``query_memory`` pipeline's rows) carries neither.
 
     A parent chunk a query view stamped ``child_count`` (its children exist but
     none was pulled in, ADR-011 §8) gives its node a ``childCount``, which the
@@ -270,11 +282,65 @@ def to_graph_payload(result: QueryResult) -> dict[str, Any]:
     ranks = [node["docRank"] for node in nodes if "docRank" in node]
     if ranks:
         total = max(ranks)
-        query = app_config.query
-        shown = min(query.full_graph_shown_docs, query.full_graph_max_docs, total)
-        controls["documents"] = {"shown": shown, "total": total}
+        shown = total
+        if document_order == "recency":
+            query = app_config.query
+            shown = min(query.full_graph_shown_docs, query.full_graph_max_docs, total)
+        controls["documents"] = {
+            "shown": shown,
+            "total": total,
+            "order": document_order,
+        }
 
     return {"nodes": nodes, "edges": edges, "controls": controls}
+
+
+def densify_document_ranks(payload: dict[str, Any]) -> dict[str, Any]:
+    """Re-key a payload's ``docRank`` on the document stars it actually draws.
+
+    A view built from TRUNCATED rows (``search_memory(visualize=True)`` keeps
+    ``max_results`` of them) can draw rows ranked 2 while rank 1's document
+    and every row it owns were cut — the slider at 1 would then empty the
+    canvas (task 168 QA). The drawn ``document`` nodes' ranks are renumbered
+    densely ``1..k`` in their original order; a node whose rank no drawn
+    star carries loses ``docRank`` (always shown); ``controls.documents``
+    becomes ``total = k`` with ``shown`` = the drawn stars the old default
+    showed (at least 1), or is dropped when no star is drawn. A dense payload
+    (every surface that does not truncate) comes back unchanged. Pure: the
+    input is never mutated.
+    """
+
+    documents = (payload.get("controls") or {}).get("documents")
+    if not documents:
+        return payload
+    drawn = sorted(
+        {
+            node["docRank"]
+            for node in payload["nodes"]
+            if node["type"] == "document" and "docRank" in node
+        }
+    )
+    dense = {rank: position for position, rank in enumerate(drawn, start=1)}
+
+    nodes: list[dict[str, Any]] = []
+    for node in payload["nodes"]:
+        rank = node.get("docRank")
+        if rank is None or dense.get(rank) == rank:
+            nodes.append(node)
+        elif rank in dense:
+            nodes.append({**node, "docRank": dense[rank]})
+        else:
+            nodes.append({k: v for k, v in node.items() if k != "docRank"})
+
+    controls = {k: v for k, v in payload["controls"].items() if k != "documents"}
+    if drawn:
+        shown = sum(rank <= documents["shown"] for rank in drawn)
+        controls["documents"] = {
+            **documents,
+            "shown": max(shown, 1),
+            "total": len(drawn),
+        }
+    return {**payload, "nodes": nodes, "controls": controls}
 
 
 def _slugify(text: str, max_len: int = 48) -> str:
@@ -371,10 +437,14 @@ def visualize_query_result(
             ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
         open_browser: Pop the file open locally. BEST EFFORT — a headless or
             remote host simply gets no browser, never an exception.
-        query: The query text, used for the default filename's slug.
+        query: The query text, used for the default filename's slug — and
+            the ranking: a query view's documents rank by relevance, the
+            **Full graph**'s (no query) by recency.
     """
 
-    payload = to_graph_payload(result)
+    payload = to_graph_payload(
+        result, document_order="relevance" if query else "recency"
+    )
     path = _render_graph_file(
         payload, query=query, output=Path(output) if output else None
     )
@@ -573,7 +643,7 @@ _RENDER_JS = """\
       // rows (bound to the previous renderer) from this payload.
       const panelBody = document.getElementById("panel-body");
       panelBody.textContent = "";
-      delete document.body.dataset.docs;   // set again below on a Full graph only
+      delete document.body.dataset.docs;   // set again below on a ranked payload only
       document.getElementById("panel").hidden = !nodes.length;
 
       if (!nodes.length) { countsEl.textContent = "No graph data returned."; return; }
@@ -601,10 +671,12 @@ _RENDER_JS = """\
       // Only an edge whose two endpoints exist is drawn — or simulated.
       const drawnEdges = edges.filter((e) => nodeById.has(e.source) && nodeById.has(e.target));
 
-      // The Documents slider (ADR-011 §7). A Full graph ranks every node by
-      // its most recent document (`docRank`) and shows the first `docLimit`
-      // documents; an unranked node (every node of a query view) always shows.
+      // The Documents slider (ADR-011 §7). A ranked payload ranks a node by
+      // its best document (`docRank`: recency on the Full graph, search
+      // relevance on a query view — `documents.order`) and shows the first
+      // `docLimit` documents; an unranked node always shows.
       const documents = payload.controls && payload.controls.documents;
+      const ORDER_LABEL = { recency: "Most recent", relevance: "Most relevant" };
       let docLimit = documents ? documents.shown : Infinity;
       function isVisible(id) {
         const rank = nodeById.get(id).docRank;
@@ -1347,9 +1419,9 @@ _RENDER_JS = """\
           if (!sim || paused) autoFit();
         }
       }
-      // Documents — the Full graph only (the gate: controls.documents), FIRST.
+      // Documents — any ranked payload (the gate: controls.documents), FIRST.
       if (documents) {
-        rangeRow(panelSection("Documents"), "Documents", 1, documents.total, 1, documents.shown, 0,
+        rangeRow(panelSection("Documents"), ORDER_LABEL[documents.order], 1, documents.total, 1, documents.shown, 0,
           applyDocumentLimit, (v) => v + " of " + documents.total);
         showDocumentCounts();                // the boot already hid the rest
       }

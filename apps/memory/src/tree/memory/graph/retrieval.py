@@ -293,7 +293,9 @@ async def query_memory(
     """Search for seed nodes, resolve chunk seeds to parents, expand the graph.
 
     Every step is scoped to ``user_id``. A single query never returns rows from
-    another tenant.
+    another tenant. The result's node rows carry ``doc_rank`` by search
+    relevance (:func:`_rank_by_relevance`) — a viz concern the model-facing
+    serializers strip.
     """
 
     top_k = top_k if top_k is not None else app_config.query.top_k
@@ -312,7 +314,8 @@ async def query_memory(
 
     seed_ids = _seed_ids(hits)
 
-    return await expand_graph(client, database, seed_ids, user_id, max_hops=max_hops)
+    result = await expand_graph(client, database, seed_ids, user_id, max_hops=max_hops)
+    return _rank_by_relevance(result, hits)
 
 
 def _seed_ids(hits: list[ScoredHit]) -> list[Any]:
@@ -334,6 +337,67 @@ def _seed_ids(hits: list[ScoredHit]) -> list[Any]:
     seed_ids = list(group_children_by_parent(children))
     seed_ids.extend(node_id for node_id in other_ids if node_id not in seed_ids)
     return seed_ids
+
+
+def _rank_by_relevance(result: QueryResult, hits: list[ScoredHit]) -> QueryResult:
+    """Stamp ``doc_rank`` on the query view's nodes by search relevance (task 168).
+
+    The result's ``document`` rows (the stars drawn) are ranked by their best
+    hit — a hit maps to a document when their ``sources`` share an element,
+    so a child seed, a parent, an entity and a document seed all map the same
+    way — best RRF score first, ties on ``str(_id)``; documents no hit maps to
+    (pulled in by expansion or the ``part_of`` closure) follow, by ``str(_id)``.
+    The hit order is the one relevance signal left: ``expand_graph``
+    re-hydrates every row, so no score survives on them (ADR-011 §7).
+
+    Every node row a ranked document owns gets a COPY stamped ``doc_rank`` —
+    a document its own rank, any other row the best rank among its
+    ``sources`` (:func:`_rank_by_provenance`). A row with no ranked provenance
+    and every edge stay unstamped (always shown). No hit or no document row →
+    the result as is. Pure: no read.
+    """
+
+    documents = [row for row in result.nodes if row.get("type") == "document"]
+    if not hits or not documents:
+        return result
+
+    best: dict[Any, float] = {}
+    for row in documents:
+        provenance = set(row.get("sources") or [])
+        scores = [
+            hit.score for hit in hits if provenance & set(hit.doc.get("sources") or [])
+        ]
+        if scores:
+            best[row["_id"]] = max(scores)
+    ranked = sorted(
+        documents,
+        key=lambda row: (
+            row["_id"] not in best,
+            -best.get(row["_id"], 0.0),
+            str(row["_id"]),
+        ),
+    )
+
+    document_rank: dict[Any, int] = {}
+    provenance_rank: dict[PydanticObjectId, int] = {}
+    for rank, row in enumerate(ranked, start=1):
+        document_rank[row["_id"]] = rank
+        for source in row.get("sources") or []:
+            provenance_rank.setdefault(source, rank)
+
+    nodes: list[dict[str, Any]] = []
+    for row in result.nodes:
+        rank = document_rank.get(row["_id"]) or _rank_by_provenance(
+            row, provenance_rank
+        )
+        nodes.append(row if rank is None else {**row, "doc_rank": rank})
+    logger.debug(
+        "Relevance rank: %d document(s), %d of %d node rows ranked",
+        len(ranked),
+        sum("doc_rank" in row for row in nodes),
+        len(nodes),
+    )
+    return QueryResult(nodes=nodes, edges=result.edges)
 
 
 # What a document with neither ``properties.date`` nor ``created_at`` ranks by:
@@ -371,7 +435,7 @@ def _document_recency(row: dict[str, Any]) -> datetime:
 def _rank_by_provenance(
     row: dict[str, Any], provenance_rank: dict[PydanticObjectId, int]
 ) -> int | None:
-    """The rank of the most recent kept document among ``row["sources"]``."""
+    """The best (smallest) document rank among ``row["sources"]``, else None."""
 
     ranks = [
         provenance_rank[source]

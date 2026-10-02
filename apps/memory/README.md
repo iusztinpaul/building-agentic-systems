@@ -352,11 +352,13 @@ TREE_MEMORY__MODE=rag make memory-query-graph QUERY="Paul Iusztin"
 
 The full graph embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
-shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider at the top of
-the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive, and once the
-revealed stars settle the view fits itself once (only on a reveal, never on hiding; a drag, box
-select or pan meanwhile cancels it; while paused it fits at once and again after Resume). A `QUERY`
-view has no slider; there, a parent chunk drawn without its children says how many it has on hover
+shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider (`Most recent`)
+at the top of the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive,
+and once the revealed stars settle the view fits itself once (only on a reveal, never on hiding; a
+drag, box select or pan meanwhile cancels it; while paused it fits at once and again after Resume). A
+`QUERY` view has the same slider ranked by search relevance (`Most relevant`): every document of the
+result shows by default (`3 of 3`); drag it left to keep only the best-matching documents' stars.
+There, a parent chunk drawn without its children says how many it has on hover
 (`child chunks  N (not shown)`).
 
 **Interacting with a graph.** The layout is live: nodes keep settling under d3-force. Dragging a
