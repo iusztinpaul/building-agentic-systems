@@ -3,21 +3,6 @@
     "tree-memory",
     "tree-memory-local"
   ],
-  "enabledPlugins": {
-    "squid@iusztinpaul": true,
-    "context7@claude-plugins-official": true,
-    "code-review@claude-plugins-official": true,
-    "commit-commands@claude-plugins-official": true,
-    "mongodb@claude-plugins-official": true
-  },
-  "extraKnownMarketplaces": {
-    "iusztinpaul": {
-      "source": {
-        "source": "github",
-        "repo": "iusztinpaul/squid"
-      }
-    }
-  },
   "skillOverrides": {
     "bright-data-mcp": "off",
     "bright-data-best-practices": "off",
@@ -36,5 +21,21 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "squid@iusztinpaul": true,
+    "context7@claude-plugins-official": true,
+    "code-review@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "mongodb@claude-plugins-official": true,
+    "mongodb-atlas@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "iusztinpaul": {
+      "source": {
+        "source": "github",
+        "repo": "iusztinpaul/squid"
+      }
+    }
   }
 }

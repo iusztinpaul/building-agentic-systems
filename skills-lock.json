@@ -19,6 +19,30 @@
       "skillPath": "skills/fastmcp-client-cli/SKILL.md",
       "computedHash": "ef06a047ab5fd88d52aa6972b274b146638ff7078cfc1b4e54aa5450212c7b32"
     },
+    "mongodb-natural-language-querying": {
+      "source": "mongodb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/mongodb-natural-language-querying/SKILL.md",
+      "computedHash": "35499a2d7c15334669bd71204cb3edf496c494e3c738adc50611fdc76ddbea01"
+    },
+    "mongodb-query-optimizer": {
+      "source": "mongodb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/mongodb-query-optimizer/SKILL.md",
+      "computedHash": "129464c93c61bcd2d4352afc7cc99eeb9485d109c5ae7e6ff614481b5693bd55"
+    },
+    "mongodb-schema-design": {
+      "source": "mongodb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/mongodb-schema-design/SKILL.md",
+      "computedHash": "627fd7407c033de8364bd44a599adff29cbb863a71ebea88a2f8fe7170baa7cb"
+    },
+    "mongodb-search-and-ai": {
+      "source": "mongodb/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/mongodb-search-and-ai/SKILL.md",
+      "computedHash": "57946928092d72ed8e672337a1f330c30f4e7b6f4d142a15a1cfb0ce7f28d250"
+    },
     "scrape": {
       "source": "brightdata/skills",
       "sourceType": "github",
