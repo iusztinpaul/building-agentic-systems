@@ -2173,9 +2173,8 @@ class TestFlowEmbeddingModelSplit:
             "tree.memory.pipeline.Document.find",
             return_value=MagicMock(to_list=AsyncMock(return_value=[doc])),
         )
-        mocker.patch(
-            "tree.memory.pipeline.User.get", new=AsyncMock(return_value=MagicMock())
-        )
+        user = MagicMock(ensure_self_person=AsyncMock())
+        mocker.patch("tree.memory.pipeline.User.get", new=AsyncMock(return_value=user))
 
         chunked = ChunkedDocument(
             document_id="507f1f77bcf86cd799439011",
@@ -2249,7 +2248,19 @@ class TestFlowEmbeddingModelSplit:
             "embed_children": embed_children,
             "embed_entities": embed_entities,
             "llm_extract_entities": llm_extract_entities,
+            "user": user,
         }
+
+    async def test_graphrag_run_restores_the_self_person_node(
+        self, stubbed_graph_stages
+    ) -> None:
+        # A user created in rag (or whose memory was dropped on a mode switch)
+        # has no ``person:self``; the first graphrag run must re-create it.
+        await memory_extract_etl_worker.fn(
+            user_id=_USER_ID, document_ids=["507f1f77bcf86cd799439011"]
+        )
+
+        stubbed_graph_stages["user"].ensure_self_person.assert_awaited_once()
 
     async def test_builds_the_resolver_from_the_resolution_model(
         self, stubbed_graph_stages

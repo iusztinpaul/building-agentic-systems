@@ -2095,6 +2095,10 @@ async def _run_extraction_worker_body(
         # Defensive — the upstream Prefect parameter validation guarantees
         # a non-None user_id, but a stale id is possible.
         raise ValueError(f"User {user_id} not found; cannot run extraction.")
+    # Self-heal: a user created in ``rag``, or whose ``memory`` was dropped on a
+    # mode switch, has no ``person:self`` node — the first-person resolver, the
+    # ``has`` edges and the active-user fan-out all need it.
+    await user.ensure_self_person()
 
     # ----- Task ④ — LLM extraction, once per PARENT chunk -------------------
     raws: list[RawExtraction] = []

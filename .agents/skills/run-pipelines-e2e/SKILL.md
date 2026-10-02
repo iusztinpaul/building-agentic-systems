@@ -18,6 +18,8 @@ By default, use the "Paul Iusztin" user when testing.
 
    Verifying a change in BOTH modes = run steps 1–3 twice, dropping `memory` in between.
 
+   `users` survive the drop. A `graphrag` run re-creates each user's `person:self` node at its first extraction (and `make memory-signup` does it for an existing user), so no reseed step is needed after switching from `rag`.
+
 1. **Serve the workflows** in the background to pick up the latest code: `make memory-serve-workflows &`. This process is the in-process Prefect worker — without it, deployments register but nothing executes. If a serve process is already running, kill it first and re-serve.
 
    **IMPORTANT — worktrees and feature branches.** The Dockerized `prefect-worker` (started by `make local-start`) executes the **MAIN checkout baked into its image**, not your working tree. Dispatching a run while only that worker is up silently runs OLD code — the pipeline "passes" and proves nothing about your branch. When verifying a feature branch or a git worktree, run `make memory-serve-workflows` **from that worktree** (and stop it when done) so the run executes the code you changed. Same rule for the mode: export `TREE_MEMORY__MODE` in the shell that serves, because the flow reads it at flow entry inside the serving process.

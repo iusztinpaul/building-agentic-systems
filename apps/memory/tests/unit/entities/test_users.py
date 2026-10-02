@@ -222,6 +222,24 @@ class TestAfterInsertHook:
         assert filter_b["_id"] == f"{user_b.id}:person:self"
         assert filter_a["_id"] != filter_b["_id"]
 
+    async def test_ensure_self_person_restores_a_missing_node(self, mocker) -> None:
+        # An EXISTING user (no insert event) whose node is gone after a
+        # rag -> graphrag switch: the same idempotent upsert re-creates it.
+        user = User(identifier="paul@example.com")
+        user.id = PydanticObjectId()
+        fake_collection = AsyncMock()
+        mocker.patch.object(
+            MemoryEntry, "get_pymongo_collection", return_value=fake_collection
+        )
+
+        await user.ensure_self_person()
+
+        fake_collection.update_one.assert_awaited_once()
+        query, update = fake_collection.update_one.await_args.args
+        assert query == {"_id": build_node_id(user.id, NodeType.PERSON, "self")}
+        assert "$setOnInsert" in update
+        assert fake_collection.update_one.await_args.kwargs["upsert"] is True
+
     async def test_rag_mode_writes_nothing(self, mocker, monkeypatch, caplog) -> None:
         monkeypatch.setattr(app_config.memory, "mode", "rag")
 

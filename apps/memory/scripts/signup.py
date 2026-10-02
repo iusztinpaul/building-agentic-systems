@@ -56,6 +56,8 @@ async def _signup(identifier: str, name: str | None, make_current: bool) -> None
         logger.info("Created user identifier=%s id=%s", identifier, user.id)
     else:
         logger.info("User already exists identifier=%s id=%s", identifier, user.id)
+        # Re-creates ``person:self`` after a switch to graphrag (no-op otherwise).
+        await user.ensure_self_person()
 
     if make_current:
         await set_current_user(user.id)

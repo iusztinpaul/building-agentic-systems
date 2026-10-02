@@ -86,7 +86,18 @@ class User(BeanieDocument):
 
     @after_event(Insert)
     async def after_insert(self) -> None:
+        """Create the user's ``person:self`` node on sign-up (graphrag only)."""
+
+        await self.ensure_self_person()
+
+    async def ensure_self_person(self) -> None:
         """Idempotent self-person creation — ``graphrag`` only.
+
+        Called on insert, by ``signup`` for an existing user, and at the start
+        of every graphrag extraction run — so a user created in ``rag`` (or
+        whose ``memory`` was dropped on a mode switch) gets the node back the
+        first time it is needed, instead of dropping out of the active-user
+        fan-out.
 
         In ``rag`` (read from ``app_config.memory.mode`` at call time) it
         writes nothing and logs the skip: ``rag`` holds ``document`` + ``chunk``
@@ -100,9 +111,8 @@ class User(BeanieDocument):
             canonical_name = attributes["name"] or identifier
             properties   = {"is_active_user": True, **attributes}
 
-        The write uses ``$setOnInsert`` so re-firing this hook on an
-        existing user (e.g. via the #021 migration script) is a no-op
-        for the self-person node.
+        The write uses ``$setOnInsert`` so calling it for a user who already
+        has the node is a no-op.
         """
 
         mode = app_config.memory.mode
