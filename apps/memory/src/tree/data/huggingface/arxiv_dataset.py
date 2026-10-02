@@ -6,8 +6,8 @@ import httpx
 from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 from datasets import load_dataset
-from pymongo.errors import DuplicateKeyError
 
+from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType
 
 logger = logging.getLogger(__name__)
@@ -191,11 +191,8 @@ async def load_document(doc: Document) -> Document | None:
         await doc.replace()
         logger.info("Upgraded latent document: %s", doc.source_uri)
     else:
-        try:
-            await doc.insert()
-            logger.info("Ingested: %s", doc.source_uri)
-        except DuplicateKeyError:
-            logger.debug("Duplicate key on insert, skipping: %s", doc.source_uri)
+        if await insert_or_upgrade_latent(doc) is None:
             return None
+        logger.info("Ingested: %s", doc.source_uri)
 
     return doc

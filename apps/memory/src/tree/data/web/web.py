@@ -8,7 +8,8 @@ Persistence rules:
 
 - ``find_one`` first; if a non-LATENT duplicate exists, return ``None``.
 - If a ``LATENT`` document exists, upgrade it in place (replace) to ``WEB``.
-- Otherwise insert; on a ``DuplicateKeyError`` race, return ``None``.
+- Otherwise insert; on a ``DuplicateKeyError`` race, upgrade a concurrently created
+  ``LATENT`` placeholder in place, else return ``None`` (``tree.data.persist``).
 - Never use ``replace_one(upsert=True)`` — that would silently overwrite documents
   promoted by other pipelines.
 """
@@ -21,9 +22,9 @@ from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from beanie import PydanticObjectId
-from pymongo.errors import DuplicateKeyError
 
 from tree.data.web.web_unlocker import fetch_url
+from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,7 @@ async def load_web_document(doc: Document) -> Document | None:
         logger.info("Upgraded LATENT document for web URL: %s", doc.source_uri)
         return existing
 
-    try:
-        await doc.insert()
-    except DuplicateKeyError:
+    if await insert_or_upgrade_latent(doc) is None:
         logger.info("Web URL already ingested (race condition): %s", doc.source_uri)
         return None
 

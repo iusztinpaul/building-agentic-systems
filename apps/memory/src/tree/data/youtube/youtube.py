@@ -36,9 +36,9 @@ from urllib.parse import parse_qs, urlparse
 import feedparser
 import httpx
 from beanie import PydanticObjectId
-from pymongo.errors import DuplicateKeyError
 
 from tree.data.youtube.types import FetchedTranscript, VideoMetadata
+from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType
 
 logger = logging.getLogger(__name__)
@@ -459,15 +459,9 @@ async def load_video_document(doc: Document) -> Document | None:
         await doc.replace()
         logger.info("%s: %s", outcome, doc.source_uri)
     else:
-        try:
-            await doc.insert()
-        except DuplicateKeyError:
-            # Concurrent insert of the same (user_id, source_uri) — e.g. the same
-            # video resolved from both a feed and a single source in one
-            # flattened batch, or a LATENT placeholder racing the real row for the
-            # same URI. The unique index lets one win; this attempt is a clean
-            # skip, not a failure.
-            logger.debug("Skipping concurrent duplicate: %s", doc.source_uri)
+        # A concurrent LATENT placeholder for this URI is upgraded in place; a
+        # real row that won the race is a clean skip.
+        if await insert_or_upgrade_latent(doc) is None:
             return None
         if doc.ingest_error is not None:
             # A failure row is NOT an ingest; saying "Ingested" here would read as

@@ -18,6 +18,7 @@ from beanie import PydanticObjectId
 from bs4 import BeautifulSoup
 from pymongo.errors import DuplicateKeyError
 
+from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType, clean_source_uri
 
 logger = logging.getLogger(__name__)
@@ -154,15 +155,10 @@ async def load_document(doc: Document, raw_entry: dict) -> Document | None:
         await doc.replace()
         logger.info("Upgraded latent document: %s", doc.source_uri)
     else:
-        try:
-            await doc.insert()
-        except DuplicateKeyError:
-            # Concurrent insert of the same (user_id, source_uri) — e.g. the same
-            # article resolved from both a feed and a single source in one
-            # flattened batch, or a LATENT placeholder racing the real row for the
-            # same URI. The unique index lets one win; this attempt is a clean
-            # skip, not a failure.
-            logger.debug("Skipping concurrent duplicate: %s", doc.source_uri)
+        # A concurrent LATENT placeholder for this URI (another article in the
+        # same batch linking here) is upgraded in place; a real row that won the
+        # race is a clean skip.
+        if await insert_or_upgrade_latent(doc) is None:
             return None
         logger.info("Ingested: %s", doc.source_uri)
 

@@ -281,6 +281,48 @@ class TestLoadDocument:
 
         assert result is None
 
+    async def test_a_latent_placeholder_created_mid_load_is_upgraded(self, mocker):
+        """Two articles in one batch that link to each other: B's reference
+        resolution inserts a LATENT placeholder for A after A's `find_one` saw
+        nothing, so A's `insert()` hits the unique index. A must upgrade that
+        placeholder in place — before the fix the article was silently dropped.
+        """
+        doc = Document(
+            source_type=SourceType.SUBSTACK,
+            source_uri="https://example.substack.com/p/test-article",
+            user_id=_USER_ID,
+            title="Test Article",
+        )
+        placeholder = Document(
+            id=PydanticObjectId(),
+            source_type=SourceType.LATENT,
+            source_uri=doc.source_uri,
+            user_id=_USER_ID,
+        )
+        # First lookup (pre-insert dedup) sees nothing; the post-race re-read
+        # finds the placeholder the other article created.
+        mocker.patch(
+            "tree.data.substack.substack.Document.find_one",
+            new_callable=mocker.AsyncMock,
+            side_effect=[None, placeholder],
+        )
+        mocker.patch(
+            "tree.data.substack.substack.Document.insert",
+            new_callable=mocker.AsyncMock,
+            side_effect=DuplicateKeyError("dup"),
+        )
+        replace = mocker.patch(
+            "tree.data.substack.substack.Document.replace",
+            new_callable=mocker.AsyncMock,
+        )
+
+        result = await load_document(doc, {"content": [{"value": ""}]})
+
+        assert result is doc
+        assert doc.id == placeholder.id
+        assert doc.source_type == SourceType.SUBSTACK
+        replace.assert_awaited_once()
+
 
 class TestResolveReferences:
     async def test_tracked_link_resolves_to_the_existing_clean_row(self, mocker):

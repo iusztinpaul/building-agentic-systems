@@ -13,9 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from beanie import PydanticObjectId
-from pymongo.errors import DuplicateKeyError
 
 from tree.data.substack.substack import html_to_plain_text
+from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType
 
 logger = logging.getLogger(__name__)
@@ -125,9 +125,7 @@ async def load_file_document(
         date=datetime.now(tz=UTC),
     )
 
-    try:
-        await doc.insert()
-    except DuplicateKeyError:
+    if await insert_or_upgrade_latent(doc) is None:
         logger.info("File already ingested (race condition): %s", source_uri)
         return None
 
