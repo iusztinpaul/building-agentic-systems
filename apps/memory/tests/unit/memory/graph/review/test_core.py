@@ -9,18 +9,26 @@ suite. Here we only cover:
 * The :class:`PendingDuplicate` / :class:`ReviewResult` dataclass shapes.
 * The ``find_pending_duplicates`` ``limit <= 0`` short-circuit (returns
   an empty list without ever touching Mongo).
+* The ``sources`` provenance a confirmed merge writes on the winner (a
+  mocked collection; edge transfer patched out).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from bson import ObjectId
 
 from tree.entities.memory import NodeType
-from tree.memory.graph.review.core import _decide_winner, find_pending_duplicates
+from tree.memory.graph.review.core import (
+    _decide_winner,
+    _handle_confirm,
+    find_pending_duplicates,
+)
 from tree.memory.graph.review.types import (
     MergeStrategy,
     PendingDuplicate,
@@ -184,3 +192,101 @@ class TestFindPendingDuplicatesShortCircuit:
 
         assert result == []
         collection.aggregate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _handle_confirm — the winner's ``sources`` provenance
+# ---------------------------------------------------------------------------
+
+
+_WINNER_ID = "person:alice"
+_LOSER_ID = "person:alyce"
+_SAME_AS_ID = f"{_LOSER_ID}|same_as|{_WINNER_ID}"
+
+
+def _confirm_collection(loser_sources: list[ObjectId]) -> MagicMock:
+    """A collection holding an older winner and a newer loser (the tiebreak)."""
+
+    rows = {
+        _WINNER_ID: {
+            "_id": _WINNER_ID,
+            "type": "person",
+            "name": "alice",
+            "sources": [ObjectId()],
+            "created_at": _NOW - timedelta(days=1),
+        },
+        _LOSER_ID: {
+            "_id": _LOSER_ID,
+            "type": "person",
+            "name": "alyce",
+            "sources": loser_sources,
+            "created_at": _NOW,
+        },
+    }
+    collection = MagicMock(name="memory")
+    collection.find_one = AsyncMock(side_effect=lambda query: rows.get(query["_id"]))
+    collection.update_one = AsyncMock()
+    return collection
+
+
+async def _confirm(mocker: Any, collection: MagicMock) -> None:
+    mocker.patch(
+        "tree.memory.graph.review.core._transfer_edges",
+        new=AsyncMock(return_value=0),
+    )
+    await _handle_confirm(
+        collection=collection,
+        user_id=_USER_ID,
+        edge_doc={"source_node_id": _LOSER_ID, "target_node_id": _WINNER_ID},
+        edge_id=_SAME_AS_ID,
+        current_status="pending",
+        reviewed_by="tester",
+        merge_strategy=MergeStrategy.KEEP_PRIMARY,
+        now=_NOW,
+    )
+
+
+def _winner_sources_unions(collection: MagicMock) -> list[list[Any]]:
+    """Every list unioned into the winner's ``sources``, in write order."""
+
+    unions = []
+    for call in collection.update_one.call_args_list:
+        query, update = call.args[0], call.args[1]
+        if query["_id"] != _WINNER_ID or "sources" not in update[0]["$set"]:
+            continue
+        expr = update[0]["$set"]["sources"]
+        set_union = expr["$slice"][0] if "$slice" in expr else expr
+        unions.append(set_union["$setUnion"][1])
+    return unions
+
+
+class TestConfirmMergeProvenance:
+    async def test_winner_gains_every_loser_source_as_an_objectid(self, mocker) -> None:
+        doc_a, doc_b = ObjectId(), ObjectId()
+        collection = _confirm_collection(loser_sources=[doc_a, doc_b])
+
+        await _confirm(mocker, collection)
+
+        # Assert: the strategy unions the first, the post-merge $setUnion all of
+        # them — ObjectIds, exactly as Mongo returned them.
+        unions = _winner_sources_unions(collection)
+        assert unions == [[doc_a], [doc_a, doc_b]]
+        assert all(isinstance(source, ObjectId) for union in unions for source in union)
+
+    async def test_a_loser_without_sources_adds_no_provenance(self, mocker) -> None:
+        collection = _confirm_collection(loser_sources=[])
+
+        await _confirm(mocker, collection)
+
+        # Assert: the merge still lands (aliases) but writes no `sources` and no
+        # synthetic `merge:` id anywhere.
+        winner_writes = [
+            call
+            for call in collection.update_one.call_args_list
+            if call.args[0]["_id"] == _WINNER_ID
+        ]
+        assert len(winner_writes) == 1
+        set_stage = winner_writes[0].args[1][0]["$set"]
+        assert "aliases" in set_stage
+        assert "sources" not in set_stage
+        assert "merge:" not in repr(collection.update_one.call_args_list)

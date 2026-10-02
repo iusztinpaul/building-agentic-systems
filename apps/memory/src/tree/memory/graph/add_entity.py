@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
+from bson import ObjectId
 
 from tree.entities.memory import (
     EdgeType,
@@ -79,7 +80,7 @@ async def add_entity(
     name: str,
     entity_type: NodeType,
     properties: dict[str, Any],
-    source_id: str,
+    source_id: PydanticObjectId,
     dedup_config: DeduplicationConfig,
     resolve: bool = True,
     deduplicate: bool = True,
@@ -126,9 +127,8 @@ async def add_entity(
             PERSON/TASK/PREFERENCE (LLM-extractable types).
         properties: Caller-supplied properties dict. Subject to the merge
             strategy when an existing canonical is hit.
-        source_id: Provenance id (typically the document ObjectId as a
-            string). Appended to the row's ``sources`` array, capped at
-            :data:`_MAX_SOURCES`.
+        source_id: The source Document's ObjectId. Unioned into the row's
+            ``sources`` array, capped at :data:`_MAX_SOURCES`.
         dedup_config: A validated :class:`DeduplicationConfig`.
         resolve: When ``False`` (and ``deduplicate=False``), short-circuit
             to a plain upsert.
@@ -343,7 +343,7 @@ async def _upsert_node(
     properties: dict[str, Any],
     embedding: list[float] | None,
     confidence: float,
-    source_id: str,
+    source_id: PydanticObjectId,
     now: datetime,
     subtype: str | None = None,
     extractor: ExtractorInfo | None = None,
@@ -379,17 +379,7 @@ async def _upsert_node(
         },
         "aliases": {"$ifNull": ["$aliases", []]},
         "confidence": {"$ifNull": ["$confidence", confidence]},
-        "sources": {
-            "$slice": [
-                {
-                    "$setUnion": [
-                        {"$ifNull": ["$sources", []]},
-                        [source_id],
-                    ]
-                },
-                _MAX_SOURCES,
-            ]
-        },
+        "sources": _sources_union_expr(source_id),
         "created_at": {"$ifNull": ["$created_at", now]},
         "updated_at": now,
     }
@@ -420,12 +410,16 @@ async def _apply_merge(
     entity_type: NodeType,
     incoming_name: str,
     incoming_properties: dict[str, Any],
-    source_id: str,
+    source_id: ObjectId | None,
     strategy: MergeStrategy,
     now: datetime,
 ) -> None:
     """Dispatch on ``strategy`` and issue ONE ``update_one`` against
-    ``target_id`` with the strategy's aggregation pipeline."""
+    ``target_id`` with the strategy's aggregation pipeline.
+
+    ``source_id`` is the source Document's ObjectId; ``None`` (an entity merge
+    whose loser has no provenance) leaves ``sources`` untouched.
+    """
 
     incoming_confidence_raw = incoming_properties.get("confidence")
     incoming_confidence = (
@@ -466,7 +460,7 @@ def _merge_keep_primary(
     *,
     incoming_name: str,
     incoming_confidence: float | None,
-    source_id: str,
+    source_id: ObjectId | None,
     now: datetime,
 ) -> list[dict[str, Any]]:
     """Append alias, union sources; discard incoming properties.
@@ -477,7 +471,7 @@ def _merge_keep_primary(
 
     set_stage: dict[str, Any] = {
         "aliases": _aliases_append_expr(incoming_name),
-        "sources": _sources_union_expr(source_id),
+        **_sources_union_stage(source_id),
         "updated_at": now,
     }
     if incoming_confidence is not None:
@@ -495,7 +489,7 @@ def _merge_properties(
     incoming_name: str,
     incoming_properties: dict[str, Any],
     incoming_confidence: float | None,
-    source_id: str,
+    source_id: ObjectId | None,
     now: datetime,
 ) -> list[dict[str, Any]]:
     """KEEP_PRIMARY effects + per-key property merge.
@@ -536,7 +530,7 @@ def _merge_properties(
 
     set_stage: dict[str, Any] = {
         "aliases": _aliases_append_expr(incoming_name),
-        "sources": _sources_union_expr(source_id),
+        **_sources_union_stage(source_id),
         "properties": merged_properties_expr,
         "updated_at": now,
     }
@@ -553,14 +547,14 @@ def _merge_properties(
 def _merge_keep_aliases(
     *,
     incoming_name: str,
-    source_id: str,
+    source_id: ObjectId | None,
     now: datetime,
 ) -> list[dict[str, Any]]:
     """Append alias + union sources only. Never touch ``properties``."""
 
     set_stage: dict[str, Any] = {
         "aliases": _aliases_append_expr(incoming_name),
-        "sources": _sources_union_expr(source_id),
+        **_sources_union_stage(source_id),
         "updated_at": now,
     }
     return [{"$set": set_stage}]
@@ -664,8 +658,26 @@ def _aliases_append_expr(incoming_name: str) -> dict[str, Any]:
     }
 
 
-def _sources_union_expr(source_id: str) -> dict[str, Any]:
-    """Aggregation expression: union ``source_id`` into ``sources`` (cap 500)."""
+def _sources_union_stage(source_id: ObjectId | None) -> dict[str, Any]:
+    """The ``sources`` entry of a merge ``$set``; none when there is no source."""
+    return {} if source_id is None else {"sources": _sources_union_expr(source_id)}
+
+
+def _sources_union_expr(source_id: ObjectId) -> dict[str, Any]:
+    """Aggregation expression: union ``source_id`` into ``sources`` (cap 500).
+
+    Every ``memory`` row's ``sources`` holds Document ObjectIds only — Mongo never
+    matches an ObjectId against its hex string, so a string here would hide the
+    row from every ``{"sources": {"$in": [<ObjectId>]}}`` read.
+
+    Raises:
+        TypeError: When ``source_id`` is not an ObjectId.
+    """
+    if not isinstance(source_id, ObjectId):
+        raise TypeError(
+            f"sources holds Document ObjectIds only; got {type(source_id).__name__} "
+            f"{source_id!r}"
+        )
     return {
         "$slice": [
             {

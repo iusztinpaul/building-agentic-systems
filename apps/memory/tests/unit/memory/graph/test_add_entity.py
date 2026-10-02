@@ -13,18 +13,20 @@ Atlas-local. These unit tests focus on the **dispatch contract**:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
+from bson import ObjectId
 
 from tree.entities.memory import NodeType
 from tree.memory.embedding_text import (
     node_to_embedding_text,
     prospective_entity_embedding_text,
 )
-from tree.memory.graph.add_entity import add_entity
+from tree.memory.graph.add_entity import _apply_merge, add_entity
 from tree.memory.graph.dedup import (
     DeduplicationConfig,
     DeduplicationResult,
@@ -41,6 +43,9 @@ from tree.models.base import EmbeddingRole
 # the prospective_id includes a realistic 24-hex-char prefix.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _PH = str(_USER_ID)
+# The source Document's ObjectId every extraction below unions into ``sources``.
+_SOURCE_ID = PydanticObjectId("65f0c0ffee0000000000abcd")
+_NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +134,7 @@ class TestAddEntityInputValidation:
                 name="   ",
                 entity_type=NodeType.PERSON,
                 properties={},
-                source_id="src1",
+                source_id=_SOURCE_ID,
                 dedup_config=DeduplicationConfig(),
             )
 
@@ -144,7 +149,7 @@ class TestAddEntityInputValidation:
                 name="alice",
                 entity_type=NodeType.PERSON,
                 properties={"confidence": 1.5},
-                source_id="src1",
+                source_id=_SOURCE_ID,
                 dedup_config=DeduplicationConfig(),
             )
 
@@ -159,7 +164,7 @@ class TestAddEntityInputValidation:
                 name="alice",
                 entity_type=NodeType.PERSON,
                 properties={"confidence": -0.1},
-                source_id="src1",
+                source_id=_SOURCE_ID,
                 dedup_config=DeduplicationConfig(),
             )
 
@@ -173,7 +178,7 @@ class TestAddEntityInputValidation:
                 name="alice",
                 entity_type=NodeType.PERSON,
                 properties={},
-                source_id="src1",
+                source_id=_SOURCE_ID,
                 dedup_config=DeduplicationConfig(),
             )
 
@@ -198,7 +203,7 @@ class TestAddEntityShortCircuit:
             name="Alice",
             entity_type=NodeType.PERSON,
             properties={"email": "a@x.com"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
             resolve=False,
             deduplicate=False,
@@ -261,7 +266,7 @@ class TestAddEntityMergedAction:
             name="alice corp",
             entity_type=NodeType.PERSON,
             properties={"description": "a longer description"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=config,
         )
 
@@ -300,7 +305,7 @@ class TestAddEntityFlaggedAction:
             name="alyce smyth",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=config,
         )
 
@@ -344,7 +349,7 @@ class TestAddEntityNoneAction:
             name="apple",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=config,
         )
 
@@ -355,6 +360,158 @@ class TestAddEntityNoneAction:
         node_args = collection.update_one.call_args_list[0]
         assert node_args.args[0] == {"_id": f"{_PH}:person:apple"}
         assert _count_same_as_calls(collection) == 0
+
+
+# ---------------------------------------------------------------------------
+# ``sources`` provenance: Document ObjectIds only
+# ---------------------------------------------------------------------------
+
+
+def _sources_set_union(set_stage: dict[str, Any]) -> list[Any]:
+    """The ``$setUnion`` operands of a ``$set`` stage's ``sources`` expression."""
+
+    return set_stage["sources"]["$slice"][0]["$setUnion"]
+
+
+def _dedup(action: str) -> DeduplicationResult:
+    """A fresh dedup decision (``add_entity`` stamps ``applied_strategy`` on it)."""
+
+    if action == "none":
+        return DeduplicationResult(action="none")
+    return DeduplicationResult(
+        action=action,  # type: ignore[arg-type]
+        matched_node_id="person:alice_canonical",
+        similarity_score=0.9,
+        match_type="embedding",
+    )
+
+
+class TestAddEntitySourcesAreObjectIds:
+    """Every write unions the source Document's ObjectId, never its hex string:
+    Mongo never matches one against the other, so a string would hide the row
+    from every ``{"sources": {"$in": [<ObjectId>]}}`` read."""
+
+    async def test_short_circuit_insert_unions_the_objectid(self, mocker) -> None:
+        database, collection = _make_database(mocker)
+
+        await add_entity(
+            database=database,
+            embedding_model=_make_embedding_model(),
+            resolver=_make_resolver(),
+            user_id=_USER_ID,
+            name="Alice",
+            entity_type=NodeType.PERSON,
+            properties={},
+            source_id=_SOURCE_ID,
+            dedup_config=DeduplicationConfig(),
+            resolve=False,
+            deduplicate=False,
+        )
+
+        set_stage = collection.update_one.call_args_list[0].args[1][0]["$set"]
+        existing, incoming = _sources_set_union(set_stage)
+        assert existing == {"$ifNull": ["$sources", []]}
+        assert incoming == [_SOURCE_ID]
+        assert all(isinstance(source, ObjectId) for source in incoming)
+
+    @pytest.mark.parametrize("action", ["none", "flagged"])
+    async def test_inserted_node_unions_the_objectid(self, mocker, action: str) -> None:
+        database, collection = _make_database(mocker)
+        _patch_dedupe_entity(mocker, _dedup(action))
+
+        await add_entity(
+            database=database,
+            embedding_model=_make_embedding_model(),
+            resolver=_make_resolver(),
+            user_id=_USER_ID,
+            name="alyce smyth",
+            entity_type=NodeType.PERSON,
+            properties={},
+            source_id=_SOURCE_ID,
+            dedup_config=DeduplicationConfig(),
+        )
+
+        set_stage = collection.update_one.call_args_list[0].args[1][0]["$set"]
+        _existing, incoming = _sources_set_union(set_stage)
+        assert incoming == [_SOURCE_ID]
+        assert all(isinstance(source, ObjectId) for source in incoming)
+
+    @pytest.mark.parametrize("strategy", _ALL_STRATEGIES)
+    async def test_merge_unions_the_objectid_into_the_canonical(
+        self, mocker, strategy: MergeStrategy
+    ) -> None:
+        database, collection = _make_database(mocker)
+        _patch_dedupe_entity(mocker, _dedup("merged"))
+
+        await add_entity(
+            database=database,
+            embedding_model=_make_embedding_model(),
+            resolver=_make_resolver(),
+            user_id=_USER_ID,
+            name="alice corp",
+            entity_type=NodeType.PERSON,
+            properties={},
+            source_id=_SOURCE_ID,
+            dedup_config=DeduplicationConfig(merge_strategy=strategy),
+        )
+
+        # Assert: a set union over the stored sources, so a second extraction
+        # of the same document adds nothing.
+        set_stage = collection.update_one.call_args_list[0].args[1][0]["$set"]
+        existing, incoming = _sources_set_union(set_stage)
+        assert existing == {"$ifNull": ["$sources", []]}
+        assert incoming == [_SOURCE_ID]
+        assert all(isinstance(source, ObjectId) for source in incoming)
+
+    @pytest.mark.parametrize(
+        ("action", "strategy"),
+        [
+            ("none", MergeStrategy.KEEP_PRIMARY),
+            *(("merged", strategy) for strategy in _ALL_STRATEGIES),
+        ],
+        ids=["insert", *(f"merge-{strategy}" for strategy in _ALL_STRATEGIES)],
+    )
+    async def test_a_hex_string_source_is_rejected_before_any_write(
+        self, mocker, action: str, strategy: MergeStrategy
+    ) -> None:
+        database, collection = _make_database(mocker)
+        _patch_dedupe_entity(mocker, _dedup(action))
+
+        with pytest.raises(TypeError, match="ObjectIds only"):
+            await add_entity(
+                database=database,
+                embedding_model=_make_embedding_model(),
+                resolver=_make_resolver(),
+                user_id=_USER_ID,
+                name="alice corp",
+                entity_type=NodeType.PERSON,
+                properties={},
+                source_id=str(_SOURCE_ID),  # type: ignore[arg-type]
+                dedup_config=DeduplicationConfig(merge_strategy=strategy),
+            )
+
+        collection.update_one.assert_not_called()
+
+    @pytest.mark.parametrize("strategy", _ALL_STRATEGIES)
+    async def test_a_merge_without_a_source_leaves_sources_untouched(
+        self, mocker, strategy: MergeStrategy
+    ) -> None:
+        _database, collection = _make_database(mocker)
+
+        await _apply_merge(
+            collection=collection,
+            target_id="person:alice_canonical",
+            entity_type=NodeType.PERSON,
+            incoming_name="alice corp",
+            incoming_properties={},
+            source_id=None,
+            strategy=strategy,
+            now=_NOW,
+        )
+
+        set_stage = collection.update_one.call_args_list[0].args[1][0]["$set"]
+        assert "sources" not in set_stage
+        assert "aliases" in set_stage
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +534,7 @@ class TestAddEntityCanonicalNameWritten:
             name="apple",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -420,7 +577,7 @@ class TestAddEntitySelfMatchExclusion:
             name="Alice",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -451,7 +608,7 @@ class TestAddEntityDedupDisabled:
             name="alice",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=config,
         )
 
@@ -487,7 +644,7 @@ class TestAddEntityTwoUserIsolation:
             name="alice",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
         target_b, _, _ = await add_entity(
@@ -498,7 +655,7 @@ class TestAddEntityTwoUserIsolation:
             name="alice",
             entity_type=NodeType.PERSON,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -564,7 +721,7 @@ class TestAddEntityNodeTextEmbedding:
             name="Andrej Karpathy",
             entity_type=NodeType.PERSON,
             properties=properties,
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -598,7 +755,7 @@ class TestAddEntityNodeTextEmbedding:
             name="Andrej Karpathy",
             entity_type=NodeType.PERSON,
             properties=properties,
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -627,7 +784,7 @@ class TestAddEntityNodeTextEmbedding:
             name="prefers-dark-mode",
             entity_type=NodeType.PREFERENCE,
             properties={"statement": statement},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -648,7 +805,7 @@ class TestAddEntityNodeTextEmbedding:
             name="france-capital",
             entity_type=NodeType.FACT,
             properties={"object": obj},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -690,7 +847,7 @@ class TestAddEntityRoutesThroughChokepoint:
             name="Andrej Karpathy",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -724,7 +881,7 @@ class TestAddEntityRoutesThroughChokepoint:
             name="poison-entity",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -751,7 +908,7 @@ class TestAddEntityRoutesThroughChokepoint:
             name="empty-entity",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -821,7 +978,7 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
             name="Cached Entity",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -854,7 +1011,7 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
             name="Fresh Entity",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -891,7 +1048,7 @@ class TestEmbeddingRole:
             name="Andrej Karpathy",
             entity_type=NodeType.PERSON,
             properties={"role": "researcher"},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 
@@ -915,7 +1072,7 @@ class TestEmbeddingRole:
             name="Prefect Technologies",
             entity_type=NodeType.ORGANIZATION,
             properties={},
-            source_id="src1",
+            source_id=_SOURCE_ID,
             dedup_config=DeduplicationConfig(),
         )
 

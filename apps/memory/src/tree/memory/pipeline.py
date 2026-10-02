@@ -1623,7 +1623,7 @@ async def _dispatch_entity_write(
         entity_type=node.type,
         subtype=node.subtype,
         properties=node.properties,
-        source_id=source_document_id,
+        source_id=PydanticObjectId(source_document_id),
         dedup_config=dedup_config,
         candidate_names=candidate_names,
         extractor=extractor,

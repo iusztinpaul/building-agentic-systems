@@ -508,6 +508,18 @@ def seven_documents(make_document_row) -> list[dict]:
     ]
 
 
+class TestFakeCollectionProvenance:
+    def test_a_row_with_a_hex_string_source_is_rejected(
+        self, make_collection, make_entity_row
+    ) -> None:
+        """Guard: no fixture can build a row with string ``sources`` (task 167)."""
+
+        src = PydanticObjectId()
+
+        with pytest.raises(ValueError, match="non-ObjectId sources"):
+            make_collection([_with_sources(make_entity_row(_USER, "e1"), str(src))])
+
+
 class TestFetchFullGraph:
     """The **Full graph** (ADR-011 §7): the ``max_docs`` most-recent documents'
     subgraphs, every row stamped ``doc_rank``, in four batched reads."""
@@ -636,27 +648,26 @@ class TestFetchFullGraph:
 
         assert _rank_of(result.nodes)["e-shared"] == 1
 
-    async def test_an_entity_whose_provenance_is_a_hex_string_still_belongs(
+    async def test_entities_carry_objectids_and_match_the_plain_objectid_in(
         self, make_collection, make_document_row, make_entity_row
     ) -> None:
-        """Regression: ``add_entity`` writes ``sources`` as the hex STRING of the
-        document id while document / chunk / edge rows hold the ObjectId, and
-        Mongo's ``$in`` never matches one against the other."""
+        """Every ``memory`` row's ``sources`` holds Document ObjectIds (task 167),
+        so one ObjectId ``$in`` returns the documents' entities too."""
 
         new_src, old_src = PydanticObjectId(), PydanticObjectId()
         collection = make_collection(
             [
                 make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
                 make_document_row(_USER, "d2", date="2026-08-01", sources=[old_src]),
-                _with_sources(
-                    make_entity_row(_USER, "e-shared"), str(old_src), str(new_src)
-                ),
+                _with_sources(make_entity_row(_USER, "e-shared"), old_src, new_src),
+                _with_sources(make_entity_row(_USER, "e-old"), old_src),
             ]
         )
 
         result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
 
-        assert _rank_of(result.nodes)["e-shared"] == 1
+        assert _rank_of(result.nodes) == {"d1": 1, "d2": 2, "e-shared": 1, "e-old": 2}
+        assert collection.find_filters[1]["sources"] == {"$in": [new_src, old_src]}
 
     async def test_edges_carry_a_rank_and_need_both_endpoints(
         self, make_collection, make_document_row, make_parent_row, make_entity_row
@@ -719,7 +730,7 @@ class TestFetchFullGraph:
                 make_document_row(_USER, "doc-b", date="2026-08-01", sources=[b_src]),
                 _with_sources(make_parent_row(_USER, "pa", document_id="doc-a"), a_src),
                 _with_sources(make_parent_row(_USER, "pb", document_id="doc-b"), b_src),
-                _with_sources(make_entity_row(_USER, "e-b"), str(b_src)),
+                _with_sources(make_entity_row(_USER, "e-b"), b_src),
                 _with_sources(make_entity_row(_USER, "e-hand"), *[]),
                 _graph_edge("pa-a", "pa", "doc-a", a_src, edge_type="part_of"),
                 # B's star, but both documents' provenance on the edge rows.
@@ -750,9 +761,9 @@ class TestFetchFullGraph:
                 make_document_row(_USER, "d1", date="2026-09-01", sources=[new_src]),
                 make_document_row(_USER, "d2", date="2026-08-01", sources=[old_src]),
                 make_document_row(_USER, "d3", date="2026-01-01", sources=[beyond_src]),
-                _with_sources(make_entity_row(_USER, "e1"), str(new_src)),
-                _with_sources(make_entity_row(_USER, "e2"), str(old_src)),
-                _with_sources(make_entity_row(_USER, "e3"), str(beyond_src)),
+                _with_sources(make_entity_row(_USER, "e1"), new_src),
+                _with_sources(make_entity_row(_USER, "e2"), old_src),
+                _with_sources(make_entity_row(_USER, "e3"), beyond_src),
                 _with_sources(make_entity_row(_USER, "e-orphan"), *[]),
                 # Hand-made / merge edges carry no provenance at all.
                 _graph_edge("same", "e1", "e2", edge_type="same_as"),
@@ -813,13 +824,11 @@ class TestFetchFullGraph:
         # Node reads never haul vectors across the wire.
         projections = collection.find_projections
         assert [projections[i] for i in (0, 1, 3)] == [{"embedding": 0}] * 3
-        # The provenance lists are exactly the kept ids, in both forms (an
-        # entity's `sources` holds the hex string, see the regression above).
-        expected = {src for src in srcs} | {str(src) for src in srcs}
-        assert set(filters[1]["sources"]["$in"]) == expected
+        # The provenance lists are exactly the kept ObjectIds, once each.
+        assert sorted(filters[1]["sources"]["$in"]) == sorted(srcs)
         # Edges: the kept provenance, OR no provenance at all (hand-made rows).
         provenance_leg, no_provenance_leg = filters[2]["$or"]
-        assert set(provenance_leg["sources"]["$in"]) == expected
+        assert sorted(provenance_leg["sources"]["$in"]) == sorted(srcs)
         assert no_provenance_leg == {"sources": []}
 
     async def test_no_returned_node_carries_an_embedding(

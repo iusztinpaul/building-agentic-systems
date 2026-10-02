@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 from beanie import PydanticObjectId
+from bson import ObjectId
 
 
 class FakeCursor:
@@ -101,6 +102,14 @@ class FakeMemoryCollection:
         search_indexes: list[dict[str, Any]] | None = None,
     ) -> None:
         self.rows = list(rows or [])
+        # Every ``memory`` row's ``sources`` holds Document ObjectIds (task 167):
+        # a hex-string fixture would hide the row from the ObjectId ``$in`` reads.
+        for row in self.rows:
+            stray = [s for s in row.get("sources") or [] if not isinstance(s, ObjectId)]
+            if stray:
+                raise ValueError(
+                    f"row {row.get('_id')!r} has non-ObjectId sources: {stray!r}"
+                )
         self.pipelines: list[list[dict[str, Any]]] = []
         self.find_filters: list[dict[str, Any]] = []
         self.find_projections: list[dict[str, Any] | None] = []

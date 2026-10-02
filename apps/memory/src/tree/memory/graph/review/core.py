@@ -495,9 +495,9 @@ async def _handle_confirm(
         entity_type=entity_type,
         incoming_name=loser_name,
         incoming_properties=loser_properties,
-        # Use a synthetic source id so the union step stays well-defined
-        # even when the loser has no sources of its own.
-        source_id=str(loser_sources[0]) if loser_sources else f"merge:{loser_id}",
+        # A loser with no provenance adds none: ``sources`` only ever holds
+        # Document ObjectIds.
+        source_id=loser_sources[0] if loser_sources else None,
         strategy=merge_strategy,
         now=now,
     )

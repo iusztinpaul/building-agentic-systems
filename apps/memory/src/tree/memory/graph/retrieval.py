@@ -369,14 +369,14 @@ def _document_recency(row: dict[str, Any]) -> datetime:
 
 
 def _rank_by_provenance(
-    row: dict[str, Any], provenance_rank: dict[str, int]
+    row: dict[str, Any], provenance_rank: dict[PydanticObjectId, int]
 ) -> int | None:
     """The rank of the most recent kept document among ``row["sources"]``."""
 
     ranks = [
-        provenance_rank[str(source)]
+        provenance_rank[source]
         for source in row.get("sources") or []
-        if str(source) in provenance_rank
+        if source in provenance_rank
     ]
     return min(ranks, default=None)
 
@@ -425,18 +425,14 @@ async def fetch_full_graph(
     kept = sorted(by_id, key=_document_recency, reverse=True)[:max_docs]
 
     nodes: dict[Any, dict[str, Any]] = {}
-    # Keyed on the hex string: ``add_entity`` writes an entity's ``sources`` as
-    # the STRING of the document id, every other row holds the ObjectId.
-    provenance_rank: dict[str, int] = {}
-    provenance: list[Any] = []
+    provenance_rank: dict[PydanticObjectId, int] = {}
     for rank, row in enumerate(kept, start=1):
         nodes[row["_id"]] = {**row, "doc_rank": rank}
         if not row.get("sources"):
             logger.debug("Document %s has no sources: embedded alone", row["_id"])
             continue
-        source = row["sources"][0]
-        provenance_rank.setdefault(str(source), rank)
-        provenance.extend(dict.fromkeys([source, str(source)]))
+        provenance_rank.setdefault(row["sources"][0], rank)
+    provenance = list(provenance_rank)
 
     # 2. Their subgraph nodes: chunks, and every entity extracted from them.
     async for row in collection.find(

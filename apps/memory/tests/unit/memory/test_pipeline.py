@@ -130,6 +130,8 @@ _TEST_LLM_IDENTITY = "gemini:gemini-3.1-flash-lite"
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 _PH = str(_USER_ID)
+# A source Document's id as the pipeline carries it (hex string).
+_DOCUMENT_ID = "65f0c0ffee0000000000abcd"
 # The memory-collection key; the bulk-write DB mock returns the same collection
 # for any subscript, so the exact string is irrelevant to the assertions.
 _MEMORY_COLLECTION_SENTINEL = MEMORY_COLLECTION
@@ -2022,7 +2024,7 @@ class TestDispatchEntityWriteReusesVector:
             confidence=1.0,
             match_type="exact",
         )
-        key = make_entity_key("d1", NodeType.PERSON, "Andrej Karpathy")
+        key = make_entity_key(_DOCUMENT_ID, NodeType.PERSON, "Andrej Karpathy")
         node_text = prospective_entity_embedding_text(
             entity_type=NodeType.PERSON,
             name="Andrej Karpathy",
@@ -2048,7 +2050,7 @@ class TestDispatchEntityWriteReusesVector:
             resolver=MagicMock(spec=CompositeResolver),
             user_id=_USER_ID,
             node=node,
-            source_document_id="d1",
+            source_document_id=_DOCUMENT_ID,
             resolved_entity=resolved_entity,
             decision=DedupDecision(action="none"),
             embeddings=embeddings,
@@ -2062,6 +2064,38 @@ class TestDispatchEntityWriteReusesVector:
         assert captured["vector"] == [0.42] * 8
         assert isinstance(captured["model"], _CachedSingleEmbedding)
         real_model.embed.assert_not_called()
+
+
+class TestDispatchEntityWriteProvenance:
+    async def test_add_entity_receives_the_document_objectid(self, mocker) -> None:
+        # Arrange
+        add_entity = mocker.patch(
+            "tree.memory.pipeline.add_entity",
+            new=AsyncMock(
+                return_value=("target-id", None, DeduplicationResult(action="none"))
+            ),
+        )
+
+        # Act
+        await _dispatch_entity_write(
+            database=MagicMock(),
+            embedding_model=MagicMock(),
+            resolver=MagicMock(spec=CompositeResolver),
+            user_id=_USER_ID,
+            node=ExtractedNode(name="Andrej Karpathy", type=NodeType.PERSON),
+            source_document_id=_DOCUMENT_ID,
+            resolved_entity=None,
+            decision=DedupDecision(action="none"),
+            embeddings=EmbeddingMap(vectors={}),
+            resolved=ResolutionOutput(),
+            dedup_config=DeduplicationConfig(),
+            summary=WriteSummary(),
+        )
+
+        # Assert — the entity's `sources` gets the ObjectId, never the hex string.
+        source_id = add_entity.await_args.kwargs["source_id"]
+        assert isinstance(source_id, PydanticObjectId)
+        assert source_id == PydanticObjectId(_DOCUMENT_ID)
 
 
 # ---------------------------------------------------------------------------

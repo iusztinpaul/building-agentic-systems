@@ -152,6 +152,7 @@ async def _resolve_pending_document_ids(
     ingested: set[PydanticObjectId] = set()
     cursor = kg.find({"user_id": user_id, "sources": {"$ne": []}}, {"sources": 1})
     async for row in cursor:
+        # Every ``sources`` element is a Document ObjectId, so ``doc.id`` matches.
         for src in row.get("sources", []) or []:
             ingested.add(src)
 
