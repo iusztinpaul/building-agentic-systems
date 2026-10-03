@@ -434,7 +434,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | Tool | Description |
 |---|---|
 | `search_memory` | Hybrid (vector + text) search. **Signature differs per mode** — see below. |
-| `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
+| `search_web` | On-demand web search — Bing via Bright Data SERP (Google is not offered: its organic links are opaque `/goto` tokens the SERP zone cannot resolve). A query Bright Data is cooling down is retried once after 15 s, then answers a retryable `fetch_failed` (or the results already collected, when a later page is the one cooling down). A page after the first that times out (60 s per request) or cannot connect also returns the results already collected. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
 | `scrape_web` | On-demand scrape of one or more URLs via Bright Data Web Unlocker. **Does NOT touch memory.** Returns markdown (or HTML) inline for exploration; pair with `search_web` to read SERP results, then call `ingest_url` on whichever URLs are worth keeping. Max 5 URLs per call. |
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
 | `ingest_file` | Ingest a local file. |
@@ -479,7 +479,6 @@ Equivalent MCP-tool invocation (JSON `arguments` an MCP client would send):
   "name": "search_web",
   "arguments": {
     "query": "MongoDB Atlas vector search",
-    "engine": "google",
     "num_results": 5,
     "ingest": false
   }

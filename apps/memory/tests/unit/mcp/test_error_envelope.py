@@ -22,6 +22,7 @@ import pytest
 from beanie import PydanticObjectId
 from pymongo.errors import ServerSelectionTimeoutError
 
+from tree.data.web.web_serp import BrightDataCooldownError
 from tree.mcp import graph_tools, tools
 from tree.mcp.graph_tools import review_confirm, review_list_pending
 from tree.mcp.tools import (
@@ -254,6 +255,26 @@ class TestMapping:
 
         assert payload["error_type"] == "network_error"
         assert payload["retryable"] is True
+
+    async def test_search_web_reports_a_serp_cooldown_as_retryable_fetch_failed(
+        self, mocker
+    ) -> None:
+        # NOT ``search_unavailable``: that code belongs to the memory retrieval
+        # legs (ADR-008 §2); a cooled-down web query is a fetch that will work
+        # again in 15 s (ADR-013 §1).
+        mocker.patch(
+            "tree.mcp.tools.web_search",
+            new_callable=AsyncMock,
+            side_effect=BrightDataCooldownError(
+                "This query recently failed and cannot be attempted at this time."
+            ),
+        )
+
+        payload = _envelope(await _tool_fn(search_web)("prefect", _make_ctx()))
+
+        assert payload["error_type"] == "fetch_failed"
+        assert payload["retryable"] is True
+        assert "15 s" in payload["message"]
 
     @pytest.mark.parametrize(
         "status_code,retryable",

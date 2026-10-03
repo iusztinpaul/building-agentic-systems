@@ -61,6 +61,7 @@ from tree.data.web.web_scrape import (
 from tree.data.web.web_scrape import (
     scrape_one as _scrape_one,
 )
+from tree.data.web.web_serp import BrightDataCooldownError
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
@@ -656,7 +657,6 @@ async def ingest_file(
 async def search_web(
     query: str,
     ctx: Context,
-    engine: Literal["google", "bing", "yandex"] = "google",
     num_results: int = 10,
     country: str | None = None,
     language: str | None = None,
@@ -664,7 +664,11 @@ async def search_web(
     ingest_top_k: int | None = None,
     ingest_urls: list[str] | None = None,
 ) -> str:
-    """Run an on-demand web search via Bright Data's SERP API.
+    """Run an on-demand web search.
+
+    Bing organic results via Bright Data's SERP API — Google is not offered:
+    its organic links are opaque `/goto` tokens the SERP zone cannot resolve
+    (2026-10).
 
     Returns SERP results (rank, title, URL, snippet) directly to the caller.
     By default, does NOT ingest anything into memory — call
@@ -678,10 +682,10 @@ async def search_web(
 
     Args:
         query: The search query.
-        engine: Search engine to query. Defaults to "google".
         num_results: Maximum number of organic results to return (default 10).
         country: Optional 2-letter ISO country code for geo-targeting (e.g. "us").
-        language: Optional 2-letter language code (e.g. "en").
+        language: Optional language, mapped to Bing's `setLang` (e.g. "en" or
+            "en-US").
         ingest: If true, fire-and-forget the `ingest-web-url-batch-etl`
             Prefect deployment with the selected URLs. Default false.
         ingest_top_k: When `ingest=true`, ingest only the first K URLs from
@@ -713,7 +717,6 @@ async def search_web(
     try:
         results = await web_search(
             query,
-            engine=engine,
             num_results=num_results,
             country=country,
             language=language,
@@ -722,6 +725,15 @@ async def search_web(
         return tool_error("invalid_input", str(exc), retryable=False)
     except BrightDataConfigurationError as exc:
         return tool_error("configuration_error", str(exc), retryable=False)
+    except BrightDataCooldownError as exc:
+        # Before its parent class: same code, but the message tells the model
+        # WHEN a retry can succeed.
+        return tool_error(
+            "fetch_failed",
+            "Bright Data SERP is cooling down this query — retry in 15 s or "
+            f"more: {exc}",
+            retryable=True,
+        )
     except BrightDataRequestError as exc:
         return tool_error("fetch_failed", str(exc), retryable=True)
     except httpx.HTTPStatusError as exc:
@@ -734,7 +746,7 @@ async def search_web(
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         return tool_error(
             "network_error",
-            f"Could not reach Bright Data SERP API: {exc}",
+            f"Could not reach Bright Data SERP API: {str(exc) or type(exc).__name__}",
             retryable=True,
         )
     except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
@@ -742,7 +754,6 @@ async def search_web(
 
     payload: dict[str, Any] = {
         "query": query,
-        "engine": engine,
         "results": [r.model_dump() for r in results],
     }
 
