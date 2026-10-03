@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pymongo.errors import AutoReconnect
 from beanie import PydanticObjectId
 from bson.binary import Binary
 
@@ -38,6 +39,7 @@ from tree.memory.rag.load import (
     child_chunk_name,
     child_row_id,
     document_row_id,
+    LOAD_RETRIES,
     load_rag_rows,
     parent_chunk_name,
     parent_row_id,
@@ -354,18 +356,69 @@ class TestRagNodeTypeGuard:
 
 
 class TestLoadRagRows:
-    async def test_flushes_every_op_in_one_unordered_bulk_write(self) -> None:
+    async def test_a_small_run_is_one_unordered_bulk_write(self) -> None:
         collection = MagicMock(name="collection")
         collection.bulk_write = AsyncMock(return_value=MagicMock())
         database = MagicMock(name="database")
         database.__getitem__.return_value = collection
         ops = _ops(2, 2)
 
-        written = await load_rag_rows(database=database, ops=ops)
+        written = await load_rag_rows(database=database, documents_ops=[ops])
 
         assert written == len(ops)
         database.__getitem__.assert_called_with(MEMORY_COLLECTION)
         collection.bulk_write.assert_awaited_once_with(ops, ordered=False)
+
+    async def test_a_large_run_is_written_in_batches_of_whole_documents(
+        self,
+    ) -> None:
+        collection = MagicMock(name="collection")
+        collection.bulk_write = AsyncMock(return_value=MagicMock())
+        database = MagicMock(name="database")
+        database.__getitem__.return_value = collection
+        documents = [_ops(1) for _ in range(5)]  # 3 ops each
+
+        written = await load_rag_rows(
+            database=database, documents_ops=documents, batch_ops=7
+        )
+
+        assert written == 15
+        sizes = [len(call.args[0]) for call in collection.bulk_write.await_args_list]
+        assert sizes == [6, 6, 3]  # never 7: that would split a document
+
+    async def test_a_dropped_batch_is_retried_then_written(self, mocker) -> None:
+        mocker.patch("tree.memory.rag.load.asyncio.sleep", new=AsyncMock())
+        collection = MagicMock(name="collection")
+        collection.bulk_write = AsyncMock(
+            side_effect=[AutoReconnect("connection closed"), MagicMock()]
+        )
+        database = MagicMock(name="database")
+        database.__getitem__.return_value = collection
+
+        written = await load_rag_rows(database=database, documents_ops=[_ops(1)])
+
+        assert written == 3
+        assert collection.bulk_write.await_count == 2
+
+    async def test_a_batch_that_keeps_dropping_raises_after_the_earlier_ones(
+        self, mocker
+    ) -> None:
+        mocker.patch("tree.memory.rag.load.asyncio.sleep", new=AsyncMock())
+        collection = MagicMock(name="collection")
+        collection.bulk_write = AsyncMock(
+            side_effect=[MagicMock(), *[AutoReconnect("closed")] * LOAD_RETRIES]
+        )
+        database = MagicMock(name="database")
+        database.__getitem__.return_value = collection
+
+        with pytest.raises(AutoReconnect):
+            await load_rag_rows(
+                database=database,
+                documents_ops=[_ops(1), _ops(1)],
+                batch_ops=3,
+            )
+
+        assert collection.bulk_write.await_count == 1 + LOAD_RETRIES
 
     async def test_empty_op_list_skips_the_round_trip(self) -> None:
         # ``bulk_write([])`` raises, so an empty run must not call it at all.
@@ -374,7 +427,7 @@ class TestLoadRagRows:
         database = MagicMock(name="database")
         database.__getitem__.return_value = collection
 
-        written = await load_rag_rows(database=database, ops=[])
+        written = await load_rag_rows(database=database, documents_ops=[])
 
         assert written == 0
         collection.bulk_write.assert_not_awaited()
@@ -425,7 +478,7 @@ class TestPropertiesAreReplacedInMongo:
             }
         )
 
-        await load_rag_rows(database=database, ops=_ops(1))
+        await load_rag_rows(database=database, documents_ops=[_ops(1)])
 
         row = await database[MEMORY_COLLECTION].find_one({"_id": row_id})
         assert row["properties"] == {
@@ -459,7 +512,7 @@ class TestPropertiesAreReplacedInMongo:
             }
         )
 
-        await load_rag_rows(database=database, ops=_ops(1))
+        await load_rag_rows(database=database, documents_ops=[_ops(1)])
 
         row = await database[MEMORY_COLLECTION].find_one({"_id": row_id})
         assert row["created_at"] == created_at
@@ -492,7 +545,7 @@ class TestStoredVectorsInMongo:
         vector = [0.125, -0.25, 0.5]
 
         await load_rag_rows(
-            database=database, ops=_ops(2, child_vectors={text: vector})
+            database=database, documents_ops=[_ops(2, child_vectors={text: vector})]
         )
 
         collection = database[MEMORY_COLLECTION]
@@ -510,9 +563,13 @@ class TestStoredVectorsInMongo:
         text = child_embedding_text(
             title=_TITLE, heading_path=["Memory", "Section 0"], content="child 0.0"
         )
-        await load_rag_rows(database=database, ops=_ops(1, child_vectors={text: [0.5]}))
+        await load_rag_rows(
+            database=database, documents_ops=[_ops(1, child_vectors={text: [0.5]})]
+        )
 
-        await load_rag_rows(database=database, ops=_ops(1, child_vectors={}))
+        await load_rag_rows(
+            database=database, documents_ops=[_ops(1, child_vectors={})]
+        )
 
         row = await database[MEMORY_COLLECTION].find_one(
             {"_id": child_row_id(_USER_ID, _URI, 0, 0)}

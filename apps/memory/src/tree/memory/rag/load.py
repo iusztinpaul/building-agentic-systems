@@ -1,14 +1,14 @@
 """The RAG load stage: one document + its **Parent chunk** / **Child chunk** rows.
 
-ADR-006 decisions 2 and 4. This module is PURE except for the single
-``bulk_write`` at the bottom: :func:`build_rag_row_ops` turns one split document
+ADR-006 decisions 2 and 4. This module is PURE except for the
+``bulk_write``s at the bottom: :func:`build_rag_row_ops` turns one split document
 into the ``UpdateOne`` upserts that materialise the hierarchy
 
     document  <--parent_id--  chunk/parent  <--parent_id--  chunk/child
 
 inside the ONE :data:`tree.entities.memory.MEMORY_COLLECTION` collection, and
-:func:`load_rag_rows` flushes every op of a run in ONE
-``bulk_write(ordered=False)``. Ordering is irrelevant: the ``_id``s are
+:func:`load_rag_rows` flushes them in small ``bulk_write(ordered=False)``
+batches of WHOLE documents. Ordering is irrelevant: the ``_id``s are
 deterministic (``build_rag_row_id`` over ``source_uri`` + position) and distinct, so a
 re-run of the same document rewrites the same rows instead of duplicating them.
 
@@ -41,11 +41,14 @@ silently making ``rag`` mode write graph rows.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
 from pymongo import UpdateOne
+from pymongo.errors import AutoReconnect, NetworkTimeout
 
 from tree.entities.memory import (
     MEMORY_COLLECTION,
@@ -55,6 +58,17 @@ from tree.entities.memory import (
 )
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.types import ParentChunk
+
+logger = logging.getLogger(__name__)
+
+LOAD_BATCH_OPS = 500
+"""Target ops per ``bulk_write`` (~3 MB at ~5.7 KB a child row). One write per
+run (~37k ops, ~200 MB for the prod corpus) ran ~6 min on Atlas M0 until the
+server closed the connection and NOTHING landed; small batches finish in
+seconds and keep the progress of the ones that did."""
+
+LOAD_RETRIES = 3
+LOAD_RETRY_BASE_DELAY_S = 2.0
 
 
 def parent_chunk_name(source_uri: str, parent_index: int) -> str:
@@ -297,15 +311,85 @@ def _build_node_op(
     )
 
 
-async def load_rag_rows(*, database: Any, ops: list[UpdateOne]) -> int:
-    """Flush every RAG row of a run in ONE ``bulk_write(ordered=False)``.
+def batch_document_ops(
+    documents_ops: list[list[UpdateOne]], batch_ops: int = LOAD_BATCH_OPS
+) -> list[list[UpdateOne]]:
+    """Pack per-document op lists into batches of about ``batch_ops`` ops.
 
-    Returns the number of ops issued (== rows written, since every op is an
-    upsert on a distinct deterministic ``_id``). An empty op list skips the
-    round-trip entirely — ``bulk_write([])`` raises.
+    A document is NEVER split across batches: a document counts as ingested as
+    soon as ANY of its rows carries it in ``sources``, so a batch that failed
+    halfway through a document would mark it done with rows missing, and the
+    next run would never pick it up again. A document larger than ``batch_ops``
+    gets a batch of its own.
     """
 
-    if not ops:
-        return 0
-    await database[MEMORY_COLLECTION].bulk_write(ops, ordered=False)
-    return len(ops)
+    batches: list[list[UpdateOne]] = []
+    current: list[UpdateOne] = []
+    for ops in documents_ops:
+        if current and len(current) + len(ops) > batch_ops:
+            batches.append(current)
+            current = []
+        current.extend(ops)
+    if current:
+        batches.append(current)
+    return batches
+
+
+async def _write_batch(collection: Any, ops: list[UpdateOne]) -> None:
+    """One ``bulk_write``, retried with backoff on a dropped connection.
+
+    Safe to retry: every op is an upsert on a deterministic ``_id``, so a batch
+    the server partly applied before the drop is rewritten, not duplicated.
+    """
+
+    for attempt in range(1, LOAD_RETRIES + 1):
+        try:
+            await collection.bulk_write(ops, ordered=False)
+            return
+        except AutoReconnect, NetworkTimeout:
+            if attempt == LOAD_RETRIES:
+                raise
+            delay = LOAD_RETRY_BASE_DELAY_S * 2 ** (attempt - 1)
+            logger.warning(
+                "load_rag_rows: bulk_write of %d ops dropped (attempt %d/%d); "
+                "retrying in %.0fs",
+                len(ops),
+                attempt,
+                LOAD_RETRIES,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+
+async def load_rag_rows(
+    *,
+    database: Any,
+    documents_ops: list[list[UpdateOne]],
+    batch_ops: int = LOAD_BATCH_OPS,
+) -> int:
+    """Flush the RAG rows of a run in batches of WHOLE documents.
+
+    ``documents_ops`` holds one :func:`build_rag_row_ops` list per document.
+    Each batch is one ``bulk_write(ordered=False)`` retried on a dropped
+    connection (:func:`_write_batch`); the batches run in sequence so a failure
+    leaves every earlier batch written and every later document pending.
+
+    Returns the number of ops issued (== rows written, since every op is an
+    upsert on a distinct deterministic ``_id``). No ops skips the round-trip
+    entirely — ``bulk_write([])`` raises.
+    """
+
+    batches = batch_document_ops(documents_ops, batch_ops)
+    collection = database[MEMORY_COLLECTION]
+    written = 0
+    for index, ops in enumerate(batches, start=1):
+        await _write_batch(collection, ops)
+        written += len(ops)
+        logger.info(
+            "load_rag_rows: batch %d/%d written (%d rows so far)",
+            index,
+            len(batches),
+            written,
+        )
+    return written

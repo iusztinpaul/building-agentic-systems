@@ -33,8 +33,8 @@ only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
   MISS), 1 retry.
 * (rag) ② ``embed_children_task`` — one batched embed of the run's unique
   **Contextual header** texts, ``INPUTS`` cache, 2 retries.
-* (rag) ③ ``load_rag_rows_task`` — document + parent + child rows in ONE
-  ``bulk_write``, ``NO_CACHE``, 3 retries. **``rag`` mode returns here.**
+* (rag) ③ ``load_rag_rows_task`` — document + parent + child rows in
+  ``bulk_write`` batches of whole documents, ``NO_CACHE``, 3 retries. **``rag`` mode returns here.**
 * (graph) ④ ``llm_extract_entities_task`` — one LLM call per PARENT chunk,
   ``INPUTS`` cache, 2 retries.
 * (graph) ④.5 ``validate_raws_task`` — envelope + field validation.
@@ -521,7 +521,7 @@ async def _load_rag_rows(
     user_id: PydanticObjectId,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> int:
-    """Upsert the document / parent / child rows of the run in ONE ``bulk_write``.
+    """Upsert the document / parent / child rows of the run, batched by document.
 
     ``NO_CACHE`` because it writes: a cache hit would skip the write on a
     re-run that a previous crash left half-applied. Idempotent instead — every
@@ -537,9 +537,9 @@ async def _load_rag_rows(
         tags=_EXTRACTION_TAGS,
         trace_headers=opik_trace_headers,
     ):
-        ops = []
+        documents_ops = []
         for chunked in chunked_docs:
-            ops.extend(
+            documents_ops.append(
                 build_rag_row_ops(
                     user_id=user_id,
                     document_id=chunked.document_id,
@@ -552,7 +552,7 @@ async def _load_rag_rows(
                 )
             )
 
-        rows = await load_rag_rows(database=database, ops=ops)
+        rows = await load_rag_rows(database=database, documents_ops=documents_ops)
         log.info(
             "load_rag_rows: documents=%d rows_written=%d",
             len(chunked_docs),
