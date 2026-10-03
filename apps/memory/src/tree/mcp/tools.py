@@ -342,8 +342,8 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     it rank, so you can quote the passage that actually matched.
 
     ``outcome`` is ``nothing_found`` when an empty memory or an off-topic query
-    left no hit above the relevance bar — say so instead of quoting unrelated
-    passages. ``search_mode`` is ``hybrid`` when both search legs answered;
+    left no hit above either search leg's relevance bar — say so instead of
+    quoting unrelated passages. ``search_mode`` is ``hybrid`` when both search legs answered;
     ``text_only`` / ``vector_only`` means one leg was unavailable, so these
     results may be incomplete — worth one caveat line.
 

@@ -11,8 +11,10 @@ Two claims are pinned here:
   ADR-008 §3) — a dead leg used to be swallowed into ``[]``, so "Mongo is
   down" and "nothing matches" were the same answer;
 * the ``query.min_vector_score`` bar on the VECTOR leg (``TestMinVectorScore``,
-  ADR-008 §3) — the only absolute score in the pipeline, so it is the only
-  place "nothing relevant" can be decided.
+  ADR-008 §3) — the only absolute score in the pipeline;
+* the provisional ``query.min_text_score`` bar on the TEXT leg
+  (``TestMinTextScore``, ADR-013 §7) — ``textScore`` is unnormalised, so ``0.0``
+  turns it off, and the module pins it off everywhere else.
 
 ``TestRRFFuse`` moved here verbatim with ``_rrf_fuse`` (was
 ``tests/unit/memory/graph/test_retrieval.py``).
@@ -41,6 +43,11 @@ _OFF_TOPIC = "zxqv plorb wumbus"
 # asserted once, in tests/unit/config/test_app_config.py, and patched here.
 _MIN_VECTOR_SCORE = 0.65
 
+# The text bar ``TestMinTextScore`` pins — a fixed number above the fake's
+# ``_DEFAULT_SEARCH_SCORE`` (0.9) for the same reason: the shipped value is
+# provisional (ADR-013 §7) and owned by the evals, never by these tests.
+_MIN_TEXT_SCORE = 1.0
+
 # The first-stage key that identifies each leg's pipeline.
 _VECTOR_STAGE = "$vectorSearch"
 _TEXT_STAGE = "$match"
@@ -49,6 +56,19 @@ _TEXT_STAGE = "$match"
 @pytest.fixture
 def embedding_model() -> FakeEmbeddingModel:
     return FakeEmbeddingModel(dimensions=4)
+
+
+@pytest.fixture(autouse=True)
+def text_gate_off(mocker) -> None:
+    """Pin the text bar OFF for every test that is not about it.
+
+    The fake stamps ``_DEFAULT_SEARCH_SCORE`` (0.9) on both legs, so a re-pinned
+    ``min_text_score`` default would otherwise silently gate the text hits the
+    filter, mode and vector-gate tests rely on. ``TestMinTextScore`` patches it
+    again on top.
+    """
+
+    mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 0.0)
 
 
 def _vector_candidate(make_child_row, node_id: str, score: float) -> dict:
@@ -451,14 +471,14 @@ class TestMinVectorScore:
 
         assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
 
-    async def test_text_hits_are_not_gated(
+    async def test_text_hits_are_not_gated_by_the_vector_bar(
         self, make_collection, embedding_model, make_child_row
     ) -> None:
         # Arrange — a rare identifier the embedding barely recognises (0.1) but
         # ``$text`` matches exactly. The row IS in the vector index, so BOTH
-        # legs return it: the gate must drop the vector copy and leave the text
-        # copy alone (``textScore`` is not normalisable — a lexical match is a
-        # match). A gate applied after fusion would lose this hit.
+        # legs return it: the vector gate must drop the vector copy and leave
+        # the text copy to its OWN bar (off here — ``text_gate_off``). A gate
+        # applied after fusion would lose this hit.
         row = make_child_row(_USER, "c0", content="memory-extract-etl-worker")
         row["_search_score"] = 0.1
         collection = make_collection([row])
@@ -547,6 +567,204 @@ class TestMinVectorScore:
 
         assert result.hits == []
         assert "0 kept at min_vector_score=0.85" in caplog.text
+
+
+def _text_candidate(make_child_row, node_id: str, score: float) -> dict:
+    """A child row ONLY ``$text`` can return: it matches ``_TEXT_QUERY`` and has
+    no ``embedding``, so its ``_search_score`` stands for a ``textScore`` and
+    the vector gate never sees it."""
+
+    row = make_child_row(_USER, node_id, content="int8 scalar quantization")
+    del row["embedding"]
+    row["_search_score"] = score
+    return row
+
+
+# A query only ``_text_candidate`` rows contain (``_vector_candidate`` rows say
+# "parent-document retrieval"), so each leg's rows are known up front.
+_TEXT_QUERY = "quantization"
+
+
+class TestMinTextScore:
+    """The text leg is gated on ``textScore`` BEFORE fusion (ADR-013 §7).
+
+    ``textScore`` is unnormalised (a sum of per-term field-weighted
+    frequencies), so the bar is provisional and ``0.0`` disables it — but the
+    gate's log line is written either way, because it is what the eval that
+    pins the bar reads.
+    """
+
+    @pytest.fixture(autouse=True)
+    def pinned_knobs(self, mocker) -> None:
+        mocker.patch(
+            "tree.memory.rag.search.app_config.query.min_vector_score",
+            _MIN_VECTOR_SCORE,
+        )
+        mocker.patch(
+            "tree.memory.rag.search.app_config.query.min_text_score",
+            _MIN_TEXT_SCORE,
+        )
+
+    async def test_drops_text_hits_below_threshold(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # A one-word lexical brush (0.5) rides along with a real match (2.4).
+        collection = make_collection(
+            [
+                _text_candidate(make_child_row, "t0", 2.4),
+                _text_candidate(make_child_row, "t1", 0.5),
+            ]
+        )
+
+        result = await hybrid_search(
+            collection,
+            _TEXT_QUERY,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert [hit.doc["_id"] for hit in result.hits] == ["t0"]
+
+    async def test_keeps_hit_at_threshold(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # The bar is inclusive, like the vector one.
+        collection = make_collection(
+            [_text_candidate(make_child_row, "t0", _MIN_TEXT_SCORE)]
+        )
+
+        result = await hybrid_search(
+            collection,
+            _TEXT_QUERY,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert [hit.doc["_id"] for hit in result.hits] == ["t0"]
+
+    async def test_logs_candidates_kept_and_top_score(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # ``top`` is the best CANDIDATE score, before the gate.
+        collection = make_collection(
+            [
+                _text_candidate(make_child_row, "t0", 2.431),
+                _text_candidate(make_child_row, "t1", 0.5),
+            ]
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            await hybrid_search(
+                collection,
+                _TEXT_QUERY,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert (
+            "text leg: 2 candidate(s), 1 kept at min_text_score=1.00 (top=2.431)"
+            in caplog.text
+        )
+
+    async def test_zero_bar_keeps_everything_and_still_logs_top(
+        self, make_collection, embedding_model, make_child_row, mocker, caplog
+    ) -> None:
+        # The operator turns the gate off: every $text hit fuses as before, and
+        # the line still reports ``top`` so the bar can be re-pinned from logs.
+        mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 0.0)
+        collection = make_collection(
+            [
+                _text_candidate(make_child_row, "t0", 0.2),
+                _text_candidate(make_child_row, "t1", 0.1),
+            ]
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                _TEXT_QUERY,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert sorted(hit.doc["_id"] for hit in result.hits) == ["t0", "t1"]
+        assert (
+            "text leg: 2 candidate(s), 2 kept at min_text_score=0.00 (top=0.200)"
+            in caplog.text
+        )
+
+    async def test_text_leg_gated_to_nothing_stays_hybrid(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # Every lexical candidate is too weak: the text leg answers ``[]`` — a
+        # RESULT, so the mode stays ``hybrid`` and the vector hit fuses alone.
+        collection = make_collection(
+            [
+                _vector_candidate(make_child_row, "v0", 0.90),
+                _text_candidate(make_child_row, "t0", 0.3),
+            ]
+        )
+
+        result = await hybrid_search(
+            collection,
+            _TEXT_QUERY,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
+        assert result.search_mode == "hybrid"
+
+    async def test_unavailable_text_leg_is_not_gated(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # The text index is gone: degraded is not filtered — ``vector_only``,
+        # and no gate line, because the gate never saw a candidate.
+        collection = make_collection([_vector_candidate(make_child_row, "v0", 0.90)])
+        _break_leg(collection, _TEXT_STAGE)
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                _TEXT_QUERY,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert result.search_mode == "vector_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
+        assert "text leg:" not in caplog.text
+
+    async def test_empty_text_leg_logs_no_gate_line(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # No candidates → nothing to gate and no ``top`` to report.
+        collection = make_collection([_vector_candidate(make_child_row, "v0", 0.90)])
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                _OFF_TOPIC,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert result.search_mode == "hybrid"
+        assert "text leg:" not in caplog.text
 
 
 class TestRRFFuse:

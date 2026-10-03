@@ -330,6 +330,11 @@ class QueryConfig(BaseModel):
     0.75, and at 0.75 an ON-TOPIC query kept nothing (top=0.735) while nonsense
     peaked at 0.649. Owned by Chapter 7's evals; override per shell with
     ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
+
+    ``min_text_score`` is the TEXT leg's bar on MongoDB's ``textScore``
+    (ADR-013 §7): unnormalised and corpus-relative, so it is PROVISIONAL, has no
+    upper bound, and ``0.0`` disables it. Pinned by the on-topic vs off-topic
+    eval in ``tasks/183``'s Log; override with ``TREE_QUERY__MIN_TEXT_SCORE=...``.
     """
 
     top_k: int = 10
@@ -337,6 +342,7 @@ class QueryConfig(BaseModel):
     rrf_k: int = 60
     embedding_batch_size: int = 64
     min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
+    min_text_score: float = Field(0.0, ge=0.0, allow_inf_nan=False)
     # The no-query cap on EVERY whole-memory view (ADR-011 §7, ADR-013 §3): how
     # many most-recent documents the **Full graph** / rag **Memory structure**
     # embeds and whose chunks the **Embedding map** plots (250 since 2026-10-03,
