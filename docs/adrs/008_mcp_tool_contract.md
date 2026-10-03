@@ -1,6 +1,6 @@
 # ADR-008: Tool Receipts, Errors and Retrieval Outcomes; MCP as the Only Harness Boundary
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [013](013_horizon_scale_mcp_surface.md): §2's `search_web` loses `engine` (Bing only) and answers Bright Data's cooldown as `fetch_failed` (task 176); §2's dispatch boundary maps Prefect's HTTP status (401/403 `configuration_error`, 429/5xx `pipeline_unavailable`, other 4xx `internal_error`; task 177).
 - **Date:** 2026-09-12. Amended 2026-09-21 on ONE value, by ADR-009 §8's re-pin protocol: §4's `min_vector_score` 0.75 → 0.70 on `voyage-4`.
 - **Deciders:** Paul (project owner)
 - **Context references:**

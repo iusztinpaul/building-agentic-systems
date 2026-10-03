@@ -180,6 +180,15 @@ STORAGE_UNAVAILABLE_MESSAGE = "memory store unreachable — try again"
 #: the embedding provider's raw ``400 Input cannot contain empty strings``.
 BLANK_QUERY_MESSAGE = "query must not be empty"
 
+#: The ONE sentence an unregistered ``online-pipeline`` deployment answers with,
+#: whether Prefect's client raised :class:`ObjectNotFound` or a raw 404
+#: :class:`PrefectHTTPStatusError` — one constant so the two paths cannot drift.
+DEPLOYMENT_MISSING_MESSAGE = (
+    "The 'online-pipeline/online-pipeline' deployment is not registered "
+    "on the Prefect API — run `make memory-serve-workflows` (local) or "
+    "deploy it, then retry."
+)
+
 
 def storage_error(tool: str, exc: Exception) -> str:
     """Map an unreachable Mongo to ``storage_unavailable``, logging the traceback.
@@ -223,6 +232,53 @@ def internal_error(tool: str, exc: Exception) -> str:
 
     logger.exception("%s failed: %s", tool, exc)
     return tool_error("internal_error", f"{tool} failed: {exc}", retryable=False)
+
+
+def _prefect_status_error(exc: PrefectHTTPStatusError) -> str:
+    """Map the Prefect API's HTTP status to what the model can act on (ADR-013 §4).
+
+    * 401 / 403 → ``configuration_error``, NOT retryable: the key is invalid or
+      expired, and only an operator rotating ``PREFECT_API_KEY`` fixes it;
+    * 404 → ``configuration_error``, NOT retryable: the same
+      :data:`DEPLOYMENT_MISSING_MESSAGE` the ``ObjectNotFound`` path answers;
+    * 429 / 5xx → ``pipeline_unavailable``, retryable, the status named;
+    * any other 4xx → ``internal_error``, NOT retryable: the dispatch sent a
+      request Prefect rejects, a bug until the traceback is read.
+
+    Called from INSIDE an ``except`` block, so ``logger.exception`` records the
+    traceback with the status, whichever branch is taken.
+    """
+
+    status = exc.response.status_code
+    logger.exception(
+        "Prefect API answered HTTP %d while dispatching the ingest", status
+    )
+    if status in (401, 403):
+        return tool_error(
+            "configuration_error",
+            f"Prefect API rejected the request (HTTP {status}): PREFECT_API_KEY is "
+            "invalid or expired for the workspace at PREFECT_API_URL — rotate the "
+            "key in Prefect Cloud, update this server's environment (Horizon: "
+            "Settings → Environment, then redeploy) and retry.",
+            retryable=False,
+        )
+    if status == 404:
+        return tool_error(
+            "configuration_error", DEPLOYMENT_MISSING_MESSAGE, retryable=False
+        )
+    if _http_retryable(status):
+        return tool_error(
+            "pipeline_unavailable",
+            f"Prefect API answered HTTP {status} — try again",
+            retryable=True,
+        )
+    return tool_error(
+        "internal_error",
+        # The status only: str(exc) embeds the request URL (the Prefect Cloud
+        # account/workspace ids); the logged traceback keeps the full error.
+        f"Prefect API answered HTTP {status} while dispatching the ingest",
+        retryable=False,
+    )
 
 
 def _retrieval_error(tool: str, exc: Exception) -> str:
@@ -512,15 +568,20 @@ async def _ingest(
     an :class:`~tree.online.IngestReceipt`. Its five fields plus the tool's own
     ``dup_extra`` echo (``url`` / ``file_path``) ARE the tool's answer.
 
-    The dispatch boundary of ADR-008 §2 lives here, and catches exactly two
-    Prefect failures — there is NO in-process fallback (ADR-002), so the model
-    must be able to tell "come back later" from "an operator has to act":
+    The dispatch boundary of ADR-008 §2 (amended by ADR-013 §4) lives here —
+    there is NO in-process fallback (ADR-002), so the model must be able to
+    tell "come back later" from "an operator has to act":
 
-    * API unreachable (``ConnectError`` / a timeout / a Prefect HTTP status) →
-      ``pipeline_unavailable``, retryable;
-    * the deployment was never registered (``ObjectNotFound``) →
+    * the API rejected the key (HTTP 401 / 403) → ``configuration_error``, NOT
+      retryable — the message names ``PREFECT_API_KEY`` and says rotate +
+      redeploy;
+    * the deployment was never registered (``ObjectNotFound`` or a raw 404) →
       ``configuration_error``, NOT retryable — the same call fails identically
-      until someone serves the workflows.
+      until someone serves the workflows;
+    * Prefect had a bad minute (HTTP 429 / 5xx) → ``pipeline_unavailable``,
+      retryable, the status named; the API is unreachable (``ConnectError`` /
+      a timeout) → ``pipeline_unavailable``, retryable;
+    * any other 4xx → ``internal_error``, NOT retryable — a bug.
 
     A ``PyMongoError`` from the dispatcher's pre-flight ``Document.find_one`` is
     caught FIRST as ``storage_unavailable`` (retryable): that lookup happens
@@ -542,13 +603,11 @@ async def _ingest(
     except ObjectNotFound:
         logger.exception("online-pipeline deployment is not registered")
         return tool_error(
-            "configuration_error",
-            "The 'online-pipeline/online-pipeline' deployment is not registered "
-            "on the Prefect API — run `make memory-serve-workflows` (local) or "
-            "deploy it, then retry.",
-            retryable=False,
+            "configuration_error", DEPLOYMENT_MISSING_MESSAGE, retryable=False
         )
-    except (httpx.ConnectError, httpx.TimeoutException, PrefectHTTPStatusError) as exc:
+    except PrefectHTTPStatusError as exc:
+        return _prefect_status_error(exc)
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.exception(
             "Prefect API unreachable while dispatching the ingest: %s", exc
         )
@@ -580,8 +639,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
     ``retryable`` is true. A Prefect API that is down is
-    ``pipeline_unavailable`` and worth retrying; a non-http(s) link is
-    ``unsupported_url`` and is not.
+    ``pipeline_unavailable`` and worth retrying; an invalid
+    ``PREFECT_API_KEY`` is ``configuration_error`` (not retryable); a
+    non-http(s) link is ``unsupported_url`` and is not.
 
     Args:
         url: The web URL to fetch and ingest.
@@ -593,9 +653,9 @@ async def ingest_url(url: str, ctx: Context) -> str:
             UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
         )
     # No fetch happens here — `_ingest` only DISPATCHES the flow run (the page
-    # is fetched worker-side), and it already answers `pipeline_unavailable`
-    # for every transport failure against the Prefect API. So the only local
-    # failure left is a link this server cannot accept.
+    # is fetched worker-side), and it already maps every Prefect API failure
+    # (transport or HTTP status) to its envelope. So the only local failure
+    # left is a link this server cannot accept.
     except ValueError as exc:
         return tool_error("unsupported_url", str(exc), retryable=False)
     except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP

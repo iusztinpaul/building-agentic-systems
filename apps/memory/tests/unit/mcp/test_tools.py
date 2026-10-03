@@ -32,6 +32,7 @@ from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 from tree.data.online_pipeline import UrlSource
 from tree.mcp.tools import (
+    DEPLOYMENT_MISSING_MESSAGE,
     ERROR_CONTRACT,
     _ingest,
     ingest_conversation,
@@ -83,6 +84,26 @@ def _tool_fn(tool):
     """Unwrap FastMCP's ``FunctionTool`` back to the coroutine it registered."""
 
     return getattr(tool, "fn", tool)
+
+
+def _prefect_http_error(status_code: int) -> PrefectHTTPStatusError:
+    """A Prefect client failure exactly as the client raises it.
+
+    ``from_httpx_error`` is how ``PrefectHttpxAsyncClient`` builds the error, so
+    the tool sees the same object a live 401 from Prefect Cloud produces.
+    """
+
+    request = httpx.Request(
+        "POST",
+        "https://api.prefect.cloud/api/accounts/a/workspaces/w/deployments/filter",
+    )
+    return PrefectHTTPStatusError.from_httpx_error(
+        httpx.HTTPStatusError(
+            f"HTTP {status_code}",
+            request=request,
+            response=httpx.Response(status_code, request=request),
+        )
+    )
 
 
 class TestIngestTail:
@@ -346,15 +367,9 @@ class TestDispatchErrors:
         [
             httpx.ConnectError("connection refused"),
             httpx.TimeoutException("timed out"),
-            PrefectHTTPStatusError(
-                "server error",
-                request=httpx.Request("POST", "http://localhost:4200/api"),
-                response=httpx.Response(
-                    502, request=httpx.Request("POST", "http://localhost:4200/api")
-                ),
-            ),
+            httpx.ReadTimeout("timed out"),
         ],
-        ids=["connect-error", "timeout", "prefect-status"],
+        ids=["connect-error", "timeout", "read-timeout"],
     )
     async def test_unreachable_prefect_is_pipeline_unavailable(
         self, mocker, exc: Exception
@@ -392,8 +407,132 @@ class TestDispatchErrors:
         # Not retryable: the same call fails identically until an operator acts,
         # so the message names the deployment AND the command that registers it.
         assert payload["retryable"] is False
+        assert payload["message"] == DEPLOYMENT_MISSING_MESSAGE
         assert "online-pipeline/online-pipeline" in payload["message"]
         assert "make memory-serve-workflows" in payload["message"]
+
+    @pytest.mark.parametrize(
+        "status_code,error_type,retryable",
+        [
+            (401, "configuration_error", False),
+            (403, "configuration_error", False),
+            (404, "configuration_error", False),
+            (422, "internal_error", False),
+            (429, "pipeline_unavailable", True),
+            (500, "pipeline_unavailable", True),
+            (502, "pipeline_unavailable", True),
+            (503, "pipeline_unavailable", True),
+        ],
+        ids=["401", "403", "404", "422", "429", "500", "502", "503"],
+    )
+    async def test_prefect_status_maps_to_what_the_model_can_act_on(
+        self, mocker, caplog, status_code: int, error_type: str, retryable: bool
+    ) -> None:
+        # ADR-013 §4: an expired key is the operator's to fix (stop), a 503 is
+        # Prefect's bad minute (retry), any other 4xx is a bug — never one
+        # "unreachable — try again" for all of them.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="tree.mcp.tools"):
+            payload = json.loads(
+                await _ingest(
+                    UrlSource(uri="https://example.com"),
+                    user_id=_USER_ID,
+                    dup_extra={"url": "https://example.com"},
+                )
+            )
+
+        assert set(payload) == {"error_type", "retryable", "message"}
+        assert payload["error_type"] == error_type
+        assert payload["retryable"] is retryable
+        if status_code == 404:
+            assert payload["message"] == DEPLOYMENT_MISSING_MESSAGE
+        else:
+            assert f"HTTP {status_code}" in payload["message"]
+        # The on-call reads the status AND the stack — not a one-liner.
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert [r.getMessage() for r in errors] == [
+            f"Prefect API answered HTTP {status_code} while dispatching the ingest"
+        ]
+        assert errors[0].exc_info is not None
+
+    @pytest.mark.parametrize("status_code", [401, 403])
+    async def test_a_rejected_key_names_the_variables_and_redeploy(
+        self, mocker, status_code: int
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "configuration_error",
+            "retryable": False,
+            "message": (
+                f"Prefect API rejected the request (HTTP {status_code}): "
+                "PREFECT_API_KEY is invalid or expired for the workspace at "
+                "PREFECT_API_URL — rotate the key in Prefect Cloud, update this "
+                "server's environment (Horizon: Settings → Environment, then "
+                "redeploy) and retry."
+            ),
+        }
+
+    async def test_another_4xx_names_only_the_status_not_the_request_url(
+        self, mocker
+    ) -> None:
+        # str(PrefectHTTPStatusError) embeds the request URL — the Prefect Cloud
+        # account/workspace ids. The model gets the status; the traceback keeps
+        # the rest.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(422),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "internal_error",
+            "retryable": False,
+            "message": "Prefect API answered HTTP 422 while dispatching the ingest",
+        }
+
+    @pytest.mark.parametrize(
+        "status_code,expected",
+        [
+            (503, "Prefect API answered HTTP 503 — try again"),
+            (429, "Prefect API answered HTTP 429 — try again"),
+        ],
+    )
+    async def test_a_transient_status_is_named_in_the_retry_message(
+        self, mocker, status_code: int, expected: str
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "pipeline_unavailable",
+            "retryable": True,
+            "message": expected,
+        }
 
     async def test_mongo_down_on_preflight_is_storage_unavailable(self, mocker) -> None:
         # The dispatcher's pre-flight ``Document.find_one`` runs BEFORE Prefect,
@@ -441,6 +580,34 @@ class TestDispatchErrors:
 
         assert payload["error_type"] == "pipeline_unavailable"
         assert payload["retryable"] is True
+
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            (ingest_url, ("https://example.com/post",)),
+            (ingest_file, ("/tmp/notes.md", "body")),
+            (ingest_conversation, ("Alice likes Python.",)),
+        ],
+        ids=["ingest_url", "ingest_file", "ingest_conversation"],
+    )
+    async def test_every_ingest_tool_reports_a_rejected_key_as_configuration(
+        self, mocker, tool, args: tuple
+    ) -> None:
+        # The live Horizon defect: a stale ``PREFECT_API_KEY`` answered 401 and
+        # every ingest tool told the model to retry. None of them may.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(401),
+        )
+
+        payload = json.loads(await _tool_fn(tool)(*args, _make_ctx()))
+
+        assert payload["error_type"] == "configuration_error"
+        assert payload["retryable"] is False
+        assert "PREFECT_API_KEY" in payload["message"]
+        assert "PREFECT_API_URL" in payload["message"]
+        assert "redeploy" in payload["message"]
 
 
 # ---------------------------------------------------------------------------

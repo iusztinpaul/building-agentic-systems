@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from beanie import PydanticObjectId
+from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pymongo.errors import ServerSelectionTimeoutError
 
 from tree.data.web.web_serp import BrightDataCooldownError
@@ -84,6 +85,12 @@ def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
         request=request,
         response=httpx.Response(status_code, request=request),
     )
+
+
+def _prefect_http_error(status_code: int) -> PrefectHTTPStatusError:
+    """The error ``PrefectHttpxAsyncClient`` raises for a non-2xx answer."""
+
+    return PrefectHTTPStatusError.from_httpx_error(_http_status_error(status_code))
 
 
 class TestHelper:
@@ -297,6 +304,51 @@ class TestMapping:
         assert payload["error_type"] == "http_error"
         assert payload["retryable"] is retryable
         assert str(status_code) in payload["message"]
+
+    @pytest.mark.parametrize(
+        "exc,error_type,retryable",
+        [
+            (_prefect_http_error(401), "configuration_error", False),
+            (_prefect_http_error(403), "configuration_error", False),
+            (_prefect_http_error(404), "configuration_error", False),
+            (ObjectNotFound(_http_status_error(404)), "configuration_error", False),
+            (_prefect_http_error(422), "internal_error", False),
+            (_prefect_http_error(429), "pipeline_unavailable", True),
+            (_prefect_http_error(500), "pipeline_unavailable", True),
+            (_prefect_http_error(503), "pipeline_unavailable", True),
+            (httpx.ConnectError("refused"), "pipeline_unavailable", True),
+            (httpx.ReadTimeout("timed out"), "pipeline_unavailable", True),
+        ],
+        ids=[
+            "401",
+            "403",
+            "404",
+            "object-not-found",
+            "422",
+            "429",
+            "500",
+            "503",
+            "connect-error",
+            "read-timeout",
+        ],
+    )
+    async def test_the_ingest_dispatch_boundary_maps_prefect_failures(
+        self, mocker, exc: Exception, error_type: str, retryable: bool
+    ) -> None:
+        # ADR-013 §4: only Prefect's bad minutes are worth a retry — an
+        # expired key, a missing deployment or a malformed request are not.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=exc,
+        )
+
+        payload = _envelope(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload["error_type"] == error_type
+        assert payload["retryable"] is retryable
 
 
 # ---------------------------------------------------------------------------

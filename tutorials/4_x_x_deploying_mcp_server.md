@@ -27,7 +27,7 @@ There is no CLI or public API for setting Horizon env vars: `fastmcp login`/`who
 2. Paste it into **Add variable**, scoped to **Production**.
 3. **Redeploy.** New values apply only on the next deployment, so a rotated key does nothing until you push or redeploy.
 
-Good example: rotate `PREFECT_API_KEY` in Prefect Cloud, paste the new value, redeploy, then re-run the smoke test below. Bad example: rotate the key in `.env.prod` only. Horizon keeps the stale key, every ingest fails with a Prefect `401 Unauthorized`, and the tool reports it as "Prefect API unreachable".
+Good example: rotate `PREFECT_API_KEY` in Prefect Cloud, paste the new value, redeploy, then re-run the smoke test below. Bad example: rotate the key in `.env.prod` only. Horizon keeps the stale key, every ingest fails with a Prefect `401 Unauthorized`, and the tool answers `configuration_error` naming `PREFECT_API_KEY`.
 
 **Idea (not built):** have the server load its rotating secrets (Voyage, Bright Data, Gemini, Opik, Mongo) from Prefect Secret blocks at startup. Horizon would then hold only `PREFECT_API_URL` and `PREFECT_API_KEY`, so most key rotations would need no Horizon edit at all.
 
