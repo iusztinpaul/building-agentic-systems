@@ -178,36 +178,109 @@ def test_payload_display_controls_are_a_copy_of_the_graph_defaults() -> None:
     assert _DEFAULT_DISPLAY["arrows"] is True
 
 
-def test_payload_colours_nodes_by_cluster_and_noise_grey() -> None:
+def test_payload_colours_clusters_through_the_legend_and_noise_grey() -> None:
     payload = to_embedding_map_payload(_map())
-    nodes = payload["nodes"]
 
-    colours = {
-        cluster_id: {n["color"] for n in nodes if n["cluster_id"] == cluster_id}
-        for cluster_id in (0, 1, -1)
+    # Act: the template's resolver — cluster_id -> legend colour.
+    colour_by_cluster = {
+        row["cluster_id"]: row["color"]
+        for row in payload["legend"]
+        if "cluster_id" in row
     }
 
-    assert colours[0] == {CLUSTER_PALETTE[0]}
-    assert colours[1] == {CLUSTER_PALETTE[1]}
-    assert colours[-1] == {NOISE_COLOUR}
+    # Assert: every drawn point resolves to its cluster's hue, noise to grey.
+    assert colour_by_cluster == {
+        0: CLUSTER_PALETTE[0],
+        1: CLUSTER_PALETTE[1],
+        -1: NOISE_COLOUR,
+    }
+    assert {n["cluster_id"] for n in payload["nodes"]} <= set(colour_by_cluster)
 
 
-def test_payload_nodes_carry_coordinates_no_label_and_the_tooltip_meta() -> None:
+def test_payload_keeps_the_colour_of_a_cluster_with_no_legend_row() -> None:
+    # Arrange: a partially written run — cluster 1's points are stamped but
+    # its ``memory_clusters`` row is missing, so no legend row carries its hue.
+    embedding_map = _map()
+    embedding_map.clusters = [c for c in embedding_map.clusters if c.cluster_id != 1]
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: the orphan points ship their own palette colour (the template's
+    # ``n.color`` wins); clustered and noise points stay lean.
+    orphans = [n for n in nodes if n["cluster_id"] == 1]
+    assert orphans
+    assert {n.get("color") for n in orphans} == {cluster_colour(1)}
+    assert all("color" not in n for n in nodes if n["cluster_id"] != 1)
+
+
+def test_payload_ships_no_colour_on_a_healthy_map() -> None:
+    nodes = to_embedding_map_payload(_map())["nodes"]
+
+    assert all("color" not in n for n in nodes)
+
+
+def test_payload_leaves_a_negative_cluster_id_to_the_template_noise_rule() -> None:
+    # Arrange: a degenerate label below -1 (the pipeline normalises these to
+    # -1, so this is defence in depth).
+    embedding_map = _map()
+    embedding_map.points[-1].cluster_id = -2
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: no per-node colour — the template paints any negative id grey.
+    assert "color" not in nodes[-1]
+    assert nodes[-1]["meta"]["cluster"] == "noise"
+
+
+def test_payload_nodes_carry_exactly_the_lean_key_set() -> None:
     payload = to_embedding_map_payload(_map())
 
+    # Assert: no ``label`` (empty anyway), no ``color`` (the legend carries it),
+    # no ``meta.document`` (the tooltip rebuilds it from ``name``).
     for node in payload["nodes"]:
-        assert isinstance(node["x"], float)
-        assert isinstance(node["y"], float)
-        # No canvas text: hundreds of chunk titles would be unreadable.
-        assert node["label"] == ""
-        assert set(node["meta"]) == {"cluster", "document", "heading_path", "snippet"}
+        assert set(node) == {
+            "id",
+            "type",
+            "name",
+            "x",
+            "y",
+            "cluster_id",
+            "size",
+            "meta",
+        }
+        assert set(node["meta"]) == {"cluster", "heading_path", "snippet"}
 
     first = payload["nodes"][0]
     assert first["type"] == "chunk"
     assert first["name"] == "Paper"
-    assert first["meta"]["cluster"] == "Cluster 0 topic"
-    assert first["meta"]["heading_path"] == "Memory > Retrieval"
-    assert first["meta"]["snippet"] == "Snippet 0."
+    assert first["meta"] == {
+        "cluster": "Cluster 0 topic",
+        "heading_path": "Memory > Retrieval",
+        "snippet": "Snippet 0.",
+    }
+
+
+def test_payload_rounds_coordinates_to_three_decimals() -> None:
+    embedding_map = _map()
+    embedding_map.points[0].x = 1.23456
+    embedding_map.points[0].y = -7.65432
+
+    node = to_embedding_map_payload(embedding_map)["nodes"][0]
+
+    assert node["x"] == 1.235
+    assert node["y"] == -7.654
+
+
+def test_payload_omits_an_empty_heading_path_and_snippet() -> None:
+    embedding_map = _map()
+    embedding_map.points[0].heading_path = []
+    embedding_map.points[0].snippet = ""
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: the _curated_meta rule — an empty value is absent, not "".
+    assert nodes[0]["meta"] == {"cluster": "Cluster 0 topic"}
+    assert set(nodes[1]["meta"]) == {"cluster", "heading_path", "snippet"}
 
 
 def test_payload_names_an_untitled_document() -> None:
@@ -217,7 +290,7 @@ def test_payload_names_an_untitled_document() -> None:
     node = to_embedding_map_payload(embedding_map)["nodes"][0]
 
     assert node["name"] == "(untitled)"
-    assert node["meta"]["document"] == "(untitled)"
+    assert "document" not in node["meta"]
 
 
 def test_payload_meta_labels_noise_points_as_noise() -> None:
@@ -231,10 +304,22 @@ def test_payload_meta_labels_noise_points_as_noise() -> None:
 def test_payload_legend_lists_clusters_by_size_then_the_two_greys() -> None:
     payload = to_embedding_map_payload(_map())
 
+    # Assert: the coloured rows carry ``cluster_id`` (noise -1) for the
+    # template's colour lookup; the not-drawn grey row carries none.
     assert payload["legend"] == [
-        {"label": "Cluster 0 topic", "size": 30, "color": CLUSTER_PALETTE[0]},
-        {"label": "Cluster 1 topic", "size": 12, "color": CLUSTER_PALETTE[1]},
-        {"label": "noise", "size": 5, "color": NOISE_COLOUR},
+        {
+            "label": "Cluster 0 topic",
+            "size": 30,
+            "color": CLUSTER_PALETTE[0],
+            "cluster_id": 0,
+        },
+        {
+            "label": "Cluster 1 topic",
+            "size": 12,
+            "color": CLUSTER_PALETTE[1],
+            "cluster_id": 1,
+        },
+        {"label": "noise", "size": 5, "color": NOISE_COLOUR, "cluster_id": -1},
         {
             "label": "unclustered / stale (not shown)",
             "size": 3,

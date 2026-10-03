@@ -22,6 +22,7 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.config.app_config import app_config
+from tree.memory.visualize.embeddings import NOISE_COLOUR
 from tree.memory.visualize.graph import (
     _D3_FORCE_CDN,
     _DEFAULT_DISPLAY,
@@ -661,9 +662,66 @@ def test_legend_rows_are_taken_from_the_payload_when_present() -> None:
     # Assert (source-level): the per-type legend is the ELSE branch now.
     assert "if (legendRows) {" in _RENDER_JS
     assert (
-        "const colorByType = new Map(nodes.map((n) => [n.type, n.color]));"
+        "const colorByType = new Map(nodes.map((n) => [n.type, colourOf(n)]));"
         in _RENDER_JS
     )
+
+
+def test_one_colour_resolver_prefers_the_node_then_the_legend_cluster() -> None:
+    # Assert (source-level): a Graph payload node keeps its own ``color``; a
+    # lean map node (no ``color``) is coloured by its legend row's cluster_id.
+    assert "n.color ?? colourByCluster.get(n.cluster_id)" in _RENDER_JS
+    # Built ONCE, from the legend rows that carry a numeric cluster_id (the
+    # "unclustered / stale" row carries none).
+    assert _RENDER_JS.count("const colourByCluster = new Map(") == 1
+    assert (
+        '(legendRows || []).filter((r) => typeof r.cluster_id === "number")'
+        in _RENDER_JS
+    )
+    # No colour site reads ``n.color`` directly any more.
+    assert _RENDER_JS.count("n.color") == 1
+
+
+def test_a_negative_cluster_id_without_a_legend_row_is_drawn_noise_grey() -> None:
+    # Assert (source-level): -2/-3 never hit the "unclustered / stale" grey —
+    # that colour names chunks that are NOT on the map.
+    assert (
+        "const colourOf = (n) => n.color ?? colourByCluster.get(n.cluster_id)\n"
+        '        ?? (n.cluster_id < 0 ? NOISE_COLOUR : "#d5d8de");'
+    ) in _RENDER_JS
+    assert f'const NOISE_COLOUR = "{NOISE_COLOUR}";' in _RENDER_JS
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        "color: colourOf(n),",  # graph.addNode
+        "entry = { color: colourOf(n), ids: [] };",  # the cluster hull
+        "[n.type, colourOf(n)]",  # the per-type legend fallback
+    ],
+)
+def test_every_node_colour_site_goes_through_the_resolver(site: str) -> None:
+    assert site in _RENDER_JS
+
+
+def test_a_node_without_a_label_draws_no_canvas_text() -> None:
+    assert 'label: n.label ?? "",' in _RENDER_JS
+
+
+def test_the_fixed_layout_tooltip_rebuilds_the_document_row_from_the_name() -> None:
+    # Assert (source-level): a map node no longer ships ``meta.document``; the
+    # card puts it back from ``name`` in its old slot (after ``cluster``), so
+    # the hover card reads type, cluster, document, heading path, snippet.
+    hover = _RENDER_JS[
+        _RENDER_JS.index('renderer.on("enterNode"') : _RENDER_JS.index(
+            'renderer.on("leaveNode"'
+        )
+    ]
+    assert "if (isFixed) {" in hover
+    assert "const { cluster, ...rest } = n.meta || {};" in hover
+    assert "document: n.name" in hover
+    # The graph's card is untouched: type first, then its curated meta.
+    assert "Object.assign({ type: n.type }, n.meta)" in hover
 
 
 def test_the_header_counts_read_the_map_summary_on_a_fixed_layout() -> None:
@@ -692,11 +750,9 @@ def _map_payload() -> dict:
                 "id": "chunk-1",
                 "type": "chunk",
                 "name": "Paper",
-                "label": "",
                 "x": 3.5,
                 "y": -1.25,
                 "cluster_id": 0,
-                "color": "#1f77b4",
                 "meta": {},
             }
         ],
@@ -1900,7 +1956,7 @@ def test_the_hover_card_ends_with_the_hidden_child_count() -> None:
     line = 'if (n.childCount != null) card["child chunks"] = n.childCount + " (not shown)";'
     assert line in body
     assert (
-        body.index("const card = Object.assign({ type: n.type }, n.meta);")
+        body.index("card = Object.assign({ type: n.type }, n.meta);")
         < body.index(line)
         < body.index("metaRows(card)")
     )
@@ -1930,10 +1986,13 @@ def test_the_closure_marker_never_reaches_the_payload() -> None:
 # sha256 of each template constant as of main before task 173. The rag tree
 # draws through the template UNCHANGED (its edges are synthesised to fit it), so
 # a JS / CSS / DOM edit made "for rag" turns this red.
+# Re-pinned by task 179 only: the lean map node's colour resolver
+# (`colourOf`, incl. its negative-id noise fallback) and the map tooltip's
+# rebuilt `document` row.
 _TEMPLATE_SHA256 = {
     "_GRAPH_STYLE": "39b6d3020fedea6fe530f6ba671b5ca0a95924e0718d6d0f5fab5c37f214bbca",
     "_BODY_MARKUP": "eabb61a3b90ddd3cfea41a32ed8d8984b0fc9ceb91dab8d99cbcddbee2e5af6c",
-    "_RENDER_JS": "f0202dbb8c5c2ea463565b601a5bcf7358685c7ca9e155c3f196d063c10abcd6",
+    "_RENDER_JS": "055947dcf2cd4ff6b5ddf6f338b5d685b37bab4744631a4ae685a3e75c95026b",
     "_FILE_HTML_TEMPLATE": (
         "fe65603e2631b89c69651571bc087e00e757ce1e082c2e12380864b035b0423d"
     ),

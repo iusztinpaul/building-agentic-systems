@@ -134,28 +134,34 @@ def to_embedding_map_payload(
 
     nodes: list[dict[str, Any]] = []
     for point in embedding_map.points:
-        title = point.title or _UNTITLED
-        nodes.append(
-            {
-                "id": point.chunk_id,
-                "type": "chunk",
-                "name": title,  # the tooltip's heading
-                # No canvas text: hundreds of overlapping chunk titles are
-                # noise, and the tooltip already carries the full story.
-                "label": "",
-                "x": point.x,
-                "y": point.y,
-                "cluster_id": point.cluster_id,
-                "color": cluster_colour(point.cluster_id),
-                "size": _MAP_NODE_SIZE,
-                "meta": {
-                    "cluster": _cluster_label(labels, point.cluster_id),
-                    "document": title,
-                    "heading_path": " > ".join(point.heading_path),
-                    "snippet": point.snippet,
-                },
-            }
-        )
+        meta: dict[str, Any] = {"cluster": _cluster_label(labels, point.cluster_id)}
+        # Omitted when empty (the ``_curated_meta`` rule): an empty tooltip row
+        # carries nothing, and on a 17k-point map every key is ~17k copies.
+        if point.heading_path:
+            meta["heading_path"] = " > ".join(point.heading_path)
+        if point.snippet:
+            meta["snippet"] = point.snippet
+        # Lean on purpose (ADR-013 §3): no ``label`` (hundreds of overlapping
+        # chunk titles are canvas noise — the template defaults it to ""), no
+        # ``color`` (the template looks it up from the legend's ``cluster_id``)
+        # and no ``meta.document`` (the tooltip rebuilds it from ``name``).
+        # Three decimals is sub-pixel on any UMAP extent a screen can show.
+        node: dict[str, Any] = {
+            "id": point.chunk_id,
+            "type": "chunk",
+            "name": point.title or _UNTITLED,  # the tooltip's heading
+            "x": round(point.x, 3),
+            "y": round(point.y, 3),
+            "cluster_id": point.cluster_id,
+            "size": _MAP_NODE_SIZE,
+            "meta": meta,
+        }
+        # The one exception: a cluster with NO legend row (a partially written
+        # run — points stamped, ``memory_clusters`` row missing) ships its own
+        # palette colour, which the template prefers. Never on a healthy map.
+        if point.cluster_id >= 0 and point.cluster_id not in labels:
+            node["color"] = cluster_colour(point.cluster_id)
+        nodes.append(node)
 
     noise = sum(1 for point in embedding_map.points if point.cluster_id < 0)
     legend = _legend_rows(embedding_map, noise=noise)
@@ -188,7 +194,9 @@ def _legend_rows(embedding_map: EmbeddingMap, *, noise: int) -> list[dict[str, A
     """One row per cluster (largest first), then the two grey rows if non-empty.
 
     The greys come last and only when they exist: an empty "noise · 0" row
-    would read as a cluster the reader cannot find on the map.
+    would read as a cluster the reader cannot find on the map. Every DRAWN
+    row carries its ``cluster_id`` (noise ``-1``) — the template's only source
+    of a point's colour; the "unclustered / stale" row has no points, so none.
     """
 
     rows: list[dict[str, Any]] = [
@@ -196,13 +204,16 @@ def _legend_rows(embedding_map: EmbeddingMap, *, noise: int) -> list[dict[str, A
             "label": cluster.label,
             "size": cluster.size,
             "color": cluster_colour(cluster.cluster_id),
+            "cluster_id": cluster.cluster_id,
         }
         for cluster in sorted(
             embedding_map.clusters, key=lambda cluster: cluster.size, reverse=True
         )
     ]
     if noise > 0:
-        rows.append({"label": "noise", "size": noise, "color": NOISE_COLOUR})
+        rows.append(
+            {"label": "noise", "size": noise, "color": NOISE_COLOUR, "cluster_id": -1}
+        )
     if embedding_map.unclustered > 0:
         rows.append(
             {

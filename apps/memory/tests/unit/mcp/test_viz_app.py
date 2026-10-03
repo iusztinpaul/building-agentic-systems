@@ -150,11 +150,9 @@ def _map_payload() -> dict:
                 "id": "chunk-1",
                 "type": "chunk",
                 "name": "Paper",
-                "label": "",
                 "x": 1.0,
                 "y": 2.0,
                 "cluster_id": 0,
-                "color": "#1f77b4",
                 "meta": {},
             }
         ],

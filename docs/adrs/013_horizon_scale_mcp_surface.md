@@ -69,7 +69,9 @@ Seven related choices, one amendment set — each the least mechanism that makes
    is computed from counts, never from the plotted set); the header says `N of M chunks (the P
    most-recent of D documents)`. Map nodes drop what the renderer can derive — `meta.document` (= `name`),
    the empty `label`, the per-node `color` (the legend rows carry `cluster_id`; the template resolves
-   `n.color ?? colourByCluster`) — and round `x`/`y` to 3 decimals; the tooltip is rebuilt identically. The
+   `n.color ?? colourByCluster`, then a negative id without a legend row → noise grey, else `#d5d8de`;
+   only a point of a cluster with no `memory_clusters` row — a partially written run — still ships
+   `color = cluster_colour(id)`) — and round `x`/`y` to 3 decimals; the tooltip is rebuilt identically. The
    graph payload is untouched. *Why one knob:* two views, one question ("how much of the memory does a
    whole-memory picture embed?"); *upgrade trigger:* the day the two need different values, split the key.
    *Fallback recorded, not built:* if the Horizon read still fails after 1–3, the cap drops to 100.
