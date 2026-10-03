@@ -46,7 +46,7 @@ expected.
       per-query normalised text score) instead of only "evals".
 - [x] `make pre-commit` green (prettier on the markdown); `make memory-tests` unchanged (no code touched).
 - [x] Tester re-runs QA (diff read) and PASSES.
-- [ ] PA re-runs acceptance review on the feature and ACCEPTS.
+- [x] PA re-runs acceptance review on the feature and ACCEPTS.
 
 ## Issues (detail)
 
@@ -187,3 +187,20 @@ $ git diff --stat          → docs/adrs/013_horizon_scale_mcp_surface.md | 51 +
 
 **VERDICT: PASS**
 
+
+### [PA] 2026-10-04 00:35 — Acceptance Review (re-review after the rollup)
+
+**VERDICT: ACCEPT**
+
+Re-read `git show 7fbe460` (ADR-013 only, +49/−2) and the Tester's claim-by-claim entry above. All three
+issues resolved: §1 carries the task-176 block (later page fails soft with no truncation marker, 60 s per
+request, pagination stop rules, `msockid` strip, no overall deadline); §5 carries the task-178 bounded
+acquire (the `wait_for` bound, the `voyage_slot_acquire_timeout_seconds: 120` knob, why both, the
+6 × 20 s derivation, the trade-off, the cosmetic `state=cancelled` line); §7 states the shipped-`0.0`
+outcome and Consequences names the per-query normalised text score as the upgrade path. Each claim
+matches the code (`web_serp.py`, `throttle.py`, `default.yaml`, `app_config.py`) and the task logs; the
+README `search_web` row and the `search()` docstring read consistently with §1. No code touched, so the
+previously-PASS criteria of tasks 176–183 stand. Hand off to the PR Reviewer.
+
+Follow-up (not blocking, no new task filed): `ConcurrencyConfig.runner_global_limit` defaults to 4 in
+`app_config.py` while `default.yaml` sets 6 — the ADR anchors the 120 s derivation to the YAML value.

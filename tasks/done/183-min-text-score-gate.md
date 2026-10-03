@@ -254,3 +254,14 @@ text leg: 1 candidate(s), 1 kept at min_text_score=0.00 (top=0.504)
 
 **Tests**
 - Unit: 4894 passing, 0 failing (`make memory-tests`, env-status local); format-check / lint-check / pre-commit clean.
+
+### [PA] 2026-10-04 00:35 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed from the user's POV in the feature-level acceptance of PR #45 (first pass REJECTed on
+documentation discipline only — ADR-013 §1/§5/§7 did not record the mid-pipeline decisions; resolved by
+rollup `tasks/done/184-pa-rejection-horizon-mcp-fixes.md`, commit 7fbe460). Evidence from the Tester
+log entries above; every automated acceptance criterion verified against the user-visible surface
+(tool text, docstrings, README, skill, tutorial, glossary). The `[HUMAN]` post-merge Horizon checks, where
+present, stay open and are listed in the PR body. Hand off to the PR Reviewer.

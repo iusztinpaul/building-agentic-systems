@@ -275,3 +275,14 @@ $ make memory-tests  ->  4810 passed in 57.68s
 
 **Notes**
 - Cosmetic: when the bound abandons a request, prefect logs `ERROR ... Service 'ConcurrencySlotAcquisitionService' failed to process item (... state=cancelled)` once per abandoned request. This is not fatal. If the bound cuts a legitimate wait, the queued request may later use a slot that no caller consumes.
+
+### [PA] 2026-10-04 00:35 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Reviewed from the user's POV in the feature-level acceptance of PR #45 (first pass REJECTed on
+documentation discipline only — ADR-013 §1/§5/§7 did not record the mid-pipeline decisions; resolved by
+rollup `tasks/done/184-pa-rejection-horizon-mcp-fixes.md`, commit 7fbe460). Evidence from the Tester
+log entries above; every automated acceptance criterion verified against the user-visible surface
+(tool text, docstrings, README, skill, tutorial, glossary). The `[HUMAN]` post-merge Horizon checks, where
+present, stay open and are listed in the PR body. Hand off to the PR Reviewer.
