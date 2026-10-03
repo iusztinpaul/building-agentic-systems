@@ -8,6 +8,7 @@ boundary. Log streaming itself is exercised by running the real pipelines.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 from pathlib import Path
@@ -100,12 +101,22 @@ class TestWaitForDispatch:
 _FLOW_RUN_ID = "0c8e6f5e-6a0b-4f3e-9d6c-2f1f4b0f9a11"
 
 
-def _patch_prefect_client(mocker, state: State) -> None:
-    """Fake ``get_client()``: no logs, and a flow run already in ``state``."""
+def _patch_prefect_client(
+    mocker, state: State, log_messages: list[str] | None = None
+) -> None:
+    """Fake ``get_client()``: ``log_messages`` once, a flow run already in ``state``."""
 
+    logs = [
+        SimpleNamespace(
+            timestamp=datetime.datetime(2026, 10, 3, tzinfo=datetime.UTC),
+            level=logging.ERROR,
+            message=message,
+        )
+        for message in log_messages or []
+    ]
     client = MagicMock()
     client.api_url = "http://localhost:4200/api"
-    client.read_logs = AsyncMock(return_value=[])
+    client.read_logs = AsyncMock(side_effect=[logs, []])
     client.read_flow_run = AsyncMock(return_value=SimpleNamespace(state=state))
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=client)
@@ -135,6 +146,30 @@ class TestWaitForFlowRun:
         assert exit_info.value.code == 1
         assert message in caplog.text
         assert "Flow completed successfully" not in caplog.text
+
+    async def test_a_streamed_failure_is_printed_once(self, mocker, caplog) -> None:
+        text = (
+            "offline-pipeline finished with failures: extraction user=u1 1/1 "
+            "shards failed (shard=0: AutoReconnect)"
+        )
+        message = f"Flow run encountered an exception: PartialIngestError: {text}"
+        _patch_prefect_client(
+            mocker,
+            State(type=StateType.FAILED, name="Failed", message=message),
+            log_messages=[
+                f"Encountered exception during execution: PartialIngestError('{text}')",
+                f"Finished in state Failed('{message}')",
+            ],
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.cli"):
+            with pytest.raises(SystemExit) as exit_info:
+                await wait_for_flow_run(_FLOW_RUN_ID)
+
+        assert exit_info.value.code == 1
+        assert caplog.text.count(text) == 1
+        assert "Finished in state" not in caplog.text
+        assert "Flow finished with state: Failed — see the error above" in caplog.text
 
     async def test_a_completed_run_reports_success_without_exiting(
         self, mocker, caplog

@@ -22,6 +22,7 @@ raise, because every caller is a terminal entry point.
 import asyncio
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -144,6 +145,30 @@ def build_online_source(source: str, title: str | None) -> OnlineSource:
     return FileSource(path=path, content=read_file(path), title=title)
 
 
+_ENGINE_FINAL_STATE_PREFIX = "Finished in state "
+_EXCEPTION_PREFIX = re.compile(r"^(?:Flow run encountered an exception: )?(?:\w+: )?")
+
+
+def _failure_detail(state_message: str | None, streamed: list[str]) -> str:
+    """The run's error for the verdict line — once, never a third copy.
+
+    The state message (e.g. the offline pipeline's partial-ingest summary)
+    usually already reached the terminal inside the engine's
+    ``Encountered exception during execution: …`` line; then point at it
+    instead of repeating it. A run that died before logging anything (a crash,
+    a cancellation) still gets the full message here.
+    """
+
+    if not state_message:
+        return "no message"
+    # "Flow run encountered an exception: PartialIngestError: <text>" while the
+    # engine logs "…: PartialIngestError('<text>')" — compare on <text>'s head.
+    head = _EXCEPTION_PREFIX.sub("", state_message)[:80]
+    if head and any(head in message for message in streamed):
+        return "see the error above"
+    return state_message
+
+
 async def wait_for_flow_run(flow_run_id: str) -> None:
     """Stream a flow run's logs and block until it is final; exit 1 on failure."""
 
@@ -153,32 +178,35 @@ async def wait_for_flow_run(flow_run_id: str) -> None:
 
         log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
         log_offset = 0
+        streamed: list[str] = []
 
         while True:
             logs = await client.read_logs(
                 log_filter=log_filter, offset=log_offset, limit=100
             )
             for log in logs:
+                log_offset += 1
+                # The engine's own "Finished in state …" line repeats the
+                # run's error verbatim; the verdict line below replaces it.
+                if log.message.startswith(_ENGINE_FINAL_STATE_PREFIX):
+                    continue
+                streamed.append(log.message)
                 logger.info(
                     "%s | %s | %s",
                     f"{log.timestamp:%Y-%m-%d %H:%M:%S}",
                     f"{logging.getLevelName(log.level):7s}",
                     log.message,
                 )
-            log_offset += len(logs)
 
             run = await client.read_flow_run(flow_run_id)
             if run.state and run.state.is_final():
                 if run.state.is_completed():
                     logger.info("Done. Flow completed successfully.")
                 else:
-                    # The state message carries the run's error (e.g. the
-                    # offline pipeline's partial-ingest summary), so the
-                    # operator reads WHY without opening the Prefect UI.
                     logger.error(
                         "Flow finished with state: %s — %s",
                         run.state.name,
-                        run.state.message or "no message",
+                        _failure_detail(run.state.message, streamed),
                     )
                     sys.exit(1)
                 break
