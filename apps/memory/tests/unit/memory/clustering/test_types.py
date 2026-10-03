@@ -197,9 +197,53 @@ class TestEmbeddingMap:
             points=[],
             total_children=10,
             unclustered=10,
+            clustered=0,
+            noise=0,
+            plotted_documents=0,
+            total_documents=2,
         )
 
         assert embedding_map.run_id == "run-1"
         assert (embedding_map.total_children, embedding_map.unclustered) == (10, 10)
         assert embedding_map.clusters == []
         assert embedding_map.points == []
+
+    @pytest.mark.parametrize(
+        ("counts", "message"),
+        [
+            # The plot is a subset of the run: 2 points, run says 1 clustered.
+            ({"clustered": 1}, "<= clustered <= total_children"),
+            # The run is a subset of the corpus.
+            ({"clustered": 11}, "<= clustered <= total_children"),
+            ({"noise": 6}, "noise must be between 0 and clustered"),
+            ({"plotted_documents": 4}, "plotted_documents must be between"),
+        ],
+    )
+    def test_rejects_counts_that_do_not_nest(
+        self, counts: dict[str, int], message: str
+    ) -> None:
+        fields = {
+            "run_id": "run-1",
+            "clusters": [],
+            "points": [
+                MapPoint(
+                    chunk_id=f"c{index}",
+                    x=0.0,
+                    y=0.0,
+                    cluster_id=0,
+                    title=None,
+                    heading_path=[],
+                    snippet="",
+                )
+                for index in range(2)
+            ],
+            "total_children": 10,
+            "unclustered": 5,
+            "clustered": 5,
+            "noise": 0,
+            "plotted_documents": 1,
+            "total_documents": 3,
+        }
+
+        with pytest.raises(ValidationError, match=message):
+            EmbeddingMap(**{**fields, **counts})

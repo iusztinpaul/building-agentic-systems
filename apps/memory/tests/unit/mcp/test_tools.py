@@ -653,6 +653,10 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
         ],
         total_children=total_children,
         unclustered=unclustered,
+        clustered=drawn,
+        noise=0,
+        plotted_documents=3,
+        total_documents=3,
     )
 
 
@@ -800,9 +804,12 @@ class TestVisualizeMemoryEmbeddings:
         summary = " ".join(visualize_memory_embeddings.__doc__.split())
 
         assert summary.startswith(
-            "Show the memory's embedding space as a 2D map: every child chunk "
-            "is a point, coloured by its cluster from the latest clustering run"
+            "Show the memory's embedding space as a 2D map: the child chunks of "
+            "the 250 most-recent documents are plotted as points, coloured by "
+            "their cluster from the latest clustering run"
         )
+        assert "the legend counts the whole run" in summary
+        assert "every child chunk" not in summary
         assert "no clustering run exists" in summary
 
 

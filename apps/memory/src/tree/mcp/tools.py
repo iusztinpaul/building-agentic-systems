@@ -410,8 +410,8 @@ async def visualize_memory_structure(
     With a ``query``, the view narrows to the passages that matched: the
     retrieved parent chunks, their documents and all their children, ranked by
     relevance (the ``Documents`` slider shows every match by default). With NO
-    query (the default), it draws the most-recent documents; the slider shows
-    100 of them and reveals the rest. A query that matches nothing, or an empty
+    query (the default), it draws the 250 most-recent documents; the slider
+    shows 100 of them and reveals the rest. A query that matches nothing, or an empty
     memory, answers a plain sentence instead of a picture.
 
     When the client renders MCP App UIs, the tree appears inline. Otherwise
@@ -429,7 +429,7 @@ async def visualize_memory_structure(
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
         max_docs: With no ``query``: how many most-recent documents to embed
-            (default from config, 500); the view shows the 100 most recent and
+            (default from config, 250); the view shows the 100 most recent and
             a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
@@ -512,10 +512,12 @@ if MEMORY_MODE == "rag":
 async def visualize_memory_embeddings(
     ctx: Context, hulls: bool = False, as_html_file: bool = False
 ) -> str | ToolResult:
-    """Show the memory's embedding space as a 2D map: every child chunk is a
-    point, coloured by its cluster from the latest clustering run, with an
-    LLM-written label per cluster. Use when the user wants to *see* what topics
-    the memory holds or how it is organised. ``hulls=true`` outlines each
+    """Show the memory's embedding space as a 2D map: the child chunks of the
+    250 most-recent documents are plotted as points, coloured by their cluster
+    from the latest clustering run, with an LLM-written label per cluster; the
+    legend counts the whole run, and the summary says how many chunks are shown
+    ("N of M chunks (the 250 most-recent of D documents)"). Use when the user
+    wants to *see* what topics the memory holds or how it is organised. ``hulls=true`` outlines each
     cluster. If no clustering run exists, this returns a message telling the
     operator which command to run; if the map is stale, the answer starts with
     a warning line.

@@ -121,6 +121,14 @@ def to_embedding_map_payload(
     simulation); there are no edges — the map's structure is proximity, not
     relationships. Dragging, pinning and the display knobs still apply.
 
+    The legend counts the RUN, the header counts the PLOT — by design (ADR-013
+    §3), do not "fix" one to match the other: the points are only the chunks of
+    the ``plotted_documents`` most-recent documents, so the ``summary`` reads
+    ``N of M chunks (the P most-recent of D documents) in K clusters (+X
+    noise)``, while the legend's cluster sizes, its noise row and the stale
+    warning describe the whole **Clustering run** — clusters are labelled from
+    the whole memory, whichever slice of it is drawn.
+
     Args:
         embedding_map: The map a surface read from storage; never computed here.
         hulls: Initial state of the "Cluster hulls" toggle. Passing it (rather
@@ -163,8 +171,7 @@ def to_embedding_map_payload(
             node["color"] = cluster_colour(point.cluster_id)
         nodes.append(node)
 
-    noise = sum(1 for point in embedding_map.points if point.cluster_id < 0)
-    legend = _legend_rows(embedding_map, noise=noise)
+    legend = _legend_rows(embedding_map)
 
     return {
         "nodes": nodes,
@@ -175,8 +182,11 @@ def to_embedding_map_payload(
         "legend": legend,
         "warning": unclustered_warning(embedding_map),
         "summary": (
-            f"Embedding map: {len(embedding_map.points)} chunks in "
-            f"{len(embedding_map.clusters)} clusters (+{noise} noise)"
+            f"Embedding map: {len(embedding_map.points)} of "
+            f"{embedding_map.clustered} chunks (the "
+            f"{embedding_map.plotted_documents} most-recent of "
+            f"{embedding_map.total_documents} documents) in "
+            f"{len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
         ),
     }
 
@@ -190,8 +200,11 @@ def _cluster_label(labels: dict[int, str], cluster_id: int) -> str:
     return labels.get(cluster_id) or f"Cluster {cluster_id}"
 
 
-def _legend_rows(embedding_map: EmbeddingMap, *, noise: int) -> list[dict[str, Any]]:
+def _legend_rows(embedding_map: EmbeddingMap) -> list[dict[str, Any]]:
     """One row per cluster (largest first), then the two grey rows if non-empty.
+
+    Run-wide counts: a cluster row's ``size`` is the run's, the noise row is
+    ``embedding_map.noise`` — not what the document cap left on the plot.
 
     The greys come last and only when they exist: an empty "noise · 0" row
     would read as a cluster the reader cannot find on the map. Every DRAWN
@@ -210,9 +223,14 @@ def _legend_rows(embedding_map: EmbeddingMap, *, noise: int) -> list[dict[str, A
             embedding_map.clusters, key=lambda cluster: cluster.size, reverse=True
         )
     ]
-    if noise > 0:
+    if embedding_map.noise > 0:
         rows.append(
-            {"label": "noise", "size": noise, "color": NOISE_COLOUR, "cluster_id": -1}
+            {
+                "label": "noise",
+                "size": embedding_map.noise,
+                "color": NOISE_COLOUR,
+                "cluster_id": -1,
+            }
         )
     if embedding_map.unclustered > 0:
         rows.append(

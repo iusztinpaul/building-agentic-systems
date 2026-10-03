@@ -349,7 +349,7 @@ at read time and never stored), in `graphrag` the knowledge graph. An empty memo
 nothing `No results for "<query>" — nothing to draw.`; both exit 1 without a file.
 
 ```bash
-make memory-visualize-structure                       # the 500 most-recent documents, 100 shown
+make memory-visualize-structure                       # the 250 most-recent documents, 100 shown
 make memory-visualize-structure MAX_DOCS=50           # embed only the 50 most recent
 make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search results
 ```
@@ -357,7 +357,7 @@ make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search r
 With a `QUERY`, `rag` draws the retrieved parents, their documents and ALL their children;
 `graphrag` the expanded subgraph around the search seeds.
 
-The no-query view embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
+The no-query view embeds the `MAX_DOCS` (default 250, `query.full_graph_max_docs`) most-recent
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
 shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider (`Most recent`)
 at the top of the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive,
@@ -390,9 +390,13 @@ same selection, pins and Display knobs work there.
 
 #### Embedding map
 
-The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its
+The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** of the
+250 most-recent documents (`query.full_graph_max_docs`, the structure view's cap and ranking) at its
 stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
-legend and the document title / heading path / snippet in the tooltip. Same renderer as the graph
+legend and the document title / heading path / snippet in the tooltip. The header counts the plot —
+`N of M chunks (the 250 most-recent of D documents) in K clusters (+X noise)` — while the legend
+sizes, the noise row and the stale warning count the whole run; clusters are labelled from the
+whole memory. Same renderer as the graph
 (fixed coordinates, no simulation — drag, pin, select, group drag and the Display knobs still work) — and identical in
 both memory modes, because the map has no edges to miss.
 
@@ -440,7 +444,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 | `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
-| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: chunks as points coloured by cluster, `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
 
 *`graphrag` only (6 more, 14 total):*
 

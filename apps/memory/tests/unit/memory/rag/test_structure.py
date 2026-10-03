@@ -284,6 +284,26 @@ class TestFetchRagStructure:
 
         assert {row["_id"] for row in result.nodes} == {"new", "p-new"}
 
+    async def test_the_shipped_cap_embeds_at_most_250_documents(
+        self, make_collection, make_document_row
+    ) -> None:
+        # ADR-013 §3: 500 → 250 — the one cap on every whole-memory view.
+        rows = [
+            make_document_row(
+                _USER,
+                f"doc{index:03d}",
+                date=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
+            )
+            for index in range(251)
+        ]
+
+        result = await fetch_rag_structure(
+            _client(make_collection(rows)), _DATABASE, _USER
+        )
+
+        assert len(result.nodes) == 250
+        assert "doc000" not in {row["_id"] for row in result.nodes}
+
     async def test_another_users_rows_are_never_read(
         self, make_collection, tree_rows, make_document_row
     ) -> None:

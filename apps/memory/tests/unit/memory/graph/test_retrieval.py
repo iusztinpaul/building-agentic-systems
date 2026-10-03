@@ -1162,6 +1162,26 @@ class TestFetchFullGraph:
 
         assert _ids(result.nodes) == ["d-new", "d-tie-a"]
 
+    async def test_the_shipped_cap_embeds_at_most_250_documents(
+        self, make_collection, make_document_row
+    ) -> None:
+        # ADR-013 §3: 500 → 250 — the one cap on every whole-memory view.
+        collection = make_collection(
+            [
+                make_document_row(
+                    _USER,
+                    f"d{index:03d}",
+                    date=f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                )
+                for index in range(251)
+            ]
+        )
+
+        result = await fetch_full_graph(_client(collection), _DATABASE, _USER)
+
+        assert len(result.nodes) == 250
+        assert "d000" not in _ids(result.nodes)
+
     async def test_rows_are_stamped_on_copies(
         self, make_collection, make_document_row
     ) -> None:

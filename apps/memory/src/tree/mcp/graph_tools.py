@@ -176,7 +176,7 @@ async def visualize_memory_structure(
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
         max_docs: With no ``query``: how many most-recent documents to embed
-            (default from config, 500); the inline view shows the 100 most
+            (default from config, 250); the inline view shows the 100 most
             recent and a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when

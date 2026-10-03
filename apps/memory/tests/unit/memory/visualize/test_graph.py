@@ -1436,6 +1436,17 @@ def test_shown_clamps_to_the_configured_embed_cap(mocker) -> None:
     }
 
 
+def test_the_shipped_caps_show_100_of_up_to_250_documents() -> None:
+    # The shipped config, unpatched: 250 embedded, 100 shown (ADR-013 §3).
+    payload = to_graph_payload(_ranked_result(250))
+
+    assert payload["controls"]["documents"] == {
+        "shown": 100,
+        "total": 250,
+        "order": "recency",
+    }
+
+
 def test_shown_clamps_to_the_documents_that_exist(mocker) -> None:
     mocker.patch.object(app_config.query, "full_graph_shown_docs", 100)
 

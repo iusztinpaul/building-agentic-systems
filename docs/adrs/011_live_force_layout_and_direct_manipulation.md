@@ -1,6 +1,6 @@
 # ADR-011: Live d3-force Layout and Direct Manipulation in the Graph Renderer
 
-- **Status:** Accepted — amends [005](005_single_graph_rendering_stack.md) Decision 1 (the layout library: graphology-layout-forceatlas2 → d3-force, one-shot → live) and Decision 2's import list; ADR-005's single-renderer and CDN decisions stand. Reaffirms [007](007_embedding_clusters_and_explicit_offline_phases.md) §2 (the Embedding map keeps its stored coordinates). — §7's capped, recency-ranked read and the `Documents` slider are reused by the rag **Memory structure** (task 173); the ranking helpers moved to `tree.memory.rag.structure`.
+- **Status:** Accepted — amends [005](005_single_graph_rendering_stack.md) Decision 1 (the layout library: graphology-layout-forceatlas2 → d3-force, one-shot → live) and Decision 2's import list; ADR-005's single-renderer and CDN decisions stand. Reaffirms [007](007_embedding_clusters_and_explicit_offline_phases.md) §2 (the Embedding map keeps its stored coordinates). — §7's capped, recency-ranked read and the `Documents` slider are reused by the rag **Memory structure** (task 173); the ranking helpers moved to `tree.memory.rag.structure`. — §7's cap `query.full_graph_max_docs` is 250 (was 500) and also governs the Embedding map, per [013](013_horizon_scale_mcp_surface.md) §3 (task 180).
 - **Date:** 2026-10-01
 - **Deciders:** Paul (project owner)
 - **Context references:**

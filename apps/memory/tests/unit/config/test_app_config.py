@@ -710,7 +710,7 @@ class TestFullGraphCaps:
                 QueryConfig().full_graph_max_docs,
                 QueryConfig().full_graph_shown_docs,
             )
-            == (500, 100)
+            == (250, 100)
         )
 
     def test_defaults_when_the_keys_are_absent(self, tmp_path) -> None:
@@ -719,7 +719,7 @@ class TestFullGraphCaps:
 
         query = load_app_config(custom).query
 
-        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (500, 100)
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (250, 100)
 
     def test_showing_more_than_is_embedded_loads(self) -> None:
         # Orchestrator decision: a config error must never take down every

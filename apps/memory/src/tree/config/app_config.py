@@ -337,11 +337,14 @@ class QueryConfig(BaseModel):
     rrf_k: int = 60
     embedding_batch_size: int = 64
     min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
-    # The **Full graph** (ADR-011 §7): how many most-recent documents one read
-    # embeds, and how many the renderer's Documents slider shows on load. No
-    # cross-key validator: shown > max is clamped where it is read
-    # (``to_graph_payload``), so one lowered key never fails every entry point.
-    full_graph_max_docs: int = Field(500, ge=1)
+    # The no-query cap on EVERY whole-memory view (ADR-011 §7, ADR-013 §3): how
+    # many most-recent documents the **Full graph** / rag **Memory structure**
+    # embeds and whose chunks the **Embedding map** plots (250 since 2026-10-03,
+    # was 500 — an 11 MB map failed on Horizon), and how many the renderer's
+    # Documents slider shows on load. No cross-key validator: shown > max is
+    # clamped where it is read (``to_graph_payload``), so one lowered key never
+    # fails every entry point.
+    full_graph_max_docs: int = Field(250, ge=1)
     full_graph_shown_docs: int = Field(100, ge=1)
 
 

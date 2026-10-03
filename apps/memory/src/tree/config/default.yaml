@@ -115,9 +115,14 @@ query:
   # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
   # for the first (0 kept) and found for the second (7 of 10 kept).
   min_vector_score: 0.70
-  # Full graph (no query): documents one read embeds / the Documents slider shows
-  # on load, most-recent first; `properties.date`, else `created_at`.
-  full_graph_max_docs: 500
+  # The no-query cap on EVERY whole-memory view, most-recent first
+  # (`properties.date`, else `created_at`) — Full graph / rag Memory structure
+  # (documents embedded) and the Embedding map (documents whose chunks are
+  # plotted). 500 → 250 on 2026-10-03: Horizon's resource read failed
+  # (JSON-RPC -32603) on the 17k-chunk / 11 MB map while 0.06–0.7 MB structure
+  # views downloaded fine; the per-view Documents slider still shows
+  # `full_graph_shown_docs`.
+  full_graph_max_docs: 250
   full_graph_shown_docs: 100
 
 dream:

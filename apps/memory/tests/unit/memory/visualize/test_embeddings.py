@@ -58,8 +58,16 @@ def _map(
     noise: int = 5,
     unclustered: int = 3,
     total_children: int = 50,
+    cut_noise: int = 0,
+    plotted_documents: int = 10,
+    total_documents: int = 10,
 ) -> EmbeddingMap:
-    """An ``EmbeddingMap`` with the ACs' shape: {0: 30 pts, 1: 12 pts} + noise."""
+    """An ``EmbeddingMap`` with the ACs' shape: {0: 30 pts, 1: 12 pts} + noise.
+
+    ``clustered`` is ``total_children - unclustered``, so a ``total_children``
+    above the drawn points + ``unclustered`` models chunks of documents beyond
+    the cap (``cut_noise`` of them noise): counted run-wide, never plotted.
+    """
 
     sizes = {0: 30, 1: 12} if sizes is None else sizes
     clusters = [
@@ -81,6 +89,10 @@ def _map(
         points=points,
         total_children=total_children,
         unclustered=unclustered,
+        clustered=total_children - unclustered,
+        noise=noise + cut_noise,
+        plotted_documents=plotted_documents,
+        total_documents=total_documents,
     )
 
 
@@ -331,7 +343,7 @@ def test_payload_legend_lists_clusters_by_size_then_the_two_greys() -> None:
 def test_payload_legend_orders_clusters_largest_first() -> None:
     # Arrange: the small cluster comes FIRST in the map (store order is not a
     # contract of the builder).
-    payload = to_embedding_map_payload(_map(sizes={0: 4, 1: 40}))
+    payload = to_embedding_map_payload(_map(sizes={0: 4, 1: 40}, total_children=52))
 
     assert [row["label"] for row in payload["legend"][:2]] == [
         "Cluster 1 topic",
@@ -373,7 +385,47 @@ def test_payload_hulls_mirrors_the_argument(hulls: bool) -> None:
 def test_payload_summary_counts_chunks_clusters_and_noise() -> None:
     payload = to_embedding_map_payload(_map())
 
-    assert payload["summary"] == "Embedding map: 47 chunks in 2 clusters (+5 noise)"
+    assert payload["summary"] == (
+        "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 documents) "
+        "in 2 clusters (+5 noise)"
+    )
+
+
+def test_payload_summary_says_how_much_the_document_cap_cut() -> None:
+    # Arrange: 20 more chunks (4 of them noise) of this run belong to
+    # documents beyond the 250 most-recent.
+    embedding_map = _map(
+        unclustered=0,
+        total_children=67,
+        cut_noise=4,
+        plotted_documents=250,
+        total_documents=1200,
+    )
+
+    payload = to_embedding_map_payload(embedding_map)
+
+    # Assert: the header counts the PLOT (47 of the run's 67), the noise the RUN.
+    assert payload["summary"] == (
+        "Embedding map: 47 of 67 chunks (the 250 most-recent of 1200 documents) "
+        "in 2 clusters (+9 noise)"
+    )
+
+
+def test_payload_legend_counts_the_whole_run_not_the_plot() -> None:
+    # Arrange: every noise chunk of the run sits in a cut document.
+    embedding_map = _map(noise=0, unclustered=0, total_children=45, cut_noise=3)
+
+    payload = to_embedding_map_payload(embedding_map)
+
+    # Assert: cluster rows keep the run's size and the noise row is run-wide,
+    # even though no noise point is drawn (ADR-013 §3, by design).
+    assert [(row["label"], row["size"]) for row in payload["legend"]] == [
+        ("Cluster 0 topic", 30),
+        ("Cluster 1 topic", 12),
+        ("noise", 3),
+    ]
+    assert all(node["cluster_id"] >= 0 for node in payload["nodes"])
+    assert payload["warning"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -462,11 +514,14 @@ def test_render_embedding_map_file_headers_the_map_with_its_summary(
 
     render_embedding_map_file(payload, out)
 
-    # The header line the reader sees is "47 chunks in 2 clusters (+5 noise)",
-    # not "47 nodes · 0 edges" — both the summary and the branch that shows it
-    # have to reach the browser.
+    # The header line the reader sees is "47 of 47 chunks (the 10 most-recent
+    # of 10 documents) in 2 clusters (+5 noise)", not "47 nodes · 0 edges" —
+    # both the summary and the branch that shows it have to reach the browser.
     html = out.read_text(encoding="utf-8")
-    assert '"summary": "Embedding map: 47 chunks in 2 clusters (+5 noise)"' in html
+    assert (
+        '"summary": "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 '
+        'documents) in 2 clusters (+5 noise)"'
+    ) in html
     assert 'payload.summary.replace(/^Embedding map: /, "")' in html
 
 
