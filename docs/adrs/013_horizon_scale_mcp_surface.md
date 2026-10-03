@@ -54,6 +54,25 @@ Seven related choices, one amendment set — each the least mechanism that makes
    genuinely empty SERP stays `[]`. *Why not keep Google behind a flag:* a parameter that always yields
    `[]` is a trap, and the `/goto` tokens are opaque by design. *Upgrade trigger:* a Bright Data format
    that resolves `/goto` → reintroduce `engine` with Google as a tested path.
+   *Implementation decision (task 176, 2026-10-03, orchestrator under the owner's pre-authorisation),
+   after live runs showed cross-page duplicates, early stops and timeouts:*
+   - **A later page fails soft.** A page after the first that stays in cooldown after its one retry,
+     times out (`httpx.TimeoutException`) or cannot connect (`httpx.ConnectError`) returns the results
+     already collected, with a WARNING only — the answer carries no truncation marker. With nothing
+     collected yet (page 1) the error still raises, so the tool answers `fetch_failed` (cooldown) or
+     `network_error` (timeout / connect), both retryable.
+   - **60 s per request.** `_DEFAULT_TIMEOUT_SECONDS = 60.0` in `web_serp.py` is the only place the SERP
+     timeout lives; neither the MCP tool nor the CLI passes its own. 6 of 23 live calls exceeded the old
+     30 s.
+   - **Pagination.** Bing's `first` advances by 10 per page (it indexes Bing's slot grid, not the parsed
+     list). Paging stops on Bing's "no results" page, on the SECOND consecutive page that adds no new URL
+     (Bing replayed page 1 once in ~1 of 8 probes), or after `ceil(num_results / 10) + 2` pages.
+   - **`msockid` is stripped** from direct and decoded `/ck/a` URLs before dedup, so the same page with
+     two session ids is one result.
+
+   The search has no overall deadline: the worst case is `max_pages × 60 s` without a cooldown (180 s
+   for `num_results=10`), plus 15 s and one retry per cooled page; a per-search wall-clock budget is the
+   follow-up.
 2. **The `graphs://` download is a gzip BLOB, one code path.** `graphs://<name>.html.gz` answers
    `gzip.compress(file)` as an explicit `ResourceResult([ResourceContent(bytes, mime_type="application/gzip")])`
    (FastMCP base64-encodes bytes into `BlobResourceContents`; a 3.2.0 TEMPLATE drops the decorator's
@@ -92,6 +111,27 @@ Seven related choices, one amendment set — each the least mechanism that makes
    embedding without throttle") and the POST proceeds; any other exception still fails the call. Voyage's
    own 429 backoff (ADR-002 §1's retry placement) remains the quota guard. ADR-002 §1's "acquire one slot
    per POST" stands as the happy path.
+   *Implementation decision (task 178, 2026-10-03, orchestrator under the owner's pre-authorisation),
+   for a limiter that accepts the connection and never replies:*
+   - **The acquire is bounded.** `acquire_voyage_slot` awaits
+     `asyncio.wait_for(rate_limit(..., timeout_seconds=bound), timeout=bound)`; the `wait_for` timeout
+     fails open with the same WARNING ("no reply within <bound> s"). The bound is the new
+     `concurrency.voyage_slot_acquire_timeout_seconds: 120` (`default.yaml` / `ConcurrencyConfig`).
+   - **Why both.** Prefect 3.6 serialises acquires per limit in one background
+     `ConcurrencySlotAcquisitionService`, whose `timeout_seconds` only starts at the head of the queue, so
+     it cannot bound the caller — `wait_for` does. Passing the same `timeout_seconds` lets the service
+     drop the hung request so the queue drains.
+   - **Derivation.** `runner_global_limit` (6 in `default.yaml`) × one slot's decay (60 / `voyage_rpm`
+     (3) = 20 s) = 120 s, so ordinary contention finishes first. An operator who changes either knob
+     re-derives it.
+   - **Trade-off.** The bound also caps a LEGITIMATE throttling wait (e.g. more containers than the
+     formula assumes) — ADR-002 §1 had no such cap. Past the bound the POST proceeds and Voyage's 429
+     backoff guards the quota. A hung limiter stalls a POST 2 min instead of Prefect's ~6–8 min retry
+     budget.
+
+   *Known limitation:* each abandoned request makes Prefect log a cosmetic, non-fatal
+   `ERROR … Service 'ConcurrencySlotAcquisitionService' failed to process item (… state=cancelled)`
+   line; a request abandoned during a legitimate wait may later take a slot no caller uses.
 6. **Web ingestion keeps the main content.** `fetch_and_extract_web` fetches HTML through the Unlocker and
    runs **Main-content extraction** with `trafilatura` (a MAIN dependency: Prefect Managed installs the
    package per run) to markdown — headings, links, lists, tables kept; nav/sidebar/footer dropped; title
@@ -135,6 +175,12 @@ Seven related choices, one amendment set — each the least mechanism that makes
    three off-topic) recorded in `tasks/183`'s Log, in `default.yaml`'s evidence-comment style. `textScore`
    is unnormalised (a sum of per-term field-weighted frequencies), so the pin is corpus-relative and owned
    by the evals chapter; the task is the last in the plan and may be dropped.
+   *Outcome (task 183, 2026-10-03):* no 0.5 step separates on-topic from off-topic — `textScore` grows
+   with the number of matched query terms, so an 8-word off-topic query (1.524) outscores one-word
+   on-topic hits (~1.0–1.1), and the lowest step that empties the off-topic legs (2.0) empties every
+   one-word on-topic leg. The gate therefore shipped at `0.0` (present, off) and the production
+   dark-photon collision stays until a re-pin; the numbers live in `tasks/183`'s Log and the
+   `min_text_score` comment in `default.yaml`.
 
 Bias-to-least notes: one engine over a flag that cannot work; gzip-on-read over a second file or a chunked
 protocol; one cap over two; a status switch over a retry framework; a WARNING over a circuit breaker; a
@@ -210,8 +256,9 @@ flowchart LR
   off; the pin lives in a Log and a comment until the evals chapter owns it.
 - **What would justify upgrading.** A Bright Data format that resolves Google's `/goto` → `engine` returns;
   a client that cannot read blobs → a signed download URL; the two views needing different caps → a
-  second key; a measured fallback rate on web ingestion → a `favor_recall` rung; a learned text threshold
-  → evals.
+  second key; a measured fallback rate on web ingestion → a `favor_recall` rung; the text bar → a
+  per-query normalised text score (`textScore` / query word count, or a minimum fraction of matched
+  query terms) that compares across query lengths, re-pinned by the evals.
 
 ## Amendments to apply (Status-line notes on the amended ADRs; body text untouched)
 
