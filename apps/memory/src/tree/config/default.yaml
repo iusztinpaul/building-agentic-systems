@@ -141,12 +141,20 @@ concurrency:
   # it on the Prefect server with `prefect gcl create voyage-embeddings --limit
   # <voyage_rpm> --slot-decay-per-second <voyage_rpm/60>`. Raise this + re-run
   # that command after adding a payment method — no code change needed.
+  # Fail-open: an unreachable limiter warns and the call proceeds (task 178);
+  # Voyage's own 429 backoff remains the quota guard.
   voyage_rpm: 3
   # Tokens/minute the key allows. Held by config (the embedding_batch
   # max_total_tokens cap), not yet a second token-weighted limiter.
   voyage_tpm: 10000
   # Prefect runner global concurrency limit
   runner_global_limit: 6
+  # Wall-clock bound (s) on one `voyage-embeddings` slot acquire (task 178). A
+  # limiter that accepts but never replies fails open after this instead of
+  # Prefect's ~6-8 min retry budget. It also caps a LEGITIMATE throttling wait:
+  # 120 = runner_global_limit (6) x one slot's decay (60 / voyage_rpm = 20 s),
+  # so ordinary contention finishes first. Re-derive it if you change either.
+  voyage_slot_acquire_timeout_seconds: 120
 
 prefect:
   # Register the OPTIONAL deployments (optional=True in orchestrator.py). Prefect

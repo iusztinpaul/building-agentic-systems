@@ -101,7 +101,8 @@ class EmbeddingBatchConfig(BaseModel):
     max_input_tokens: int = Field(default=32_000)
     # YAML-only fan-out knob (#054): how many embed requests a single stage may
     # dispatch concurrently. Default 1 keeps dispatch serial; the cross-flow
-    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out.
+    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out
+    # (fail-open: an unreachable limiter warns and the call proceeds, task 178).
     dispatch_concurrency: int = Field(default=1)
 
 
@@ -251,17 +252,24 @@ class ConcurrencyConfig(BaseModel):
       Drives the server-side ``voyage-embeddings`` Prefect global concurrency
       limit (limit = ``voyage_rpm``, slot-decay-per-second = ``voyage_rpm / 60``),
       created with ``prefect gcl create voyage-embeddings --limit <voyage_rpm>
-      --slot-decay-per-second <voyage_rpm/60>``.
+      --slot-decay-per-second <voyage_rpm/60>``. Fail-open: an unreachable
+      limiter warns and the call proceeds (task 178).
     * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
       ``max_total_tokens`` cap), not yet a second token-weighted limiter.
     * ``runner_global_limit`` — admission control for ``serve(limit=...)``;
       kept close to ``voyage_rpm`` so we don't admit far more runs than the
       embed budget can feed.
+    * ``voyage_slot_acquire_timeout_seconds`` — wall-clock bound on one
+      ``voyage-embeddings`` slot acquire (task 178). A limiter that never
+      replies fails open after this instead of Prefect's ~6-8 min retry budget.
+      Also caps a legitimate throttling wait, so keep it above the worst
+      contention wait (``runner_global_limit x 60 / voyage_rpm``).
     """
 
     voyage_rpm: int = 3
     voyage_tpm: int = 10_000
     runner_global_limit: int = 4
+    voyage_slot_acquire_timeout_seconds: float = 120.0
 
 
 class PrefectConfig(BaseModel):

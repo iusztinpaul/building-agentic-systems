@@ -284,7 +284,9 @@ wins:
   a server-side GCL (`limit = voyage_rpm = 3`, `slot_decay = rpm/60`) that caps Voyage embedding
   POSTs across *every* run/container/topology at once. `strict=False` → no-ops when absent
   (dev/tests). Created out-of-band: `prefect gcl create voyage-embeddings --limit <rpm>
-  --slot-decay-per-second <rpm/60>`. See ADR-002.
+  --slot-decay-per-second <rpm/60>`. See ADR-002. Fail-open (ADR-013 §5, task 178): if the
+  limiter can't be reached or doesn't reply within `voyage_slot_acquire_timeout_seconds`, the POST
+  proceeds with one WARNING — Voyage's own 429 backoff remains the quota guard.
 
 Only the GCL protects the shared API regardless of how many workers/containers exist — pool and
 worker limits scale *with* hardware and can't, alone, keep us under a vendor rate ceiling.
