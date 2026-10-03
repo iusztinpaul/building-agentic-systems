@@ -100,6 +100,35 @@ Seven related choices, one amendment set — each the least mechanism that makes
    thin pages and is logged as a WARNING; `Document.metadata.extraction` records the path. `scrape_web` is
    unchanged (it shows the page as fetched). *Upgrade trigger:* a measured fallback rate worth a free
    `favor_recall` rung before the billable one.
+   *Implementation decision (task 182, 2026-10-03, orchestrator under the owner's pre-authorisation),
+   after a live probe showed the spec-exact call drops every code block on Mintlify docs pages:*
+   - **Best of two, no site-specific logic.** "B′" strips `class`/`id` from each `<pre>` and its
+     ancestor chain (stopping below `<body>`). Neither run is right everywhere:
+     - On the Mintlify pages the default run keeps 0 of 5 and 0 of 11 code blocks; B′ keeps them.
+     - On the simonwillison.net blog B′ drops the 2 code blocks; on the GitHub README it mangles one.
+   - **The rule.** Run the default first. If the HTML has ≥1 `<pre>` and the markdown has fewer fenced
+     code blocks than there are `<pre>` elements, also run B′ on a copy of the HTML. Keep whichever has
+     MORE fenced code blocks; a tie keeps the default.
+     - Both runs happen in one `asyncio.to_thread` call, with no extra Unlocker request.
+     - `Document.metadata.extraction_variant` records the winner (`default` | `pre_unwrapped`) next to
+       `extraction: trafilatura`.
+   - When the markdown has no H1, prepend `# {title}`: the page's first `<h1>` text, else the metadata
+     title.
+   - Title on BOTH paths = page metadata title → first markdown H1 → URL tail. On the fallback the HTML
+     is already fetched, so the title costs nothing.
+   - A LATENT placeholder promoted by `load_web_document` merges `metadata`.
+
+   *Known limitations:*
+   - Mintlify's `<span data-as="p">` paragraphs repeat a few sentences and glue link tails to the next
+     word: 6 duplicates and 3 glued on `/deployment/prefect-horizon`. There are no site-specific hacks.
+   - Code that trafilatura emits WITHOUT fences puts `# comment` lines at line start, which read as an H1.
+     Example: 2 of 4 code blocks on the simonwillison.net post. The same page's first `<h1>` is its site
+     header.
+   - The fence count is a proxy. Pages whose code is all inline `<pre>` snippets always pay the second
+     (CPU-only) run.
+
+   *Upgrade trigger:* missing code samples or a heading misfire that users notice. The fix would be
+   per-generator preprocessing or a different extractor.
 7. **A provisional bar on the `$text` leg.** `query.min_text_score` (`0.0` = off) gates `textScore` BEFORE
    fusion exactly as `min_vector_score` gates the vector leg — never on an unavailable leg, gated-to-nothing
    is `[]` with `search_mode: hybrid` — and its value is pinned by a six-query live eval (three on-topic,
