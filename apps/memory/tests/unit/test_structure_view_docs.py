@@ -28,7 +28,9 @@ _ROOT_README = _REPO_ROOT / "README.md"
 _MEMORY_README = _REPO_ROOT / "apps" / "memory" / "README.md"
 _MEMORY_SKILL = _REPO_ROOT / ".agents" / "skills" / "tree-memory" / "SKILL.md"
 _E2E_SKILL = _REPO_ROOT / ".agents" / "skills" / "run-pipelines-e2e" / "SKILL.md"
-_DOCS = [_ROOT_README, _MEMORY_README, _MEMORY_SKILL, _E2E_SKILL]
+# The tree-memory skill is a facade for the agent, which reaches the structure
+# through the MCP tool — the CLI surfaces are operator docs, so it is not listed.
+_DOCS = [_ROOT_README, _MEMORY_README, _E2E_SKILL]
 
 
 def _read(path: Path) -> str:

@@ -1,152 +1,74 @@
 ---
 name: tree-memory
-description: "Query, explore, and write to Tree's memory. Use when the user asks to recall, search, visualize, or ingest information (people, tasks, episodes, preferences, documents, URLs, files, conversations)."
+description: "Query, explore, and write to Tree's memory through its MCP server (rag or graphrag mode)."
 argument-hint: <natural language query or instruction>
-allowed-tools: mcp__tree-memory__query_memory, mcp__tree-memory__search_memory, mcp__tree-memory__deep_search_memory, mcp__tree-memory__visualize_memory_embeddings, mcp__tree-memory__visualize_memory_structure, mcp__tree-memory__ingest_url, mcp__tree-memory__ingest_file, mcp__tree-memory__ingest_conversation, Read
 disable-model-invocation: true
 ---
 
 # Tree Memory
 
-Query, explore, and write to Tree's (Your Rooted Personal Assistant) memory through the MCP server.
-
-## Instruction
+A facade over Tree's MCP server — `tree-memory` (cloud) or `tree-memory-local` (this repo). Each tool's description says what it takes and returns; this skill says which tools to **chain**, in what order, and why.
 
 The query or instruction to run is: $ARGUMENTS
 
 If no arguments are provided, ask the user what they want to know or do with Tree's memory.
 
+**Provenance** is the thread through every chain: each claim you make carries where it came from — a memory document's `title` and `source_uri`, a web URL, or the searches that came up empty.
+
 ---
 
-## Memory modes — which tools exist
+## Steps
 
-The server registers its tools ONCE at boot from `memory.mode` (ADR-006), so the tool set tells you the mode:
+1. **Find the mode.** The server registers its tools once at boot from `memory.mode` (default `rag`), so the tool list IS the mode: `query_memory` absent → `rag`, read [`rag.md`](rag.md); present → `graphrag`, read [`graphrag.md`](graphrag.md). Done when you have named the mode and read its file.
+2. **Pick the chain.** Reading or seeing memory → the read chains below plus the mode file. Adding to memory → read [`write.md`](write.md). Done when you can name the chain you will run.
+3. **Run it to a checkable end.** A read is done when every claim carries its provenance, or you answered "Not in memory" naming what you searched. A write is done when every source has its **receipt** reported.
 
-| Tool | `rag` | `graphrag` | What it does |
+| Tool | `rag` | `graphrag` | Purpose |
 |---|---|---|---|
-| `search_memory` | ✅ | ✅ | Semantic + text search. **Different signature per mode** (see below). |
-| `ingest_url` | ✅ | ✅ | Ingest a web page. |
-| `ingest_file` | ✅ | ✅ | Ingest a local file's text. |
-| `ingest_conversation` | ✅ | ✅ | Ingest conversation text. |
-| `search_web` | ✅ | ✅ | Live web search (Bright Data SERP). |
-| `scrape_web` | ✅ | ✅ | Scrape URLs to markdown. |
-| `visualize_memory_embeddings` | ✅ | ✅ | 2-D map of the memory's topics (clusters of chunk embeddings). |
-| `visualize_memory_structure` | ✅ | ✅ | Interactive view of the memory structure: document → chunk tree in `rag`, the knowledge graph in `graphrag`. **Different signature per mode** (`max_hops` in `graphrag` only). |
-| `query_memory` | — | ✅ | NL → MongoDB aggregation for exact/structured answers. |
-| `deep_search_memory` | — | ✅ | Wide search, results written to disk + a YAML index. |
-| `memory_dashboard` | — | ✅ | Graph dashboard app. |
-| `review_list_pending` / `review_confirm` / `review_reject` | — | ✅ | Human review of flagged duplicate entities. |
+| `search_memory` | ✅ | ✅ | First reader for any question. |
+| `visualize_memory_structure` | ✅ | ✅ | Picture of an answer, or of the whole memory. |
+| `visualize_memory_embeddings` | ✅ | ✅ | Topic map. |
+| `ingest_url` / `ingest_file` / `ingest_conversation` | ✅ | ✅ | Writes. |
+| `search_web` / `scrape_web` | ✅ | ✅ | Find and read web pages. |
+| `query_memory` | — | ✅ | Exact counts and filters. |
+| `deep_search_memory` | — | ✅ | Wide sweep → index → selective reads. |
+| `memory_dashboard` | — | ✅ | Summary view. |
+| `review_list_pending` / `review_confirm` / `review_reject` | — | ✅ | Dedup review loop. |
 
-**Do not work around a missing tool.** In `rag` there are no edges, so the six graph tools are not registered at all and calling one returns the standard unknown-tool error. If `query_memory` is absent, the answer is `search_memory` — not a retry. `visualize_memory_embeddings` and `visualize_memory_structure` are the exceptions that prove the rule: the map has no edges, and the rag structure draws its document → chunk links from each chunk's `parent_id` rather than from stored edges, so both are registered in BOTH modes.
+A tool marked `—` is absent in that mode; the mode file names the chain to use instead.
 
 ---
 
-## Reading Strategy
+## Read chains
 
-### `search_memory` — Default for most queries
-- Open-ended or semantic queries (find related things, explore a topic). **Start here when unsure** — the most forgiving tool, and the only reader present in both modes
-- Parameters and result differ by mode:
-
-| | `rag` | `graphrag` |
-|---|---|---|
-| Parameters | `query`, `top_k` (default 10) | `query`, `top_k` (default 10), `max_hops` (default 1), `max_results` (default 10), `visualize` |
-| How | hybrid vector + text search (RRF) over **child chunks**, grouped back to their **parent chunks** | the same seed search, then graph expansion over edges |
-| Returns | `{"parents": [...], "outcome": "found" \| "nothing_found", "search_mode": "hybrid" \| "text_only" \| "vector_only"}` — each parent has `content`, `heading_path`, `parent_id`, `score`, `matched_children` and the `document` it belongs to (`title`, `source_uri`, `date`) | nodes + edges of the matched subgraph |
-| Present it as | passages grouped by document title, quoting the matched children | entities and their relationships |
-
-### `query_memory` — For structured/precise questions (graphrag only)
-- Counts, filters, aggregations, specific lookups ("how many tasks does Paul have?") — translates natural language to MongoDB aggregation pipelines via LLM
-- Use when `search_memory` is too broad or you need exact answers
-
-### `deep_search_memory` — For broad exploration (graphrag only, progressive disclosure)
-- Runs a wider search and saves **all** results to disk. Parameters: `query`, `top_k` (default 50), `max_hops` (default 3), `session_id` (optional)
-- Returns a **YAML index** with one-line summaries — NOT the full results. Scan each entry's `context`, then `Read` only the file paths (`file` field, under `directory`) you actually need, and summarize for the user
-
-### Visualization
-
-**`visualize_memory_embeddings` — both modes.** Use it for "what topics are in my memory", "show me a map". It draws the **embedding map**: every child chunk as a point at its stored coordinates, coloured by its cluster, each cluster carrying an LLM-written label. Pass `hulls=true` when the user asks to outline the clusters. Two answers you must relay verbatim rather than paper over:
-
-- `No clustering run found for this user — run make memory-run-clustering-pipeline to build the embedding map.` — say exactly that and offer to run the command. Do NOT fall back to `search_memory` and summarize topics yourself; the user asked for the map.
-- A first line reading `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat that line, then the rest of the answer: the map is real but under-reports the corpus, and `make memory-run-clustering-pipeline` is the fix.
-
-When the answer carries a file path plus a `graphs://` resource link, the client could not render the map inline: share the path if it is on the user's machine, otherwise read the linked resource and save its text as a local `.html` file. Never re-author the HTML.
-
-**`visualize_memory_structure` — both modes.** Use it for "how is my memory organised", "show me my documents and their chunks", "show me the graph". With no `query` it draws the most-recent documents (a `Documents` slider reveals more); with a `query` it narrows to what matched. In `rag` it is the document → parent chunk → child chunk tree (no entities, no relations); in `graphrag` the knowledge graph. Two plain-text answers to relay as they are, not as failures: `Memory is empty for this user — run make memory-run-pipeline first.` and `No results for "<query>" — nothing to draw.` The CLI equivalents are `make memory-visualize-structure` (the picture) and `make memory-search QUERY="…"` (the ranked parents as text).
-
-**Graph alongside results — `graphrag` only.** Use `visualize=true` on `search_memory` or `query_memory` when the user wants the answer AND a graph of the connections between entities. In `rag`, `search_memory` has no `visualize` — call `visualize_memory_structure` with the same `query` instead.
-
----
-
-## Search loop
-
-1. **At most 3 `search_memory` calls per user question, and every retry must change the query materially** — different entities or a different angle, never a synonym. Why: a synonym lands in the same embedding neighbourhood and returns the same parents, so the retry spends a call and buys nothing.
+1. **Budget: at most 3 memory-reader calls per question** — `search_memory`, plus `query_memory` and `deep_search_memory` in graphrag, counted together — **each retry a new angle**: different entities or a different framing. Why: a synonym lands in the same embedding neighbourhood and returns the same results.
    - Good: `"Prefect deployment slots"` → `"free-tier limit five deployments"`.
    - Bad: `"Prefect deployment slots"` → `"Prefect deployment slot"`.
-2. **`outcome: "nothing_found"` → at most ONE materially different retry, then answer "Not in memory" naming what you searched.** Never fall through to `search_web` unless the user asked for the web. In `graphrag` there is no `outcome` field: an empty `[]` from `search_memory` / `query_memory`, or `No results found.` from `deep_search_memory`, IS `nothing_found` for this rule. Why: `nothing_found` means the search ran and matched nothing (a dead leg reports itself in `search_mode`, not as an empty result), so a third phrasing is guessing — and answering from the web passes web text off as the user's own memory.
-   - Good: two `nothing_found`s → "Not in memory — I searched the sourdough starter decision and bread baking notes."
-   - Bad: two `nothing_found`s → `search_web("sourdough starter")`, presented as what memory holds.
-3. **Stop as soon as the answer is covered — 3 is a budget, not a target.** Why: every extra call adds latency and near-duplicate passages the user has to re-read, and a specific question is usually answered by the first call.
-   - Good: the first call returns the decision the user asked about → answer and stop.
-   - Bad: the first call already answers, and two more run "to be thorough".
-4. **`search_mode` other than `"hybrid"` → prefix ONE caveat line naming the leg that was unavailable, offer to retry later, then answer anyway.** For `text_only` use exactly: `Search ran text-only — vector search was unavailable; results may miss semantic matches` (`vector_only` is the mirror case: the text leg was down). `search_mode` is rag-only — `graphrag` never sends it, so there is no caveat to print there. Why: those parents are real but partial, and an unflagged partial answer reads as a complete one.
-   - Good: caveat line, then the passages, then "I can rerun this once vector search is back."
-   - Bad: present the `text_only` passages as all of memory, or refuse to answer at all.
-5. **Budget the loop in calls, never in tokens or context size.** Why: you cannot measure your own context spend, so a size cap is unenforceable guesswork, while "at most 3 calls" is checkable in the transcript.
-   - Good: "that was my third `search_memory` call — I answer with what I have."
-   - Bad: "keep searching until the retrieved passages start to feel too long."
+2. **Empty answer (the mode file says what "empty" looks like) → ONE new-angle retry, then "Not in memory", naming what you searched.** Why: a third phrasing is guessing.
+   - Good: two empty answers → "Not in memory — I searched the sourdough starter decision and bread baking notes."
+   - Bad: a third and fourth rephrasing of "sourdough".
+3. **Stop once the answer is covered — 3 is a budget, not a target.**
+   - Good: the first call returns the decision asked about → answer and stop.
+   - Bad: two more calls "to be thorough".
+4. **Answer + picture → reuse the SAME `query` in the visual call.** Why: the picture then shows exactly the passages you quoted.
+   - Good: `search_memory("Modal cold starts")`, then the mode's picture call with `"Modal cold starts"`.
+   - Bad: a picture of the whole memory next to an answer about one topic.
+5. **Map → drill-down: a cluster label from `visualize_memory_embeddings` is a ready `search_memory` query.** Why: the label names a topic the memory actually holds.
+   - Good: cluster "Prefect deployment limits" → "what's in that one?" → `search_memory("Prefect deployment limits")`.
+   - Bad: summarising the cluster from its label alone.
+6. **Memory miss → offer the web, and run it only on a yes.** Chain `search_web` → `scrape_web` → answer with the URLs as provenance → offer to keep the useful pages (see [`write.md`](write.md)). Why: web text without its URL reads as something the user stored.
+   - Good: "Not in memory. Want me to search the web?" → yes → answer citing the URLs.
+   - Bad: two empty searches → web results presented as what memory holds.
+
+**Relay the map's two fixed answers verbatim**, as the answer itself:
+
+- `No clustering run found for this user — run make memory-run-clustering-pipeline to build the embedding map.` — offer to run the command.
+- A first line `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat it, then the rest: the map is real but under-reports the corpus.
+
+**A visual answer carrying a file path plus a `graphs://` link** could not render inline: share the path on `tree-memory-local`; on `tree-memory` (cloud) read the linked resource and save its text as a local `.html` file.
 
 ---
 
-## Writing Strategy
+## Errors
 
-Use these tools when the user wants to add content to memory. All three exist in both modes; what gets written differs (`rag`: document + chunk rows; `graphrag`: those plus entities and edges).
-
-**All three answer the same receipt** — `{"source_uri", "duplicate", "document_id", "flow_run_id", "status"}`, plus an echo of the `url` / `file_path` you passed:
-- `duplicate: true` — already in memory, NOTHING was submitted: `document_id` names the existing document, `flow_run_id` is null, `status` is `"duplicate"`. Say it is already known, name its `source_uri`, and do not resubmit.
-- `duplicate: false` — ONE pipeline run was submitted: report the `source_uri` and the `flow_run_id`, and say memory is being written out-of-band. No counts of any kind come back — never report one. Confirm later with `search_memory` for the new title; a `nothing_found` right after a submit means "not written yet", not "nothing is there".
-
-### `ingest_url` — Ingest a web page
-- Pass the URL; the router handles plain web pages, Substack articles and YouTube videos, and the tool returns as soon as the run is submitted
-- `source_uri` may differ from the URL you passed (a YouTube link canonicalises) — quote the `source_uri`
-- Use when: user shares a URL and wants it added to memory
-
-### `ingest_file` — Ingest a local file
-- The server never opens the path: read the file YOURSELF and pass its text as `content` (convert non-text formats to text/markdown first)
-- Pass the absolute file path — it is the dedup key (`source_uri` is `file://<path>`) — and an optional title
-- Use when: user wants to add a local file to memory
-
-### `ingest_conversation` — Ingest conversation text
-- Pass the raw conversation text and optional title
-- In `graphrag` it also extracts people, tasks, episodes, preferences and their relationships
-- Use when: the user asks to remember a conversation — whole sessions are persisted by the SessionEnd hook, not by you
-
----
-
-## Presenting Results
-
-- Summarize results in a human-readable way — don't dump raw JSON unless the user asks for it.
-- Group by type (people, tasks, episodes, documents) when presenting mixed results; in `rag`, group the parents by their document title, and in `graphrag` highlight the relationships between entities.
-- For deep search: present the index summary first, then offer to dive into specific entries.
-- On `outcome: "nothing_found"`, say so and name what was searched (see Search loop).
-
-### Errors
-
-Any tool may answer `{"error_type", "retryable", "message"}` instead of its normal result. Act on `retryable`, never on the code string: `true` (transient infrastructure — `search_unavailable`, `pipeline_unavailable`, `storage_unavailable`, `network_error`, …) means retry the SAME call ONCE, then relay `message` and stop; `false` (`invalid_input`, `unsupported_url`, `configuration_error`, …) means change the input or stop — retrying it unchanged fails identically. Always relay `message` when you stop.
-
----
-
-## Memory Reference
-
-### Node Types (both modes write `document` and `chunk`; the rest are graphrag-only)
-- **document** — Source documents (articles, papers, files, conversations)
-- **chunk** — Two subtypes: **`parent`** (~4096 tokens, what retrieval returns, never embedded) and **`child`** (~256 tokens, the embedded search unit). Every chunk row carries `parent_id` (its parent chunk's id, or the document's id for a parent) and `chunk_index`.
-- **person**, **organization**, **location**, **event**, **object** — POLE+O entities (`object` subtypes include `task`, `project`, `topic`, `software`, …)
-- **preference** — User preferences; **fact** — free-form propositions that fit no typed relation (island nodes, no edges)
-
-### Edge Types (graphrag only)
-- **part_of** / **next** — structure: child → parent → document, plus sequential order between sibling chunks at both levels
-- **mentions** (document → person), **referenced** (document ↔ document), **has** (person → preference)
-- **related_to** — the umbrella for LLM-extracted domain relations, discriminated by `semantic_type` (`has_task`, `experienced_by`, `knows`, `employed_by`, `located_at`, `owns`, `uses`, …)
-- **same_as** (confirmed duplicate entities), **superseded_by** (bi-temporal supersession between contradictory preferences/facts)
-
-**Source types:** `substack` (articles/RSS), `web` (generic pages), `youtube` (videos), `huggingface` (ArXiv datasets), `file` (via `ingest_file`), `conversation` (via `ingest_conversation`), `latent` (referenced but not yet fully ingested).
+Any tool may answer `{"error_type", "retryable", "message"}`. Act on `retryable`: `true` → retry the SAME call ONCE, then relay `message` and end the chain; `false` → change the input or end the chain. Why end it: the next link would work from missing data.
