@@ -22,6 +22,7 @@ from beanie import PydanticObjectId
 from bson.binary import Binary
 
 from tests.unit.conftest import TEST_DATABASE
+from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.clusters import (
@@ -78,12 +79,15 @@ async def _insert_child(
     heading_path: list[str] | None = None,
     cluster_id: int | None = None,
     viz: ChunkViz | None = None,
+    source: PydanticObjectId | None = None,
 ) -> MemoryEntry:
     """Insert one **Child chunk** row through the ODM, its vector as ``binData``.
 
     Beanie would persist ``embedding`` as a float array, which no production
     writer does (task 175), so the vector is set raw after the insert;
-    ``embedding=[]`` leaves the child pending (``null``).
+    ``embedding=[]`` leaves the child pending (``null``). ``source`` is the
+    owning document's ``sources[0]`` — the map plots a child only when it names
+    one of the most-recent documents.
     """
 
     entry = MemoryEntry(
@@ -100,6 +104,7 @@ async def _insert_child(
         },
         cluster_id=cluster_id,
         viz=viz,
+        sources=[source] if source is not None else [],
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -128,17 +133,35 @@ async def _insert_parent(user_id: PydanticObjectId, chunk_id: str) -> None:
     ).insert()
 
 
-async def _insert_document(user_id: PydanticObjectId, chunk_id: str) -> None:
+async def _insert_document(
+    user_id: PydanticObjectId,
+    chunk_id: str,
+    *,
+    source: PydanticObjectId | None = None,
+    date: str | None = None,
+) -> PydanticObjectId:
+    """A ``document`` row; returns its ``sources[0]`` (fresh unless given).
+
+    ``date`` is ``properties.date`` (ISO string) — what the map's recency
+    ranking reads first.
+    """
+
+    source = source or PydanticObjectId()
+    properties: dict[str, Any] = {"title": "Memory for AI Agents"}
+    if date is not None:
+        properties["date"] = date
     await MemoryEntry(
         id=chunk_id,
         user_id=user_id,
         kind="node",
         type=NodeType.DOCUMENT,
         name=chunk_id,
-        properties={"title": "Memory for AI Agents"},
+        properties=properties,
+        sources=[source],
         created_at=_NOW,
         updated_at=_NOW,
     ).insert()
+    return source
 
 
 async def _insert_cluster(
@@ -596,8 +619,10 @@ class TestLatestRunId:
 class TestLoadEmbeddingMap:
     @pytest.fixture
     async def mixed_corpus(self, mongo_client, user_id) -> None:
-        """5 embedded children: 3 drawn by ``r1``, 1 stale, 1 never clustered."""
+        """One document, 5 embedded children: 3 drawn by ``r1``, 1 stale, 1
+        never clustered."""
 
+        source = await _insert_document(user_id, "doc1")
         for index in (1, 2, 3):
             await _insert_child(
                 user_id,
@@ -605,11 +630,44 @@ class TestLoadEmbeddingMap:
                 content="x" * 400,
                 cluster_id=0 if index < 3 else 1,
                 viz=ChunkViz(x=float(index), y=float(index), run_id="r1"),
+                source=source,
             )
         await _insert_child(
-            user_id, "c4", cluster_id=0, viz=ChunkViz(x=9.0, y=9.0, run_id="r0")
+            user_id,
+            "c4",
+            cluster_id=0,
+            viz=ChunkViz(x=9.0, y=9.0, run_id="r0"),
+            source=source,
         )
-        await _insert_child(user_id, "c5")
+        await _insert_child(user_id, "c5", source=source)
+        await _insert_cluster(user_id, 0, run_id="r1", size=2, label="Agent memory")
+        await _insert_cluster(user_id, 1, run_id="r1", size=1, label="Retrieval")
+
+    @pytest.fixture
+    async def three_documents(self, mongo_client, user_id) -> None:
+        """Three dated documents, every child clustered by ``r1``.
+
+        ``old`` (2026-01) owns a clustered and a noise child, ``mid`` (2026-02)
+        one clustered child, ``new`` (2026-03) a clustered and a noise child.
+        Inserted oldest-first so ``_id`` order is not recency order.
+        """
+
+        for name, month, children in (
+            ("old", 1, [("old-a", 0), ("old-noise", -1)]),
+            ("mid", 2, [("mid-a", 0)]),
+            ("new", 3, [("new-a", 1), ("new-noise", -1)]),
+        ):
+            source = await _insert_document(
+                user_id, f"doc-{name}", date=f"2026-{month:02d}-01T00:00:00+00:00"
+            )
+            for chunk_id, cluster_id in children:
+                await _insert_child(
+                    user_id,
+                    chunk_id,
+                    cluster_id=cluster_id,
+                    viz=ChunkViz(x=1.0, y=2.0, run_id="r1"),
+                    source=source,
+                )
         await _insert_cluster(user_id, 0, run_id="r1", size=2, label="Agent memory")
         await _insert_cluster(user_id, 1, run_id="r1", size=1, label="Retrieval")
 
@@ -639,7 +697,86 @@ class TestLoadEmbeddingMap:
         # UMAP fit — a space nothing else on the map shares.
         assert embedding_map.total_children == 5
         assert len(embedding_map.points) == 3
+        assert embedding_map.clustered == 3
         assert embedding_map.unclustered == 2
+
+    async def test_plots_only_the_chunks_of_the_most_recent_documents(
+        self, mongo_client, user_id, three_documents
+    ) -> None:
+        embedding_map = await load_embedding_map(
+            mongo_client, TEST_DATABASE, user_id, max_docs=2
+        )
+
+        # ADR-013 §3: ranked by ``properties.date``, so ``old`` is cut even
+        # though it was inserted first.
+        assert {point.chunk_id for point in embedding_map.points} == {
+            "mid-a",
+            "new-a",
+            "new-noise",
+        }
+        assert (embedding_map.plotted_documents, embedding_map.total_documents) == (
+            2,
+            3,
+        )
+
+    async def test_the_run_wide_counts_ignore_the_document_cap(
+        self, mongo_client, user_id, three_documents
+    ) -> None:
+        embedding_map = await load_embedding_map(
+            mongo_client, TEST_DATABASE, user_id, max_docs=2
+        )
+
+        # The cut ``old`` chunks are clustered, not stale: they count into
+        # ``clustered`` and ``noise`` and NEVER into ``unclustered`` — otherwise
+        # the cap would raise the stale warning on a fresh map.
+        assert embedding_map.total_children == 5
+        assert embedding_map.clustered == 5
+        assert embedding_map.noise == 2
+        assert embedding_map.unclustered == 0
+
+    async def test_a_stale_chunk_of_a_cut_document_is_still_unclustered(
+        self, mongo_client, user_id, three_documents
+    ) -> None:
+        old_source = (
+            await mongo_client[TEST_DATABASE][MEMORY_COLLECTION].find_one(
+                {"_id": "doc-old"}
+            )
+        )["sources"][0]
+        await _insert_child(user_id, "old-pending", source=old_source)
+
+        embedding_map = await load_embedding_map(
+            mongo_client, TEST_DATABASE, user_id, max_docs=1
+        )
+
+        # Staleness is run-wide: the cap hides ``old``'s points, not its debt.
+        assert len(embedding_map.points) == 2
+        assert (embedding_map.unclustered, embedding_map.total_children) == (1, 6)
+
+    async def test_the_cap_defaults_to_the_config(
+        self, mongo_client, user_id, three_documents, mocker
+    ) -> None:
+        mocker.patch.object(app_config.query, "full_graph_max_docs", 1)
+
+        embedding_map = await load_embedding_map(mongo_client, TEST_DATABASE, user_id)
+
+        assert {point.chunk_id for point in embedding_map.points} == {
+            "new-a",
+            "new-noise",
+        }
+        assert embedding_map.plotted_documents == 1
+
+    async def test_a_cap_above_the_corpus_plots_every_document(
+        self, mongo_client, user_id, three_documents
+    ) -> None:
+        embedding_map = await load_embedding_map(
+            mongo_client, TEST_DATABASE, user_id, max_docs=250
+        )
+
+        assert len(embedding_map.points) == embedding_map.clustered == 5
+        assert (embedding_map.plotted_documents, embedding_map.total_documents) == (
+            3,
+            3,
+        )
 
     async def test_clusters_are_sorted_by_size_descending(
         self, mongo_client, user_id, mixed_corpus
@@ -677,12 +814,17 @@ class TestLoadEmbeddingMap:
     async def test_an_all_noise_run_is_a_map_with_no_legend(
         self, mongo_client, user_id
     ) -> None:
+        source = await _insert_document(user_id, "doc1")
         await _insert_child(
-            user_id, "c1", cluster_id=-1, viz=ChunkViz(x=1.0, y=2.0, run_id="r1")
+            user_id,
+            "c1",
+            cluster_id=-1,
+            viz=ChunkViz(x=1.0, y=2.0, run_id="r1"),
+            source=source,
         )
 
         embedding_map = await load_embedding_map(mongo_client, TEST_DATABASE, user_id)
 
         assert embedding_map.clusters == []
         assert [point.cluster_id for point in embedding_map.points] == [-1]
-        assert embedding_map.unclustered == 0
+        assert (embedding_map.noise, embedding_map.unclustered) == (1, 0)

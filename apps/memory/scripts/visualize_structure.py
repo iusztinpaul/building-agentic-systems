@@ -15,7 +15,7 @@ mode stores, through the ONE **Graph renderer** (ADR-005):
   (``graph-<stamp>.html``), the expanded subgraph around the search seeds with
   one.
 
-Either mode, no query: the 500 most-recent documents are embedded and the
+Either mode, no query: the 250 most-recent documents are embedded and the
 ``Documents`` slider shows 100 (``--max-docs`` embeds fewer); a query view ranks
 its documents by relevance and shows them all. An empty memory, a query that
 finds nothing and both search legs down each print ONE line and exit 1 without
@@ -27,7 +27,7 @@ current-session user; override with ``USER_ID=<ObjectId>`` or
 :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Usage:
-    # The current user's memory structure: 500 most-recent documents embedded,
+    # The current user's memory structure: 250 most-recent documents embedded,
     # 100 shown by the Documents slider
     make memory-visualize-structure
 

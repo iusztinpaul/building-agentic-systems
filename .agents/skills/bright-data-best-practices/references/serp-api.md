@@ -20,6 +20,8 @@
 
 Bright Data SERP API extracts structured search engine results from Google, Bing, Yandex, and DuckDuckGo. It automatically handles proxy management, CAPTCHA solving, and delivers results in under 5 seconds.
 
+> **This project queries Bing only (2026-10, ADR-013 §1).** Google now wraps every organic link in an encrypted `/goto?url=<token>` redirect in EVERY Bright Data format (raw HTML, `data_format: markdown`, `format: json`); `brd_json=1` collapses to `{general, input}` on our `cli_serp` zone, and neither the SERP nor the Unlocker zone resolves `/goto`. The Google examples below are upstream reference only. Bing organic results are `li.b_algo h2 a`, with hrefs either direct or `https://www.bing.com/ck/a?…&u=a1<base64url>` (strip `a1`, restore `=` padding, base64url-decode → the real URL). Bright Data may also answer HTTP 200 with the plain-text sentence "This query recently failed and cannot be attempted at this time. Please try again later, after a minimum of 15 seconds." — treat it as a cooldown, not an empty SERP (`tree.data.web.web_serp` waits 15 s and retries once).
+
 **What it returns:**
 - Organic results (title, description, link, rank)
 - Paid advertisements (top, bottom, product listing, premium)

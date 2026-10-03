@@ -73,7 +73,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-4` / 1024.
 - `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
-- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.70`, re-pinned live on voyage-4 in `tasks/141`; provisional per ADR-008 §4).
+- `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.70`, re-pinned live on voyage-4 in `tasks/141`; provisional per ADR-008 §4), `min_text_score` (the `$text` leg's bar on the unnormalised `textScore`, `0.0` = off — shipped off because `tasks/183`'s eval found no separating value; provisional per ADR-013 §7).
 - `mcp` — `max_retries`, `max_results`.
 - `modal` — the **Modal catalog** (`embedding_models` + `llm_models`) plus the App pins (`autoinference_utils_version`, `engines.vllm/sglang.version`) and the two waits, `warmup_deadline_s` (for a
   cold server) and `request_timeout_s` (for one answer). One entry per Hugging Face model that may be served on Modal: `repo_id`, `revision`, the model's own facts (`native_dimensions`, `matryoshka_dimensions`, `query_prompt`, `document_prompt` for embeddings; `n_gpus` plus the optional request knobs `max_tokens` and `chat_template_kwargs` for LLMs) and the App fields `gpu`, `cpu`, `memory_mb`, `max_model_len`, `extra_server_args`. There is NO `serving` and NO `base_model`: the **Serving path** is decided at deploy time by asking Modal, and the App fields are read only if it refuses (embeddings -> vLLM, LLMs -> SGLang). See ADR-009 §2/§3.
@@ -349,7 +349,7 @@ at read time and never stored), in `graphrag` the knowledge graph. An empty memo
 nothing `No results for "<query>" — nothing to draw.`; both exit 1 without a file.
 
 ```bash
-make memory-visualize-structure                       # the 500 most-recent documents, 100 shown
+make memory-visualize-structure                       # the 250 most-recent documents, 100 shown
 make memory-visualize-structure MAX_DOCS=50           # embed only the 50 most recent
 make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search results
 ```
@@ -357,7 +357,7 @@ make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search r
 With a `QUERY`, `rag` draws the retrieved parents, their documents and ALL their children;
 `graphrag` the expanded subgraph around the search seeds.
 
-The no-query view embeds the `MAX_DOCS` (default 500, `query.full_graph_max_docs`) most-recent
+The no-query view embeds the `MAX_DOCS` (default 250, `query.full_graph_max_docs`) most-recent
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
 shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider (`Most recent`)
 at the top of the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive,
@@ -390,9 +390,13 @@ same selection, pins and Display knobs work there.
 
 #### Embedding map
 
-The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** at its
+The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** of the
+250 most-recent documents (`query.full_graph_max_docs`, the structure view's cap and ranking) at its
 stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
-legend and the document title / heading path / snippet in the tooltip. Same renderer as the graph
+legend and the document title / heading path / snippet in the tooltip. The header counts the plot —
+`N of M chunks (the 250 most-recent of D documents) in K clusters (+X noise)` — while the legend
+sizes, the noise row and the stale warning count the whole run; clusters are labelled from the
+whole memory. Same renderer as the graph
 (fixed coordinates, no simulation — drag, pin, select, group drag and the Display knobs still work) — and identical in
 both memory modes, because the map has no edges to miss.
 
@@ -434,13 +438,13 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | Tool | Description |
 |---|---|
 | `search_memory` | Hybrid (vector + text) search. **Signature differs per mode** — see below. |
-| `search_web` | On-demand web search via Bright Data SERP. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
+| `search_web` | On-demand web search — Bing via Bright Data SERP (Google is not offered: its organic links are opaque `/goto` tokens the SERP zone cannot resolve). A query Bright Data is cooling down is retried once after 15 s, then answers a retryable `fetch_failed` (or the results already collected, when a later page is the one cooling down). A page after the first that times out (60 s per request) or cannot connect also returns the results already collected. **Does NOT touch memory by default.** Opt-in `ingest=true` fires the `ingest-web-url-batch-etl` deployment fire-and-forget — but that deployment is NOT registered (no free-tier slot is spare), so the ingest degrades to `{"triggered": false, "error": …}` while the search result itself still returns. |
 | `scrape_web` | On-demand scrape of one or more URLs via Bright Data Web Unlocker. **Does NOT touch memory.** Returns markdown (or HTML) inline for exploration; pair with `search_web` to read SERP results, then call `ingest_url` on whichever URLs are worth keeping. Max 5 URLs per call. |
-| `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. |
+| `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. For a custom page the main content is extracted with trafilatura (nav/sidebar/footer dropped); falls back to Bright Data markdown when the extraction has fewer than 300 non-whitespace characters. The stored document records which in `metadata.extraction` (and, for trafilatura, `metadata.extraction_variant`: `default` or `pre_unwrapped`, the code-preserving rerun). |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 | `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
-| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: chunks as points coloured by cluster, `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
 
 *`graphrag` only (6 more, 14 total):*
 
@@ -455,7 +459,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 
 | Mode | Signature | Returns |
 |---|---|---|
-| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …], "outcome": "found" \| "nothing_found", "search_mode": "hybrid" \| "text_only" \| "vector_only"}`, best match first. `top_k` IS the result cap; nothing above `min_vector_score` (or an empty memory) answers `"outcome": "nothing_found"` with `"parents": []`; a dead search leg shows as a non-`hybrid` `search_mode` (ADR-008 §3). |
+| `rag` | `search_memory(query: str, top_k: int = 10)` | `RetrievalResult` JSON — `{"parents": [{parent_id, chunk_index, heading_path, content, score, document, matched_children}, …], "outcome": "found" \| "nothing_found", "search_mode": "hybrid" \| "text_only" \| "vector_only"}`, best match first. `top_k` IS the result cap; nothing above `min_vector_score` / `min_text_score` (or an empty memory) answers `"outcome": "nothing_found"` with `"parents": []`; a dead search leg shows as a non-`hybrid` `search_mode` (ADR-008 §3). |
 | `graphrag` | `search_memory(query: str, top_k: int = 10, max_hops: int = 1, max_results: int = 10, visualize: bool = False)` | Serialized nodes + edges after graph expansion, plus the interactive graph when `visualize=true`. |
 
 In `graphrag`, `query_memory` and `search_memory` accept a `visualize` flag that renders an interactive HTML graph.
@@ -479,7 +483,6 @@ Equivalent MCP-tool invocation (JSON `arguments` an MCP client would send):
   "name": "search_web",
   "arguments": {
     "query": "MongoDB Atlas vector search",
-    "engine": "google",
     "num_results": 5,
     "ingest": false
   }

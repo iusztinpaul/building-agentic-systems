@@ -104,10 +104,10 @@ query:
   max_hops: 1
   rrf_k: 60
   embedding_batch_size: 64
-  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion; $text
-  # hits are never gated. Atlas normalises cosine to (1 + cos) / 2, so this is
-  # an absolute similarity (the RRF score is not). PROVISIONAL and owned by
-  # Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion ($text
+  # hits clear min_text_score below). Atlas normalises cosine to (1 + cos) / 2,
+  # so this is an absolute similarity (the RRF score is not). PROVISIONAL and
+  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
   # re-pinned on voyage-4, 2026-09 — tasks/141 Log: voyage-4 scores lower than
   # voyage-3.5 did, so 0.75 (tasks/125, on voyage-3.5) kept NOTHING for an
   # on-topic query. Live, corpus 4 ADRs in tree_e2e_141: nonsense
@@ -115,9 +115,37 @@ query:
   # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
   # for the first (0 kept) and found for the second (7 of 10 kept).
   min_vector_score: 0.70
-  # Full graph (no query): documents one read embeds / the Documents slider shows
-  # on load, most-recent first; `properties.date`, else `created_at`.
-  full_graph_max_docs: 500
+  # Bar the $TEXT leg must clear BEFORE fusion; 0.0 = OFF (ADR-013 §7). MongoDB
+  # textScore is the sum over matched query terms of field weight (1 on every
+  # text_index field) x term frequency normalised by field length — UNNORMALISED
+  # and corpus-relative, so it is PROVISIONAL and owned by Chapter 7's evals.
+  # Every answered text leg logs `text leg: N candidate(s), K kept at
+  # min_text_score=X (top=Y)` — read `top` there to re-pin. Override with
+  # TREE_QUERY__MIN_TEXT_SCORE=...
+  # shipped OFF, 2026-10 — tasks/183 Log: live, local corpus (14 docs, 372
+  # children, no MongoDB page), text-leg top at 0.0: off-topic "MongoDB Atlas
+  # Vector Search scalar binary quantization int8" 1.524, "dark photon
+  # vector-like fermions" 1.472, "recipe for sourdough bread" 0.504, "zxqv
+  # plorb wumbus" no candidates; on-topic "context engineering" 2.099,
+  # "structured outputs pydantic" 2.975, "ReAct agent tool calling" 3.736 — but
+  # one-word on-topic "pydantic" 1.072, "ReAct" 1.062, "Gemini" 1.028 (the
+  # vector leg still finds those three). The score grows with the
+  # number of matched query terms, so the lowest 0.5 step that empties the
+  # off-topic legs (2.0) also empties every one-word on-topic leg: no step
+  # separates them. Re-pin with the same on-topic vs off-topic protocol.
+  # Upgrade path: raw textScore sums matched query words, so a per-query
+  # normalised score (e.g. textScore / query word count) is what would compare
+  # across query lengths. The gate sits inside the shared $text leg, so a bar
+  # > 0 ALSO filters graphrag's seed text search, not only rag's search_memory.
+  min_text_score: 0.0
+  # The no-query cap on EVERY whole-memory view, most-recent first
+  # (`properties.date`, else `created_at`) — Full graph / rag Memory structure
+  # (documents embedded) and the Embedding map (documents whose chunks are
+  # plotted). 500 → 250 on 2026-10-03: Horizon's resource read failed
+  # (JSON-RPC -32603) on the 17k-chunk / 11 MB map while 0.06–0.7 MB structure
+  # views downloaded fine; the per-view Documents slider still shows
+  # `full_graph_shown_docs`.
+  full_graph_max_docs: 250
   full_graph_shown_docs: 100
 
 dream:
@@ -141,12 +169,20 @@ concurrency:
   # it on the Prefect server with `prefect gcl create voyage-embeddings --limit
   # <voyage_rpm> --slot-decay-per-second <voyage_rpm/60>`. Raise this + re-run
   # that command after adding a payment method — no code change needed.
+  # Fail-open: an unreachable limiter warns and the call proceeds (task 178);
+  # Voyage's own 429 backoff remains the quota guard.
   voyage_rpm: 3
   # Tokens/minute the key allows. Held by config (the embedding_batch
   # max_total_tokens cap), not yet a second token-weighted limiter.
   voyage_tpm: 10000
   # Prefect runner global concurrency limit
   runner_global_limit: 6
+  # Wall-clock bound (s) on one `voyage-embeddings` slot acquire (task 178). A
+  # limiter that accepts but never replies fails open after this instead of
+  # Prefect's ~6-8 min retry budget. It also caps a LEGITIMATE throttling wait:
+  # 120 = runner_global_limit (6) x one slot's decay (60 / voyage_rpm = 20 s),
+  # so ordinary contention finishes first. Re-derive it if you change either.
+  voyage_slot_acquire_timeout_seconds: 120
 
 prefect:
   # Register the OPTIONAL deployments (optional=True in orchestrator.py). Prefect

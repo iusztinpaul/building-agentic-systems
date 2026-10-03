@@ -194,20 +194,19 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-visualize-structure: # Render the MEMORY STRUCTURE of one user as an interactive HTML file under `.tree/graphs/` and open it, following memory.mode: in `rag` the document → parent chunk → child chunk tree (edges drawn from parent_id), in `graphrag` the knowledge graph. No QUERY: the 500 most-recent documents, 100 shown (MAX_DOCS=N embeds fewer). QUERY="…" narrows to the search results (rag: the retrieved parents + their documents and children; graphrag: the expanded subgraph); the Documents slider then ranks by relevance. OUTPUT=<path> pins the file. Defaults to the current user; USER_ID=<oid> / USER_IDENTIFIER=<handle> override.
+visualize-structure: # Render the MEMORY STRUCTURE of one user as an interactive HTML file under `.tree/graphs/` and open it, following memory.mode: in `rag` the document → parent chunk → child chunk tree (edges drawn from parent_id), in `graphrag` the knowledge graph. No QUERY: the 250 most-recent documents (query.full_graph_max_docs), 100 shown (MAX_DOCS=N embeds fewer). QUERY="…" narrows to the search results (rag: the retrieved parents + their documents and children; graphrag: the expanded subgraph); the Documents slider then ranks by relevance. OUTPUT=<path> pins the file. Defaults to the current user; USER_ID=<oid> / USER_IDENTIFIER=<handle> override.
 	uv run python scripts/visualize_structure.py $(USER_FLAGS) $(if $(QUERY),--query "$(QUERY)",) $(if $(TOP_K),--top-k "$(TOP_K)",) $(if $(MAX_DOCS),--max-docs "$(MAX_DOCS)",) $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 search: # Search one user's memory and print the ranked parent chunks as TEXT (score, title, heading path, 300-char excerpt, matched children) — Parent-document retrieval, identical in both modes. Requires QUERY="…"; TOP_K=N caps the parents. Defaults to the current user; USER_ID / USER_IDENTIFIER override.
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make memory-search QUERY="your query" [TOP_K=10]'; exit 1; fi
 	uv run python scripts/search_memory.py $(USER_FLAGS) --query "$(QUERY)" $(if $(TOP_K),--top-k "$(TOP_K)",)
 
-visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. Plots the chunks of the 250 most-recent documents (query.full_graph_max_docs) — the header says "N of M chunks"; the legend counts the whole run. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
 	uv run python scripts/visualize_embeddings.py $(USER_FLAGS) $(if $(filter true,$(HULLS)),--hulls,) $(if $(OUTPUT),--output "$(OUTPUT)",)
 
-search-web: # On-demand web search via Bright Data SERP. Pass QUERY="your query" [ENGINE=google] [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
+search-web: # On-demand Bing web search via Bright Data SERP. Pass QUERY="your query" [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make search-web QUERY="your query"'; exit 1; fi
 	uv run python scripts/search_web.py --query "$(QUERY)" \
-		$(if $(ENGINE),--engine $(ENGINE),) \
 		$(if $(NUM_RESULTS),--num-results $(NUM_RESULTS),) \
 		$(if $(COUNTRY),--country $(COUNTRY),) \
 		$(if $(LANGUAGE),--language $(LANGUAGE),) \

@@ -689,6 +689,53 @@ class TestQueryConfig:
 
         assert load_app_config(custom).query.min_vector_score == 0.70
 
+    def test_min_text_score_default_override_and_bounds(self, tmp_path, monkeypatch):
+        # ADR-013 §7: the text leg's bar on the UNNORMALISED ``textScore``.
+        # Shipped OFF (0.0) — tasks/183's eval found no bar separating on-topic
+        # from off-topic queries — in the typed default, default.yaml and the
+        # frozen fixture alike; a YAML without the key keeps the typed default.
+        assert QueryConfig().min_text_score == 0.0
+        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_text_score == 0.0
+        absent = tmp_path / "absent.yaml"
+        absent.write_text("query:\n  top_k: 5\n")
+        assert load_app_config(absent).query.min_text_score == 0.0
+
+        # The YAML key is READ (a value the typed default cannot fake) ...
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  min_text_score: 1.5\n")
+        assert load_app_config(custom).query.min_text_score == 1.5
+
+        # ... and the env hatch wins over it. No upper bound — textScore is a
+        # sum of term weights.
+        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", "2.5")
+        assert load_app_config(custom).query.min_text_score == 2.5
+
+        # Bounds: a negative bar is a typo, not a stricter gate.
+        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", "-1")
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+        assert "min_text_score" in str(excinfo.value)
+
+    @pytest.mark.parametrize("value", ["inf", "nan"])
+    def test_min_text_score_rejects_inf_and_nan(
+        self, value, tmp_path, monkeypatch
+    ) -> None:
+        # No upper bound, so ``inf`` would pass ``ge=0`` and gate EVERY text hit
+        # away, and ``nan`` compares False against every score — same effect.
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", value)
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        assert "min_text_score" in str(excinfo.value)
+
+    def test_min_text_score_loaded_from_frozen_config(self, frozen_config_path):
+        config = load_app_config(frozen_config_path)
+
+        assert config.query.min_text_score == 0.0
+
 
 class TestFullGraphCaps:
     """ADR-011 §7: ``query.full_graph_max_docs`` (how many most-recent documents
@@ -710,7 +757,7 @@ class TestFullGraphCaps:
                 QueryConfig().full_graph_max_docs,
                 QueryConfig().full_graph_shown_docs,
             )
-            == (500, 100)
+            == (250, 100)
         )
 
     def test_defaults_when_the_keys_are_absent(self, tmp_path) -> None:
@@ -719,7 +766,7 @@ class TestFullGraphCaps:
 
         query = load_app_config(custom).query
 
-        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (500, 100)
+        assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (250, 100)
 
     def test_showing_more_than_is_embedded_loads(self) -> None:
         # Orchestrator decision: a config error must never take down every

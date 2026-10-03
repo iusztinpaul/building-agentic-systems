@@ -5,8 +5,8 @@ with hand-scored hits so the grouping, the parent/document fetches and the
 ranking are asserted on their own. The one end-to-end case (empty collection)
 runs the real search against the fake collection.
 
-``TestOutcome`` pins the **Retrieval outcome** (ADR-008 §3): the gate that makes
-``nothing_found`` possible lives in the vector leg (``test_search.py``), what is
+``TestOutcome`` pins the **Retrieval outcome** (ADR-008 §3): the gates that make
+``nothing_found`` possible live in the two legs (``test_search.py``), what is
 asserted here is that zero HITS — not zero parents — is what the word reports.
 """
 
@@ -394,8 +394,8 @@ class TestOutcome:
     """The **Retrieval outcome** (ADR-008 §3): is the answer honestly empty?
 
     Computed on the seed search's HITS, before grouping — an RRF score cannot
-    carry a relevance bar, so "nothing relevant" is decided by the vector leg's
-    gate upstream and reported here as a word the model can read.
+    carry a relevance bar, so "nothing relevant" is decided by the legs' gates
+    upstream and reported here as a word the model can read.
     """
 
     async def test_nothing_found_when_no_hits(
@@ -418,6 +418,31 @@ class TestOutcome:
         )
 
         assert result.outcome == "nothing_found"
+        assert result.parents == []
+
+    async def test_nothing_found_when_both_legs_gate_to_nothing(
+        self, mocker, make_collection, make_child_row, embedding_model
+    ) -> None:
+        # The REAL search: one child both legs return — a near-miss vector
+        # (0.3) and a one-word lexical brush (0.3). Each leg's own bar drops
+        # its copy, so nothing fuses and the outcome is honest; both legs
+        # ANSWERED, so the mode is still ``hybrid``.
+        mocker.patch("tree.memory.rag.search.app_config.query.min_vector_score", 0.65)
+        mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 1.0)
+        row = make_child_row(_USER, "c0", content="vector quantization")
+        row["_search_score"] = 0.3
+        collection = make_collection([row])
+
+        result = await retrieve_parents(
+            _client(collection),
+            _DATABASE,
+            "vector",
+            embedding_model,
+            _USER,
+        )
+
+        assert result.outcome == "nothing_found"
+        assert result.search_mode == "hybrid"
         assert result.parents == []
 
     async def test_found_with_hits(

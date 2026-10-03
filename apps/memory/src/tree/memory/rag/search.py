@@ -195,8 +195,7 @@ def _gate_vector_candidates(
     The bar sits on ``vectorSearchScore`` (Atlas normalises cosine to
     ``(1 + cos) / 2``, an absolute similarity) and NEVER on the fused RRF score,
     which is a rank statistic comparable only within one query. ``$text`` hits
-    are ungated in :func:`_text_search`: a lexical match is a match, and
-    ``textScore`` is not normalisable.
+    clear their own bar in :func:`_gate_text_candidates`.
 
     ``top`` in the log line is the best CANDIDATE score, before the gate — it is
     what tells an operator whether the knob is set too high.
@@ -287,6 +286,8 @@ async def _text_search(
     break both **Parent-document retrieval** (a parent has no ``parent_id``
     pointing at a parent) and graph expansion (ADR-006: expansion starts at
     parents ∪ entities, never at a row that IS the answer's container).
+
+    Candidates that ran clear :func:`_gate_text_candidates` before fusion.
     """
 
     pipeline = [
@@ -309,12 +310,44 @@ async def _text_search(
         results = []
         async for doc in cursor:
             results.append(doc)
-        return results
     except Exception:
         logger.warning(
             "Text search leg unavailable; the query runs vector-only", exc_info=True
         )
         return None
+
+    # Gated OUTSIDE the ``try``: a gate bug must raise, not read as a dead leg.
+    return _gate_text_candidates(results) if results else []
+
+
+def _gate_text_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop ``$text`` candidates scoring below ``query.min_text_score`` (ADR-013 §7).
+
+    The text-leg twin of :func:`_gate_vector_candidates`: runs only on a leg
+    that ANSWERED with candidates, before fusion; a leg gated down to nothing
+    returns ``[]`` (mode stays ``hybrid``), never ``None``.
+
+    ``textScore`` is UNNORMALISED — a sum of per-term field-weighted
+    frequencies, corpus-relative — so the bar is PROVISIONAL and ``0.0``
+    disables it. The log line is written either way: at ``0.0`` it still
+    reports ``top``, which is what an operator re-pinning the bar reads.
+
+    It sits inside :func:`_text_search`, which BOTH memory modes call, so a bar
+    ``> 0`` also filters graphrag's seed search, not only rag's.
+    """
+
+    threshold = app_config.query.min_text_score
+    kept = [doc for doc in candidates if doc["_search_score"] >= threshold]
+    logger.info(
+        "text leg: %d candidate(s), %d kept at min_text_score=%.2f (top=%.3f)",
+        len(candidates),
+        len(kept),
+        threshold,
+        max(doc["_search_score"] for doc in candidates),
+    )
+    return kept
 
 
 def _rrf_fuse(

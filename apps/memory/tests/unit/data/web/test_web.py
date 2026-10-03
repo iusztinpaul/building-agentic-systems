@@ -1,5 +1,6 @@
 """Unit tests for tree.data.web.web — fetch_and_extract_web and load_web_document."""
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ from tree.data.web.web import (
     fetch_and_extract_web,
     load_web_document,
 )
+from tree.data.web.web_extract import ExtractedPage
 from tree.entities.documents import Document, SourceType
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -83,54 +85,119 @@ class TestDeriveSummary:
         assert _derive_summary("") == ""
 
 
+_RICH_PARAGRAPHS = [
+    f"Paragraph {n} of the article body explains part {n} of the feature in enough "
+    "detail that the extraction clears the three-hundred-character threshold."
+    for n in ("one", "two", "three")
+]
+_RICH_HTML = (
+    "<html><head><title>A Great Article Title</title>"
+    '<meta property="og:title" content="A Great Article Title"></head><body>'
+    '<nav><a href="/a">Welcome!</a><a href="/b">Installation</a></nav>'
+    "<main><article><h1>A Great Article</h1>"
+    + "".join(f"<p>{p}</p>" for p in _RICH_PARAGRAPHS)
+    + "</article></main></body></html>"
+)
+_THIN_HTML = "<html><body><main>ok</main></body></html>"
+_FALLBACK_MARKDOWN = "# Notice\n\nThe site is down for maintenance."
+
+
+def _mock_fetch(mocker, *, html: str, markdown: str = _FALLBACK_MARKDOWN) -> AsyncMock:
+    async def _fetch(url: str, *, data_format: str = "markdown") -> str:
+        return html if data_format == "html" else markdown
+
+    return mocker.patch(
+        "tree.data.web.web.fetch_url", new_callable=AsyncMock, side_effect=_fetch
+    )
+
+
 class TestFetchAndExtractWeb:
-    async def test_returns_document_with_web_source(self, mocker) -> None:
-        markdown = "# A Great Article\n\nThis is the body of the article."
-        mocker.patch(
-            "tree.data.web.web.fetch_url",
-            new_callable=AsyncMock,
-            return_value=markdown,
+    async def test_rich_page_makes_one_html_request(self, mocker) -> None:
+        mock_fetch = _mock_fetch(mocker, html=_RICH_HTML)
+
+        doc = await fetch_and_extract_web("https://example.com/posts/great", _USER_ID)
+
+        mock_fetch.assert_awaited_once_with(
+            "https://example.com/posts/great", data_format="html"
         )
+        assert doc.metadata == {
+            "extraction": "trafilatura",
+            "extraction_variant": "default",
+        }
+        assert doc.content.startswith("# A Great Article")
+        assert "Welcome!" not in doc.content
+        assert "Installation" not in doc.content
+
+    async def test_returns_document_with_web_source(self, mocker) -> None:
+        _mock_fetch(mocker, html=_RICH_HTML)
 
         doc = await fetch_and_extract_web("https://example.com/posts/great", _USER_ID)
 
         assert doc.source_type == SourceType.WEB
         assert doc.source_uri == "https://example.com/posts/great"
-        assert doc.title == "A Great Article"
-        assert doc.content == markdown
-        assert doc.summary  # non-empty
+        assert doc.title == "A Great Article Title"
+        assert doc.summary == _derive_summary(doc.content)
         assert doc.authors == ["Unknown"]
         assert doc.date is not None
         assert doc.date.tzinfo is not None
         assert doc.date.utcoffset().total_seconds() == 0
 
-    async def test_falls_back_to_url_path_tail(self, mocker) -> None:
-        markdown = "Plain body, no h1."
-        mocker.patch(
-            "tree.data.web.web.fetch_url",
-            new_callable=AsyncMock,
-            return_value=markdown,
+    async def test_thin_page_falls_back_to_brightdata_markdown(
+        self, mocker, caplog
+    ) -> None:
+        mock_fetch = _mock_fetch(mocker, html=_THIN_HTML)
+
+        with caplog.at_level(logging.WARNING, logger="tree.data.web.web"):
+            doc = await fetch_and_extract_web("https://example.com/notice", _USER_ID)
+
+        assert [c.kwargs["data_format"] for c in mock_fetch.await_args_list] == [
+            "html",
+            "markdown",
+        ]
+        assert doc.content == _FALLBACK_MARKDOWN
+        assert doc.metadata == {"extraction": "brightdata_markdown"}
+        assert doc.title == "Notice"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "Main-content extraction too thin for https://example.com/notice" in (
+            warnings[0].getMessage()
         )
+        assert "second Unlocker request" in warnings[0].getMessage()
+
+    async def test_title_falls_back_to_first_h1_without_metadata_title(
+        self, mocker
+    ) -> None:
+        _mock_fetch(mocker, html=_RICH_HTML)
+        mocker.patch(
+            "tree.data.web.web.extract_main_content",
+            return_value=ExtractedPage(markdown="# From H1\n\nbody", title=None),
+        )
+
+        doc = await fetch_and_extract_web("https://example.com/x", _USER_ID)
+
+        assert doc.title == "From H1"
+        assert doc.metadata["extraction"] == "trafilatura"
+
+    async def test_fallback_title_prefers_page_metadata_title(self, mocker) -> None:
+        thin_with_title = (
+            "<html><head><title>Maintenance Notice</title></head>"
+            "<body><main>ok</main></body></html>"
+        )
+        _mock_fetch(mocker, html=thin_with_title, markdown="Plain body, no h1.")
+
+        doc = await fetch_and_extract_web("https://example.com/notice", _USER_ID)
+
+        assert doc.metadata == {"extraction": "brightdata_markdown"}
+        assert doc.title == "Maintenance Notice"
+
+    async def test_title_falls_back_to_url_path_tail(self, mocker) -> None:
+        _mock_fetch(mocker, html=_THIN_HTML, markdown="Plain body, no h1.")
 
         doc = await fetch_and_extract_web(
             "https://example.com/blog/some-thing", _USER_ID
         )
 
         assert doc.title == "Some Thing"
-
-    async def test_passes_markdown_data_format(self, mocker) -> None:
-        markdown = "# Title\n\nbody"
-        mock_fetch = mocker.patch(
-            "tree.data.web.web.fetch_url",
-            new_callable=AsyncMock,
-            return_value=markdown,
-        )
-
-        await fetch_and_extract_web("https://example.com/x", _USER_ID)
-
-        mock_fetch.assert_awaited_once()
-        kwargs = mock_fetch.call_args.kwargs
-        assert kwargs.get("data_format") == "markdown"
 
 
 def _make_doc(
@@ -213,6 +280,25 @@ class TestLoadWebDocument:
         assert existing.date.tzinfo is not None
         assert existing.date.utcoffset().total_seconds() == 0
         existing.replace.assert_awaited_once()
+
+    async def test_latent_upgrade_merges_metadata(self, mocker) -> None:
+        doc = _make_doc()
+        doc.metadata = {"extraction": "trafilatura"}
+
+        existing = MagicMock()
+        existing.source_type = SourceType.LATENT
+        existing.metadata = {"cited_by": "abc"}
+        existing.replace = AsyncMock()
+
+        mocker.patch(
+            "tree.data.web.web.Document.find_one",
+            new_callable=AsyncMock,
+            return_value=existing,
+        )
+
+        await load_web_document(doc)
+
+        assert existing.metadata == {"cited_by": "abc", "extraction": "trafilatura"}
 
     async def test_returns_none_on_duplicate_key_race(self, mocker) -> None:
         doc = _make_doc()

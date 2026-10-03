@@ -1,5 +1,5 @@
 """
-On-demand web search via Bright Data's SERP API.
+On-demand Bing web search via Bright Data's SERP API.
 
 Sanity-check companion to the ``search_web`` MCP tool. Calls the same
 ``tree.data.web.web_serp.search`` client directly — no MongoDB, no extraction.
@@ -8,8 +8,8 @@ Optionally fires the ``ingest-web-url-batch-etl`` Prefect deployment when
 
 Usage:
     uv run python scripts/search_web.py --query "knowledge graphs"
-    uv run python scripts/search_web.py --query "Prefect 3" --engine google --num-results 5
-    uv run python scripts/search_web.py --query "datenschutz" --country de --language de
+    uv run python scripts/search_web.py --query "Prefect 3" --num-results 5
+    uv run python scripts/search_web.py --query "datenschutz" --country de --language de-DE
     uv run python scripts/search_web.py --query "agent tool use" --ingest --ingest-top-k 3
     uv run python scripts/search_web.py --query "x" --ingest --ingest-urls "https://a,https://b"
 """
@@ -21,6 +21,7 @@ import json
 import logging
 
 import click
+import httpx
 from beanie import PydanticObjectId
 
 from tree.data.web.web_pipeline import trigger_url_batch_ingest
@@ -45,7 +46,6 @@ def _parse_ingest_urls(raw: str | None) -> list[str] | None:
 
 async def _run(
     query: str,
-    engine: str,
     num_results: int,
     country: str | None,
     language: str | None,
@@ -79,7 +79,6 @@ async def _run(
     try:
         results = await web_search(
             query,
-            engine=engine,  # type: ignore[arg-type]
             num_results=num_results,
             country=country,
             language=language,
@@ -93,19 +92,22 @@ async def _run(
     except BrightDataRequestError as exc:
         logger.error("SERP request failed: %s", exc)
         return 1
+    except httpx.TimeoutException as exc:
+        logger.error("SERP request timed out: %s", str(exc) or type(exc).__name__)
+        return 1
+    except httpx.ConnectError as exc:
+        logger.error("SERP request could not connect: %s", exc)
+        return 1
 
     if not results:
-        logger.info("No results for query=%r (engine=%s)", query, engine)
+        logger.info("No results for query=%r", query)
     else:
-        logger.info(
-            "Got %d result(s) for query=%r (engine=%s):", len(results), query, engine
-        )
+        logger.info("Got %d result(s) for query=%r:", len(results), query)
         for r in results:
             logger.info("[%d] %s — %s", r.rank, r.title, r.url)
 
     payload: dict[str, object] = {
         "query": query,
-        "engine": engine,
         "results": [r.model_dump() for r in results],
     }
 
@@ -177,14 +179,6 @@ async def _maybe_ingest(
     help="Search query.",
 )
 @click.option(
-    "--engine",
-    "-e",
-    type=click.Choice(["google", "bing", "yandex"]),
-    default="google",
-    show_default=True,
-    help="Search engine to query.",
-)
-@click.option(
     "--num-results",
     "-n",
     type=int,
@@ -202,7 +196,7 @@ async def _maybe_ingest(
     "--language",
     "-l",
     default=None,
-    help="Optional 2-letter language code (e.g. 'en').",
+    help="Optional language, mapped to Bing's setLang (e.g. 'en' or 'en-US').",
 )
 @click.option(
     "--ingest",
@@ -234,7 +228,6 @@ async def _maybe_ingest(
 )
 def main(
     query: str,
-    engine: str,
     num_results: int,
     country: str | None,
     language: str | None,
@@ -243,7 +236,7 @@ def main(
     ingest_urls: str | None,
     user_id: str | None,
 ) -> None:
-    """Run a Bright Data SERP search and print results."""
+    """Run a Bing search via Bright Data's SERP API and print results."""
 
     parsed_ingest_urls = _parse_ingest_urls(ingest_urls)
 
@@ -257,7 +250,6 @@ def main(
     exit_code = asyncio.run(
         _run(
             query,
-            engine,
             num_results,
             country,
             language,

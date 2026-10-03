@@ -12,7 +12,8 @@ Four operations, and nothing else reads or writes these rows:
   and ``viz``. Idempotent for a given ``run_id``.
 * :func:`latest_run_id` — which **Clustering run** the surfaces should read.
 * :func:`load_embedding_map` — the **Embedding map** a surface renders, read
-  whole and never computed (ADR-007 §8).
+  and never computed (ADR-007 §8): the chunks of the most-recent documents,
+  counted against the whole run (ADR-013 §3).
 
 Raw pymongo on ``MEMORY_COLLECTION`` / ``MEMORY_CLUSTERS_COLLECTION``, following
 ``rag/indexing.py``'s style rather than Beanie's: these are bulk statements over
@@ -33,6 +34,7 @@ from beanie import PydanticObjectId
 from pydantic import BaseModel, Field
 from pymongo import AsyncMongoClient, UpdateOne
 
+from tree.config.app_config import app_config
 from tree.entities.clusters import MEMORY_CLUSTERS_COLLECTION, build_cluster_id
 from tree.entities.memory import (
     MEMORY_COLLECTION,
@@ -45,6 +47,7 @@ from tree.memory.clustering.types import (
     MapPoint,
     MemoryClusterInfo,
 )
+from tree.memory.rag.structure import rank_recent_documents
 
 logger = logging.getLogger(__name__)
 
@@ -362,20 +365,31 @@ async def latest_run_id(
 
 
 async def load_embedding_map(
-    client: AsyncMongoClient, database: str, user_id: PydanticObjectId
+    client: AsyncMongoClient,
+    database: str,
+    user_id: PydanticObjectId,
+    *,
+    max_docs: int | None = None,
 ) -> EmbeddingMap | None:
-    """Read the whole **Embedding map** of ``user_id``'s latest run.
+    """Read the **Embedding map** of ``user_id``'s latest run, capped by document.
 
     Surfaces READ; they never compute (ADR-007 §8). Points are the embedded
-    children carrying THIS run's ``viz.run_id``; children with no assignment or
-    a stale one are counted into ``unclustered`` and omitted, which is what the
-    warning line reports.
+    children carrying THIS run's ``viz.run_id`` whose document (``sources``) is
+    among the ``max_docs`` most-recent ones (default
+    ``query.full_graph_max_docs``; ranked by ``rank_recent_documents``, the
+    **Memory structure**'s ranking — ADR-013 §3). Everything else describes the
+    WHOLE run: the clusters, ``clustered``, ``noise``, and ``unclustered`` =
+    children with no assignment or a stale one, computed from counts — never
+    from the plotted set, or the cap would read as staleness in the warning.
 
     Returns:
         The map, or ``None`` when the user has never been clustered — a caller
         shows an explanatory message, never an empty picture.
     """
 
+    max_docs = (
+        max_docs if max_docs is not None else app_config.query.full_graph_max_docs
+    )
     run_id = await latest_run_id(client, database, user_id)
     if run_id is None:
         return None
@@ -393,10 +407,22 @@ async def load_embedding_map(
     )
 
     memory_collection = db[MEMORY_COLLECTION]
+    documents = await memory_collection.find(
+        {"user_id": user_id, "kind": "node", "type": "document"},
+        {"_id": 1, "sources": 1, "properties.date": 1, "created_at": 1},
+    ).to_list()
+    kept = rank_recent_documents(documents, max_docs)
+    kept_sources = {row["sources"][0] for row in kept if row.get("sources")}
+
     point_cursor = memory_collection.find(
-        {**_embedded_children_filter(user_id), "viz.run_id": run_id},
+        {
+            **_embedded_children_filter(user_id),
+            "viz.run_id": run_id,
+            "sources": {"$in": list(kept_sources)},
+        },
         {
             "_id": 1,
+            "sources": 1,
             "cluster_id": 1,
             "viz": 1,
             "properties.title": 1,
@@ -406,15 +432,34 @@ async def load_embedding_map(
     )
     points = [_to_map_point(document) async for document in point_cursor]
 
-    total_children = await memory_collection.count_documents(
-        _embedded_children_filter(user_id)
+    children = _embedded_children_filter(user_id)
+    total_children = await memory_collection.count_documents(children)
+    clustered = await memory_collection.count_documents(
+        {**children, "viz.run_id": run_id}
+    )
+    noise = await memory_collection.count_documents(
+        {**children, "viz.run_id": run_id, "cluster_id": NOISE_LABEL}
+    )
+    logger.info(
+        "Embedding map %s for user_id=%s: plotting %d of %d clustered chunks "
+        "(the %d most-recent of %d documents)",
+        run_id,
+        user_id,
+        len(points),
+        clustered,
+        len(kept),
+        len(documents),
     )
     return EmbeddingMap(
         run_id=run_id,
         clusters=clusters,
         points=points,
         total_children=total_children,
-        unclustered=total_children - len(points),
+        unclustered=total_children - clustered,
+        clustered=clustered,
+        noise=noise,
+        plotted_documents=len(kept),
+        total_documents=len(documents),
     )
 
 

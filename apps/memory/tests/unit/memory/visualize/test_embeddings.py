@@ -58,8 +58,16 @@ def _map(
     noise: int = 5,
     unclustered: int = 3,
     total_children: int = 50,
+    cut_noise: int = 0,
+    plotted_documents: int = 10,
+    total_documents: int = 10,
 ) -> EmbeddingMap:
-    """An ``EmbeddingMap`` with the ACs' shape: {0: 30 pts, 1: 12 pts} + noise."""
+    """An ``EmbeddingMap`` with the ACs' shape: {0: 30 pts, 1: 12 pts} + noise.
+
+    ``clustered`` is ``total_children - unclustered``, so a ``total_children``
+    above the drawn points + ``unclustered`` models chunks of documents beyond
+    the cap (``cut_noise`` of them noise): counted run-wide, never plotted.
+    """
 
     sizes = {0: 30, 1: 12} if sizes is None else sizes
     clusters = [
@@ -81,6 +89,10 @@ def _map(
         points=points,
         total_children=total_children,
         unclustered=unclustered,
+        clustered=total_children - unclustered,
+        noise=noise + cut_noise,
+        plotted_documents=plotted_documents,
+        total_documents=total_documents,
     )
 
 
@@ -178,36 +190,109 @@ def test_payload_display_controls_are_a_copy_of_the_graph_defaults() -> None:
     assert _DEFAULT_DISPLAY["arrows"] is True
 
 
-def test_payload_colours_nodes_by_cluster_and_noise_grey() -> None:
+def test_payload_colours_clusters_through_the_legend_and_noise_grey() -> None:
     payload = to_embedding_map_payload(_map())
-    nodes = payload["nodes"]
 
-    colours = {
-        cluster_id: {n["color"] for n in nodes if n["cluster_id"] == cluster_id}
-        for cluster_id in (0, 1, -1)
+    # Act: the template's resolver — cluster_id -> legend colour.
+    colour_by_cluster = {
+        row["cluster_id"]: row["color"]
+        for row in payload["legend"]
+        if "cluster_id" in row
     }
 
-    assert colours[0] == {CLUSTER_PALETTE[0]}
-    assert colours[1] == {CLUSTER_PALETTE[1]}
-    assert colours[-1] == {NOISE_COLOUR}
+    # Assert: every drawn point resolves to its cluster's hue, noise to grey.
+    assert colour_by_cluster == {
+        0: CLUSTER_PALETTE[0],
+        1: CLUSTER_PALETTE[1],
+        -1: NOISE_COLOUR,
+    }
+    assert {n["cluster_id"] for n in payload["nodes"]} <= set(colour_by_cluster)
 
 
-def test_payload_nodes_carry_coordinates_no_label_and_the_tooltip_meta() -> None:
+def test_payload_keeps_the_colour_of_a_cluster_with_no_legend_row() -> None:
+    # Arrange: a partially written run — cluster 1's points are stamped but
+    # its ``memory_clusters`` row is missing, so no legend row carries its hue.
+    embedding_map = _map()
+    embedding_map.clusters = [c for c in embedding_map.clusters if c.cluster_id != 1]
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: the orphan points ship their own palette colour (the template's
+    # ``n.color`` wins); clustered and noise points stay lean.
+    orphans = [n for n in nodes if n["cluster_id"] == 1]
+    assert orphans
+    assert {n.get("color") for n in orphans} == {cluster_colour(1)}
+    assert all("color" not in n for n in nodes if n["cluster_id"] != 1)
+
+
+def test_payload_ships_no_colour_on_a_healthy_map() -> None:
+    nodes = to_embedding_map_payload(_map())["nodes"]
+
+    assert all("color" not in n for n in nodes)
+
+
+def test_payload_leaves_a_negative_cluster_id_to_the_template_noise_rule() -> None:
+    # Arrange: a degenerate label below -1 (the pipeline normalises these to
+    # -1, so this is defence in depth).
+    embedding_map = _map()
+    embedding_map.points[-1].cluster_id = -2
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: no per-node colour — the template paints any negative id grey.
+    assert "color" not in nodes[-1]
+    assert nodes[-1]["meta"]["cluster"] == "noise"
+
+
+def test_payload_nodes_carry_exactly_the_lean_key_set() -> None:
     payload = to_embedding_map_payload(_map())
 
+    # Assert: no ``label`` (empty anyway), no ``color`` (the legend carries it),
+    # no ``meta.document`` (the tooltip rebuilds it from ``name``).
     for node in payload["nodes"]:
-        assert isinstance(node["x"], float)
-        assert isinstance(node["y"], float)
-        # No canvas text: hundreds of chunk titles would be unreadable.
-        assert node["label"] == ""
-        assert set(node["meta"]) == {"cluster", "document", "heading_path", "snippet"}
+        assert set(node) == {
+            "id",
+            "type",
+            "name",
+            "x",
+            "y",
+            "cluster_id",
+            "size",
+            "meta",
+        }
+        assert set(node["meta"]) == {"cluster", "heading_path", "snippet"}
 
     first = payload["nodes"][0]
     assert first["type"] == "chunk"
     assert first["name"] == "Paper"
-    assert first["meta"]["cluster"] == "Cluster 0 topic"
-    assert first["meta"]["heading_path"] == "Memory > Retrieval"
-    assert first["meta"]["snippet"] == "Snippet 0."
+    assert first["meta"] == {
+        "cluster": "Cluster 0 topic",
+        "heading_path": "Memory > Retrieval",
+        "snippet": "Snippet 0.",
+    }
+
+
+def test_payload_rounds_coordinates_to_three_decimals() -> None:
+    embedding_map = _map()
+    embedding_map.points[0].x = 1.23456
+    embedding_map.points[0].y = -7.65432
+
+    node = to_embedding_map_payload(embedding_map)["nodes"][0]
+
+    assert node["x"] == 1.235
+    assert node["y"] == -7.654
+
+
+def test_payload_omits_an_empty_heading_path_and_snippet() -> None:
+    embedding_map = _map()
+    embedding_map.points[0].heading_path = []
+    embedding_map.points[0].snippet = ""
+
+    nodes = to_embedding_map_payload(embedding_map)["nodes"]
+
+    # Assert: the _curated_meta rule — an empty value is absent, not "".
+    assert nodes[0]["meta"] == {"cluster": "Cluster 0 topic"}
+    assert set(nodes[1]["meta"]) == {"cluster", "heading_path", "snippet"}
 
 
 def test_payload_names_an_untitled_document() -> None:
@@ -217,7 +302,7 @@ def test_payload_names_an_untitled_document() -> None:
     node = to_embedding_map_payload(embedding_map)["nodes"][0]
 
     assert node["name"] == "(untitled)"
-    assert node["meta"]["document"] == "(untitled)"
+    assert "document" not in node["meta"]
 
 
 def test_payload_meta_labels_noise_points_as_noise() -> None:
@@ -231,10 +316,22 @@ def test_payload_meta_labels_noise_points_as_noise() -> None:
 def test_payload_legend_lists_clusters_by_size_then_the_two_greys() -> None:
     payload = to_embedding_map_payload(_map())
 
+    # Assert: the coloured rows carry ``cluster_id`` (noise -1) for the
+    # template's colour lookup; the not-drawn grey row carries none.
     assert payload["legend"] == [
-        {"label": "Cluster 0 topic", "size": 30, "color": CLUSTER_PALETTE[0]},
-        {"label": "Cluster 1 topic", "size": 12, "color": CLUSTER_PALETTE[1]},
-        {"label": "noise", "size": 5, "color": NOISE_COLOUR},
+        {
+            "label": "Cluster 0 topic",
+            "size": 30,
+            "color": CLUSTER_PALETTE[0],
+            "cluster_id": 0,
+        },
+        {
+            "label": "Cluster 1 topic",
+            "size": 12,
+            "color": CLUSTER_PALETTE[1],
+            "cluster_id": 1,
+        },
+        {"label": "noise", "size": 5, "color": NOISE_COLOUR, "cluster_id": -1},
         {
             "label": "unclustered / stale (not shown)",
             "size": 3,
@@ -246,7 +343,7 @@ def test_payload_legend_lists_clusters_by_size_then_the_two_greys() -> None:
 def test_payload_legend_orders_clusters_largest_first() -> None:
     # Arrange: the small cluster comes FIRST in the map (store order is not a
     # contract of the builder).
-    payload = to_embedding_map_payload(_map(sizes={0: 4, 1: 40}))
+    payload = to_embedding_map_payload(_map(sizes={0: 4, 1: 40}, total_children=52))
 
     assert [row["label"] for row in payload["legend"][:2]] == [
         "Cluster 1 topic",
@@ -288,7 +385,47 @@ def test_payload_hulls_mirrors_the_argument(hulls: bool) -> None:
 def test_payload_summary_counts_chunks_clusters_and_noise() -> None:
     payload = to_embedding_map_payload(_map())
 
-    assert payload["summary"] == "Embedding map: 47 chunks in 2 clusters (+5 noise)"
+    assert payload["summary"] == (
+        "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 documents) "
+        "in 2 clusters (+5 noise)"
+    )
+
+
+def test_payload_summary_says_how_much_the_document_cap_cut() -> None:
+    # Arrange: 20 more chunks (4 of them noise) of this run belong to
+    # documents beyond the 250 most-recent.
+    embedding_map = _map(
+        unclustered=0,
+        total_children=67,
+        cut_noise=4,
+        plotted_documents=250,
+        total_documents=1200,
+    )
+
+    payload = to_embedding_map_payload(embedding_map)
+
+    # Assert: the header counts the PLOT (47 of the run's 67), the noise the RUN.
+    assert payload["summary"] == (
+        "Embedding map: 47 of 67 chunks (the 250 most-recent of 1200 documents) "
+        "in 2 clusters (+9 noise)"
+    )
+
+
+def test_payload_legend_counts_the_whole_run_not_the_plot() -> None:
+    # Arrange: every noise chunk of the run sits in a cut document.
+    embedding_map = _map(noise=0, unclustered=0, total_children=45, cut_noise=3)
+
+    payload = to_embedding_map_payload(embedding_map)
+
+    # Assert: cluster rows keep the run's size and the noise row is run-wide,
+    # even though no noise point is drawn (ADR-013 §3, by design).
+    assert [(row["label"], row["size"]) for row in payload["legend"]] == [
+        ("Cluster 0 topic", 30),
+        ("Cluster 1 topic", 12),
+        ("noise", 3),
+    ]
+    assert all(node["cluster_id"] >= 0 for node in payload["nodes"])
+    assert payload["warning"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -377,11 +514,14 @@ def test_render_embedding_map_file_headers_the_map_with_its_summary(
 
     render_embedding_map_file(payload, out)
 
-    # The header line the reader sees is "47 chunks in 2 clusters (+5 noise)",
-    # not "47 nodes · 0 edges" — both the summary and the branch that shows it
-    # have to reach the browser.
+    # The header line the reader sees is "47 of 47 chunks (the 10 most-recent
+    # of 10 documents) in 2 clusters (+5 noise)", not "47 nodes · 0 edges" —
+    # both the summary and the branch that shows it have to reach the browser.
     html = out.read_text(encoding="utf-8")
-    assert '"summary": "Embedding map: 47 chunks in 2 clusters (+5 noise)"' in html
+    assert (
+        '"summary": "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 '
+        'documents) in 2 clusters (+5 noise)"'
+    ) in html
     assert 'payload.summary.replace(/^Embedding map: /, "")' in html
 
 

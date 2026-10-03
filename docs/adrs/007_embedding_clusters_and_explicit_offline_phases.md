@@ -1,6 +1,6 @@
 # ADR-007: Embedding Clusters, the Embedding Map, and Explicit Offline Phases
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by [013](013_horizon_scale_mcp_surface.md) §2–§3 (tasks 179–181): §2's map nodes are lean (no `label`, per-node `color` or `meta.document`; the template colours from the legend's `cluster_id`; 3-decimal coordinates; empty `heading_path` / `snippet` omitted) — same picture, same tooltip rows minus the blank ones (task 179). §8's map plots the chunks of the `query.full_graph_max_docs` (250) most-recent documents while counting the whole run, per [013](013_horizon_scale_mcp_surface.md) §3 (task 180). §7's `graphs://` resource answers a gzip blob (`graphs://<name>.html.gz`, `application/gzip`), per [013](013_horizon_scale_mcp_surface.md) §2 (task 181).
 - **Date:** 2026-09-06
 - **Deciders:** Paul (project owner)
 - **Context references:**

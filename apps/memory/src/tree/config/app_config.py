@@ -101,7 +101,8 @@ class EmbeddingBatchConfig(BaseModel):
     max_input_tokens: int = Field(default=32_000)
     # YAML-only fan-out knob (#054): how many embed requests a single stage may
     # dispatch concurrently. Default 1 keeps dispatch serial; the cross-flow
-    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out.
+    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out
+    # (fail-open: an unreachable limiter warns and the call proceeds, task 178).
     dispatch_concurrency: int = Field(default=1)
 
 
@@ -251,17 +252,24 @@ class ConcurrencyConfig(BaseModel):
       Drives the server-side ``voyage-embeddings`` Prefect global concurrency
       limit (limit = ``voyage_rpm``, slot-decay-per-second = ``voyage_rpm / 60``),
       created with ``prefect gcl create voyage-embeddings --limit <voyage_rpm>
-      --slot-decay-per-second <voyage_rpm/60>``.
+      --slot-decay-per-second <voyage_rpm/60>``. Fail-open: an unreachable
+      limiter warns and the call proceeds (task 178).
     * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
       ``max_total_tokens`` cap), not yet a second token-weighted limiter.
     * ``runner_global_limit`` — admission control for ``serve(limit=...)``;
       kept close to ``voyage_rpm`` so we don't admit far more runs than the
       embed budget can feed.
+    * ``voyage_slot_acquire_timeout_seconds`` — wall-clock bound on one
+      ``voyage-embeddings`` slot acquire (task 178). A limiter that never
+      replies fails open after this instead of Prefect's ~6-8 min retry budget.
+      Also caps a legitimate throttling wait, so keep it above the worst
+      contention wait (``runner_global_limit x 60 / voyage_rpm``).
     """
 
     voyage_rpm: int = 3
     voyage_tpm: int = 10_000
     runner_global_limit: int = 4
+    voyage_slot_acquire_timeout_seconds: float = 120.0
 
 
 class PrefectConfig(BaseModel):
@@ -322,6 +330,11 @@ class QueryConfig(BaseModel):
     0.75, and at 0.75 an ON-TOPIC query kept nothing (top=0.735) while nonsense
     peaked at 0.649. Owned by Chapter 7's evals; override per shell with
     ``TREE_QUERY__MIN_VECTOR_SCORE=...``.
+
+    ``min_text_score`` is the TEXT leg's bar on MongoDB's ``textScore``
+    (ADR-013 §7): unnormalised and corpus-relative, so it is PROVISIONAL, has no
+    upper bound, and ``0.0`` disables it. Pinned by the on-topic vs off-topic
+    eval in ``tasks/183``'s Log; override with ``TREE_QUERY__MIN_TEXT_SCORE=...``.
     """
 
     top_k: int = 10
@@ -329,11 +342,15 @@ class QueryConfig(BaseModel):
     rrf_k: int = 60
     embedding_batch_size: int = 64
     min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
-    # The **Full graph** (ADR-011 §7): how many most-recent documents one read
-    # embeds, and how many the renderer's Documents slider shows on load. No
-    # cross-key validator: shown > max is clamped where it is read
-    # (``to_graph_payload``), so one lowered key never fails every entry point.
-    full_graph_max_docs: int = Field(500, ge=1)
+    min_text_score: float = Field(0.0, ge=0.0, allow_inf_nan=False)
+    # The no-query cap on EVERY whole-memory view (ADR-011 §7, ADR-013 §3): how
+    # many most-recent documents the **Full graph** / rag **Memory structure**
+    # embeds and whose chunks the **Embedding map** plots (250 since 2026-10-03,
+    # was 500 — an 11 MB map failed on Horizon), and how many the renderer's
+    # Documents slider shows on load. No cross-key validator: shown > max is
+    # clamped where it is read (``to_graph_payload``), so one lowered key never
+    # fails every entry point.
+    full_graph_max_docs: int = Field(250, ge=1)
     full_graph_shown_docs: int = Field(100, ge=1)
 
 

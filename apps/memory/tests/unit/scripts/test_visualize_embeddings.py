@@ -81,6 +81,10 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
         ],
         total_children=total_children,
         unclustered=unclustered,
+        clustered=drawn,
+        noise=0,
+        plotted_documents=3,
+        total_documents=3,
     )
 
 
@@ -133,7 +137,10 @@ class TestRenderedMap:
         assert result.exit_code == 0
         assert "Wrote " in result.output
         assert "embedding-map-20260906-101500.html" in result.output
-        assert "Embedding map: 12 chunks in 1 clusters (+0 noise)" in result.output
+        assert (
+            "Embedding map: 12 of 12 chunks (the 3 most-recent of 3 documents) "
+            "in 1 clusters (+0 noise)"
+        ) in result.output
 
     def test_a_stale_run_warns_on_the_very_first_line(
         self, cli_module, mocked_boundaries, loaded_map

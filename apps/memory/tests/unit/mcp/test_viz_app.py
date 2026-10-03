@@ -3,8 +3,8 @@
 Covers ``_graph_tool_result`` — the ONE dual-path helper every visualization
 tool delivers through (ADR-005, decision 4; payload in a ``content`` JSON block,
 because the App-UI host does not forward ``structuredContent`` to a custom
-iframe) — the file fallback's ``graphs://`` resource link, and both resource
-handlers. The TOOLS that call the helper are tested where they are registered
+iframe) — the file fallback's ``graphs://<name>.html.gz`` resource link (the
+**Graph download**, a gzip blob), and both resource handlers. The TOOLS that call the helper are tested where they are registered
 (``visualize_memory_structure`` / ``query_memory`` / ``search_memory`` in
 ``test_graph_tools.py``); the Graph renderer it delegates to
 (``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives in
@@ -12,16 +12,23 @@ handlers. The TOOLS that call the helper are tested where they are registered
 ``tests/unit/memory/visualize/test_graph.py``.
 """
 
+import base64
+import gzip
 import json
+import re
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastmcp import Client, FastMCP
 from fastmcp.tools import ToolResult
+from mcp.types import BlobResourceContents
 
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import (
     _GRAPH_HTML,
+    DOWNLOAD_CONTRACT,
     GRAPH_VIEW_URI,
     _graph_tool_result,
     graph_file,
@@ -116,7 +123,9 @@ def test_graph_tool_result_writes_a_file_and_links_it_for_non_ui_clients(
     assert "SUMMARY-SENTINEL" in text_block.text
     assert str(tmp_path) in text_block.text
     assert link_block.type == "resource_link"
-    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://")
+    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://").removesuffix(
+        ".gz"
+    )
     assert rendered.is_file()
     # No payload block on this branch — the data is inside the file.
     assert not any(b.type == "text" and b.text.startswith("{") for b in result.content)
@@ -150,11 +159,9 @@ def _map_payload() -> dict:
                 "id": "chunk-1",
                 "type": "chunk",
                 "name": "Paper",
-                "label": "",
                 "x": 1.0,
                 "y": 2.0,
                 "cluster_id": 0,
-                "color": "#1f77b4",
                 "meta": {},
             }
         ],
@@ -182,7 +189,10 @@ def test_graph_tool_result_calls_a_graph_a_graph_in_both_branches(
         "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
         "a self-contained interactive graph to:\n"
     ) in text_block.text
-    assert link_block.description == "Self-contained interactive graph (download me)"
+    assert link_block.description == (
+        "gzip-compressed self-contained interactive graph — base64-decode the "
+        "blob, gunzip, open the .html"
+    )
 
 
 def test_graph_tool_result_calls_an_embedding_map_a_map_in_both_branches(
@@ -204,9 +214,9 @@ def test_graph_tool_result_calls_an_embedding_map_a_map_in_both_branches(
         "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
         "a self-contained interactive embedding map to:\n"
     ) in text_block.text
-    assert (
-        link_block.description
-        == "Self-contained interactive embedding map (download me)"
+    assert link_block.description == (
+        "gzip-compressed self-contained interactive embedding map — "
+        "base64-decode the blob, gunzip, open the .html"
     )
     assert "graph" not in inline.content[0].text
     assert "interactive graph" not in text_block.text
@@ -224,26 +234,89 @@ def test_the_delivered_noun_comes_from_the_payloads_layout_key() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_graph_file_resource_serves_rendered_html(mocker, tmp_path: Path) -> None:
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
+def test_the_file_branch_links_the_gzip_download_and_states_the_contract(
+    mocker, tmp_path: Path
+) -> None:
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
     payload = to_graph_payload(_seed_result())
-    rendered = _render_graph_file(payload, output=tmp_path / "alice-x.html")
 
-    html = graph_file(rendered.name)
+    result = _graph_tool_result(
+        _make_ctx(ui_supported=False), payload, "SUMMARY", query="alice"
+    )
 
-    assert html == rendered.read_text(encoding="utf-8")
+    # Assert: ONE download path — the link names the gzip blob of the file the
+    # text names, and the text closes with the one decode contract.
+    text_block, link_block = result.content
+    html_name = link_block.name.removesuffix(".gz")
+    assert link_block.name == f"{html_name}.gz"
+    assert html_name.endswith(".html")
+    assert str(link_block.uri) == f"graphs://{html_name}.gz"
+    assert link_block.mimeType == "application/gzip"
+    assert str(tmp_path / html_name) in text_block.text
+    assert text_block.text.endswith(DOWNLOAD_CONTRACT)
+
+
+def test_a_local_browser_open_needs_no_download_instructions(
+    mocker, tmp_path: Path
+) -> None:
+    # Story: the local user is not bothered with gzip.
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=True)
+
+    result = _graph_tool_result(
+        _make_ctx(ui_supported=False), to_graph_payload(_seed_result()), "SUMMARY"
+    )
+
+    assert result.content[0].text.endswith("Opened it in your browser.")
+
+
+# ---------------------------------------------------------------------------
+# graphs://{name}.html.gz — the Graph download (gzip blob of a rendered file)
+# ---------------------------------------------------------------------------
+
+
+def _rendered(tmp_path: Path) -> Path:
+    payload = to_graph_payload(_seed_result())
+    return _render_graph_file(payload, output=tmp_path / "alice-x.html")
+
+
+def test_graph_file_resource_serves_the_gzip_of_the_rendered_html(
+    mocker, tmp_path: Path
+) -> None:
+    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
+    rendered = _rendered(tmp_path)
+
+    result = graph_file(f"{rendered.name}.gz")
+
+    (content,) = result.contents
+    assert isinstance(content.content, bytes)
+    assert content.mime_type == "application/gzip"
+    assert gzip.decompress(content.content) == rendered.read_bytes()
+    # Compressed on read: no second file lands next to the HTML.
+    assert sorted(p.name for p in tmp_path.iterdir()) == [rendered.name]
 
 
 @pytest.mark.parametrize(
     "bad_name",
-    ["../../../etc/passwd", "../escape.html", "not-html.txt", "sub/dir.html"],
+    [
+        "alice-x.html",  # the retired text name — one download path
+        "../alice-x.html.gz",
+        "../../../etc/passwd.gz",
+        "x.txt.gz",
+        "sub/dir.html.gz",
+        ".gz",
+        "alice-x.html.gz.gz",
+        "alice-x\x00.html.gz",  # NUL: the guard's message, not the OS's
+    ],
 )
-def test_graph_file_resource_rejects_unsafe_names(
+def test_graph_file_resource_rejects_unsafe_and_non_gzip_names(
     mocker, tmp_path: Path, bad_name: str
 ) -> None:
     mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
+    _rendered(tmp_path)
 
-    with pytest.raises(ValueError, match="Invalid graph file name"):
+    with pytest.raises(ValueError, match=r"Invalid graph file name: .*\.html\.gz"):
         graph_file(bad_name)
 
 
@@ -251,7 +324,77 @@ def test_graph_file_resource_missing_file_raises(mocker, tmp_path: Path) -> None
     mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
 
     with pytest.raises(FileNotFoundError, match="No rendered graph"):
-        graph_file("missing.html")
+        graph_file("missing.html.gz")
+
+
+def test_graph_file_docstring_states_the_download_contract() -> None:
+    doc = " ".join((graph_file.__doc__ or "").split())
+
+    assert DOWNLOAD_CONTRACT in doc
+
+
+async def test_the_registered_graphs_template_declares_application_gzip() -> None:
+    template = await mcp.get_resource_template("graphs://{name}")
+
+    assert template is not None
+    assert template.mime_type == "application/gzip"
+
+
+async def test_a_client_reads_the_download_as_a_base64_gzip_blob(
+    mocker, tmp_path: Path
+) -> None:
+    # Arrange: the REAL registered template on a bare server, so the client
+    # round trip skips the app lifespan (Mongo + models) it does not need.
+    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
+    rendered = _rendered(tmp_path)
+    server = FastMCP("graph-download-test")
+    server.add_template(await mcp.get_resource_template("graphs://{name}"))
+
+    async with Client(server) as client:
+        contents = await client.read_resource(f"graphs://{rendered.name}.gz")
+
+    # Assert: the protocol carries the blob base64-encoded; the documented
+    # decode gives back the server-side file byte for byte.
+    (content,) = contents
+    assert isinstance(content, BlobResourceContents)
+    assert content.mimeType == "application/gzip"
+    assert gzip.decompress(base64.b64decode(content.blob)) == rendered.read_bytes()
+
+
+async def test_the_contracts_shell_one_liner_decodes_the_blob(
+    mocker, tmp_path: Path
+) -> None:
+    # Regression: ``base64 -d blob.b64`` (a positional file) fails on macOS's
+    # BSD base64 ("invalid argument"); the contract must run as written on
+    # both BSD and GNU, so the test runs the contract's OWN command.
+    graphs = tmp_path / "graphs"
+    graphs.mkdir()
+    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", graphs)
+    rendered = _render_graph_file(
+        to_graph_payload(_seed_result()), output=graphs / "alice-x.html"
+    )
+    (content,) = graph_file(f"{rendered.name}.gz").contents
+    (tmp_path / "blob.b64").write_text(base64.b64encode(content.content).decode())
+    match = re.search(r"`(base64 -d [^`]+)`", DOWNLOAD_CONTRACT)
+    assert match is not None
+    command = match.group(1).replace("<name>", "decoded")
+
+    subprocess.run(command, shell=True, check=True, cwd=tmp_path)  # noqa: S602
+
+    assert (tmp_path / "decoded.html").read_bytes() == rendered.read_bytes()
+
+
+def test_no_mcp_source_still_says_save_its_text() -> None:
+    # Source guard: the text download is retired everywhere in the MCP layer.
+    mcp_src = Path(__file__).parents[3] / "src" / "tree" / "mcp"
+    offenders = [
+        p.name
+        for p in mcp_src.rglob("*.py")
+        if "save its text" in p.read_text(encoding="utf-8")
+    ]
+
+    assert mcp_src.is_dir()
+    assert offenders == []
 
 
 def test_graph_html_reads_content_blocks_before_structured_content() -> None:

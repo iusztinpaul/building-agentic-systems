@@ -163,9 +163,14 @@ async def visualize_memory_structure(
     When the client renders MCP App UIs, the graph appears inline. Otherwise
     (or when ``as_html_file`` is set) the same graph is written to a
     self-contained HTML file; the result carries the server-side path AND a
-    ``graphs://`` resource link — do NOT re-author the HTML yourself. If the
-    path exists locally just share it; if the server is remote (cloud), read
-    the linked resource and save its text as a local ``.html`` file.
+    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
+    yourself. If the path exists locally just share it. If that path is not
+    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         query: Search query text — seeds the subgraph to visualize. Omit (empty)
@@ -176,7 +181,7 @@ async def visualize_memory_structure(
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
         max_docs: With no ``query``: how many most-recent documents to embed
-            (default from config, 500); the inline view shows the 100 most
+            (default from config, 250); the inline view shows the 100 most
             recent and a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
@@ -248,9 +253,14 @@ async def query_memory(
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
     client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
-    path exists locally just share it; if the server is remote (cloud), read
-    the linked resource and save its text as a local ``.html`` file.
+    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
+    yourself. If the path exists locally just share it. If that path is not
+    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         query: Natural language question about the knowledge graph.
@@ -305,9 +315,14 @@ async def search_memory(
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
     client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://`` resource link — do NOT re-author the HTML yourself. If that
-    path exists locally just share it; if the server is remote (cloud), read
-    the linked resource and save its text as a local ``.html`` file.
+    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
+    yourself. If the path exists locally just share it. If that path is not
+    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         query: Search query text.
