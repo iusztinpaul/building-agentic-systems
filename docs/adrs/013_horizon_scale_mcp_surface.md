@@ -55,11 +55,14 @@ Seven related choices, one amendment set — each the least mechanism that makes
    `[]` is a trap, and the `/goto` tokens are opaque by design. *Upgrade trigger:* a Bright Data format
    that resolves `/goto` → reintroduce `engine` with Google as a tested path.
 2. **The `graphs://` download is a gzip BLOB, one code path.** `graphs://<name>.html.gz` answers
-   `gzip.compress(file)` as `bytes` with `mime_type="application/gzip"` (FastMCP base64-encodes bytes into
-   `BlobResourceContents`), compressed on read — no `.gz` on disk, no second template; the plain `.html`
+   `gzip.compress(file)` as an explicit `ResourceResult([ResourceContent(bytes, mime_type="application/gzip")])`
+   (FastMCP base64-encodes bytes into `BlobResourceContents`; a 3.2.0 TEMPLATE drops the decorator's
+   `mime_type` for a bare `bytes` return and answers `application/octet-stream`, so the mime is set on the
+   content — task 181), compressed on read — no `.gz` on disk, no second template; the plain `.html`
    name is rejected so there is one way to download. The file-branch tool text, the five tool docstrings
    and the resource docstring share ONE decode contract (`DOWNLOAD_CONTRACT`, test-anchored like
-   `ERROR_CONTRACT`): `base64 -d blob.b64 | gunzip > <name>.html`. The inline `ui://` iframe path is
+   `ERROR_CONTRACT`): `base64 -d < blob.b64 | gunzip > <name>.html` (stdin form — macOS's BSD `base64`
+   rejects a file argument). The inline `ui://` iframe path is
    unchanged. *Why not chunked resources or a signed URL:* the protocol already carries blobs; chunking
    adds a client-side protocol.
 3. **One cap on every whole-memory view, and a leaner map node.** `query.full_graph_max_docs` becomes 250

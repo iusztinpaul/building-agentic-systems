@@ -416,10 +416,15 @@ async def visualize_memory_structure(
 
     When the client renders MCP App UIs, the tree appears inline. Otherwise
     (or when ``as_html_file`` is set) it is written to a self-contained HTML
-    file; the result carries the server-side path AND a ``graphs://`` resource
-    link — do NOT re-author the HTML yourself. If the path exists locally just
-    share it; if the server is remote (cloud), read the linked resource and
-    save its text as a local ``.html`` file.
+    file; the result carries the server-side path AND a
+    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
+    yourself. If the path exists locally just share it. If that path is not
+    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         query: Search query text — narrows the view to the matching passages.
@@ -521,6 +526,18 @@ async def visualize_memory_embeddings(
     cluster. If no clustering run exists, this returns a message telling the
     operator which command to run; if the map is stale, the answer starts with
     a warning line.
+
+    When the client renders MCP App UIs, the map appears inline. Otherwise
+    (or when ``as_html_file`` is set) it is written to a self-contained HTML
+    file; the result carries the server-side path AND a
+    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
+    yourself. If the path exists locally just share it. If that path is not
+    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         hulls: Draw a convex hull around each cluster (default off).

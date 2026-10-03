@@ -65,7 +65,7 @@ A tool marked `—` is absent in that mode; the mode file names the chain to use
 - `No clustering run found for this user — run make memory-run-clustering-pipeline to build the embedding map.` — offer to run the command.
 - A first line `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat it, then the rest: the map is real but under-reports the corpus.
 
-**A visual answer carrying a file path plus a `graphs://` link** could not render inline: share the path on `tree-memory-local`; on `tree-memory` (cloud) read the linked resource and save its text as a local `.html` file.
+**A visual answer carrying a file path plus a `graphs://…html.gz` link** could not render inline: share the path on `tree-memory-local`; on `tree-memory` (cloud) read the linked `graphs://…html.gz` blob, base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it.
 
 ---
 

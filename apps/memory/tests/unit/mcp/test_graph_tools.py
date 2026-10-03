@@ -34,7 +34,7 @@ from tree.mcp.graph_tools import (
 from tests.unit.memory.conftest import FakeMemoryCollection, chunk_star_rows
 from tree.entities.memory import MEMORY_COLLECTION, to_stored_vector
 from tree.mcp.server import mcp
-from tree.mcp.viz_app import GRAPH_VIEW_URI
+from tree.mcp.viz_app import DOWNLOAD_CONTRACT, GRAPH_VIEW_URI
 from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.graph import retrieval
 from tree.memory.graph.retrieval import expand_graph
@@ -259,8 +259,10 @@ class TestGraphToolsDualDelivery:
         assert _serialize(_GRAPH_DOCS) in text_block.text
         assert str(tmp_path) in text_block.text
         assert str(link_block.uri).startswith("graphs://")
-        rendered = tmp_path / str(link_block.uri).removeprefix("graphs://")
+        assert str(link_block.uri).endswith(".html.gz")
+        rendered = tmp_path / link_block.name.removesuffix(".gz")
         assert rendered.is_file()
+        assert DOWNLOAD_CONTRACT in text_block.text
 
     async def test_docs_without_kind_skip_the_graph_and_stay_a_plain_string(
         self, mocker, tool_name, tool
@@ -707,10 +709,12 @@ async def test_visualize_fallback_returns_path_and_resource_link(
     text_block, link_block = result.content
     assert str(tmp_path) in text_block.text
     assert link_block.type == "resource_link"
-    assert str(link_block.uri).startswith("graphs://")
-    assert link_block.mimeType == "text/html"
-    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://")
+    assert str(link_block.uri) == f"graphs://{link_block.name}"
+    assert link_block.name.endswith(".html.gz")
+    assert link_block.mimeType == "application/gzip"
+    rendered = tmp_path / link_block.name.removesuffix(".gz")
     assert rendered.is_file()
+    assert DOWNLOAD_CONTRACT in text_block.text
 
 
 async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
@@ -916,3 +920,17 @@ async def test_visualize_memory_structure_still_draws_the_whole_graph_on_no_quer
     result = await visualize_memory_structure(_make_graph_ctx(ui_supported=True))
 
     assert isinstance(result, ToolResult)
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [visualize_memory_structure, query_memory, search_memory],
+    ids=["visualize_memory_structure", "query_memory", "search_memory"],
+)
+def test_every_graph_tool_docstring_states_the_download_contract(tool) -> None:
+    # Assert: the one decode instruction reaches the model verbatim (modulo
+    # wrapping) from every graphrag tool that can answer with a file.
+    doc = " ".join((tool.__doc__ or "").split())
+
+    assert DOWNLOAD_CONTRACT in doc
+    assert "save its text" not in doc

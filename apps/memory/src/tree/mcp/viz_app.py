@@ -28,10 +28,12 @@ Claude Code terminal, or agentic surfaces that only consume tool text).
 when the UI extension is absent — or when the caller explicitly asks via
 ``as_html_file`` — it renders the *same* graph into a self-contained HTML file
 under ``.tree/graphs/`` (data embedded inline, no ext-apps round-trip) and
-returns the path PLUS a ``graphs://<name>`` resource link. The path serves the
-local (stdio) deployment; the resource link serves remote ones (Prefect
-Horizon), where the client can't reach the server's filesystem and instead
-downloads the HTML over the MCP connection (read the resource, save the text).
+returns the path PLUS a ``graphs://<name>.html.gz`` resource link (the **Graph
+download**). The path serves the local (stdio) deployment; the resource link
+serves remote ones (Prefect Horizon), where the client can't reach the server's
+filesystem and instead downloads the file over the MCP connection as a gzip
+BLOB — compressed on read, so an 11 MB embedding map travels as ~3 MB of
+base64 (ADR-013 §2). The decode instruction is the one :data:`DOWNLOAD_CONTRACT`.
 Either way the slow path stays off the model: it never hand-authors HTML.
 
 **One dual-path helper for every visualization tool (ADR-005, decision 4).**
@@ -50,6 +52,7 @@ dump while the MODEL sees only the short text summary. The JS reads ``content``
 first, then falls back to ``structuredContent`` for hosts that forward it.
 """
 
+import gzip
 import json
 import logging
 import webbrowser
@@ -57,6 +60,7 @@ from typing import Any
 
 from fastmcp import Context
 from fastmcp.apps import UI_EXTENSION_ID, AppConfig, ResourceCSP
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.tools import ToolResult
 from mcp import types
 
@@ -79,6 +83,26 @@ _ORDER_ADJECTIVE = {"recency": "most-recent", "relevance": "most-relevant"}
 # The MCP Apps iframe runtime — an MCP-layer concern, hence spliced in here
 # rather than by ``_resolve_static`` (which the standalone file variant shares).
 _EXT_APPS_CDN = "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps"
+
+#: The **Graph download**'s media type — the resource link, the template and
+#: every blob it answers carry it.
+GZIP_MIME = "application/gzip"
+
+#: The ONE instruction for downloading a rendered graph file from a remote
+#: server through the **Graph download** (``graphs://<name>.html.gz``, a gzip
+#: blob). It closes the file branch's tool text and is a TEST ANCHOR, the
+#: ``ERROR_CONTRACT`` pattern: every graph-capable tool's docstring and
+#: :func:`graph_file`'s must CONTAIN it verbatim (modulo line wrapping), so the
+#: decode step cannot drift between six places. FastMCP reads ``__doc__`` at
+#: import time, so the docstrings repeat the text rather than interpolate it.
+DOWNLOAD_CONTRACT = (
+    "If that path is not on your machine (remote server, e.g. Prefect Horizon), "
+    "read the linked `graphs://…html.gz` resource — an `application/gzip` blob: "
+    "write its base64 `blob` to a file and run "
+    "`base64 -d < blob.b64 | gunzip > <name>.html` "
+    "(Python: `gzip.decompress(base64.b64decode(blob))`), "
+    "then open the `.html` in a browser."
+)
 
 
 def _graph_tool_result(
@@ -103,7 +127,13 @@ def _graph_tool_result(
     * **Self-contained HTML file** otherwise (or when ``as_html_file`` is set):
       the same payload is rendered under ``.tree/graphs/``, the browser is
       opened BEST EFFORT, and the result carries the server-side path plus a
-      ``graphs://<name>`` resource link for clients of a remote server.
+      ``graphs://<name>.html.gz`` resource link (the **Graph download**) for
+      clients of a remote server. If that path is not on your machine (remote
+      server, e.g. Prefect Horizon), read the linked `graphs://…html.gz`
+      resource — an `application/gzip` blob: write its base64 `blob` to a
+      file and run `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+      `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+      browser.
 
     Args:
         ctx: The MCP request context (used for the capability check).
@@ -166,16 +196,14 @@ def _graph_tool_result(
         "Opened it in your browser."
         if opened
         else (
-            "Open it in a browser to explore (drag nodes, zoom/pan). If that "
-            "path is NOT on your machine (the MCP server runs remotely, e.g. "
-            "on Prefect Horizon), read the linked MCP resource instead and "
-            "save its text locally as an .html file."
+            "Open it in a browser to explore (drag nodes, zoom/pan). "
+            f"{DOWNLOAD_CONTRACT}"
         )
     )
     # The file lives on the SERVER's filesystem. For remote deployments the
-    # path alone is unreachable, so the same HTML is also exposed as an MCP
-    # resource (``graphs://<name>``, see :func:`graph_file`) the client can
-    # fetch over the existing connection.
+    # path alone is unreachable, so the same HTML is also exposed as a gzip
+    # blob resource (``graphs://<name>.html.gz``, see :func:`graph_file`) the
+    # client can fetch over the existing connection.
     return ToolResult(
         content=[
             types.TextContent(
@@ -187,35 +215,57 @@ def _graph_tool_result(
             ),
             types.ResourceLink(
                 type="resource_link",
-                uri=f"graphs://{path.name}",  # type: ignore[arg-type]
-                name=path.name,
-                mimeType="text/html",
-                description=f"Self-contained interactive {noun} (download me)",
+                uri=f"graphs://{path.name}.gz",  # type: ignore[arg-type]
+                name=f"{path.name}.gz",
+                mimeType=GZIP_MIME,
+                description=(
+                    f"gzip-compressed self-contained interactive {noun} — "
+                    "base64-decode the blob, gunzip, open the .html"
+                ),
             ),
         ]
     )
 
 
-@mcp.resource("graphs://{name}", mime_type="text/html")
-def graph_file(name: str) -> str:
-    """Self-contained HTML of a previously rendered graph visualization.
+@mcp.resource("graphs://{name}", mime_type=GZIP_MIME)
+def graph_file(name: str) -> ResourceResult:
+    """Gzip of a previously rendered graph visualization — the **Graph download**.
 
-    Lets clients of a REMOTE server (e.g. Prefect Horizon) download the file
-    ``visualize_memory_structure`` wrote to the server-side ``.tree/graphs/`` dir:
-    read this resource and save its text locally as an ``.html`` file.
+    Lets clients of a REMOTE server (e.g. Prefect Horizon) download the
+    self-contained HTML a visualize tool wrote to the server-side
+    ``.tree/graphs/`` dir, as an MCP BLOB (base64 in the frame). Only
+    ``<name>.html.gz`` names are served — one download path. If that path is
+    not on your machine (remote server, e.g. Prefect Horizon), read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its base64
+    `blob` to a file and run `base64 -d < blob.b64 | gunzip > <name>.html`
+    (Python: `gzip.decompress(base64.b64decode(blob))`), then open the `.html`
+    in a browser.
     """
 
+    invalid = f"Invalid graph file name: {name!r} (expected <name>.html.gz)"
+    # A NUL byte would otherwise surface as the OS-level "embedded null
+    # character" from ``Path.resolve()`` instead of this message.
+    if "\x00" in name or not name.endswith(".gz"):
+        raise ValueError(invalid)
     base = GRAPHS_DIR.resolve()
-    path = (base / name).resolve()
+    path = (base / name.removesuffix(".gz")).resolve()
     # Guard traversal: the rendered files are flat ``<slug>-<stamp>.html``
     # names directly under GRAPHS_DIR.
     if path.parent != base or path.suffix != ".html":
-        raise ValueError(f"Invalid graph file name: {name!r}")
+        raise ValueError(invalid)
     if not path.is_file():
         raise FileNotFoundError(
-            f"No rendered graph named {name!r} — run visualize_memory_structure first."
+            f"No rendered graph named {name!r} — run a visualize tool with "
+            "as_html_file=true first."
         )
-    return path.read_text(encoding="utf-8")
+    # Compressed on read: no second file on disk. ``bytes`` content becomes a
+    # base64 ``BlobResourceContents``. The mime type is set HERE, not left to
+    # the decorator: FastMCP 3.2 wraps a TEMPLATE's bare ``bytes`` return as
+    # ``application/octet-stream`` (only static resources forward their
+    # declared ``mime_type``); the decorator's copy is what ``list`` shows.
+    return ResourceResult(
+        [ResourceContent(gzip.compress(path.read_bytes()), mime_type=GZIP_MIME)]
+    )
 
 
 @mcp.resource(

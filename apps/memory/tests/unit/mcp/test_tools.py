@@ -42,6 +42,7 @@ from tree.mcp.tools import (
     visualize_memory_embeddings,
     visualize_memory_structure,
 )
+from tree.mcp.viz_app import DOWNLOAD_CONTRACT
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.rag.structure import (
     EMPTY_MEMORY_MESSAGE,
@@ -752,9 +753,10 @@ class TestVisualizeMemoryEmbeddings:
         _, link_block = result.content
         assert link_block.type == "resource_link"
         assert re.fullmatch(
-            r"graphs://embedding-map-\d{8}-\d{6}\.html", str(link_block.uri)
+            r"graphs://embedding-map-\d{8}-\d{6}\.html\.gz", str(link_block.uri)
         ), link_block.uri
-        assert (tmp_path / link_block.name).is_file()
+        assert link_block.mimeType == "application/gzip"
+        assert (tmp_path / link_block.name.removesuffix(".gz")).is_file()
 
     async def test_the_delivered_copy_calls_the_picture_a_map_not_a_graph(
         self, mocker, tmp_path
@@ -777,8 +779,10 @@ class TestVisualizeMemoryEmbeddings:
         assert "self-contained interactive embedding map to:" in text_block.text
         assert "interactive graph" not in text_block.text
         assert link_block.description == (
-            "Self-contained interactive embedding map (download me)"
+            "gzip-compressed self-contained interactive embedding map — "
+            "base64-decode the blob, gunzip, open the .html"
         )
+        assert text_block.text.endswith(DOWNLOAD_CONTRACT)
         assert inline.content[0].text.endswith("(interactive embedding map view).")
 
     async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
@@ -972,9 +976,11 @@ class TestRagVisualizeMemoryStructure:
         text_block, link_block = result.content
         assert text_block.text.startswith("Memory structure (rag:")
         assert re.fullmatch(
-            r"graphs://structure-\d{8}-\d{6}\.html", str(link_block.uri)
+            r"graphs://structure-\d{8}-\d{6}\.html\.gz", str(link_block.uri)
         ), link_block.uri
-        assert (tmp_path / link_block.name).is_file()
+        assert link_block.mimeType == "application/gzip"
+        assert (tmp_path / link_block.name.removesuffix(".gz")).is_file()
+        assert DOWNLOAD_CONTRACT in text_block.text
 
     async def test_as_html_file_forces_the_file_for_a_ui_client(
         self, mocker, tmp_path, readers
@@ -1088,6 +1094,16 @@ class TestRagVisualizeMemoryStructure:
         doc = " ".join((visualize_memory_structure.__doc__ or "").split())
 
         assert ERROR_CONTRACT in doc
+
+    @pytest.mark.parametrize(
+        "tool",
+        [visualize_memory_structure, visualize_memory_embeddings],
+        ids=["visualize_memory_structure", "visualize_memory_embeddings"],
+    )
+    def test_the_docstring_states_the_download_contract(self, tool) -> None:
+        doc = " ".join((tool.__doc__ or "").split())
+
+        assert DOWNLOAD_CONTRACT in doc
 
     def test_the_signature_has_no_max_hops(self) -> None:
         params = set(inspect.signature(visualize_memory_structure).parameters)
