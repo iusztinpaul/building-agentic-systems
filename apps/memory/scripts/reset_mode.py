@@ -14,12 +14,12 @@ The four-step order:
     3. re-serve workflows (make memory-serve-workflows)
     4. make memory-run-pipeline
 
-DESTRUCTIVE, so it is a DRY RUN unless the confirmation token matches: `yes` on
-a local target, `prod` when the env target is prod OR the Mongo scheme is
-`mongodb+srv` (an Atlas URI is prod data whatever `.env.target` says — and
-direnv exports the prod vars into every shell). Either way it first prints the
-env target, the redacted host, the database, the configured mode and the row
-counts. A dry run exits 1.
+DESTRUCTIVE, so it is a DRY RUN unless `CONFIRM=yes` — run it bare first and
+read the env target. Either way it first prints the env target, the redacted
+host, the database, the configured mode and the row counts, plus a PROD warning
+when the env target is prod OR the Mongo scheme is `mongodb+srv` (an Atlas URI
+is prod data whatever `.env.target` says — and direnv exports the prod vars into
+every shell). A dry run exits 1.
 
 Needs no follow-up beyond step 4: `person:self` comes back at the next graphrag
 run (`User.ensure_self_person`), Beanie recreates the classic indexes at the
@@ -30,7 +30,7 @@ them from cache at no Voyage cost. Do not add a cache purge here.
 
 Usage:
     make memory-reset-mode                    # dry run: what would go?
-    make memory-reset-mode CONFIRM=yes        # drop (local target)
+    make memory-reset-mode CONFIRM=yes        # drop (any target)
     uv run python scripts/reset_mode.py --env-target local --confirm yes
 """
 
@@ -48,10 +48,8 @@ init_logger()
 logger = logging.getLogger(__name__)
 
 
-def _required_token(env_target: str) -> str:
-    if env_target == "prod" or settings.mongo.mongo_scheme == "mongodb+srv":
-        return "prod"
-    return "yes"
+def _is_prod(env_target: str) -> bool:
+    return env_target == "prod" or settings.mongo.mongo_scheme == "mongodb+srv"
 
 
 def _log_block(report: ModeResetReport) -> None:
@@ -75,7 +73,6 @@ def _log_block(report: ModeResetReport) -> None:
 
 
 async def _run(env_target: str, confirm: str | None) -> None:
-    required = _required_token(env_target)
     database = settings.mongo.mongo_initdb_database
     client = AsyncMongoClient(settings.mongo.mongo_uri.get_secret_value())
     try:
@@ -83,16 +80,18 @@ async def _run(env_target: str, confirm: str | None) -> None:
             client, database, env_target=env_target, dry_run=True
         )
         _log_block(report)
+        if _is_prod(env_target):
+            logger.warning(
+                "Target is PROD (%s) — CONFIRM=yes drops the memory of every "
+                "user there.",
+                report.target,
+            )
 
-        if confirm != required:
-            if required == "prod":
-                logger.info("Dry run: nothing dropped.")
-                logger.info("Target is prod — re-run with CONFIRM=prod to drop it.")
-            else:
-                logger.info(
-                    "Dry run: nothing dropped. Re-run with CONFIRM=yes to drop "
-                    "both collections."
-                )
+        if confirm != "yes":
+            logger.info(
+                "Dry run: nothing dropped. Re-run with CONFIRM=yes to drop "
+                "both collections."
+            )
             raise SystemExit(1)
 
         report = await reset_memory_mode(
@@ -115,13 +114,12 @@ async def _run(env_target: str, confirm: str | None) -> None:
     default="unknown",
     show_default=True,
     help="The active env target (the Makefile passes it). `unknown` leaves the "
-    "prod decision to the Mongo scheme alone.",
+    "prod warning to the Mongo scheme alone.",
 )
 @click.option(
     "--confirm",
     default=None,
-    help="Confirmation token: `yes` on a local target, `prod` on prod. Anything "
-    "else is a dry run.",
+    help="Confirmation token: `yes` drops (on any target). Anything else is a dry run.",
 )
 def main(env_target: str, confirm: str | None) -> None:
     """Drop the mode-bound collections for ALL users (dry run without a token)."""

@@ -37,7 +37,7 @@ make memory-serve-workflows &             # 3. re-serve
 make memory-run-pipeline                  # 4. every document is pending again -> rebuilt in the new mode
 ```
 
-On the prod target — or any `mongodb+srv` URI, whatever `.env.target` says — `CONFIRM=yes` is refused and only `CONFIRM=prod` drops. The reset keeps `documents` and `users` (and the dream watermark and the extraction audit), so nothing is re-scraped; chunking and child embeddings replay from the Prefect cache, and graphrag re-creates `person:self` by itself.
+Run the dry run first and read its `env target:` line: `CONFIRM=yes` drops on every target, and the dry run warns when the target is prod or any `mongodb+srv` URI (whatever `.env.target` says). The reset keeps `documents` and `users` (and the dream watermark and the extraction audit), so nothing is re-scraped; chunking and child embeddings replay from the Prefect cache, and graphrag re-creates `person:self` by itself.
 
 ## Setup
 

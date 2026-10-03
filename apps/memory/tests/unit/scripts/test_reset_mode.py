@@ -2,9 +2,9 @@
 
 The script is glue: Mongo and ``reset_memory_mode`` are mocked, and what is
 asserted is the contract an operator sees on a command that drops the memory of
-EVERY user — the target and counts first, a dry run (exit 1) unless the token
-matches, and a token that must say ``prod`` whenever the target is prod or an
-Atlas ``mongodb+srv`` URI (direnv exports the prod vars into every shell).
+EVERY user — the target and counts first, a dry run (exit 1) unless
+``CONFIRM=yes``, and a PROD warning whenever the target is prod or an Atlas
+``mongodb+srv`` URI (direnv exports the prod vars into every shell).
 """
 
 from __future__ import annotations
@@ -110,29 +110,35 @@ class TestResetModeCli:
         assert "Next: set memory.mode" in logs
         assert "3 document(s) are pending" in logs
 
-    def test_yes_on_the_prod_target_is_refused(
+    def test_the_prod_dry_run_warns_and_drops_nothing(
         self, cli_module, reset_spy, caplog
     ) -> None:
+        result, logs = _invoke(cli_module, caplog, "--env-target", "prod")
+
+        assert result.exit_code == 1
+        assert not _dropped(reset_spy)
+        assert "Target is PROD" in logs
+        assert "Re-run with CONFIRM=yes" in logs
+
+    def test_yes_on_the_prod_target_drops(self, cli_module, reset_spy, caplog) -> None:
         result, logs = _invoke(
             cli_module, caplog, "--env-target", "prod", "--confirm", "yes"
         )
 
-        assert result.exit_code == 1
-        assert not _dropped(reset_spy)
-        assert "Target is prod — re-run with CONFIRM=prod to drop it." in logs
-        # The local hint would be wrong advice here.
-        assert "Re-run with CONFIRM=yes" not in logs
+        assert result.exit_code == 0, result.output
+        assert _dropped(reset_spy)
+        assert "Target is PROD" in logs
 
-    def test_prod_on_the_prod_target_drops(self, cli_module, reset_spy) -> None:
+    def test_the_old_prod_token_is_a_dry_run(self, cli_module, reset_spy) -> None:
         result = CliRunner().invoke(
             cli_module.main, ["--env-target", "prod", "--confirm", "prod"]
         )
 
-        assert result.exit_code == 0, result.output
-        assert _dropped(reset_spy)
+        assert result.exit_code == 1
+        assert not _dropped(reset_spy)
 
     @pytest.mark.parametrize("env_target", ["local", "unknown"])
-    def test_an_srv_uri_is_prod_whatever_the_env_target_says(
+    def test_an_srv_uri_warns_prod_whatever_the_env_target_says(
         self, cli_module, reset_spy, mocker, caplog, env_target: str
     ) -> None:
         mocker.patch.object(
@@ -141,13 +147,11 @@ class TestResetModeCli:
             MongoSettings(mongo_scheme="mongodb+srv", mongo_host="tree.x.mongodb.net"),
         )
 
-        result, logs = _invoke(
-            cli_module, caplog, "--env-target", env_target, "--confirm", "yes"
-        )
+        result, logs = _invoke(cli_module, caplog, "--env-target", env_target)
 
         assert result.exit_code == 1
         assert not _dropped(reset_spy)
-        assert "CONFIRM=prod" in logs
+        assert "Target is PROD" in logs
 
     def test_a_direct_invocation_on_a_plain_uri_takes_yes(
         self, cli_module, reset_spy, caplog
@@ -157,6 +161,7 @@ class TestResetModeCli:
         assert result.exit_code == 0, result.output
         assert _dropped(reset_spy)
         assert "env target: unknown" in logs
+        assert "Target is PROD" not in logs
 
     def test_the_script_never_boots_beanie(self, cli_module) -> None:
         # Booting Beanie right before the drop would recreate the OLD mode's

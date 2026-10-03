@@ -19,7 +19,7 @@ By default, use the "Paul Iusztin" user when testing.
    make memory-run-pipeline              # ④ every document is pending again, so this rebuilds everything
    ```
 
-   Read the dry run's `env target:` before confirming — on prod (or any `mongodb+srv` URI) `CONFIRM=yes` is refused and only `CONFIRM=prod` drops. Paste its row counts into the Log. Verifying a change in BOTH modes = run steps 1–3 twice, with a `make memory-reset-mode CONFIRM=yes` in between.
+   Read the dry run's `env target:` before confirming — `CONFIRM=yes` drops on every target, and the dry run warns when it is prod (or any `mongodb+srv` URI). Paste its row counts into the Log. Verifying a change in BOTH modes = run steps 1–3 twice, with a `make memory-reset-mode CONFIRM=yes` in between.
 
    `users` survive the reset. A `graphrag` run re-creates each user's `person:self` node at its first extraction (and `make memory-signup` does it for an existing user), so no reseed step is needed after switching from `rag`.
 

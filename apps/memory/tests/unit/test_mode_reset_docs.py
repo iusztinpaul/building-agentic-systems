@@ -27,8 +27,9 @@ def test_the_mode_switch_docs_name_the_command(path: Path) -> None:
     assert "make memory-reset-mode CONFIRM=yes" in path.read_text(encoding="utf-8")
 
 
-def test_the_readme_names_the_prod_token() -> None:
-    assert "CONFIRM=prod" in _MEMORY_README.read_text(encoding="utf-8")
+def test_no_reader_doc_names_the_retired_prod_token() -> None:
+    for path in (_MEMORY_README, _E2E_SKILL):
+        assert "CONFIRM=prod" not in path.read_text(encoding="utf-8")
 
 
 def test_the_raw_mongosh_drop_is_gone_from_what_readers_follow() -> None:
