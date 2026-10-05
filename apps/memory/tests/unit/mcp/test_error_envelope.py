@@ -20,8 +20,10 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from beanie import PydanticObjectId
+from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pymongo.errors import ServerSelectionTimeoutError
 
+from tree.data.web.web_serp import BrightDataCooldownError
 from tree.mcp import graph_tools, tools
 from tree.mcp.graph_tools import review_confirm, review_list_pending
 from tree.mcp.tools import (
@@ -62,7 +64,6 @@ def _make_ctx() -> MagicMock:
         "database": "test_db",
         "embedding_model": MagicMock(),
         "llm": MagicMock(),
-        "user_id": _USER_ID,
         "thread_id": "mcp-session-test",
     }
     return ctx
@@ -83,6 +84,12 @@ def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
         request=request,
         response=httpx.Response(status_code, request=request),
     )
+
+
+def _prefect_http_error(status_code: int) -> PrefectHTTPStatusError:
+    """The error ``PrefectHttpxAsyncClient`` raises for a non-2xx answer."""
+
+    return PrefectHTTPStatusError.from_httpx_error(_http_status_error(status_code))
 
 
 class TestHelper:
@@ -255,6 +262,26 @@ class TestMapping:
         assert payload["error_type"] == "network_error"
         assert payload["retryable"] is True
 
+    async def test_search_web_reports_a_serp_cooldown_as_retryable_fetch_failed(
+        self, mocker
+    ) -> None:
+        # NOT ``search_unavailable``: that code belongs to the memory retrieval
+        # legs (ADR-008 §2); a cooled-down web query is a fetch that will work
+        # again in 15 s (ADR-013 §1).
+        mocker.patch(
+            "tree.mcp.tools.web_search",
+            new_callable=AsyncMock,
+            side_effect=BrightDataCooldownError(
+                "This query recently failed and cannot be attempted at this time."
+            ),
+        )
+
+        payload = _envelope(await _tool_fn(search_web)("prefect", _make_ctx()))
+
+        assert payload["error_type"] == "fetch_failed"
+        assert payload["retryable"] is True
+        assert "15 s" in payload["message"]
+
     @pytest.mark.parametrize(
         "status_code,retryable",
         [(429, True), (500, True), (503, True), (400, False), (404, False)],
@@ -276,6 +303,51 @@ class TestMapping:
         assert payload["error_type"] == "http_error"
         assert payload["retryable"] is retryable
         assert str(status_code) in payload["message"]
+
+    @pytest.mark.parametrize(
+        "exc,error_type,retryable",
+        [
+            (_prefect_http_error(401), "configuration_error", False),
+            (_prefect_http_error(403), "configuration_error", False),
+            (_prefect_http_error(404), "configuration_error", False),
+            (ObjectNotFound(_http_status_error(404)), "configuration_error", False),
+            (_prefect_http_error(422), "internal_error", False),
+            (_prefect_http_error(429), "pipeline_unavailable", True),
+            (_prefect_http_error(500), "pipeline_unavailable", True),
+            (_prefect_http_error(503), "pipeline_unavailable", True),
+            (httpx.ConnectError("refused"), "pipeline_unavailable", True),
+            (httpx.ReadTimeout("timed out"), "pipeline_unavailable", True),
+        ],
+        ids=[
+            "401",
+            "403",
+            "404",
+            "object-not-found",
+            "422",
+            "429",
+            "500",
+            "503",
+            "connect-error",
+            "read-timeout",
+        ],
+    )
+    async def test_the_ingest_dispatch_boundary_maps_prefect_failures(
+        self, mocker, exc: Exception, error_type: str, retryable: bool
+    ) -> None:
+        # ADR-013 §4: only Prefect's bad minutes are worth a retry — an
+        # expired key, a missing deployment or a malformed request are not.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=exc,
+        )
+
+        payload = _envelope(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload["error_type"] == error_type
+        assert payload["retryable"] is retryable
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +409,11 @@ def test_no_legacy_error_keys(module) -> None:
     )
 
 
-# Every tool that CAN answer an envelope, in both modules. Tools that only ever
-# answer data (``visualize_memory_embeddings``, the dashboard) are absent on
-# purpose — promising an error shape they never emit would be a lie to the model.
+# Every tool that CAN answer an envelope from its own work, in both modules.
+# ``visualize_memory_embeddings`` and the dashboard are absent: their only
+# envelope is the **Request user** seam's (``configuration_error`` /
+# ``storage_unavailable``, swept in ``test_tools_request_user.py``) — they have
+# no catch-all of their own to promise yet.
 _ENVELOPE_TOOLS = [
     ("rag:search_memory", tools.search_memory),
     ("rag:visualize_memory_structure", tools.visualize_memory_structure),

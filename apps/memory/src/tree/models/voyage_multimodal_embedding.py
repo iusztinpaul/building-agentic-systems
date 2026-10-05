@@ -28,11 +28,11 @@ import asyncio
 import logging
 
 import aiohttp
-from prefect.concurrency.asyncio import rate_limit
 
 from tree.config.app_config import app_config
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 from tree.models.exceptions import ExtractionError, ModelError
+from tree.models.throttle import acquire_voyage_slot
 from tree.observability import record_embedding_usage, track
 
 logger = logging.getLogger(__name__)
@@ -65,15 +65,6 @@ def _record_voyage_cost(model: str, body: dict) -> None:
     except Exception as exc:  # noqa: BLE001 — telemetry must never break embed
         logger.debug("Opik Voyage cost recording no-op: %s", exc)
 
-
-# The Prefect global concurrency limit (ADR-002 §1) that throttles every real
-# Voyage embed POST across separate flow runs. Acquired immediately before each
-# real network POST attempt (inside the 429-backoff loop, so a 429-retry
-# re-acquires a fresh slot). ``strict=False`` makes a missing limit a no-op, so
-# unit tests and fresh dev boxes without a synced ``voyage-embeddings`` GCL
-# behave exactly as before. A ``_CachedSingleEmbedding`` cache hit never reaches
-# this client, so it is never throttled.
-_VOYAGE_EMBED_LIMIT = "voyage-embeddings"
 
 # Default exponential-backoff schedule for HTTP 429 rate limits. Kept
 # tight (8 attempts, capped at 60s each) so a real outage still surfaces
@@ -214,13 +205,9 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
         backoff_iter = iter(self._rate_limit_backoff_seconds)
         while True:
             try:
-                # ADR-002 §1: acquire one shared ``voyage-embeddings`` slot per
-                # real POST attempt. Placed inside the 429-backoff loop so a
-                # 429-retry re-acquires a fresh slot; ``strict=False`` no-ops
-                # when the limit is absent. The early ``if not texts: return []``
-                # above short-circuits before this, so an empty call never
-                # occupies a slot.
-                await rate_limit(_VOYAGE_EMBED_LIMIT, occupy=1, strict=False)
+                # One ``voyage-embeddings`` slot per real POST attempt (fail-open;
+                # placement rationale in ``acquire_voyage_slot``).
+                await acquire_voyage_slot()
                 timeout = aiohttp.ClientTimeout(total=self._timeout)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(

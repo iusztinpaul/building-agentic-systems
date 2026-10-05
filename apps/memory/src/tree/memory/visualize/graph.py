@@ -17,9 +17,11 @@ What lives here:
   as a node, and the force / display defaults the template seeds from).
 * :data:`_GRAPH_STYLE` / :data:`_BODY_MARKUP` / :data:`_RENDER_JS` +
   :func:`_resolve_static` — the shared CSS / DOM / JS spliced into a template.
-* :func:`_render_graph_file` — write a self-contained HTML file (data embedded
-  inline as ``const DATA = …``, so it works as a plain ``file://`` page) under
-  the one output convention ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
+* :func:`render_graph_html` — the self-contained HTML as a string (data
+  embedded inline as ``const DATA = …``, so it works as a plain ``file://``
+  page); the MCP **Graph file** stores its gzip.
+* :func:`_render_graph_file` — write that HTML to a file under the one output
+  convention ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
 * :func:`densify_document_ranks` — re-key a TRUNCATED payload's ``docRank``
   on the document stars it draws.
 * :func:`visualize_query_result` — the CLI-facing entry point.
@@ -51,8 +53,9 @@ resources, CSP wiring, the ext-apps iframe runtime) live in
 The template also draws the **Embedding map** (ADR-007 §2) through four
 OPTIONAL payload keys — ``layout: "fixed"`` (use each node's ``x``/``y`` and
 build no simulation; drag, pin and the display knobs still work), ``legend``
-(explicit rows instead of the per-type one), ``warning`` (an amber banner) and
-``hulls`` (the convex-hull overlay). A payload without them renders the live
+(explicit rows instead of the per-type one; a row's ``cluster_id`` colours the
+lean map nodes, which ship no ``color`` of their own), ``warning`` (an amber
+banner) and ``hulls`` (the convex-hull overlay). A payload without them renders the live
 graph; the map payload builder is :mod:`tree.memory.visualize.embeddings`.
 """
 
@@ -379,30 +382,39 @@ def _payload_noun(payload: dict[str, Any]) -> str:
     return "embedding map" if payload.get("layout") == "fixed" else "graph"
 
 
-def _render_graph_file(
-    payload: dict[str, Any],
-    query: str = "",
-    output: Path | None = None,
-) -> Path:
-    """Write a self-contained HTML file (data embedded inline) and return it.
+def render_graph_html(payload: dict[str, Any]) -> str:
+    """Render a payload into the self-contained HTML page, data embedded inline.
 
     Takes any payload the ONE template understands: a **Graph payload** or an
-    **Embedding map** payload (the same ``{nodes, edges}`` plus the optional
-    ``layout`` / ``legend`` / ``warning`` / ``hulls`` keys).
-
-    Used as the fallback when the client does not render MCP App UIs, or when
-    the caller explicitly asks for an openable file. The HTML carries its data
-    directly (``const DATA = …``) rather than waiting for the ext-apps
-    ``ontoolresult`` channel, so it works as a plain ``file://`` page.
-
-    Defaults to a uniquely-named file under ``.tree/graphs/`` (created on
-    demand); pass ``output`` to write somewhere specific.
+    **Embedding map** payload. The page carries its data directly
+    (``const DATA = …``) rather than waiting for the ext-apps ``ontoolresult``
+    channel, so it works as a plain ``file://`` page. Shared by
+    :func:`_render_graph_file` (the CLI and the local stdio server write it to
+    disk) and the MCP file branch (which stores its gzip as a **Graph file**).
     """
 
     # Guard against ``</script>`` (or ``</`` generally) appearing inside a
     # label and prematurely closing the inline <script> block.
     data_json = json.dumps(payload).replace("</", "<\\/")
-    html = _FILE_HTML_BASE.replace("__DATA__", data_json)
+    return _FILE_HTML_BASE.replace("__DATA__", data_json)
+
+
+def _render_graph_file(
+    payload: dict[str, Any],
+    query: str = "",
+    output: Path | None = None,
+) -> Path:
+    """Write :func:`render_graph_html`'s page to a file and return its path.
+
+    Used by the CLI and, on a local ``stdio`` MCP server only, by the file
+    branch's open-in-browser convenience (a remote server stores a **Graph
+    file** instead and writes nothing to disk).
+
+    Defaults to a uniquely-named file under ``.tree/graphs/`` (created on
+    demand); pass ``output`` to write somewhere specific.
+    """
+
+    html = render_graph_html(payload)
 
     path = output or _default_graph_path(query)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -676,6 +688,18 @@ _RENDER_JS = """\
         : nodes.length + " nodes · " + edges.length + " edges";
       const hullsEnabled = legendRows !== null && typeof payload.hulls === "boolean";
 
+      // ONE colour resolver for every site that paints a node. A Graph payload
+      // node ships its own `color`; a lean Embedding-map node does not — its
+      // legend row (matched on `cluster_id`, noise -1) carries the hue. Any
+      // other negative id is noise too (embeddings.NOISE_COLOUR), never the
+      // "unclustered / stale" grey, which names chunks NOT on the map.
+      const NOISE_COLOUR = "#9e9e9e";
+      const colourByCluster = new Map(
+        (legendRows || []).filter((r) => typeof r.cluster_id === "number")
+          .map((r) => [r.cluster_id, r.color]));
+      const colourOf = (n) => n.color ?? colourByCluster.get(n.cluster_id)
+        ?? (n.cluster_id < 0 ? NOISE_COLOUR : "#d5d8de");
+
       const nodeById = new Map(nodes.map((n) => [n.id, n]));
       // Only an edge whose two endpoints exist is drawn — or simulated.
       const drawnEdges = edges.filter((e) => nodeById.has(e.source) && nodeById.has(e.target));
@@ -747,9 +771,9 @@ _RENDER_JS = """\
         const s = simById.get(n.id);
         const shown = isVisible(n.id);
         graph.addNode(n.id, {
-          label: n.label,            // labels in-view show ONLY the name
+          label: n.label ?? "",      // labels in-view show ONLY the name (a map ships none)
           nodeType: n.type,          // (Sigma reserves "type" for the program)
-          color: n.color,
+          color: colourOf(n),
           size: n.size,              // by role, resolved in Python
           // Sigma skips a hidden node and every edge touching it.
           hidden: !shown,
@@ -900,7 +924,16 @@ _RENDER_JS = """\
         const n = nodeById.get(node);
         if (!n) return;
         // Lead with type (+ subtype, already in meta), then the rest of the meta.
-        const card = Object.assign({ type: n.type }, n.meta);
+        let card;
+        if (isFixed) {
+          // A map node ships no meta.document (it IS the name): put the row
+          // back in its old slot, after `cluster`, so the card reads as before.
+          const { cluster, ...rest } = n.meta || {};
+          card = Object.assign({ type: n.type }, cluster === undefined ? {} : { cluster },
+            { document: n.name }, rest);
+        } else {
+          card = Object.assign({ type: n.type }, n.meta);
+        }
         // A parent whose children were not pulled in says how many exist.
         if (n.childCount != null) card["child chunks"] = n.childCount + " (not shown)";
         tooltip.innerHTML = '<div class="tt-title">' + esc(n.name) + "</div>" + metaRows(card);
@@ -1135,7 +1168,7 @@ _RENDER_JS = """\
             : '<span class="size">· ' + esc(r.size) + "</span>") + "</div>"
         ).join("");
       } else {
-        const colorByType = new Map(nodes.map((n) => [n.type, n.color]));
+        const colorByType = new Map(nodes.map((n) => [n.type, colourOf(n)]));
         rows = [...colorByType.entries()].sort((a, b) => a[0].localeCompare(b[0]))
           .map(([t, c]) => '<div class="row"><span class="dot" style="background:' + c + '"></span>' + t + "</div>")
           .join("");
@@ -1163,7 +1196,7 @@ _RENDER_JS = """\
           // Noise (-1) is a residue, not a group: it never gets a hull.
           if (typeof n.cluster_id !== "number" || n.cluster_id < 0) continue;
           let entry = byCluster.get(n.cluster_id);
-          if (!entry) { entry = { color: n.color, ids: [] }; byCluster.set(n.cluster_id, entry); }
+          if (!entry) { entry = { color: colourOf(n), ids: [] }; byCluster.set(n.cluster_id, entry); }
           entry.ids.push(n.id);
         }
       }

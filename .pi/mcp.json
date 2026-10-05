@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "tree-memory": {
+      "type": "http",
+      "url": "https://tree-memory.fastmcp.app/mcp"
+    },
+    "tree-memory-local": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "apps/memory",
+        "run",
+        "--env-file",
+        "../../.env",
+        "python",
+        "scripts/serve_mcp.py"
+      ],
+      "env": {
+        "ENV_FILE_PATH": "../../.env"
+      }
+    }
+  }
+}

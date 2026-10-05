@@ -5,6 +5,9 @@ READS the latest **Clustering run** and draws it (ADR-007 Decision 8) — it nev
 clusters. `make memory-run-clustering-pipeline` is what produces the data; this
 command only turns the stored `cluster_id` / `viz {x, y, run_id}` fields into a
 picture, so it is instant and needs no served workflows, no Prefect and no LLM.
+It plots the chunks of the ``query.full_graph_max_docs`` (250) most-recent
+documents; the summary says ``N of M chunks`` and the legend counts the whole
+run (ADR-013 §3).
 
 Two outcomes that are NOT failures of the renderer:
 

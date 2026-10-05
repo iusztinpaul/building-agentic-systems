@@ -189,9 +189,13 @@ class MapPoint(BaseModel):
 class EmbeddingMap(BaseModel):
     """The whole picture one surface renders — read from storage, never computed.
 
-    ``total_children`` and ``unclustered`` drive the warning contract
-    (ADR-007 §8): the output starts with "N of M chunks have no cluster
-    assignment (or a stale one)" whenever ``unclustered`` is non-zero.
+    Two scopes, on purpose (ADR-013 §3): ``points`` are the PLOT — only the
+    chunks of the ``plotted_documents`` most-recent documents
+    (``query.full_graph_max_docs``) — while ``clusters``, ``clustered``,
+    ``noise``, ``total_children`` and ``unclustered`` describe the WHOLE run.
+    ``total_children`` and ``unclustered`` drive the warning contract (ADR-007
+    §8): the output starts with "N of M chunks have no cluster assignment (or
+    a stale one)" whenever ``unclustered`` is non-zero.
     """
 
     run_id: str = Field(description="The Clustering run these points come from.")
@@ -199,7 +203,10 @@ class EmbeddingMap(BaseModel):
         description="One entry per non-noise cluster of that run (the legend)."
     )
     points: list[MapPoint] = Field(
-        description="The drawn chunks: those carrying this run's coordinates."
+        description=(
+            "The drawn chunks: those carrying this run's coordinates whose "
+            "document is among the plotted (most-recent) documents."
+        )
     )
     total_children: int = Field(
         description="All embedded child chunks of the user (drawn or not)."
@@ -210,16 +217,31 @@ class EmbeddingMap(BaseModel):
             "omitted from points and reported in the warning and the legend."
         ),
     )
+    clustered: int = Field(
+        description=(
+            "Embedded children carrying this run's coordinates, run-wide — "
+            "plotted or cut by the document cap (the summary's M)."
+        ),
+    )
+    noise: int = Field(
+        description="This run's noise children (cluster_id -1), run-wide."
+    )
+    plotted_documents: int = Field(
+        description="Documents whose chunks are plotted: the most-recent ones."
+    )
+    total_documents: int = Field(description="All documents of the user.")
 
     @model_validator(mode="after")
-    def _check_unclustered_fits_the_corpus(self) -> "EmbeddingMap":
-        """``unclustered`` is a SUBSET count of ``total_children``.
+    def _check_counts_fit_the_corpus(self) -> "EmbeddingMap":
+        """Every count is a SUBSET count of the one it is compared against.
 
-        The store computes it as ``total_children - len(points)``, so a value
-        above the total (or below zero) means the two queries disagreed about
-        what an embedded child chunk is — and the warning line would read "7 of
-        5 chunks have no cluster assignment", which reads to an operator as a
-        broken map rather than a broken query.
+        The store computes ``unclustered`` as ``total_children - clustered``
+        (never ``- len(points)``: the document cap would read as staleness), and
+        the plot is a subset of the run, the run a subset of the corpus. A value
+        out of order means two queries disagreed about what an embedded child
+        chunk is — and the warning line would read "7 of 5 chunks have no
+        cluster assignment", which reads to an operator as a broken map rather
+        than a broken query.
         """
 
         if not 0 <= self.unclustered <= self.total_children:
@@ -227,5 +249,22 @@ class EmbeddingMap(BaseModel):
                 "unclustered must be between 0 and total_children: got "
                 f"unclustered={self.unclustered}, "
                 f"total_children={self.total_children}"
+            )
+        if not len(self.points) <= self.clustered <= self.total_children:
+            raise ValueError(
+                "expected len(points) <= clustered <= total_children: got "
+                f"{len(self.points)} points, clustered={self.clustered}, "
+                f"total_children={self.total_children}"
+            )
+        if not 0 <= self.noise <= self.clustered:
+            raise ValueError(
+                "noise must be between 0 and clustered: got "
+                f"noise={self.noise}, clustered={self.clustered}"
+            )
+        if not 0 <= self.plotted_documents <= self.total_documents:
+            raise ValueError(
+                "plotted_documents must be between 0 and total_documents: got "
+                f"plotted_documents={self.plotted_documents}, "
+                f"total_documents={self.total_documents}"
             )
         return self

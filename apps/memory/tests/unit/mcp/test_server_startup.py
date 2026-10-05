@@ -1,9 +1,8 @@
-"""Unit tests for MCP server boot-time user_id resolution (#020).
+"""Unit tests for the MCP server boot (``tree.mcp.server``).
 
-Replaces the transient ``_resolve_active_user_id`` helper from #019 with
-strict ``--user-id`` / ``TREE_USER_IDENTIFIER`` resolution. The server
-MUST fail to boot if neither is provided — there is no silent fallback
-to a default user.
+Since ADR-014 the boot pins NO user: the five pinning names are gone and the
+lifespan context carries no ``user_id`` — every tool resolves the **Request
+user** per call (``tree.mcp.request_user``).
 """
 
 from __future__ import annotations
@@ -11,10 +10,9 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from beanie import PydanticObjectId
 
 from tree.mcp import server as server_module
 
@@ -56,80 +54,70 @@ def test_entrypoint_loaded_by_path_registers_all_tools() -> None:
     )
 
 
-class TestResolveServerUserId:
-    async def test_cli_user_id_wins(self, mocker) -> None:
-        """A direct ``user_id`` argument bypasses the env lookup entirely."""
+_REMOVED_PINNING_NAMES = [
+    "_SERVER_USER_ID",
+    "set_server_user_id",
+    "get_server_user_id",
+    "_resolve_server_user_id",
+    "_resolve_user_id_from_env",
+]
 
-        oid = PydanticObjectId()
-        # ``User.find_one`` must NOT be called when the id is provided.
-        mock_find = mocker.patch(
-            "tree.entities.users.User.find_one", new_callable=AsyncMock
-        )
 
-        resolved = await server_module._resolve_server_user_id(
-            user_id=oid, identifier=None
-        )
+@pytest.mark.parametrize("name", _REMOVED_PINNING_NAMES)
+def test_server_module_no_longer_pins_a_user(name: str) -> None:
+    assert not hasattr(server_module, name)
 
-        assert resolved == oid
-        mock_find.assert_not_awaited()
 
-    async def test_env_identifier_resolves_via_user_lookup(self, mocker) -> None:
-        """``TREE_USER_IDENTIFIER`` path looks the user up by identifier."""
+@pytest.fixture
+def booted_lifespan(mocker) -> dict[str, AsyncMock | MagicMock]:
+    """The lifespan's infrastructure, faked: no Mongo, no models, no Opik."""
 
-        target_id = PydanticObjectId()
-        fake_user = mocker.MagicMock()
-        fake_user.id = target_id
-        mock_find = mocker.patch(
-            "tree.entities.users.User.find_one",
+    client = MagicMock()
+    client.close = AsyncMock()
+    mocker.patch.object(server_module, "configure_opik")
+    mocker.patch.object(server_module, "flush_opik")
+    mocker.patch.object(server_module, "get_llm", return_value=MagicMock())
+    mocker.patch.object(server_module, "get_embedding_model", return_value=MagicMock())
+    return {
+        "init_mongodb": mocker.patch.object(
+            server_module, "init_mongodb", new_callable=AsyncMock, return_value=client
+        ),
+        "ensure_indexes": mocker.patch.object(
+            server_module, "ensure_indexes", new_callable=AsyncMock
+        ),
+        "assert_index": mocker.patch.object(
+            server_module,
+            "assert_settings_match_live_vector_index",
             new_callable=AsyncMock,
-            return_value=fake_user,
-        )
-
-        resolved = await server_module._resolve_server_user_id(
-            user_id=None, identifier="paul@example.com"
-        )
-
-        assert resolved == target_id
-        mock_find.assert_awaited_once()
-
-    async def test_identifier_with_no_matching_user_raises(self, mocker) -> None:
-        """Identifier set but no matching user → loud, actionable failure."""
-
-        mocker.patch(
-            "tree.entities.users.User.find_one",
-            new_callable=AsyncMock,
-            return_value=None,
-        )
-
-        with pytest.raises(RuntimeError, match="no User"):
-            await server_module._resolve_server_user_id(
-                user_id=None, identifier="missing@example.com"
-            )
-
-    async def test_neither_provided_raises(self) -> None:
-        """Both inputs absent → boot must fail with an actionable message."""
-
-        with pytest.raises(RuntimeError, match=r"--user-id.*TREE_USER_IDENTIFIER"):
-            await server_module._resolve_server_user_id(user_id=None, identifier=None)
+        ),
+    }
 
 
-class TestSetServerUserId:
-    """The module-level ``_SERVER_USER_ID`` is the single read source for tools."""
+async def test_lifespan_context_carries_no_user(mocker, booted_lifespan) -> None:
+    mocker.patch.object(server_module.settings, "mcp_skip_index_bootstrap", False)
 
-    def test_set_and_get_round_trip(self) -> None:
-        oid = PydanticObjectId()
-        previous = server_module._SERVER_USER_ID
-        try:
-            server_module.set_server_user_id(oid)
-            assert server_module.get_server_user_id() == oid
-        finally:
-            server_module._SERVER_USER_ID = previous
+    async with server_module.app_lifespan(server_module.mcp) as context:
+        keys = set(context)
 
-    def test_get_before_set_raises(self) -> None:
-        previous = server_module._SERVER_USER_ID
-        try:
-            server_module._SERVER_USER_ID = None
-            with pytest.raises(RuntimeError, match=r"not been initialised"):
-                server_module.get_server_user_id()
-        finally:
-            server_module._SERVER_USER_ID = previous
+    assert keys == {"client", "database", "llm", "embedding_model", "thread_id"}
+
+
+async def test_lifespan_ensures_indexes_without_a_user(mocker, booted_lifespan) -> None:
+    mocker.patch.object(server_module.settings, "mcp_skip_index_bootstrap", False)
+
+    async with server_module.app_lifespan(server_module.mcp):
+        pass
+
+    booted_lifespan["ensure_indexes"].assert_awaited_once()
+    assert "user_id" not in booted_lifespan["ensure_indexes"].await_args.kwargs
+
+
+async def test_lifespan_connects_to_mongo_exactly_once(mocker, booted_lifespan) -> None:
+    """The ONE ``init_mongodb`` per boot: the entrypoint no longer pre-connects."""
+
+    mocker.patch.object(server_module.settings, "mcp_skip_index_bootstrap", True)
+
+    async with server_module.app_lifespan(server_module.mcp):
+        pass
+
+    booted_lifespan["init_mongodb"].assert_awaited_once()

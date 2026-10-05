@@ -13,10 +13,13 @@ voyage-4 is not supported``. This module pins the text client's contract;
 the routing fix is covered in :mod:`tests.unit.models.test_get_model`.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiohttp
+import httpx
 import pytest
+from prefect.concurrency.asyncio import AcquireConcurrencySlotTimeoutError
 
 from tree.memory.embedding_text import embed_in_batches
 from tree.models.exceptions import ExtractionError, ModelError
@@ -431,7 +434,7 @@ class TestVoyageTextRateLimitChokepoint:
     ``while True`` loop, so a 429-retry re-acquires a fresh slot.
 
     The autouse ``_noop_voyage_rate_limit`` conftest fixture stubs
-    ``tree.models.voyage_embedding.rate_limit`` so unit boxes don't hit a Prefect
+    ``tree.models.throttle.rate_limit`` so unit boxes don't hit a Prefect
     server; these tests re-patch the same target with a spy to assert the call
     count and arguments.
     """
@@ -441,7 +444,7 @@ class TestVoyageTextRateLimitChokepoint:
     ) -> None:
         # Arrange: a clean 200 — exactly one real POST.
         rate_limit = mocker.patch(
-            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+            "tree.models.throttle.rate_limit", new_callable=AsyncMock
         )
         response_data = {"data": [{"embedding": [0.1]}]}
         mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
@@ -452,7 +455,9 @@ class TestVoyageTextRateLimitChokepoint:
             await model.embed(["hello"])
 
         # Assert: one POST -> one slot, with the documented args.
-        rate_limit.assert_awaited_once_with("voyage-embeddings", occupy=1, strict=False)
+        rate_limit.assert_awaited_once_with(
+            "voyage-embeddings", occupy=1, timeout_seconds=ANY, strict=False
+        )
 
     async def test_429_retry_reacquires_a_fresh_slot(self, mocker) -> None:
         # Arrange: 429, 429, then 200 — three real POST attempts, so the slot
@@ -461,7 +466,7 @@ class TestVoyageTextRateLimitChokepoint:
             "tree.models.voyage_embedding.asyncio.sleep", new_callable=AsyncMock
         )
         rate_limit = mocker.patch(
-            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+            "tree.models.throttle.rate_limit", new_callable=AsyncMock
         )
         m = VoyageTextEmbeddingModel(
             api_key="key",
@@ -494,7 +499,7 @@ class TestVoyageTextRateLimitChokepoint:
         assert rate_limit.await_count == 3
         for call in rate_limit.await_args_list:
             assert call.args == ("voyage-embeddings",)
-            assert call.kwargs == {"occupy": 1, "strict": False}
+            assert call.kwargs == {"occupy": 1, "timeout_seconds": ANY, "strict": False}
 
     async def test_empty_input_acquires_no_slot(
         self, mocker, model: VoyageTextEmbeddingModel
@@ -502,13 +507,110 @@ class TestVoyageTextRateLimitChokepoint:
         # Arrange: the ``if not texts: return []`` short-circuit fires before any
         # POST and so must NOT acquire a slot.
         rate_limit = mocker.patch(
-            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+            "tree.models.throttle.rate_limit", new_callable=AsyncMock
         )
 
         result = await model.embed([])
 
         assert result == []
         rate_limit.assert_not_awaited()
+
+
+class TestVoyageTextRateLimiterFailsOpen:
+    """Task 178 / ADR-013 §5: a Prefect limiter that cannot be reached logs ONE
+    WARNING and the Voyage POST proceeds; any other limiter exception still
+    fails the call as ``ExtractionError`` exactly as before.
+    """
+
+    @staticmethod
+    def _ok_session(mocker) -> MagicMock:
+        response = _mock_aiohttp_response(
+            status=200, json_data={"data": [{"embedding": [0.1, 0.2]}]}
+        )
+        session, post = _mock_aiohttp_session(response)
+        mocker.patch("aiohttp.ClientSession", return_value=session)
+        return post
+
+    @staticmethod
+    def _fail_open_warnings(caplog) -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "embedding without throttle" in record.getMessage()
+        ]
+
+    async def test_stale_prefect_key_embeds_anyway_with_one_warning(
+        self, mocker, caplog, model: VoyageTextEmbeddingModel, limiter_401
+    ) -> None:
+        # Arrange: the live Horizon failure — prefect's wrapper over a 401.
+        mocker.patch(
+            "tree.models.throttle.rate_limit",
+            new_callable=AsyncMock,
+            side_effect=limiter_401,
+        )
+        post = self._ok_session(mocker)
+
+        # Act
+        with caplog.at_level(logging.WARNING):
+            result = await model.embed(["hello"])
+
+        # Assert: vectors back, the POST happened, one WARNING naming the 401.
+        assert result == [[0.1, 0.2]]
+        post.assert_called_once()
+        warnings = self._fail_open_warnings(caplog)
+        assert len(warnings) == 1
+        assert "401" in warnings[0]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(
+                AcquireConcurrencySlotTimeoutError("timed out after 5.0 second(s)"),
+                id="acquire-timeout",
+            ),
+            pytest.param(
+                httpx.ConnectError("[Errno 61] Connection refused"),
+                id="connect-error",
+            ),
+        ],
+    )
+    async def test_unreachable_limiter_embeds_anyway(
+        self, mocker, caplog, model: VoyageTextEmbeddingModel, error: Exception
+    ) -> None:
+        # Arrange
+        mocker.patch(
+            "tree.models.throttle.rate_limit",
+            new_callable=AsyncMock,
+            side_effect=error,
+        )
+        self._ok_session(mocker)
+
+        # Act
+        with caplog.at_level(logging.WARNING):
+            result = await model.embed(["hello"])
+
+        # Assert
+        assert result == [[0.1, 0.2]]
+        assert len(self._fail_open_warnings(caplog)) == 1
+
+    async def test_other_limiter_exception_still_fails_the_call(
+        self, mocker, model: VoyageTextEmbeddingModel
+    ) -> None:
+        # Arrange: a bug in the limiter path, not "cannot reach".
+        mocker.patch(
+            "tree.models.throttle.rate_limit",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("limiter bug"),
+        )
+        post = self._ok_session(mocker)
+
+        # Act / Assert: today's ExtractionError, and no POST was sent.
+        with pytest.raises(
+            ExtractionError, match="Voyage text-embeddings call failed: limiter bug"
+        ):
+            await model.embed(["hello"])
+        post.assert_not_called()
 
 
 class TestVoyageTextComposesWithEmbeddingTextResilience:

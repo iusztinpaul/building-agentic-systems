@@ -61,11 +61,13 @@ from tree.data.web.web_scrape import (
 from tree.data.web.web_scrape import (
     scrape_one as _scrape_one,
 )
+from tree.data.web.web_serp import BrightDataCooldownError
 from tree.data.web.web_serp import search as web_search
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
+from tree.mcp import request_user
 from tree.mcp.server import MEMORY_MODE, mcp
 
 # viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
@@ -179,6 +181,15 @@ STORAGE_UNAVAILABLE_MESSAGE = "memory store unreachable — try again"
 #: the embedding provider's raw ``400 Input cannot contain empty strings``.
 BLANK_QUERY_MESSAGE = "query must not be empty"
 
+#: The ONE sentence an unregistered ``online-pipeline`` deployment answers with,
+#: whether Prefect's client raised :class:`ObjectNotFound` or a raw 404
+#: :class:`PrefectHTTPStatusError` — one constant so the two paths cannot drift.
+DEPLOYMENT_MISSING_MESSAGE = (
+    "The 'online-pipeline/online-pipeline' deployment is not registered "
+    "on the Prefect API — run `make memory-serve-workflows` (local) or "
+    "deploy it, then retry."
+)
+
 
 def storage_error(tool: str, exc: Exception) -> str:
     """Map an unreachable Mongo to ``storage_unavailable``, logging the traceback.
@@ -224,6 +235,53 @@ def internal_error(tool: str, exc: Exception) -> str:
     return tool_error("internal_error", f"{tool} failed: {exc}", retryable=False)
 
 
+def _prefect_status_error(exc: PrefectHTTPStatusError) -> str:
+    """Map the Prefect API's HTTP status to what the model can act on (ADR-013 §4).
+
+    * 401 / 403 → ``configuration_error``, NOT retryable: the key is invalid or
+      expired, and only an operator rotating ``PREFECT_API_KEY`` fixes it;
+    * 404 → ``configuration_error``, NOT retryable: the same
+      :data:`DEPLOYMENT_MISSING_MESSAGE` the ``ObjectNotFound`` path answers;
+    * 429 / 5xx → ``pipeline_unavailable``, retryable, the status named;
+    * any other 4xx → ``internal_error``, NOT retryable: the dispatch sent a
+      request Prefect rejects, a bug until the traceback is read.
+
+    Called from INSIDE an ``except`` block, so ``logger.exception`` records the
+    traceback with the status, whichever branch is taken.
+    """
+
+    status = exc.response.status_code
+    logger.exception(
+        "Prefect API answered HTTP %d while dispatching the ingest", status
+    )
+    if status in (401, 403):
+        return tool_error(
+            "configuration_error",
+            f"Prefect API rejected the request (HTTP {status}): PREFECT_API_KEY is "
+            "invalid or expired for the workspace at PREFECT_API_URL — rotate the "
+            "key in Prefect Cloud, update this server's environment (Horizon: "
+            "Settings → Environment, then redeploy) and retry.",
+            retryable=False,
+        )
+    if status == 404:
+        return tool_error(
+            "configuration_error", DEPLOYMENT_MISSING_MESSAGE, retryable=False
+        )
+    if _http_retryable(status):
+        return tool_error(
+            "pipeline_unavailable",
+            f"Prefect API answered HTTP {status} — try again",
+            retryable=True,
+        )
+    return tool_error(
+        "internal_error",
+        # The status only: str(exc) embeds the request URL (the Prefect Cloud
+        # account/workspace ids); the logged traceback keeps the full error.
+        f"Prefect API answered HTTP {status} while dispatching the ingest",
+        retryable=False,
+    )
+
+
 def _retrieval_error(tool: str, exc: Exception) -> str:
     """Map ANY retrieval failure to an envelope, always logging the traceback.
 
@@ -248,20 +306,56 @@ def _retrieval_error(tool: str, exc: Exception) -> str:
     return internal_error(tool, exc)
 
 
-def _set_retrieval_thread(ctx: Context, tool: str) -> None:
+#: What the per-call **Request user** lookup can raise. Every tool resolves its
+#: user where it first needs it (after its cheap input guards, before tracing or
+#: any read/write) and answers :func:`request_user_error` for these::
+#:
+#:     try:
+#:         user_id = await request_user.resolve_request_user(ctx)
+#:     except REQUEST_USER_ERRORS as exc:
+#:         return request_user_error("search_memory", exc)
+#:
+#: The seam is called through its MODULE so one patch of
+#: ``tree.mcp.request_user.resolve_request_user`` reaches ``tools``,
+#: ``graph_tools`` and ``dashboard_app`` alike.
+REQUEST_USER_ERRORS = (request_user.RequestUserError, PyMongoError)
+
+
+def request_user_error(tool: str, exc: Exception) -> str:
+    """Map a failed **Request user** lookup to its envelope.
+
+    * :class:`~tree.mcp.request_user.RequestUserError` (no identifier for this
+      transport, or no such user) → ``configuration_error``, NOT retryable:
+      the same call fails until the client config or ``users`` changes;
+    * :class:`PyMongoError` from the ``users`` read → ``storage_unavailable``,
+      retryable — the per-request lookup must not turn a Mongo outage into a
+      protocol error (ADR-008 §2).
+
+    Called from INSIDE an ``except`` block (the storage branch logs the
+    traceback).
+    """
+
+    if isinstance(exc, request_user.RequestUserError):
+        return tool_error("configuration_error", str(exc), retryable=False)
+    return storage_error(tool, exc)
+
+
+def _set_retrieval_thread(
+    ctx: Context, tool: str, *, user_id: PydanticObjectId
+) -> None:
     """Group this tool's trace under the server-instance thread, fail-open.
 
     Reads the lifespan ``thread_id`` (a server-instance UUID minted at boot —
     one harness session = one thread) and tags the current Opik trace with it
-    plus ``user_id`` metadata. No-ops when Opik is unconfigured or the context
-    lacks a thread_id.
+    plus the resolved **Request user**'s ``user_id`` metadata. No-ops when Opik
+    is unconfigured or the context lacks a thread_id.
     """
 
     try:
         lc = ctx.lifespan_context
         update_current_trace(
             thread_id=lc.get("thread_id"),
-            metadata={"user_id": str(lc.get("user_id")), "tool": tool},
+            metadata={"user_id": str(user_id), "tool": tool},
         )
     except Exception as exc:  # noqa: BLE001 — telemetry must never break the tool
         logger.debug("Opik retrieval-thread tagging no-op: %s", exc)
@@ -285,8 +379,8 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     it rank, so you can quote the passage that actually matched.
 
     ``outcome`` is ``nothing_found`` when an empty memory or an off-topic query
-    left no hit above the relevance bar — say so instead of quoting unrelated
-    passages. ``search_mode`` is ``hybrid`` when both search legs answered;
+    left no hit above either search leg's relevance bar — say so instead of
+    quoting unrelated passages. ``search_mode`` is ``hybrid`` when both search legs answered;
     ``text_only`` / ``vector_only`` means one leg was unavailable, so these
     results may be incomplete — worth one caveat line.
 
@@ -304,7 +398,11 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_memory", exc)
+    _set_retrieval_thread(ctx, "search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await retrieve_parents(
@@ -312,7 +410,7 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -353,16 +451,22 @@ async def visualize_memory_structure(
     With a ``query``, the view narrows to the passages that matched: the
     retrieved parent chunks, their documents and all their children, ranked by
     relevance (the ``Documents`` slider shows every match by default). With NO
-    query (the default), it draws the most-recent documents; the slider shows
-    100 of them and reveals the rest. A query that matches nothing, or an empty
+    query (the default), it draws the 250 most-recent documents; the slider
+    shows 100 of them and reveals the rest. A query that matches nothing, or an empty
     memory, answers a plain sentence instead of a picture.
 
     When the client renders MCP App UIs, the tree appears inline. Otherwise
-    (or when ``as_html_file`` is set) it is written to a self-contained HTML
-    file; the result carries the server-side path AND a ``graphs://`` resource
-    link — do NOT re-author the HTML yourself. If the path exists locally just
-    share it; if the server is remote (cloud), read the linked resource and
-    save its text as a local ``.html`` file.
+    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
+    file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         query: Search query text — narrows the view to the matching passages.
@@ -372,7 +476,7 @@ async def visualize_memory_structure(
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
         max_docs: With no ``query``: how many most-recent documents to embed
-            (default from config, 500); the view shows the 100 most recent and
+            (default from config, 250); the view shows the 100 most recent and
             a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
@@ -384,7 +488,11 @@ async def visualize_memory_structure(
     if top_k is not None and top_k < 1:
         return tool_error("invalid_input", "top_k must be ≥ 1", retryable=False)
 
-    _set_retrieval_thread(ctx, "visualize_memory_structure")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_structure", exc)
+    _set_retrieval_thread(ctx, "visualize_memory_structure", user_id=user_id)
     lc = ctx.lifespan_context
     query = query.strip()
     try:
@@ -394,21 +502,21 @@ async def visualize_memory_structure(
                 database=lc["database"],
                 query=query,
                 embedding_model=lc["embedding_model"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 top_k=top_k,
             )
             if retrieval.outcome == "nothing_found" or not retrieval.parents:
                 # A plain ``str``: there is no payload to deliver.
                 return NO_RESULTS_MESSAGE.format(query=query)
             result = await fetch_retrieval_structure(
-                lc["client"], lc["database"], lc["user_id"], retrieval
+                lc["client"], lc["database"], user_id, retrieval
             )
             label = repr(query)
         else:
             # The structure read hits the SAME Mongo, so it is inside the same
             # guard: "the database is down" must not differ by argument.
             result = await fetch_rag_structure(
-                lc["client"], lc["database"], lc["user_id"], max_docs=max_docs
+                lc["client"], lc["database"], user_id, max_docs=max_docs
             )
             label = "your full memory"
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -432,8 +540,13 @@ async def visualize_memory_structure(
         "Memory structure (rag: document → parent chunk → child chunk) for "
         f"{label}: {counts}"
     )
-    return _graph_tool_result(
-        ctx, payload, summary, query=query or "structure", as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query=query or "structure",
+        as_html_file=as_html_file,
     )
 
 
@@ -455,13 +568,28 @@ if MEMORY_MODE == "rag":
 async def visualize_memory_embeddings(
     ctx: Context, hulls: bool = False, as_html_file: bool = False
 ) -> str | ToolResult:
-    """Show the memory's embedding space as a 2D map: every child chunk is a
-    point, coloured by its cluster from the latest clustering run, with an
-    LLM-written label per cluster. Use when the user wants to *see* what topics
-    the memory holds or how it is organised. ``hulls=true`` outlines each
+    """Show the memory's embedding space as a 2D map: the child chunks of the
+    250 most-recent documents are plotted as points, coloured by their cluster
+    from the latest clustering run, with an LLM-written label per cluster; the
+    legend counts the whole run, and the summary says how many chunks are shown
+    ("N of M chunks (the 250 most-recent of D documents)"). Use when the user
+    wants to *see* what topics the memory holds or how it is organised. ``hulls=true`` outlines each
     cluster. If no clustering run exists, this returns a message telling the
     operator which command to run; if the map is stale, the answer starts with
     a warning line.
+
+    When the client renders MCP App UIs, the map appears inline. Otherwise
+    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
+    file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
+    `graphs://…html.gz` resource — an `application/gzip` blob: write its
+    base64 `blob` to a file and run
+    `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
+    `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
+    browser.
 
     Args:
         hulls: Draw a convex hull around each cluster (default off).
@@ -469,11 +597,13 @@ async def visualize_memory_embeddings(
             / openable HTML file instead of the inline interactive view.
     """
 
-    _set_retrieval_thread(ctx, "visualize_memory_embeddings")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_embeddings", exc)
+    _set_retrieval_thread(ctx, "visualize_memory_embeddings", user_id=user_id)
     lc = ctx.lifespan_context
-    embedding_map = await load_embedding_map(
-        lc["client"], lc["database"], lc["user_id"]
-    )
+    embedding_map = await load_embedding_map(lc["client"], lc["database"], user_id)
     # Never an empty canvas: a user nobody has clustered gets the command to run
     # (ADR-007 §8). A plain ``str`` — there is no payload to deliver.
     if embedding_map is None:
@@ -487,8 +617,13 @@ async def visualize_memory_embeddings(
         # still tells the user the map under-reports the corpus.
         summary = f"{warning}\n{summary}"
 
-    return _graph_tool_result(
-        ctx, payload, summary, query="embedding-map", as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query="embedding-map",
+        as_html_file=as_html_file,
     )
 
 
@@ -511,15 +646,20 @@ async def _ingest(
     an :class:`~tree.online.IngestReceipt`. Its five fields plus the tool's own
     ``dup_extra`` echo (``url`` / ``file_path``) ARE the tool's answer.
 
-    The dispatch boundary of ADR-008 §2 lives here, and catches exactly two
-    Prefect failures — there is NO in-process fallback (ADR-002), so the model
-    must be able to tell "come back later" from "an operator has to act":
+    The dispatch boundary of ADR-008 §2 (amended by ADR-013 §4) lives here —
+    there is NO in-process fallback (ADR-002), so the model must be able to
+    tell "come back later" from "an operator has to act":
 
-    * API unreachable (``ConnectError`` / a timeout / a Prefect HTTP status) →
-      ``pipeline_unavailable``, retryable;
-    * the deployment was never registered (``ObjectNotFound``) →
+    * the API rejected the key (HTTP 401 / 403) → ``configuration_error``, NOT
+      retryable — the message names ``PREFECT_API_KEY`` and says rotate +
+      redeploy;
+    * the deployment was never registered (``ObjectNotFound`` or a raw 404) →
       ``configuration_error``, NOT retryable — the same call fails identically
-      until someone serves the workflows.
+      until someone serves the workflows;
+    * Prefect had a bad minute (HTTP 429 / 5xx) → ``pipeline_unavailable``,
+      retryable, the status named; the API is unreachable (``ConnectError`` /
+      a timeout) → ``pipeline_unavailable``, retryable;
+    * any other 4xx → ``internal_error``, NOT retryable — a bug.
 
     A ``PyMongoError`` from the dispatcher's pre-flight ``Document.find_one`` is
     caught FIRST as ``storage_unavailable`` (retryable): that lookup happens
@@ -541,13 +681,11 @@ async def _ingest(
     except ObjectNotFound:
         logger.exception("online-pipeline deployment is not registered")
         return tool_error(
-            "configuration_error",
-            "The 'online-pipeline/online-pipeline' deployment is not registered "
-            "on the Prefect API — run `make memory-serve-workflows` (local) or "
-            "deploy it, then retry.",
-            retryable=False,
+            "configuration_error", DEPLOYMENT_MISSING_MESSAGE, retryable=False
         )
-    except (httpx.ConnectError, httpx.TimeoutException, PrefectHTTPStatusError) as exc:
+    except PrefectHTTPStatusError as exc:
+        return _prefect_status_error(exc)
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
         logger.exception(
             "Prefect API unreachable while dispatching the ingest: %s", exc
         )
@@ -579,22 +717,26 @@ async def ingest_url(url: str, ctx: Context) -> str:
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
     ``retryable`` is true. A Prefect API that is down is
-    ``pipeline_unavailable`` and worth retrying; a non-http(s) link is
-    ``unsupported_url`` and is not.
+    ``pipeline_unavailable`` and worth retrying; an invalid
+    ``PREFECT_API_KEY`` is ``configuration_error`` (not retryable); a
+    non-http(s) link is ``unsupported_url`` and is not.
 
     Args:
         url: The web URL to fetch and ingest.
     """
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_url", exc)
     try:
         return await _ingest(
-            UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
+            UrlSource(uri=url), user_id=user_id, dup_extra={"url": url}
         )
     # No fetch happens here — `_ingest` only DISPATCHES the flow run (the page
-    # is fetched worker-side), and it already answers `pipeline_unavailable`
-    # for every transport failure against the Prefect API. So the only local
-    # failure left is a link this server cannot accept.
+    # is fetched worker-side), and it already maps every Prefect API failure
+    # (transport or HTTP status) to its envelope. So the only local failure
+    # left is a link this server cannot accept.
     except ValueError as exc:
         return tool_error("unsupported_url", str(exc), retryable=False)
     except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
@@ -638,11 +780,14 @@ async def ingest_file(
         title: Optional title override. Defaults to the filename.
     """
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_file", exc)
     try:
         return await _ingest(
             FileSource(path=file_path, content=content, title=title),
-            user_id=lc["user_id"],
+            user_id=user_id,
             dup_extra={"file_path": file_path},
         )
     except ValueError as exc:
@@ -656,7 +801,6 @@ async def ingest_file(
 async def search_web(
     query: str,
     ctx: Context,
-    engine: Literal["google", "bing", "yandex"] = "google",
     num_results: int = 10,
     country: str | None = None,
     language: str | None = None,
@@ -664,7 +808,11 @@ async def search_web(
     ingest_top_k: int | None = None,
     ingest_urls: list[str] | None = None,
 ) -> str:
-    """Run an on-demand web search via Bright Data's SERP API.
+    """Run an on-demand web search.
+
+    Bing organic results via Bright Data's SERP API — Google is not offered:
+    its organic links are opaque `/goto` tokens the SERP zone cannot resolve
+    (2026-10).
 
     Returns SERP results (rank, title, URL, snippet) directly to the caller.
     By default, does NOT ingest anything into memory — call
@@ -678,10 +826,10 @@ async def search_web(
 
     Args:
         query: The search query.
-        engine: Search engine to query. Defaults to "google".
         num_results: Maximum number of organic results to return (default 10).
         country: Optional 2-letter ISO country code for geo-targeting (e.g. "us").
-        language: Optional 2-letter language code (e.g. "en").
+        language: Optional language, mapped to Bing's `setLang` (e.g. "en" or
+            "en-US").
         ingest: If true, fire-and-forget the `ingest-web-url-batch-etl`
             Prefect deployment with the selected URLs. Default false.
         ingest_top_k: When `ingest=true`, ingest only the first K URLs from
@@ -710,10 +858,16 @@ async def search_web(
             retryable=False,
         )
 
+    # EVERY call resolves the user, with or without ``ingest``: a misconfigured
+    # client fails on its first call, and before a SERP credit is spent.
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_web", exc)
+
     try:
         results = await web_search(
             query,
-            engine=engine,
             num_results=num_results,
             country=country,
             language=language,
@@ -722,6 +876,15 @@ async def search_web(
         return tool_error("invalid_input", str(exc), retryable=False)
     except BrightDataConfigurationError as exc:
         return tool_error("configuration_error", str(exc), retryable=False)
+    except BrightDataCooldownError as exc:
+        # Before its parent class: same code, but the message tells the model
+        # WHEN a retry can succeed.
+        return tool_error(
+            "fetch_failed",
+            "Bright Data SERP is cooling down this query — retry in 15 s or "
+            f"more: {exc}",
+            retryable=True,
+        )
     except BrightDataRequestError as exc:
         return tool_error("fetch_failed", str(exc), retryable=True)
     except httpx.HTTPStatusError as exc:
@@ -734,7 +897,7 @@ async def search_web(
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         return tool_error(
             "network_error",
-            f"Could not reach Bright Data SERP API: {exc}",
+            f"Could not reach Bright Data SERP API: {str(exc) or type(exc).__name__}",
             retryable=True,
         )
     except Exception as exc:  # noqa: BLE001 — no tool raises through FastMCP
@@ -742,14 +905,12 @@ async def search_web(
 
     payload: dict[str, Any] = {
         "query": query,
-        "engine": engine,
         "results": [r.model_dump() for r in results],
     }
 
     if ingest:
-        lc = ctx.lifespan_context
         payload["ingest"] = await _build_ingest_block(
-            results, ingest_top_k, ingest_urls, user_id=lc["user_id"]
+            results, ingest_top_k, ingest_urls, user_id=user_id
         )
 
     return json.dumps(payload, indent=2)
@@ -841,6 +1002,13 @@ async def scrape_web(
         return tool_error(
             "invalid_input", "max_chars must be >= 1 or None", retryable=False
         )
+
+    # Nothing here is per-user, but "every tool" resolves the user: a
+    # misconfigured client fails on its first call, whichever tool it is.
+    try:
+        await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("scrape_web", exc)
 
     try:
         results = await asyncio.gather(
@@ -939,7 +1107,10 @@ async def ingest_conversation(
                 retryable=False,
             )
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_conversation", exc)
     try:
         return await _ingest(
             ConversationSource(
@@ -948,7 +1119,7 @@ async def ingest_conversation(
                 session_uri=session_uri,
                 session_started_at=parsed_session_started_at,
             ),
-            user_id=lc["user_id"],
+            user_id=user_id,
             dup_extra={},
         )
     except ValueError as exc:

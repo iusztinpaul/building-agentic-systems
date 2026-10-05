@@ -181,6 +181,34 @@ class TestEnsureIndexes:
         collection.create_index.assert_not_awaited()
         collection.create_search_index.assert_awaited_once()
 
+    async def test_runs_without_a_user_and_logs_the_server_boot(self, caplog) -> None:
+        """The MCP boot pins no user (ADR-014 §1); the indexes are global."""
+
+        collection = _make_collection()
+        client = _wire_client(collection)
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await ensure_indexes(
+                client, "test_db", embedding_model=FakeEmbeddingModel(dimensions=8)
+            )
+
+        collection.create_search_index.assert_awaited_once()
+        assert "triggered by server boot" in caplog.text
+
+    async def test_logs_the_tenant_that_triggered_it(self, caplog) -> None:
+        collection = _make_collection()
+        client = _wire_client(collection)
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await ensure_indexes(
+                client,
+                "test_db",
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+                user_id=_TEST_USER_ID,
+            )
+
+        assert f"triggered by tenant user_id={_TEST_USER_ID}" in caplog.text
+
     async def test_vector_index_includes_filter_fields(self) -> None:
         """The created vector index must declare ``user_id``, ``kind``,
         ``type``, ``subtype`` AND ``merged_into`` as filter paths so

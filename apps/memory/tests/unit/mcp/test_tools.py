@@ -31,7 +31,9 @@ from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 from tree.data.online_pipeline import UrlSource
+from tree.entities.graph_files import GraphFile
 from tree.mcp.tools import (
+    DEPLOYMENT_MISSING_MESSAGE,
     ERROR_CONTRACT,
     _ingest,
     ingest_conversation,
@@ -41,6 +43,7 @@ from tree.mcp.tools import (
     visualize_memory_embeddings,
     visualize_memory_structure,
 )
+from tree.mcp.viz_app import DOWNLOAD_CONTRACT
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.rag.structure import (
     EMPTY_MEMORY_MESSAGE,
@@ -60,6 +63,14 @@ from tree.models.exceptions import ExtractionError, ModelError
 from tree.online import IngestReceipt
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+@pytest.fixture
+def request_user_id() -> PydanticObjectId:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _USER_ID
+
 
 # The two **Ingest receipt** shapes every ingest tool can answer with.
 _DISPATCHED = IngestReceipt(
@@ -83,6 +94,26 @@ def _tool_fn(tool):
     """Unwrap FastMCP's ``FunctionTool`` back to the coroutine it registered."""
 
     return getattr(tool, "fn", tool)
+
+
+def _prefect_http_error(status_code: int) -> PrefectHTTPStatusError:
+    """A Prefect client failure exactly as the client raises it.
+
+    ``from_httpx_error`` is how ``PrefectHttpxAsyncClient`` builds the error, so
+    the tool sees the same object a live 401 from Prefect Cloud produces.
+    """
+
+    request = httpx.Request(
+        "POST",
+        "https://api.prefect.cloud/api/accounts/a/workspaces/w/deployments/filter",
+    )
+    return PrefectHTTPStatusError.from_httpx_error(
+        httpx.HTTPStatusError(
+            f"HTTP {status_code}",
+            request=request,
+            response=httpx.Response(status_code, request=request),
+        )
+    )
 
 
 class TestIngestTail:
@@ -129,7 +160,6 @@ def _make_ctx() -> MagicMock:
         "client": MagicMock(),
         "database": "test_db",
         "embedding_model": MagicMock(),
-        "user_id": _USER_ID,
         "thread_id": "mcp-session-test",
     }
     return ctx
@@ -346,15 +376,9 @@ class TestDispatchErrors:
         [
             httpx.ConnectError("connection refused"),
             httpx.TimeoutException("timed out"),
-            PrefectHTTPStatusError(
-                "server error",
-                request=httpx.Request("POST", "http://localhost:4200/api"),
-                response=httpx.Response(
-                    502, request=httpx.Request("POST", "http://localhost:4200/api")
-                ),
-            ),
+            httpx.ReadTimeout("timed out"),
         ],
-        ids=["connect-error", "timeout", "prefect-status"],
+        ids=["connect-error", "timeout", "read-timeout"],
     )
     async def test_unreachable_prefect_is_pipeline_unavailable(
         self, mocker, exc: Exception
@@ -392,8 +416,132 @@ class TestDispatchErrors:
         # Not retryable: the same call fails identically until an operator acts,
         # so the message names the deployment AND the command that registers it.
         assert payload["retryable"] is False
+        assert payload["message"] == DEPLOYMENT_MISSING_MESSAGE
         assert "online-pipeline/online-pipeline" in payload["message"]
         assert "make memory-serve-workflows" in payload["message"]
+
+    @pytest.mark.parametrize(
+        "status_code,error_type,retryable",
+        [
+            (401, "configuration_error", False),
+            (403, "configuration_error", False),
+            (404, "configuration_error", False),
+            (422, "internal_error", False),
+            (429, "pipeline_unavailable", True),
+            (500, "pipeline_unavailable", True),
+            (502, "pipeline_unavailable", True),
+            (503, "pipeline_unavailable", True),
+        ],
+        ids=["401", "403", "404", "422", "429", "500", "502", "503"],
+    )
+    async def test_prefect_status_maps_to_what_the_model_can_act_on(
+        self, mocker, caplog, status_code: int, error_type: str, retryable: bool
+    ) -> None:
+        # ADR-013 §4: an expired key is the operator's to fix (stop), a 503 is
+        # Prefect's bad minute (retry), any other 4xx is a bug — never one
+        # "unreachable — try again" for all of them.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="tree.mcp.tools"):
+            payload = json.loads(
+                await _ingest(
+                    UrlSource(uri="https://example.com"),
+                    user_id=_USER_ID,
+                    dup_extra={"url": "https://example.com"},
+                )
+            )
+
+        assert set(payload) == {"error_type", "retryable", "message"}
+        assert payload["error_type"] == error_type
+        assert payload["retryable"] is retryable
+        if status_code == 404:
+            assert payload["message"] == DEPLOYMENT_MISSING_MESSAGE
+        else:
+            assert f"HTTP {status_code}" in payload["message"]
+        # The on-call reads the status AND the stack — not a one-liner.
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert [r.getMessage() for r in errors] == [
+            f"Prefect API answered HTTP {status_code} while dispatching the ingest"
+        ]
+        assert errors[0].exc_info is not None
+
+    @pytest.mark.parametrize("status_code", [401, 403])
+    async def test_a_rejected_key_names_the_variables_and_redeploy(
+        self, mocker, status_code: int
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "configuration_error",
+            "retryable": False,
+            "message": (
+                f"Prefect API rejected the request (HTTP {status_code}): "
+                "PREFECT_API_KEY is invalid or expired for the workspace at "
+                "PREFECT_API_URL — rotate the key in Prefect Cloud, update this "
+                "server's environment (Horizon: Settings → Environment, then "
+                "redeploy) and retry."
+            ),
+        }
+
+    async def test_another_4xx_names_only_the_status_not_the_request_url(
+        self, mocker
+    ) -> None:
+        # str(PrefectHTTPStatusError) embeds the request URL — the Prefect Cloud
+        # account/workspace ids. The model gets the status; the traceback keeps
+        # the rest.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(422),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "internal_error",
+            "retryable": False,
+            "message": "Prefect API answered HTTP 422 while dispatching the ingest",
+        }
+
+    @pytest.mark.parametrize(
+        "status_code,expected",
+        [
+            (503, "Prefect API answered HTTP 503 — try again"),
+            (429, "Prefect API answered HTTP 429 — try again"),
+        ],
+    )
+    async def test_a_transient_status_is_named_in_the_retry_message(
+        self, mocker, status_code: int, expected: str
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(status_code),
+        )
+
+        payload = json.loads(
+            await _tool_fn(ingest_url)("https://example.com/post", _make_ctx())
+        )
+
+        assert payload == {
+            "error_type": "pipeline_unavailable",
+            "retryable": True,
+            "message": expected,
+        }
 
     async def test_mongo_down_on_preflight_is_storage_unavailable(self, mocker) -> None:
         # The dispatcher's pre-flight ``Document.find_one`` runs BEFORE Prefect,
@@ -442,6 +590,34 @@ class TestDispatchErrors:
         assert payload["error_type"] == "pipeline_unavailable"
         assert payload["retryable"] is True
 
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            (ingest_url, ("https://example.com/post",)),
+            (ingest_file, ("/tmp/notes.md", "body")),
+            (ingest_conversation, ("Alice likes Python.",)),
+        ],
+        ids=["ingest_url", "ingest_file", "ingest_conversation"],
+    )
+    async def test_every_ingest_tool_reports_a_rejected_key_as_configuration(
+        self, mocker, tool, args: tuple
+    ) -> None:
+        # The live Horizon defect: a stale ``PREFECT_API_KEY`` answered 401 and
+        # every ingest tool told the model to retry. None of them may.
+        mocker.patch(
+            "tree.mcp.tools.dispatch_online_pipeline",
+            new_callable=AsyncMock,
+            side_effect=_prefect_http_error(401),
+        )
+
+        payload = json.loads(await _tool_fn(tool)(*args, _make_ctx()))
+
+        assert payload["error_type"] == "configuration_error"
+        assert payload["retryable"] is False
+        assert "PREFECT_API_KEY" in payload["message"]
+        assert "PREFECT_API_URL" in payload["message"]
+        assert "redeploy" in payload["message"]
+
 
 # ---------------------------------------------------------------------------
 # ``visualize_memory_embeddings`` — the **Embedding map**, in BOTH modes
@@ -451,6 +627,9 @@ class TestDispatchErrors:
 def _viz_ctx(*, ui_supported: bool) -> MagicMock:
     ctx = _make_ctx()
     ctx.client_supports_extension.return_value = ui_supported
+    # A remote (Horizon-shaped) server: the file branch stores a Graph file
+    # and writes nothing to disk. The stdio extras are covered in test_viz_app.
+    ctx.transport = "streamable-http"
     return ctx
 
 
@@ -486,6 +665,10 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
         ],
         total_children=total_children,
         unclustered=unclustered,
+        clustered=drawn,
+        noise=0,
+        plotted_documents=3,
+        total_documents=3,
     )
 
 
@@ -563,11 +746,11 @@ class TestVisualizeMemoryEmbeddings:
         )
         assert "Embedding map:" in result.content[0].text
 
-    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
-        self, mocker, tmp_path
+    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+        self, mocker, tmp_path, request_user_id
     ) -> None:
-        # Story 1: the Claude Code terminal renders no MCP App UI, so the same
-        # map arrives as a self-contained file plus a downloadable resource.
+        # Story 1: a client that renders no MCP App UI gets the same map as a
+        # downloadable Graph file the request user owns — no server file.
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
         mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
         mocker.patch(
@@ -581,9 +764,12 @@ class TestVisualizeMemoryEmbeddings:
         _, link_block = result.content
         assert link_block.type == "resource_link"
         assert re.fullmatch(
-            r"graphs://embedding-map-\d{8}-\d{6}\.html", str(link_block.uri)
+            r"graphs://[A-Za-z0-9_-]{22}\.html\.gz", str(link_block.uri)
         ), link_block.uri
-        assert (tmp_path / link_block.name).is_file()
+        assert link_block.mimeType == "application/gzip"
+        row = await GraphFile.find_one(GraphFile.name == link_block.name)
+        assert row is not None and row.user_id == request_user_id
+        assert list(tmp_path.iterdir()) == []
 
     async def test_the_delivered_copy_calls_the_picture_a_map_not_a_graph(
         self, mocker, tmp_path
@@ -603,11 +789,15 @@ class TestVisualizeMemoryEmbeddings:
         inline = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
 
         text_block, link_block = answer.content
-        assert "self-contained interactive embedding map to:" in text_block.text
+        assert "self-contained interactive embedding map as a download" in (
+            text_block.text
+        )
         assert "interactive graph" not in text_block.text
         assert link_block.description == (
-            "Self-contained interactive embedding map (download me)"
+            "gzip-compressed self-contained interactive embedding map — "
+            "base64-decode the blob, gunzip, open the .html"
         )
+        assert DOWNLOAD_CONTRACT in text_block.text
         assert inline.content[0].text.endswith("(interactive embedding map view).")
 
     async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
@@ -626,16 +816,20 @@ class TestVisualizeMemoryEmbeddings:
         )
 
         assert result.content[1].type == "resource_link"
-        assert list(tmp_path.glob("embedding-map-*.html"))
+        assert "you asked for an HTML file" in result.content[0].text
+        assert list(tmp_path.iterdir()) == []
 
     async def test_the_docstring_tells_the_model_when_to_draw_a_map(self) -> None:
         # The docstring IS the tool description an MCP client shows the model.
         summary = " ".join(visualize_memory_embeddings.__doc__.split())
 
         assert summary.startswith(
-            "Show the memory's embedding space as a 2D map: every child chunk "
-            "is a point, coloured by its cluster from the latest clustering run"
+            "Show the memory's embedding space as a 2D map: the child chunks of "
+            "the 250 most-recent documents are plotted as points, coloured by "
+            "their cluster from the latest clustering run"
         )
+        assert "the legend counts the whole run" in summary
+        assert "every child chunk" not in summary
         assert "no clustering run exists" in summary
 
 
@@ -787,8 +981,8 @@ class TestRagVisualizeMemoryStructure:
         assert readers["fetch_rag_structure"].await_args.kwargs == {"max_docs": 7}
         readers["retrieve_parents"].assert_not_awaited()
 
-    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
-        self, mocker, tmp_path, readers
+    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+        self, mocker, tmp_path, readers, request_user_id
     ) -> None:
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
         mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
@@ -798,9 +992,13 @@ class TestRagVisualizeMemoryStructure:
         text_block, link_block = result.content
         assert text_block.text.startswith("Memory structure (rag:")
         assert re.fullmatch(
-            r"graphs://structure-\d{8}-\d{6}\.html", str(link_block.uri)
+            r"graphs://[A-Za-z0-9_-]{22}\.html\.gz", str(link_block.uri)
         ), link_block.uri
-        assert (tmp_path / link_block.name).is_file()
+        assert link_block.mimeType == "application/gzip"
+        row = await GraphFile.find_one(GraphFile.name == link_block.name)
+        assert row is not None and row.user_id == request_user_id
+        assert list(tmp_path.iterdir()) == []
+        assert DOWNLOAD_CONTRACT in text_block.text
 
     async def test_as_html_file_forces_the_file_for_a_ui_client(
         self, mocker, tmp_path, readers
@@ -914,6 +1112,16 @@ class TestRagVisualizeMemoryStructure:
         doc = " ".join((visualize_memory_structure.__doc__ or "").split())
 
         assert ERROR_CONTRACT in doc
+
+    @pytest.mark.parametrize(
+        "tool",
+        [visualize_memory_structure, visualize_memory_embeddings],
+        ids=["visualize_memory_structure", "visualize_memory_embeddings"],
+    )
+    def test_the_docstring_states_the_download_contract(self, tool) -> None:
+        doc = " ".join((tool.__doc__ or "").split())
+
+        assert DOWNLOAD_CONTRACT in doc
 
     def test_the_signature_has_no_max_hops(self) -> None:
         params = set(inspect.signature(visualize_memory_structure).parameters)

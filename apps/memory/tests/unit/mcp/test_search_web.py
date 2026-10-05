@@ -16,12 +16,20 @@ from beanie import PydanticObjectId
 from click.testing import CliRunner
 
 from tree.data.web import SearchResult
+from tree.data.web.web_serp import BrightDataCooldownError
 from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+@pytest.fixture
+def request_user_id() -> PydanticObjectId:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _USER_ID
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +57,13 @@ def _sample_results() -> list[SearchResult]:
 def _make_ctx() -> MagicMock:
     """Build a mock FastMCP Context.
 
-    The ``search_web`` ingest path reads ``lifespan_context['user_id']`` so we
-    stub a real dict with a stable :class:`PydanticObjectId` here. The non-
-    ingest path doesn't touch it.
+    The user comes from the **Request user** seam (patched in ``conftest.py``
+    to resolve to ``_USER_ID`` via the ``request_user_id`` override below), so
+    the lifespan context carries none.
     """
 
     ctx = MagicMock()
-    ctx.lifespan_context = {"user_id": _USER_ID}
+    ctx.lifespan_context = {}
     return ctx
 
 
@@ -80,13 +88,13 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()(
             "knowledge graphs",
             ctx,
-            engine="google",
             num_results=5,
         )
 
         payload = json.loads(raw)
+        # Bing is the only engine (ADR-013 §1): a constant key carries nothing.
+        assert set(payload) == {"query", "results"}
         assert payload["query"] == "knowledge graphs"
-        assert payload["engine"] == "google"
         assert len(payload["results"]) == 2
         first = payload["results"][0]
         assert first["rank"] == 1
@@ -96,7 +104,7 @@ class TestSearchWebMcpTool:
 
         mock_search.assert_awaited_once()
         kwargs = mock_search.await_args.kwargs
-        assert kwargs["engine"] == "google"
+        assert "engine" not in kwargs
         assert kwargs["num_results"] == 5
         assert kwargs["country"] is None
         assert kwargs["language"] is None
@@ -109,7 +117,6 @@ class TestSearchWebMcpTool:
         raw = await _get_tool_callable()(
             "datenschutz",
             ctx,
-            engine="google",
             num_results=10,
             country="de",
             language="de",
@@ -196,6 +203,42 @@ class TestSearchWebMcpTool:
         assert payload["retryable"] is True
         assert "503" in payload["message"]
 
+    async def test_cooldown_error_is_a_retryable_fetch_failed(self, mocker) -> None:
+        cooldown = (
+            "This query recently failed and cannot be attempted at this time. "
+            "Please try again later, after a minimum of 15 seconds."
+        )
+        mock_search = AsyncMock(side_effect=BrightDataCooldownError(cooldown))
+        mocker.patch("tree.mcp.tools.web_search", mock_search)
+        ctx = _make_ctx()
+
+        raw = await _get_tool_callable()("prefect horizon fastmcp", ctx)
+
+        payload = json.loads(raw)
+        assert payload == {
+            "error_type": "fetch_failed",
+            "retryable": True,
+            "message": (
+                "Bright Data SERP is cooling down this query — retry in 15 s or "
+                f"more: {cooldown}"
+            ),
+        }
+
+    async def test_schema_has_no_engine_parameter(self) -> None:
+        from tree.mcp.server import mcp
+
+        tool = await mcp.get_tool("search_web")
+
+        assert set(tool.parameters["properties"]) == {
+            "query",
+            "num_results",
+            "country",
+            "language",
+            "ingest",
+            "ingest_top_k",
+            "ingest_urls",
+        }
+
     async def test_http_status_error_is_serialized(self, mocker) -> None:
         request = httpx.Request("POST", "https://api.brightdata.com/request")
         response = httpx.Response(status_code=500, request=request)
@@ -234,6 +277,24 @@ class TestSearchWebMcpTool:
         assert payload["error_type"] == "network_error"
         assert payload["retryable"] is True
         assert payload["message"]
+
+    async def test_network_error_with_empty_message_names_the_exception(
+        self, mocker
+    ) -> None:
+        # httpx raises bare timeouts (``str(exc) == ""``) — the message must not
+        # end in a dangling colon.
+        mocker.patch(
+            "tree.mcp.tools.web_search",
+            AsyncMock(side_effect=httpx.ReadTimeout("")),
+        )
+
+        raw = await _get_tool_callable()("anything", _make_ctx())
+
+        payload = json.loads(raw)
+        assert payload["error_type"] == "network_error"
+        assert payload["message"] == (
+            "Could not reach Bright Data SERP API: ReadTimeout"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +528,6 @@ class TestSearchWebCli:
         assert result.exit_code == 0
         for opt in (
             "--query",
-            "--engine",
             "--num-results",
             "--country",
             "--language",
@@ -490,7 +550,7 @@ class TestSearchWebCli:
         assert result.exit_code == 0, result.output
         mock_search.assert_awaited_once()
         kwargs = mock_search.await_args.kwargs
-        assert kwargs["engine"] == "google"
+        assert "engine" not in kwargs
         assert kwargs["num_results"] == 5
         assert kwargs["country"] is None
         assert kwargs["language"] is None
@@ -505,19 +565,44 @@ class TestSearchWebCli:
             [
                 "--query",
                 "datenschutz",
-                "--engine",
-                "google",
                 "--country",
                 "de",
                 "--language",
-                "de",
+                "de-DE",
             ],
         )
 
         assert result.exit_code == 0, result.output
         kwargs = mock_search.await_args.kwargs
         assert kwargs["country"] == "de"
-        assert kwargs["language"] == "de"
+        assert kwargs["language"] == "de-DE"
+
+    def test_engine_is_an_unknown_option(self, mocker, cli_main) -> None:
+        # Bing only (ADR-013 §1): a stale ``--engine`` is a usage error, and
+        # the search is never run.
+        mock_search = AsyncMock(return_value=_sample_results())
+        mocker.patch("scripts.search_web.web_search", mock_search)
+        runner = CliRunner()
+
+        result = runner.invoke(cli_main, ["--query", "x", "--engine", "google"])
+
+        assert result.exit_code == 2
+        assert "No such option: --engine" in result.output
+        mock_search.assert_not_awaited()
+
+    def test_printed_payload_has_no_engine_key(self, mocker, cli_main) -> None:
+        mocker.patch(
+            "scripts.search_web.web_search",
+            AsyncMock(return_value=_sample_results()),
+        )
+        log_info = mocker.patch("scripts.search_web.logger.info")
+        runner = CliRunner()
+
+        result = runner.invoke(cli_main, ["--query", "knowledge graphs"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(log_info.call_args_list[-1].args[1])
+        assert set(payload) == {"query", "results"}
 
     def test_empty_query_exits_one(self, mocker, cli_main) -> None:
         # Arrange — let web_search raise the ValueError that the real client raises.
@@ -550,6 +635,43 @@ class TestSearchWebCli:
         result = runner.invoke(cli_main, ["--query", "anything"])
 
         assert result.exit_code == 1
+
+    @pytest.mark.parametrize(
+        "network_error, expected_log",
+        [
+            (httpx.ReadTimeout("timed out"), "SERP request timed out: timed out"),
+            (httpx.ReadTimeout(""), "SERP request timed out: ReadTimeout"),
+            (
+                httpx.ConnectError("connection refused"),
+                "SERP request could not connect: connection refused",
+            ),
+            (
+                BrightDataCooldownError("This query recently failed"),
+                "SERP request failed: This query recently failed",
+            ),
+        ],
+    )
+    def test_network_errors_exit_one_without_a_traceback(
+        self,
+        mocker,
+        cli_main,
+        network_error: Exception,
+        expected_log: str,
+    ) -> None:
+        mocker.patch(
+            "scripts.search_web.web_search", AsyncMock(side_effect=network_error)
+        )
+        log_error = mocker.patch("scripts.search_web.logger.error")
+        runner = CliRunner()
+
+        result = runner.invoke(cli_main, ["--query", "anything"])
+
+        assert result.exit_code == 1
+        # A clean exit: SystemExit(1), not the network exception escaping.
+        assert isinstance(result.exception, SystemExit)
+        assert "Traceback" not in result.output
+        logged = log_error.call_args.args[0] % log_error.call_args.args[1:]
+        assert logged == expected_log
 
     def test_missing_query_argument_exits_nonzero(self, cli_main) -> None:
         # Arrange — Click rejects missing required option with exit code 2.

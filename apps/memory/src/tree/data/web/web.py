@@ -1,5 +1,7 @@
 """Web ingestion core: fetch a URL via Bright Data Web Unlocker, build a Document, persist it.
 
+The Document keeps the page's main content (``web_extract``, ADR-013 §6), not its nav.
+
 Mirrors the layered structure of ``tree.data.substack.substack`` (extraction
 helpers + ``fetch_and_extract_*`` + ``load_*_document``) and the LATENT-promotion
 pattern from ``tree.data.file.file.load_file_document``.
@@ -16,6 +18,7 @@ Persistence rules:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -23,6 +26,7 @@ from urllib.parse import urlparse
 
 from beanie import PydanticObjectId
 
+from tree.data.web.web_extract import extract_main_content, page_title
 from tree.data.web.web_unlocker import fetch_url
 from tree.data.persist import insert_or_upgrade_latent
 from tree.entities.documents import Document, SourceType
@@ -72,17 +76,44 @@ def _derive_summary(markdown: str) -> str:
 
 
 async def fetch_and_extract_web(url: str, user_id: PydanticObjectId) -> Document:
-    """Fetch ``url`` via Bright Data Web Unlocker (markdown) and build a Document.
+    """Fetch ``url`` via Bright Data Web Unlocker and build a Document of its main content.
+
+    Fetches the page's HTML and runs **Main-content extraction** (``extract_main_content``,
+    ADR-013 §6). When that is too thin, falls back to Bright Data's whole-page markdown —
+    a SECOND billable Unlocker request, logged as a WARNING.
+    ``metadata["extraction"]`` records the path (``trafilatura`` | ``brightdata_markdown``);
+    on the trafilatura path ``metadata["extraction_variant"]`` records which run won
+    (``default`` | ``pre_unwrapped``).
 
     The returned Document has ``source_type=SourceType.WEB``, ``source_uri=url``,
-    a derived ``title`` (first H1 → URL path tail), a 300-char ``summary``,
-    the verbatim markdown ``content``, ``authors=["Unknown"]``, and a
+    a derived ``title`` (page metadata title → first markdown H1 → URL path tail, on
+    both paths), a 300-char
+    ``summary``, the markdown ``content``, ``authors=["Unknown"]``, and a
     timezone-aware UTC ``date``. The document is **not** persisted.
     """
 
-    markdown = await fetch_url(url, data_format="markdown")
+    html = await fetch_url(url, data_format="html")
+    # trafilatura is synchronous CPU work; keep it off the event loop (batch gathers).
+    extracted = await asyncio.to_thread(extract_main_content, html, url)
+    if extracted is not None:
+        markdown = extracted.markdown
+        metadata_title = extracted.title
+        metadata = {
+            "extraction": "trafilatura",
+            "extraction_variant": extracted.variant,
+        }
+    else:
+        logger.warning(
+            "Main-content extraction too thin for %s — falling back to Bright Data "
+            "markdown (second Unlocker request)",
+            url,
+        )
+        markdown = await fetch_url(url, data_format="markdown")
+        # The HTML is already here, so its title is free (no third request).
+        metadata_title = await asyncio.to_thread(page_title, html)
+        metadata = {"extraction": "brightdata_markdown"}
 
-    title = _derive_title(markdown, url)
+    title = metadata_title or _derive_title(markdown, url)
     summary = _derive_summary(markdown)
 
     return Document(
@@ -94,6 +125,7 @@ async def fetch_and_extract_web(url: str, user_id: PydanticObjectId) -> Document
         content=markdown,
         authors=["Unknown"],
         date=datetime.now(tz=UTC),
+        metadata=metadata,
     )
 
 
@@ -118,6 +150,7 @@ async def load_web_document(doc: Document) -> Document | None:
         existing.summary = doc.summary
         existing.content = doc.content
         existing.authors = doc.authors
+        existing.metadata = {**existing.metadata, **doc.metadata}
         existing.date = datetime.now(tz=UTC)
         await existing.replace()
         logger.info("Upgraded LATENT document for web URL: %s", doc.source_uri)

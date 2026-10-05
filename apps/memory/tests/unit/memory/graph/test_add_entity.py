@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from beanie import PydanticObjectId
@@ -955,8 +955,9 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
     A cache HIT must therefore acquire NO ``voyage-embeddings`` slot — gating it
     serialized ~40 zero-POST lookups behind the 3-RPM throttle and timed out
     extraction. A cache MISS (a real Voyage client) DOES acquire a slot. The
-    ``rate_limit`` symbol lives only in the Voyage client modules now, so we spy
-    on it there and drive the full ``add_entity`` dedup path with each model.
+    ``rate_limit`` symbol lives only in ``tree.models.throttle`` (the one helper
+    both Voyage clients call), so we spy on it there and drive the full
+    ``add_entity`` dedup path with each model.
     """
 
     async def test_cache_hit_via_cached_single_embedding_acquires_no_slot(
@@ -965,12 +966,8 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         # Arrange — the real cache shim the pipeline injects on a cache hit.
         from tree.memory.pipeline import _CachedSingleEmbedding
 
-        text_rate_limit = mocker.patch(
-            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
-        )
-        mm_rate_limit = mocker.patch(
-            "tree.models.voyage_multimodal_embedding.rate_limit",
-            new_callable=AsyncMock,
+        rate_limit = mocker.patch(
+            "tree.models.throttle.rate_limit", new_callable=AsyncMock
         )
         database, _collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
@@ -990,9 +987,8 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         )
 
         # Assert — the cached vector never reached a Voyage client, so NO slot
-        # was acquired in either client (the timeout regression is fixed).
-        text_rate_limit.assert_not_awaited()
-        mm_rate_limit.assert_not_awaited()
+        # was acquired by either client (the timeout regression is fixed).
+        rate_limit.assert_not_awaited()
 
     async def test_cache_miss_via_real_voyage_client_acquires_a_slot(
         self, mocker
@@ -1001,8 +997,8 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         # reach the network POST and acquire exactly one slot.
         from tree.models.voyage_embedding import VoyageTextEmbeddingModel
 
-        text_rate_limit = mocker.patch(
-            "tree.models.voyage_embedding.rate_limit", new_callable=AsyncMock
+        rate_limit = mocker.patch(
+            "tree.models.throttle.rate_limit", new_callable=AsyncMock
         )
         database, _collection = _make_database(mocker)
         _patch_dedupe_entity(mocker, DeduplicationResult(action="none"))
@@ -1023,8 +1019,8 @@ class TestCachedDedupAcquiresNoRateLimitSlot:
         )
 
         # Assert — the real POST acquired exactly one slot, with documented args.
-        text_rate_limit.assert_awaited_once_with(
-            "voyage-embeddings", occupy=1, strict=False
+        rate_limit.assert_awaited_once_with(
+            "voyage-embeddings", occupy=1, timeout_seconds=ANY, strict=False
         )
 
 

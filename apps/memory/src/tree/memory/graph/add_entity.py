@@ -247,7 +247,8 @@ async def add_entity(
         # Voyage-400 bisect-and-skip resilience for free. The shared
         # ``voyage-embeddings`` rate limit lives at the real network POST inside
         # the Voyage clients, NOT here — so a ``_CachedSingleEmbedding`` cache
-        # hit (extraction hot path) acquires no slot. A skipped (un-embeddable)
+        # hit (extraction hot path) acquires no slot (fail-open: an unreachable
+        # limiter warns and the call proceeds, task 178). A skipped (un-embeddable)
         # input comes back as the empty placeholder ``[]``, which degrades to
         # ``embedding = []`` exactly as the previous
         # ``embedded[0] if embedded else []`` did.

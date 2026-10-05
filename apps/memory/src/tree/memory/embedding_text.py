@@ -129,7 +129,8 @@ async def embed_in_batches(
 
     # ADR-002 §1: ``dispatch_concurrency`` is the local fan-out seam. Default 1
     # keeps dispatch strictly sequential (today's exact request count + order);
-    # the cross-flow ``voyage-embeddings`` GCL is the real throttle. The knob is
+    # the cross-flow ``voyage-embeddings`` GCL is the real throttle (fail-open:
+    # an unreachable limiter warns and the call proceeds, task 178). The knob is
     # flipped >1 only after the Voyage cap is lifted — do NOT default it higher.
     from tree.config.app_config import app_config
 
@@ -186,7 +187,8 @@ async def _embed_chunk_resilient(
         # the inline dedup embed through this function still earns the Voyage-400
         # bisect-and-skip resilience, but a ``_CachedSingleEmbedding`` cache hit
         # (extraction hot path) never reaches a Voyage client, so it acquires no
-        # slot — that was the timeout this relocation fixes.
+        # slot — that was the timeout this relocation fixes. Fail-open: an
+        # unreachable limiter warns and the call proceeds (task 178).
         return await embedding_model.embed(chunk, input_type=input_type)
     except ExtractionError as exc:
         # Only a structured HTTP 400 is a content rejection we skip; everything
