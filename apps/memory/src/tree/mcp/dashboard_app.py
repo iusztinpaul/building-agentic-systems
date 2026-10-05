@@ -129,8 +129,7 @@ async def memory_dashboard(
     # the host does NOT forward ``structuredContent`` to a custom iframe (see
     # module docstring). The payload rides in a ``content`` JSON block marked
     # ``audience=["user"]`` so the iframe gets the full dump while the MODEL
-    # sees only the short summary. ``structured_content`` is kept for any host
-    # that forwards it too.
+    # sees only the short summary. That block is the ONLY copy (ADR-014 §5).
     app_payload = {"query": query, **payload}
     return ToolResult(
         content=[
@@ -144,7 +143,6 @@ async def memory_dashboard(
                 annotations=types.Annotations(audience=["user"]),
             ),
         ],
-        structured_content=app_payload,
     )
 
 
@@ -386,17 +384,13 @@ _DASHBOARD_HTML_TEMPLATE = """\
 
     app.ontoolresult = (result) => {
       const r = result || {};
-      // The host forwards only `content` to a custom iframe; read that first,
-      // then fall back to `structuredContent` for hosts that do forward it.
+      // The payload is the first JSON `content` block whose `nodes` is an array.
       let data = null;
       for (const c of (r.content || [])) {
         if (c && c.type === "text") {
           try { const p = JSON.parse(c.text); if (p && Array.isArray(p.nodes)) { data = p; break; } }
           catch (_e) { /* not a JSON block (e.g. the human summary) */ }
         }
-      }
-      if (!data && r.structuredContent && Array.isArray(r.structuredContent.nodes)) {
-        data = r.structuredContent;
       }
       if (data && Array.isArray(data.nodes)) render(data);
       else { document.getElementById("empty").hidden = false;

@@ -141,13 +141,14 @@ async def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_on
     )
 
     # Assert: the model reads the summary; the full node/edge dump is addressed
-    # to the iframe alone (audience=["user"]) and mirrored on structured_content.
+    # to the iframe alone (audience=["user"]) and travels ONCE — no
+    # structured_content copy counting twice against the response cap.
     summary_block, payload_block = result.content
     assert "SUMMARY-SENTINEL" in summary_block.text
     assert summary_block.annotations is None
     assert payload_block.annotations.audience == ["user"]
     assert json.loads(payload_block.text) == payload
-    assert result.structured_content == payload
+    assert result.structured_content is None
 
 
 @pytest.mark.usefixtures("ttl_300")
@@ -649,11 +650,26 @@ def test_no_mcp_source_still_carries_a_retired_download_sentence(
     assert offenders == []
 
 
-def test_graph_html_reads_content_blocks_before_structured_content() -> None:
-    # Assert: the widget parses content JSON blocks FIRST (the host forwards
-    # only `content` to a custom iframe), with structuredContent as fallback.
+def test_graph_html_reads_only_the_content_blocks() -> None:
+    # Assert: the widget parses the content JSON block — the one channel the
+    # payload rides in (ADR-014 §5); the structuredContent fallback is gone.
     assert "ontoolresult" in _GRAPH_HTML
-    assert _GRAPH_HTML.index("r.content") < _GRAPH_HTML.index("r.structuredContent")
+    assert "r.content" in _GRAPH_HTML
+    assert "structuredContent" not in _GRAPH_HTML
+
+
+def test_no_mcp_source_sends_structured_content() -> None:
+    # Source guard: the payload is sent once, in the audience=["user"] content
+    # block; no MCP tool re-adds the structured_content copy (ADR-014 §5).
+    mcp_src = Path(__file__).parents[3] / "src" / "tree" / "mcp"
+    offenders = [
+        p.name
+        for p in mcp_src.rglob("*.py")
+        if "structured_content" in p.read_text(encoding="utf-8")
+    ]
+
+    assert mcp_src.is_dir()
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------

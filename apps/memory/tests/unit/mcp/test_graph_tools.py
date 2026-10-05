@@ -246,13 +246,13 @@ class TestGraphToolsDualDelivery:
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
-        # Assert: node/edge dump rides in the audience=["user"] block.
+        # Assert: node/edge dump rides in the audience=["user"] block — once.
         payload_block = result.content[1]
         assert payload_block.annotations.audience == ["user"]
         payload = json.loads(payload_block.text)
         assert len(payload["nodes"]) == 2
         assert len(payload["edges"]) == 1
-        assert result.structured_content == payload
+        assert result.structured_content is None
 
     async def test_visualize_falls_back_to_a_graph_file_and_resource_link(
         self, mocker, tool_name, tool, tmp_path: Path, request_user_id
@@ -361,8 +361,9 @@ async def test_search_memory_never_leaks_the_closure_marker_to_the_graph(
     result = await _star_search(mocker, 20, visualize=True)
 
     assert isinstance(result, ToolResult)
+    # The graph payload rides only in the content blocks scanned here.
     assert all("_closure_added" not in block.text for block in result.content)
-    assert "_closure_added" not in json.dumps(result.structured_content, default=str)
+    assert result.structured_content is None
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +412,7 @@ async def test_visualize_ships_payload_in_content_block_for_ui_clients(
         b for b in result.content if b.type == "text" and b.text.startswith("{")
     )
     assert json_block.annotations.audience == ["user"]
-    assert result.structured_content is not None
+    assert result.structured_content is None
 
 
 async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:

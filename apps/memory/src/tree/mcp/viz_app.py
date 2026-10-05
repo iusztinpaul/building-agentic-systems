@@ -48,12 +48,12 @@ the only place either exists. Every graph-capable MCP tool calls it —
 from a visualization standpoint they behave identically. A new tool builds a
 payload and calls this helper; it never reimplements a branch.
 
-The iframe payload travels in a ``content`` JSON block (a custom HTML app reads
-the tool result's ``content`` via ``ontoolresult`` — ``structuredContent`` is
-FastMCP's *Prefab*-renderer channel and is NOT forwarded to a custom iframe).
+The iframe payload travels ONLY in a ``content`` JSON block (a custom HTML app
+reads the tool result's ``content`` via ``ontoolresult`` — ``structuredContent``
+is FastMCP's *Prefab*-renderer channel and is NOT forwarded to a custom iframe).
 That block is marked ``audience=["user"]`` so the iframe gets the full node/edge
-dump while the MODEL sees only the short text summary. The JS reads ``content``
-first, then falls back to ``structuredContent`` for hosts that forward it.
+dump while the MODEL sees only the short text summary. The payload is sent once
+— no second copy counting against the host's response cap (ADR-014 §5).
 """
 
 import gzip
@@ -197,8 +197,8 @@ async def _graph_tool_result(
         # ``ontoolresult`` — ``structuredContent`` is FastMCP's *Prefab*-renderer
         # channel and is NOT forwarded to a custom iframe. So the graph payload
         # rides in a ``content`` JSON block; it's marked ``audience=["user"]`` so
-        # the iframe gets it while the MODEL still sees only ``summary``.
-        # ``structured_content`` is kept for any host that forwards it too.
+        # the iframe gets it while the MODEL still sees only ``summary``. That
+        # block is the ONLY copy of the payload (ADR-014 §5).
         return ToolResult(
             content=[
                 types.TextContent(
@@ -211,7 +211,6 @@ async def _graph_tool_result(
                     annotations=types.Annotations(audience=["user"]),
                 ),
             ],
-            structured_content=payload,
         )
 
     # Fallback: client can't render MCP App UIs, or a file was requested. The
@@ -378,18 +377,13 @@ __RENDER_JS__
 
     app.ontoolresult = (result) => {
       const r = result || {};
-      // A custom HTML app receives the payload via `content` (the host does not
-      // forward `structuredContent` to a custom iframe); read that first, then
-      // fall back to `structuredContent` for hosts that do forward it.
+      // The payload is the first JSON `content` block whose `nodes` is an array.
       let data = null;
       for (const c of (r.content || [])) {
         if (c && c.type === "text") {
           try { const p = JSON.parse(c.text); if (p && Array.isArray(p.nodes)) { data = p; break; } }
           catch (_e) { /* not a JSON block (e.g. the human summary) */ }
         }
-      }
-      if (!data && r.structuredContent && Array.isArray(r.structuredContent.nodes)) {
-        data = r.structuredContent;
       }
       if (data && Array.isArray(data.nodes)) render(data);
       else countsEl.textContent = "No graph data in tool result.";
