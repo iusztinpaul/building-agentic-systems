@@ -18,6 +18,7 @@ from tree.config.app_config import (
     DreamConfig,
     EmbeddingConfig,
     HdbscanConfig,
+    MCPConfig,
     MemoryConfig,
     MODAL_NAME_PREFIX,
     ModalConfig,
@@ -569,6 +570,23 @@ class TestExtractionConcurrencyKnobs:
         config = load_app_config(custom)
 
         assert config.extraction.doc_concurrency == 3
+
+
+class TestGraphFileTtlConfig:
+    """ADR-014 §4: how long a **Graph file** stays readable (task 185)."""
+
+    def test_default_yaml_and_typed_default_agree_on_300(self) -> None:
+        assert MCPConfig().graph_file_ttl_seconds == 300
+        assert load_app_config(_DEFAULT_CONFIG_PATH).mcp.graph_file_ttl_seconds == 300
+
+    def test_env_override_wins_over_yaml(self, tmp_path, monkeypatch) -> None:
+        custom = tmp_path / "mcp.yaml"
+        custom.write_text("mcp:\n  graph_file_ttl_seconds: 300\n")
+        monkeypatch.setenv("TREE_MCP__GRAPH_FILE_TTL_SECONDS", "120")
+
+        config = load_app_config(custom)
+
+        assert config.mcp.graph_file_ttl_seconds == 120
 
 
 class TestMemoryModeConfig:

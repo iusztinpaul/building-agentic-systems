@@ -22,6 +22,7 @@ import logging
 from beanie import init_beanie
 from pydantic import BaseModel
 from pymongo import AsyncMongoClient
+from pymongo.asynchronous.database import AsyncDatabase
 
 from tree.config.app_config import MemoryMode, app_config
 from tree.config.settings import settings
@@ -30,6 +31,12 @@ from tree.entities.documents import Document
 from tree.entities.extraction_audit import (
     ExtractionDroppedField,
     ExtractionRejection,
+)
+from tree.entities.graph_files import (
+    GRAPH_FILE_TTL_INDEX,
+    GRAPH_FILES_COLLECTION,
+    GraphFile,
+    graph_file_indexes,
 )
 from tree.entities.memory import MEMORY_COLLECTION, MemoryEntry, memory_indexes
 from tree.entities.meta_state import KnowledgeGraphMetaState
@@ -47,6 +54,7 @@ ALL_DOCUMENT_MODELS = [
     User,
     ExtractionRejection,
     ExtractionDroppedField,
+    GraphFile,
 ]
 
 
@@ -55,9 +63,57 @@ async def init_mongodb(uri: str, database: str) -> AsyncMongoClient:
     # Beanie reads ``Settings.indexes`` at init: bind the configured mode's set
     # first, so every entry point creates exactly that mode's classic indexes.
     MemoryEntry.Settings.indexes = memory_indexes(app_config.memory.mode)
+    # BEFORE ``init_beanie``: Beanie re-submits every declared index, so a live
+    # ``created_at_ttl`` with another ``expireAfterSeconds`` would fail boot
+    # with IndexOptionsConflict (code 85). Declare whichever TTL is now live.
+    ttl_seconds = await reconcile_graph_file_ttl(
+        client[database], app_config.mcp.graph_file_ttl_seconds
+    )
+    GraphFile.Settings.indexes = graph_file_indexes(ttl_seconds)
     await init_beanie(database=client[database], document_models=ALL_DOCUMENT_MODELS)
 
     return client
+
+
+async def reconcile_graph_file_ttl(db: AsyncDatabase, ttl_seconds: int) -> int:
+    """Bring the live ``graph_files`` TTL to ``ttl_seconds`` with ``collMod``.
+
+    Returns the TTL now in force, for ``init_mongodb`` to declare: the
+    configured one, or the LIVE one when ``collMod`` failed — declaring the
+    configured value then would crash ``init_beanie`` on code 85. A missing
+    collection or index is a no-op (Beanie creates it next). Any error is ONE
+    WARNING and never raises: a stale TTL is a nuisance, a dead server is not.
+    """
+
+    live_ttl: int | None = None
+    try:
+        indexes = await db[GRAPH_FILES_COLLECTION].index_information()
+        ttl_index = indexes.get(GRAPH_FILE_TTL_INDEX)
+        if ttl_index is None:
+            return ttl_seconds
+        live_ttl = ttl_index.get("expireAfterSeconds")
+        if live_ttl == ttl_seconds:
+            return ttl_seconds
+        await db.command(
+            {
+                "collMod": GRAPH_FILES_COLLECTION,
+                "index": {
+                    "name": GRAPH_FILE_TTL_INDEX,
+                    "expireAfterSeconds": ttl_seconds,
+                },
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 — a TTL reconcile must never break boot
+        logger.warning("graph_files TTL reconcile skipped: %s", exc)
+        return ttl_seconds if live_ttl is None else live_ttl
+
+    logger.info(
+        "graph_files %s: expireAfterSeconds %s → %s",
+        GRAPH_FILE_TTL_INDEX,
+        live_ttl,
+        ttl_seconds,
+    )
+    return ttl_seconds
 
 
 # The two collections whose contents depend on ``memory.mode``: the rows

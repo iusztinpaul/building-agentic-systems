@@ -411,6 +411,11 @@ class ObservabilityConfig(BaseModel):
 class MCPConfig(BaseModel):
     max_retries: int = 1
     max_results: int = 10
+    # How long a **Graph file** (the ``graphs://<token>.html.gz`` download)
+    # stays readable, ADR-014 §4. No bounds on purpose: a value Mongo rejects
+    # must reach the boot-time reconcile (which warns and keeps the live TTL),
+    # not crash the config load.
+    graph_file_ttl_seconds: int = 300
 
 
 class ChunkLevelConfig(BaseModel):
