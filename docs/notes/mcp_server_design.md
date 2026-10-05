@@ -81,7 +81,7 @@ Tools on the file path: `visualize_memory_structure`, `visualize_memory_embeddin
 
 ### 5. One user is pinned at boot
 
-- `server.py` resolves `--user-id` / `TREE_USER_IDENTIFIER` ONCE at boot and every tool reads that
+- `server.py` resolved a CLI user flag or `TREE_USER_IDENTIFIER` ONCE at boot and every tool reads that
   `_SERVER_USER_ID` (`server.py:3`, `server.py:65`). Every caller of a deployment shares one memory.
 - Locally that is one person, one process. On Horizon, with one shared bearer token, anyone holding
   the token reads, searches and ingests into the same user's memory, and graph files carry no owner.
@@ -131,23 +131,22 @@ Fixes problem 5 and gives Idea 1 its owner.
 - **One seam:** `resolve_request_user(ctx) -> PydanticObjectId` replaces every read of the
   boot-pinned id (the `ContextVar` refactor `server.py:13` already anticipates). Visualization,
   search, query and ingest all scope by its result.
-- **Input — a generic user identifier** (email or handle), looked up with
-  `User.find_one(User.identifier == identifier)`, the lookup `_resolve_server_user_id` does today.
-  - Preferred source: an HTTP header (e.g. `X-Tree-User`) set in each client's MCP config next to the
-    shared bearer token. Stateless, the model never has to know or pass it, tool signatures unchanged.
-  - Fallback source: a `user` argument on every tool, resolved by the same seam — only if Horizon's
-    gateway strips custom headers (**unverified**; the gateway docs only document `POST /mcp`
-    forwarding, https://docs.horizon.prefect.io/gateway).
-  - Stdio / local runs fall back to `TREE_USER_IDENTIFIER`, so the Makefile flow keeps working.
-- **Trust model, stated plainly:** with one shared token the identifier is a claim, not a proof —
-  anyone holding the token can name any user. Acceptable until login exists.
-- **Long run:** after login, each user gets their own token; the seam reads the identity from the
-  verified token (FastMCP `get_access_token()`, Horizon's gateway auth) and the header/argument goes
-  away. Only the seam's body changes.
+- **Input — a generic user identifier** (email or handle), looked up case-insensitively in
+  `User.identifier`. Decided in planning (ADR-014): exactly one source per transport, no fallback.
+  - HTTP: ONLY Horizon's `horizon-actor-email` header, which the gateway injects after authenticating
+    an organization member (and strips when a client forges it). A local HTTP client sets it itself.
+    An earlier draft used a custom client header; it was dropped because Horizon already supplies a
+    verified identity.
+  - stdio: ONLY `TREE_USER_IDENTIFIER` from `.env`.
+  - Missing or unknown → `configuration_error`, never a default user.
+- **Trust model:** verified on Horizon (the gateway's authenticated actor), a claim locally. Horizon
+  authentication must stay enabled. See `mcp_server_auth.md`.
+- **Long run:** public self-serve sign-up means our own OAuth (a FastMCP auth provider) with the
+  seam reading the token's email instead of the header. Only the seam's body changes.
 
 ## Open checks before planning
 
-1. Does Horizon's gateway forward custom HTTP headers to the server? (decides header vs argument)
+1. Which exact `horizon-actor-email` value and case does Horizon send for our account?
 2. Does a Claude Desktop call on Horizon get the inline view or the file? (problem 4)
 3. Does the inline view render on Claude Desktop with `structured_content` removed? (Idea 2)
 4. The real exception behind the masked "Error reading resource" in the Horizon server logs — expected
