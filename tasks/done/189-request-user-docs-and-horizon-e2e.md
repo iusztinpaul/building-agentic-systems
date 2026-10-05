@@ -325,3 +325,9 @@ $ make memory-tests
 - Out of scope, per the coordinator: the three `docs/notes/*.md` moved files and the `data/notes/*` deletions are not part of 189 and must be left out of its commit (or moved by the owner as one separate change).
 
 **VERDICT: PASS** (all non-[HUMAN] criteria verified; the [HUMAN] Horizon AC and the tutorial-measurement AC remain open by design)
+
+### [PA] 2026-10-05 22:10 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Feature-level review of `request-scoped-users` (PR #46, tasks 185–189, ADR-014, glossary). Reviewed evidence from the Tester log entry; all machine-verifiable acceptance criteria verified from the user's POV. Reviewed runbook, tutorial, skill, README, .env.example and the two ADR Status-line notes against the code: every claim matches request_user.py / viz_app.py. The [HUMAN] Horizon checks (a)–(f) and the tutorial measurement sentence stay open by design. Hand off to the PR Reviewer.

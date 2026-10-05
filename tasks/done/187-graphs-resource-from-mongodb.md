@@ -314,3 +314,9 @@ $ mongosh … created_at_ttl expireAfterSeconds → 300   # the stdio boot recon
 - My first server restart attempt silently failed to bind (stale server on 8765) yet reconciled the TTL index first; harmless, but note the boot reconciles the index before binding.
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-05 22:10 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Feature-level review of `request-scoped-users` (PR #46, tasks 185–189, ADR-014, glossary). Reviewed evidence from the Tester log entry; all machine-verifiable acceptance criteria verified from the user's POV. Reviewed the download from the user's POV: no server path over HTTP, one "not found or expired" answer for unknown / foreign / expired, the stdio path + browser kept, one decode contract in six places. Hand off to the PR Reviewer.

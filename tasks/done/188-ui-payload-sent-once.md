@@ -197,3 +197,9 @@ I looked at the screenshots for the embedding map (legend, 47 points drawn) and 
 - The proxy cannot prove what Claude Desktop forwards; that is exactly the pending [HUMAN] AC.
 
 **VERDICT: PASS** (all machine-verifiable ACs; the [HUMAN] Claude Desktop AC remains explicitly PENDING and must be ticked by the human before the task is considered done).
+
+### [PA] 2026-10-05 22:10 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Feature-level review of `request-scoped-users` (PR #46, tasks 185–189, ADR-014, glossary). Reviewed evidence from the Tester log entry; all machine-verifiable acceptance criteria verified from the user's POV. Reviewed the single-copy payload. The [HUMAN] Claude Desktop inline-render check (stdio, graphrag) stays open and is not grounds for REJECT; the restore rule is recorded in ADR-014 §5. Hand off to the PR Reviewer.

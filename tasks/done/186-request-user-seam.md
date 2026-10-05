@@ -368,3 +368,9 @@ MCP server ready (database=tree, thread_id=mcp-session-e066a0f7-…)
 - Task 189 must update `.agents/skills/run-pipelines-e2e/SKILL.md` `fastmcp call … --auth none` recipe (now needs the header), as the SWE noted.
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-05 22:10 — Acceptance Review
+
+**VERDICT: ACCEPT**
+
+Feature-level review of `request-scoped-users` (PR #46, tasks 185–189, ADR-014, glossary). Reviewed evidence from the Tester log entry; all machine-verifiable acceptance criteria verified from the user's POV. Reviewed the seam from the user's POV: one identifier source per transport (header over HTTP, env over stdio), everything after the identifier is read is shared, and each of the three failure messages names its fix. Hand off to the PR Reviewer.
