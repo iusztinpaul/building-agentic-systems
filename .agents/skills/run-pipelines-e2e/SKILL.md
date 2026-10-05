@@ -56,7 +56,23 @@ By default, use the "Paul Iusztin" user when testing.
 
    It writes `.tree/graphs/embedding-map-<UTC-stamp>.html` and opens it; the legend shows one row per cluster. Two expected outcomes, not failures: with no clustering run it prints `No clustering run found for this user …` and exits 1, and after ingesting anything since the last run the FIRST output line is `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` (those points are off the map and counted in the legend). Ingest one document and re-run to see that stale warning appear — then re-cluster to clear it.
 
-   For the MCP surface, serve it in the same mode (e.g. `TREE_MEMORY__MODE=graphrag make memory-serve-mcp TRANSPORT=streamable-http` after a graphrag run) and call the tools with `uv run fastmcp call http://127.0.0.1:8000/mcp --auth none <tool> …`, e.g. `… visualize_memory_embeddings hulls=true` — it must carry the same file path, warning line and no-run message as the CLI. `rag` registers 8 tools, `graphrag` 14 — `visualize_memory_structure` in both (no `max_hops` in `rag`).
+   For the MCP surface, serve it in the same mode (e.g. `TREE_MEMORY__MODE=graphrag make memory-serve-mcp TRANSPORT=streamable-http` after a graphrag run; if port 8000 is taken, prefix `FASTMCP_PORT=<n>` and use that port in the URL below). Over HTTP every call must carry `horizon-actor-email` — without it each tool answers `configuration_error` — so call the tools through `fastmcp.Client` with the header set from `.env`'s `TREE_USER_IDENTIFIER` (`--env-file` loads it; a bare `uv run` does not):
+
+   ```bash
+   uv --directory apps/memory run --env-file ../../.env python - <<'EOF'
+   import asyncio, os
+   from fastmcp import Client
+   from fastmcp.client.transports import StreamableHttpTransport
+   async def main() -> None:
+       transport = StreamableHttpTransport("http://127.0.0.1:8000/mcp", headers={"horizon-actor-email": os.environ["TREE_USER_IDENTIFIER"]})
+       async with Client(transport) as client:
+           print(len(await client.list_tools()), "tools")
+           print((await client.call_tool("visualize_memory_embeddings", {"hulls": True})).content[0].text)
+   asyncio.run(main())
+   EOF
+   ```
+
+   It must carry the same warning line and no-run message as the CLI; where the CLI names a file, the HTTP answer names no path — a `graphs://<token>.html.gz` link and "The link expires in about 5 minutes." The stdio entry (`tree-memory-local`) needs no header: it reads `TREE_USER_IDENTIFIER` from `.env`. `rag` registers 8 tools, `graphrag` 14 — `visualize_memory_structure` in both (no `max_hops` in `rag`).
 
    **The four tool-contract checks (ADR-008).** Every answer is JSON, so read the named field — not the prose:
 

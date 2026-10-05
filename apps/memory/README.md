@@ -427,6 +427,8 @@ make memory-serve-mcp                       # stdio transport (default)
 make memory-serve-mcp TRANSPORT=streamable-http
 ```
 
+Neither form takes a `USER_ID`: the server resolves the user per request. Over stdio it reads `TREE_USER_IDENTIFIER` from `.env`; over HTTP the identity is Horizon's `horizon-actor-email` header — set it on the client yourself only against a local `TRANSPORT=streamable-http` server (there is no gateway to add it).
+
 The repo-root `.mcp.json` already wires this up — Claude Code and the harness auto-spawn it. No extra setup needed from those clients.
 
 **Tools exposed.** The tool set IS the memory mode (`memory.mode`, ADR-006): the server reads it once at boot and registers only what that mode can honour. A graph tool called against a `rag` server returns the standard unknown-tool error — it was never registered.
