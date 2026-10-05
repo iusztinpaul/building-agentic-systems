@@ -25,12 +25,15 @@ import json
 from collections import Counter
 from typing import Any
 
+from beanie import PydanticObjectId
 from fastmcp import Context
 from fastmcp.apps import UI_EXTENSION_ID, AppConfig, ResourceCSP
 from fastmcp.tools import ToolResult
 from mcp import types
 
+from tree.mcp import request_user
 from tree.mcp.server import mcp
+from tree.mcp.tools import REQUEST_USER_ERRORS, request_user_error
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
 from tree.memory.visualize.graph import to_graph_payload
@@ -41,7 +44,12 @@ _EXT_APPS_CDN = "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with
 
 
 async def _fetch_payload(
-    ctx: Context, query: str, top_k: int, max_hops: int
+    ctx: Context,
+    query: str,
+    top_k: int,
+    max_hops: int,
+    *,
+    user_id: PydanticObjectId,
 ) -> dict[str, Any]:
     """Run the structured query (or full-graph fetch) → {nodes, edges} payload."""
 
@@ -52,7 +60,7 @@ async def _fetch_payload(
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
             max_hops=max_hops,
         )
@@ -60,7 +68,7 @@ async def _fetch_payload(
         result = await fetch_full_graph(
             client=lc["client"],
             database=lc["database"],
-            user_id=lc["user_id"],
+            user_id=user_id,
         )
     # The graph view's rule (task 168); this template ignores `docRank` today.
     return to_graph_payload(result, document_order="relevance" if query else "recency")
@@ -102,7 +110,11 @@ async def memory_dashboard(
             with no query.
     """
 
-    payload = await _fetch_payload(ctx, query, top_k, max_hops)
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("memory_dashboard", exc)
+    payload = await _fetch_payload(ctx, query, top_k, max_hops, user_id=user_id)
     label = repr(query) if query else "your full memory"
     summary = _summary(payload, label)
 

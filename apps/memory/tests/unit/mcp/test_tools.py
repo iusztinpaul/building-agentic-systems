@@ -63,6 +63,14 @@ from tree.online import IngestReceipt
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
+
+@pytest.fixture
+def request_user_id() -> PydanticObjectId:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _USER_ID
+
+
 # The two **Ingest receipt** shapes every ingest tool can answer with.
 _DISPATCHED = IngestReceipt(
     source_uri="https://example.com",
@@ -151,7 +159,6 @@ def _make_ctx() -> MagicMock:
         "client": MagicMock(),
         "database": "test_db",
         "embedding_model": MagicMock(),
-        "user_id": _USER_ID,
         "thread_id": "mcp-session-test",
     }
     return ctx

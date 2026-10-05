@@ -67,6 +67,7 @@ from tree.data.web.web_unlocker import (
     BrightDataConfigurationError,
     BrightDataRequestError,
 )
+from tree.mcp import request_user
 from tree.mcp.server import MEMORY_MODE, mcp
 
 # viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
@@ -305,20 +306,56 @@ def _retrieval_error(tool: str, exc: Exception) -> str:
     return internal_error(tool, exc)
 
 
-def _set_retrieval_thread(ctx: Context, tool: str) -> None:
+#: What the per-call **Request user** lookup can raise. Every tool resolves its
+#: user where it first needs it (after its cheap input guards, before tracing or
+#: any read/write) and answers :func:`request_user_error` for these::
+#:
+#:     try:
+#:         user_id = await request_user.resolve_request_user(ctx)
+#:     except REQUEST_USER_ERRORS as exc:
+#:         return request_user_error("search_memory", exc)
+#:
+#: The seam is called through its MODULE so one patch of
+#: ``tree.mcp.request_user.resolve_request_user`` reaches ``tools``,
+#: ``graph_tools`` and ``dashboard_app`` alike.
+REQUEST_USER_ERRORS = (request_user.RequestUserError, PyMongoError)
+
+
+def request_user_error(tool: str, exc: Exception) -> str:
+    """Map a failed **Request user** lookup to its envelope.
+
+    * :class:`~tree.mcp.request_user.RequestUserError` (no identifier for this
+      transport, or no such user) → ``configuration_error``, NOT retryable:
+      the same call fails until the client config or ``users`` changes;
+    * :class:`PyMongoError` from the ``users`` read → ``storage_unavailable``,
+      retryable — the per-request lookup must not turn a Mongo outage into a
+      protocol error (ADR-008 §2).
+
+    Called from INSIDE an ``except`` block (the storage branch logs the
+    traceback).
+    """
+
+    if isinstance(exc, request_user.RequestUserError):
+        return tool_error("configuration_error", str(exc), retryable=False)
+    return storage_error(tool, exc)
+
+
+def _set_retrieval_thread(
+    ctx: Context, tool: str, *, user_id: PydanticObjectId
+) -> None:
     """Group this tool's trace under the server-instance thread, fail-open.
 
     Reads the lifespan ``thread_id`` (a server-instance UUID minted at boot —
     one harness session = one thread) and tags the current Opik trace with it
-    plus ``user_id`` metadata. No-ops when Opik is unconfigured or the context
-    lacks a thread_id.
+    plus the resolved **Request user**'s ``user_id`` metadata. No-ops when Opik
+    is unconfigured or the context lacks a thread_id.
     """
 
     try:
         lc = ctx.lifespan_context
         update_current_trace(
             thread_id=lc.get("thread_id"),
-            metadata={"user_id": str(lc.get("user_id")), "tool": tool},
+            metadata={"user_id": str(user_id), "tool": tool},
         )
     except Exception as exc:  # noqa: BLE001 — telemetry must never break the tool
         logger.debug("Opik retrieval-thread tagging no-op: %s", exc)
@@ -361,7 +398,11 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_memory", exc)
+    _set_retrieval_thread(ctx, "search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await retrieve_parents(
@@ -369,7 +410,7 @@ async def search_memory(query: str, ctx: Context, top_k: int = 10) -> str:
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -446,7 +487,11 @@ async def visualize_memory_structure(
     if top_k is not None and top_k < 1:
         return tool_error("invalid_input", "top_k must be ≥ 1", retryable=False)
 
-    _set_retrieval_thread(ctx, "visualize_memory_structure")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_structure", exc)
+    _set_retrieval_thread(ctx, "visualize_memory_structure", user_id=user_id)
     lc = ctx.lifespan_context
     query = query.strip()
     try:
@@ -456,21 +501,21 @@ async def visualize_memory_structure(
                 database=lc["database"],
                 query=query,
                 embedding_model=lc["embedding_model"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 top_k=top_k,
             )
             if retrieval.outcome == "nothing_found" or not retrieval.parents:
                 # A plain ``str``: there is no payload to deliver.
                 return NO_RESULTS_MESSAGE.format(query=query)
             result = await fetch_retrieval_structure(
-                lc["client"], lc["database"], lc["user_id"], retrieval
+                lc["client"], lc["database"], user_id, retrieval
             )
             label = repr(query)
         else:
             # The structure read hits the SAME Mongo, so it is inside the same
             # guard: "the database is down" must not differ by argument.
             result = await fetch_rag_structure(
-                lc["client"], lc["database"], lc["user_id"], max_docs=max_docs
+                lc["client"], lc["database"], user_id, max_docs=max_docs
             )
             label = "your full memory"
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -545,11 +590,13 @@ async def visualize_memory_embeddings(
             / openable HTML file instead of the inline interactive view.
     """
 
-    _set_retrieval_thread(ctx, "visualize_memory_embeddings")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_embeddings", exc)
+    _set_retrieval_thread(ctx, "visualize_memory_embeddings", user_id=user_id)
     lc = ctx.lifespan_context
-    embedding_map = await load_embedding_map(
-        lc["client"], lc["database"], lc["user_id"]
-    )
+    embedding_map = await load_embedding_map(lc["client"], lc["database"], user_id)
     # Never an empty canvas: a user nobody has clustered gets the command to run
     # (ADR-007 §8). A plain ``str`` — there is no payload to deliver.
     if embedding_map is None:
@@ -666,10 +713,13 @@ async def ingest_url(url: str, ctx: Context) -> str:
         url: The web URL to fetch and ingest.
     """
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_url", exc)
     try:
         return await _ingest(
-            UrlSource(uri=url), user_id=lc["user_id"], dup_extra={"url": url}
+            UrlSource(uri=url), user_id=user_id, dup_extra={"url": url}
         )
     # No fetch happens here — `_ingest` only DISPATCHES the flow run (the page
     # is fetched worker-side), and it already maps every Prefect API failure
@@ -718,11 +768,14 @@ async def ingest_file(
         title: Optional title override. Defaults to the filename.
     """
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_file", exc)
     try:
         return await _ingest(
             FileSource(path=file_path, content=content, title=title),
-            user_id=lc["user_id"],
+            user_id=user_id,
             dup_extra={"file_path": file_path},
         )
     except ValueError as exc:
@@ -793,6 +846,13 @@ async def search_web(
             retryable=False,
         )
 
+    # EVERY call resolves the user, with or without ``ingest``: a misconfigured
+    # client fails on its first call, and before a SERP credit is spent.
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_web", exc)
+
     try:
         results = await web_search(
             query,
@@ -837,9 +897,8 @@ async def search_web(
     }
 
     if ingest:
-        lc = ctx.lifespan_context
         payload["ingest"] = await _build_ingest_block(
-            results, ingest_top_k, ingest_urls, user_id=lc["user_id"]
+            results, ingest_top_k, ingest_urls, user_id=user_id
         )
 
     return json.dumps(payload, indent=2)
@@ -931,6 +990,13 @@ async def scrape_web(
         return tool_error(
             "invalid_input", "max_chars must be >= 1 or None", retryable=False
         )
+
+    # Nothing here is per-user, but "every tool" resolves the user: a
+    # misconfigured client fails on its first call, whichever tool it is.
+    try:
+        await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("scrape_web", exc)
 
     try:
         results = await asyncio.gather(
@@ -1029,7 +1095,10 @@ async def ingest_conversation(
                 retryable=False,
             )
 
-    lc = ctx.lifespan_context
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("ingest_conversation", exc)
     try:
         return await _ingest(
             ConversationSource(
@@ -1038,7 +1107,7 @@ async def ingest_conversation(
                 session_uri=session_uri,
                 session_started_at=parsed_session_started_at,
             ),
-            user_id=lc["user_id"],
+            user_id=user_id,
             dup_extra={},
         )
     except ValueError as exc:

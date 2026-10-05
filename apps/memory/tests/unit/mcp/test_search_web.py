@@ -25,6 +25,13 @@ from tree.data.web.web_unlocker import (
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 
+@pytest.fixture
+def request_user_id() -> PydanticObjectId:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _USER_ID
+
+
 # ---------------------------------------------------------------------------
 # MCP tool tests — call the registered tool's underlying function directly.
 # ---------------------------------------------------------------------------
@@ -50,13 +57,13 @@ def _sample_results() -> list[SearchResult]:
 def _make_ctx() -> MagicMock:
     """Build a mock FastMCP Context.
 
-    The ``search_web`` ingest path reads ``lifespan_context['user_id']`` so we
-    stub a real dict with a stable :class:`PydanticObjectId` here. The non-
-    ingest path doesn't touch it.
+    The user comes from the **Request user** seam (patched in ``conftest.py``
+    to resolve to ``_USER_ID`` via the ``request_user_id`` override below), so
+    the lifespan context carries none.
     """
 
     ctx = MagicMock()
-    ctx.lifespan_context = {"user_id": _USER_ID}
+    ctx.lifespan_context = {}
     return ctx
 
 

@@ -81,7 +81,6 @@ def _make_ctx(*, ui_supported: bool) -> MagicMock:
         "client": MagicMock(),
         "database": "test",
         "embedding_model": MagicMock(),
-        "user_id": _UID,
     }
     return ctx
 

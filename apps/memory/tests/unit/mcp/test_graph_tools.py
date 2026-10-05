@@ -110,6 +110,13 @@ class TestSerialize:
 _GRAPH_UID = "65f1a2b3c4d5e6f7a8b9c0d1"
 
 
+@pytest.fixture
+def request_user_id() -> str:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _GRAPH_UID
+
+
 def _node(node_id: str, node_type: str) -> dict[str, Any]:
     return {
         "_id": f"{_GRAPH_UID}:{node_type}:{node_id}",
@@ -152,7 +159,6 @@ def _make_graph_ctx(*, ui_supported: bool) -> MagicMock:
         "database": "test_db",
         "llm": MagicMock(),
         "embedding_model": MagicMock(),
-        "user_id": _GRAPH_UID,
     }
     return ctx
 

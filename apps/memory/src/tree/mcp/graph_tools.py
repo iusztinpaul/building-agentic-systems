@@ -36,6 +36,7 @@ from tree.entities.memory import NodeType
 # dashboard_app: side-effect import — registers the custom-HTML dashboard
 # (memory_dashboard tool + ui:// resource).
 from tree.mcp import dashboard_app  # noqa: F401
+from tree.mcp import request_user
 from tree.mcp.deep_search import MODEL_HIDDEN_KEYS, write_deep_search_results
 
 from tree.mcp.server import mcp
@@ -43,7 +44,9 @@ from tree.mcp.tools import (
     BLANK_QUERY_MESSAGE,
     _retrieval_error,
     _set_retrieval_thread,
+    REQUEST_USER_ERRORS,
     internal_error,
+    request_user_error,
     storage_error,
     tool_error,
 )
@@ -191,6 +194,10 @@ async def visualize_memory_structure(
     if max_docs is not None and max_docs < 1:
         return tool_error("invalid_input", "max_docs must be ≥ 1", retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_structure", exc)
     lc = ctx.lifespan_context
     try:
         if query:
@@ -199,7 +206,7 @@ async def visualize_memory_structure(
                 database=lc["database"],
                 query=query,
                 embedding_model=lc["embedding_model"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 top_k=top_k,
                 max_hops=max_hops,
             )
@@ -210,7 +217,7 @@ async def visualize_memory_structure(
             result = await fetch_full_graph(
                 client=lc["client"],
                 database=lc["database"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 max_docs=max_docs,
             )
             label = "your full memory"
@@ -275,7 +282,11 @@ async def query_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "query_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("query_memory", exc)
+    _set_retrieval_thread(ctx, "query_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         results = await execute_nl_query(
@@ -284,7 +295,7 @@ async def query_memory(
             query=query,
             llm=lc["llm"],
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             max_results=max_results,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -340,7 +351,11 @@ async def search_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_memory", exc)
+    _set_retrieval_thread(ctx, "search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await structured_query_memory(
@@ -348,7 +363,7 @@ async def search_memory(
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
             max_hops=max_hops,
         )
@@ -400,7 +415,11 @@ async def deep_search_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "deep_search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("deep_search_memory", exc)
+    _set_retrieval_thread(ctx, "deep_search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await structured_query_memory(
@@ -408,7 +427,7 @@ async def deep_search_memory(
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
             max_hops=max_hops,
         )
@@ -488,12 +507,16 @@ async def review_list_pending(
     except ValueError as exc:
         return tool_error("invalid_input", str(exc), retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_list_pending", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         pending = await _find_pending_duplicates(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             entity_type=type_filter,
             limit=limit,
         )
@@ -539,12 +562,16 @@ async def review_confirm(
     except ValueError as exc:
         return tool_error("invalid_input", str(exc), retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_confirm", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         result = await _review_duplicate(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.CONFIRM,
@@ -584,12 +611,16 @@ async def review_reject(
     ``retryable`` is true.
     """
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_reject", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         result = await _review_duplicate(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.REJECT,
