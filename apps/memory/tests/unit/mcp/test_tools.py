@@ -31,6 +31,7 @@ from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
 from tree.data.online_pipeline import UrlSource
+from tree.entities.graph_files import GraphFile
 from tree.mcp.tools import (
     DEPLOYMENT_MISSING_MESSAGE,
     ERROR_CONTRACT,
@@ -62,6 +63,14 @@ from tree.models.exceptions import ExtractionError, ModelError
 from tree.online import IngestReceipt
 
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
+
+
+@pytest.fixture
+def request_user_id() -> PydanticObjectId:
+    """The patched **Request user** seam resolves to this module's tenant."""
+
+    return _USER_ID
+
 
 # The two **Ingest receipt** shapes every ingest tool can answer with.
 _DISPATCHED = IngestReceipt(
@@ -151,7 +160,6 @@ def _make_ctx() -> MagicMock:
         "client": MagicMock(),
         "database": "test_db",
         "embedding_model": MagicMock(),
-        "user_id": _USER_ID,
         "thread_id": "mcp-session-test",
     }
     return ctx
@@ -619,6 +627,9 @@ class TestDispatchErrors:
 def _viz_ctx(*, ui_supported: bool) -> MagicMock:
     ctx = _make_ctx()
     ctx.client_supports_extension.return_value = ui_supported
+    # A remote (Horizon-shaped) server: the file branch stores a Graph file
+    # and writes nothing to disk. The stdio extras are covered in test_viz_app.
+    ctx.transport = "streamable-http"
     return ctx
 
 
@@ -735,11 +746,11 @@ class TestVisualizeMemoryEmbeddings:
         )
         assert "Embedding map:" in result.content[0].text
 
-    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
-        self, mocker, tmp_path
+    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+        self, mocker, tmp_path, request_user_id
     ) -> None:
-        # Story 1: the Claude Code terminal renders no MCP App UI, so the same
-        # map arrives as a self-contained file plus a downloadable resource.
+        # Story 1: a client that renders no MCP App UI gets the same map as a
+        # downloadable Graph file the request user owns — no server file.
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
         mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
         mocker.patch(
@@ -753,10 +764,12 @@ class TestVisualizeMemoryEmbeddings:
         _, link_block = result.content
         assert link_block.type == "resource_link"
         assert re.fullmatch(
-            r"graphs://embedding-map-\d{8}-\d{6}\.html\.gz", str(link_block.uri)
+            r"graphs://[A-Za-z0-9_-]{22}\.html\.gz", str(link_block.uri)
         ), link_block.uri
         assert link_block.mimeType == "application/gzip"
-        assert (tmp_path / link_block.name.removesuffix(".gz")).is_file()
+        row = await GraphFile.find_one(GraphFile.name == link_block.name)
+        assert row is not None and row.user_id == request_user_id
+        assert list(tmp_path.iterdir()) == []
 
     async def test_the_delivered_copy_calls_the_picture_a_map_not_a_graph(
         self, mocker, tmp_path
@@ -776,13 +789,15 @@ class TestVisualizeMemoryEmbeddings:
         inline = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
 
         text_block, link_block = answer.content
-        assert "self-contained interactive embedding map to:" in text_block.text
+        assert "self-contained interactive embedding map as a download" in (
+            text_block.text
+        )
         assert "interactive graph" not in text_block.text
         assert link_block.description == (
             "gzip-compressed self-contained interactive embedding map — "
             "base64-decode the blob, gunzip, open the .html"
         )
-        assert text_block.text.endswith(DOWNLOAD_CONTRACT)
+        assert DOWNLOAD_CONTRACT in text_block.text
         assert inline.content[0].text.endswith("(interactive embedding map view).")
 
     async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
@@ -801,7 +816,8 @@ class TestVisualizeMemoryEmbeddings:
         )
 
         assert result.content[1].type == "resource_link"
-        assert list(tmp_path.glob("embedding-map-*.html"))
+        assert "you asked for an HTML file" in result.content[0].text
+        assert list(tmp_path.iterdir()) == []
 
     async def test_the_docstring_tells_the_model_when_to_draw_a_map(self) -> None:
         # The docstring IS the tool description an MCP client shows the model.
@@ -965,8 +981,8 @@ class TestRagVisualizeMemoryStructure:
         assert readers["fetch_rag_structure"].await_args.kwargs == {"max_docs": 7}
         readers["retrieve_parents"].assert_not_awaited()
 
-    async def test_a_non_ui_client_gets_a_file_and_its_graphs_resource_link(
-        self, mocker, tmp_path, readers
+    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+        self, mocker, tmp_path, readers, request_user_id
     ) -> None:
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
         mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
@@ -976,10 +992,12 @@ class TestRagVisualizeMemoryStructure:
         text_block, link_block = result.content
         assert text_block.text.startswith("Memory structure (rag:")
         assert re.fullmatch(
-            r"graphs://structure-\d{8}-\d{6}\.html\.gz", str(link_block.uri)
+            r"graphs://[A-Za-z0-9_-]{22}\.html\.gz", str(link_block.uri)
         ), link_block.uri
         assert link_block.mimeType == "application/gzip"
-        assert (tmp_path / link_block.name.removesuffix(".gz")).is_file()
+        row = await GraphFile.find_one(GraphFile.name == link_block.name)
+        assert row is not None and row.user_id == request_user_id
+        assert list(tmp_path.iterdir()) == []
         assert DOWNLOAD_CONTRACT in text_block.text
 
     async def test_as_html_file_forces_the_file_for_a_ui_client(

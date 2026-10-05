@@ -6,6 +6,8 @@ record which one is "current". It is the operator-facing front door to the
 
 * ``signup``      — create a :class:`~tree.entities.users.User` (idempotent on
                     ``identifier``) and, by default, set it as the current user.
+                    New identifiers are stored stripped + lowercased; one that
+                    collides case-insensitively with an existing row is refused.
 * ``set-current`` — point the current-user session at an existing user.
 * ``whoami``      — print the current user.
 
@@ -29,7 +31,7 @@ from beanie import PydanticObjectId
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.sessions import get_current_user, set_current_user
-from tree.entities.users import User
+from tree.entities.users import User, find_user_by_identifier, normalize_identifier
 from tree.logging import init_logger
 
 init_logger()
@@ -48,14 +50,24 @@ async def _connect() -> None:
 async def _signup(identifier: str, name: str | None, make_current: bool) -> None:
     await _connect()
 
-    user = await User.find_one({"identifier": identifier})
+    # The MCP **Request user** lookup is case-insensitive (ADR-014 §1), so two
+    # rows differing only in case would make it ambiguous: store new rows in
+    # ONE case, and refuse a case-only variant of an existing row. Comparing
+    # the STRIPPED (not lowercased) input keeps re-running the exact stored
+    # identifier idempotent — including a legacy row stored with uppercase.
+    requested = identifier.strip()
+    user = await find_user_by_identifier(requested)
+    if user is not None and user.identifier != requested:
+        raise click.ClickException(
+            f"identifier '{requested}' already exists as '{user.identifier}'."
+        )
     if user is None:
         attributes = {"name": name} if name else {}
-        user = User(identifier=identifier, attributes=attributes)
+        user = User(identifier=normalize_identifier(requested), attributes=attributes)
         await user.insert()
-        logger.info("Created user identifier=%s id=%s", identifier, user.id)
+        logger.info("Created user identifier=%s id=%s", user.identifier, user.id)
     else:
-        logger.info("User already exists identifier=%s id=%s", identifier, user.id)
+        logger.info("User already exists identifier=%s id=%s", user.identifier, user.id)
         # Re-creates ``person:self`` after a switch to graphrag (no-op otherwise).
         await user.ensure_self_person()
 
@@ -72,7 +84,7 @@ async def _set_current(identifier: str | None, user_id: str | None) -> None:
     if user_id is not None:
         user = await User.get(PydanticObjectId(user_id))
     else:
-        user = await User.find_one({"identifier": identifier})
+        user = await find_user_by_identifier(identifier or "")
 
     if user is None:
         raise click.ClickException(

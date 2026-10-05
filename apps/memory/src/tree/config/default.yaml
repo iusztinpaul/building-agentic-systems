@@ -194,6 +194,11 @@ prefect:
 mcp:
   max_retries: 1
   max_results: 10
+  # How long a rendered graph download (`graphs://…html.gz`) stays readable.
+  # Mongo's TTL monitor runs about every 60 s, so a file can outlive this by a
+  # minute. Override: TREE_MCP__GRAPH_FILE_TTL_SECONDS=… — a change is applied
+  # at the next boot by `collMod`, no index drop.
+  graph_file_ttl_seconds: 300
 
 # YouTube ETL: the bounded wait for ONE Bright Data transcript collection
 # (ADR-004). Credential presence is the backend switch — there is no `enabled`

@@ -65,10 +65,12 @@ A tool marked `—` is absent in that mode; the mode file names the chain to use
 - `No clustering run found for this user — run make memory-run-clustering-pipeline to build the embedding map.` — offer to run the command.
 - A first line `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat it, then the rest: the map is real but under-reports the corpus.
 
-**A visual answer carrying a file path plus a `graphs://…html.gz` link** could not render inline: share the path on `tree-memory-local`; on `tree-memory` (cloud) read the linked `graphs://…html.gz` blob, base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it.
+**A visual answer carrying a `graphs://…html.gz` link** could not render inline: on `tree-memory-local` share the local path it also gives; on `tree-memory` (cloud) read the linked blob within its expiry (about 5 minutes), base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it; an expired link → re-run the visual tool once.
 
 ---
 
 ## Errors
 
 Any tool may answer `{"error_type", "retryable", "message"}`. Act on `retryable`: `true` → retry the SAME call ONCE, then relay `message` and end the chain; `false` → change the input or end the chain. Why end it: the next link would work from missing data.
+
+`configuration_error` naming `horizon-actor-email` or `TREE_USER_IDENTIFIER` means the request carries no user (Horizon auth disabled, a service-account key, or an empty local env); `configuration_error` naming `make memory-signup` means the email has no user yet — the operator runs `make memory-signup USER_IDENTIFIER=<their Horizon account email>`. Either way, relay the message, do not retry.

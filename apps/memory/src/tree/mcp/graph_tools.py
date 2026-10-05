@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any
 
+from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
 from fastmcp.apps import AppConfig
@@ -36,6 +37,7 @@ from tree.entities.memory import NodeType
 # dashboard_app: side-effect import — registers the custom-HTML dashboard
 # (memory_dashboard tool + ui:// resource).
 from tree.mcp import dashboard_app  # noqa: F401
+from tree.mcp import request_user
 from tree.mcp.deep_search import MODEL_HIDDEN_KEYS, write_deep_search_results
 
 from tree.mcp.server import mcp
@@ -43,7 +45,9 @@ from tree.mcp.tools import (
     BLANK_QUERY_MESSAGE,
     _retrieval_error,
     _set_retrieval_thread,
+    REQUEST_USER_ERRORS,
     internal_error,
+    request_user_error,
     storage_error,
     tool_error,
 )
@@ -85,11 +89,13 @@ def _serialize(docs: list[dict[str, Any]]) -> str:
     return json_util.dumps(cleaned, indent=2)
 
 
-def _dual_graph_result(
+async def _dual_graph_result(
     ctx: Context,
     docs: list[dict[str, Any]],
     serialized: str,
     query: str,
+    *,
+    user_id: PydanticObjectId,
 ) -> str | ToolResult:
     """Answer with the serialized docs AND the graph, on whichever channel fits.
 
@@ -98,8 +104,8 @@ def _dual_graph_result(
     builds a **Graph payload** nor branches on client capability itself. That
     branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
     which also serves ``visualize_memory_structure`` (ADR-005, decision 4): inline
-    MCP App iframe when the client renders App UIs, else a self-contained file
-    under ``.tree/graphs/`` + a ``graphs://`` resource link.
+    MCP App iframe when the client renders App UIs, else a **Graph file**
+    owned by ``user_id`` behind an expiring ``graphs://`` resource link.
 
     ``serialized`` is carried VERBATIM into the model-visible text of whatever
     comes back: these tools' contract is answering the user's question, so the
@@ -137,7 +143,7 @@ def _dual_graph_result(
         f"{serialized}\n\nGraph of these results: "
         f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
-    return _graph_tool_result(ctx, payload, summary, query=query)
+    return await _graph_tool_result(ctx, payload, summary, user_id=user_id, query=query)
 
 
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
@@ -161,11 +167,12 @@ async def visualize_memory_structure(
     to *see* the graph rather than read node/edge JSON.
 
     When the client renders MCP App UIs, the graph appears inline. Otherwise
-    (or when ``as_html_file`` is set) the same graph is written to a
-    self-contained HTML file; the result carries the server-side path AND a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    (or when ``as_html_file`` is set) the same graph is rendered as a
+    self-contained HTML file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -191,6 +198,10 @@ async def visualize_memory_structure(
     if max_docs is not None and max_docs < 1:
         return tool_error("invalid_input", "max_docs must be ≥ 1", retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("visualize_memory_structure", exc)
     lc = ctx.lifespan_context
     try:
         if query:
@@ -199,7 +210,7 @@ async def visualize_memory_structure(
                 database=lc["database"],
                 query=query,
                 embedding_model=lc["embedding_model"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 top_k=top_k,
                 max_hops=max_hops,
             )
@@ -210,7 +221,7 @@ async def visualize_memory_structure(
             result = await fetch_full_graph(
                 client=lc["client"],
                 database=lc["database"],
-                user_id=lc["user_id"],
+                user_id=user_id,
                 max_docs=max_docs,
             )
             label = "your full memory"
@@ -231,8 +242,13 @@ async def visualize_memory_structure(
         )
     summary = f"Knowledge graph for {label}: {counts}"
 
-    return _graph_tool_result(
-        ctx, payload, summary, query=query, as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query=query,
+        as_html_file=as_html_file,
     )
 
 
@@ -252,10 +268,11 @@ async def query_memory(
 
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -275,7 +292,11 @@ async def query_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "query_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("query_memory", exc)
+    _set_retrieval_thread(ctx, "query_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         results = await execute_nl_query(
@@ -284,7 +305,7 @@ async def query_memory(
             query=query,
             llm=lc["llm"],
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             max_results=max_results,
         )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
@@ -292,7 +313,7 @@ async def query_memory(
     output = _serialize(results)
 
     if visualize and results:
-        return _dual_graph_result(ctx, results, output, query)
+        return await _dual_graph_result(ctx, results, output, query, user_id=user_id)
 
     return output
 
@@ -314,10 +335,11 @@ async def search_memory(
 
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -340,7 +362,11 @@ async def search_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("search_memory", exc)
+    _set_retrieval_thread(ctx, "search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await structured_query_memory(
@@ -348,7 +374,7 @@ async def search_memory(
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
             max_hops=max_hops,
         )
@@ -361,7 +387,7 @@ async def search_memory(
     output = _serialize(docs)
 
     if visualize and docs:
-        return _dual_graph_result(ctx, docs, output, query)
+        return await _dual_graph_result(ctx, docs, output, query, user_id=user_id)
 
     return output
 
@@ -400,7 +426,11 @@ async def deep_search_memory(
     if not query.strip():
         return tool_error("invalid_input", BLANK_QUERY_MESSAGE, retryable=False)
 
-    _set_retrieval_thread(ctx, "deep_search_memory")
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("deep_search_memory", exc)
+    _set_retrieval_thread(ctx, "deep_search_memory", user_id=user_id)
     lc = ctx.lifespan_context
     try:
         result = await structured_query_memory(
@@ -408,7 +438,7 @@ async def deep_search_memory(
             database=lc["database"],
             query=query,
             embedding_model=lc["embedding_model"],
-            user_id=lc["user_id"],
+            user_id=user_id,
             top_k=top_k,
             max_hops=max_hops,
         )
@@ -488,12 +518,16 @@ async def review_list_pending(
     except ValueError as exc:
         return tool_error("invalid_input", str(exc), retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_list_pending", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         pending = await _find_pending_duplicates(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             entity_type=type_filter,
             limit=limit,
         )
@@ -539,12 +573,16 @@ async def review_confirm(
     except ValueError as exc:
         return tool_error("invalid_input", str(exc), retryable=False)
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_confirm", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         result = await _review_duplicate(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.CONFIRM,
@@ -584,12 +622,16 @@ async def review_reject(
     ``retryable`` is true.
     """
 
+    try:
+        user_id = await request_user.resolve_request_user(ctx)
+    except REQUEST_USER_ERRORS as exc:
+        return request_user_error("review_reject", exc)
     lc = ctx.lifespan_context
     database = lc["client"][lc["database"]]
     try:
         result = await _review_duplicate(
             database,
-            user_id=lc["user_id"],
+            user_id=user_id,
             source_node_id=source_node_id,
             target_node_id=target_node_id,
             decision=ReviewDecision.REJECT,

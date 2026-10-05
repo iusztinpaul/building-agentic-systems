@@ -30,6 +30,7 @@ fast filtered reads.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -168,6 +169,33 @@ class User(BeanieDocument):
             self.id,
             node_id,
         )
+
+
+def normalize_identifier(identifier: str) -> str:
+    """The stored form of a NEW identifier: stripped and lowercased.
+
+    Horizon's docs do not promise the case of an account email, so ``signup``
+    stores ``" Paul@Example.com "`` as ``"paul@example.com"``. Rows created
+    before this rule keep their stored case — :func:`find_user_by_identifier`
+    matches them case-insensitively, so no migration is needed.
+    """
+
+    return identifier.strip().lower()
+
+
+async def find_user_by_identifier(identifier: str) -> User | None:
+    """Look a :class:`User` up by identifier, CASE-INSENSITIVELY (ADR-014 §1).
+
+    An anchored, escaped ``$regex`` with the ``i`` option: ``a+b@x.com`` never
+    matches ``aab@x.com``, and ``Paul@Example.com`` finds the row
+    ``paul@example.com`` (and vice versa). The regex misses the unique
+    ``identifier`` index; the ``users`` collection is one row per person, so
+    the scan is free (upgrade trigger: a measured cost). Shared by the MCP
+    **Request user** seam and ``scripts/signup.py``.
+    """
+
+    pattern = f"^{re.escape(normalize_identifier(identifier))}$"
+    return await User.find_one({"identifier": {"$regex": pattern, "$options": "i"}})
 
 
 # ---------------------------------------------------------------------------

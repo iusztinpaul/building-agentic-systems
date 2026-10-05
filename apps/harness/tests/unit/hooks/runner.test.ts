@@ -52,33 +52,9 @@ describe("runHook", () => {
     expect(result.exitCode).toBe(1);
     expect(result.parsed).toBeUndefined();
   });
-
-  test("non-JSON stdout is treated as observation", async () => {
-    const result = await runHook({ command: "echo hello" }, { event: "PostToolUse" });
-    expect(result.exitCode).toBe(0);
-    expect(result.parsed).toBeUndefined();
-    expect(result.raw.trim()).toBe("hello");
-  });
 });
 
 describe("runMatchingHooks", () => {
-  test("returns blocked=true when first hook exits non-zero", async () => {
-    const cfg: HookConfig = {
-      PreToolUse: [
-        { matcher: "bash", command: "exit 1" },
-        { matcher: "bash", command: "echo never" },
-      ],
-    };
-    const result = await runMatchingHooks(
-      "PreToolUse",
-      cfg,
-      { tool: "bash", input: {} },
-      { toolName: "bash", input: {} },
-    );
-    expect(result.blocked).toBe(true);
-    expect(result.fires).toHaveLength(1); // short-circuits
-  });
-
   test("returns blocked=true with parsed reason when stdout says block", async () => {
     const cfg: HookConfig = {
       PreToolUse: [

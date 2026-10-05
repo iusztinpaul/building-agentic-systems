@@ -58,7 +58,6 @@ def _make_ctx(*, ui_supported: bool) -> MagicMock:
         "client": MagicMock(),
         "database": "test",
         "embedding_model": MagicMock(),
-        "user_id": _UID,
     }
     return ctx
 
@@ -129,9 +128,10 @@ async def test_dashboard_ships_payload_in_content_block_for_ui_clients(
     assert json_block.annotations.audience == ["user"]
 
 
-async def test_dashboard_keeps_structured_content_for_forwarding_hosts(
+async def test_dashboard_sends_the_payload_once(
     mocker,
 ) -> None:
+    # Story: the dashboard still fills its cards — from ONE copy of the payload.
     mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
@@ -140,8 +140,15 @@ async def test_dashboard_keeps_structured_content_for_forwarding_hosts(
 
     result = await memory_dashboard(ctx, query="alice")
 
-    assert result.structured_content is not None
-    assert len(result.structured_content["nodes"]) == 2
+    # Assert: exactly one audience=["user"] block, no structured_content copy.
+    user_blocks = [
+        b
+        for b in result.content
+        if b.annotations is not None and b.annotations.audience == ["user"]
+    ]
+    assert len(user_blocks) == 1
+    assert json.loads(user_blocks[0].text) == _content_payload(result)
+    assert result.structured_content is None
 
 
 async def test_dashboard_model_facing_summary_is_short(mocker) -> None:
@@ -240,13 +247,12 @@ def test_dashboard_view_serves_resolved_html() -> None:
     assert "@modelcontextprotocol/ext-apps" in html
 
 
-def test_dashboard_html_reads_content_blocks_before_structured_content() -> None:
-    # Assert: the widget parses content JSON blocks FIRST (the host forwards
-    # only `content` to a custom iframe), with structuredContent as fallback.
+def test_dashboard_html_reads_only_the_content_blocks() -> None:
+    # Assert: the widget parses the content JSON block — the one channel the
+    # payload rides in (ADR-014 §5); the structuredContent fallback is gone.
     assert "ontoolresult" in _DASHBOARD_HTML
-    assert _DASHBOARD_HTML.index("r.content") < _DASHBOARD_HTML.index(
-        "r.structuredContent"
-    )
+    assert "r.content" in _DASHBOARD_HTML
+    assert "structuredContent" not in _DASHBOARD_HTML
 
 
 def test_dashboard_html_renders_tables_and_chart_client_side() -> None:

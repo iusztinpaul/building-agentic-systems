@@ -6,7 +6,9 @@ Horizon protects it with **Horizon Authentication** (OAuth + organization
 membership): clients must be logged into Horizon and a member of the org.
 So this helper uses the OAuth flow — ``auth="oauth"`` opens the default
 browser on first use, captures the callback, and caches the token for
-subsequent calls. There is no static API key for client connections.
+subsequent calls. A personal Horizon API key also works, as a bearer token
+(``Client(url, auth="fmcp_…")`` sends ``Authorization: Bearer fmcp_…``); it
+resolves to the same actor email as the OAuth session.
 
 Usage::
 
@@ -33,9 +35,25 @@ def get_cloud_client() -> Client:
     client is an async context manager — open it with ``async with`` before
     calling tools.
 
-    This is the interactive path. A headless/server-side caller would need
-    Horizon's optional *delegated authentication* (a pre-registered OAuth
-    provider or per-user API key) instead of the browser flow.
+    This is the interactive path. A headless caller uses a personal Horizon
+    API key instead (``Client(url, auth="fmcp_…")``, a bearer token). A
+    service-account key carries no email, so its calls answer
+    ``configuration_error``.
+
+    It sends NO identity header: on Horizon the gateway injects the verified
+    ``horizon-actor-email`` (and strips any client-supplied ``horizon-*``
+    header), and the server resolves the **Request user** from it. A client
+    pointed at a LOCAL HTTP server (``make memory-serve-mcp
+    TRANSPORT=streamable-http``) has no gateway, so it sets the header itself::
+
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        Client(
+            StreamableHttpTransport(
+                "http://127.0.0.1:8000/mcp",
+                headers={"horizon-actor-email": "<your signed-up identifier>"},
+            )
+        )
     """
 
     return Client(settings.tree_memory_cloud_url, auth="oauth")

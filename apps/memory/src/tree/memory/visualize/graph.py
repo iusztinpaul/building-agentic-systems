@@ -17,9 +17,11 @@ What lives here:
   as a node, and the force / display defaults the template seeds from).
 * :data:`_GRAPH_STYLE` / :data:`_BODY_MARKUP` / :data:`_RENDER_JS` +
   :func:`_resolve_static` — the shared CSS / DOM / JS spliced into a template.
-* :func:`_render_graph_file` — write a self-contained HTML file (data embedded
-  inline as ``const DATA = …``, so it works as a plain ``file://`` page) under
-  the one output convention ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
+* :func:`render_graph_html` — the self-contained HTML as a string (data
+  embedded inline as ``const DATA = …``, so it works as a plain ``file://``
+  page); the MCP **Graph file** stores its gzip.
+* :func:`_render_graph_file` — write that HTML to a file under the one output
+  convention ``.tree/graphs/<query-slug>-<UTC-stamp>.html``.
 * :func:`densify_document_ranks` — re-key a TRUNCATED payload's ``docRank``
   on the document stars it draws.
 * :func:`visualize_query_result` — the CLI-facing entry point.
@@ -380,30 +382,39 @@ def _payload_noun(payload: dict[str, Any]) -> str:
     return "embedding map" if payload.get("layout") == "fixed" else "graph"
 
 
-def _render_graph_file(
-    payload: dict[str, Any],
-    query: str = "",
-    output: Path | None = None,
-) -> Path:
-    """Write a self-contained HTML file (data embedded inline) and return it.
+def render_graph_html(payload: dict[str, Any]) -> str:
+    """Render a payload into the self-contained HTML page, data embedded inline.
 
     Takes any payload the ONE template understands: a **Graph payload** or an
-    **Embedding map** payload (the same ``{nodes, edges}`` plus the optional
-    ``layout`` / ``legend`` / ``warning`` / ``hulls`` keys).
-
-    Used as the fallback when the client does not render MCP App UIs, or when
-    the caller explicitly asks for an openable file. The HTML carries its data
-    directly (``const DATA = …``) rather than waiting for the ext-apps
-    ``ontoolresult`` channel, so it works as a plain ``file://`` page.
-
-    Defaults to a uniquely-named file under ``.tree/graphs/`` (created on
-    demand); pass ``output`` to write somewhere specific.
+    **Embedding map** payload. The page carries its data directly
+    (``const DATA = …``) rather than waiting for the ext-apps ``ontoolresult``
+    channel, so it works as a plain ``file://`` page. Shared by
+    :func:`_render_graph_file` (the CLI and the local stdio server write it to
+    disk) and the MCP file branch (which stores its gzip as a **Graph file**).
     """
 
     # Guard against ``</script>`` (or ``</`` generally) appearing inside a
     # label and prematurely closing the inline <script> block.
     data_json = json.dumps(payload).replace("</", "<\\/")
-    html = _FILE_HTML_BASE.replace("__DATA__", data_json)
+    return _FILE_HTML_BASE.replace("__DATA__", data_json)
+
+
+def _render_graph_file(
+    payload: dict[str, Any],
+    query: str = "",
+    output: Path | None = None,
+) -> Path:
+    """Write :func:`render_graph_html`'s page to a file and return its path.
+
+    Used by the CLI and, on a local ``stdio`` MCP server only, by the file
+    branch's open-in-browser convenience (a remote server stores a **Graph
+    file** instead and writes nothing to disk).
+
+    Defaults to a uniquely-named file under ``.tree/graphs/`` (created on
+    demand); pass ``output`` to write somewhere specific.
+    """
+
+    html = render_graph_html(payload)
 
     path = output or _default_graph_path(query)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -3,28 +3,40 @@
 Covers ``_graph_tool_result`` — the ONE dual-path helper every visualization
 tool delivers through (ADR-005, decision 4; payload in a ``content`` JSON block,
 because the App-UI host does not forward ``structuredContent`` to a custom
-iframe) — the file fallback's ``graphs://<name>.html.gz`` resource link (the
-**Graph download**, a gzip blob), and both resource handlers. The TOOLS that call the helper are tested where they are registered
-(``visualize_memory_structure`` / ``query_memory`` / ``search_memory`` in
-``test_graph_tools.py``); the Graph renderer it delegates to
-(``to_graph_payload`` / ``_render_graph_file`` / the shared templates) lives in
+iframe) — the file branch's **Graph file** row and its expiring
+``graphs://<token>.html.gz`` link (the **Graph download**, ADR-014 §4), and both
+resource handlers. The **Graph file** rows go to the session's REAL test
+database (``tests/unit/conftest.py`` boots Beanie), so the ``{name, user_id}``
+scoping is proven against Mongo, not against a mock's call args. The TOOLS that
+call the helper are tested where they are registered (``test_graph_tools.py`` /
+``test_tools.py``); the Graph renderer it delegates to lives in
 ``tree.memory.visualize.graph`` and is tested in
 ``tests/unit/memory/visualize/test_graph.py``.
 """
 
 import base64
 import gzip
+import inspect
 import json
 import re
+import secrets
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ResourceError
 from fastmcp.tools import ToolResult
+from mcp.shared.exceptions import McpError
 from mcp.types import BlobResourceContents
+from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
+from tree.config.app_config import app_config
+from tree.entities.graph_files import GraphFile
+from tree.mcp import tools as mcp_tools
+from tree.mcp.request_user import RequestUserError, unknown_identifier_message
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import (
     _GRAPH_HTML,
@@ -39,11 +51,12 @@ from tree.memory.visualize.graph import (
     _D3_FORCE_CDN,
     _FILE_HTML_BASE,
     _payload_noun,
-    _render_graph_file,
+    render_graph_html,
     to_graph_payload,
 )
 
 _UID = "65f1a2b3c4d5e6f7a8b9c0d1"
+_TOKEN_NAME = re.compile(r"[A-Za-z0-9_-]{22}\.html\.gz")
 
 
 def _node(node_id: str, node_type: str, **props: object) -> dict:
@@ -74,16 +87,42 @@ def _seed_result() -> QueryResult:
     )
 
 
-def _make_ctx(*, ui_supported: bool) -> MagicMock:
+def _make_ctx(*, ui_supported: bool, transport: str = "streamable-http") -> MagicMock:
     ctx = MagicMock()
     ctx.client_supports_extension.return_value = ui_supported
+    ctx.transport = transport
     ctx.lifespan_context = {
         "client": MagicMock(),
         "database": "test",
         "embedding_model": MagicMock(),
-        "user_id": _UID,
     }
     return ctx
+
+
+@pytest.fixture
+def graphs_dir(mocker, tmp_path: Path) -> Path:
+    """Where ``_render_graph_file`` writes by default — empty unless stdio wrote."""
+
+    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def browser_open(mocker) -> MagicMock:
+    return mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+
+
+@pytest.fixture
+def ttl_300(mocker) -> None:
+    """Pin the configured TTL so the expiry sentence is deterministic."""
+
+    mocker.patch.object(app_config.mcp, "graph_file_ttl_seconds", 300)
+
+
+async def _stored(name: str) -> GraphFile:
+    row = await GraphFile.find_one(GraphFile.name == name)
+    assert row is not None, name
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -91,63 +130,198 @@ def _make_ctx(*, ui_supported: bool) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only() -> None:
+async def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_only(
+    request_user_id: PydanticObjectId,
+) -> None:
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=True)
 
-    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
+    result = await _graph_tool_result(
+        ctx, payload, "SUMMARY-SENTINEL", user_id=request_user_id
+    )
 
     # Assert: the model reads the summary; the full node/edge dump is addressed
-    # to the iframe alone (audience=["user"]) and mirrored on structured_content.
+    # to the iframe alone (audience=["user"]) and travels ONCE — no
+    # structured_content copy counting twice against the response cap.
     summary_block, payload_block = result.content
     assert "SUMMARY-SENTINEL" in summary_block.text
     assert summary_block.annotations is None
     assert payload_block.annotations.audience == ["user"]
     assert json.loads(payload_block.text) == payload
-    assert result.structured_content == payload
+    assert result.structured_content is None
 
 
-def test_graph_tool_result_writes_a_file_and_links_it_for_non_ui_clients(
-    mocker, tmp_path: Path
+@pytest.mark.usefixtures("ttl_300")
+async def test_the_http_file_branch_stores_a_graph_file_and_links_it(
+    graphs_dir: Path, browser_open: MagicMock, request_user_id: PydanticObjectId
 ) -> None:
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    # Story: Codex downloads the map from Horizon across instances.
     payload = to_graph_payload(_seed_result())
-    ctx = _make_ctx(ui_supported=False)
 
-    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL", query="alice")
-
-    # Assert: the summary survives the fallback branch too, alongside the
-    # server-side path and the resource link a remote client downloads.
-    text_block, link_block = result.content
-    assert "SUMMARY-SENTINEL" in text_block.text
-    assert str(tmp_path) in text_block.text
-    assert link_block.type == "resource_link"
-    rendered = tmp_path / str(link_block.uri).removeprefix("graphs://").removesuffix(
-        ".gz"
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=False),
+        payload,
+        "SUMMARY-SENTINEL",
+        user_id=request_user_id,
+        query="alice",
     )
-    assert rendered.is_file()
+
+    # Assert: ONE row, owned by the request user, under a token name, whose
+    # bytes gunzip to the very page the renderer produces.
+    text_block, link_block = result.content
+    assert _TOKEN_NAME.fullmatch(link_block.name), link_block.name
+    row = await _stored(link_block.name)
+    assert row.user_id == request_user_id
+    assert gzip.decompress(row.html_gz).decode("utf-8") == render_graph_html(payload)
+    assert link_block.type == "resource_link"
+    assert str(link_block.uri) == f"graphs://{row.name}"
+    assert link_block.mimeType == "application/gzip"
+    # The text: the summary, the decode contract, the expiry — and NOTHING the
+    # remote client cannot use (no server path, no browser on the server).
+    assert "SUMMARY-SENTINEL" in text_block.text
+    assert DOWNLOAD_CONTRACT in text_block.text
+    assert text_block.text.endswith("The link expires in about 5 minutes.")
+    assert str(graphs_dir) not in text_block.text
+    assert ".tree/graphs" not in text_block.text
+    assert list(graphs_dir.iterdir()) == []
+    browser_open.assert_not_called()
     # No payload block on this branch — the data is inside the file.
     assert not any(b.type == "text" and b.text.startswith("{") for b in result.content)
 
 
-def test_graph_tool_result_survives_a_headless_browser_open(
-    mocker, tmp_path: Path
+async def test_every_render_gets_its_own_token(
+    graphs_dir: Path, browser_open: MagicMock, request_user_id: PydanticObjectId
 ) -> None:
-    # Arrange: a headless / remote server has no browser to open.
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch(
-        "tree.mcp.viz_app.webbrowser.open",
-        side_effect=RuntimeError("no browser"),
-    )
     payload = to_graph_payload(_seed_result())
     ctx = _make_ctx(ui_supported=False)
 
-    result = _graph_tool_result(ctx, payload, "SUMMARY-SENTINEL")
+    first = await _graph_tool_result(ctx, payload, "S", user_id=request_user_id)
+    second = await _graph_tool_result(ctx, payload, "S", user_id=request_user_id)
 
-    # Assert: swallowed — a missing browser never turns a good query into an error.
+    assert first.content[1].name != second.content[1].name
+
+
+@pytest.mark.parametrize(
+    ("ttl_seconds", "sentence"),
+    [
+        (300, "expires in about 5 minutes."),
+        (90, "expires in about 1 minute."),
+        (30, "expires in about 1 minute."),  # never "about 0 minutes"
+    ],
+)
+async def test_the_expiry_sentence_follows_the_configured_ttl(
+    mocker,
+    graphs_dir: Path,
+    browser_open: MagicMock,
+    request_user_id: PydanticObjectId,
+    ttl_seconds: int,
+    sentence: str,
+) -> None:
+    mocker.patch.object(app_config.mcp, "graph_file_ttl_seconds", ttl_seconds)
+
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=False),
+        to_graph_payload(_seed_result()),
+        "S",
+        user_id=request_user_id,
+    )
+
+    assert result.content[0].text.endswith(sentence)
+
+
+@pytest.mark.usefixtures("ttl_300")
+async def test_the_stdio_file_branch_also_saves_and_opens_the_local_file(
+    graphs_dir: Path, browser_open: MagicMock, request_user_id: PydanticObjectId
+) -> None:
+    # Story: the local user is not bothered with gzip.
+    browser_open.return_value = True
+    payload = to_graph_payload(_seed_result())
+
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=False, transport="stdio"),
+        payload,
+        "SUMMARY",
+        user_id=request_user_id,
+        query="alice",
+    )
+
+    # Assert: the row AND the local file — two names, the token in the URI and
+    # the slug+stamp on disk — and the link survives in case the open failed.
+    text_block, link_block = result.content
+    row = await _stored(link_block.name)
+    assert row.user_id == request_user_id
+    (written,) = graphs_dir.iterdir()
+    assert re.fullmatch(r"alice-\d{8}-\d{6}\.html", written.name), written.name
+    assert written.read_text(encoding="utf-8") == render_graph_html(payload)
+    browser_open.assert_called_once_with(written.resolve().as_uri())
+    assert f"to:\n{written}\n" in text_block.text
+    assert text_block.text.endswith(
+        "Opened it in your browser. The graphs:// link expires in about 5 minutes."
+    )
+    assert DOWNLOAD_CONTRACT not in text_block.text
+    assert str(link_block.uri) == f"graphs://{row.name}"
+
+
+@pytest.mark.usefixtures("ttl_300")
+@pytest.mark.parametrize(
+    "open_outcome",
+    [{"return_value": False}, {"side_effect": RuntimeError("no browser")}],
+    ids=["open-returns-false", "open-raises"],
+)
+async def test_a_stdio_browser_open_that_fails_answers_the_contract(
+    mocker,
+    graphs_dir: Path,
+    request_user_id: PydanticObjectId,
+    open_outcome: dict,
+) -> None:
+    # Arrange: a headless stdio host has no browser to open.
+    mocker.patch("tree.mcp.viz_app.webbrowser.open", **open_outcome)
+
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=False, transport="stdio"),
+        to_graph_payload(_seed_result()),
+        "SUMMARY",
+        user_id=request_user_id,
+    )
+
+    # Assert: swallowed — a missing browser never fails the tool; the text
+    # falls back to the decode contract and still states the expiry.
     assert isinstance(result, ToolResult)
-    assert result.content[1].type == "resource_link"
+    text_block, link_block = result.content
+    assert link_block.type == "resource_link"
+    assert str(graphs_dir) in text_block.text
+    assert DOWNLOAD_CONTRACT in text_block.text
+    assert text_block.text.endswith("The graphs:// link expires in about 5 minutes.")
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+async def test_a_failed_insert_answers_storage_unavailable(
+    mocker,
+    graphs_dir: Path,
+    browser_open: MagicMock,
+    request_user_id: PydanticObjectId,
+    transport: str,
+) -> None:
+    mocker.patch.object(
+        GraphFile, "insert", side_effect=ServerSelectionTimeoutError("mongo down")
+    )
+
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=False, transport=transport),
+        to_graph_payload(_seed_result()),
+        "SUMMARY",
+        user_id=request_user_id,
+    )
+
+    # Assert: the retryable envelope, and nothing half-delivered — no local
+    # file, no browser, no link to a row that does not exist.
+    assert json.loads(result) == {
+        "error_type": "storage_unavailable",
+        "retryable": True,
+        "message": mcp_tools.STORAGE_UNAVAILABLE_MESSAGE,
+    }
+    assert list(graphs_dir.iterdir()) == []
+    browser_open.assert_not_called()
 
 
 def _map_payload() -> dict:
@@ -171,55 +345,69 @@ def _map_payload() -> dict:
     }
 
 
-def test_graph_tool_result_calls_a_graph_a_graph_in_both_branches(
-    mocker, tmp_path: Path
+@pytest.mark.parametrize(
+    ("payload", "noun", "other"),
+    [
+        (to_graph_payload(_seed_result()), "graph", None),
+        (_map_payload(), "embedding map", "graph"),
+    ],
+    ids=["graph", "embedding-map"],
+)
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+async def test_every_branch_names_the_payload_by_its_noun(
+    graphs_dir: Path,
+    browser_open: MagicMock,
+    request_user_id: PydanticObjectId,
+    payload: dict,
+    noun: str,
+    other: str | None,
+    transport: str,
 ) -> None:
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-    payload = to_graph_payload(_seed_result())
-
-    inline = _graph_tool_result(_make_ctx(ui_supported=True), payload, "SUMMARY")
-    fallback = _graph_tool_result(_make_ctx(ui_supported=False), payload, "SUMMARY")
-
-    # Assert: the graph strings are BYTE-IDENTICAL to what graph tools have
-    # always returned — deriving the noun from the payload changes nothing here.
-    assert inline.content[0].text == "SUMMARY (interactive graph view)."
-    text_block, link_block = fallback.content
-    assert (
-        "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
-        "a self-contained interactive graph to:\n"
-    ) in text_block.text
-    assert link_block.description == (
-        "gzip-compressed self-contained interactive graph — base64-decode the "
-        "blob, gunzip, open the .html"
+    inline = await _graph_tool_result(
+        _make_ctx(ui_supported=True, transport=transport),
+        payload,
+        "SUMMARY",
+        user_id=request_user_id,
     )
-
-
-def test_graph_tool_result_calls_an_embedding_map_a_map_in_both_branches(
-    mocker, tmp_path: Path
-) -> None:
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-    payload = _map_payload()
-
-    inline = _graph_tool_result(_make_ctx(ui_supported=True), payload, "SUMMARY")
-    fallback = _graph_tool_result(_make_ctx(ui_supported=False), payload, "SUMMARY")
+    fallback = await _graph_tool_result(
+        _make_ctx(ui_supported=False, transport=transport),
+        payload,
+        "SUMMARY",
+        user_id=request_user_id,
+    )
 
     # Assert: in rag mode there is no graph at all, so every string the model
     # (or the user) reads calls the map a map — the glossary keeps **Embedding
     # map** and **Graph payload** distinct, and the copy follows.
-    assert inline.content[0].text == "SUMMARY (interactive embedding map view)."
+    assert inline.content[0].text == f"SUMMARY (interactive {noun} view)."
     text_block, link_block = fallback.content
     assert (
-        "SUMMARY. Since this client does not render inline MCP App UIs, I saved "
-        "a self-contained interactive embedding map to:\n"
+        "SUMMARY. Since this client does not render inline MCP App UIs, I "
     ) in text_block.text
+    assert f"self-contained interactive {noun} " in text_block.text
     assert link_block.description == (
-        "gzip-compressed self-contained interactive embedding map — "
-        "base64-decode the blob, gunzip, open the .html"
+        f"gzip-compressed self-contained interactive {noun} — base64-decode the "
+        "blob, gunzip, open the .html"
     )
-    assert "graph" not in inline.content[0].text
-    assert "interactive graph" not in text_block.text
+    if other is not None:
+        assert f"interactive {other}" not in text_block.text
+
+
+async def test_as_html_file_names_the_request_as_the_reason(
+    graphs_dir: Path, browser_open: MagicMock, request_user_id: PydanticObjectId
+) -> None:
+    result = await _graph_tool_result(
+        _make_ctx(ui_supported=True),
+        to_graph_payload(_seed_result()),
+        "SUMMARY",
+        user_id=request_user_id,
+        as_html_file=True,
+    )
+
+    assert result.content[0].text.startswith(
+        "SUMMARY. Since you asked for an HTML file, I rendered a self-contained "
+        "interactive graph as a download."
+    )
 
 
 def test_the_delivered_noun_comes_from_the_payloads_layout_key() -> None:
@@ -230,107 +418,152 @@ def test_the_delivered_noun_comes_from_the_payloads_layout_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# graphs://{name} resource — remote download of rendered files
+# graphs://{name} — the Graph download, read from MongoDB per Request user
 # ---------------------------------------------------------------------------
 
 
-def test_the_file_branch_links_the_gzip_download_and_states_the_contract(
-    mocker, tmp_path: Path
-) -> None:
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-    payload = to_graph_payload(_seed_result())
+async def _insert_row(user_id: PydanticObjectId) -> tuple[GraphFile, str]:
+    """Store a rendered graph the way the file branch does; return it + its HTML."""
 
-    result = _graph_tool_result(
-        _make_ctx(ui_supported=False), payload, "SUMMARY", query="alice"
+    html = render_graph_html(to_graph_payload(_seed_result()))
+    name = secrets.token_urlsafe(16) + ".html.gz"
+    row = GraphFile(
+        user_id=user_id, name=name, html_gz=gzip.compress(html.encode("utf-8"))
+    )
+    await row.insert()
+    return row, html
+
+
+def _not_found(name: str, minutes: str = "5 minutes") -> str:
+    return (
+        f"Graph file '{name}' not found or expired (download links expire after "
+        f"about {minutes}) — run the visualize tool again."
     )
 
-    # Assert: ONE download path — the link names the gzip blob of the file the
-    # text names, and the text closes with the one decode contract.
-    text_block, link_block = result.content
-    html_name = link_block.name.removesuffix(".gz")
-    assert link_block.name == f"{html_name}.gz"
-    assert html_name.endswith(".html")
-    assert str(link_block.uri) == f"graphs://{html_name}.gz"
-    assert link_block.mimeType == "application/gzip"
-    assert str(tmp_path / html_name) in text_block.text
-    assert text_block.text.endswith(DOWNLOAD_CONTRACT)
 
-
-def test_a_local_browser_open_needs_no_download_instructions(
-    mocker, tmp_path: Path
+async def test_graph_file_resource_serves_the_request_users_row(
+    request_user_id: PydanticObjectId,
 ) -> None:
-    # Story: the local user is not bothered with gzip.
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=True)
+    row, html = await _insert_row(request_user_id)
 
-    result = _graph_tool_result(
-        _make_ctx(ui_supported=False), to_graph_payload(_seed_result()), "SUMMARY"
-    )
+    result = await graph_file(row.name, MagicMock())
 
-    assert result.content[0].text.endswith("Opened it in your browser.")
-
-
-# ---------------------------------------------------------------------------
-# graphs://{name}.html.gz — the Graph download (gzip blob of a rendered file)
-# ---------------------------------------------------------------------------
-
-
-def _rendered(tmp_path: Path) -> Path:
-    payload = to_graph_payload(_seed_result())
-    return _render_graph_file(payload, output=tmp_path / "alice-x.html")
-
-
-def test_graph_file_resource_serves_the_gzip_of_the_rendered_html(
-    mocker, tmp_path: Path
-) -> None:
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
-    rendered = _rendered(tmp_path)
-
-    result = graph_file(f"{rendered.name}.gz")
-
+    # Assert: the stored gzip, as is, as an application/gzip blob.
     (content,) = result.contents
     assert isinstance(content.content, bytes)
     assert content.mime_type == "application/gzip"
-    assert gzip.decompress(content.content) == rendered.read_bytes()
-    # Compressed on read: no second file lands next to the HTML.
-    assert sorted(p.name for p in tmp_path.iterdir()) == [rendered.name]
+    assert content.content == row.html_gz
+    assert gzip.decompress(content.content).decode("utf-8") == html
+
+
+@pytest.mark.usefixtures("ttl_300")
+async def test_another_users_row_reads_exactly_like_an_unknown_one(
+    request_user_id: PydanticObjectId,
+) -> None:
+    # Story: another user guesses a link — nothing distinguishes "not yours"
+    # from "gone" (an expired row is a deleted row: the same lookup miss).
+    alices_row, _ = await _insert_row(PydanticObjectId())
+    unknown = "Q2hhbmdlTWVQbGVhc2UxMj.html.gz"
+
+    with pytest.raises(ResourceError) as foreign:
+        await graph_file(alices_row.name, MagicMock())
+    with pytest.raises(ResourceError) as missing:
+        await graph_file(unknown, MagicMock())
+
+    assert str(foreign.value) == _not_found(alices_row.name)
+    assert str(missing.value) == _not_found(unknown)
 
 
 @pytest.mark.parametrize(
     "bad_name",
     [
-        "alice-x.html",  # the retired text name — one download path
-        "../alice-x.html.gz",
+        "embedding-map-20261003-181500.html",  # the retired text name
+        "alice-x.html.gz",  # a pre-ADR-014 slug+stamp name
+        "../Q2hhbmdlTWVQbGVhc2UxMj.html.gz",
         "../../../etc/passwd.gz",
-        "x.txt.gz",
-        "sub/dir.html.gz",
+        "Q2hhbmdlTWVQbGVhc2UxMj.txt.gz",
+        "Q2hhbmdlTWVQbGVhc2UxM.html.gz",  # 21 chars: not a token_urlsafe(16)
+        "Q2hhbmdlTWVQbGVhc2UxMj.html.gz.gz",
+        "Q2hhbmdlTWVQbGVhc2UxMj.html.gz\n",
+        "Q2hhbmdlTWVQbGVhc2Ux\x00j.html.gz",  # NUL
         ".gz",
-        "alice-x.html.gz.gz",
-        "alice-x\x00.html.gz",  # NUL: the guard's message, not the OS's
     ],
 )
-def test_graph_file_resource_rejects_unsafe_and_non_gzip_names(
-    mocker, tmp_path: Path, bad_name: str
+async def test_graph_file_resource_rejects_names_it_never_handed_out(
+    bad_name: str, _patched_request_user: AsyncMock
 ) -> None:
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
-    _rendered(tmp_path)
+    with pytest.raises(
+        ResourceError,
+        match=r"^Invalid graph file name: .*\(expected <name>\.html\.gz\)$",
+    ):
+        await graph_file(bad_name, MagicMock())
 
-    with pytest.raises(ValueError, match=r"Invalid graph file name: .*\.html\.gz"):
-        graph_file(bad_name)
+    # The guard runs before the seam: a malformed name costs no users read.
+    _patched_request_user.assert_not_awaited()
 
 
-def test_graph_file_resource_missing_file_raises(mocker, tmp_path: Path) -> None:
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
+@pytest.mark.parametrize(
+    "seam_error",
+    [
+        RequestUserError(unknown_identifier_message("bob@example.com")),
+        RequestUserError("No horizon-actor-email header on this request."),
+    ],
+    ids=["unknown-identifier", "missing-header"],
+)
+async def test_a_seam_failure_reaches_the_reader_with_the_seams_message(
+    mocker, seam_error: RequestUserError
+) -> None:
+    mocker.patch(
+        "tree.mcp.request_user.resolve_request_user",
+        new_callable=AsyncMock,
+        side_effect=seam_error,
+    )
 
-    with pytest.raises(FileNotFoundError, match="No rendered graph"):
-        graph_file("missing.html.gz")
+    with pytest.raises(ResourceError) as raised:
+        await graph_file("Q2hhbmdlTWVQbGVhc2UxMj.html.gz", MagicMock())
+
+    assert str(raised.value) == str(seam_error)
+
+
+@pytest.mark.parametrize("failing", ["seam", "find_one"])
+async def test_an_unreachable_store_answers_the_storage_message(
+    mocker, failing: str
+) -> None:
+    if failing == "seam":
+        mocker.patch(
+            "tree.mcp.request_user.resolve_request_user",
+            new_callable=AsyncMock,
+            side_effect=PyMongoError("users unreachable"),
+        )
+    else:
+        mocker.patch.object(
+            GraphFile, "find_one", side_effect=PyMongoError("graph_files unreachable")
+        )
+
+    with pytest.raises(ResourceError) as raised:
+        await graph_file("Q2hhbmdlTWVQbGVhc2UxMj.html.gz", MagicMock())
+
+    assert str(raised.value) == mcp_tools.STORAGE_UNAVAILABLE_MESSAGE
+
+
+def test_graph_file_reads_no_filesystem_path() -> None:
+    # Source guard: the bytes live in Mongo — the server's disk is not
+    # consulted, so any instance answers (ADR-014 §4).
+    source = inspect.getsource(getattr(graph_file, "fn", graph_file))
+
+    assert "GRAPHS_DIR" not in source
+    assert "Path" not in source
 
 
 def test_graph_file_docstring_states_the_download_contract() -> None:
     doc = " ".join((graph_file.__doc__ or "").split())
 
     assert DOWNLOAD_CONTRACT in doc
+
+
+def test_the_download_contract_presupposes_no_path() -> None:
+    assert DOWNLOAD_CONTRACT.startswith("Read the linked `graphs://…html.gz` resource")
+    assert "path" not in DOWNLOAD_CONTRACT
 
 
 async def test_the_registered_graphs_template_declares_application_gzip() -> None:
@@ -340,40 +573,53 @@ async def test_the_registered_graphs_template_declares_application_gzip() -> Non
     assert template.mime_type == "application/gzip"
 
 
-async def test_a_client_reads_the_download_as_a_base64_gzip_blob(
-    mocker, tmp_path: Path
-) -> None:
-    # Arrange: the REAL registered template on a bare server, so the client
-    # round trip skips the app lifespan (Mongo + models) it does not need.
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", tmp_path)
-    rendered = _rendered(tmp_path)
-    server = FastMCP("graph-download-test")
-    server.add_template(await mcp.get_resource_template("graphs://{name}"))
+async def _bare_server(*, mask_error_details: bool = False) -> FastMCP:
+    """The REAL registered template on a bare server: the client round trip
+    skips the app lifespan (Mongo client + models) it does not need."""
 
-    async with Client(server) as client:
-        contents = await client.read_resource(f"graphs://{rendered.name}.gz")
+    server = FastMCP("graph-download-test", mask_error_details=mask_error_details)
+    server.add_template(await mcp.get_resource_template("graphs://{name}"))
+    return server
+
+
+async def test_a_client_reads_the_download_as_a_base64_gzip_blob(
+    request_user_id: PydanticObjectId,
+) -> None:
+    row, html = await _insert_row(request_user_id)
+
+    async with Client(await _bare_server()) as client:
+        contents = await client.read_resource(f"graphs://{row.name}")
 
     # Assert: the protocol carries the blob base64-encoded; the documented
-    # decode gives back the server-side file byte for byte.
+    # decode gives back the rendered page byte for byte.
     (content,) = contents
     assert isinstance(content, BlobResourceContents)
     assert content.mimeType == "application/gzip"
-    assert gzip.decompress(base64.b64decode(content.blob)) == rendered.read_bytes()
+    assert gzip.decompress(base64.b64decode(content.blob)).decode("utf-8") == html
+
+
+@pytest.mark.usefixtures("ttl_300")
+async def test_the_not_found_message_survives_error_masking() -> None:
+    # Story: the link is read too late. A plain exception would reach the
+    # client as a masked "Error reading resource"; a ResourceError keeps its
+    # message even with ``mask_error_details`` on (Horizon's hosts may set it).
+    name = "Q2hhbmdlTWVQbGVhc2UxMj.html.gz"
+
+    async with Client(await _bare_server(mask_error_details=True)) as client:
+        with pytest.raises(McpError) as raised:
+            await client.read_resource(f"graphs://{name}")
+
+    assert str(raised.value) == _not_found(name)
 
 
 async def test_the_contracts_shell_one_liner_decodes_the_blob(
-    mocker, tmp_path: Path
+    tmp_path: Path, request_user_id: PydanticObjectId
 ) -> None:
     # Regression: ``base64 -d blob.b64`` (a positional file) fails on macOS's
     # BSD base64 ("invalid argument"); the contract must run as written on
     # both BSD and GNU, so the test runs the contract's OWN command.
-    graphs = tmp_path / "graphs"
-    graphs.mkdir()
-    mocker.patch("tree.mcp.viz_app.GRAPHS_DIR", graphs)
-    rendered = _render_graph_file(
-        to_graph_payload(_seed_result()), output=graphs / "alice-x.html"
-    )
-    (content,) = graph_file(f"{rendered.name}.gz").contents
+    row, html = await _insert_row(request_user_id)
+    (content,) = (await graph_file(row.name, MagicMock())).contents
     (tmp_path / "blob.b64").write_text(base64.b64encode(content.content).decode())
     match = re.search(r"`(base64 -d [^`]+)`", DOWNLOAD_CONTRACT)
     assert match is not None
@@ -381,27 +627,49 @@ async def test_the_contracts_shell_one_liner_decodes_the_blob(
 
     subprocess.run(command, shell=True, check=True, cwd=tmp_path)  # noqa: S602
 
-    assert (tmp_path / "decoded.html").read_bytes() == rendered.read_bytes()
+    assert (tmp_path / "decoded.html").read_text(encoding="utf-8") == html
 
 
-def test_no_mcp_source_still_says_save_its_text() -> None:
-    # Source guard: the text download is retired everywhere in the MCP layer.
+@pytest.mark.parametrize(
+    "retired",
+    ["save its text", "If that path is not on your machine", "server-side path"],
+)
+def test_no_mcp_source_still_carries_a_retired_download_sentence(
+    retired: str,
+) -> None:
+    # Source guard: the text download and the path-first contract are retired
+    # everywhere in the MCP layer (task 189 updates the skill / tutorial).
     mcp_src = Path(__file__).parents[3] / "src" / "tree" / "mcp"
     offenders = [
         p.name
         for p in mcp_src.rglob("*.py")
-        if "save its text" in p.read_text(encoding="utf-8")
+        if retired in p.read_text(encoding="utf-8")
     ]
 
     assert mcp_src.is_dir()
     assert offenders == []
 
 
-def test_graph_html_reads_content_blocks_before_structured_content() -> None:
-    # Assert: the widget parses content JSON blocks FIRST (the host forwards
-    # only `content` to a custom iframe), with structuredContent as fallback.
+def test_graph_html_reads_only_the_content_blocks() -> None:
+    # Assert: the widget parses the content JSON block — the one channel the
+    # payload rides in (ADR-014 §5); the structuredContent fallback is gone.
     assert "ontoolresult" in _GRAPH_HTML
-    assert _GRAPH_HTML.index("r.content") < _GRAPH_HTML.index("r.structuredContent")
+    assert "r.content" in _GRAPH_HTML
+    assert "structuredContent" not in _GRAPH_HTML
+
+
+def test_no_mcp_source_sends_structured_content() -> None:
+    # Source guard: the payload is sent once, in the audience=["user"] content
+    # block; no MCP tool re-adds the structured_content copy (ADR-014 §5).
+    mcp_src = Path(__file__).parents[3] / "src" / "tree" / "mcp"
+    offenders = [
+        p.name
+        for p in mcp_src.rglob("*.py")
+        if "structured_content" in p.read_text(encoding="utf-8")
+    ]
+
+    assert mcp_src.is_dir()
+    assert offenders == []
 
 
 # ---------------------------------------------------------------------------

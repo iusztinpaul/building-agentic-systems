@@ -342,15 +342,16 @@ async def ensure_indexes(
     database: str,
     *,
     embedding_model: BaseEmbeddingModel,
-    user_id: PydanticObjectId,
+    user_id: PydanticObjectId | None = None,
 ) -> None:
     """Ensure the vector search index.
 
     The classic indexes, ``$text`` included, are NOT created here: Beanie
     creates the mode's set (:func:`tree.entities.memory.memory_indexes`) on
     every ``init_mongodb``. This function owns only what Beanie cannot
-    express, the mongot vector index (ADR-012). ``user_id`` is passed so the
-    signature mirrors the other pipeline entry points.
+    express, the mongot vector index (ADR-012). ``user_id`` is optional and
+    only logged: the pipeline passes the tenant that triggered the run, the MCP
+    server boot passes none (ADR-014 §1).
 
     Reads ``embedding_model.dimensions`` ONCE and uses it to drive the
     vector-search index's ``numDimensions``. If a ``vector_index`` already
@@ -361,17 +362,14 @@ async def ensure_indexes(
     configuration is already in place.
     """
 
-    # ``user_id`` is bound by the caller; ``ensure_indexes`` is parameterised
-    # on it so the signature mirrors the rest of the pipeline. The actual
-    # indexes are global to the collection (one index covers every
-    # tenant) — the parameter exists for shape consistency and to surface a
-    # ``TypeError`` when a caller forgets it. We log it here so the operator
-    # can correlate an index-reconcile run with the tenant that triggered it.
+    # The indexes are global to the collection (one index covers every tenant),
+    # so ``user_id`` only tells the operator what triggered this reconcile.
+    trigger = f"tenant user_id={user_id}" if user_id is not None else "server boot"
     logger.info(
-        "Ensuring indexes on %s (triggered by tenant user_id=%s; indexes "
-        "themselves are global to the collection)",
+        "Ensuring indexes on %s (triggered by %s; indexes themselves are global "
+        "to the collection)",
         MEMORY_COLLECTION,
-        user_id,
+        trigger,
     )
 
     db = client[database]

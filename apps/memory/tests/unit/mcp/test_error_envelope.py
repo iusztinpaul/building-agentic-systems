@@ -64,7 +64,6 @@ def _make_ctx() -> MagicMock:
         "database": "test_db",
         "embedding_model": MagicMock(),
         "llm": MagicMock(),
-        "user_id": _USER_ID,
         "thread_id": "mcp-session-test",
     }
     return ctx
@@ -410,9 +409,11 @@ def test_no_legacy_error_keys(module) -> None:
     )
 
 
-# Every tool that CAN answer an envelope, in both modules. Tools that only ever
-# answer data (``visualize_memory_embeddings``, the dashboard) are absent on
-# purpose — promising an error shape they never emit would be a lie to the model.
+# Every tool that CAN answer an envelope from its own work, in both modules.
+# ``visualize_memory_embeddings`` and the dashboard are absent: their only
+# envelope is the **Request user** seam's (``configuration_error`` /
+# ``storage_unavailable``, swept in ``test_tools_request_user.py``) — they have
+# no catch-all of their own to promise yet.
 _ENVELOPE_TOOLS = [
     ("rag:search_memory", tools.search_memory),
     ("rag:visualize_memory_structure", tools.visualize_memory_structure),

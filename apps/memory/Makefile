@@ -221,6 +221,7 @@ scrape-web: # On-demand scrape of one or more URLs via Bright Data Web Unlocker 
 		$(if $(MAX_CHARS),--max-chars $(MAX_CHARS),) \
 		$(if $(TIMEOUT),--timeout $(TIMEOUT),)
 
-serve-mcp: # Serve the MCP server. Requires USER_ID=<oid> OR TREE_USER_IDENTIFIER env. Optional TRANSPORT=stdio|http|sse|streamable-http.
-	@if [ -z "$(USER_ID)" ] && [ -z "$(TREE_USER_IDENTIFIER)" ]; then echo 'USAGE: make serve-mcp USER_ID=<oid>  (or set TREE_USER_IDENTIFIER=<handle>)'; exit 1; fi
-	uv run python scripts/serve_mcp.py $(if $(USER_ID),--user-id "$(USER_ID)",) $(TRANSPORT_ARG)
+# stdio reads TREE_USER_IDENTIFIER from .env (exported by this Makefile); over
+# HTTP the gateway (Horizon) or the client (local) sends horizon-actor-email.
+serve-mcp: # Serve the MCP server. Optional TRANSPORT=stdio|http|sse|streamable-http.
+	uv run python scripts/serve_mcp.py $(TRANSPORT_ARG)
