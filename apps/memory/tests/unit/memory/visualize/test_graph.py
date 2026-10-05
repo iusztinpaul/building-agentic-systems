@@ -37,6 +37,7 @@ from tree.memory.visualize.graph import (
     _slugify,
     _truncate,
     densify_document_ranks,
+    render_graph_html,
     to_graph_payload,
     visualize_query_result,
 )
@@ -375,6 +376,16 @@ def test_render_graph_file_writes_self_contained_html(tmp_path: Path) -> None:
     assert "ontoolresult" not in html
     # The actual node id made it into the embedded data.
     assert alice in html
+
+
+def test_render_graph_file_writes_exactly_render_graph_html(tmp_path: Path) -> None:
+    # The split (ADR-014 §4): ONE page builder, shared by the file writer (CLI,
+    # stdio) and the MCP Graph file — the two cannot drift.
+    payload = to_graph_payload(_seed_result())
+
+    path = _render_graph_file(payload, output=tmp_path / "graph.html")
+
+    assert path.read_text(encoding="utf-8") == render_graph_html(payload)
 
 
 def test_render_graph_file_wires_metadata_and_edge_hover(tmp_path: Path) -> None:

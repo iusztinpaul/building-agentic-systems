@@ -9,6 +9,7 @@ move.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from tree.mcp.graph_tools import (
     visualize_memory_structure,
 )
 from tests.unit.memory.conftest import FakeMemoryCollection, chunk_star_rows
+from tree.entities.graph_files import GraphFile
 from tree.entities.memory import MEMORY_COLLECTION, to_stored_vector
 from tree.mcp.server import mcp
 from tree.mcp.viz_app import DOWNLOAD_CONTRACT, GRAPH_VIEW_URI
@@ -154,6 +156,9 @@ def _tool_fn(tool):
 def _make_graph_ctx(*, ui_supported: bool) -> MagicMock:
     ctx = MagicMock()
     ctx.client_supports_extension.return_value = ui_supported
+    # A remote (Horizon-shaped) server: the file branch stores a Graph file
+    # and writes nothing to disk. The stdio extras are covered in test_viz_app.
+    ctx.transport = "streamable-http"
     ctx.lifespan_context = {
         "client": MagicMock(),
         "database": "test_db",
@@ -249,8 +254,8 @@ class TestGraphToolsDualDelivery:
         assert len(payload["edges"]) == 1
         assert result.structured_content == payload
 
-    async def test_visualize_falls_back_to_a_file_and_resource_link(
-        self, mocker, tool_name, tool, tmp_path: Path
+    async def test_visualize_falls_back_to_a_graph_file_and_resource_link(
+        self, mocker, tool_name, tool, tmp_path: Path, request_user_id
     ) -> None:
         # Arrange: a client that renders no MCP App UIs (e.g. the terminal).
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
@@ -260,15 +265,18 @@ class TestGraphToolsDualDelivery:
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
-        # Assert: serialized rows + the server-side path + the download link.
+        # Assert: serialized rows + the expiring download link to a Graph file
+        # the REQUEST user owns — and no server file.
         text_block, link_block = result.content
         assert _serialize(_GRAPH_DOCS) in text_block.text
-        assert str(tmp_path) in text_block.text
-        assert str(link_block.uri).startswith("graphs://")
-        assert str(link_block.uri).endswith(".html.gz")
-        rendered = tmp_path / link_block.name.removesuffix(".gz")
-        assert rendered.is_file()
+        assert re.fullmatch(
+            r"graphs://[A-Za-z0-9_-]{22}\.html\.gz", str(link_block.uri)
+        )
+        row = await GraphFile.find_one(GraphFile.name == link_block.name)
+        assert row is not None and str(row.user_id) == str(request_user_id)
+        assert list(tmp_path.iterdir()) == []
         assert DOWNLOAD_CONTRACT in text_block.text
+        assert "The link expires in about" in text_block.text
 
     async def test_docs_without_kind_skip_the_graph_and_stay_a_plain_string(
         self, mocker, tool_name, tool
@@ -695,8 +703,8 @@ async def test_visualize_an_unranked_query_keeps_the_plain_summary(mocker) -> No
     assert "documents" not in _content_payload(result)["controls"]
 
 
-async def test_visualize_fallback_returns_path_and_resource_link(
-    mocker, tmp_path: Path
+async def test_visualize_fallback_returns_a_graph_file_resource_link(
+    mocker, tmp_path: Path, request_user_id
 ) -> None:
     # Arrange: no UI extension → file fallback (browser-open suppressed).
     mocker.patch(
@@ -709,17 +717,18 @@ async def test_visualize_fallback_returns_path_and_resource_link(
 
     result = await visualize_memory_structure(ctx, query="alice")
 
-    # Assert: the text block carries the server-side path; the resource link
-    # lets a client of a REMOTE server download the same HTML over MCP.
+    # Assert: no server path; the resource link lets the client download the
+    # Graph file the request user owns over MCP, from any instance.
     assert isinstance(result, ToolResult)
     text_block, link_block = result.content
-    assert str(tmp_path) in text_block.text
+    assert str(tmp_path) not in text_block.text
     assert link_block.type == "resource_link"
     assert str(link_block.uri) == f"graphs://{link_block.name}"
     assert link_block.name.endswith(".html.gz")
     assert link_block.mimeType == "application/gzip"
-    rendered = tmp_path / link_block.name.removesuffix(".gz")
-    assert rendered.is_file()
+    row = await GraphFile.find_one(GraphFile.name == link_block.name)
+    assert row is not None and str(row.user_id) == str(request_user_id)
+    assert list(tmp_path.iterdir()) == []
     assert DOWNLOAD_CONTRACT in text_block.text
 
 

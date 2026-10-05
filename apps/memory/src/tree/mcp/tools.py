@@ -456,11 +456,12 @@ async def visualize_memory_structure(
     memory, answers a plain sentence instead of a picture.
 
     When the client renders MCP App UIs, the tree appears inline. Otherwise
-    (or when ``as_html_file`` is set) it is written to a self-contained HTML
-    file; the result carries the server-side path AND a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
+    file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -539,8 +540,13 @@ async def visualize_memory_structure(
         "Memory structure (rag: document → parent chunk → child chunk) for "
         f"{label}: {counts}"
     )
-    return _graph_tool_result(
-        ctx, payload, summary, query=query or "structure", as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query=query or "structure",
+        as_html_file=as_html_file,
     )
 
 
@@ -573,11 +579,12 @@ async def visualize_memory_embeddings(
     a warning line.
 
     When the client renders MCP App UIs, the map appears inline. Otherwise
-    (or when ``as_html_file`` is set) it is written to a self-contained HTML
-    file; the result carries the server-side path AND a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
+    file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -610,8 +617,13 @@ async def visualize_memory_embeddings(
         # still tells the user the map under-reports the corpus.
         summary = f"{warning}\n{summary}"
 
-    return _graph_tool_result(
-        ctx, payload, summary, query="embedding-map", as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query="embedding-map",
+        as_html_file=as_html_file,
     )
 
 

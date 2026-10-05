@@ -21,6 +21,7 @@ import json
 import logging
 from typing import Any
 
+from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
 from fastmcp.apps import AppConfig
@@ -88,11 +89,13 @@ def _serialize(docs: list[dict[str, Any]]) -> str:
     return json_util.dumps(cleaned, indent=2)
 
 
-def _dual_graph_result(
+async def _dual_graph_result(
     ctx: Context,
     docs: list[dict[str, Any]],
     serialized: str,
     query: str,
+    *,
+    user_id: PydanticObjectId,
 ) -> str | ToolResult:
     """Answer with the serialized docs AND the graph, on whichever channel fits.
 
@@ -101,8 +104,8 @@ def _dual_graph_result(
     builds a **Graph payload** nor branches on client capability itself. That
     branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
     which also serves ``visualize_memory_structure`` (ADR-005, decision 4): inline
-    MCP App iframe when the client renders App UIs, else a self-contained file
-    under ``.tree/graphs/`` + a ``graphs://`` resource link.
+    MCP App iframe when the client renders App UIs, else a **Graph file**
+    owned by ``user_id`` behind an expiring ``graphs://`` resource link.
 
     ``serialized`` is carried VERBATIM into the model-visible text of whatever
     comes back: these tools' contract is answering the user's question, so the
@@ -140,7 +143,7 @@ def _dual_graph_result(
         f"{serialized}\n\nGraph of these results: "
         f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges"
     )
-    return _graph_tool_result(ctx, payload, summary, query=query)
+    return await _graph_tool_result(ctx, payload, summary, user_id=user_id, query=query)
 
 
 @mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
@@ -164,11 +167,12 @@ async def visualize_memory_structure(
     to *see* the graph rather than read node/edge JSON.
 
     When the client renders MCP App UIs, the graph appears inline. Otherwise
-    (or when ``as_html_file`` is set) the same graph is written to a
-    self-contained HTML file; the result carries the server-side path AND a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    (or when ``as_html_file`` is set) the same graph is rendered as a
+    self-contained HTML file; the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -238,8 +242,13 @@ async def visualize_memory_structure(
         )
     summary = f"Knowledge graph for {label}: {counts}"
 
-    return _graph_tool_result(
-        ctx, payload, summary, query=query, as_html_file=as_html_file
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        summary,
+        user_id=user_id,
+        query=query,
+        as_html_file=as_html_file,
     )
 
 
@@ -259,10 +268,11 @@ async def query_memory(
 
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -303,7 +313,7 @@ async def query_memory(
     output = _serialize(results)
 
     if visualize and results:
-        return _dual_graph_result(ctx, results, output, query)
+        return await _dual_graph_result(ctx, results, output, query, user_id=user_id)
 
     return output
 
@@ -325,10 +335,11 @@ async def search_memory(
 
     The answer always carries the serialized results. With ``visualize`` the
     same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file plus a
-    ``graphs://<name>.html.gz`` resource link — do NOT re-author the HTML
-    yourself. If the path exists locally just share it. If that path is not
-    on your machine (remote server, e.g. Prefect Horizon), read the linked
+    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    ``graphs://<name>.html.gz`` resource link that expires after a few
+    minutes (and, on a local stdio server, the file path too) — do NOT
+    re-author the HTML yourself. If a local path is given just share it.
+    Read the linked
     `graphs://…html.gz` resource — an `application/gzip` blob: write its
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
@@ -376,7 +387,7 @@ async def search_memory(
     output = _serialize(docs)
 
     if visualize and docs:
-        return _dual_graph_result(ctx, docs, output, query)
+        return await _dual_graph_result(ctx, docs, output, query, user_id=user_id)
 
     return output
 
