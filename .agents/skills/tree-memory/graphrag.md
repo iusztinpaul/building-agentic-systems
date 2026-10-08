@@ -2,7 +2,7 @@
 
 The memory is a knowledge graph: documents and chunks plus extracted entities (people, organizations, events, tasks, preferences, …) and the edges between them. The graph readers answer rows tagged `kind: "node"` or `kind: "edge"`.
 
-**Empty = `[]`** from `search_memory` / `query_memory`, or `No results found.` from `deep_search_memory` — the trigger for read chain 2 in `SKILL.md`. No graph reader sends `outcome` or `search_mode`.
+**Empty = `[]`** from `search_memory` / `query_memory`, or `No results found.` from `deep_search_memory` — the trigger for read chain 5 in `SKILL.md`. No graph reader sends `outcome` or `search_mode`.
 
 ## Read chains in graphrag
 
@@ -10,7 +10,7 @@ The memory is a knowledge graph: documents and chunks plus extracted entities (p
 
    | Question | Start with | Escalate to |
    |---|---|---|
-   | Open-ended, semantic, unsure | `search_memory` | `deep_search_memory` when the answer clearly spans more than the 10 returned rows |
+   | Open-ended, semantic, unsure | `search_memory` | `deep_search_memory` when the answer clearly spans more than the 5 returned rows |
    | Count, filter, aggregate, exact lookup | `query_memory` | `search_memory` when the aggregate comes back empty — the generated pipeline may have filtered on the wrong field |
    | "Summarise what's in my memory" | `memory_dashboard` | `query_memory` / `search_memory` for the details a row or bar points at |
    | "Show me how X connects" / "show me the graph" | `visualize_memory_structure` (with `query` for X, none for the whole graph) | `search_memory` on the nodes the picture surfaces |
@@ -38,4 +38,4 @@ The memory is a knowledge graph: documents and chunks plus extracted entities (p
 
 ## Provenance
 
-Group rows by node type and lead with the relationship the user asked about — `related_to` edges carry the specific relation in `semantic_type` (e.g. "Paul —[has_task]→ ship the demo"). Quote chunk content when the answer is a passage, with its document's `title` and `source_uri`.
+Group rows by node type and lead with the relationship the user asked about — `related_to` edges carry the specific relation in `semantic_type` (e.g. "Paul —[has_task]→ ship the demo"). Cite each claim `[n]` to the document its rows came from — `title` and `source_uri` (format in `SKILL.md` → Answer format).
