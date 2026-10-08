@@ -40,7 +40,7 @@ locally; `make memory-format-check` / `make memory-lint-check` green).
       Nit 4 landed — see the 01:20 PA entry), the ADR hunk (`-U0`) `@@ -3 +3 @@`; `grep -n '\\w+' docs/glossary.md` → only the new pattern.*
 - [x] Tester re-runs full QA suite and PASSES (including the new regression tests), and reproduces the
       live check below (`"gpt-4.1 pricing"` → 0 text candidates on the local corpus at `0.5`).
-- [ ] PA re-runs acceptance review and ACCEPTS.
+- [x] PA re-runs acceptance review and ACCEPTS.
 - [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
 
 ## Blockers (detail)
@@ -256,3 +256,55 @@ docs/ apps/` → only ADR-015 line 73 (the code is renamed). Not committed — s
 - Docker `tree-prefect-worker` untouched (Up); scratch DB `qa194_scratch` dropped; no processes left running.
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-09 02:05 — Acceptance Review (round 2, head `8c077eb`)
+
+**VERDICT: ACCEPT**
+
+Reviewed evidence from the Tester log entry and re-walked the feature live from the user's POV
+(`make env-status` → local; `make memory-search`, local mongot, user `paul.iusztin@example.com`,
+372 child chunks). All acceptance criteria verified from the user's POV. Hand off to the PR Reviewer.
+
+**What 194 changed, as the user sees it**
+- Version-bearing questions no longer seed the text leg through phantom digit terms. Live, `TOP_K=5`:
+  `"gpt-4.1 pricing"` → `vector leg: 20 candidate(s), 0 kept at min_vector_score=0.70 (top=0.672)`,
+  `text leg: 0 candidate(s), 3 query term(s), min_should_match=2`, `outcome=nothing_found` → "No results."
+  `"claude 3.5 sonnet"` → `0 kept (top=0.692)`, `text leg: 0 candidate(s), 3 query term(s),
+  min_should_match=2`, `nothing_found`. `"voyage-3.5 embeddings"` → `text leg: 0 candidate(s), 3 query
+  term(s), min_should_match=2`; the vector leg alone keeps 4 (`top=0.711`) — that is the vector leg's
+  `min_vector_score` pin, not the text leg, and outside this feature. All three M = 3 (was M = 4).
+- On-topic queries unchanged (192's table): `"ReAct agent tool calling"` → `text leg: 20 candidate(s), 4
+  query term(s), min_should_match=2`, "Building Production ReAct Agents From Scratch Is Simple" leads;
+  `"Gemini"` → `text leg: 20 candidate(s), 1 query term(s), min_should_match=1`, vector `0 kept
+  (top=0.697)`, the text leg alone answers it. (20 is the child `$limit` at `TOP_K=5` — `top_k × 4`;
+  192's 37 was at the default `TOP_K=10`. Task 193's Scope 6 / AC / Story 5 said "logs 37" without the
+  `TOP_K` — reworded today so the next runner does not read the cap as a drop.)
+- Operator story: `_create_search_index` (`indexing.py:776-781`) re-raises bare unless the driver
+  message names `MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED` or "maximum number of FTS indexes"; only the cap
+  gets the "Atlas M0 allows 3 … drop the stray index … re-run `make memory-run-indexing-pipeline`"
+  message. An unreachable mongot now reads as what it is.
+- Docs: ADR-015 line 3 carries the task-194 clause (tokenizer `\w+(?:\.\w+)*`, `TOKEN_PATTERN` shared
+  with the fake, public `TEXT_INDEX_FILTER_PATHS`); glossary row 39 names the pattern with the why, row
+  41 names both mongot indexes on **Mode reset**; both in commit `8c077eb`. Task 193 `Depends on:` /
+  `Blocked by:` name 194 (lines 10 / 162) — 194 is done, so 193 is unblocked. Glossary terms used
+  consistently in the diff (**Text search index**, **Minimum match ratio**).
+
+**Known follow-ups in the PR body — none changes the verdict**
+- Comma-grouped numbers: reproduced live — `"sourdough 1,000 tokens"` → `text leg: 9 candidate(s), 4
+  query term(s), min_should_match=2`, `found`, five AI-article parents for a baking question. Same
+  mechanism as Blocker 1 (a phantom `1` from `1,000`), but pre-existing under `\w+`, outside 194's AC
+  (decimals), and disclosed. Not a rejection of 194; filed as a groomed follow-up with the live numbers:
+  `tasks/195-comma-grouped-numbers-in-token-pattern.md` (also lists apostrophes / colons in the
+  `TOKEN_PATTERN` docstring — the Tester's open note).
+- Apostrophe words: under-recall only (measured 0 matches), bundled into 195's docstring item.
+- Near-miss short queries: task 193, pending, depends on 194 (now satisfied).
+- `_vector_search` `node_filter` dict-merge (`search.py:233`): no caller passes `user_id` / `kind`
+  today; pre-existing and outside this feature — stays recorded in the PR body, as 192's acceptance
+  already decided.
+- Stale Docker worker image, served-flow INFO visibility: operator / runbook class, not product.
+- PR body test plan says `5283 passed`; the Tester's run on 194 is `5291` — refresh the number when the
+  PR Reviewer re-runs.
+
+Files touched by this review (not committed): `tasks/done/194-pr-review-rollup.md` (this entry + the PA
+AC tick), `tasks/193-near-miss-queries-in-the-ratio-repin-protocol.md` (`TOP_K` wording on the Gemini
+check, three places), `tasks/195-comma-grouped-numbers-in-token-pattern.md` (new).

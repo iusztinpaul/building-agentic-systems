@@ -88,8 +88,9 @@ query to make a step work.
 **6. Confirm through the user's path** (one Voyage embed each, ≥ 21 s apart): `make memory-search` at the
 new pin for `"vector-like particles"` (expect `nothing_found`, or the Log says why it legitimately stays),
 `"How does the ReAct agent decide when to call a tool?"` (expect the ReAct passages still lead),
-`"Gemini"` (text leg alone answers it: `vector 0 kept`, so N must stay 37), and the two short on-topic
-queries of step 2.
+`"Gemini"` (text leg alone answers it: `vector 0 kept`, so N must stay 37 in the uncapped table; the CLI
+line shows `min(N, TOP_K × 4)` because the leg's `$limit` is `top_k * _CHILD_HITS_PER_PARENT` — 37 at the
+default `TOP_K=10`, 20 at `TOP_K=5`), and the two short on-topic queries of step 2.
 
 **Out of scope (intentional):** adding `like` (or any word) to `STOP_WORDS` — `like` is neither in
 Lucene's 33 nor a question word, and ADR-015 §3 keeps the list minimal; see Open questions. Any change to
@@ -109,7 +110,9 @@ Lucene's 33 nor a question word, and ADR-015 §3 keeps the list minimal; see Ope
       say the protocol includes near-miss queries.
 - [ ] Live, local: `make memory-search QUERY="vector-like particles"` at the pin answers `nothing_found`
       (or the Log says why not); `"How does the ReAct agent decide when to call a tool?"` still leads with
-      ReAct / tool-calling passages; `"Gemini"` logs `37 candidate(s), 1 query term(s), min_should_match=1`.
+      ReAct / tool-calling passages; `"Gemini"` logs `37 candidate(s), 1 query term(s), min_should_match=1`
+      at the default `TOP_K` (10 → child `$limit` 40; at `TOP_K=5` the same line reads `20 candidate(s)` —
+      the cap, not a drop — and the uncapped table must still say 37).
 - [ ] `grep -rnI '10-query' apps/memory/src docs/glossary.md apps/memory/README.md` is empty AFTER the
       task (the old wording no longer tells the re-pinner to repeat the blind spot). Non-vacuity: BEFORE
       the task the same grep hits exactly 3 lines — `default.yaml:134` (the comment's "Re-pin with the
@@ -142,8 +145,9 @@ Lucene's 33 nor a question word, and ADR-015 §3 keeps the list minimal; see Ope
    step, and which (e.g. `"vector-like"`) no ratio can separate and why.
 
 ### Story: A one-word query still works
-1. `make memory-search QUERY="Gemini"` → `1 query term(s), min_should_match=1`, 37 candidates, the text
-   leg alone answers it (vector top 0.697 < 0.70) — unchanged by any pin.
+1. `make memory-search QUERY="Gemini"` (default `TOP_K`) → `1 query term(s), min_should_match=1`, 37
+   candidates (20 at `TOP_K=5`: the child `$limit`, not a loss), the text leg alone answers it (vector top
+   0.697 < 0.70) — unchanged by any pin.
 
 ## Open questions
 
@@ -210,3 +214,11 @@ this query is a separate class, not a sixth near-miss. Nothing else in the task 
 Addendum (same entry, 00:58): the query only reads M = 3 / N = 0 once 194's tokenizer is in; on today's
 `\w+` it is M = 4 and seeds 20 candidates, which would break the "every off-topic N == 0" pin rule — so
 `Depends on:` / `Blocked by:` now name `tasks/194`; run this task after 194 lands.
+
+### [PA] 2026-10-09 02:05 — Grooming fix (the Gemini check names its `TOP_K`)
+
+At 194's acceptance review `make memory-search QUERY="Gemini" TOP_K=5` logged `20 candidate(s)`, not
+37: the text leg's `$limit` is `top_k * _CHILD_HITS_PER_PARENT` (4), so the CLI line shows
+`min(N, TOP_K × 4)` — 37 at the default `TOP_K=10` (192's run), 20 at `TOP_K=5`. Scope 6, the live AC
+and Story 5 now say so, so the cap is not read as a drop. The uncapped table's 37 is unchanged. 194 is
+done; this task is unblocked.
