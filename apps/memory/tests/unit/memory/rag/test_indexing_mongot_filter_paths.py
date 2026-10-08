@@ -4,15 +4,15 @@ Multi-tenant isolation depends on the index declarations carrying
 ``user_id`` as a filter path so ``$vectorSearch`` / ``$search`` prune other
 tenants' rows server-side. The declarations live in
 ``tree.memory.rag.indexing._VECTOR_INDEX_FILTER_PATHS`` and
-``_TEXT_INDEX_FILTER_PATHS``; these tests lock in the contract so a future
+``TEXT_INDEX_FILTER_PATHS``; these tests lock in the contract so a future
 refactor cannot silently drop it.
 """
 
 from __future__ import annotations
 
 from tree.memory.rag.indexing import (
-    _TEXT_INDEX_FILTER_PATHS,
-    _TEXT_INDEX_TEXT_PATHS,
+    TEXT_INDEX_FILTER_PATHS,
+    TEXT_INDEX_TEXT_PATHS,
     _VECTOR_INDEX_FILTER_PATHS,
     _build_vector_index_definition,
 )
@@ -37,7 +37,7 @@ class TestVectorIndexFilterPaths:
 class TestTextIndexPaths:
     def test_filter_paths_are_user_id_first_with_their_atlas_types(self) -> None:
         # Insertion order IS the declaration order: user_id first.
-        assert list(_TEXT_INDEX_FILTER_PATHS.items()) == [
+        assert list(TEXT_INDEX_FILTER_PATHS.items()) == [
             ("user_id", "objectId"),
             ("kind", "token"),
             ("type", "token"),
@@ -46,10 +46,10 @@ class TestTextIndexPaths:
 
     def test_merged_into_is_not_a_filter_path(self) -> None:
         # ADR-015 §6: no text-leg reader filters tombstones.
-        assert "merged_into" not in _TEXT_INDEX_FILTER_PATHS
+        assert "merged_into" not in TEXT_INDEX_FILTER_PATHS
 
     def test_text_paths_are_the_four_lexical_fields(self) -> None:
-        assert _TEXT_INDEX_TEXT_PATHS == (
+        assert TEXT_INDEX_TEXT_PATHS == (
             "name",
             "aliases",
             "properties.content",

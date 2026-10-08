@@ -9,7 +9,7 @@ evaluates the handful of operators our pipelines use — equality, ``$or``, ``$i
 ``sources``), ``$type: "binData"`` (a stored vector), ``$nor``, the Atlas
 ``$search`` compound of the text leg (``filter`` / ``mustNot`` ``equals``,
 ``should`` ``text`` clauses counted against ``minimumShouldMatch`` — whole
-``\\w+`` tokens, case-insensitive, NO stemming), ``$limit``, ``$graphLookup``
+``TOKEN_PATTERN`` tokens, case-insensitive, NO stemming), ``$limit``, ``$graphLookup``
 (breadth-first, ``restrictSearchWithMatch`` applied) and a ``$setUnion``
 ``$project`` — plus exclusion
 projections (``{"embedding": 0}``), stamps the ``_search_score`` both legs read
@@ -22,7 +22,6 @@ silently ignored by the double.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Any
 
@@ -32,6 +31,7 @@ from bson import ObjectId
 from bson.binary import Binary
 
 from tree.entities.memory import to_stored_vector
+from tree.memory.rag.search import TOKEN_PATTERN
 
 
 class FakeCursor:
@@ -85,8 +85,9 @@ def _search_compound_matches(row: dict[str, Any], compound: dict[str, Any]) -> b
     ``filter`` — every ``equals`` holds; ``mustNot`` — no nested
     ``compound.must`` of ``equals`` holds in full; ``should`` — at least
     ``minimumShouldMatch`` ``text`` clauses match. A ``text`` clause matches when
-    ANY of its paths (array values included) holds the term as a whole ``\\w+``
-    token, case-insensitive — no stemming, unlike ``lucene.english``.
+    ANY of its paths (array values included) holds the term as a whole token of
+    :data:`tree.memory.rag.search.TOKEN_PATTERN` — the pattern the query side
+    splits on — case-insensitive; no stemming, unlike ``lucene.english``.
     """
 
     def equals(clause: dict[str, Any]) -> bool:
@@ -111,7 +112,7 @@ def _text_clause_matches(row: dict[str, Any], text: dict[str, Any]) -> bool:
         for part in path.split("."):
             value = (value or {}).get(part) if isinstance(value, dict) else None
         for item in value if isinstance(value, list) else [value]:
-            if item is not None and term in re.findall(r"\w+", str(item).lower()):
+            if item is not None and term in TOKEN_PATTERN.findall(str(item).lower()):
                 return True
     return False
 
@@ -142,9 +143,10 @@ _DEFAULT_SEARCH_SCORE = 0.9
 class FakeMemoryCollection:
     """Records aggregate pipelines / find filters and applies them to ``rows``.
 
-    Its ``$search`` emulation splits text on ``\\w+`` and models neither
-    Lucene's UAX#29 tokenizer (``google_genai:gemini-1.5`` stays ONE token live)
-    nor ``lucene.english`` stemming (``calling`` ≠ ``call``), so it
+    Its ``$search`` emulation splits text on the query side's ``TOKEN_PATTERN``
+    (``4.1`` stays one token, as in Lucene's UAX#29 tokenizer) but models neither
+    UAX#29's colon-joined identifiers (``google_genai:gemini`` is ONE token live,
+    two here) nor ``lucene.english`` stemming (``calling`` ≠ ``call``), so it
     under-approximates the live candidate set — never rely on a stemmed match.
     """
 

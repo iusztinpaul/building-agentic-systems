@@ -50,8 +50,8 @@ from bson import ObjectId
 
 from tree.config.app_config import app_config
 from tree.memory.rag.indexing import (
-    _TEXT_INDEX_FILTER_PATHS,
-    _TEXT_INDEX_TEXT_PATHS,
+    TEXT_INDEX_FILTER_PATHS,
+    TEXT_INDEX_TEXT_PATHS,
     TEXT_SEARCH_INDEX_NAME,
     VECTOR_INDEX_NAME,
     index_entry_is_queryable,
@@ -65,6 +65,20 @@ logger = logging.getLogger(__name__)
 # The one row shape that must never be a search seed (ADR-006 decision 2).
 _PARENT_ROW: dict[str, Any] = {"type": "chunk", "subtype": "parent"}
 
+TOKEN_PATTERN: re.Pattern[str] = re.compile(r"\w+(?:\.\w+)*")
+"""How text splits into terms: word runs, a ``.`` between two of them kept inside.
+
+The **Text search index** analyzer (``lucene.english``) tokenises with Lucene's
+standard (UAX#29) tokenizer, which keeps ``4.1`` / ``3.5`` / ``0.70`` / ``e.g``
+whole, so the query side must too. Good: ``"gpt-4.1 pricing"`` → ``gpt``,
+``4.1``, ``pricing`` (M = 3). Bad: plain ``\\w+`` → ``gpt``, ``4``, ``1``,
+``pricing`` (M = 4) — the index holds no ``4`` for ``4.1``, so the phantom
+terms match any row with stray digits. ``bread.`` → ``bread`` and
+``vector-like`` → ``vector``, ``like`` as before; colon-joined identifiers
+(``genai:gemini``, one UAX#29 token) are NOT modelled. The unit-test fake of
+``$search`` tokenises row text with this same pattern.
+"""
+
 # Lucene's 33 English stop words, verbatim: what ``lucene.english`` (the
 # **Text search index** analyzer) drops at index time, so a clause on one of
 # them can never match (task 190's spike).
@@ -75,7 +89,8 @@ _LUCENE_ENGLISH_STOP_WORDS = frozenset(
 
 STOP_WORDS: frozenset[str] = _LUCENE_ENGLISH_STOP_WORDS | frozenset(
     # Question / pronoun / auxiliary / function words — roughly NLTK's English
-    # list, split the way ``\w+`` splits contractions ("don't" → "don", "t").
+    # list, split the way :data:`TOKEN_PATTERN` splits contractions ("don't" →
+    # "don", "t").
     "i me my myself we our ours ourselves you your yours yourself yourselves "
     "he him his himself she her hers herself its itself them theirs themselves "
     "what which who whom whose those am were been being have has had having "
@@ -283,8 +298,11 @@ async def _search_index_is_queryable(
     this leg is unavailable; it only names the outcome in the WARNING lines.
 
     One extra ``listSearchIndexes`` command, and only on the path where the
-    leg matched nothing — rare for a real query (``retrieve_parents`` asks for
-    40 candidates over a non-empty collection), so the hot path pays nothing.
+    leg matched nothing. For the vector leg that is rare (``retrieve_parents``
+    asks for 40 candidates over a non-empty collection); for the text leg it is
+    the DESIGNED answer to every off-topic query at the **Minimum match ratio**,
+    so each such query pays one metadata round trip — negligible next to the
+    LLM-paced caller. A leg with candidates pays nothing.
 
     Fail-OPEN twice, because only an ABSENT index is unambiguous:
 
@@ -340,8 +358,9 @@ async def _search_index_is_queryable(
 def query_terms(query: str) -> list[str]:
     """The DISTINCT content terms of ``query``, in first-occurrence order.
 
-    Lower-cased ``\\w+`` tokens minus :data:`STOP_WORDS`, deduped. ``M`` of the
-    **Minimum match ratio** is ``len(query_terms(query))``. Dedupe is
+    Lower-cased :data:`TOKEN_PATTERN` tokens (``4.1`` stays one term) minus
+    :data:`STOP_WORDS`, deduped. ``M`` of the **Minimum match ratio** is
+    ``len(query_terms(query))``. Dedupe is
     pre-stemming (``agent`` / ``agents`` are two terms) — the accepted
     trade-off of ADR-015 §3; the index still stems both sides of a match.
 
@@ -353,7 +372,7 @@ def query_terms(query: str) -> list[str]:
     trips ``maxClauseCount``, the leg raises and the query runs ``vector_only``.
     """
 
-    terms = (t for t in re.findall(r"\w+", query.lower()) if t not in STOP_WORDS)
+    terms = (t for t in TOKEN_PATTERN.findall(query.lower()) if t not in STOP_WORDS)
     return list(dict.fromkeys(terms))[:_MAX_QUERY_TERMS]
 
 
@@ -383,9 +402,10 @@ async def _text_search(
     """Atlas ``$search`` on ``text_search_index`` — ``None`` when unavailable.
 
     A row is a candidate iff it contains at least K of the query's M terms:
-    M = :func:`query_terms` (lower-cased words minus :data:`STOP_WORDS`,
-    deduped, capped at :data:`_MAX_QUERY_TERMS`), K = :func:`min_should_match` at ``query.text_min_match_ratio``
-    (the **Minimum match ratio**). One ``text`` clause per term over ALL four
+    M = :func:`query_terms` (lower-cased :data:`TOKEN_PATTERN` tokens minus
+    :data:`STOP_WORDS`, deduped, capped at :data:`_MAX_QUERY_TERMS`),
+    K = :func:`min_should_match` at ``query.text_min_match_ratio`` (the
+    **Minimum match ratio**). One ``text`` clause per term over ALL four
     text paths, so ``minimumShouldMatch`` counts terms, not paths. M == 0 (an
     all-stop-word query) answers ``[]`` without a query — Atlas rejects an
     empty ``should``, and the leg did run: the mode stays ``hybrid``.
@@ -412,10 +432,10 @@ async def _text_search(
 
     _check_text_node_filter(node_filter)
     terms = query_terms(query)
-    k = min_should_match(len(terms), app_config.query.text_min_match_ratio)
     if not terms:
         _log_text_leg(0, 0, 0)
         return []
+    k = min_should_match(len(terms), app_config.query.text_min_match_ratio)
 
     # The tenant / kind pins come FIRST and are ANDed with the caller's keys,
     # never merged: a ``node_filter`` naming ``user_id`` must narrow the leg
@@ -442,7 +462,7 @@ async def _text_search(
                         }
                     ],
                     "should": [
-                        {"text": {"query": term, "path": list(_TEXT_INDEX_TEXT_PATHS)}}
+                        {"text": {"query": term, "path": list(TEXT_INDEX_TEXT_PATHS)}}
                         for term in terms
                     ],
                     "minimumShouldMatch": k,
@@ -479,10 +499,10 @@ def _check_text_node_filter(node_filter: dict[str, Any]) -> None:
     ``try``: a programming error must not read as a dead leg)."""
 
     for key, value in node_filter.items():
-        if key not in _TEXT_INDEX_FILTER_PATHS:
+        if key not in TEXT_INDEX_FILTER_PATHS:
             raise ValueError(
                 f"node_filter key {key!r} is not a {TEXT_SEARCH_INDEX_NAME} filter "
-                f"path ({', '.join(_TEXT_INDEX_FILTER_PATHS)})"
+                f"path ({', '.join(TEXT_INDEX_FILTER_PATHS)})"
             )
         if not isinstance(value, str | ObjectId):
             raise ValueError(

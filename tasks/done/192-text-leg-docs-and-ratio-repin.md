@@ -515,3 +515,28 @@ this run") is pre-existing first-deploy wording, still true when no index exists
 the PR body.
 
 All acceptance criteria verified from the user's POV. Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-10-09 12:30 — Review (PR #47, head `440ff70`)
+
+**VERDICT: BLOCKERS**
+
+Reviewed 30 files, 3829 insertions / 479 deletions (every production file read in full; tests, docs,
+ADR-015 and the amended Status lines read; 1148 tests in the touched modules pass; format + lint green).
+Blockers: 2 (1 SWE, 1 PA); Nits: 7.
+
+- BLOCKERS: filed rollup task `tasks/194-pr-review-rollup.md`. Pipeline re-runs from inner loop on the
+  rollup; re-invoke me after PA ACCEPT + re-push.
+  1. [Standards / correctness] `search.py:356` `query_terms` tokenises with `\w+`, but the index's
+     `lucene.english` (standard tokenizer) keeps decimals whole — verified live: `$search` `"4.1"` → 0
+     rows, `"4"` → 67, `"1"` → 95 of 413. At the pinned `0.5`, `"gpt-4.1 pricing"` (0 rows name it)
+     yields 20 text candidates with the leg's exact compound; 0 with `\w+(?:\.\w+)*` (which leaves all
+     13 existing `TestQueryTerms` pins unchanged). Same for `voyage-3.5` (22 → 0), `claude 3.5` (18 → 0).
+  2. [PA] [Documentation discipline] ADR-015 §3 and the glossary's **Minimum match ratio** row state
+     `\w+` verbatim; one Status-line note + one phrase once Blocker 1 lands.
+- Nits (in the rollup): private `_TEXT_INDEX_*` imported across modules; "rare for a real query" probe
+  docstring now false for the text leg; `_create_search_index` wraps every error in the M0 story;
+  glossary **Mode reset** names only `vector_index`; stale `$text` comment in `test_load.py:263`;
+  untested `definition` fallback in `_existing_text_index_mappings`; `k` computed before the M = 0 guard.
+- Sound, for the record: tenant pins ANDed before `node_filter` and keys restricted to the filter paths;
+  `mustNot` parent exclusion; shared probe / wait helpers; subset drift check; idempotent legacy drop;
+  `[0, 1]` ratio bounds; no stray files; AGENTS.md rules (types, async, logger, Pydantic, YAML) met.

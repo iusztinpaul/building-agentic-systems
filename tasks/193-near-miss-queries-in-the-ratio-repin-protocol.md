@@ -7,7 +7,9 @@ feature: atlas-search-text-leg
 # Extend ADR-015 §8's re-pin protocol with short near-miss off-topic queries (M = 2 / M = 3 on two generic words), re-run the table, re-pin `query.text_min_match_ratio` to the lowest step that separates the ENLARGED set, and record the known short-query leak where the next re-pinner reads (`default.yaml` comment, glossary **Minimum match ratio**)
 
 Tags: `evals`, `config`, `retrieval`, `docs`, `adr`
-Depends on: None (192 is done; this is the PA's acceptance-review follow-up, not a rejection)
+Depends on: `tasks/194-pr-review-rollup.md` (its `query_terms` tokenizer, `\w+(?:\.\w+)*`, is what makes
+`"gpt-4.1 pricing"` M = 3 / N = 0; on `\w+` it is M = 4 and seeds 20 candidates). 192 is done; this is the
+PA's acceptance-review follow-up, not a rejection.
 Blocks: —
 Implements: ADR-015 §8 (amended by this task's Status-line note — the protocol gains near-miss queries)
 
@@ -43,14 +45,20 @@ next re-pinner down the same blind spot. This task fixes the protocol, not the c
 
 **1. Amend the protocol (PA-owned ADR edit — the SWE skips this item; the PA applies it when this task
 starts, as on 192).** One Status-line note on ADR-015 (the project's amendment style, see ADR-008 / 012 /
-013): "§8's eval set gains near-miss off-topic queries (M = 2 / M = 3 on generic words), per task 193;
-the pin rule is unchanged — the lowest 0.1 step separating the enlarged set." Body text untouched.
+013): "§8's eval set gains near-miss off-topic queries (M = 2 / M = 3 on generic words) and one
+version-bearing off-topic query, per task 193; the pin rule is unchanged — the lowest 0.1 step separating
+the enlarged set." Body text untouched.
 
 **2. The enlarged query set.** Keep ADR-015 §8's ten. Add at least FIVE near-miss off-topic queries, each
 sharing one or two GENERIC words with the corpus and none of its topic, covering M = 2 and M = 3:
 `"vector-like particles"`, `"bread recipe"`, `"vector-like"`, plus ≥ 2 more of the SWE's choice (e.g.
 `"memory foam mattress"` — `memory` + `foam` + `mattress`; `"tool shed plans"` — `tool` + `shed` +
-`plans`). Record each query's terms and M in the Log before running anything. Add at least TWO short
+`plans`). Also add ONE version-bearing off-topic query, `"gpt-4.1 pricing"` (M = 3 with task 194's
+tokenizer: `gpt`, `4.1`, `pricing`; 0 corpus rows name it) — a different leak class from the near-miss
+five (phantom digit terms, closed by 194's `\w+(?:\.\w+)*`, not generic words), kept in the protocol so
+the next re-pinner sees it stay at N = 0 (run only after `tasks/194` has landed). Record each query's
+terms and M in the Log before running
+anything. Add at least TWO short
 on-topic queries with M = 2–3 (e.g. `"agent memory"`, `"pydantic validation"`), chosen so that at least
 ONE of them has an N that drops to 0 at some step ≤ 1.0 — a higher pin's recall cost must be a measured
 number in the table, not an assumption.
@@ -92,7 +100,8 @@ Lucene's 33 nor a question word, and ADR-015 §3 keeps the list minimal; see Ope
 - [ ] ADR-015 carries one Status-line note naming the enlarged protocol (task 193); `git diff --numstat
       docs/adrs` is `1 1` on 015 only.
 - [ ] The Log holds the enlarged table: the ten ADR-015 §8 queries + ≥ 5 near-miss off-topic (M = 2 and
-      M = 3 both present) + ≥ 2 short on-topic, each with its terms, M, and `K → N` per 0.1 step.
+      M = 3 both present) + 1 version-bearing off-topic (`"gpt-4.1 pricing"`) + ≥ 2 short on-topic, each
+      with its terms, M, and `K → N` per 0.1 step.
 - [ ] The pinned value is the lowest 0.1 step separating the enlarged set; any query set aside as
       "unseparable by ratio" is named in the Log AND in the `default.yaml` comment with the reason.
 - [ ] `default.yaml`, `frozen_config.yaml`, `QueryConfig` and `test_app_config.py` agree on the value; the
@@ -150,7 +159,7 @@ Lucene's 33 nor a question word, and ADR-015 §3 keeps the list minimal; see Ope
 
 ---
 
-Blocked by: (none)
+Blocked by: `tasks/194-pr-review-rollup.md`
 
 ## Log
 
@@ -187,3 +196,17 @@ re-pin by the unchanged rule, and record the leak class where the next re-pinner
   (recommendation: surface to the human; ADR-015 already names the vector leg as the carrier).
 
 Ready for implementation (after the PA applies the ADR-015 Status-line note and the glossary rows).
+
+### [PA] 2026-10-09 00:55 — Grooming fix (one version-bearing query joins the protocol, from rollup 194)
+
+PR review of #47 (rollup `tasks/194`, Blocker 1) found that `query_terms`'s `\w+` split `4.1` into the
+phantom terms `4` / `1`, which the index's standard tokenizer never emits — `"gpt-4.1 pricing"` seeded 20
+off-topic text candidates at `0.5` on a corpus with 0 rows naming it. 194 fixes the tokenizer
+(`\w+(?:\.\w+)*`); this task's protocol gains ONE version-bearing off-topic query, `"gpt-4.1 pricing"`
+(M = 3), so the closed leak class stays measured by the re-pin table rather than only by a unit test.
+Scope 1's quoted ADR-015 note and the Log-table AC name it; the near-miss count (≥ 5) is unchanged —
+this query is a separate class, not a sixth near-miss. Nothing else in the task changes.
+
+Addendum (same entry, 00:58): the query only reads M = 3 / N = 0 once 194's tokenizer is in; on today's
+`\w+` it is M = 4 and seeds 20 candidates, which would break the "every off-topic N == 0" pin rule — so
+`Depends on:` / `Blocked by:` now name `tasks/194`; run this task after 194 lands.

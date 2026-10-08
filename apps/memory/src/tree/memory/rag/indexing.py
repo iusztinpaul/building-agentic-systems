@@ -579,7 +579,7 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
 # text. Declared DOTTED here (the form ``$search`` queries
 # use); :func:`_build_text_search_index_definition` nests ``properties.*``
 # through a ``document`` field, the Atlas static-mapping syntax.
-_TEXT_INDEX_TEXT_PATHS: tuple[str, ...] = (
+TEXT_INDEX_TEXT_PATHS: tuple[str, ...] = (
     "name",
     "aliases",
     "properties.content",
@@ -597,7 +597,7 @@ _TEXT_INDEX_ANALYZER = "lucene.english"
 # is first (every query is tenant-scoped); ``token`` carries no
 # ``normalizer`` because the values are already lower-case literals.
 # ``merged_into`` is deliberately ABSENT (ADR-015 §6 — no reader needs it).
-_TEXT_INDEX_FILTER_PATHS: dict[str, str] = {
+TEXT_INDEX_FILTER_PATHS: dict[str, str] = {
     "user_id": "objectId",
     "kind": "token",
     "type": "token",
@@ -615,11 +615,11 @@ def _build_text_search_index_definition() -> dict[str, Any]:
     """
 
     fields: dict[str, Any] = {}
-    for path in _TEXT_INDEX_TEXT_PATHS:
+    for path in TEXT_INDEX_TEXT_PATHS:
         _set_static_mapping(
             fields, path, {"type": "string", "analyzer": _TEXT_INDEX_ANALYZER}
         )
-    for path, field_type in _TEXT_INDEX_FILTER_PATHS.items():
+    for path, field_type in TEXT_INDEX_FILTER_PATHS.items():
         _set_static_mapping(fields, path, {"type": field_type})
     return {"mappings": {"dynamic": False, "fields": fields}}
 
@@ -697,11 +697,11 @@ def _text_search_index_drift(
         have["dynamic"], want["dynamic"] = dynamic, False
 
     live = _extract_text_index_field_types(existing)
-    for path in _TEXT_INDEX_TEXT_PATHS:
+    for path in TEXT_INDEX_TEXT_PATHS:
         declared = ("string", _TEXT_INDEX_ANALYZER)
         if live.get(path) != declared:
             have[path], want[path] = live.get(path), declared
-    for path, field_type in _TEXT_INDEX_FILTER_PATHS.items():
+    for path, field_type in TEXT_INDEX_FILTER_PATHS.items():
         live_type = live[path][0] if path in live else None
         if live_type != field_type:
             have[path], want[path] = live_type, field_type
@@ -729,8 +729,8 @@ async def _ensure_text_search_index(collection: Any) -> None:
                 "filter paths=%s)",
                 TEXT_SEARCH_INDEX_NAME,
                 _TEXT_INDEX_ANALYZER,
-                list(_TEXT_INDEX_TEXT_PATHS),
-                _TEXT_INDEX_FILTER_PATHS,
+                list(TEXT_INDEX_TEXT_PATHS),
+                TEXT_INDEX_FILTER_PATHS,
             )
             return
 
@@ -760,10 +760,12 @@ async def _ensure_text_search_index(collection: Any) -> None:
 async def _create_search_index(collection: Any, model: dict[str, Any]) -> None:
     """``create_search_index`` for EITHER mongot index, with the M0-cap message.
 
-    Any driver error re-raises as a ``RuntimeError`` naming the index and the
-    Atlas M0 3-search-index cap — the one failure an operator can act on
-    (a stray third index in Atlas → ``MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED``).
-    The driver error stays visible through ``from exc`` chaining.
+    A driver error that IS the Atlas M0 3-search-index cap (its message names
+    ``MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED`` or "maximum number of FTS indexes")
+    re-raises as a ``RuntimeError`` naming the index and the stray-index fix,
+    the driver error kept through ``from exc`` chaining. Every other error
+    (auth, network, a malformed definition) propagates unchanged, so an
+    unreachable mongot never reads as a cap problem.
     """
 
     name = model["name"]
@@ -771,6 +773,12 @@ async def _create_search_index(collection: Any, model: dict[str, Any]) -> None:
     try:
         await collection.create_search_index(model=model)
     except Exception as exc:
+        message = str(exc)
+        if (
+            "MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED" not in message
+            and "maximum number of fts indexes" not in message.lower()
+        ):
+            raise
         raise RuntimeError(
             f"Could not create search index '{name}': Atlas M0 allows 3 search "
             f"indexes per cluster (search + vectorSearch together) and Tree "

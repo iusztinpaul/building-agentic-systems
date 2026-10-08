@@ -719,7 +719,8 @@ def _text_leg_lines(caplog) -> list[str]:
 
 
 class TestQueryTerms:
-    """``query_terms``: lower-case ``\\w+`` tokens, minus ``STOP_WORDS``, deduped."""
+    """``query_terms``: lower-case ``TOKEN_PATTERN`` tokens, minus ``STOP_WORDS``,
+    deduped."""
 
     @pytest.mark.parametrize(
         ("query", "expected"),
@@ -760,6 +761,19 @@ class TestQueryTerms:
             ),
             # Pre-stemming dedupe is the accepted trade-off (ADR-015 §3).
             pytest.param("agent agents", ["agent", "agents"], id="no-stemming"),
+            # The index's standard tokenizer keeps ``4.1`` / ``3.5`` whole, so
+            # splitting them would send the phantom terms ``4`` / ``1`` (task 194).
+            pytest.param(
+                "gpt-4.1 pricing", ["gpt", "4.1", "pricing"], id="decimal-stays-whole"
+            ),
+            pytest.param("voyage-3.5", ["voyage", "3.5"], id="version-stays-whole"),
+            pytest.param(
+                "voyage-3.5 embeddings",
+                ["voyage", "3.5", "embeddings"],
+                id="version-query-three-terms",
+            ),
+            pytest.param("e.g. 0.70", ["e.g", "0.70"], id="dotted-abbreviation"),
+            pytest.param("bread.", ["bread"], id="trailing-dot-dropped"),
         ],
     )
     def test_terms(self, query: str, expected: list[str]) -> None:
@@ -1037,6 +1051,33 @@ class TestMinimumMatchRatio:
         assert result.search_mode == "hybrid"
         assert _text_leg_lines(caplog) == [
             "text leg: 0 candidate(s), 8 query term(s), min_should_match=4"
+        ]
+
+    async def test_decimal_query_term_never_matches_its_bare_digits(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # M = 3 (gpt, 4.1, pricing), K = 2. Split on ``\w+`` it was M = 4 and
+        # the stray digits ``4`` + ``1`` made any row carrying them a candidate.
+        collection = make_collection(
+            [
+                _text_only_row(make_child_row, "digits", "chapter 4 of 1 book"),
+                _text_only_row(make_child_row, "on-topic", "gpt-4.1 pricing per token"),
+            ]
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                "gpt-4.1 pricing",
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert [hit.doc["_id"] for hit in result.hits] == ["on-topic"]
+        assert _text_leg_lines(caplog) == [
+            "text leg: 1 candidate(s), 3 query term(s), min_should_match=2"
         ]
 
     async def test_long_query_sends_capped_clauses_and_k_over_the_cap(

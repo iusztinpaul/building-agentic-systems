@@ -260,7 +260,7 @@ class TestBuildRagRowOps:
     def test_no_row_carries_entity_naming_fields(self) -> None:
         # Positional ``_id``s are never resolved or merged, so these fields
         # would only hold filler or duplicated values (a URI-shaped ``name`` is
-        # also tokenised by ``$text``).
+        # also tokenised by the **Text search index**).
         naming_fields = {"name", "canonical_name", "aliases", "confidence"}
         for op in _ops(1, 1):
             assert naming_fields.isdisjoint(_set_stage(op))

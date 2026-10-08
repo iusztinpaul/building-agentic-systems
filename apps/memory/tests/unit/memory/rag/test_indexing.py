@@ -820,6 +820,14 @@ class TestEnsureTextSearchIndex:
                 },
                 id="exactly-as-sent",
             ),
+            # No ``latestDefinition``: the ``definition`` fallback is read.
+            pytest.param(
+                {
+                    "name": TEXT_SEARCH_INDEX_NAME,
+                    "definition": _build_text_search_index_definition(),
+                },
+                id="definition-fallback",
+            ),
             pytest.param(_LIVE_TEXT_INDEX, id="local-mongot-echo"),
             pytest.param(_with_echoed_extras(), id="echoed-defaults-and-extra-path"),
             # Atlas's default for ``mappings.dynamic`` is ``false``: an echo
@@ -1025,6 +1033,20 @@ class TestCreateSearchIndex:
         assert "Atlas → Search & Vector Search" in message
         assert "make memory-run-indexing-pipeline" in message
         assert excinfo.value.__cause__ is driver_error
+
+    async def test_other_driver_errors_propagate_unchanged(self) -> None:
+        # An unreachable mongot or a bad definition must not read as the M0 cap.
+        driver_error = OperationFailure("connection refused: mongot:27028")
+        collection = AsyncMock()
+        collection.create_search_index = AsyncMock(side_effect=driver_error)
+
+        with pytest.raises(OperationFailure) as excinfo:
+            await _create_search_index(
+                collection,
+                {"name": TEXT_SEARCH_INDEX_NAME, "type": "search", "definition": {}},
+            )
+
+        assert excinfo.value is driver_error
 
     async def test_ensure_indexes_routes_the_vector_create_through_it(self) -> None:
         collection = _make_collection()
