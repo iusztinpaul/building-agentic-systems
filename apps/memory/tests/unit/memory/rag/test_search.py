@@ -23,11 +23,17 @@ Two claims are pinned here:
 from __future__ import annotations
 
 import logging
+from unittest.mock import AsyncMock
 
 import pytest
 from beanie import PydanticObjectId
 
-from tree.memory.rag.search import SearchUnavailableError, _rrf_fuse, hybrid_search
+from tree.memory.rag.search import (
+    SearchUnavailableError,
+    _rrf_fuse,
+    _search_index_is_queryable,
+    hybrid_search,
+)
 from tree.models.base import EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel
 
@@ -404,6 +410,41 @@ class TestSearchMode:
         ]
         assert len(warnings) == 1
         assert warnings[0].exc_info is not None
+
+
+class TestSearchIndexIsQueryable:
+    """The ONE availability probe, shared by both legs' indexes (ADR-015 §5)."""
+
+    async def test_absent_text_search_index_is_unavailable(
+        self, make_collection, caplog
+    ) -> None:
+        # Arrange — the default catalogue holds a queryable ``vector_index``
+        # only, so the probe must look up the index BY NAME to say ``False``.
+        collection = make_collection()
+
+        with caplog.at_level(logging.WARNING):
+            queryable = await _search_index_is_queryable(
+                collection, "text_search_index", fallback_mode="vector_only"
+            )
+
+        assert queryable is False
+        assert collection.search_index_probes == ["text_search_index"]
+        assert "search index 'text_search_index' absent" in caplog.text
+        assert "the query runs vector_only" in caplog.text
+
+    async def test_raising_probe_fails_open(self, make_collection, caplog) -> None:
+        collection = make_collection()
+        collection.list_search_indexes = AsyncMock(
+            side_effect=RuntimeError("mongot unreachable")
+        )
+
+        with caplog.at_level(logging.WARNING):
+            queryable = await _search_index_is_queryable(
+                collection, "text_search_index", fallback_mode="vector_only"
+            )
+
+        assert queryable is True
+        assert "Could not probe search index 'text_search_index'" in caplog.text
 
 
 class TestMinVectorScore:

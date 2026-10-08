@@ -1,3 +1,4 @@
+import copy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, MagicMock
@@ -5,6 +6,7 @@ from unittest.mock import AsyncMock, call, MagicMock
 import pytest
 from beanie import PydanticObjectId
 from bson.binary import Binary
+from pymongo.errors import OperationFailure
 
 from tests.unit.conftest import TEST_DATABASE
 from tree.config.app_config import app_config
@@ -26,14 +28,18 @@ from tree.entities.memory import (
 from tree.memory.rag.embedding import child_embedding_text
 from tree.memory.rag.indexing import (
     _backfill_filter,
+    _build_text_search_index_definition,
     _build_vector_index_definition,
+    _create_search_index,
     _reset_filter,
+    _ensure_text_search_index,
     _ensure_vector_index,
+    _SEARCH_INDEX_POLL_S,
+    _SEARCH_INDEX_READY_TIMEOUT_S,
     _VECTOR_INDEX_FILTER_PATHS,
+    TEXT_SEARCH_INDEX_NAME,
     VECTOR_INDEX_NAME,
-    _VECTOR_INDEX_POLL_S,
-    _VECTOR_INDEX_READY_TIMEOUT_S,
-    _wait_for_vector_index_ready,
+    _wait_for_search_index_ready,
     embed_nodes,
     ensure_indexes,
     index_entry_is_queryable,
@@ -126,28 +132,108 @@ def _make_collection(
 ) -> MagicMock:
     """Build a mock collection with the wait-loop hooks satisfied.
 
-    The first call to ``list_search_indexes()`` (without a name) returns
-    the supplied ``initial_indexes`` so the reconcile logic sees the
-    desired starting state; subsequent calls (with the index name) return
-    a non-empty result so the wait-loop in ``_ensure_vector_index`` exits
-    immediately.
+    ``list_search_indexes()`` WITHOUT a name (the reconcile read of each
+    ensure) answers the supplied ``initial_indexes``; WITH a name (the wait
+    loop's poll) it answers ``{"name": <that name>}`` — the local mongot's
+    readiness-less entry — so the wait loop of EITHER index exits on its first
+    poll. Answering per name matters: a poll for ``text_search_index`` that
+    found only ``vector_index`` would wait out 300 s of mocked sleeps.
+
+    ``collection.events`` records every create / drop / named poll in call
+    order, so a test can assert "drop → create → wait" across the mocks.
     """
 
-    initial = initial_indexes or []
+    initial = list(initial_indexes or [])
     collection = AsyncMock()
-    call_count = 0
+    events: list[tuple[str, str]] = []
 
-    async def _list_search(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
+    async def _list_search(name: str | None = None):
+        if name is None:
             return _AsyncCursorFromList(initial)
-        return _AsyncCursorWithItem({"name": VECTOR_INDEX_NAME})
+        events.append(("wait", name))
+        return _AsyncCursorWithItem({"name": name})
+
+    async def _create(*, model: dict) -> None:
+        events.append(("create", model["name"]))
+
+    async def _drop(name: str) -> None:
+        events.append(("drop", name))
 
     collection.list_search_indexes = _list_search
-    collection.create_search_index = AsyncMock()
-    collection.drop_search_index = AsyncMock()
+    collection.create_search_index = AsyncMock(side_effect=_create)
+    collection.drop_search_index = AsyncMock(side_effect=_drop)
+    collection.events = events
     return collection
+
+
+def _created_models(collection: MagicMock) -> dict[str, dict]:
+    """``name → model`` of every ``create_search_index`` call on the mock."""
+
+    return {
+        awaited.kwargs["model"]["name"]: awaited.kwargs["model"]
+        for awaited in collection.create_search_index.await_args_list
+    }
+
+
+# ``text_search_index`` exactly as the LOCAL mongot (community-search 0.60.1)
+# echoes it back — captured raw in task 190's spike: every string field gains
+# ``indexOptions`` / ``store`` / ``norms``, the ``properties`` document gains
+# its own ``dynamic: false``, tokens carry no ``normalizer``. None of that is
+# drift, so this entry is the "already up-to-date" state.
+_LIVE_TEXT_INDEX: dict = {
+    "id": "6ac7ef73a9e82a5f66624205",
+    "name": TEXT_SEARCH_INDEX_NAME,
+    "type": "search",
+    "latestDefinition": {
+        "name": TEXT_SEARCH_INDEX_NAME,
+        "numPartitions": 1,
+        "mappings": {
+            "dynamic": False,
+            "fields": {
+                "aliases": {
+                    "type": "string",
+                    "analyzer": "lucene.english",
+                    "indexOptions": "offsets",
+                    "store": True,
+                    "norms": "include",
+                },
+                "user_id": {"type": "objectId"},
+                "subtype": {"type": "token"},
+                "kind": {"type": "token"},
+                "name": {
+                    "type": "string",
+                    "analyzer": "lucene.english",
+                    "indexOptions": "offsets",
+                    "store": True,
+                    "norms": "include",
+                },
+                "type": {"type": "token"},
+                "properties": {
+                    "type": "document",
+                    "dynamic": False,
+                    "fields": {
+                        "aliases": {
+                            "type": "string",
+                            "analyzer": "lucene.english",
+                            "indexOptions": "offsets",
+                            "store": True,
+                            "norms": "include",
+                        },
+                        "content": {
+                            "type": "string",
+                            "analyzer": "lucene.english",
+                            "indexOptions": "offsets",
+                            "store": True,
+                            "norms": "include",
+                        },
+                    },
+                },
+            },
+        },
+        "indexFeatureVersion": 4,
+        "definitionVersion": 0,
+    },
+}
 
 
 def _wire_client(collection: MagicMock) -> MagicMock:
@@ -164,9 +250,9 @@ def _wire_client(collection: MagicMock) -> MagicMock:
 
 
 class TestEnsureIndexes:
-    async def test_creates_no_classic_index(self) -> None:
-        """Beanie owns every classic index, ``$text`` included (ADR-012);
-        ``ensure_indexes`` creates only the mongot vector index."""
+    async def test_creates_both_mongot_indexes_and_no_classic_index(self) -> None:
+        """Beanie owns every classic index (ADR-012); ``ensure_indexes`` owns the
+        two mongot indexes (ADR-015 §5)."""
 
         collection = _make_collection()
         client = _wire_client(collection)
@@ -179,7 +265,10 @@ class TestEnsureIndexes:
         )
 
         collection.create_index.assert_not_awaited()
-        collection.create_search_index.assert_awaited_once()
+        assert list(_created_models(collection)) == [
+            VECTOR_INDEX_NAME,
+            TEXT_SEARCH_INDEX_NAME,
+        ]
 
     async def test_runs_without_a_user_and_logs_the_server_boot(self, caplog) -> None:
         """The MCP boot pins no user (ADR-014 §1); the indexes are global."""
@@ -192,7 +281,10 @@ class TestEnsureIndexes:
                 client, "test_db", embedding_model=FakeEmbeddingModel(dimensions=8)
             )
 
-        collection.create_search_index.assert_awaited_once()
+        assert list(_created_models(collection)) == [
+            VECTOR_INDEX_NAME,
+            TEXT_SEARCH_INDEX_NAME,
+        ]
         assert "triggered by server boot" in caplog.text
 
     async def test_logs_the_tenant_that_triggered_it(self, caplog) -> None:
@@ -225,8 +317,7 @@ class TestEnsureIndexes:
             user_id=_TEST_USER_ID,
         )
 
-        collection.create_search_index.assert_awaited_once()
-        model = collection.create_search_index.await_args.kwargs["model"]
+        model = _created_models(collection)[VECTOR_INDEX_NAME]
         fields = model["definition"]["fields"]
         filter_paths = {f["path"] for f in fields if f.get("type") == "filter"}
 
@@ -251,7 +342,7 @@ class TestEnsureIndexes:
             user_id=_TEST_USER_ID,
         )
 
-        model = collection.create_search_index.await_args.kwargs["model"]
+        model = _created_models(collection)[VECTOR_INDEX_NAME]
         vector_field = next(
             f for f in model["definition"]["fields"] if f.get("type") == "vector"
         )
@@ -279,7 +370,7 @@ class TestEnsureIndexes:
                 ]
             },
         }
-        collection = _make_collection(initial_indexes=[existing])
+        collection = _make_collection(initial_indexes=[existing, _LIVE_TEXT_INDEX])
         client = _wire_client(collection)
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
@@ -326,7 +417,7 @@ class TestEnsureIndexes:
                 ]
             },
         }
-        collection = _make_collection(initial_indexes=[existing])
+        collection = _make_collection(initial_indexes=[existing, _LIVE_TEXT_INDEX])
         client = _wire_client(collection)
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
@@ -364,7 +455,7 @@ class TestEnsureIndexes:
                 ]
             },
         }
-        collection = _make_collection(initial_indexes=[existing])
+        collection = _make_collection(initial_indexes=[existing, _LIVE_TEXT_INDEX])
         client = _wire_client(collection)
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
@@ -403,7 +494,7 @@ class TestEnsureIndexes:
                 ]
             },
         }
-        collection = _make_collection(initial_indexes=[existing])
+        collection = _make_collection(initial_indexes=[existing, _LIVE_TEXT_INDEX])
         client = _wire_client(collection)
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
@@ -444,106 +535,142 @@ class _ScriptedCatalogue:
         return _AsyncCursorFromList(state)
 
 
-def _entry(**fields) -> dict:
-    return {"name": VECTOR_INDEX_NAME, **fields}
+def _entry(index_name: str, **fields) -> dict:
+    return {"name": index_name, **fields}
 
 
-class TestVectorIndexReadiness:
+@pytest.mark.parametrize("index_name", [VECTOR_INDEX_NAME, TEXT_SEARCH_INDEX_NAME])
+class TestSearchIndexReadiness:
     """ADR-008: readiness is OBSERVED (``queryable`` / ``status``), not guessed
-    from the entry merely existing."""
+    from the entry merely existing — for BOTH mongot indexes (ADR-015 §5)."""
 
-    async def test_returns_when_queryable(self, caplog) -> None:
-        collection = _ScriptedCatalogue([[_entry(status="READY", queryable=True)]])
-
-        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
-            await _wait_for_vector_index_ready(collection)
-
-        assert len(collection.probes) == 1
-        assert f"Vector search index '{VECTOR_INDEX_NAME}' ready (status=READY)" in (
-            caplog.text
+    async def test_returns_when_queryable(self, caplog, index_name: str) -> None:
+        collection = _ScriptedCatalogue(
+            [[_entry(index_name, status="READY", queryable=True)]]
         )
 
-    async def test_polls_until_queryable(self, _no_mongot_sync_sleeps) -> None:
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await _wait_for_search_index_ready(collection, index_name)
+
+        assert collection.probes == [index_name]
+        assert f"Search index '{index_name}' ready (status=READY)" in caplog.text
+
+    async def test_polls_until_queryable(
+        self, _no_mongot_sync_sleeps, index_name: str
+    ) -> None:
         collection = _ScriptedCatalogue(
             [
-                [_entry(status="BUILDING", queryable=False)],
-                [_entry(status="READY", queryable=True)],
+                [_entry(index_name, status="BUILDING", queryable=False)],
+                [_entry(index_name, status="READY", queryable=True)],
             ]
         )
 
-        await _wait_for_vector_index_ready(collection)
+        await _wait_for_search_index_ready(collection, index_name)
 
-        assert len(collection.probes) == 2
+        assert collection.probes == [index_name, index_name]
         # Exactly ONE wait, of the declared poll interval — a mid-build index
         # must not be polled in a hot loop.
-        assert _no_mongot_sync_sleeps.await_args_list == [call(_VECTOR_INDEX_POLL_S)]
-        assert _VECTOR_INDEX_POLL_S == 5
+        assert _no_mongot_sync_sleeps.await_args_list == [call(_SEARCH_INDEX_POLL_S)]
+        assert _SEARCH_INDEX_POLL_S == 5
 
-    async def test_absent_entry_keeps_polling(self) -> None:
+    async def test_absent_entry_keeps_polling(self, index_name: str) -> None:
         # mongot has not published the freshly created index yet: "not there"
         # is "not yet", so the poll waits rather than declaring it ready.
-        collection = _ScriptedCatalogue([[], [_entry(status="READY", queryable=True)]])
+        collection = _ScriptedCatalogue(
+            [[], [_entry(index_name, status="READY", queryable=True)]]
+        )
 
-        await _wait_for_vector_index_ready(collection)
+        await _wait_for_search_index_ready(collection, index_name)
 
         assert len(collection.probes) == 2
 
-    async def test_raises_on_failed(self) -> None:
-        collection = _ScriptedCatalogue([[_entry(status="FAILED", queryable=False)]])
+    async def test_raises_on_failed_naming_the_index(self, index_name: str) -> None:
+        collection = _ScriptedCatalogue(
+            [[_entry(index_name, status="FAILED", queryable=False)]]
+        )
 
         with pytest.raises(RuntimeError) as excinfo:
-            await _wait_for_vector_index_ready(collection)
+            await _wait_for_search_index_ready(collection, index_name)
 
-        assert VECTOR_INDEX_NAME in str(excinfo.value)
+        assert f"'{index_name}'" in str(excinfo.value)
         assert "status=FAILED" in str(excinfo.value)
 
-    async def test_raises_on_failed_even_when_queryable(self) -> None:
+    async def test_raises_on_failed_even_when_queryable(self, index_name: str) -> None:
         """FAILED is checked BEFORE ``queryable``.
 
         The docs allow a FAILED index to report ``queryable: true`` — it is
         then serving the PREVIOUS definition, which right after a recreate is
-        the stale-dimensions state, not a success.
+        a stale definition, not a success.
         """
 
-        collection = _ScriptedCatalogue([[_entry(status="FAILED", queryable=True)]])
+        collection = _ScriptedCatalogue(
+            [[_entry(index_name, status="FAILED", queryable=True)]]
+        )
 
         with pytest.raises(RuntimeError, match="status=FAILED"):
-            await _wait_for_vector_index_ready(collection)
+            await _wait_for_search_index_ready(collection, index_name)
 
-    async def test_times_out_fail_open(self, caplog, _no_mongot_sync_sleeps) -> None:
-        collection = _ScriptedCatalogue([[_entry(status="BUILDING", queryable=False)]])
+    async def test_times_out_fail_open_naming_the_index(
+        self, caplog, _no_mongot_sync_sleeps, index_name: str
+    ) -> None:
+        collection = _ScriptedCatalogue(
+            [[_entry(index_name, status="BUILDING", queryable=False)]]
+        )
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
-            await _wait_for_vector_index_ready(collection)  # fail-open: no raise
+            await _wait_for_search_index_ready(collection, index_name)  # no raise
 
-        expected_polls = _VECTOR_INDEX_READY_TIMEOUT_S // _VECTOR_INDEX_POLL_S
+        expected_polls = _SEARCH_INDEX_READY_TIMEOUT_S // _SEARCH_INDEX_POLL_S
         assert expected_polls == 60
         assert len(collection.probes) == expected_polls
         assert _no_mongot_sync_sleeps.await_count == expected_polls
         warning = caplog.text
-        assert "text_only" in warning
-        assert "not queryable after 300 s" in warning
+        assert f"Search index '{index_name}' not queryable after 300 s" in warning
         assert "last status=BUILDING" in warning
+        assert "retrieval leg stays unavailable until it is queryable" in warning
+        # The helper serves both legs, so it names no one fallback mode.
+        assert "text_only" not in warning
 
     async def test_entry_without_readiness_fields_is_ready(
-        self, caplog, _no_mongot_sync_sleeps
+        self, caplog, _no_mongot_sync_sleeps, index_name: str
     ) -> None:
         """The LOCAL mongot reports NEITHER ``status`` NOR ``queryable``.
 
-        Verified 2026-09-12 with ``mongosh`` against ``docker/mongot``: the
-        entry is ``{id, name, type, latestDefinition}``. Waiting for
-        ``queryable is True`` would burn the full 300 s cap on every local
-        indexing run, so the absence of both fields reads as ready — through
-        ``_ensure_vector_index``, to pin the real call site.
+        Verified 2026-09-12 (``vector_index``) and in task 190's spike
+        (``text_search_index``): the entry is ``{id, name, type,
+        latestDefinition}``. Waiting for ``queryable is True`` would burn the
+        full 300 s cap on every local indexing run, so the absence of both
+        fields reads as ready.
         """
 
-        collection = _make_collection()  # its poll answers {"name": ...} only
+        collection = _ScriptedCatalogue(
+            [[_entry(index_name, id="1", type="search", latestDefinition={})]]
+        )
 
         with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
-            await _ensure_vector_index(collection, 8)
+            await _wait_for_search_index_ready(collection, index_name)
 
+        assert f"Search index '{index_name}' reports neither" in caplog.text
         assert "treating it as ready" in caplog.text
         _no_mongot_sync_sleeps.assert_not_awaited()
+
+
+async def test_vector_ensure_waits_on_a_readiness_less_entry_without_sleeping(
+    caplog, _no_mongot_sync_sleeps
+) -> None:
+    """Pins the real call site: ``_ensure_vector_index`` → the shared wait."""
+
+    collection = _make_collection()  # its poll answers {"name": ...} only
+
+    with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+        await _ensure_vector_index(collection, 8)
+
+    assert collection.events == [
+        ("create", VECTOR_INDEX_NAME),
+        ("wait", VECTOR_INDEX_NAME),
+    ]
+    assert "treating it as ready" in caplog.text
+    _no_mongot_sync_sleeps.assert_not_awaited()
 
 
 class TestIndexEntryIsQueryable:
@@ -587,6 +714,226 @@ class TestVectorIndexDefinition:
         }
         assert _VECTOR_INDEX_FILTER_PATHS[0] == "user_id"
         assert set(_VECTOR_INDEX_FILTER_PATHS).issubset(filter_paths)
+
+
+# ---------------------------------------------------------------------------
+# The Text search index (ADR-015 §5–§7)
+# ---------------------------------------------------------------------------
+
+_ENGLISH = {"type": "string", "analyzer": "lucene.english"}
+
+
+def _live_text_index(**mapping_changes) -> dict:
+    """``_LIVE_TEXT_INDEX`` with its ``mappings`` edited (``None`` deletes)."""
+
+    entry = copy.deepcopy(_LIVE_TEXT_INDEX)
+    mappings = entry["latestDefinition"]["mappings"]
+    for key, value in mapping_changes.items():
+        if value is None:
+            mappings["fields"].pop(key)
+        elif key == "dynamic":
+            mappings["dynamic"] = value
+        else:
+            mappings["fields"][key] = value
+    return entry
+
+
+def _with_echoed_extras() -> dict:
+    """An echo carrying defaults the local mongot does NOT add but Atlas may:
+    ``searchAnalyzer`` on a string, ``normalizer`` on a token, an extra field."""
+
+    entry = copy.deepcopy(_LIVE_TEXT_INDEX)
+    fields = entry["latestDefinition"]["mappings"]["fields"]
+    fields["name"]["searchAnalyzer"] = "lucene.english"
+    fields["kind"]["normalizer"] = "none"
+    fields["created_at"] = {"type": "date"}
+    return entry
+
+
+class TestTextSearchIndexDefinition:
+    def test_definition_is_static_english_text_paths_plus_filter_paths(self) -> None:
+        assert _build_text_search_index_definition() == {
+            "mappings": {
+                "dynamic": False,
+                "fields": {
+                    "name": _ENGLISH,
+                    "aliases": _ENGLISH,
+                    # Static mappings nest through ``document``; QUERY paths
+                    # stay dotted (``properties.content``).
+                    "properties": {
+                        "type": "document",
+                        "fields": {"content": _ENGLISH, "aliases": _ENGLISH},
+                    },
+                    "user_id": {"type": "objectId"},
+                    "kind": {"type": "token"},
+                    "type": {"type": "token"},
+                    "subtype": {"type": "token"},
+                },
+            }
+        }
+
+
+class TestEnsureTextSearchIndex:
+    async def test_absent_index_is_created_then_waited_on(self) -> None:
+        collection = _make_collection()
+
+        await _ensure_text_search_index(collection)
+
+        assert _created_models(collection) == {
+            TEXT_SEARCH_INDEX_NAME: {
+                "name": TEXT_SEARCH_INDEX_NAME,
+                "type": "search",
+                "definition": _build_text_search_index_definition(),
+            }
+        }
+        assert collection.events == [
+            ("create", TEXT_SEARCH_INDEX_NAME),
+            ("wait", TEXT_SEARCH_INDEX_NAME),
+        ]
+
+    @pytest.mark.parametrize(
+        "live_entry",
+        [
+            pytest.param(
+                {
+                    "name": TEXT_SEARCH_INDEX_NAME,
+                    "latestDefinition": _build_text_search_index_definition(),
+                },
+                id="exactly-as-sent",
+            ),
+            pytest.param(_LIVE_TEXT_INDEX, id="local-mongot-echo"),
+            pytest.param(_with_echoed_extras(), id="echoed-defaults-and-extra-path"),
+        ],
+    )
+    async def test_matching_index_is_left_alone(self, caplog, live_entry: dict) -> None:
+        collection = _make_collection(initial_indexes=[live_entry])
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await _ensure_text_search_index(collection)
+
+        collection.create_search_index.assert_not_awaited()
+        collection.drop_search_index.assert_not_awaited()
+        assert collection.events == []
+        assert (
+            f"Search index '{TEXT_SEARCH_INDEX_NAME}' already up-to-date "
+            "(analyzer=lucene.english" in caplog.text
+        )
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    @pytest.mark.parametrize(
+        ("live_entry", "drifted"),
+        [
+            pytest.param(
+                _live_text_index(
+                    properties={
+                        "type": "document",
+                        "fields": {
+                            "content": {
+                                "type": "string",
+                                "analyzer": "lucene.standard",
+                            },
+                            "aliases": _ENGLISH,
+                        },
+                    }
+                ),
+                "properties.content",
+                id="analyzer-lucene-standard",
+            ),
+            pytest.param(
+                _live_text_index(subtype=None), "subtype", id="subtype-filter-missing"
+            ),
+            pytest.param(_live_text_index(dynamic=True), "dynamic", id="dynamic-true"),
+        ],
+    )
+    async def test_drift_warns_then_drops_and_recreates(
+        self, caplog, _no_mongot_sync_sleeps, live_entry: dict, drifted: str
+    ) -> None:
+        collection = _make_collection(initial_indexes=[live_entry])
+        _no_mongot_sync_sleeps.side_effect = lambda seconds: collection.events.append(
+            ("sleep", seconds)
+        )
+
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
+            await _ensure_text_search_index(collection)
+
+        assert collection.events == [
+            ("drop", TEXT_SEARCH_INDEX_NAME),
+            ("sleep", 2),
+            ("create", TEXT_SEARCH_INDEX_NAME),
+            ("wait", TEXT_SEARCH_INDEX_NAME),
+        ]
+        (warning,) = [r.getMessage() for r in caplog.records]
+        assert f"Search index '{TEXT_SEARCH_INDEX_NAME}' definition drift" in warning
+        assert "dropping and recreating" in warning
+        have, want = warning.split("want=")
+        assert f"'{drifted}'" in have.split("have=")[1]
+        assert f"'{drifted}'" in want
+
+    async def test_drift_warning_names_have_and_want_values(self, caplog) -> None:
+        collection = _make_collection(
+            initial_indexes=[_live_text_index(kind={"type": "string"})]
+        )
+
+        with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
+            await _ensure_text_search_index(collection)
+
+        assert "have={'kind': 'string'}, want={'kind': 'token'}" in caplog.text
+
+    async def test_ensure_indexes_runs_vector_before_text(self) -> None:
+        collection = _make_collection()
+        client = _wire_client(collection)
+
+        await ensure_indexes(
+            client, "test_db", embedding_model=FakeEmbeddingModel(dimensions=8)
+        )
+
+        # Every create is followed by its own wait, vector first.
+        assert collection.events == [
+            ("create", VECTOR_INDEX_NAME),
+            ("wait", VECTOR_INDEX_NAME),
+            ("create", TEXT_SEARCH_INDEX_NAME),
+            ("wait", TEXT_SEARCH_INDEX_NAME),
+        ]
+
+
+class TestCreateSearchIndex:
+    @pytest.mark.parametrize("index_name", [VECTOR_INDEX_NAME, TEXT_SEARCH_INDEX_NAME])
+    async def test_failing_create_names_the_index_and_the_m0_cap(
+        self, index_name: str
+    ) -> None:
+        driver_error = OperationFailure(
+            "MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED: The maximum number of FTS indexes "
+            "has been reached for this instance size."
+        )
+        collection = AsyncMock()
+        collection.create_search_index = AsyncMock(side_effect=driver_error)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await _create_search_index(
+                collection, {"name": index_name, "type": "search", "definition": {}}
+            )
+
+        message = str(excinfo.value)
+        assert f"Could not create search index '{index_name}'" in message
+        assert "Atlas M0 allows 3 search indexes per cluster" in message
+        assert "search + vectorSearch together" in message
+        assert "MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED" in message
+        assert "Atlas → Search & Vector Search" in message
+        assert "make memory-run-indexing-pipeline" in message
+        assert excinfo.value.__cause__ is driver_error
+
+    async def test_ensure_indexes_routes_the_vector_create_through_it(self) -> None:
+        collection = _make_collection()
+        collection.create_search_index = AsyncMock(
+            side_effect=OperationFailure("MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED")
+        )
+
+        with pytest.raises(RuntimeError, match=f"'{VECTOR_INDEX_NAME}': Atlas M0"):
+            await ensure_indexes(
+                _wire_client(collection),
+                "test_db",
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+            )
 
 
 # ---------------------------------------------------------------------------

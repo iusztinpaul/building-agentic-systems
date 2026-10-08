@@ -138,7 +138,7 @@ async def _vector_search(
     verified 2026-09-12 against the local mongot, which returns an empty result
     set rather than an error for a missing index. Both must read as
     ``text_only``, so the empty answer is confirmed against
-    :func:`_vector_index_is_queryable` before it counts as "no matches".
+    :func:`_search_index_is_queryable` before it counts as "no matches".
 
     No parent exclusion here: parents are written without an ``embedding`` and so
     are absent from the vector index — adding a filter clause for them would
@@ -177,7 +177,10 @@ async def _vector_search(
         return None
 
     if not results:
-        return [] if await _vector_index_is_queryable(collection) else None
+        queryable = await _search_index_is_queryable(
+            collection, VECTOR_INDEX_NAME, fallback_mode="text_only"
+        )
+        return [] if queryable else None
 
     return _gate_vector_candidates(results)
 
@@ -188,7 +191,7 @@ def _gate_vector_candidates(
     """Drop ANN candidates scoring below ``query.min_vector_score`` (ADR-008 §3).
 
     Runs only on a leg that ANSWERED with candidates, and only after
-    :func:`_vector_index_is_queryable` has settled availability — a leg gated
+    :func:`_search_index_is_queryable` has settled availability — a leg gated
     down to nothing returns ``[]`` (a real "no matches", mode stays ``hybrid``),
     never ``None`` (degraded). Degraded and filtered must not be the same answer.
 
@@ -213,18 +216,24 @@ def _gate_vector_candidates(
     return kept
 
 
-async def _vector_index_is_queryable(collection: Any) -> bool:
-    """Is ``vector_index`` present AND queryable? Probes ONLY an empty leg.
+async def _search_index_is_queryable(
+    collection: Any, index_name: str, *, fallback_mode: SearchMode
+) -> bool:
+    """Is mongot index ``index_name`` present AND queryable? Probes ONLY an empty leg.
 
-    One extra ``listSearchIndexes`` command, and only on the path where the ANN
-    stage matched nothing — rare for a real query (``retrieve_parents`` asks for
+    Shared by both legs' indexes (``vector_index``, ``text_search_index`` —
+    ADR-015 §5). ``fallback_mode`` is the **Search mode** the query runs in when
+    this leg is unavailable; it only names the outcome in the WARNING lines.
+
+    One extra ``listSearchIndexes`` command, and only on the path where the
+    leg matched nothing — rare for a real query (``retrieve_parents`` asks for
     40 candidates over a non-empty collection), so the hot path pays nothing.
 
     Fail-OPEN twice, because only an ABSENT index is unambiguous:
 
     * the probe raising — an undeterminable state must not turn every empty
-      vector leg into a degraded query (an unreachable mongot already fails the
-      aggregate above, which is the loud path);
+      leg into a degraded query (an unreachable mongot already fails the
+      aggregate, which is the loud path);
     * an entry the shared helper cannot judge. ``index_entry_is_queryable``
       (:mod:`tree.memory.rag.indexing`) answers ``None`` when the deployment
       reports neither ``queryable`` nor ``status`` — the local mongot — and
@@ -236,33 +245,35 @@ async def _vector_index_is_queryable(collection: Any) -> bool:
     """
 
     try:
-        cursor = await collection.list_search_indexes(VECTOR_INDEX_NAME)
+        cursor = await collection.list_search_indexes(index_name)
         entries = await cursor.to_list()
     except Exception:
         logger.warning(
-            "Could not probe search index '%s'; reading the empty vector leg as "
-            "a real empty result",
-            VECTOR_INDEX_NAME,
+            "Could not probe search index '%s'; reading its empty leg as a real "
+            "empty result instead of falling back to %s",
+            index_name,
+            fallback_mode,
             exc_info=True,
         )
         return True
 
     if not entries:
         logger.warning(
-            "Vector search leg unavailable: search index '%s' absent; the query "
-            "runs text-only",
-            VECTOR_INDEX_NAME,
+            "Search leg unavailable: search index '%s' absent; the query runs %s",
+            index_name,
+            fallback_mode,
         )
         return False
 
     entry = entries[0]
     if index_entry_is_queryable(entry) is False:
         logger.warning(
-            "Vector search leg unavailable: search index '%s' is not queryable "
-            "(status=%s, queryable=%s); the query runs text-only",
-            VECTOR_INDEX_NAME,
+            "Search leg unavailable: search index '%s' is not queryable "
+            "(status=%s, queryable=%s); the query runs %s",
+            index_name,
             entry.get("status"),
             entry.get("queryable"),
+            fallback_mode,
         )
         return False
 
