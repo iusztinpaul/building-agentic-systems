@@ -41,7 +41,7 @@ locally; `make memory-format-check` / `make memory-lint-check` green).
 - [x] Tester re-runs full QA suite and PASSES (including the new regression tests), and reproduces the
       live check below (`"gpt-4.1 pricing"` → 0 text candidates on the local corpus at `0.5`).
 - [x] PA re-runs acceptance review and ACCEPTS.
-- [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
+- [x] PR Reviewer re-runs and reports `NO BLOCKERS`. *Round 2, head `717a443`, 2026-10-09 — see the PR Reviewer Log entry.*
 
 ## Blockers (detail)
 
@@ -308,3 +308,86 @@ Reviewed evidence from the Tester log entry and re-walked the feature live from 
 Files touched by this review (not committed): `tasks/done/194-pr-review-rollup.md` (this entry + the PA
 AC tick), `tasks/193-near-miss-queries-in-the-ratio-repin-protocol.md` (`TOP_K` wording on the Gemini
 check, three places), `tasks/195-comma-grouped-numbers-in-token-pattern.md` (new).
+
+### [PR Reviewer] 2026-10-09 01:35 — Review (round 2, head `717a443`)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed 33 files, 4439 insertions / 479 deletions (`git diff 7669c81...717a443`, every file read in full),
+plus the two round-2 commits in isolation (`8c077eb` fix, `717a443` docs). Blockers: 0; Nits: 5.
+Local: `make env-status` → local; `make memory-format-check` 341 files formatted; `make memory-lint-check`
+all checks passed; `make memory-tests` → 5291 passed in 57 s. Working tree clean; no stray files in the diff.
+
+**Round-1 items, each verified in the code (not the tick):**
+- Blocker 1 — `search.py:68` `TOKEN_PATTERN = re.compile(r"\w+(?:\.\w+)*")`, used by `query_terms`
+  (`search.py:375`) and imported by the fake (`tests/unit/memory/conftest.py:34`, `_text_clause_matches`
+  at `:115`; `import re` gone). `TestQueryTerms` pins `decimal-stays-whole`, `version-stays-whole`,
+  `version-query-three-terms`, `dotted-abbreviation`, `trailing-dot-dropped`; every pre-existing pin
+  unchanged. `TestMinimumMatchRatio::test_decimal_query_term_never_matches_its_bare_digits` pins the
+  behaviour (row `"chapter 4 of 1 book"` absent, `"gpt-4.1 pricing per token"` present, log line
+  `text leg: 1 candidate(s), 3 query term(s), min_should_match=2`).
+- Blocker 2 [PA] — ADR-015 line 3 carries the task-194 note (pattern, `TOKEN_PATTERN` shared with the
+  fake, public `TEXT_INDEX_FILTER_PATHS`); glossary row 39 reads `\w+(?:\.\w+)*` with the why; task 193
+  carries `"gpt-4.1 pricing"` and names 194 in `Depends on:` / `Blocked by:`.
+- Nit 1 — `TEXT_INDEX_TEXT_PATHS` / `TEXT_INDEX_FILTER_PATHS` public in `indexing.py:582/600`; no
+  `_TEXT_INDEX_*` left in `apps/` (grep). Nit 2 — `_search_index_is_queryable` docstring
+  (`search.py:300-305`) now says the empty text leg is the designed off-topic answer. Nit 3 —
+  `_create_search_index` (`indexing.py:776-781`) wraps only a message naming
+  `MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED` / "maximum number of fts indexes", bare `raise` otherwise;
+  `TestCreateSearchIndex::test_other_driver_errors_propagate_unchanged` asserts identity. Nit 4 —
+  glossary row 41 names both mongot indexes. Nit 5 — `test_load.py:263`. Nit 6 —
+  `definition-fallback` param on `test_matching_index_is_left_alone`. Nit 7 — `k =` sits below the
+  `if not terms` guard (`search.py:435-438`).
+
+**Dimensions on the whole diff (round 2):**
+- A Performance — nothing: one `$search` per query, the probe only on an empty leg, `query_terms` on a
+  short string, the index reconcile once per indexing run.
+- B Clean code — nothing: no unused imports (ruff), no dead helpers (`_equals` ×4, `_log_text_leg` ×2,
+  `_existing_text_index_mappings` ×2, `_set_static_mapping`, `_extract_text_index_field_types`), no
+  prints, no owner-less TODOs; the verbatim Lucene stop list in `test_search.py` is a deliberate pin.
+- C Untested — nothing: `_check_text_node_filter` (2 params), `_search_index_is_queryable` (absent /
+  building / readiness-less / raising), `_drop_legacy_text_index` (present / absent / code 27 / other
+  failure), `_create_search_index` (cap / non-cap / routed from `ensure_indexes`), drift (analyzer /
+  missing filter path / `dynamic` / type, echoed extras, `dynamic` absent, `definition` fallback),
+  ensure order, readiness loop parametrised over both indexes, the exact `$search` pipeline, K edge
+  cases incl. float overshoot, cap at 64, tenant pins ANDed.
+- D Standards — tenant pins first and ANDed in the text leg; keys restricted to the index's filter
+  paths; `PydanticObjectId` is a `bson.ObjectId` subclass so the `str | ObjectId` check holds; no new
+  `.env.example` knob (per AGENTS.md); logger not print; timezone n/a. Only Nit 2 below.
+- E Documentation discipline — **Text search index**, **Minimum match ratio**, **Search mode**,
+  **Retrieval outcome**, **`memory` collection**, **Mode reset** rows present and used consistently
+  in docstrings; ADR-015 Accepted with Status-line notes on 008 / 012 / 013. Nits 1 and 4 below.
+- F Simplicity / anti-over-engineering — nothing flagged. Walked what 194 introduced (public
+  `TOKEN_PATTERN` — one constant, two consumers; cap-only wrapping inlined, no new helper; the
+  `TEXT_INDEX_*` rename) and the rest (`_equals`, `_log_text_leg`, `_set_static_mapping`,
+  `_text_search_index_drift` returning `(have, want)`, `fallback_mode` on the shared probe, the
+  conftest `$search` emulation, the `events` recorder in `_make_collection`): each has two or more
+  callers or mirrors the existing vector helper one-for-one; none crosses "more than we needed".
+
+**Known follow-ups in the PR body** (comma-grouped numbers → 195; near-miss short queries → 193;
+apostrophe words; `_vector_search` dict-merge; stale Docker worker; served-flow INFO logs): none is
+blocking; none re-filed.
+
+**Nits** (also appended to the PR description; caveman-format comment posted on the PR):
+1. [PA] [Documentation discipline] — `docs/adrs/015_atlas_search_text_leg_min_match_ratio.md:85` (§7)
+   — body: "A `create_search_index` failure (e.g. `MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED`) raises a
+   `RuntimeError` naming the M0 3-index cap"; since round-1 Nit 3 only the cap error is wrapped and every
+   other driver error propagates unchanged. One clause on the existing task-194 Status-line note.
+2. [Standards] — `apps/memory/tests/unit/memory/rag/test_indexing.py:156` (`_list_search`),
+   `apps/memory/tests/unit/config/test_app_config.py:710` and `:745` — three added defs with no return
+   annotation (AGENTS.md: return types even for `None`). Ruff does not enforce it; cosmetic.
+3. [Clean code] — `apps/memory/src/tree/memory/rag/indexing.py:371` (130-char docstring line in
+   `ensure_indexes`) and `:579-580` (the `TEXT_INDEX_TEXT_PATHS` comment wraps as "queries / use);"
+   after the rename shortened it) — rewrap both to 88 columns.
+4. [PA] [Documentation discipline] — `docs/adrs/006_rag_graphrag_memory_modes.md:189` (Diagram:
+   "$vectorSearch + $text · RRF") and `docs/adrs/007_embedding_clusters_and_explicit_offline_phases.md:84`
+   — both bodies still name the retired `$text` operator; ADR-015 lists 006 as relied-on-unchanged and
+   192 scoped the Status notes to 008 / 012 / 013. Optional one-clause Status pointer on 006, the ADR a
+   reader of hybrid search opens.
+5. [Standards] — `apps/memory/src/tree/memory/rag/search.py:233` (`_vector_search` merges
+   `**node_filter` over its `user_id` / `kind` pins) — disclosed in the PR body and pre-existing;
+   `TestTenantPins` calls `_text_search` directly to dodge it. Give it a task number so it survives the
+   merge; today the PR body is its only record.
+
+Not committed — the orchestrator owns the commit; this entry and the AC tick ship with whatever commit
+closes the hand-off.
