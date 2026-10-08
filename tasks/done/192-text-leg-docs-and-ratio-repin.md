@@ -449,3 +449,69 @@ an outcome; the Status line already carries 191's note). Not committed — ships
 **Cleanup**: MCP server (8765) and serve-workflows processes killed (0 left, port 8765 free), `docker start tree-prefect-worker` done, `$listSearchIndexes` = `vector_index,text_search_index`.
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-09 00:40 — Acceptance Review (feature `atlas-search-text-leg`: 190, 191, 192; PR #47)
+
+**VERDICT: ACCEPT**
+
+Walked from the three user perspectives against the Tasks Plan's AC and stories; the Tester's evidence
+re-read from the user's POV, plus three live `make memory-search` runs (local env, Voyage-spaced; the
+Prefect worker was not touched — the CLI does not need it).
+
+- **Claude Code user via the `tree-memory` skill / `search_memory`.** Story "full sentence, on-topic":
+  `"How does the ReAct agent decide when to call a tool?"` → `text leg: 20 candidate(s), 5 query term(s),
+  min_should_match=3`, hybrid, fused top-5 led by "Building Production ReAct Agents…" and "Tool Calling
+  From Scratch…" — the story's promise holds. Off-topic 8-term query → `nothing_found`, hybrid (Tester).
+  One-word `"Gemini"` answered by the text leg alone (vector top 0.697 < 0.70) — the leg still does its
+  recall job. All-stop-word query → `hybrid`, no pipeline. Skill read chain 3 now states the K-of-M rule
+  in the model's terms ("`0.5` → half of them") and keeps "never threshold the returned `score`";
+  `rag.md`'s `vector_only` caveat line mirrors `text_only`. `search_memory`'s docstring, README row 464,
+  `RetrievalOutcome` text all describe the ratio; no `min_text_score` / `$text` reaches a user anywhere.
+- **Operator deploying / running the indexing pipeline.** First run creates `text_search_index` and
+  drops the classic `text_index` once (logged, idempotent); second run is a no-op; drift heals; the M0
+  cap error names the index and the fix. The deploy window reads as `search_mode: vector_only` with ONE
+  WARN naming the absent index and the mode, and the runbook (step 1 bullet, step 3 sentence) and the PR
+  body both say to run `make memory-run-indexing-pipeline` right after merging. MCP smoke
+  `hybrid → vector_only → hybrid` reproduced by SWE and Tester.
+- **graphrag seeds.** Verified by reading the shared `_text_search` (`node_filter={}` keeps entity rows,
+  `mustNot` excludes parents unconditionally) and `TestGraphSeedFilter` / `test_graph_seed_search_shares_the_rule`;
+  NOT run live (local mode is `rag`). ADR-015's Consequences record the entity-name trade-off (K = 1 only
+  when the question has ≤ 2 content words at 0.5; entities still seed through the vector leg).
+- **Documentation discipline.** ADR-015 present with the feature's seven decisions and diagram; glossary
+  rows **Minimum match ratio** and **Text search index** added, **`memory` collection** / **Retrieval
+  outcome** / **Search mode** amended; Status-line notes on ADR-008 / 012 / 013 verbatim; canonical terms
+  used throughout code, YAML comments and copy.
+
+**The judged finding — short near-miss off-topic queries leak at the pinned 0.5.** Live:
+`"vector-like particles"` (M = 3, K = 2) → `text leg: 6 candidate(s)`, vector `0 kept (top=0.610)` →
+**3 parents, `found`** ("Stop Converting Documents to Text", "How Does Memory for AI Agents Work?"), on
+`vector` + `like` alone; `"bread recipe"` (M = 2, K = 1) → 1 row (Tester). At 0.7 the ten protocol
+queries still separate (Tester) and the full-sentence ReAct story returns the identical top-2 at K = 4
+(PA, live) — so on THIS corpus 0.7 costs nothing measurable. I still did not re-pin, and this is NOT a
+rejection, because: (1) the pin followed the rule the human approved in ADR-015 §8 ("lowest 0.1 step
+separating these ten queries") exactly, and moving it on one query the protocol never contained is a
+post-hoc rule change, not an SWE defect; (2) it is a strict improvement over the retired `$text` leg,
+where the same query returned 93 rows; (3) the real defence for `found`-with-irrelevant-passages is
+unchanged — the skill cites only passages that answer, and the vector leg's 0.70 bar already excluded
+every one of them; (4) `"vector-like"` alone keeps 6 rows at every ratio ≥ 0.6 (both terms co-occur), so
+no ratio closes the class — only an enlarged protocol can say what is acceptable, and that is PA/evals
+work. The corpus is 10 articles about agents, so "costs nothing" is thin evidence either way.
+
+**What is missing for "documented":** the leak lives only in the PR body and the Tester's log; the two
+places the next re-pinner reads — the `default.yaml` comment and the glossary **Minimum match ratio**
+row — say "re-pin with the same 10-query protocol", which repeats the blind spot. Not edited here (192 is
+committed and pushed; I was not asked to commit). Filed as a groomed follow-up instead:
+`tasks/193-near-miss-queries-in-the-ratio-repin-protocol.md` (status pending) — enlarge ADR-015 §8's set
+with ≥ 5 near-miss off-topic (M = 2 and M = 3) and ≥ 2 short on-topic queries, re-run 192's table, re-pin
+by the unchanged rule, record the leak class in `default.yaml` / glossary, one ADR-015 Status-line note.
+**If the human prefers to pin 0.7 now:** the evidence above supports it on this corpus; it would be a
+one-value change in `default.yaml` / `frozen_config.yaml` / `QueryConfig` / `test_app_config.py` plus the
+comment and glossary rows — route it through 193 so the enlarged protocol, not one query, owns the value.
+
+**Non-blocking, noted once:** `tutorials/4_x_x_deploying_mcp_server.md:11` ("search returns nothing until
+this run") is pre-existing first-deploy wording, still true when no index exists; "PROVISIONAL" next to
+"pinned live" mirrors `min_vector_score`'s style. Both the Tester's and SWE's follow-ups (vector-leg
+`node_filter` dict-merge, stale Docker worker image, served-flow INFO visibility) stand as recorded in
+the PR body.
+
+All acceptance criteria verified from the user's POV. Hand off to the PR Reviewer.
