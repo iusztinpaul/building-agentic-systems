@@ -12,7 +12,9 @@ modes (ADR-006 decision 4):
    definitions: ``vector_index`` (``$vectorSearch``; ``numDimensions``
    reconciled against the live embedding model on every call) and
    ``text_search_index``, the **Text search index** (``$search``,
-   ``lucene.english``; definition drift → drop + recreate, ADR-015 §5–§7).
+   ``lucene.english``; definition drift → drop + recreate, ADR-015 §5–§7) —
+   then drop the classic ``$text`` index ``text_index`` it replaced, if a
+   database still carries one.
 
 Plus one operator-triggered inverse of (1): :func:`reset_embeddings`, the
 **Embedding reset** (ADR-009 §7), which empties exactly the vectors the backfill
@@ -35,6 +37,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
+from pymongo.errors import OperationFailure
 
 from tree.entities.memory import (
     MEMORY_COLLECTION,
@@ -53,6 +56,13 @@ logger = logging.getLogger(__name__)
 # Index names (shared with query module).
 VECTOR_INDEX_NAME = "vector_index"
 TEXT_SEARCH_INDEX_NAME = "text_search_index"
+
+# The classic ``$text`` index ``text_search_index`` replaced (ADR-015 §1).
+# Beanie no longer declares it and never drops, so ``ensure_indexes`` retires
+# it once per database.
+_LEGACY_TEXT_INDEX_NAME = "text_index"
+# MongoDB's ``IndexNotFound`` error code: a drop of an index that is not there.
+_INDEX_NOT_FOUND = 27
 
 # How long ``_wait_for_search_index_ready`` waits for a freshly created mongot
 # index (either of the two) to answer queries, and how long it sleeps between
@@ -352,9 +362,13 @@ async def ensure_indexes(
     """Ensure BOTH mongot search indexes: ``vector_index`` then ``text_search_index``.
 
     This function owns what Beanie cannot express — the two mongot indexes
-    (ADR-012, ADR-015 §5–§7). The classic set is Beanie's: it creates the
-    mode's indexes (:func:`tree.entities.memory.memory_indexes`) on every
-    ``init_mongodb``. ``user_id`` is optional and only logged: the pipeline
+    (ADR-012, ADR-015 §5–§7) and the ONE classic-index retirement Beanie cannot
+    perform (it only creates): the legacy ``$text`` index ``text_index`` is
+    dropped as step 3, AFTER ``text_search_index`` is ensured (ready, or the
+    fail-open timeout — the ``$text`` leg is gone either way, so the classic
+    index serves nothing). ADR-012's "nothing drops" stands for every other
+    index. The classic set is Beanie's: it creates the mode's indexes
+    (:func:`tree.entities.memory.memory_indexes`) on every ``init_mongodb``. ``user_id`` is optional and only logged: the pipeline
     passes the tenant that triggered the run, the MCP server boot passes none
     (ADR-014 §1).
 
@@ -371,7 +385,8 @@ async def ensure_indexes(
       server-echoed defaults are not drift.
 
     Either index is created when absent, and every create is followed by
-    :func:`_wait_for_search_index_ready`. Vector first, text second.
+    :func:`_wait_for_search_index_ready`. Vector first, text second, the
+    legacy drop third.
 
     Idempotent: every step inspects live state and skips when the desired
     configuration is already in place.
@@ -399,6 +414,39 @@ async def ensure_indexes(
     await _ensure_vector_index(collection, target_dimensions)
     # --- 2. Text search index (for $search) ---
     await _ensure_text_search_index(collection)
+    # --- 3. Retire the classic $text index it replaced ---
+    await _drop_legacy_text_index(collection)
+
+
+async def _drop_legacy_text_index(collection: Any) -> None:
+    """Drop the classic ``text_index`` when the collection still has it.
+
+    Idempotent: absent → nothing. ``IndexNotFound`` (code 27) on the drop is
+    "already gone" too — a concurrent ``ensure_indexes`` (MCP boot vs the
+    indexing pipeline) dropped it between our check and our drop. Every OTHER
+    drop failure propagates — a silently kept ``$text`` index would cost every
+    write an index update for no reader.
+    """
+
+    if _LEGACY_TEXT_INDEX_NAME not in await collection.index_information():
+        logger.debug("No legacy $text index '%s' to drop", _LEGACY_TEXT_INDEX_NAME)
+        return
+
+    try:
+        await collection.drop_index(_LEGACY_TEXT_INDEX_NAME)
+    except OperationFailure as exc:
+        if exc.code != _INDEX_NOT_FOUND:
+            raise
+        logger.debug(
+            "Legacy $text index '%s' already dropped by a concurrent ensure_indexes",
+            _LEGACY_TEXT_INDEX_NAME,
+        )
+        return
+    logger.info(
+        "Dropped legacy $text index '%s' (replaced by '%s', ADR-015)",
+        _LEGACY_TEXT_INDEX_NAME,
+        TEXT_SEARCH_INDEX_NAME,
+    )
 
 
 def _build_vector_index_definition(dimensions: int) -> dict[str, Any]:
@@ -527,8 +575,8 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
 
 
 # Atlas Search text paths of the **Text search index** — the four fields the
-# classic ``$text`` index (``TEXT_INDEX_FIELDS``) covered, so the lexical leg
-# reads the same text. Declared DOTTED here (the form ``$search`` queries
+# retired classic ``$text`` index covered, so the lexical leg reads the same
+# text. Declared DOTTED here (the form ``$search`` queries
 # use); :func:`_build_text_search_index_definition` nests ``properties.*``
 # through a ``document`` field, the Atlas static-mapping syntax.
 _TEXT_INDEX_TEXT_PATHS: tuple[str, ...] = (
@@ -634,15 +682,17 @@ def _text_search_index_drift(
     A SUBSET comparison on the declared paths — exactly as the vector helper
     compares dimensions + the filter-path set, never the whole dict
     (server-echoed defaults would otherwise drop + recreate on every run):
-    ``mappings.dynamic`` must be ``False``; every text path a ``string`` with
-    the ``lucene.english`` analyzer; every filter path its declared type.
-    Extra live paths are not drift. Both dicts are empty when up-to-date.
+    ``mappings.dynamic`` must be ``False`` — ABSENT counts as ``False``, Atlas's
+    default, so a catalogue that omits the key is not drift; every text path a
+    ``string`` with the ``lucene.english`` analyzer; every filter path its
+    declared type. Extra live paths are not drift. Both dicts are empty when
+    up-to-date.
     """
 
     have: dict[str, Any] = {}
     want: dict[str, Any] = {}
 
-    dynamic = _existing_text_index_mappings(existing).get("dynamic")
+    dynamic = _existing_text_index_mappings(existing).get("dynamic", False)
     if dynamic is not False:
         have["dynamic"], want["dynamic"] = dynamic, False
 

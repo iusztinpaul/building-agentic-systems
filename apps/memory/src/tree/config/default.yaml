@@ -104,10 +104,11 @@ query:
   max_hops: 1
   rrf_k: 60
   embedding_batch_size: 64
-  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion ($text
-  # hits clear min_text_score below). Atlas normalises cosine to (1 + cos) / 2,
-  # so this is an absolute similarity (the RRF score is not). PROVISIONAL and
-  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion (the text
+  # leg is gated by text_min_match_ratio below). Atlas normalises cosine to
+  # (1 + cos) / 2, so this is an absolute similarity (the RRF score is not).
+  # PROVISIONAL and owned by Chapter 7's evals. Override with
+  # TREE_QUERY__MIN_VECTOR_SCORE=...
   # re-pinned on voyage-4, 2026-09 — tasks/141 Log: voyage-4 scores lower than
   # voyage-3.5 did, so 0.75 (tasks/125, on voyage-3.5) kept NOTHING for an
   # on-topic query. Live, corpus 4 ADRs in tree_e2e_141: nonsense
@@ -115,29 +116,14 @@ query:
   # documents?" top=0.735 — 0.70 is the 0.05 step that answers nothing_found
   # for the first (0 kept) and found for the second (7 of 10 kept).
   min_vector_score: 0.70
-  # Bar the $TEXT leg must clear BEFORE fusion; 0.0 = OFF (ADR-013 §7). MongoDB
-  # textScore is the sum over matched query terms of field weight (1 on every
-  # text_index field) x term frequency normalised by field length — UNNORMALISED
-  # and corpus-relative, so it is PROVISIONAL and owned by Chapter 7's evals.
-  # Every answered text leg logs `text leg: N candidate(s), K kept at
-  # min_text_score=X (top=Y)` — read `top` there to re-pin. Override with
-  # TREE_QUERY__MIN_TEXT_SCORE=...
-  # shipped OFF, 2026-10 — tasks/183 Log: live, local corpus (14 docs, 372
-  # children, no MongoDB page), text-leg top at 0.0: off-topic "MongoDB Atlas
-  # Vector Search scalar binary quantization int8" 1.524, "dark photon
-  # vector-like fermions" 1.472, "recipe for sourdough bread" 0.504, "zxqv
-  # plorb wumbus" no candidates; on-topic "context engineering" 2.099,
-  # "structured outputs pydantic" 2.975, "ReAct agent tool calling" 3.736 — but
-  # one-word on-topic "pydantic" 1.072, "ReAct" 1.062, "Gemini" 1.028 (the
-  # vector leg still finds those three). The score grows with the
-  # number of matched query terms, so the lowest 0.5 step that empties the
-  # off-topic legs (2.0) also empties every one-word on-topic leg: no step
-  # separates them. Re-pin with the same on-topic vs off-topic protocol.
-  # Upgrade path: raw textScore sums matched query words, so a per-query
-  # normalised score (e.g. textScore / query word count) is what would compare
-  # across query lengths. The gate sits inside the shared $text leg, so a bar
-  # > 0 ALSO filters graphrag's seed text search, not only rag's search_memory.
-  min_text_score: 0.0
+  # Minimum match ratio of the TEXT leg (ADR-015): a row is a text candidate
+  # iff it contains K of the query's M distinct content terms (stop words
+  # dropped), K = max(1, ceil(ratio x M)) — e.g. "ReAct agent tool calling",
+  # M = 4 → K = 2 at 0.5. 0.0 = any one term. No score bar on that leg. Every
+  # text leg logs `text leg: N candidate(s), M query term(s),
+  # min_should_match=K`. PROVISIONAL 0.5 — re-pinned by task 192's eval, see
+  # ADR-015. Override with TREE_QUERY__TEXT_MIN_MATCH_RATIO=...
+  text_min_match_ratio: 0.5
   # The no-query cap on EVERY whole-memory view, most-recent first
   # (`properties.date`, else `created_at`) — Full graph / rag Memory structure
   # (documents embedded) and the Embedding map (documents whose chunks are

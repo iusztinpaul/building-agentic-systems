@@ -41,7 +41,8 @@ from tree.entities.graph_files import (
 )
 from tree.entities.memory import MEMORY_COLLECTION, MemoryEntry
 
-_BASE = {"text_index", "user_kind_type_subtype", "user_type_name"}
+# No classic ``text_index`` since ADR-015 — the lexical leg is mongot's.
+_BASE = {"user_kind_type_subtype", "user_type_name"}
 _EXPECTED = {
     "rag": _BASE,
     "graphrag": _BASE

@@ -177,10 +177,10 @@ RetrievalOutcome = Literal["found", "nothing_found"]
 
 ``nothing_found`` iff ZERO hits survived the seed search, where the vector leg
 was gated on ``query.min_vector_score`` and the text leg on
-``query.min_text_score`` (``0.0`` = off) before fusion. It is computed on the
-hits, BEFORE parent grouping: a hit whose parent row is missing is a data
-problem (logged, dropped), not "nothing found". NOT a **Search mode**: that says
-which legs answered, this says whether the answer is empty.
+``query.text_min_match_ratio`` (K of M query terms) before fusion. It is
+computed on the hits, BEFORE parent grouping: a hit whose parent row is missing
+is a data problem (logged, dropped), not "nothing found". NOT a **Search
+mode**: that says which legs answered, this says whether the answer is empty.
 """
 
 
@@ -208,7 +208,7 @@ class RetrievalResult(BaseModel):
         description=(
             "``nothing_found`` iff the seed search kept no hits (the vector leg "
             "gated on ``query.min_vector_score``, the text leg on "
-            "``query.min_text_score``, ``0.0`` = off); "
+            "``query.text_min_match_ratio`` (K of M query terms)); "
             "``found`` otherwise."
         ),
     )

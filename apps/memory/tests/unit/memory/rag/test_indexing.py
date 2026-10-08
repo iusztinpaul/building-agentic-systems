@@ -31,6 +31,7 @@ from tree.memory.rag.indexing import (
     _build_text_search_index_definition,
     _build_vector_index_definition,
     _create_search_index,
+    _drop_legacy_text_index,
     _reset_filter,
     _ensure_text_search_index,
     _ensure_vector_index,
@@ -129,6 +130,7 @@ class _AsyncCursorFromList:
 def _make_collection(
     *,
     initial_indexes: list[dict] | None = None,
+    classic_indexes: dict[str, dict] | None = None,
 ) -> MagicMock:
     """Build a mock collection with the wait-loop hooks satisfied.
 
@@ -139,8 +141,12 @@ def _make_collection(
     poll. Answering per name matters: a poll for ``text_search_index`` that
     found only ``vector_index`` would wait out 300 s of mocked sleeps.
 
-    ``collection.events`` records every create / drop / named poll in call
-    order, so a test can assert "drop → create → wait" across the mocks.
+    ``index_information()`` answers ``classic_indexes`` (default: only
+    ``_id_``), so the legacy ``text_index`` drop is opt-in per test.
+
+    ``collection.events`` records every create / drop / named poll / classic
+    ``drop_index`` in call order, so a test can assert "drop → create → wait"
+    across the mocks.
     """
 
     initial = list(initial_indexes or [])
@@ -159,9 +165,16 @@ def _make_collection(
     async def _drop(name: str) -> None:
         events.append(("drop", name))
 
+    async def _drop_classic(name: str) -> None:
+        events.append(("drop_index", name))
+
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock(side_effect=_create)
     collection.drop_search_index = AsyncMock(side_effect=_drop)
+    collection.index_information = AsyncMock(
+        return_value=classic_indexes or {"_id_": {"key": [("_id", 1)]}}
+    )
+    collection.drop_index = AsyncMock(side_effect=_drop_classic)
     collection.events = events
     return collection
 
@@ -750,6 +763,12 @@ def _with_echoed_extras() -> dict:
     return entry
 
 
+def _without_dynamic() -> dict:
+    entry = copy.deepcopy(_LIVE_TEXT_INDEX)
+    del entry["latestDefinition"]["mappings"]["dynamic"]
+    return entry
+
+
 class TestTextSearchIndexDefinition:
     def test_definition_is_static_english_text_paths_plus_filter_paths(self) -> None:
         assert _build_text_search_index_definition() == {
@@ -803,6 +822,9 @@ class TestEnsureTextSearchIndex:
             ),
             pytest.param(_LIVE_TEXT_INDEX, id="local-mongot-echo"),
             pytest.param(_with_echoed_extras(), id="echoed-defaults-and-extra-path"),
+            # Atlas's default for ``mappings.dynamic`` is ``false``: an echo
+            # that omits the key must not drop + recreate on every run.
+            pytest.param(_without_dynamic(), id="dynamic-absent"),
         ],
     )
     async def test_matching_index_is_left_alone(self, caplog, live_entry: dict) -> None:
@@ -894,6 +916,88 @@ class TestEnsureTextSearchIndex:
             ("create", TEXT_SEARCH_INDEX_NAME),
             ("wait", TEXT_SEARCH_INDEX_NAME),
         ]
+
+
+# The classic ``$text`` index as ``index_information()`` lists it.
+_LEGACY_TEXT_INDEX = {
+    "key": [("_fts", "text"), ("_ftsx", 1)],
+    "weights": {"name": 1, "aliases": 1, "properties.content": 1},
+}
+
+
+class TestDropLegacyTextIndex:
+    """ADR-015 §1, §7: the ONE retirement step — Beanie only creates."""
+
+    async def test_present_text_index_is_dropped_after_the_text_index_ensure(
+        self, caplog
+    ) -> None:
+        collection = _make_collection(
+            classic_indexes={"_id_": {}, "text_index": _LEGACY_TEXT_INDEX}
+        )
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await ensure_indexes(
+                _wire_client(collection),
+                "test_db",
+                embedding_model=FakeEmbeddingModel(dimensions=8),
+            )
+
+        # Step 3, after ``text_search_index`` is created AND waited on: the
+        # lexical leg never loses both indexes at once.
+        assert collection.events == [
+            ("create", VECTOR_INDEX_NAME),
+            ("wait", VECTOR_INDEX_NAME),
+            ("create", TEXT_SEARCH_INDEX_NAME),
+            ("wait", TEXT_SEARCH_INDEX_NAME),
+            ("drop_index", "text_index"),
+        ]
+        assert (
+            "Dropped legacy $text index 'text_index' (replaced by "
+            "'text_search_index', ADR-015)" in caplog.text
+        )
+
+    async def test_absent_text_index_is_a_no_op(self, caplog) -> None:
+        collection = _make_collection(
+            initial_indexes=[_LIVE_TEXT_INDEX],
+            classic_indexes={"_id_": {}, "user_type_name": {}},
+        )
+
+        with caplog.at_level("INFO", logger="tree.memory.rag.indexing"):
+            await _drop_legacy_text_index(collection)
+
+        collection.drop_index.assert_not_awaited()
+        assert "Dropped legacy" not in caplog.text
+
+    async def test_drop_failure_propagates(self) -> None:
+        collection = _make_collection(
+            classic_indexes={"_id_": {}, "text_index": _LEGACY_TEXT_INDEX}
+        )
+        collection.drop_index = AsyncMock(side_effect=OperationFailure("not allowed"))
+
+        with pytest.raises(OperationFailure, match="not allowed"):
+            await _drop_legacy_text_index(collection)
+
+    async def test_index_not_found_on_the_drop_is_already_gone(self, caplog) -> None:
+        # Two concurrent ``ensure_indexes`` (MCP boot + indexing pipeline) both
+        # see the index; the loser's drop answers IndexNotFound (code 27).
+        collection = _make_collection(
+            classic_indexes={"_id_": {}, "text_index": _LEGACY_TEXT_INDEX}
+        )
+        collection.drop_index = AsyncMock(
+            side_effect=OperationFailure(
+                "index not found with name [text_index]", code=27
+            )
+        )
+
+        with caplog.at_level("DEBUG", logger="tree.memory.rag.indexing"):
+            await _drop_legacy_text_index(collection)
+
+        collection.drop_index.assert_awaited_once_with("text_index")
+        assert "Dropped legacy" not in caplog.text
+        assert (
+            "Legacy $text index 'text_index' already dropped by a concurrent "
+            "ensure_indexes" in caplog.text
+        )
 
 
 class TestCreateSearchIndex:

@@ -6,7 +6,10 @@ rows that are actually filtered by those pipelines (so "a parent row is never a
 seed" is a behavioural claim, not a spelling claim). ``FakeMemoryCollection``
 evaluates the handful of operators our pipelines use — equality, ``$or``, ``$in``
 (against a scalar, or ANY element of a list field, as Mongo does for
-``sources``), ``$type: "binData"`` (a stored vector), ``$nor``, ``$text`` (substring), ``$limit``, ``$graphLookup``
+``sources``), ``$type: "binData"`` (a stored vector), ``$nor``, the Atlas
+``$search`` compound of the text leg (``filter`` / ``mustNot`` ``equals``,
+``should`` ``text`` clauses counted against ``minimumShouldMatch`` — whole
+``\\w+`` tokens, case-insensitive, NO stemming), ``$limit``, ``$graphLookup``
 (breadth-first, ``restrictSearchWithMatch`` applied) and a ``$setUnion``
 ``$project`` — plus exclusion
 projections (``{"embedding": 0}``), stamps the ``_search_score`` both legs read
@@ -19,6 +22,7 @@ silently ignored by the double.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -56,15 +60,6 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
         elif key == "$or":
             if not any(matches(row, sub) for sub in expected):
                 return False
-        elif key == "$text":
-            haystack = " ".join(
-                [
-                    str(row.get("name", "")),
-                    str((row.get("properties") or {}).get("content", "")),
-                ]
-            ).lower()
-            if expected["$search"].lower() not in haystack:
-                return False
         elif expected == {"$type": "binData"}:
             # A stored vector is float32 ``binData`` (task 175).
             if not isinstance(row.get(key), Binary):
@@ -84,11 +79,55 @@ def matches(row: dict[str, Any], query: dict[str, Any]) -> bool:
     return True
 
 
-# The ``listSearchIndexes`` entry a collection has AFTER the indexing pipeline
-# ran: mongot serves queries from it. The default, because every pipeline-shape
-# test stands for a properly indexed collection.
+def _search_compound_matches(row: dict[str, Any], compound: dict[str, Any]) -> bool:
+    """The Atlas ``$search`` ``compound`` the text leg sends, on ONE row.
+
+    ``filter`` — every ``equals`` holds; ``mustNot`` — no nested
+    ``compound.must`` of ``equals`` holds in full; ``should`` — at least
+    ``minimumShouldMatch`` ``text`` clauses match. A ``text`` clause matches when
+    ANY of its paths (array values included) holds the term as a whole ``\\w+``
+    token, case-insensitive — no stemming, unlike ``lucene.english``.
+    """
+
+    def equals(clause: dict[str, Any]) -> bool:
+        spec = clause["equals"]
+        return row.get(spec["path"]) == spec["value"]
+
+    if not all(equals(clause) for clause in compound.get("filter", [])):
+        return False
+    for clause in compound.get("mustNot", []):
+        if all(equals(sub) for sub in clause["compound"]["must"]):
+            return False
+    matched = sum(
+        _text_clause_matches(row, clause["text"]) for clause in compound["should"]
+    )
+    return matched >= compound["minimumShouldMatch"]
+
+
+def _text_clause_matches(row: dict[str, Any], text: dict[str, Any]) -> bool:
+    term = text["query"].lower()
+    for path in text["path"]:
+        value: Any = row
+        for part in path.split("."):
+            value = (value or {}).get(part) if isinstance(value, dict) else None
+        for item in value if isinstance(value, list) else [value]:
+            if item is not None and term in re.findall(r"\w+", str(item).lower()):
+                return True
+    return False
+
+
+# The ``listSearchIndexes`` entries a collection has AFTER the indexing pipeline
+# ran: mongot serves queries from both. The default, because every
+# pipeline-shape test stands for a properly indexed collection — with only
+# ``vector_index`` here, every empty text leg would probe, find no
+# ``text_search_index`` and silently read as ``vector_only``.
 _QUERYABLE_VECTOR_INDEX: dict[str, Any] = {
     "name": "vector_index",
+    "status": "READY",
+    "queryable": True,
+}
+_QUERYABLE_TEXT_INDEX: dict[str, Any] = {
+    "name": "text_search_index",
     "status": "READY",
     "queryable": True,
 }
@@ -101,7 +140,13 @@ _DEFAULT_SEARCH_SCORE = 0.9
 
 
 class FakeMemoryCollection:
-    """Records aggregate pipelines / find filters and applies them to ``rows``."""
+    """Records aggregate pipelines / find filters and applies them to ``rows``.
+
+    Its ``$search`` emulation splits text on ``\\w+`` and models neither
+    Lucene's UAX#29 tokenizer (``google_genai:gemini-1.5`` stays ONE token live)
+    nor ``lucene.english`` stemming (``calling`` ≠ ``call``), so it
+    under-approximates the live candidate set — never rely on a stemmed match.
+    """
 
     def __init__(
         self,
@@ -123,7 +168,7 @@ class FakeMemoryCollection:
         # ``search_indexes=[]`` is the never-indexed / dropped-index state;
         # ``[{"status": "BUILDING", "queryable": False}]`` the mid-build one.
         self.search_indexes = (
-            [_QUERYABLE_VECTOR_INDEX]
+            [_QUERYABLE_VECTOR_INDEX, _QUERYABLE_TEXT_INDEX]
             if search_indexes is None
             else list(search_indexes)
         )
@@ -168,9 +213,9 @@ class FakeMemoryCollection:
 
     @property
     def text_pipeline(self) -> list[dict[str, Any]]:
-        """The single ``$text``-carrying ``$match`` pipeline that was issued."""
+        """The single ``$search`` (text leg) pipeline that was issued."""
 
-        return self._one("$match")
+        return self._one("$search")
 
     def _one(self, first_stage_key: str) -> list[dict[str, Any]]:
         found = [p for p in self.pipelines if first_stage_key in p[0]]
@@ -189,6 +234,14 @@ class FakeMemoryCollection:
                 if row.get("embedding") and matches(row, stage["filter"])
             ]
             rows = rows[: stage["limit"]]
+        elif "$search" in head:
+            compound = head["$search"]["compound"]
+            rows = [row for row in self.rows if _search_compound_matches(row, compound)]
+            for stage in pipeline[1:]:
+                if "$limit" in stage:
+                    rows = rows[: stage["$limit"]]
+                elif "$addFields" not in stage:
+                    raise NotImplementedError(f"unsupported $search stage: {stage}")
         else:
             rows = [row for row in self.rows if matches(row, head["$match"])]
             for stage in pipeline:

@@ -4,7 +4,8 @@ Two claims are pinned here:
 
 * the EXACT filter shapes both stages send to Mongo — a ``node_filter`` that
   reaches only one of the two stages would let fusion resurrect the rows the
-  caller excluded;
+  caller excluded — and the text leg's ``user_id`` / ``kind`` pins are ANDed
+  with a ``node_filter``, never replaced by it (``TestTenantPins``);
 * the "a **Parent chunk** is never a seed" invariant, asserted behaviourally
   (a parent row whose content matches the query is absent from the results);
 * the **Search mode** each leg-failure combination reports (``TestSearchMode``,
@@ -12,9 +13,12 @@ Two claims are pinned here:
   down" and "nothing matches" were the same answer;
 * the ``query.min_vector_score`` bar on the VECTOR leg (``TestMinVectorScore``,
   ADR-008 §3) — the only absolute score in the pipeline;
-* the provisional ``query.min_text_score`` bar on the TEXT leg
-  (``TestMinTextScore``, ADR-013 §7) — ``textScore`` is unnormalised, so ``0.0``
-  turns it off, and the module pins it off everywhere else.
+* the **Minimum match ratio** rule on the TEXT leg (``TestMinimumMatchRatio``,
+  ADR-015 §2–§5) — the exact ``$search`` pipeline, K of M query terms, the
+  all-stop-word and unsupported-filter edges, the absent-index probe — plus the
+  pure ``query_terms`` (capped at 64 distinct terms) / ``min_should_match`` it
+  is built from. The module pins the ratio to ``0.0`` (any one term)
+  everywhere else.
 
 ``TestRRFFuse`` moved here verbatim with ``_rrf_fuse`` (was
 ``tests/unit/memory/graph/test_retrieval.py``).
@@ -29,18 +33,24 @@ import pytest
 from beanie import PydanticObjectId
 
 from tree.memory.rag.search import (
+    _MAX_QUERY_TERMS,
+    STOP_WORDS,
     SearchUnavailableError,
     _rrf_fuse,
     _search_index_is_queryable,
+    _text_search,
     hybrid_search,
+    min_should_match,
+    query_terms,
 )
 from tree.models.base import EmbeddingRole
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
+_OTHER_USER = PydanticObjectId("507f1f77bcf86cd799439022")
 _CHILD_FILTER = {"type": "chunk", "subtype": "child"}
 
-# A query no row's text contains, so the ``$text`` leg answers ``[]`` and the
+# A query no row's text contains, so the text leg answers ``[]`` and the
 # vector leg's gate is the only thing deciding what reaches fusion.
 _OFF_TOPIC = "zxqv plorb wumbus"
 
@@ -49,14 +59,20 @@ _OFF_TOPIC = "zxqv plorb wumbus"
 # asserted once, in tests/unit/config/test_app_config.py, and patched here.
 _MIN_VECTOR_SCORE = 0.65
 
-# The text bar ``TestMinTextScore`` pins — a fixed number above the fake's
-# ``_DEFAULT_SEARCH_SCORE`` (0.9) for the same reason: the shipped value is
-# provisional (ADR-013 §7) and owned by the evals, never by these tests.
-_MIN_TEXT_SCORE = 1.0
-
 # The first-stage key that identifies each leg's pipeline.
 _VECTOR_STAGE = "$vectorSearch"
-_TEXT_STAGE = "$match"
+_TEXT_STAGE = "$search"
+
+# Where the text leg reads the **Minimum match ratio**.
+_RATIO = "tree.memory.rag.search.app_config.query.text_min_match_ratio"
+
+# Lucene's 33 English stop words, VERBATIM — what ``lucene.english`` drops at
+# index time (task 190's spike: such a clause never matches). Spelled out here
+# rather than imported so the pin cannot drift with the code it checks.
+_LUCENE_ENGLISH_STOP_WORDS = frozenset(
+    "a an and are as at be but by for if in into is it no not of on or such "
+    "that the their then there these they this to was will with".split()
+)
 
 
 @pytest.fixture
@@ -65,16 +81,17 @@ def embedding_model() -> FakeEmbeddingModel:
 
 
 @pytest.fixture(autouse=True)
-def text_gate_off(mocker) -> None:
-    """Pin the text bar OFF for every test that is not about it.
+def any_one_term(mocker) -> None:
+    """Pin the **Minimum match ratio** to ``0.0`` (K = 1) for every test that
+    is not about it.
 
-    The fake stamps ``_DEFAULT_SEARCH_SCORE`` (0.9) on both legs, so a re-pinned
-    ``min_text_score`` default would otherwise silently gate the text hits the
-    filter, mode and vector-gate tests rely on. ``TestMinTextScore`` patches it
-    again on top.
+    The filter, mode and vector-gate tests use rows that share ONE word with a
+    multi-word query; a re-pinned default (``0.5`` today, provisional per
+    ADR-015) would otherwise silently drop their text hits.
+    ``TestMinimumMatchRatio`` patches it again on top.
     """
 
-    mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 0.0)
+    mocker.patch(_RATIO, 0.0)
 
 
 def _vector_candidate(make_child_row, node_id: str, score: float) -> dict:
@@ -92,8 +109,8 @@ def _vector_candidate(make_child_row, node_id: str, score: float) -> dict:
 def _break_leg(collection, stage: str) -> None:
     """Make ONE leg's aggregate raise, leaving the other leg working.
 
-    The real triggers are a dropped ``vector_index`` (mid-rebuild) and a missing
-    text index on a fresh collection; both surface as the aggregate raising.
+    The real trigger is mongot being unreachable; a dropped index does NOT
+    raise (it answers ``[]`` — see the probe tests).
     """
 
     working_aggregate = collection.aggregate
@@ -130,7 +147,7 @@ class TestChildOnlyFilter:
         }
         assert stage["limit"] == 8
 
-    async def test_text_match_carries_the_same_filter_keys(
+    async def test_text_filter_carries_the_same_filter_keys(
         self, make_collection, embedding_model
     ) -> None:
         collection = make_collection()
@@ -144,12 +161,13 @@ class TestChildOnlyFilter:
             node_filter=_CHILD_FILTER,
         )
 
-        match = collection.text_pipeline[0]["$match"]
-        assert match["user_id"] == _USER
-        assert match["kind"] == "node"
-        assert match["type"] == "chunk"
-        assert match["subtype"] == "child"
-        assert match["$text"] == {"$search": "parent chunk"}
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert compound["filter"] == [
+            {"equals": {"path": "user_id", "value": _USER}},
+            {"equals": {"path": "kind", "value": "node"}},
+            {"equals": {"path": "type", "value": "chunk"}},
+            {"equals": {"path": "subtype", "value": "child"}},
+        ]
 
 
 class TestGraphSeedFilter:
@@ -165,7 +183,7 @@ class TestGraphSeedFilter:
         stage = collection.vector_pipeline[0]["$vectorSearch"]
         assert stage["filter"] == {"user_id": _USER, "kind": "node"}
 
-    async def test_text_match_excludes_parent_rows(
+    async def test_text_filter_is_user_and_kind_and_excludes_parent_rows(
         self, make_collection, embedding_model
     ) -> None:
         collection = make_collection()
@@ -174,8 +192,22 @@ class TestGraphSeedFilter:
             collection, "alice", embedding_model, _USER, limit=10, node_filter={}
         )
 
-        assert collection.text_pipeline[0]["$match"]["$nor"] == [
-            {"type": "chunk", "subtype": "parent"}
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        # No ``subtype`` clause: entity rows and children both qualify ...
+        assert compound["filter"] == [
+            {"equals": {"path": "user_id", "value": _USER}},
+            {"equals": {"path": "kind", "value": "node"}},
+        ]
+        # ... and parents never do, unconditionally (ADR-006 §2).
+        assert compound["mustNot"] == [
+            {
+                "compound": {
+                    "must": [
+                        {"equals": {"path": "type", "value": "chunk"}},
+                        {"equals": {"path": "subtype", "value": "parent"}},
+                    ]
+                }
+            }
         ]
 
     async def test_a_matching_parent_row_is_not_returned(
@@ -209,6 +241,50 @@ class TestGraphSeedFilter:
         )
 
         assert {hit.doc["_id"] for hit in result.hits} == {"c0", "e1"}
+
+
+class TestTenantPins:
+    """The text leg's ``user_id`` / ``kind`` pins are ANDed with ``node_filter``.
+
+    A colliding key narrows the leg (to nothing), never swaps in another tenant
+    or row kind — the leg is called directly because the vector leg still
+    merges its filter dict (a separate follow-up).
+    """
+
+    @pytest.mark.parametrize(
+        ("node_filter", "row_user", "row_kind"),
+        [
+            pytest.param({"user_id": _OTHER_USER}, _OTHER_USER, "node", id="user-id"),
+            pytest.param({"kind": "edge"}, _USER, "edge", id="kind"),
+            pytest.param(
+                {"user_id": _OTHER_USER, "kind": "edge"},
+                _OTHER_USER,
+                "edge",
+                id="user-id-and-kind",
+            ),
+        ],
+    )
+    async def test_colliding_key_keeps_the_pins_and_returns_no_foreign_row(
+        self, make_collection, make_child_row, node_filter, row_user, row_kind
+    ) -> None:
+        foreign = make_child_row(row_user, "foreign", content="tenant secret agent")
+        foreign["kind"] = row_kind
+        collection = make_collection([foreign])
+
+        results = await _text_search(
+            collection, "secret agent", user_id=_USER, limit=10, node_filter=node_filter
+        )
+
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert compound["filter"] == [
+            {"equals": {"path": "user_id", "value": _USER}},
+            {"equals": {"path": "kind", "value": "node"}},
+            *(
+                {"equals": {"path": path, "value": value}}
+                for path, value in node_filter.items()
+            ),
+        ]
+        assert results == []
 
 
 class TestFusedOutput:
@@ -247,8 +323,8 @@ class TestSearchMode:
     async def test_vector_leg_failure_reports_text_only(
         self, make_collection, embedding_model, make_child_row
     ) -> None:
-        # Arrange — ``vector_index`` was dropped for a dimension change, so
-        # the $vectorSearch aggregate raises while $text still answers.
+        # Arrange — mongot rejects the $vectorSearch aggregate while the
+        # $search one still answers.
         collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
         _break_leg(collection, _VECTOR_STAGE)
 
@@ -262,8 +338,7 @@ class TestSearchMode:
     async def test_text_leg_failure_reports_vector_only(
         self, make_collection, embedding_model, make_child_row
     ) -> None:
-        # Arrange — no text index (the state of a fresh collection before the
-        # indexing pipeline runs): the $text aggregate raises.
+        # Arrange — the $search aggregate raises (mongot rejected it).
         collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
         _break_leg(collection, _TEXT_STAGE)
 
@@ -418,9 +493,13 @@ class TestSearchIndexIsQueryable:
     async def test_absent_text_search_index_is_unavailable(
         self, make_collection, caplog
     ) -> None:
-        # Arrange — the default catalogue holds a queryable ``vector_index``
-        # only, so the probe must look up the index BY NAME to say ``False``.
-        collection = make_collection()
+        # Arrange — the catalogue holds a queryable ``vector_index`` only, so
+        # the probe must look up the index BY NAME to say ``False``.
+        collection = make_collection(
+            search_indexes=[
+                {"name": "vector_index", "status": "READY", "queryable": True}
+            ]
+        )
 
         with caplog.at_level(logging.WARNING):
             queryable = await _search_index_is_queryable(
@@ -516,10 +595,10 @@ class TestMinVectorScore:
         self, make_collection, embedding_model, make_child_row
     ) -> None:
         # Arrange — a rare identifier the embedding barely recognises (0.1) but
-        # ``$text`` matches exactly. The row IS in the vector index, so BOTH
+        # ``$search`` matches exactly. The row IS in the vector index, so BOTH
         # legs return it: the vector gate must drop the vector copy and leave
-        # the text copy to its OWN bar (off here — ``text_gate_off``). A gate
-        # applied after fusion would lose this hit.
+        # the text copy alone — the text leg has no score bar (ADR-015 §4). A
+        # gate applied after fusion would lose this hit.
         row = make_child_row(_USER, "c0", content="memory-extract-etl-worker")
         row["_search_score"] = 0.1
         collection = make_collection([row])
@@ -582,7 +661,9 @@ class TestMinVectorScore:
 
         assert result.hits == []
         assert result.search_mode == "hybrid"
-        assert collection.search_index_probes == []
+        # The off-topic TEXT leg is genuinely empty and probes its own index;
+        # the vector leg answered candidates, so it never probes.
+        assert "vector_index" not in collection.search_index_probes
 
     async def test_operator_override_raises_the_bar(
         self, make_collection, embedding_model, make_child_row, mocker, caplog
@@ -610,29 +691,169 @@ class TestMinVectorScore:
         assert "0 kept at min_vector_score=0.85" in caplog.text
 
 
-def _text_candidate(make_child_row, node_id: str, score: float) -> dict:
-    """A child row ONLY ``$text`` can return: it matches ``_TEXT_QUERY`` and has
-    no ``embedding``, so its ``_search_score`` stands for a ``textScore`` and
-    the vector gate never sees it."""
+# The README / ADR-015 example question: five content terms at ratio 0.5 → K = 3.
+_REACT_QUESTION = "What is the ReAct agent tool calling loop?"
+_REACT_TERMS = ["react", "agent", "tool", "calling", "loop"]
 
-    row = make_child_row(_USER, node_id, content="int8 scalar quantization")
+# One row per number of ``_REACT_TERMS`` it shares (1, 2, 3), none with a
+# vector, so the text leg alone decides which of them fuse.
+_ONE_TERM = "the tool registry"
+_TWO_TERMS = "the tool calling contract"
+_THREE_TERMS = "the agent tool calling contract"
+
+
+def _text_only_row(make_child_row, node_id: str, content: str) -> dict:
+    """A child row ONLY the text leg can return: no ``embedding``."""
+
+    row = make_child_row(_USER, node_id, content=content)
     del row["embedding"]
-    row["_search_score"] = score
     return row
 
 
-# A query only ``_text_candidate`` rows contain (``_vector_candidate`` rows say
-# "parent-document retrieval"), so each leg's rows are known up front.
-_TEXT_QUERY = "quantization"
+def _text_leg_lines(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("text leg:")
+    ]
 
 
-class TestMinTextScore:
-    """The text leg is gated on ``textScore`` BEFORE fusion (ADR-013 §7).
+class TestQueryTerms:
+    """``query_terms``: lower-case ``\\w+`` tokens, minus ``STOP_WORDS``, deduped."""
 
-    ``textScore`` is unnormalised (a sum of per-term field-weighted
-    frequencies), so the bar is provisional and ``0.0`` disables it — but the
-    gate's log line is written either way, because it is what the eval that
-    pins the bar reads.
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            pytest.param("", [], id="empty"),
+            pytest.param("what is it", [], id="all-stop-words"),
+            pytest.param(_REACT_QUESTION, _REACT_TERMS, id="readme-question"),
+            pytest.param("ReAct react REACT", ["react"], id="dedupe-case-folded"),
+            pytest.param(
+                "Pydantic pydantic structured outputs",
+                ["pydantic", "structured", "outputs"],
+                id="dedupe-keeps-first-occurrence-order",
+            ),
+            pytest.param("vector-like", ["vector", "like"], id="hyphen-splits"),
+            pytest.param(
+                "How does the ReAct agent decide when to call a tool?",
+                ["react", "agent", "decide", "call", "tool"],
+                id="story-full-sentence",
+            ),
+            pytest.param(
+                "MongoDB Atlas Vector Search scalar binary quantization int8",
+                [
+                    "mongodb",
+                    "atlas",
+                    "vector",
+                    "search",
+                    "scalar",
+                    "binary",
+                    "quantization",
+                    "int8",
+                ],
+                id="story-eight-term-quantization",
+            ),
+            pytest.param(
+                "ReAct agent tool calling",
+                ["react", "agent", "tool", "calling"],
+                id="live-ac-four-terms",
+            ),
+            # Pre-stemming dedupe is the accepted trade-off (ADR-015 §3).
+            pytest.param("agent agents", ["agent", "agents"], id="no-stemming"),
+        ],
+    )
+    def test_terms(self, query: str, expected: list[str]) -> None:
+        assert query_terms(query) == expected
+
+    @pytest.mark.parametrize(
+        ("distinct", "kept"),
+        [
+            pytest.param(_MAX_QUERY_TERMS - 1, _MAX_QUERY_TERMS - 1, id="under-cap"),
+            pytest.param(_MAX_QUERY_TERMS, _MAX_QUERY_TERMS, id="at-cap"),
+            pytest.param(_MAX_QUERY_TERMS + 1, _MAX_QUERY_TERMS, id="one-over-cap"),
+            pytest.param(300, _MAX_QUERY_TERMS, id="pasted-paragraph"),
+        ],
+    )
+    def test_keeps_the_first_capped_distinct_terms(
+        self, distinct: int, kept: int
+    ) -> None:
+        # 256 terms x 4 paths = mongot's 1024-clause ``maxClauseCount``: the
+        # cap keeps a long query's leg alive instead of raising.
+        query = " ".join(f"term{i}" for i in range(distinct))
+
+        assert query_terms(query) == [f"term{i}" for i in range(kept)]
+
+    def test_cap_counts_distinct_terms_not_tokens(self) -> None:
+        # Duplicates and stop words inside the first 64 positions do not use
+        # up the cap: it keeps the first 64 DISTINCT content terms.
+        query = "the agent agent " + " ".join(f"term{i}" for i in range(100))
+
+        assert query_terms(query) == [
+            "agent",
+            *(f"term{i}" for i in range(_MAX_QUERY_TERMS - 1)),
+        ]
+
+    def test_stop_words_are_a_superset_of_lucene_english(self) -> None:
+        # A word ``lucene.english`` drops can never match, so leaving it out
+        # of ``STOP_WORDS`` would count it toward M and silently raise K.
+        assert len(_LUCENE_ENGLISH_STOP_WORDS) == 33
+        assert _LUCENE_ENGLISH_STOP_WORDS <= STOP_WORDS
+
+    @pytest.mark.parametrize(
+        "word", ["what", "how", "does", "when", "which", "you", "can", "would"]
+    )
+    def test_question_and_auxiliary_words_are_stop_words(self, word: str) -> None:
+        assert word in STOP_WORDS
+
+    @pytest.mark.parametrize(
+        "word", ["vector", "agent", "tool", "call", "calling", "like", "loop"]
+    )
+    def test_domain_words_are_never_stop_words(self, word: str) -> None:
+        # The bad example from the docstring: a common DOMAIN word is content.
+        assert word not in STOP_WORDS
+
+
+class TestMinShouldMatch:
+    @pytest.mark.parametrize(
+        ("term_count", "ratio", "expected"),
+        [
+            pytest.param(0, 0.5, 0, id="no-terms"),
+            pytest.param(0, 0.0, 0, id="no-terms-ratio-zero"),
+            pytest.param(3, 0.0, 1, id="ratio-zero-is-any-one-term"),
+            pytest.param(3, 0.5, 2, id="half-of-three"),
+            pytest.param(8, 0.5, 4, id="half-of-eight"),
+            pytest.param(3, 1.0, 3, id="ratio-one-is-every-term"),
+            pytest.param(1, 0.1, 1, id="at-least-one"),
+            pytest.param(5, 0.5, 3, id="readme-question"),
+            pytest.param(10, 0.7, 7, id="seven-tenths-of-ten"),
+            # ``0.28 * 25`` is 7.000000000000001 and ``0.56 * 25`` is
+            # 14.000000000000002 in binary floating point: a bare ``ceil``
+            # would ask for one term more than the ratio says.
+            pytest.param(25, 0.28, 7, id="float-overshoot-0.28"),
+            pytest.param(25, 0.56, 14, id="float-overshoot-0.56"),
+        ],
+    )
+    def test_k(self, term_count: int, ratio: float, expected: int) -> None:
+        assert min_should_match(term_count, ratio) == expected
+
+    @pytest.mark.parametrize("term_count", range(1, 11))
+    @pytest.mark.parametrize("step", range(11))
+    def test_k_is_between_one_and_m_at_every_tenth(
+        self, term_count: int, step: int
+    ) -> None:
+        # Atlas rejects ``minimumShouldMatch`` > the number of should clauses
+        # (task 190's spike: OperationFailure code 8), so K must never exceed M.
+        k = min_should_match(term_count, step / 10)
+
+        assert 1 <= k <= term_count
+
+
+class TestMinimumMatchRatio:
+    """The text leg keeps rows matching K of the query's M terms (ADR-015 §2–§5).
+
+    ``$search`` on ``text_search_index``: one ``text`` clause per DISTINCT
+    content term over the four text paths, ``minimumShouldMatch = K``; no score
+    bar of any kind (RRF reads rank only).
     """
 
     @pytest.fixture(autouse=True)
@@ -641,143 +862,277 @@ class TestMinTextScore:
             "tree.memory.rag.search.app_config.query.min_vector_score",
             _MIN_VECTOR_SCORE,
         )
-        mocker.patch(
-            "tree.memory.rag.search.app_config.query.min_text_score",
-            _MIN_TEXT_SCORE,
+        mocker.patch(_RATIO, 0.5)
+
+    async def test_pipeline_is_one_search_compound_k_of_m_terms(
+        self, make_collection, embedding_model
+    ) -> None:
+        collection = make_collection()
+
+        await hybrid_search(
+            collection,
+            _REACT_QUESTION,
+            embedding_model,
+            _USER,
+            limit=8,
+            node_filter=_CHILD_FILTER,
         )
 
-    async def test_drops_text_hits_below_threshold(
+        paths = ["name", "aliases", "properties.content", "properties.aliases"]
+        # ``$search`` first (Atlas requires it); no ``$sort`` (``$search``
+        # already returns by score), no ``$match``, no ``$text``.
+        assert collection.text_pipeline == [
+            {
+                "$search": {
+                    "index": "text_search_index",
+                    "compound": {
+                        "filter": [
+                            {"equals": {"path": "user_id", "value": _USER}},
+                            {"equals": {"path": "kind", "value": "node"}},
+                            {"equals": {"path": "type", "value": "chunk"}},
+                            {"equals": {"path": "subtype", "value": "child"}},
+                        ],
+                        "mustNot": [
+                            {
+                                "compound": {
+                                    "must": [
+                                        {"equals": {"path": "type", "value": "chunk"}},
+                                        {
+                                            "equals": {
+                                                "path": "subtype",
+                                                "value": "parent",
+                                            }
+                                        },
+                                    ]
+                                }
+                            }
+                        ],
+                        # ONE clause per term carrying ALL four paths: K
+                        # counts terms, not paths.
+                        "should": [
+                            {"text": {"query": term, "path": paths}}
+                            for term in _REACT_TERMS
+                        ],
+                        "minimumShouldMatch": 3,
+                    },
+                }
+            },
+            {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
+            {"$limit": 8},
+        ]
+
+    async def test_stop_words_and_duplicates_never_become_clauses(
+        self, make_collection, embedding_model
+    ) -> None:
+        collection = make_collection()
+
+        await hybrid_search(
+            collection,
+            "the ReAct react REACT",
+            embedding_model,
+            _USER,
+            limit=8,
+            node_filter=_CHILD_FILTER,
+        )
+
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert [clause["text"]["query"] for clause in compound["should"]] == ["react"]
+        assert compound["minimumShouldMatch"] == 1
+
+    async def test_half_ratio_keeps_rows_sharing_k_of_m_terms(
         self, make_collection, embedding_model, make_child_row
     ) -> None:
-        # A one-word lexical brush (0.5) rides along with a real match (2.4).
+        # M = 5, K = 3: a row brushing one or two of the question's words is
+        # not a text candidate; the row sharing three is.
         collection = make_collection(
             [
-                _text_candidate(make_child_row, "t0", 2.4),
-                _text_candidate(make_child_row, "t1", 0.5),
+                _text_only_row(make_child_row, "t1", _ONE_TERM),
+                _text_only_row(make_child_row, "t2", _TWO_TERMS),
+                _text_only_row(make_child_row, "t3", _THREE_TERMS),
             ]
         )
 
         result = await hybrid_search(
             collection,
-            _TEXT_QUERY,
+            _REACT_QUESTION,
             embedding_model,
             _USER,
             limit=10,
             node_filter=_CHILD_FILTER,
         )
 
-        assert [hit.doc["_id"] for hit in result.hits] == ["t0"]
+        assert [hit.doc["_id"] for hit in result.hits] == ["t3"]
 
-    async def test_keeps_hit_at_threshold(
-        self, make_collection, embedding_model, make_child_row
+    async def test_ratio_zero_needs_any_one_term(
+        self, make_collection, embedding_model, make_child_row, mocker
     ) -> None:
-        # The bar is inclusive, like the vector one.
+        mocker.patch(_RATIO, 0.0)
         collection = make_collection(
-            [_text_candidate(make_child_row, "t0", _MIN_TEXT_SCORE)]
+            [
+                _text_only_row(make_child_row, "t1", _ONE_TERM),
+                _text_only_row(make_child_row, "t2", _TWO_TERMS),
+            ]
         )
 
         result = await hybrid_search(
             collection,
-            _TEXT_QUERY,
+            _REACT_QUESTION,
             embedding_model,
             _USER,
             limit=10,
             node_filter=_CHILD_FILTER,
         )
 
-        assert [hit.doc["_id"] for hit in result.hits] == ["t0"]
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert compound["minimumShouldMatch"] == 1
+        assert sorted(hit.doc["_id"] for hit in result.hits) == ["t1", "t2"]
 
-    async def test_logs_candidates_kept_and_top_score(
-        self, make_collection, embedding_model, make_child_row, caplog
+    async def test_ratio_one_needs_every_term(
+        self, make_collection, embedding_model, make_child_row, mocker
     ) -> None:
-        # ``top`` is the best CANDIDATE score, before the gate.
+        mocker.patch(_RATIO, 1.0)
         collection = make_collection(
             [
-                _text_candidate(make_child_row, "t0", 2.431),
-                _text_candidate(make_child_row, "t1", 0.5),
+                _text_only_row(make_child_row, "t3", _THREE_TERMS),
+                _text_only_row(
+                    make_child_row, "all", "the ReAct agent tool calling loop"
+                ),
+            ]
+        )
+
+        result = await hybrid_search(
+            collection,
+            _REACT_QUESTION,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert compound["minimumShouldMatch"] == len(_REACT_TERMS)
+        assert [hit.doc["_id"] for hit in result.hits] == ["all"]
+
+    async def test_one_shared_word_of_eight_is_not_a_candidate(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # The off-topic story: the physics paper shares only "vector" with an
+        # eight-term question (K = 4), so the text leg no longer carries it.
+        physics = _text_only_row(
+            make_child_row, "physics", "dark photon vector-like fermions"
+        )
+        collection = make_collection([physics])
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                "MongoDB Atlas Vector Search scalar binary quantization int8",
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert result.hits == []
+        assert result.search_mode == "hybrid"
+        assert _text_leg_lines(caplog) == [
+            "text leg: 0 candidate(s), 8 query term(s), min_should_match=4"
+        ]
+
+    async def test_long_query_sends_capped_clauses_and_k_over_the_cap(
+        self, make_collection, embedding_model, caplog
+    ) -> None:
+        # 300 distinct terms would be 1200 Lucene clauses — mongot raises
+        # (``maxClauseCount`` 1024) and the leg reads ``vector_only``.
+        collection = make_collection()
+        query = " ".join(f"term{i}" for i in range(300))
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                query,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        compound = collection.text_pipeline[0]["$search"]["compound"]
+        assert [clause["text"]["query"] for clause in compound["should"]] == [
+            f"term{i}" for i in range(_MAX_QUERY_TERMS)
+        ]
+        assert compound["minimumShouldMatch"] == 32
+        assert result.search_mode == "hybrid"
+        assert _text_leg_lines(caplog) == [
+            "text leg: 0 candidate(s), 64 query term(s), min_should_match=32"
+        ]
+
+    async def test_all_stop_word_query_sends_no_search_and_stays_hybrid(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        # M = 0: Atlas rejects an empty ``should``, and there is nothing to ask
+        # — the leg RAN and found nothing, so the vector leg alone decides.
+        collection = make_collection(
+            [_vector_candidate(make_child_row, "v0", 0.90)],
+            search_indexes=[
+                {"name": "vector_index", "status": "READY", "queryable": True}
+            ],
+        )
+
+        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
+            result = await hybrid_search(
+                collection,
+                "what is it",
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=_CHILD_FILTER,
+            )
+
+        assert not [p for p in collection.pipelines if _TEXT_STAGE in p[0]]
+        # No probe either — even though ``text_search_index`` is absent here.
+        assert "text_search_index" not in collection.search_index_probes
+        assert result.search_mode == "hybrid"
+        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
+        assert _text_leg_lines(caplog) == [
+            "text leg: 0 candidate(s), 0 query term(s), min_should_match=0"
+        ]
+
+    async def test_logs_the_line_on_a_leg_with_candidates(
+        self, make_collection, embedding_model, make_child_row, caplog
+    ) -> None:
+        collection = make_collection(
+            [
+                _text_only_row(make_child_row, "t3", _THREE_TERMS),
+                _text_only_row(make_child_row, "t3b", _THREE_TERMS),
             ]
         )
 
         with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
             await hybrid_search(
                 collection,
-                _TEXT_QUERY,
+                _REACT_QUESTION,
                 embedding_model,
                 _USER,
                 limit=10,
                 node_filter=_CHILD_FILTER,
             )
 
-        assert (
-            "text leg: 2 candidate(s), 1 kept at min_text_score=1.00 (top=2.431)"
-            in caplog.text
-        )
+        assert _text_leg_lines(caplog) == [
+            "text leg: 2 candidate(s), 5 query term(s), min_should_match=3"
+        ]
 
-    async def test_zero_bar_keeps_everything_and_still_logs_top(
-        self, make_collection, embedding_model, make_child_row, mocker, caplog
-    ) -> None:
-        # The operator turns the gate off: every $text hit fuses as before, and
-        # the line still reports ``top`` so the bar can be re-pinned from logs.
-        mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 0.0)
-        collection = make_collection(
-            [
-                _text_candidate(make_child_row, "t0", 0.2),
-                _text_candidate(make_child_row, "t1", 0.1),
-            ]
-        )
-
-        with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
-            result = await hybrid_search(
-                collection,
-                _TEXT_QUERY,
-                embedding_model,
-                _USER,
-                limit=10,
-                node_filter=_CHILD_FILTER,
-            )
-
-        assert sorted(hit.doc["_id"] for hit in result.hits) == ["t0", "t1"]
-        assert (
-            "text leg: 2 candidate(s), 2 kept at min_text_score=0.00 (top=0.200)"
-            in caplog.text
-        )
-
-    async def test_text_leg_gated_to_nothing_stays_hybrid(
-        self, make_collection, embedding_model, make_child_row
-    ) -> None:
-        # Every lexical candidate is too weak: the text leg answers ``[]`` — a
-        # RESULT, so the mode stays ``hybrid`` and the vector hit fuses alone.
-        collection = make_collection(
-            [
-                _vector_candidate(make_child_row, "v0", 0.90),
-                _text_candidate(make_child_row, "t0", 0.3),
-            ]
-        )
-
-        result = await hybrid_search(
-            collection,
-            _TEXT_QUERY,
-            embedding_model,
-            _USER,
-            limit=10,
-            node_filter=_CHILD_FILTER,
-        )
-
-        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
-        assert result.search_mode == "hybrid"
-
-    async def test_unavailable_text_leg_is_not_gated(
+    async def test_no_line_on_a_raised_leg(
         self, make_collection, embedding_model, make_child_row, caplog
     ) -> None:
-        # The text index is gone: degraded is not filtered — ``vector_only``,
-        # and no gate line, because the gate never saw a candidate.
+        # Degraded is not empty: ``vector_only``, the WARN, and no text line.
         collection = make_collection([_vector_candidate(make_child_row, "v0", 0.90)])
         _break_leg(collection, _TEXT_STAGE)
 
         with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
             result = await hybrid_search(
                 collection,
-                _TEXT_QUERY,
+                _REACT_QUESTION,
                 embedding_model,
                 _USER,
                 limit=10,
@@ -786,26 +1141,176 @@ class TestMinTextScore:
 
         assert result.search_mode == "vector_only"
         assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
-        assert "text leg:" not in caplog.text
+        assert _text_leg_lines(caplog) == []
+        assert "Text search leg unavailable" in caplog.text
 
-    async def test_empty_text_leg_logs_no_gate_line(
-        self, make_collection, embedding_model, make_child_row, caplog
+    @pytest.mark.parametrize(
+        ("node_filter", "message"),
+        [
+            pytest.param(
+                {"merged_into": None},
+                "node_filter key 'merged_into' is not a text_search_index filter "
+                "path (user_id, kind, type, subtype)",
+                id="key-outside-the-filter-paths",
+            ),
+            pytest.param(
+                {"type": {"$in": ["chunk", "person"]}},
+                "node_filter value for 'type' must be a str or ObjectId",
+                id="non-scalar-value",
+            ),
+        ],
+    )
+    async def test_unsupported_node_filter_raises_before_any_aggregate(
+        self, make_collection, embedding_model, node_filter: dict, message: str
     ) -> None:
-        # No candidates → nothing to gate and no ``top`` to report.
-        collection = make_collection([_vector_candidate(make_child_row, "v0", 0.90)])
+        # A programming error must raise — never read as a dead leg
+        # (``vector_only``) — and no ``$search`` may have been sent.
+        collection = make_collection()
+
+        with pytest.raises(ValueError) as excinfo:
+            await hybrid_search(
+                collection,
+                _REACT_QUESTION,
+                embedding_model,
+                _USER,
+                limit=10,
+                node_filter=node_filter,
+            )
+
+        assert message in str(excinfo.value)
+        assert not [p for p in collection.pipelines if _TEXT_STAGE in p[0]]
+
+    @pytest.mark.parametrize(
+        "text_entry",
+        [
+            pytest.param(None, id="absent"),
+            pytest.param(
+                {"name": "text_search_index", "status": "BUILDING", "queryable": False},
+                id="building",
+            ),
+        ],
+    )
+    async def test_empty_leg_on_an_unavailable_index_reads_vector_only(
+        self, make_collection, embedding_model, make_child_row, caplog, text_entry
+    ) -> None:
+        # ``$search`` on an absent index answers ``[]`` without raising (task
+        # 190's spike) — so the empty leg is confirmed against the catalogue.
+        collection = make_collection(
+            [_vector_candidate(make_child_row, "v0", 0.90)],
+            search_indexes=[
+                {"name": "vector_index", "status": "READY", "queryable": True},
+                *([text_entry] if text_entry else []),
+            ],
+        )
 
         with caplog.at_level(logging.INFO, logger="tree.memory.rag.search"):
             result = await hybrid_search(
                 collection,
-                _OFF_TOPIC,
+                _REACT_QUESTION,
                 embedding_model,
                 _USER,
                 limit=10,
                 node_filter=_CHILD_FILTER,
             )
 
+        assert result.search_mode == "vector_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
+        assert collection.search_index_probes == ["text_search_index"]
+        assert "search index 'text_search_index'" in caplog.text
+        assert "the query runs vector_only" in caplog.text
+        # The leg RAN (it did not raise), so its line is written before the
+        # probe decides availability.
+        assert _text_leg_lines(caplog) == [
+            "text leg: 0 candidate(s), 5 query term(s), min_should_match=3"
+        ]
+
+    async def test_empty_leg_on_a_readiness_less_entry_stays_hybrid(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # The LOCAL mongot reports neither ``status`` nor ``queryable``.
+        collection = make_collection(
+            [_vector_candidate(make_child_row, "v0", 0.90)],
+            search_indexes=[
+                {"name": "vector_index", "type": "vectorSearch"},
+                {"name": "text_search_index", "type": "search"},
+            ],
+        )
+
+        result = await hybrid_search(
+            collection,
+            _REACT_QUESTION,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
         assert result.search_mode == "hybrid"
-        assert "text leg:" not in caplog.text
+
+    async def test_empty_leg_with_a_raising_probe_stays_hybrid(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        collection = make_collection([_vector_candidate(make_child_row, "v0", 0.90)])
+        collection.list_search_indexes = AsyncMock(
+            side_effect=RuntimeError("mongot unreachable")
+        )
+
+        result = await hybrid_search(
+            collection,
+            _REACT_QUESTION,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert result.search_mode == "hybrid"
+        assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
+
+    async def test_probe_never_runs_on_a_leg_with_candidates(
+        self, make_collection, embedding_model, make_child_row
+    ) -> None:
+        # Even with ``text_search_index`` missing from the catalogue: a leg
+        # that returned rows is self-evidently queryable.
+        collection = make_collection(
+            [_text_only_row(make_child_row, "t3", _THREE_TERMS)],
+            search_indexes=[
+                {"name": "vector_index", "status": "READY", "queryable": True}
+            ],
+        )
+
+        result = await hybrid_search(
+            collection,
+            _REACT_QUESTION,
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter=_CHILD_FILTER,
+        )
+
+        assert result.search_mode == "hybrid"
+        assert "text_search_index" not in collection.search_index_probes
+
+    async def test_graph_seed_search_shares_the_rule(
+        self, make_collection, embedding_model, make_entity_row, make_parent_row
+    ) -> None:
+        # graphrag (``node_filter={}``): an entity naming two of the three
+        # terms (K = 2) is a seed; the parent naming all three never is.
+        entity = make_entity_row(_USER, "e1", name="ReAct agent")
+        del entity["embedding"]
+        parent = make_parent_row(_USER, "p1", content="ReAct agent loop")
+        collection = make_collection([entity, parent])
+
+        result = await hybrid_search(
+            collection,
+            "ReAct agent loop",
+            embedding_model,
+            _USER,
+            limit=10,
+            node_filter={},
+        )
+
+        assert [hit.doc["_id"] for hit in result.hits] == ["e1"]
 
 
 class TestRRFFuse:

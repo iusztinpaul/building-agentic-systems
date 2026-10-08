@@ -9,10 +9,17 @@ pre-ADR-006 ``search_nodes`` did.
 
 **A Parent chunk is NEVER a seed, in either mode.** Parents carry no vector
 (no ``embedding`` field), so the vector stage cannot return one; the text stage
-excludes them explicitly with ``$nor`` because a `$text` query has no such
-guard. That invariant lives HERE, unconditionally, rather than in each caller's
-``node_filter`` — a caller that forgets it would silently start seeding graph
-expansion from rows the retrieval layer promises never to return.
+excludes them explicitly with a ``mustNot`` clause because the **Text search
+index** indexes a parent's content like any other row's. That invariant lives
+HERE, unconditionally, rather than in each caller's ``node_filter`` — a caller
+that forgets it would silently start seeding graph expansion from rows the
+retrieval layer promises never to return.
+
+The text stage is Atlas ``$search`` on ``text_search_index`` (ADR-015): a row is
+a text candidate iff it contains at least K of the query's M distinct content
+terms — the **Minimum match ratio**, ``K = max(1, ceil(ratio × M))`` — sent as
+``compound.should`` (one ``text`` clause per term) + ``minimumShouldMatch``.
+There is no score bar on that leg: RRF reads rank only.
 
 Atlas ``$vectorSearch`` pre-filter semantics (verified 2026-09-05 against
 https://www.mongodb.com/docs/vector-search/indexes/vector-search-type and
@@ -34,12 +41,21 @@ https://www.mongodb.com/docs/vector-search/indexes/vector-search-type and
 from __future__ import annotations
 
 import logging
+import math
+import re
 from typing import Any
 
 from beanie import PydanticObjectId
+from bson import ObjectId
 
 from tree.config.app_config import app_config
-from tree.memory.rag.indexing import VECTOR_INDEX_NAME, index_entry_is_queryable
+from tree.memory.rag.indexing import (
+    _TEXT_INDEX_FILTER_PATHS,
+    _TEXT_INDEX_TEXT_PATHS,
+    TEXT_SEARCH_INDEX_NAME,
+    VECTOR_INDEX_NAME,
+    index_entry_is_queryable,
+)
 from tree.memory.rag.types import HybridSearchResult, ScoredHit, SearchMode
 from tree.models.base import BaseEmbeddingModel
 from tree.observability import track
@@ -48,6 +64,46 @@ logger = logging.getLogger(__name__)
 
 # The one row shape that must never be a search seed (ADR-006 decision 2).
 _PARENT_ROW: dict[str, Any] = {"type": "chunk", "subtype": "parent"}
+
+# Lucene's 33 English stop words, verbatim: what ``lucene.english`` (the
+# **Text search index** analyzer) drops at index time, so a clause on one of
+# them can never match (task 190's spike).
+_LUCENE_ENGLISH_STOP_WORDS = frozenset(
+    "a an and are as at be but by for if in into is it no not of on or such "
+    "that the their then there these they this to was will with".split()
+)
+
+STOP_WORDS: frozenset[str] = _LUCENE_ENGLISH_STOP_WORDS | frozenset(
+    # Question / pronoun / auxiliary / function words — roughly NLTK's English
+    # list, split the way ``\w+`` splits contractions ("don't" → "don", "t").
+    "i me my myself we our ours ourselves you your yours yourself yourselves "
+    "he him his himself she her hers herself its itself them theirs themselves "
+    "what which who whom whose those am were been being have has had having "
+    "do does did doing because until while about against between through "
+    "during before after above below from up down out off over under again "
+    "further once here when where why how all any both each few more most "
+    "other some nor only own same so than too very s t can just don should "
+    "now d ll m o re ve y ain aren couldn didn doesn hadn hasn haven isn ma "
+    "mightn mustn needn shan shouldn wasn weren won wouldn could would might "
+    "must shall".split()
+)
+"""Query words that never count as content terms of the **Minimum match ratio**.
+
+A SUPERSET of Lucene's 33 English stop words: a word ``lucene.english`` drops
+can never match, so counting it toward M would silently raise K. The rest are
+words a question carries without naming its topic. Vendored — no NLTK
+dependency (ADR-015 §3).
+
+Good: ``"What is the ReAct agent?"`` → ``["react", "agent"]`` (the question
+words go, the topic stays). Bad: listing a DOMAIN word because it is common —
+dropping ``"vector"`` would make "vector database" match every "database" row.
+"""
+
+
+# Distinct content terms one text leg sends. mongot caps a query at 1024
+# Lucene clauses (``maxClauseCount``) and each term is 4 (one per text path),
+# so 256 terms kill the leg; 64 keeps a 4x margin over any real question.
+_MAX_QUERY_TERMS = 64
 
 
 class SearchUnavailableError(RuntimeError):
@@ -66,10 +122,10 @@ async def hybrid_search(
 ) -> HybridSearchResult:
     """Vector + text search over ``collection``, fused with RRF.
 
-    ``node_filter`` narrows BOTH stages to one row family and is merged into the
-    ``$vectorSearch.filter`` and the text ``$match`` alike — a filter applied to
-    only one stage would let the other stage smuggle the excluded rows back in
-    through fusion.
+    ``node_filter`` narrows BOTH stages to one row family — merged into the
+    ``$vectorSearch.filter``, ANDed after the pins in the ``$search`` filter — a
+    filter applied to only one stage would let the other stage smuggle the
+    excluded rows back in through fusion.
 
     ``user_id`` is pinned into both stages server-side, so cross-tenant rows are
     pruned before fusion rather than after. Returns at most ``limit`` hits,
@@ -197,8 +253,9 @@ def _gate_vector_candidates(
 
     The bar sits on ``vectorSearchScore`` (Atlas normalises cosine to
     ``(1 + cos) / 2``, an absolute similarity) and NEVER on the fused RRF score,
-    which is a rank statistic comparable only within one query. ``$text`` hits
-    clear their own bar in :func:`_gate_text_candidates`.
+    which is a rank statistic comparable only within one query. The text leg
+    has no score bar: :func:`_text_search` keeps rows sharing K of the query's
+    M terms (ADR-015 §2).
 
     ``top`` in the log line is the best CANDIDATE score, before the gate — it is
     what tells an operator whether the knob is set too high.
@@ -280,6 +337,41 @@ async def _search_index_is_queryable(
     return True
 
 
+def query_terms(query: str) -> list[str]:
+    """The DISTINCT content terms of ``query``, in first-occurrence order.
+
+    Lower-cased ``\\w+`` tokens minus :data:`STOP_WORDS`, deduped. ``M`` of the
+    **Minimum match ratio** is ``len(query_terms(query))``. Dedupe is
+    pre-stemming (``agent`` / ``agents`` are two terms) — the accepted
+    trade-off of ADR-015 §3; the index still stems both sides of a match.
+
+    Capped at the FIRST :data:`_MAX_QUERY_TERMS` (64) distinct terms, so K is
+    computed over the capped M: each term is one Lucene clause per text path,
+    and mongot rejects a query past 1024 clauses (``maxClauseCount``). Good: a
+    pasted 300-word paragraph keeps its first 64 content terms and the leg
+    still runs. Bad: raising the cap to 256 — 256 × 4 paths = 1024 clauses
+    trips ``maxClauseCount``, the leg raises and the query runs ``vector_only``.
+    """
+
+    terms = (t for t in re.findall(r"\w+", query.lower()) if t not in STOP_WORDS)
+    return list(dict.fromkeys(terms))[:_MAX_QUERY_TERMS]
+
+
+def min_should_match(term_count: int, ratio: float) -> int:
+    """K: how many of ``term_count`` terms a row must contain (ADR-015 §2).
+
+    ``0`` when there are no terms, else ``max(1, ceil(ratio × M))`` — ``0.0``
+    means "any one term", ``1.0`` "every term". Never above ``term_count``:
+    Atlas rejects a ``minimumShouldMatch`` larger than the number of ``should``
+    clauses. The product is rounded first because binary floats can overshoot
+    (``0.28 * 25 == 7.000000000000001`` would otherwise ask for 8 of 25 terms).
+    """
+
+    if term_count == 0:
+        return 0
+    return min(term_count, max(1, math.ceil(round(ratio * term_count, 9))))
+
+
 async def _text_search(
     collection: Any,
     query: str,
@@ -288,31 +380,76 @@ async def _text_search(
     limit: int,
     node_filter: dict[str, Any],
 ) -> list[dict[str, Any]] | None:
-    """Run ``$text`` on the memory collection — ``None`` when the leg raised.
+    """Atlas ``$search`` on ``text_search_index`` — ``None`` when unavailable.
 
-    (A standard text index, not Atlas Search.)
+    A row is a candidate iff it contains at least K of the query's M terms:
+    M = :func:`query_terms` (lower-cased words minus :data:`STOP_WORDS`,
+    deduped, capped at :data:`_MAX_QUERY_TERMS`), K = :func:`min_should_match` at ``query.text_min_match_ratio``
+    (the **Minimum match ratio**). One ``text`` clause per term over ALL four
+    text paths, so ``minimumShouldMatch`` counts terms, not paths. M == 0 (an
+    all-stop-word query) answers ``[]`` without a query — Atlas rejects an
+    empty ``should``, and the leg did run: the mode stays ``hybrid``.
 
-    The ``$nor`` clause is the parent-exclusion invariant: unlike the vector
-    stage, ``$text`` happily matches a parent's content, and a parent seed would
-    break both **Parent-document retrieval** (a parent has no ``parent_id``
-    pointing at a parent) and graph expansion (ADR-006: expansion starts at
-    parents ∪ entities, never at a row that IS the answer's container).
+    No gate on ``searchScore``: BM25 grows with repetition, not word overlap,
+    and RRF reads rank only. The ratio applies to every caller — graphrag's
+    seed search (``node_filter={}``) as well as rag's children.
 
-    Candidates that ran clear :func:`_gate_text_candidates` before fusion.
+    The ``mustNot`` clause is the parent-exclusion invariant: the index holds a
+    parent's content like any row's, and a parent seed would break both
+    **Parent-document retrieval** (a parent has no ``parent_id`` pointing at a
+    parent) and graph expansion (ADR-006: expansion starts at parents ∪
+    entities, never at a row that IS the answer's container).
+
+    Unavailable is TWO states, as for the vector leg: the aggregate raising,
+    and an EMPTY answer from an absent / not-queryable index (``$search`` on a
+    missing index answers ``[]`` — task 190's spike), confirmed by
+    :func:`_search_index_is_queryable` → ``vector_only``.
+
+    Raises:
+        ValueError: a ``node_filter`` key outside the index's filter paths or a
+            non-scalar value — a programming error, never a dead leg.
     """
 
+    _check_text_node_filter(node_filter)
+    terms = query_terms(query)
+    k = min_should_match(len(terms), app_config.query.text_min_match_ratio)
+    if not terms:
+        _log_text_leg(0, 0, 0)
+        return []
+
+    # The tenant / kind pins come FIRST and are ANDed with the caller's keys,
+    # never merged: a ``node_filter`` naming ``user_id`` must narrow the leg
+    # (to nothing), not swap in another tenant.
+    filters = [
+        _equals("user_id", user_id),
+        _equals("kind", "node"),
+        *(_equals(path, value) for path, value in node_filter.items()),
+    ]
     pipeline = [
         {
-            "$match": {
-                "user_id": user_id,
-                "kind": "node",
-                **node_filter,
-                "$nor": [_PARENT_ROW],
-                "$text": {"$search": query},
+            "$search": {
+                "index": TEXT_SEARCH_INDEX_NAME,
+                "compound": {
+                    "filter": filters,
+                    "mustNot": [
+                        {
+                            "compound": {
+                                "must": [
+                                    _equals(path, value)
+                                    for path, value in _PARENT_ROW.items()
+                                ]
+                            }
+                        }
+                    ],
+                    "should": [
+                        {"text": {"query": term, "path": list(_TEXT_INDEX_TEXT_PATHS)}}
+                        for term in terms
+                    ],
+                    "minimumShouldMatch": k,
+                },
             }
         },
-        {"$addFields": {"_search_score": {"$meta": "textScore"}}},
-        {"$sort": {"_search_score": -1}},
+        {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
         {"$limit": limit},
     ]
 
@@ -327,38 +464,46 @@ async def _text_search(
         )
         return None
 
-    # Gated OUTSIDE the ``try``: a gate bug must raise, not read as a dead leg.
-    return _gate_text_candidates(results) if results else []
+    _log_text_leg(len(results), len(terms), k)
+    if not results:
+        queryable = await _search_index_is_queryable(
+            collection, TEXT_SEARCH_INDEX_NAME, fallback_mode="vector_only"
+        )
+        return [] if queryable else None
+    return results
 
 
-def _gate_text_candidates(
-    candidates: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Drop ``$text`` candidates scoring below ``query.min_text_score`` (ADR-013 §7).
+def _check_text_node_filter(node_filter: dict[str, Any]) -> None:
+    """Every ``node_filter`` key must be a text-index filter path, every value a
+    scalar ``equals`` can match — else ``ValueError`` (raised OUTSIDE the leg's
+    ``try``: a programming error must not read as a dead leg)."""
 
-    The text-leg twin of :func:`_gate_vector_candidates`: runs only on a leg
-    that ANSWERED with candidates, before fusion; a leg gated down to nothing
-    returns ``[]`` (mode stays ``hybrid``), never ``None``.
+    for key, value in node_filter.items():
+        if key not in _TEXT_INDEX_FILTER_PATHS:
+            raise ValueError(
+                f"node_filter key {key!r} is not a {TEXT_SEARCH_INDEX_NAME} filter "
+                f"path ({', '.join(_TEXT_INDEX_FILTER_PATHS)})"
+            )
+        if not isinstance(value, str | ObjectId):
+            raise ValueError(
+                f"node_filter value for {key!r} must be a str or ObjectId, "
+                f"got {value!r}"
+            )
 
-    ``textScore`` is UNNORMALISED — a sum of per-term field-weighted
-    frequencies, corpus-relative — so the bar is PROVISIONAL and ``0.0``
-    disables it. The log line is written either way: at ``0.0`` it still
-    reports ``top``, which is what an operator re-pinning the bar reads.
 
-    It sits inside :func:`_text_search`, which BOTH memory modes call, so a bar
-    ``> 0`` also filters graphrag's seed search, not only rag's.
-    """
+def _equals(path: str, value: Any) -> dict[str, Any]:
+    return {"equals": {"path": path, "value": value}}
 
-    threshold = app_config.query.min_text_score
-    kept = [doc for doc in candidates if doc["_search_score"] >= threshold]
+
+def _log_text_leg(candidates: int, term_count: int, k: int) -> None:
+    """The per-query line of every text leg that RAN (ADR-015 §4)."""
+
     logger.info(
-        "text leg: %d candidate(s), %d kept at min_text_score=%.2f (top=%.3f)",
-        len(candidates),
-        len(kept),
-        threshold,
-        max(doc["_search_score"] for doc in candidates),
+        "text leg: %d candidate(s), %d query term(s), min_should_match=%d",
+        candidates,
+        term_count,
+        k,
     )
-    return kept
 
 
 def _rrf_fuse(

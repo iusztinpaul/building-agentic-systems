@@ -423,12 +423,15 @@ class TestOutcome:
     async def test_nothing_found_when_both_legs_gate_to_nothing(
         self, mocker, make_collection, make_child_row, embedding_model
     ) -> None:
-        # The REAL search: one child both legs return — a near-miss vector
-        # (0.3) and a one-word lexical brush (0.3). Each leg's own bar drops
-        # its copy, so nothing fuses and the outcome is honest; both legs
-        # ANSWERED, so the mode is still ``hybrid``.
+        # The REAL search: one child — a near-miss vector (0.3) that shares
+        # ONE of the query's two content terms. The vector bar drops its
+        # vector copy; at ratio 1.0 the text leg needs both terms (K = 2 of
+        # M = 2), so it matches nothing. Nothing fuses and the outcome is
+        # honest; both legs ANSWERED, so the mode is still ``hybrid``.
         mocker.patch("tree.memory.rag.search.app_config.query.min_vector_score", 0.65)
-        mocker.patch("tree.memory.rag.search.app_config.query.min_text_score", 1.0)
+        mocker.patch(
+            "tree.memory.rag.search.app_config.query.text_min_match_ratio", 1.0
+        )
         row = make_child_row(_USER, "c0", content="vector quantization")
         row["_search_score"] = 0.3
         collection = make_collection([row])
@@ -436,7 +439,7 @@ class TestOutcome:
         result = await retrieve_parents(
             _client(collection),
             _DATABASE,
-            "vector",
+            "vector database",
             embedding_model,
             _USER,
         )
