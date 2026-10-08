@@ -121,8 +121,18 @@ query:
   # dropped), K = max(1, ceil(ratio x M)) — e.g. "ReAct agent tool calling",
   # M = 4 → K = 2 at 0.5. 0.0 = any one term. No score bar on that leg. Every
   # text leg logs `text leg: N candidate(s), M query term(s),
-  # min_should_match=K`. PROVISIONAL 0.5 — re-pinned by task 192's eval, see
-  # ADR-015. Override with TREE_QUERY__TEXT_MIN_MATCH_RATIO=...
+  # min_should_match=K`. PROVISIONAL and owned by Chapter 7's evals. Override
+  # with TREE_QUERY__TEXT_MIN_MATCH_RATIO=...
+  # pinned live, 2026-10-09 — tasks/192 Log: local corpus 14 documents / 372
+  # child chunks, 4 off-topic vs 6 on-topic queries, N = text candidates.
+  # Decisive rows: "dark photon vector-like fermions" (M = 5) keeps 6 at 0.4
+  # (K = 2, every one on "vector" + "like") and 0 at 0.5 (K = 3); "recipe for
+  # sourdough bread" (M = 3) 1 at 0.3 ("recipe"), 0 from 0.4; "MongoDB Atlas
+  # Vector Search scalar binary quantization int8" (M = 8) 1 at 0.3, 0 from
+  # 0.4. On-topic never drops to 0 at any step (fewest at 0.5: "pydantic" 19).
+  # 0.5 is the lowest 0.1 step with every off-topic N = 0 and every on-topic
+  # N >= 1 (the separating window is 0.5-1.0). Re-pin with the same 10-query
+  # protocol after the corpus grows.
   text_min_match_ratio: 0.5
   # The no-query cap on EVERY whole-memory view, most-recent first
   # (`properties.date`, else `created_at`) — Full graph / rag Memory structure

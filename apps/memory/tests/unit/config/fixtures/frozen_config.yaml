@@ -96,6 +96,8 @@ query:
   min_vector_score: 0.70
   # Minimum match ratio of the text leg: K = max(1, ceil(ratio x M)) of the
   # query's M content terms; 0.0 = any one term (ADR-015 §2) — provisional.
+  # pinned live, 2026-10-09 — tasks/192 Log (lowest 0.1 step with all 4
+  # off-topic queries at 0 text candidates and all 6 on-topic at >= 1).
   text_min_match_ratio: 0.5
   # Full graph (no query): documents one read embeds / the Documents slider shows
   # on load, most-recent first; `properties.date`, else `created_at`.

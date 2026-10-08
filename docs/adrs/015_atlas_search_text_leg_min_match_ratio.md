@@ -1,6 +1,6 @@
 # ADR-015: An Atlas Search Text Leg Gated by a Minimum Match Ratio, Not a Score
 
-- **Status:** Accepted — amends [008](008_mcp_tool_contract.md) §3 (the text leg's rule is "K of M query terms", there is no text score bar), [012](012_mode_aware_memory_index_set.md) §1–§2 (`text_index` leaves the Beanie set; `ensure_indexes` owns BOTH mongot indexes and performs one retirement drop) and [013](013_horizon_scale_mcp_surface.md) §7 (`query.min_text_score` is replaced by `query.text_min_match_ratio`). Everything else in those ADRs stands.
+- **Status:** Accepted — amends [008](008_mcp_tool_contract.md) §3 (the text leg's rule is "K of M query terms", there is no text score bar), [012](012_mode_aware_memory_index_set.md) §1–§2 (`text_index` leaves the Beanie set; `ensure_indexes` owns BOTH mongot indexes and performs one retirement drop) and [013](013_horizon_scale_mcp_surface.md) §7 (`query.min_text_score` is replaced by `query.text_min_match_ratio`). Everything else in those ADRs stands. — §2's K is computed as `min(M, max(1, ceil(round(ratio × M, 9))))` (never above M; the product rounded so a binary float cannot overshoot a step) and §3's M is capped at the FIRST 64 distinct terms (`_MAX_QUERY_TERMS`: mongot's 1024 `maxClauseCount` ÷ 4 text paths, with margin), per task 191.
 - **Date:** 2026-10-08
 - **Deciders:** Paul (project owner)
 - **Context references:**

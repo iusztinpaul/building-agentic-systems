@@ -335,8 +335,11 @@ class QueryConfig(BaseModel):
     (ADR-015 §2): a row is a text candidate iff it contains at least
     ``K = max(1, ceil(ratio × M))`` of the query's M distinct content terms;
     ``0.0`` = any one term, ``1.0`` = all of them. There is no text score bar.
-    PROVISIONAL ``0.5`` — re-pinned by the on-topic vs off-topic eval in
-    ``tasks/192``'s Log; override with ``TREE_QUERY__TEXT_MIN_MATCH_RATIO=...``.
+    ``0.5`` is PROVISIONAL — pinned live, 2026-10-09 (``tasks/192`` Log): the
+    lowest 0.1 step at which 4 off-topic queries keep 0 text candidates and 6
+    on-topic ones keep at least 1 (at 0.4 "dark photon vector-like fermions"
+    still kept 6 rows on "vector" + "like"). Owned by Chapter 7's evals;
+    override per shell with ``TREE_QUERY__TEXT_MIN_MATCH_RATIO=...``.
     """
 
     top_k: int = 10
