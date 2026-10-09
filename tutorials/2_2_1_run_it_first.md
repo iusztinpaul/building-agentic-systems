@@ -13,7 +13,7 @@ All four commands run from the repository root. Point the environment to the loc
 ```bash
 make env-local
 make local-start
-make memory-signup USER_IDENTIFIER=paul@example.com
+make memory-signup USER_IDENTIFIER=pauliusztin@decodingai.com   # use YOUR OWN email
 make memory-run-data-pipeline SOURCE_FILE="sources/light.yaml"
 ```
 

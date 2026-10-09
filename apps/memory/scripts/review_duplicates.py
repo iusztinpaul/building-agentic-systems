@@ -13,12 +13,12 @@ Usage:
     # Confirm or reject a specific pair.
     uv --directory apps/memory run python scripts/review_duplicates.py \
         --user-id 507f... confirm \
-        person:alice person:alice s --reviewed-by alice@example.com \
+        person:alice person:alice s --reviewed-by pauliusztin@decodingai.com \
         [--strategy keep_primary|merge_properties|keep_aliases]
 
     uv --directory apps/memory run python scripts/review_duplicates.py \
         --user-id 507f... reject \
-        person:bob person:bobby --reviewed-by alice@example.com
+        person:bob person:bobby --reviewed-by pauliusztin@decodingai.com
 
     # Interactive walk (no subcommand): prompt for reviewer name once, then
     # walk pending pairs one at a time.

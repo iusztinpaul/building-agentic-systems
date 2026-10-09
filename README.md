@@ -142,14 +142,16 @@ make memory-check-db
 **4. Create your user.** Every pipeline runs under a `user_id`, and a fresh database has none. `signup` is idempotent and pins the new user as the **current user** — the singleton session pointer (`whoami`) that every pipeline and the harness default to, so you don't pass an id on each command.
 
 ```bash
-make memory-signup USER_IDENTIFIER=paul NAME="Paul Iusztin"
+make memory-signup USER_IDENTIFIER=pauliusztin@decodingai.com NAME="Paul Iusztin"
 make memory-whoami            # prints the current user (id, identifier, name)
 ```
 
-Already signed up (or juggling several users)? Skip `signup` and just repoint the current-user pointer at an existing user — by handle or id:
+> **Use your own email as `USER_IDENTIFIER`.** Every example in this repo uses `pauliusztin@decodingai.com` — replace it with yours. Once the MCP server runs on Prefect Horizon with auth on, it identifies each request by the email of the Horizon account that made it, so the identifier you sign up with must be exactly that email. Good: the email you log into Horizon with. Bad: a handle like `paul`, or a teammate's email — the server answers `configuration_error` for an email with no signed-up user.
+
+Already signed up (or juggling several users)? Skip `signup` and just repoint the current-user pointer at an existing user — by email or id:
 
 ```bash
-make memory-set-current-user USER_IDENTIFIER=paul    # or: USER_ID=<oid>
+make memory-set-current-user USER_IDENTIFIER=pauliusztin@decodingai.com    # or: USER_ID=<oid>
 ```
 
 **5. Serve the Prefect workers.** The pipelines are Prefect *deployments* — registered definitions that don't run until a worker is serving them, so start one before triggering anything below. The simplest path also reloads your local pipeline code on every (re)serve:
@@ -160,7 +162,7 @@ make memory-serve-workflows &   # in-process worker; (re)serve to load local cod
 
 (Step 2's Dockerized `prefect-worker` already serves every deployment from the in-container code, so if you're not iterating on pipeline code you can rely on that instead — just don't run both, or you'll get duplicate workers.)
 
-**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<handle>`. The data pipeline fills `documents`; the memory pipeline turns those into the `memory` collection — how much of it runs depends on `memory.mode` (see [Memory modes](apps/memory/README.md#memory-modes)).
+**6. Ingest → extract → index → query.** These run as the current user by default; override any one with `USER_ID=<oid>` or `USER_IDENTIFIER=<email>`. The data pipeline fills `documents`; the memory pipeline turns those into the `memory` collection — how much of it runs depends on `memory.mode` (see [Memory modes](apps/memory/README.md#memory-modes)).
 
 ```bash
 make memory-run-data-pipeline              # ingests the default sources (sources/backfill.yaml + sources/listen.yaml) → documents
@@ -171,7 +173,7 @@ make memory-visualize-structure            # interactive HTML (document → chun
 make memory-search QUERY="AI agents"       # ranked parent chunks as text (both modes)
 make memory-visualize-embeddings           # the embedding map of the latest clustering run (both modes)
 
-make memory-run-data-pipeline USER_IDENTIFIER=another@example.com  # one-off run as a different user
+make memory-run-data-pipeline USER_IDENTIFIER=pauliusztin@decodingai.com  # one-off run as a specific user
 
 # Or chain data → extract → index in one shot:
 make memory-run-pipeline                                          # default sources (backfill + listen)

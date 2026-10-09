@@ -144,12 +144,12 @@ deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Ad
 
 # --- Users & Session ---
 
-signup: # Create a user (idempotent on USER_IDENTIFIER) and set it current. Requires USER_IDENTIFIER=<handle>. Optional NAME="Display Name".
+signup: # Create a user (idempotent on USER_IDENTIFIER) and set it current. Requires USER_IDENTIFIER=<email>. Optional NAME="Display Name".
 	@if [ -z "$(USER_IDENTIFIER)" ]; then echo 'USAGE: make signup USER_IDENTIFIER=<handle e.g. email> [NAME="Display Name"]'; exit 1; fi
 	uv run python scripts/signup.py signup --user-identifier "$(USER_IDENTIFIER)" $(if $(NAME),--name "$(NAME)",)
 
-set-current-user: # Point the current-user session at an existing user. Requires USER_IDENTIFIER=<handle> or USER_ID=<oid>.
-	@if [ -z "$(USER_IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user USER_IDENTIFIER=<handle> | USER_ID=<oid>'; exit 1; fi
+set-current-user: # Point the current-user session at an existing user. Requires USER_IDENTIFIER=<email> or USER_ID=<oid>.
+	@if [ -z "$(USER_IDENTIFIER)" ] && [ -z "$(USER_ID)" ]; then echo 'USAGE: make set-current-user USER_IDENTIFIER=<email> | USER_ID=<oid>'; exit 1; fi
 	uv run python scripts/signup.py set-current $(if $(USER_IDENTIFIER),--user-identifier "$(USER_IDENTIFIER)",) $(if $(USER_ID),--user-id "$(USER_ID)",)
 
 whoami: # Print the current user (id, identifier, name).
@@ -194,14 +194,14 @@ run-dream-consolidation: # Trigger the dream-consolidation fan-out ETL via Prefe
 
 # --- Querying ---
 
-visualize-structure: # Render the MEMORY STRUCTURE of one user as an interactive HTML file under `.tree/graphs/` and open it, following memory.mode: in `rag` the document → parent chunk → child chunk tree (edges drawn from parent_id), in `graphrag` the knowledge graph. No QUERY: the 250 most-recent documents (query.full_graph_max_docs), 100 shown (MAX_DOCS=N embeds fewer). QUERY="…" narrows to the search results (rag: the retrieved parents + their documents and children; graphrag: the expanded subgraph); the Documents slider then ranks by relevance. OUTPUT=<path> pins the file. Defaults to the current user; USER_ID=<oid> / USER_IDENTIFIER=<handle> override.
+visualize-structure: # Render the MEMORY STRUCTURE of one user as an interactive HTML file under `.tree/graphs/` and open it, following memory.mode: in `rag` the document → parent chunk → child chunk tree (edges drawn from parent_id), in `graphrag` the knowledge graph. No QUERY: the 250 most-recent documents (query.full_graph_max_docs), 100 shown (MAX_DOCS=N embeds fewer). QUERY="…" narrows to the search results (rag: the retrieved parents + their documents and children; graphrag: the expanded subgraph); the Documents slider then ranks by relevance. OUTPUT=<path> pins the file. Defaults to the current user; USER_ID=<oid> / USER_IDENTIFIER=<email> override.
 	uv run python scripts/visualize_structure.py $(USER_FLAGS) $(if $(QUERY),--query "$(QUERY)",) $(if $(TOP_K),--top-k "$(TOP_K)",) $(if $(MAX_DOCS),--max-docs "$(MAX_DOCS)",) $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 search: # Search one user's memory and print the ranked parent chunks as TEXT (score, title, heading path, 300-char excerpt, matched children) — Parent-document retrieval, identical in both modes. Requires QUERY="…"; TOP_K=N caps the parents. Defaults to the current user; USER_ID / USER_IDENTIFIER override.
 	@if [ -z "$(QUERY)" ]; then echo 'USAGE: make memory-search QUERY="your query" [TOP_K=10]'; exit 1; fi
 	uv run python scripts/search_memory.py $(USER_FLAGS) --query "$(QUERY)" $(if $(TOP_K),--top-k "$(TOP_K)",)
 
-visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. Plots the chunks of the 250 most-recent documents (query.full_graph_max_docs) — the header says "N of M chunks"; the legend counts the whole run. READS only: run `make memory-run-clustering-pipeline` first — with no run it prints the message and exits 1; chunks ingested since it warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<handle>.
+visualize-embeddings: # Render the EMBEDDING MAP of one user (the latest clustering run) as an interactive HTML file under `.tree/graphs/` and open it. Plots the chunks of the 250 most-recent documents (query.full_graph_max_docs) — the header says "N of M chunks"; the legend counts the whole run. READS the run: with no run yet it draws the chunks unclustered (a PCA preview) and the first output line says to run `make memory-run-clustering-pipeline`; chunks ingested since a run warn on the first output line. HULLS=true outlines each cluster, OUTPUT=<path> pins the file. Defaults to the current user; override with USER_ID=<oid> or USER_IDENTIFIER=<email>.
 	uv run python scripts/visualize_embeddings.py $(USER_FLAGS) $(if $(filter true,$(HULLS)),--hulls,) $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 search-web: # On-demand Bing web search via Bright Data SERP. Pass QUERY="your query" [NUM_RESULTS=10] [COUNTRY=us] [LANGUAGE=en] [INGEST=true] [INGEST_TOP_K=N] [INGEST_URLS="a,b,c"].

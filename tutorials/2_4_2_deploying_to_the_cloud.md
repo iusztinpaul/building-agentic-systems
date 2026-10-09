@@ -192,12 +192,14 @@ Now, by running the [apps/memory/deploy/prefect_pipelines_setup.py](../apps/memo
 Before running the script, we must ensure that we have a user within our database by running the `make memory-signup` command. Additionally, through the `GROUPS` argument, we control whether we spin up only the data deployments, only the memory deployments, or all of them. At the moment we aim to deploy just the data pipelines.
 
 ```bash
-make memory-signup USER_IDENTIFIER=you@example.com
+make memory-signup USER_IDENTIFIER=pauliusztin@decodingai.com
 make memory-deploy-prefect-setup-up GROUPS=data
 make memory-deploy-prefect-setup-update GROUPS=data
 make memory-deploy-prefect-setup-down GROUPS=data
 make memory-deploy-prefect-setup-status
 ```
+
+Replace `pauliusztin@decodingai.com` with **your own email**. When we deploy the MCP server to Horizon with authentication on, every request is identified by the email of the Horizon account that sent it, so a user signed up under any other identifier (a handle like `paul`, or someone else's email) is never found and every tool call answers `configuration_error`.
 
 Outputs:
 
@@ -274,7 +276,7 @@ To sum up, to deploy the whole stack and run the backfill, you need to run the f
 ```bash
 make env-prod
 make memory-atlas-up
-make memory-signup USER_IDENTIFIER=you@example.com
+make memory-signup USER_IDENTIFIER=pauliusztin@decodingai.com   # your own Horizon account email
 make memory-deploy-prefect-setup-up GROUPS=data
 make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml"
 ```

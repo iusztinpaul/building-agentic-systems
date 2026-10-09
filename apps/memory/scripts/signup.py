@@ -17,8 +17,8 @@ pipeline ``run-*`` targets need as ``USER_ID``.
 
 Usage::
 
-    make memory-signup USER_IDENTIFIER=me@example.com NAME="Paul Iusztin"
-    make memory-set-current-user USER_IDENTIFIER=me@example.com
+    make memory-signup USER_IDENTIFIER=pauliusztin@decodingai.com NAME="Paul Iusztin"
+    make memory-set-current-user USER_IDENTIFIER=pauliusztin@decodingai.com
     make memory-whoami
 """
 
