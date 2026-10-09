@@ -51,9 +51,18 @@ export async function runHook(
     stderr: "inherit",
   });
 
-  const stdin = proc.stdin as unknown as { write: (s: string) => void; end: () => void };
-  stdin.write(`${JSON.stringify(context)}\n`);
-  stdin.end();
+  const stdin = proc.stdin as unknown as {
+    write: (s: string) => unknown;
+    end: () => unknown;
+  };
+  try {
+    stdin.write(`${JSON.stringify(context)}\n`);
+    await stdin.end();
+  } catch (err) {
+    // Reading stdin is optional: a hook like `echo '{...}'` exits without it,
+    // closing the pipe while we still write — EPIPE. Only that is tolerated.
+    if ((err as { code?: string }).code !== "EPIPE") throw err;
+  }
 
   const timeout = setTimeout(() => proc.kill(), HOOK_TIMEOUT_MS);
   try {

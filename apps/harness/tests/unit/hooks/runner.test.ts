@@ -52,6 +52,17 @@ describe("runHook", () => {
     expect(result.exitCode).toBe(1);
     expect(result.parsed).toBeUndefined();
   });
+
+  test("a hook that never reads stdin does not crash the runner (EPIPE)", async () => {
+    // A context far past the pipe buffer (~64 KiB): the hook exits without
+    // reading it, so the write hits a closed pipe every time, not by chance.
+    const result = await runHook(
+      { command: `echo '{"prompt":"rewritten"}'` },
+      { event: "UserPromptSubmit", prompt: "x".repeat(1_000_000) },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.parsed).toEqual({ prompt: "rewritten" });
+  });
 });
 
 describe("runMatchingHooks", () => {
