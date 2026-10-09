@@ -150,7 +150,7 @@ class TestModalUsageRecording:
         usage.total_tokens = 42
         response = MagicMock()
         response.usage = usage
-        response.data = [MagicMock(embedding=[0.1] * 2048)]
+        response.data = [MagicMock(index=0, embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -167,7 +167,7 @@ class TestModalUsageRecording:
         model = self._model()
         response = MagicMock()
         response.usage = None
-        response.data = [MagicMock(embedding=[0.1] * 2048)]
+        response.data = [MagicMock(index=0, embedding=[0.1] * 2048)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         await model.embed(["hello"])
@@ -186,7 +186,7 @@ class TestModalUsageRecording:
         vector = [0.9] * 2048
         response = MagicMock()
         response.usage = MagicMock(total_tokens=5)
-        response.data = [MagicMock(embedding=vector)]
+        response.data = [MagicMock(index=0, embedding=vector)]
         model._client.embeddings.create = AsyncMock(return_value=response)
 
         result = await model.embed(["hello"])

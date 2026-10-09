@@ -200,8 +200,8 @@ async def _embed_batch(
     Embedding is delegated to :func:`tree.memory.embedding_text.embed_texts`,
     which packs the texts into synchronous requests bounded by
     ``models.embedding_batch``. The returned vectors are
-    positionally aligned with ``docs`` (across multiple requests), so the zip
-    below is safe.
+    positionally aligned with ``docs`` (across multiple requests); the zip
+    below is strict, so a length mismatch raises instead of dropping rows.
 
     Embeds as ``document`` (ADR-009 §5): the backfill refills exactly the
     vectors the inline path persists, so it must use the same **Embedding
@@ -221,7 +221,7 @@ async def _embed_batch(
         UpdateOne(
             {"_id": doc["_id"]}, {"$set": {"embedding": to_stored_vector(vector)}}
         )
-        for doc, vector in zip(docs, vectors)
+        for doc, vector in zip(docs, vectors, strict=True)
         if vector
     ]
     if ops:

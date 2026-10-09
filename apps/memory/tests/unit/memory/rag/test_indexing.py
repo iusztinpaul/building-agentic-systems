@@ -1363,6 +1363,33 @@ class TestEmbedNodesIsBackfillOnly:
         )
         assert "(1 skipped, will retry)" in summary
 
+    async def test_fewer_vectors_than_docs_raises_and_writes_nothing(
+        self, mocker
+    ) -> None:
+        """A short vector list must fail the batch, not leave the tail docs
+        unembedded as if they had been skipped."""
+
+        docs = [
+            {"_id": "person:alice", "type": "person", "kind": "node"},
+            {"_id": "person:bob", "type": "person", "kind": "node"},
+        ]
+        collection = AsyncMock()
+        collection.find = MagicMock(
+            return_value=AsyncMock(to_list=AsyncMock(return_value=docs))
+        )
+        client = _wire_client(collection)
+        mocker.patch(
+            "tree.memory.rag.indexing.embed_texts",
+            new=AsyncMock(return_value=[[0.1, 0.2, 0.3, 0.4]]),
+        )
+
+        with pytest.raises(ValueError, match="zip"):
+            await embed_nodes(
+                client, "test_db", _SpyEmbeddingModel(dimensions=4), _TEST_USER_ID
+            )
+
+        collection.bulk_write.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # Embedding role on the backfill (ADR-009 decision 5)

@@ -493,7 +493,7 @@ async def _embed_children(
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
-        return dict(zip(texts, vectors))
+        return dict(zip(texts, vectors, strict=True))
 
 
 embed_children_task = task(
@@ -1196,7 +1196,7 @@ async def _embed_entities(
             len(texts),
             len(vectors[0]) if vectors else 0,
         )
-        return dict(zip(texts, vectors))
+        return dict(zip(texts, vectors, strict=True))
 
 
 embed_entities_task = task(

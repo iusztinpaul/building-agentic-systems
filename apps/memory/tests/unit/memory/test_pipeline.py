@@ -515,6 +515,23 @@ class TestEmbedChildrenTask:
         assert embed_children_task.name == "embed-children"
 
 
+class TestEmbedTasksRejectAShortVectorList:
+    """The ``text -> vector`` map must never drop a text's vector silently."""
+
+    @pytest.mark.parametrize(
+        "task_fn", [_embed_children, _embed_entities], ids=["children", "entities"]
+    )
+    async def test_fewer_vectors_than_texts_raises(self, mocker, task_fn) -> None:
+        model = MagicMock()
+        model.embed = AsyncMock(return_value=[[0.1, 0.2]])
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+
+        with pytest.raises(ValueError, match="zip"):
+            await task_fn(["a", "b"], embedding_identity="voyage:voyage-4:1024")
+
+
 # ---------------------------------------------------------------------------
 # Task ③ — load_rag_rows
 # ---------------------------------------------------------------------------

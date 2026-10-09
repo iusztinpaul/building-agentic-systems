@@ -1,6 +1,8 @@
 import abc
 from typing import Any, Literal
 
+from tree.models.exceptions import ExtractionError
+
 # The **Embedding role**: which side of retrieval a text is on (ADR-009 §5).
 # ``"query"`` is a user question, ``"document"`` is a text that gets persisted
 # and later retrieved; ``None`` means symmetric — no role at all.
@@ -50,3 +52,27 @@ class BaseEmbeddingModel(abc.ABC):
         The role is per CALL, never per instance: one model object serves both
         the indexing path (``"document"``) and the query path (``"query"``).
         """
+
+
+def vectors_in_input_order(
+    indexed: list[tuple[int, list[float]]], n_inputs: int, *, provider: str
+) -> list[list[float]]:
+    """Return a response's vectors in input order — exactly one per input.
+
+    Providers tag each vector with the ``index`` of its input; downstream code
+    pairs vectors with inputs by position, so a short response would drop the
+    tail rows' vectors and a reordered one would write vectors onto the wrong
+    rows. Both are provider bugs, not transient failures: raise
+    ``ExtractionError`` WITHOUT ``status_code``, so ``_embed_chunk_resilient``
+    re-raises it instead of bisecting it into skipped ``[]`` rows.
+    """
+
+    ordered = sorted(indexed, key=lambda pair: pair[0])
+    indices = [index for index, _ in ordered]
+    if indices != list(range(n_inputs)):
+        shown = ", ".join(map(str, indices[:10])) + (", …" if len(indices) > 10 else "")
+        raise ExtractionError(
+            f"{provider} returned indices [{shown}] for {n_inputs} inputs "
+            f"(expected 0..{n_inputs - 1}); this batch's vectors were discarded."
+        )
+    return [vector for _, vector in ordered]

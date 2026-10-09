@@ -39,7 +39,11 @@ import openai
 from openai import AsyncOpenAI
 
 from tree.config.app_config import ModalEmbeddingModelConfig, app_config
-from tree.models.base import BaseEmbeddingModel, EmbeddingRole
+from tree.models.base import (
+    BaseEmbeddingModel,
+    EmbeddingRole,
+    vectors_in_input_order,
+)
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.modal_catalog import (
     MODAL_SERVER_NAME,
@@ -320,7 +324,16 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
             raise ExtractionError(f"Embedding call failed: {exc}") from exc
 
         _record_modal_usage(self._entry.repo_id, response)
-        return self._checked_vectors([item.embedding for item in response.data])
+        return self._checked_vectors(
+            vectors_in_input_order(
+                [
+                    (getattr(item, "index", position), item.embedding)
+                    for position, item in enumerate(response.data)
+                ],
+                len(texts),
+                provider=self._entry.repo_id,
+            )
+        )
 
     def _checked_vectors(self, vectors: list[list[float]]) -> list[list[float]]:
         """Assert the wire width, truncate, assert the returned width.

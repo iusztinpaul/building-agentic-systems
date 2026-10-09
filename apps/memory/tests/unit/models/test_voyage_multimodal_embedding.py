@@ -210,6 +210,49 @@ class TestVoyageMultimodalEmbed:
         )
         assert len(payload["inputs"]) == 3
 
+    async def test_embed_raises_when_response_has_fewer_vectors_than_inputs(
+        self, model
+    ) -> None:
+        response_data = {
+            "data": [
+                {"index": 0, "embedding": [0.1]},
+                {"index": 1, "embedding": [0.2]},
+            ]
+        }
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+
+            with pytest.raises(
+                ExtractionError, match=r"indices \[0, 1\] for 3 inputs"
+            ) as exc_info:
+                await model.embed(["a", "b", "c"])
+
+        # No 400: ``_embed_chunk_resilient`` must re-raise a provider bug,
+        # never bisect it into skipped ``[]`` rows.
+        assert exc_info.value.status_code is None
+
+    async def test_embed_returns_a_reordered_response_in_input_order(
+        self, model
+    ) -> None:
+        response_data = {
+            "data": [
+                {"index": 2, "embedding": [0.3]},
+                {"index": 0, "embedding": [0.1]},
+                {"index": 1, "embedding": [0.2]},
+            ]
+        }
+        mock_resp = _mock_aiohttp_response(status=200, json_data=response_data)
+        mock_session, _ = _mock_aiohttp_session(mock_resp)
+
+        with patch("aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = mock_session
+            result = await model.embed(["a", "b", "c"])
+
+        assert result == [[0.1], [0.2], [0.3]]
+
 
 class TestVoyageMultimodalRateLimitRetry:
     """The 429 exponential-backoff loop was folded into this client from

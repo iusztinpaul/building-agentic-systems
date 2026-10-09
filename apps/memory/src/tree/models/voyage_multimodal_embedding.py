@@ -30,7 +30,11 @@ import logging
 import aiohttp
 
 from tree.config.app_config import app_config
-from tree.models.base import BaseEmbeddingModel, EmbeddingRole
+from tree.models.base import (
+    BaseEmbeddingModel,
+    EmbeddingRole,
+    vectors_in_input_order,
+)
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.models.throttle import acquire_voyage_slot
 from tree.observability import record_embedding_usage, track
@@ -248,7 +252,15 @@ class VoyageMultimodalEmbeddingModel(BaseEmbeddingModel):
                             )
 
                         _record_voyage_cost(self._model, body)
-                        return [item["embedding"] for item in data]
+                        # A missing ``index`` falls back to the item's position.
+                        return vectors_in_input_order(
+                            [
+                                (item.get("index", position), item["embedding"])
+                                for position, item in enumerate(data)
+                            ],
+                            len(texts),
+                            provider="Voyage multimodal API",
+                        )
             except ExtractionError:
                 raise
             except Exception as exc:

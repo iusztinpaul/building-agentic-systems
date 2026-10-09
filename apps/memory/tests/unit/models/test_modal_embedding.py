@@ -62,11 +62,22 @@ def _vector(width: int, seed: int = 0) -> list[float]:
     return [((index + seed) % 97 + 1) / 97 for index in range(width)]
 
 
-def _response(vectors: list[list[float]], total_tokens: int | None = 7) -> Any:
-    """An OpenAI-shaped embeddings response over ``vectors``."""
+def _response(
+    vectors: list[list[float]],
+    total_tokens: int | None = 7,
+    indices: list[int] | None = None,
+) -> Any:
+    """An OpenAI-shaped embeddings response over ``vectors``.
 
+    Each item carries its ``index`` (position by default), as the wire does.
+    """
+
+    indices = list(range(len(vectors))) if indices is None else indices
     return SimpleNamespace(
-        data=[SimpleNamespace(embedding=vector) for vector in vectors],
+        data=[
+            SimpleNamespace(index=index, embedding=vector)
+            for index, vector in zip(indices, vectors, strict=True)
+        ],
         usage=SimpleNamespace(total_tokens=total_tokens),
     )
 
@@ -591,6 +602,30 @@ class TestResponseLength:
 
         with pytest.raises(ExtractionError, match="returned 1024-d vectors"):
             await model.embed(["a", "b", "c"])
+
+    async def test_fewer_vectors_than_inputs_raises(self, server, openai) -> None:
+        model = _model(dimensions=None)
+        openai.answer = _response([_vector(2048), _vector(2048)])
+
+        with pytest.raises(
+            ExtractionError, match=r"indices \[0, 1\] for 3 inputs"
+        ) as excinfo:
+            await model.embed(["a", "b", "c"])
+
+        # No 400: ``_embed_chunk_resilient`` must re-raise a provider bug,
+        # never bisect it into skipped ``[]`` rows.
+        assert excinfo.value.status_code is None
+
+    async def test_a_reordered_response_comes_back_in_input_order(
+        self, server, openai
+    ) -> None:
+        raw = [_vector(2048, seed=seed) for seed in range(3)]
+        model = _model(dimensions=None)
+        openai.answer = _response([raw[2], raw[0], raw[1]], indices=[2, 0, 1])
+
+        vectors = await model.embed(["a", "b", "c"])
+
+        assert vectors == raw
 
 
 class TestRolePrompts:
