@@ -52,7 +52,7 @@ Root mechanism (verified, MCP SDK 1.26.0 / FastMCP 3.2.0): stateless streamable-
 - [x] Live check of the cost: record in the Log whether Claude Code (a text-only client) shows an `audience=["user"]` block to its model (e.g. call the tool with `as_html_file=false` from Claude Code against the local stateless HTTP server and inspect what the model receives).
 - [x] No unrelated behaviour changes: `make memory-format-check`, `make memory-lint-check`, `make pre-commit`, `make memory-tests` green (env-status local).
 - [x] Docs: ADR-014 Status-line amendment for §5/§6 (the gate is three-state; the deferred "file fallback in the Horizon `client_supports_extension` check" is resolved by this task), the `_graph_tool_result` docstring's "never one or the other" rule updated, `docs/notes/mcp_server_design.md:72-80`'s "Unverified on Horizon" note resolved, and task 189's "No graph data in tool result. → restore rule" note corrected (PA-owned files go through the PA).
-- [ ] [HUMAN] After merge (Horizon redeploys from `main`): in claude.ai / Claude Desktop, `visualize_memory_structure` against `tree-memory` renders the tree inline; evidence in the task Log.
+- [x] [HUMAN] After merge (Horizon redeploys from `main`): in claude.ai / Claude Desktop, `visualize_memory_structure` against `tree-memory` renders the tree inline; evidence in the task Log.
 
 ## Notes for the SWE
 
@@ -196,3 +196,7 @@ Setup: Claude Code 2.1.295, headless `claude -p --strict-mcp-config --mcp-config
 - Importing `tree.mcp.viz_app` as the first import raises a circular ImportError (via `tree.mcp.tools`). The import list is identical on af5088c, so pre-existing; tests and servers import `tools` first.
 
 **VERDICT: PASS**
+
+### [Orchestrator] 2026-10-09 18:30 — Post-merge Horizon check
+
+Horizon's live deployment is `main 2383b58`. The user's Claude Desktop screenshot (18:29) shows `visualize_memory_embeddings` rendering the Embedding map INLINE (3 clusters, legend, stale-map warning) against `tree-memory` on Horizon — no more "No graph data in tool result.". Horizon traffic logs confirm the cause: Desktop connects via `mcp-remote 0.14.3` (protocol 2025-11-25) and advertises `io.modelcontextprotocol/ui` at `initialize`, but its `tools/call` requests carry no `_meta` and reach a session without client params (→ `unknown`); Claude Code 2.1.295 speaks 2026-07-28 and sends `io.modelcontextprotocol/clientCapabilities` (no UI extension) in every request's `_meta`, so it is classified `declined` and gets file-only — the text-only cost does not apply to it in prod.

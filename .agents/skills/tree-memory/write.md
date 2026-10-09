@@ -19,7 +19,7 @@ Every ingest tool answers a **receipt**: `duplicate`, `source_uri`, `document_id
 ## Write → Read
 
 1. **`duplicate: false` → memory is written out-of-band.** Report `source_uri` and `flow_run_id`. An empty search right after a submit means "not written yet".
-2. **Every ingest makes the map stale.** Ingest never clusters, so the next `visualize_memory_embeddings` opens with the `no cluster assignment` line until `make memory-run-clustering-pipeline` runs. Say so when the user asks for the map after adding content.
+2. **Every ingest makes the map stale.** Ingest never clusters, so the next `visualize_memory_embeddings` opens with the `don’t have a 2D embedding` line until `make memory-run-clustering-pipeline` runs. Say so when the user asks for the map after adding content.
 3. **`duplicate: true` but search still finds nothing → the earlier run stored the source and failed to process it.** A re-ingest deduplicates and skips processing; offer `make memory-run-memory-pipeline MODE=online SOURCE_URIS=<source_uri>`.
    - Good: "It's stored but was never indexed — `make memory-run-memory-pipeline MODE=online SOURCE_URIS=https://…` will finish it."
    - Bad: calling `ingest_url` again.

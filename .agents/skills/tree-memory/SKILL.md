@@ -73,7 +73,7 @@ A tool marked `—` is absent in that mode; the mode file names the chain to use
 **Relay the map's two fixed answers verbatim**, as the answer itself:
 
 - A first line `No clustering run found for this user. Showing the raw embeddings. Trigger it manually.` — repeat it: the map has no topics yet, and clustering is manual only; offer to run `make memory-run-clustering-pipeline`.
-- A first line `N of M chunks have no cluster assignment (or a stale one) — run make memory-run-clustering-pipeline` — repeat it, then the rest: the map is real but under-reports the corpus.
+- A first line `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.` — repeat it, then the rest: the map is real but under-reports the corpus. Offer to run `make memory-run-clustering-pipeline`.
 
 **A visual answer carrying a `graphs://…html.gz` link** could not render inline: on `tree-memory-local` share the local path it also gives; on `tree-memory` (cloud) read the linked blob within its expiry (about 5 minutes), base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it; an expired link → re-run the visual tool once.
 

@@ -129,7 +129,8 @@ def unclustered_warning(embedding_map: EmbeddingMap) -> str | None:
     The warning contract of ADR-007 §8: chunks ingested after the last
     **Clustering run** (or carrying an older run's coordinates) cannot be
     placed, so the map silently under-reports the corpus. The line names both
-    numbers and the command that fixes it.
+    numbers and the two ways to fix it (cluster now, or wait for the offline
+    pipeline).
     """
 
     if embedding_map.run_id is None:
@@ -137,9 +138,9 @@ def unclustered_warning(embedding_map: EmbeddingMap) -> str | None:
     if embedding_map.unclustered <= 0:
         return None
     return (
-        f"{embedding_map.unclustered} of {embedding_map.total_children} chunks "
-        "have no cluster assignment (or a stale one) — run make "
-        "memory-run-clustering-pipeline"
+        f"{embedding_map.unclustered}/{embedding_map.total_children} chunks don’t "
+        "have a 2D embedding. Run the clustering algorithm manually or wait for "
+        "the scheduled offline pipeline to compute them."
     )
 
 

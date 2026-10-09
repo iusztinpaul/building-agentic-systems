@@ -786,8 +786,8 @@ class TestVisualizeMemoryEmbeddings:
         result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
 
         assert result.content[0].text.startswith(
-            "2 of 12 chunks have no cluster assignment (or a stale one) — run "
-            "make memory-run-clustering-pipeline"
+            "2/12 chunks don’t have a 2D embedding. Run the clustering algorithm "
+            "manually or wait for the scheduled offline pipeline to compute them."
         )
         assert "Embedding map:" in result.content[0].text
 

@@ -215,8 +215,8 @@ def test_unclustered_warning_reports_both_counts_and_the_command() -> None:
     warning = unclustered_warning(_map())
 
     assert warning == (
-        "3 of 50 chunks have no cluster assignment (or a stale one) — "
-        "run make memory-run-clustering-pipeline"
+        "3/50 chunks don’t have a 2D embedding. Run the clustering algorithm "
+        "manually or wait for the scheduled offline pipeline to compute them."
     )
 
 
@@ -432,8 +432,8 @@ def test_payload_carries_the_warning_when_chunks_are_unclustered() -> None:
     payload = to_embedding_map_payload(_map())
 
     assert payload["warning"] == (
-        "3 of 50 chunks have no cluster assignment (or a stale one) — "
-        "run make memory-run-clustering-pipeline"
+        "3/50 chunks don’t have a 2D embedding. Run the clustering algorithm "
+        "manually or wait for the scheduled offline pipeline to compute them."
     )
 
 
@@ -600,7 +600,7 @@ def test_render_embedding_map_file_carries_the_warning_and_every_cluster_label(
     render_embedding_map_file(payload, out)
 
     html = out.read_text(encoding="utf-8")
-    assert "have no cluster assignment (or a stale one)" in html
+    assert "don’t have a 2D embedding" in html
     for label in ("Cluster 0 topic", "Cluster 1 topic", "unclustered / stale"):
         assert label in html
 

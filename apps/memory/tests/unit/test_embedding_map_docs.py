@@ -40,7 +40,7 @@ class TestMemoryReadme:
             "#### Embedding map",  # the CLI subsection
             "make memory-visualize-embeddings",
             "visualize_memory_embeddings",  # the tool table row
-            "have no cluster assignment",  # the warning contract
+            "don’t have a 2D embedding",  # the warning contract
             "No clustering run found for this user",  # the no-run message
         ],
     )
@@ -86,7 +86,7 @@ class TestTreeMemorySkill:
     @pytest.mark.parametrize(
         "needle",
         [
-            "no cluster assignment (or a stale one)",
+            "don’t have a 2D embedding",
             "No clustering run found for this user",
         ],
     )

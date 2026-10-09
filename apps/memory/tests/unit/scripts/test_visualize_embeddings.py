@@ -152,8 +152,8 @@ class TestRenderedMap:
         result = CliRunner().invoke(cli_module.main, ["--no-open"])
 
         assert result.output.splitlines()[0] == (
-            "3 of 12 chunks have no cluster assignment (or a stale one) — run "
-            "make memory-run-clustering-pipeline"
+            "3/12 chunks don’t have a 2D embedding. Run the clustering algorithm "
+            "manually or wait for the scheduled offline pipeline to compute them."
         )
 
     def test_no_run_draws_the_preview_and_warns_on_the_first_line(
@@ -186,7 +186,7 @@ class TestRenderedMap:
 
         result = CliRunner().invoke(cli_module.main, ["--no-open"])
 
-        assert "no cluster assignment" not in result.output
+        assert "don’t have a 2D embedding" not in result.output
 
     @pytest.mark.parametrize(
         ("flag", "expected"), [("--hulls", True), ("--no-hulls", False)]

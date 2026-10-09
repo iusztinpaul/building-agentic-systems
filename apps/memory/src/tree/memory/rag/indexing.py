@@ -279,8 +279,8 @@ async def reset_embeddings(
     (2) exists because ``load_embedding_map`` reads a child as CURRENT when
     ``viz.run_id`` equals the latest run id, and re-embedding never touches
     ``viz`` — without it the **Embedding map** would keep drawing old-space
-    coordinates in silence. Cleared, the existing surfaces warn instead ("N of M
-    chunks have no cluster assignment (or a stale one)"). ``memory_clusters``
+    coordinates in silence. Cleared, the existing surfaces warn instead ("N/M
+    chunks don’t have a 2D embedding. …"). ``memory_clusters``
     rows are deliberately left alone: the next **Clustering run** replaces them
     wholesale.
 

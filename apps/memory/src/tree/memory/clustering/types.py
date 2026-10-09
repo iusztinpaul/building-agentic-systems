@@ -217,8 +217,8 @@ class EmbeddingMap(BaseModel):
     (``query.full_graph_max_docs``) — while ``clusters``, ``clustered``,
     ``noise``, ``total_children`` and ``unclustered`` describe the WHOLE run.
     ``total_children`` and ``unclustered`` drive the warning contract (ADR-007
-    §8): the output starts with "N of M chunks have no cluster assignment (or
-    a stale one)" whenever ``unclustered`` is non-zero.
+    §8): the output starts with "N/M chunks don’t have a 2D embedding. …"
+    whenever ``unclustered`` is non-zero.
 
     ``run_id is None`` is the **unclustered preview**: the user has embedded
     children but no Clustering run yet, so the points are a read-time PCA

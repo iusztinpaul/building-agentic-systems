@@ -17,7 +17,7 @@ Three outcomes that are NOT failures of the renderer:
   of the raw embeddings) and the FIRST line of stdout is the "No clustering run
   found … run make memory-run-clustering-pipeline" warning.
 * Chunks ingested since the last run → the FIRST line of stdout is the warning
-  "N of M chunks have no cluster assignment (or a stale one)"; those points are
+  "N/M chunks don’t have a 2D embedding. …"; those points are
   omitted from the map and counted in its legend.
 
 A separate command rather than a flag on ``visualize_structure.py``: that one

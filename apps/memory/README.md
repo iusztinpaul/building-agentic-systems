@@ -295,8 +295,7 @@ Three things to know:
   indexing pipeline right after, and re-run it if it fails: both the reset and the backfill are
   idempotent (a second reset matches 0 rows and writes nothing).
 - **The map goes stale on purpose.** The reset clears the child chunks' `cluster_id` / `viz`, so
-  `make memory-visualize-embeddings` warns "N of M chunks have no cluster assignment (or a stale
-  one)" instead of silently drawing coordinates from the old space. `memory_clusters` rows are left
+  `make memory-visualize-embeddings` warns "N/M chunks don’t have a 2D embedding. …" instead of silently drawing coordinates from the old space. `memory_clusters` rows are left
   alone — the next clustering run replaces them wholesale.
 
 `CONFIRM=yes` is the only guard: the command is destructive on whichever environment is active
@@ -421,8 +420,8 @@ It READS; it never clusters (ADR-007 Decision 8), so three outcomes are contract
   `No clustering run found for this user. Showing the raw embeddings. Trigger it manually.` — trigger it with
   `make memory-run-clustering-pipeline`.
 - **A stale map** — chunks ingested since the last run have no coordinates, so the FIRST line of
-  output is `N of M chunks have no cluster assignment (or a stale one) — run make
-  memory-run-clustering-pipeline`; those points are left off the map and counted in the legend as
+  output is `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.`
+  (fix it with `make memory-run-clustering-pipeline`); those points are left off the map and counted in the legend as
   "unclustered / stale (not shown)". Re-run the clustering phase to clear it.
 
 The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
