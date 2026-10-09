@@ -103,11 +103,6 @@ class EmbeddingBatchConfig(BaseModel):
     # second token-weighted limiter (an explicit deferred follow-up).
     max_total_tokens: int = Field(default=10_000)
     max_input_tokens: int = Field(default=32_000)
-    # YAML-only fan-out knob (#054): how many embed requests a single stage may
-    # dispatch concurrently. Default 1 keeps dispatch serial; the cross-flow
-    # `voyage-embeddings` GCL is the real throttle, this just bounds local fan-out
-    # (fail-open: an unreachable limiter warns and the call proceeds, task 178).
-    dispatch_concurrency: int = Field(default=1)
 
 
 class ModelsConfig(BaseModel):
@@ -358,7 +353,6 @@ class QueryConfig(BaseModel):
     top_k: int = 10
     max_hops: int = 1
     rrf_k: int = 60
-    embedding_batch_size: int = 64
     min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
     text_min_match_ratio: float = Field(0.5, ge=0.0, le=1.0, allow_inf_nan=False)
     embedding_timeout_seconds: float = Field(10.0, gt=0, allow_inf_nan=False)

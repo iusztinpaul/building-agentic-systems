@@ -14,6 +14,7 @@ from tree.config.app_config import (
     ClusteringConfig,
     ConcurrencyConfig,
     DreamConfig,
+    EmbeddingBatchConfig,
     EmbeddingConfig,
     HdbscanConfig,
     MCPConfig,
@@ -66,11 +67,10 @@ class TestLoadAppConfig:
         assert config.models.search_embedding.dimensions == 1024
         # #044: real-time request-batching caps. #054/ADR-002 dropped
         # max_total_tokens 320_000 → 10_000 (the shared free-tier Voyage TPM
-        # window) and added dispatch_concurrency.
+        # window).
         assert config.models.embedding_batch.max_inputs == 1000
         assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
-        assert config.models.embedding_batch.dispatch_concurrency == 1
         assert config.extraction.llm_concurrency == 5
         # #054: intra-run fan-out knobs.
         assert config.extraction.doc_concurrency == 1
@@ -94,7 +94,6 @@ class TestLoadAppConfig:
         assert config.models.embedding_batch.max_inputs == 1000
         assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
-        assert config.models.embedding_batch.dispatch_concurrency == 1
 
     def test_embedding_batch_caps_loaded_from_yaml(self, tmp_path):
         """Operator-tuned batching caps in YAML are read into the typed
@@ -533,20 +532,14 @@ class TestRunnerGlobalLimitBump:
 
 
 class TestExtractionConcurrencyKnobs:
-    """#054: the new intra-run fan-out knobs on ``extraction`` +
-    ``models.embedding_batch``, including the env-override hatch."""
+    """#054: the intra-run fan-out knobs on ``extraction``, including the
+    env-override hatch."""
 
     def test_extraction_fanout_knobs_loaded_from_default_yaml(self, frozen_config_path):
         config = load_app_config(frozen_config_path)
 
         assert config.extraction.doc_concurrency == 1
         assert config.extraction.dedup_concurrency == 8
-
-    def test_dispatch_concurrency_loaded_from_default_yaml(self, frozen_config_path):
-        config = load_app_config(frozen_config_path)
-
-        assert config.models.embedding_batch.dispatch_concurrency == 1
-        assert config.models.embedding_batch.max_total_tokens == 10_000
 
     def test_dedup_concurrency_env_override(self, tmp_path, monkeypatch):
         """``TREE_EXTRACTION__DEDUP_CONCURRENCY=4`` overrides the YAML default
@@ -568,6 +561,44 @@ class TestExtractionConcurrencyKnobs:
         config = load_app_config(custom)
 
         assert config.extraction.doc_concurrency == 3
+
+
+class TestRemovedEmbeddingBatchKnobs:
+    """Task 201: ``models.embedding_batch.dispatch_concurrency`` and
+    ``query.embedding_batch_size`` had no behaviour (dispatch is always
+    sequential; query embeds one text), so they were removed.
+
+    The models keep pydantic's default ``extra="ignore"``: a stale key is
+    dropped, never fatal, so an operator's leftover ``TREE_*`` override cannot
+    crash startup.
+    """
+
+    def test_models_no_longer_define_the_removed_knobs(self) -> None:
+        # A knob nothing reads must not creep back as a field.
+        assert "dispatch_concurrency" not in EmbeddingBatchConfig.model_fields
+        assert "embedding_batch_size" not in QueryConfig.model_fields
+
+    def test_stale_yaml_keys_and_env_overrides_are_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: an old YAML and leftover env overrides still name both knobs.
+        custom = tmp_path / "stale.yaml"
+        custom.write_text(
+            "models:\n"
+            "  embedding_batch:\n"
+            "    dispatch_concurrency: 1\n"
+            "query:\n"
+            "  embedding_batch_size: 64\n"
+        )
+        monkeypatch.setenv("TREE_MODELS__EMBEDDING_BATCH__DISPATCH_CONCURRENCY", "4")
+        monkeypatch.setenv("TREE_QUERY__EMBEDDING_BATCH_SIZE", "32")
+
+        # Act
+        config = load_app_config(custom)
+
+        # Assert: the load succeeds and neither knob survives onto the model.
+        assert not hasattr(config.models.embedding_batch, "dispatch_concurrency")
+        assert not hasattr(config.query, "embedding_batch_size")
 
 
 class TestGraphFileTtlConfig:

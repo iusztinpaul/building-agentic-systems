@@ -1075,31 +1075,6 @@ class TestEmbedChunkResilientDoesNotRateLimit:
         assert vectors == [[9.0, 9.0]]
 
 
-class TestDispatchConcurrencyDefault:
-    """``dispatch_concurrency=1`` (default) keeps dispatch sequential.
-
-    The knob is the seam to flip on only after the Voyage cap is lifted; at the
-    default it must not change request count or ordering vs the pre-task code.
-    """
-
-    async def test_default_one_preserves_request_count_and_order(self) -> None:
-        # Arrange: confirm the wired-in default is 1, then drive a multi-chunk
-        # batch and assert the request count + global ordering are unchanged.
-        from tree.config.app_config import app_config
-
-        assert app_config.models.embedding_batch.dispatch_concurrency == 1
-
-        model = _OrderEncodingEmbeddingModel()
-        texts = [f"t{i}" for i in range(7)]
-
-        vectors = await embed_in_batches(texts, model, max_inputs=3)
-
-        # Assert: identical to the pre-task sequential batcher — 3 + 3 + 1
-        # requests, vectors in global input order.
-        assert [len(c) for c in model.calls] == [3, 3, 1]
-        assert vectors == [[float(i)] for i in range(7)]
-
-
 class TestSanitizationIsDelegatedToTheCleaningModule:
     """ONE definition: the sanitizer lives in ``tree.memory.rag.cleaning``."""
 

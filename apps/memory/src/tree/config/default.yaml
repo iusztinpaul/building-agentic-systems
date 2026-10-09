@@ -71,7 +71,6 @@ models:
     max_inputs: 1000
     max_total_tokens: 10000
     max_input_tokens: 32000
-    dispatch_concurrency: 1
 
 extraction:
   llm_concurrency: 5
@@ -98,7 +97,6 @@ query:
   top_k: 10
   max_hops: 1
   rrf_k: 60
-  embedding_batch_size: 64
   # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion (the text
   # leg is gated by text_min_match_ratio below). Atlas normalises cosine to
   # (1 + cos) / 2, so this is an absolute similarity (the RRF score is not).
