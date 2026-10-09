@@ -181,6 +181,24 @@ async def test_dashboard_falls_back_to_text_without_ui_extension(mocker) -> None
     assert "2 nodes" in result
 
 
+async def test_dashboard_ships_payload_when_the_capability_is_unknown(mocker) -> None:
+    # Story: claude.ai on Horizon (stateless HTTP): no initialize-time params
+    # on this request, but the host has mounted the dashboard iframe.
+    mocker.patch(
+        "tree.mcp.dashboard_app.structured_query_memory",
+        new=AsyncMock(return_value=_seed_result()),
+    )
+    ctx = _make_ctx(ui_supported=False)
+    ctx.session.client_params = None
+
+    result = await memory_dashboard(ctx, query="alice")
+
+    assert isinstance(result, ToolResult)
+    assert len(_content_payload(result)["nodes"]) == 2
+    assert "does not render" not in result.content[0].text
+    assert "query_memory / search_memory" in result.content[0].text
+
+
 async def test_dashboard_empty_query_covers_full_graph(mocker) -> None:
     query_mock = mocker.patch(
         "tree.mcp.dashboard_app.structured_query_memory", new=AsyncMock()

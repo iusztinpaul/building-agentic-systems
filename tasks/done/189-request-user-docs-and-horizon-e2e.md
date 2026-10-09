@@ -331,3 +331,21 @@ $ make memory-tests
 **VERDICT: ACCEPT**
 
 Feature-level review of `request-scoped-users` (PR #46, tasks 185–189, ADR-014, glossary). Reviewed evidence from the Tester log entry; all machine-verifiable acceptance criteria verified from the user's POV. Reviewed runbook, tutorial, skill, README, .env.example and the two ADR Status-line notes against the code: every claim matches request_user.py / viz_app.py. The [HUMAN] Horizon checks (a)–(f) and the tutorial measurement sentence stay open by design. Hand off to the PR Reviewer.
+
+### [PA] 2026-10-09 17:35 — Correction to the Horizon checklist, items (e) and (f)
+
+**Corrections to the SWE entry above (not a rewrite; the original lines stand as written).**
+
+- (e) says `"No graph data in tool result." means task 188's restore rule applies.` That mapping was
+  wrong. Task 196 (`tasks/196-bug-mcp-apps-no-graph-data-on-horizon.md`) reproduced the empty iframe
+  deterministically: on stateless streamable-http (what Horizon runs) every `tools/call` lands on a fresh
+  session whose `client_params is None`, so `ctx.client_supports_extension` always answered `False` and
+  `_graph_tool_result` took the file branch — which carries no payload in ANY channel. The host mounts the
+  iframe from `tools/list`'s `_meta.ui.resourceUri` regardless of the per-call branch, so it rendered
+  "No graph data in tool result." The restore rule (ADR-014 §5: flip to `structured_content`-only) does
+  NOT apply and was never the cause; the capability gate is now three-state (`viz_app._ui_capability`).
+- (f)'s anticipated follow-up ("session capabilities not shared across Horizon instances") is filed as
+  `tasks/197-persist-mcp-client-capabilities-per-horizon-session.md`; its trigger was measured in 196
+  (text-only clients receive the `audience=["user"]` block on Horizon unless they pass
+  `as_html_file=true`).
+- (e) and (f) remain un-run [HUMAN] checks; the post-merge inline check now lives on task 196's last AC.

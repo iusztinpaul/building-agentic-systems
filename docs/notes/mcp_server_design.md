@@ -63,6 +63,9 @@ Tools on the file path: `visualize_memory_structure`, `visualize_memory_embeddin
 
 ### 3. The UI payload is sent twice
 
+**Resolved** (ADR-014 §5, task 188, PR #46): the payload now travels ONCE, in the `audience=["user"]`
+`content` block; the bullets below and their line cites read as history.
+
 - `_graph_tool_result` and `memory_dashboard` return the payload in a `content` JSON block marked
   `audience=["user"]` AND in `structured_content` (`viz_app.py:162`, `dashboard_app.py:122`).
 - The `content` block is the channel that works: the custom iframe reads it via `ontoolresult`;
@@ -77,7 +80,13 @@ Tools on the file path: `visualize_memory_structure`, `visualize_memory_embeddin
 - Session state is in-memory per instance ("sessions are stored in memory on each server instance",
   https://gofastmcp.com/deployment/http). If `tools/call` reaches an instance that never saw the
   `initialize`, a UI-capable client (Claude Desktop) may be treated as text-only and pushed onto the
-  fragile file path. **Unverified on Horizon** — one Claude Desktop call settles it.
+  fragile file path. **Verified (task 196):** on stateless streamable-http the MCP SDK builds a fresh
+  `ServerSession(stateless=True)` per request whose `client_params` stay `None`, so the two-state check
+  ALWAYS picked the file branch on Horizon, whatever the client advertised — and the host, which mounts
+  the iframe from `tools/list`'s `_meta.ui.resourceUri` regardless, showed "No graph data in tool
+  result.". The gate is now three-state (`viz_app._ui_capability`): an unknown capability answers the
+  payload block AND the `graphs://` link. Persisting the capabilities per Horizon `mcp-session-id` is
+  `tasks/197-persist-mcp-client-capabilities-per-horizon-session.md`.
 
 ### 5. One user is pinned at boot
 
@@ -147,7 +156,10 @@ Fixes problem 5 and gives Idea 1 its owner.
 ## Open checks before planning
 
 1. Which exact `horizon-actor-email` value and case does Horizon send for our account?
-2. Does a Claude Desktop call on Horizon get the inline view or the file? (problem 4)
-3. Does the inline view render on Claude Desktop with `structured_content` removed? (Idea 2)
+2. Does a Claude Desktop call on Horizon get the inline view or the file? (problem 4 — answered by
+   task 196: the file, always, until the three-state gate; see §4)
+3. Does the inline view render on Claude Desktop with `structured_content` removed? (Idea 2 — the
+   empty iframe seen on Horizon was problem 4, not this; the post-merge [HUMAN] check on task 196
+   closes it)
 4. The real exception behind the masked "Error reading resource" in the Horizon server logs — expected
    `FileNotFoundError` (problem 2) or `ValueError` for a `.html` name on `main`.

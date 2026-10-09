@@ -104,8 +104,9 @@ async def _dual_graph_result(
     builds a **Graph payload** nor branches on client capability itself. That
     branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
     which also serves ``visualize_memory_structure`` (ADR-005, decision 4): inline
-    MCP App iframe when the client renders App UIs, else a **Graph file**
-    owned by ``user_id`` behind an expiring ``graphs://`` resource link.
+    MCP App iframe when the client renders App UIs, a **Graph file** owned by
+    ``user_id`` behind an expiring ``graphs://`` resource link when it does
+    not, and both when a stateless request cannot tell.
 
     ``serialized`` is carried VERBATIM into the model-visible text of whatever
     comes back: these tools' contract is answering the user's question, so the
@@ -177,7 +178,9 @@ async def visualize_memory_structure(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser.
+    browser. A client that cannot display interactive MCP App views (e.g. a
+    terminal client such as Claude Code) should pass ``as_html_file=true``: it
+    then gets only the download, never the inline view's data.
 
     Args:
         query: Search query text — seeds the subgraph to visualize. Omit (empty)
@@ -186,7 +189,8 @@ async def visualize_memory_structure(
         max_hops: Hops of graph expansion around the seeds (default 2). Ignored
             with no query.
         as_html_file: Set true when the user explicitly asks for a downloadable
-            / openable HTML file instead of the inline interactive view.
+            / openable HTML file instead of the inline interactive view, or
+            when this client cannot display it.
         max_docs: With no ``query``: how many most-recent documents to embed
             (default from config, 250); the inline view shows the 100 most
             recent and a slider reveals the rest. Ignored with a ``query``.
@@ -277,7 +281,10 @@ async def query_memory(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser.
+    browser. A client that cannot display interactive MCP App views (e.g. a
+    terminal client such as Claude Code) should leave ``visualize`` false and,
+    for a picture, call ``visualize_memory_structure`` with
+    ``as_html_file=true``.
 
     Args:
         query: Natural language question about the knowledge graph.
@@ -344,7 +351,10 @@ async def search_memory(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser.
+    browser. A client that cannot display interactive MCP App views (e.g. a
+    terminal client such as Claude Code) should leave ``visualize`` false and,
+    for a picture, call ``visualize_memory_structure`` with
+    ``as_html_file=true``.
 
     Args:
         query: Search query text.

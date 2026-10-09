@@ -24,9 +24,14 @@ the ``graphs://`` resource.
 
 **Fallback (Option B).** Not every client renders MCP App UIs (e.g. the
 Claude Code terminal, or agentic surfaces that only consume tool text).
-:func:`_graph_tool_result` checks ``ctx.client_supports_extension(UI_EXTENSION_ID)``;
-when the UI extension is absent — or when the caller explicitly asks via
-``as_html_file`` — it renders the *same* graph into a self-contained HTML page
+:func:`_ui_capability` reads the client's initialize-time capabilities in THREE
+states: ``supported`` (the UI extension was advertised), ``declined`` (the
+client's params are known and lack it) and ``unknown`` (no params on this
+request — a STATELESS streamable-http server such as Prefect Horizon builds a
+fresh session per request that never saw ``initialize``, so the capability is
+invisible on ``tools/call``). When the extension is declined, the capability
+is unknown, or the caller explicitly asks via ``as_html_file``,
+:func:`_graph_tool_result` renders the *same* graph into a self-contained HTML page
 (data embedded inline, no ext-apps round-trip), gzips it and stores it as a
 **Graph file** in MongoDB (ADR-014 §4): one row owned by the **Request user**,
 named by an unguessable token, dropped by a TTL after
@@ -53,7 +58,13 @@ reads the tool result's ``content`` via ``ontoolresult`` — ``structuredContent
 is FastMCP's *Prefab*-renderer channel and is NOT forwarded to a custom iframe).
 That block is marked ``audience=["user"]`` so the iframe gets the full node/edge
 dump while the MODEL sees only the short text summary. The payload is sent once
-— no second copy counting against the host's response cap (ADR-014 §5).
+— no second copy counting against the host's response cap (ADR-014 §5). When
+the capability is ``unknown`` the answer carries BOTH that block and the
+``graphs://`` link: a UI host (which mounts the iframe from ``tools/list``'s
+``_meta.ui.resourceUri`` whatever the per-call answer) gets its data, and a
+text-only client keeps a working file — at the cost of one **Graph file** write
+per call and the payload block reaching clients that cannot use it (they opt
+out with ``as_html_file=true``, as every app tool's description says).
 """
 
 import gzip
@@ -62,7 +73,7 @@ import logging
 import re
 import secrets
 import webbrowser
-from typing import Any
+from typing import Any, Literal
 
 from beanie import PydanticObjectId
 from fastmcp import Context
@@ -133,6 +144,30 @@ def _minutes(n: int) -> str:
     return f"{n} minute" if n == 1 else f"{n} minutes"
 
 
+#: What the server knows about the client's MCP Apps support on THIS request.
+UiCapability = Literal["supported", "declined", "unknown"]
+
+
+def _ui_capability(ctx: Context) -> UiCapability:
+    """Whether the client renders MCP App views — ``unknown`` when unknowable.
+
+    ``ctx.client_supports_extension`` is two-state: it answers ``False`` both
+    for a client that did not advertise the UI extension AND for a request
+    whose session never saw the client's ``initialize``. The latter is every
+    ``tools/call`` on a STATELESS streamable-http server (Prefect Horizon): the
+    MCP SDK builds a fresh ``ServerSession(stateless=True)`` per request, whose
+    ``client_params`` stay ``None``. Such a request is ``unknown``, not
+    ``declined`` — as is a call outside any request context, where
+    ``ctx.session`` would raise.
+    """
+
+    if ctx.request_context is None or ctx.session.client_params is None:
+        return "unknown"
+    if ctx.client_supports_extension(UI_EXTENSION_ID):
+        return "supported"
+    return "declined"
+
+
 async def _graph_tool_result(
     ctx: Context,
     payload: dict[str, Any],
@@ -146,18 +181,17 @@ async def _graph_tool_result(
     the client can render.
 
     The ONE dual-path seam behind every graph-capable MCP tool (ADR-005,
-    decision 4) — both paths, chosen by client capability, never one or the
-    other:
+    decision 4) — both paths, chosen by :func:`_ui_capability`:
 
     * **Inline MCP App iframe** when the client supports the UI extension: the
       ``summary`` goes in a model-visible text block and the full node/edge
       payload rides in a second block marked ``audience=["user"]``, so the
       iframe gets the graph while the model reads only ``summary``.
-    * **Graph file** otherwise (or when ``as_html_file`` is set, ADR-014 §4):
-      the same payload is rendered to self-contained HTML, gzipped and stored
-      in MongoDB as one row owned by ``user_id`` under an unguessable
-      ``<token>.html.gz`` name that expires after
-      ``mcp.graph_file_ttl_seconds``. The result carries a
+    * **Graph file** when the client declined the extension (or when
+      ``as_html_file`` is set, ADR-014 §4): the same payload is rendered to
+      self-contained HTML, gzipped and stored in MongoDB as one row owned by
+      ``user_id`` under an unguessable ``<token>.html.gz`` name that expires
+      after ``mcp.graph_file_ttl_seconds``. The result carries a
       ``graphs://<token>.html.gz`` resource link (the **Graph download**) and
       the expiry, never a server path. Read the linked `graphs://…html.gz`
       resource — an `application/gzip` blob: write its base64 `blob` to a file
@@ -167,6 +201,11 @@ async def _graph_tool_result(
       ``.tree/graphs/<slug>-<stamp>.html``, open it best effort and name the
       path — so a stdio answer carries TWO names: the token in the URI, the
       slug+stamp on disk.
+    * **Both** when the capability is unknown (a stateless HTTP request, e.g.
+      on Prefect Horizon): the payload block AND the **Graph download** link,
+      so a UI host's iframe renders and a text-only client still has a file.
+      The JSON still travels once — a resource link is not a copy (ADR-014
+      §5). No local file: a stdio session always saw ``initialize``.
 
     Args:
         ctx: The MCP request context (capability check and transport).
@@ -175,14 +214,15 @@ async def _graph_tool_result(
             same ``{nodes, edges}`` shape plus the template's optional keys).
         summary: The model-visible text. Callers whose tool contract is
             answering a question (``query_memory`` / ``search_memory``) put
-            their serialized results in here — both branches keep it verbatim,
+            their serialized results in here — every branch keeps it verbatim,
             so the model never loses data to the visualization.
         user_id: The **Request user** — the owner of the **Graph file** row.
         query: Search query text, used to slug the stdio file name.
-        as_html_file: Force the file branch even for a UI-capable client.
+        as_html_file: Force the file branch alone, whatever the capability —
+            how a text-only client opts out of the payload block.
 
     Returns:
-        The ``ToolResult`` for either branch, or the ``storage_unavailable``
+        The ``ToolResult`` for the chosen branch, or the ``storage_unavailable``
         **Tool error envelope** (a ``str``) when the row cannot be written.
     """
 
@@ -190,33 +230,35 @@ async def _graph_tool_result(
     # payload is a "graph", an Embedding map is an "embedding map" (ADR-007 §2
     # — in rag mode there is no graph anywhere to confuse it with).
     noun = _payload_noun(payload)
+    capability = _ui_capability(ctx)
 
-    ui_supported = ctx.client_supports_extension(UI_EXTENSION_ID)
-    if ui_supported and not as_html_file:
-        # A CUSTOM HTML app's iframe reads the tool result's ``content`` via
-        # ``ontoolresult`` — ``structuredContent`` is FastMCP's *Prefab*-renderer
-        # channel and is NOT forwarded to a custom iframe. So the graph payload
-        # rides in a ``content`` JSON block; it's marked ``audience=["user"]`` so
-        # the iframe gets it while the MODEL still sees only ``summary``. That
-        # block is the ONLY copy of the payload (ADR-014 §5).
+    # A CUSTOM HTML app's iframe reads the tool result's ``content`` via
+    # ``ontoolresult`` — ``structuredContent`` is FastMCP's *Prefab*-renderer
+    # channel and is NOT forwarded to a custom iframe. So the graph payload
+    # rides in a ``content`` JSON block; it's marked ``audience=["user"]`` so
+    # the iframe gets it while the MODEL still sees only ``summary``. That
+    # block is the ONLY copy of the payload (ADR-014 §5).
+    payload_block = types.TextContent(
+        type="text",
+        text=json.dumps(payload),
+        annotations=types.Annotations(audience=["user"]),
+    )
+    if capability == "supported" and not as_html_file:
         return ToolResult(
             content=[
                 types.TextContent(
                     type="text",
                     text=f"{summary} (interactive {noun} view).",
                 ),
-                types.TextContent(
-                    type="text",
-                    text=json.dumps(payload),
-                    annotations=types.Annotations(audience=["user"]),
-                ),
+                payload_block,
             ],
         )
 
-    # Fallback: client can't render MCP App UIs, or a file was requested. The
-    # bytes go to Mongo, not the server's disk: the ``resources/read`` that
-    # follows may land on another instance (ADR-014 §4). Gzip at WRITE time —
-    # the blob the resource answers is the stored bytes, as is.
+    # The client can't (or may not) render MCP App UIs, or a file was
+    # requested. The bytes go to Mongo, not the server's disk: the
+    # ``resources/read`` that follows may land on another instance (ADR-014
+    # §4). Gzip at WRITE time — the blob the resource answers is the stored
+    # bytes, as is.
     html = render_graph_html(payload)
     name = secrets.token_urlsafe(16) + ".html.gz"
     try:
@@ -231,12 +273,36 @@ async def _graph_tool_result(
 
         return storage_error("graph file write", exc)
 
+    link = types.ResourceLink(
+        type="resource_link",
+        uri=f"graphs://{name}",  # type: ignore[arg-type]
+        name=name,
+        mimeType=GZIP_MIME,
+        description=(
+            f"gzip-compressed self-contained interactive {noun} — "
+            "base64-decode the blob, gunzip, open the .html"
+        ),
+    )
+    ttl = _minutes(_ttl_minutes())
+
+    if capability == "unknown" and not as_html_file:
+        # Stateless HTTP: nothing says whether this client renders the view
+        # its host may already have mounted, so answer for both. Never claim
+        # "this client does not render" — it may well have.
+        text = (
+            f"{summary} (interactive {noun} view). If this client cannot show "
+            f"the view, the same {noun} is also a self-contained download. "
+            f"{DOWNLOAD_CONTRACT} The link expires in about {ttl}."
+        )
+        return ToolResult(
+            content=[types.TextContent(type="text", text=text), payload_block, link]
+        )
+
     reason = (
         "you asked for an HTML file"
         if as_html_file
         else "this client does not render inline MCP App UIs"
     )
-    ttl = _minutes(_ttl_minutes())
     if ctx.transport == "stdio":
         # The local convenience: the server's disk IS the user's disk.
         path = _render_graph_file(payload, query=query)
@@ -267,21 +333,7 @@ async def _graph_tool_result(
             f"The link expires in about {ttl}."
         )
 
-    return ToolResult(
-        content=[
-            types.TextContent(type="text", text=text),
-            types.ResourceLink(
-                type="resource_link",
-                uri=f"graphs://{name}",  # type: ignore[arg-type]
-                name=name,
-                mimeType=GZIP_MIME,
-                description=(
-                    f"gzip-compressed self-contained interactive {noun} — "
-                    "base64-decode the blob, gunzip, open the .html"
-                ),
-            ),
-        ]
-    )
+    return ToolResult(content=[types.TextContent(type="text", text=text), link])
 
 
 @mcp.resource("graphs://{name}", mime_type=GZIP_MIME)

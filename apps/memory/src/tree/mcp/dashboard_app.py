@@ -27,13 +27,14 @@ from typing import Any
 
 from beanie import PydanticObjectId
 from fastmcp import Context
-from fastmcp.apps import UI_EXTENSION_ID, AppConfig, ResourceCSP
+from fastmcp.apps import AppConfig, ResourceCSP
 from fastmcp.tools import ToolResult
 from mcp import types
 
 from tree.mcp import request_user
 from tree.mcp.server import mcp
 from tree.mcp.tools import REQUEST_USER_ERRORS, request_user_error
+from tree.mcp.viz_app import _ui_capability
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
 from tree.memory.visualize.graph import to_graph_payload
@@ -118,12 +119,23 @@ async def memory_dashboard(
     label = repr(query) if query else "your full memory"
     summary = _summary(payload, label)
 
-    if not ctx.client_supports_extension(UI_EXTENSION_ID):
+    # The graph view's three-state rule (``viz_app._ui_capability``), minus the
+    # file: the dashboard has no standalone renderer, so ``unknown`` (a
+    # stateless HTTP request) answers the payload — a UI host has already
+    # mounted the iframe from ``tools/list`` and needs it.
+    capability = _ui_capability(ctx)
+    if capability == "declined":
         # Text-only client: the summary already carries the per-type breakdown.
         return (
             f"{summary} (This client does not render inline MCP App UIs — "
             "use query_memory / search_memory to inspect the details.)"
         )
+    view = (
+        "interactive dashboard view"
+        if capability == "supported"
+        else "interactive dashboard view; if this client cannot show it, use "
+        "query_memory / search_memory to inspect the details"
+    )
 
     # The iframe reads the tool result's ``content`` via ``ontoolresult`` —
     # the host does NOT forward ``structuredContent`` to a custom iframe (see
@@ -135,7 +147,7 @@ async def memory_dashboard(
         content=[
             types.TextContent(
                 type="text",
-                text=f"{summary} (interactive dashboard view).",
+                text=f"{summary} ({view}).",
             ),
             types.TextContent(
                 type="text",

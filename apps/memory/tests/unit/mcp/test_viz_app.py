@@ -43,6 +43,7 @@ from tree.mcp.viz_app import (
     DOWNLOAD_CONTRACT,
     GRAPH_VIEW_URI,
     _graph_tool_result,
+    _ui_capability,
     graph_file,
     graph_view,
 )
@@ -99,6 +100,21 @@ def _make_ctx(*, ui_supported: bool, transport: str = "streamable-http") -> Magi
     return ctx
 
 
+def _unknown_ctx(*, how: str, transport: str = "streamable-http") -> MagicMock:
+    """A ctx whose capability cannot be known — the stateless-HTTP shape.
+
+    ``client_supports_extension`` answers ``False`` here, exactly as FastMCP
+    does on a session that never saw ``initialize``.
+    """
+
+    ctx = _make_ctx(ui_supported=False, transport=transport)
+    if how == "stateless-session":
+        ctx.session.client_params = None
+    else:
+        ctx.request_context = None
+    return ctx
+
+
 @pytest.fixture
 def graphs_dir(mocker, tmp_path: Path) -> Path:
     """Where ``_render_graph_file`` writes by default — empty unless stdio wrote."""
@@ -149,6 +165,80 @@ async def test_graph_tool_result_keeps_summary_model_visible_and_payload_user_on
     assert payload_block.annotations.audience == ["user"]
     assert json.loads(payload_block.text) == payload
     assert result.structured_content is None
+
+
+@pytest.mark.parametrize(
+    ("ui_supported", "how", "expected"),
+    [
+        (True, None, "supported"),
+        (False, None, "declined"),
+        (False, "stateless-session", "unknown"),
+        (False, "no-request-context", "unknown"),
+    ],
+)
+def test_the_capability_has_three_states(
+    ui_supported: bool, how: str | None, expected: str
+) -> None:
+    ctx = _make_ctx(ui_supported=ui_supported) if how is None else _unknown_ctx(how=how)
+
+    assert _ui_capability(ctx) == expected
+
+
+@pytest.mark.usefixtures("ttl_300")
+@pytest.mark.parametrize("how", ["stateless-session", "no-request-context"])
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+async def test_an_unknown_capability_answers_the_payload_and_the_download(
+    graphs_dir: Path,
+    browser_open: MagicMock,
+    request_user_id: PydanticObjectId,
+    how: str,
+    transport: str,
+) -> None:
+    # Story: claude.ai on Horizon (stateless HTTP) — the host mounted the
+    # iframe from tools/list, the server cannot tell whether it did.
+    payload = to_graph_payload(_seed_result())
+
+    result = await _graph_tool_result(
+        _unknown_ctx(how=how, transport=transport),
+        payload,
+        "SUMMARY-SENTINEL",
+        user_id=request_user_id,
+    )
+
+    # Assert: the iframe's data (user-only, once) AND a working download.
+    text_block, payload_block, link_block = result.content
+    assert payload_block.annotations.audience == ["user"]
+    assert json.loads(payload_block.text) == payload
+    row = await _stored(link_block.name)
+    assert row.user_id == request_user_id
+    assert str(link_block.uri) == f"graphs://{row.name}"
+    # The text never claims the client cannot render: it may well have.
+    assert text_block.annotations is None
+    assert text_block.text.startswith("SUMMARY-SENTINEL (interactive graph view).")
+    assert "does not render" not in text_block.text
+    assert DOWNLOAD_CONTRACT in text_block.text
+    assert text_block.text.endswith("The link expires in about 5 minutes.")
+    # No local file or browser on top of a view the host may be showing.
+    assert list(graphs_dir.iterdir()) == []
+    browser_open.assert_not_called()
+    assert result.structured_content is None
+
+
+async def test_as_html_file_answers_only_the_download_when_the_capability_is_unknown(
+    graphs_dir: Path, browser_open: MagicMock, request_user_id: PydanticObjectId
+) -> None:
+    # Story: Claude Code on Horizon follows the tool description's opt-out.
+    result = await _graph_tool_result(
+        _unknown_ctx(how="stateless-session"),
+        to_graph_payload(_seed_result()),
+        "SUMMARY",
+        user_id=request_user_id,
+        as_html_file=True,
+    )
+
+    text_block, link_block = result.content
+    assert link_block.type == "resource_link"
+    assert text_block.text.startswith("SUMMARY. Since you asked for an HTML file")
 
 
 @pytest.mark.usefixtures("ttl_300")
