@@ -129,6 +129,12 @@ query:
   # N >= 1 (the separating window is 0.5-1.0). Re-pin with the same 10-query
   # protocol after the corpus grows.
   text_min_match_ratio: 0.5
+  # Bound on embedding the QUERY (the vector leg's first step). Past it, or on
+  # any embed error, the vector leg is unavailable and the query runs text_only
+  # (ADR-008 §3) instead of waiting out the ingestion client's 240 s 429 backoff
+  # past Horizon's 170 s request cut. PROVISIONAL and owned by Chapter 7's
+  # evals. Override with TREE_QUERY__EMBEDDING_TIMEOUT_SECONDS=...
+  embedding_timeout_seconds: 10
   # The no-query cap on EVERY whole-memory view, most-recent first
   # (`properties.date`, else `created_at`) — Full graph / rag Memory structure
   # (documents embedded) and the Embedding map (documents whose chunks are

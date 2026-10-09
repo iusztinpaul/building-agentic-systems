@@ -26,7 +26,9 @@ Two claims are pinned here:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -44,6 +46,7 @@ from tree.memory.rag.search import (
     query_terms,
 )
 from tree.models.base import EmbeddingRole
+from tree.models.exceptions import ExtractionError
 from tree.models.fake_model import FakeEmbeddingModel
 
 _USER = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -62,6 +65,9 @@ _MIN_VECTOR_SCORE = 0.65
 # The first-stage key that identifies each leg's pipeline.
 _VECTOR_STAGE = "$vectorSearch"
 _TEXT_STAGE = "$search"
+
+# Where the vector leg reads its bound on embedding the query.
+_EMBED_TIMEOUT = "tree.memory.rag.search.app_config.query.embedding_timeout_seconds"
 
 # Where the text leg reads the **Minimum match ratio**.
 _RATIO = "tree.memory.rag.search.app_config.query.text_min_match_ratio"
@@ -121,6 +127,29 @@ def _break_leg(collection, stage: str) -> None:
         return await working_aggregate(pipeline)
 
     collection.aggregate = flaky_aggregate
+
+
+class _DownEmbeddingModel(FakeEmbeddingModel):
+    """The embedding provider is down: every ``embed`` raises like Voyage does."""
+
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        raise ExtractionError("Voyage AI embedding failed: HTTP 503")
+
+
+class _SlowEmbeddingModel(FakeEmbeddingModel):
+    """The provider answers, but only after ``delay_s`` (backoff, slot wait)."""
+
+    def __init__(self, delay_s: float) -> None:
+        super().__init__(dimensions=4)
+        self._delay_s = delay_s
+
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        await asyncio.sleep(self._delay_s)
+        return await super().embed(texts, input_type)
 
 
 class TestChildOnlyFilter:
@@ -485,6 +514,85 @@ class TestSearchMode:
         ]
         assert len(warnings) == 1
         assert warnings[0].exc_info is not None
+
+    async def test_query_embedding_failure_reports_text_only(
+        self, make_collection, make_child_row
+    ) -> None:
+        # Arrange — Voyage / Modal is down while Mongo is fine: the question
+        # cannot be embedded, but the text leg can still answer it.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+
+        result = await hybrid_search(
+            collection, "alpha", _DownEmbeddingModel(), _USER, limit=10, node_filter={}
+        )
+
+        assert result.search_mode == "text_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
+        assert not [p for p in collection.pipelines if _VECTOR_STAGE in p[0]]
+
+    async def test_query_embedding_timeout_reports_text_only_within_bound(
+        self, make_collection, make_child_row, mocker
+    ) -> None:
+        # Arrange — the provider WOULD answer, after a wait far past the bound
+        # (a 429 backoff, a held ``voyage-embeddings`` slot, a cold start).
+        mocker.patch(_EMBED_TIMEOUT, 0.01)
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+
+        started = time.monotonic()
+        result = await hybrid_search(
+            collection,
+            "alpha",
+            _SlowEmbeddingModel(delay_s=5.0),
+            _USER,
+            limit=10,
+            node_filter={},
+        )
+        elapsed = time.monotonic() - started
+
+        assert result.search_mode == "text_only"
+        assert [hit.doc["_id"] for hit in result.hits] == ["c0"]
+        assert elapsed < 1.0
+
+    async def test_query_embedding_failure_and_broken_text_leg_raises(
+        self, make_collection, make_child_row
+    ) -> None:
+        # No embedding AND no text leg: there is no hit list to report.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+        _break_leg(collection, _TEXT_STAGE)
+
+        with pytest.raises(SearchUnavailableError, match="both unavailable"):
+            await hybrid_search(
+                collection,
+                "alpha",
+                _DownEmbeddingModel(),
+                _USER,
+                limit=10,
+                node_filter={},
+            )
+
+    async def test_query_embedding_failure_logs_its_own_warning(
+        self, make_collection, make_child_row, caplog
+    ) -> None:
+        # The model being down and mongot being down are different pages for
+        # an operator, so they must not share one WARNING line.
+        collection = make_collection([make_child_row(_USER, "c0", content="alpha")])
+
+        with caplog.at_level(logging.WARNING):
+            await hybrid_search(
+                collection,
+                "alpha",
+                _DownEmbeddingModel(),
+                _USER,
+                limit=10,
+                node_filter={},
+            )
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert [r.getMessage() for r in warnings] == [
+            "Query embedding unavailable; the query runs text-only"
+        ]
+        assert warnings[0].exc_info is not None
+        assert "HTTP 503" in caplog.text
 
 
 class TestSearchIndexIsQueryable:

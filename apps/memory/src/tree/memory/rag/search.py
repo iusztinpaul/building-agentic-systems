@@ -40,6 +40,7 @@ https://www.mongodb.com/docs/vector-search/indexes/vector-search-type and
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -122,7 +123,7 @@ _MAX_QUERY_TERMS = 64
 
 
 class SearchUnavailableError(RuntimeError):
-    """Both search legs raised, so no hit list exists — degraded, not empty."""
+    """Both search legs are unavailable, so no hit list exists — degraded, not empty."""
 
 
 @track(name="hybrid_search")
@@ -146,15 +147,17 @@ async def hybrid_search(
     pruned before fusion rather than after. Returns at most ``limit`` hits,
     best fused score first.
 
-    Each leg answers ``list[dict] | None``: ``None`` means the leg RAISED,
-    ``[]`` means it ran and matched nothing (ADR-008 §3). This function turns
+    Each leg answers ``list[dict] | None``: ``None`` means the leg is
+    unavailable (it raised, its index is absent or building, or — vector leg —
+    the query could not be embedded in time), ``[]`` means it ran and matched
+    nothing (ADR-008 §3). This function turns
     that pair into a **Search mode** — one dead leg is ``text_only`` /
     ``vector_only``, two live legs are ``hybrid`` even when both are empty —
     so a caller can tell "no matches" from "half the index is gone".
 
     Raises:
-        SearchUnavailableError: both legs raised; there is no hit list to
-            report, and an empty one would read as "nothing matches".
+        SearchUnavailableError: both legs are unavailable; there is no hit
+            list to report, and an empty one would read as "nothing matches".
     """
 
     vector_results = await _vector_search(
@@ -203,13 +206,21 @@ async def _vector_search(
 ) -> list[dict[str, Any]] | None:
     """Approximate-nearest-neighbour stage. ``None`` when the leg is unavailable.
 
-    Unavailable is TWO states, because ``$vectorSearch`` only raises for one of
-    them: the aggregate raising (mongot unreachable), and the aggregate quietly
-    answering ``[]`` because ``vector_index`` is absent or still building —
-    verified 2026-09-12 against the local mongot, which returns an empty result
-    set rather than an error for a missing index. Both must read as
-    ``text_only``, so the empty answer is confirmed against
-    :func:`_search_index_is_queryable` before it counts as "no matches".
+    Unavailable is THREE states, each read as ``text_only``:
+
+    * the query embedding failing or overrunning
+      ``query.embedding_timeout_seconds`` (Voyage / Modal down, slow, or every
+      embedding slot held by an ingestion run) — bounded so the query degrades
+      well inside Horizon's 170 s request cut;
+    * the aggregate raising (mongot unreachable);
+    * the aggregate quietly answering ``[]`` because ``vector_index`` is absent
+      or still building — verified 2026-09-12 against the local mongot, which
+      returns an empty result set rather than an error for a missing index. So
+      the empty answer is confirmed against :func:`_search_index_is_queryable`
+      before it counts as "no matches".
+
+    The first two log different WARNINGs, so an operator can tell the model
+    being down from mongot being down.
 
     No parent exclusion here: parents are written without an ``embedding`` and so
     are absent from the vector index — adding a filter clause for them would
@@ -220,7 +231,19 @@ async def _vector_search(
 
     # ``query`` is the user's question — the QUERY side of retrieval, searched
     # against a corpus of ``document`` vectors (ADR-009 §5).
-    query_vector = (await embedding_model.embed([query], input_type="query"))[0]
+    # ``except Exception`` like the aggregate below: an error inside ``embed``
+    # also reads as ``text_only``, and the WARNING keeps its traceback.
+    try:
+        vectors = await asyncio.wait_for(
+            embedding_model.embed([query], input_type="query"),
+            timeout=app_config.query.embedding_timeout_seconds,
+        )
+        query_vector = vectors[0]
+    except Exception:
+        logger.warning(
+            "Query embedding unavailable; the query runs text-only", exc_info=True
+        )
+        return None
 
     pipeline = [
         {

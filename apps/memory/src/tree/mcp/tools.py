@@ -126,10 +126,13 @@ ERROR_CONTRACT = (
 #: What "retrieval is DOWN" looks like, as opposed to "retrieval found
 #: nothing": the search legs gave up (:class:`SearchUnavailableError`), Mongo is
 #: unreachable (:class:`PyMongoError`), or the embedding provider failed
-#: (:class:`~tree.models.exceptions.ModelError` — the BASE, since both a
-#: Voyage ``ExtractionError`` and a bare ``ModelError`` from an unresolvable
-#: Modal endpoint escape ``embed()``). All three are transient infrastructure,
-#: so all three answer ``search_unavailable`` with ``retryable=True``.
+#: OUTSIDE a search leg (:class:`~tree.models.exceptions.ModelError` — the BASE,
+#: covering a Voyage ``ExtractionError`` and a bare ``ModelError`` from an
+#: unresolvable Modal endpoint). ``search_memory``'s query embedding never
+#: reaches it — that failure is the vector leg degrading to ``text_only`` —
+#: but graphrag's ``nl_query`` still embeds outside a leg. All three are
+#: transient infrastructure, so all three answer ``search_unavailable`` with
+#: ``retryable=True``.
 _RETRIEVAL_UNAVAILABLE = (SearchUnavailableError, PyMongoError, ModelError)
 
 

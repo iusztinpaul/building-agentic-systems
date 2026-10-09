@@ -340,6 +340,15 @@ class QueryConfig(BaseModel):
     on-topic ones keep at least 1 (at 0.4 "dark photon vector-like fermions"
     still kept 6 rows on "vector" + "like"). Owned by Chapter 7's evals;
     override per shell with ``TREE_QUERY__TEXT_MIN_MATCH_RATIO=...``.
+
+    ``embedding_timeout_seconds`` bounds embedding the QUERY, the first step of
+    the vector leg: past it (or on any embed error) the leg is unavailable and
+    the query runs ``text_only`` (ADR-008 §3). The query reuses the ingestion
+    client, whose 429 backoff alone waits 240 s, past Horizon's 170 s request
+    cut, so without the bound the call dies before it can degrade. ``10`` is
+    PROVISIONAL (a warm Voyage call answers in well under 1 s). Owned by
+    Chapter 7's evals; override per shell with
+    ``TREE_QUERY__EMBEDDING_TIMEOUT_SECONDS=...``.
     """
 
     top_k: int = 10
@@ -348,6 +357,7 @@ class QueryConfig(BaseModel):
     embedding_batch_size: int = 64
     min_vector_score: float = Field(0.70, ge=0.0, le=1.0)
     text_min_match_ratio: float = Field(0.5, ge=0.0, le=1.0, allow_inf_nan=False)
+    embedding_timeout_seconds: float = Field(10.0, gt=0, allow_inf_nan=False)
     # The no-query cap on EVERY whole-memory view (ADR-011 §7, ADR-013 §3): how
     # many most-recent documents the **Full graph** / rag **Memory structure**
     # embeds and whose chunks the **Embedding map** plots (250 since 2026-10-03,

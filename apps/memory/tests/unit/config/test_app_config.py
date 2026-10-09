@@ -745,6 +745,50 @@ class TestQueryConfig:
 
         assert config.query.text_min_match_ratio == 0.5
 
+    def test_embedding_timeout_seconds_default_override_and_env(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # ADR-008 §3: the bound on embedding the query before the vector leg
+        # gives up and the query runs text_only. PROVISIONAL 10 s in the typed
+        # default, default.yaml and the frozen fixture alike.
+        assert QueryConfig().embedding_timeout_seconds == 10.0
+        assert (
+            load_app_config(_DEFAULT_CONFIG_PATH).query.embedding_timeout_seconds
+            == 10.0
+        )
+        absent = tmp_path / "absent.yaml"
+        absent.write_text("query:\n  top_k: 5\n")
+        assert load_app_config(absent).query.embedding_timeout_seconds == 10.0
+
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  embedding_timeout_seconds: 3\n")
+        assert load_app_config(custom).query.embedding_timeout_seconds == 3.0
+
+        monkeypatch.setenv("TREE_QUERY__EMBEDDING_TIMEOUT_SECONDS", "0.001")
+        assert load_app_config(custom).query.embedding_timeout_seconds == 0.001
+
+    @pytest.mark.parametrize("value", ["0", "-1", "inf", "nan"])
+    def test_embedding_timeout_seconds_rejects_non_positive_or_unbounded(
+        self, value, tmp_path, monkeypatch
+    ) -> None:
+        # 0 would time out every query embedding (text_only forever); inf is
+        # the unbounded wait the knob exists to remove.
+        custom = tmp_path / "query.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+        monkeypatch.setenv("TREE_QUERY__EMBEDDING_TIMEOUT_SECONDS", value)
+
+        with pytest.raises(ValidationError) as excinfo:
+            load_app_config(custom)
+
+        assert "embedding_timeout_seconds" in str(excinfo.value)
+
+    def test_embedding_timeout_seconds_loaded_from_frozen_config(
+        self, frozen_config_path
+    ) -> None:
+        config = load_app_config(frozen_config_path)
+
+        assert config.query.embedding_timeout_seconds == 10.0
+
 
 class TestFullGraphCaps:
     """ADR-011 §7: ``query.full_graph_max_docs`` (how many most-recent documents
