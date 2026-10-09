@@ -707,52 +707,45 @@ class TestQueryConfig:
 
         assert load_app_config(custom).query.min_vector_score == 0.70
 
-    def test_min_text_score_default_override_and_bounds(self, tmp_path, monkeypatch):
-        # ADR-013 §7: the text leg's bar on the UNNORMALISED ``textScore``.
-        # Shipped OFF (0.0) — tasks/183's eval found no bar separating on-topic
-        # from off-topic queries — in the typed default, default.yaml and the
-        # frozen fixture alike; a YAML without the key keeps the typed default.
-        assert QueryConfig().min_text_score == 0.0
-        assert load_app_config(_DEFAULT_CONFIG_PATH).query.min_text_score == 0.0
+    def test_text_min_match_ratio_default_override_and_env(self, tmp_path, monkeypatch):
+        # ADR-015 §2: the share of a query's M content terms a text candidate
+        # must contain. PROVISIONAL 0.5 in the typed default, default.yaml and
+        # the frozen fixture alike; a YAML without the key keeps the typed one.
+        assert QueryConfig().text_min_match_ratio == 0.5
+        assert load_app_config(_DEFAULT_CONFIG_PATH).query.text_min_match_ratio == 0.5
         absent = tmp_path / "absent.yaml"
         absent.write_text("query:\n  top_k: 5\n")
-        assert load_app_config(absent).query.min_text_score == 0.0
+        assert load_app_config(absent).query.text_min_match_ratio == 0.5
 
         # The YAML key is READ (a value the typed default cannot fake) ...
         custom = tmp_path / "query.yaml"
-        custom.write_text("query:\n  min_text_score: 1.5\n")
-        assert load_app_config(custom).query.min_text_score == 1.5
+        custom.write_text("query:\n  text_min_match_ratio: 0.3\n")
+        assert load_app_config(custom).query.text_min_match_ratio == 0.3
 
-        # ... and the env hatch wins over it. No upper bound — textScore is a
-        # sum of term weights.
-        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", "2.5")
-        assert load_app_config(custom).query.min_text_score == 2.5
+        # ... and the env hatch wins over it (the "loosen it for one shell"
+        # story: 0.0 = any one term).
+        monkeypatch.setenv("TREE_QUERY__TEXT_MIN_MATCH_RATIO", "0.0")
+        assert load_app_config(custom).query.text_min_match_ratio == 0.0
 
-        # Bounds: a negative bar is a typo, not a stricter gate.
-        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", "-1")
-        with pytest.raises(ValidationError) as excinfo:
-            load_app_config(custom)
-        assert "min_text_score" in str(excinfo.value)
-
-    @pytest.mark.parametrize("value", ["inf", "nan"])
-    def test_min_text_score_rejects_inf_and_nan(
+    @pytest.mark.parametrize("value", ["-0.1", "1.5", "inf", "nan"])
+    def test_text_min_match_ratio_rejects_values_outside_zero_one(
         self, value, tmp_path, monkeypatch
     ) -> None:
-        # No upper bound, so ``inf`` would pass ``ge=0`` and gate EVERY text hit
-        # away, and ``nan`` compares False against every score — same effect.
+        # A ratio outside [0, 1] is a typo: above 1 would ask for more terms
+        # than the query has; ``nan`` / ``inf`` have no ceiling at all.
         custom = tmp_path / "query.yaml"
         custom.write_text("query:\n  top_k: 5\n")
-        monkeypatch.setenv("TREE_QUERY__MIN_TEXT_SCORE", value)
+        monkeypatch.setenv("TREE_QUERY__TEXT_MIN_MATCH_RATIO", value)
 
         with pytest.raises(ValidationError) as excinfo:
             load_app_config(custom)
 
-        assert "min_text_score" in str(excinfo.value)
+        assert "text_min_match_ratio" in str(excinfo.value)
 
-    def test_min_text_score_loaded_from_frozen_config(self, frozen_config_path):
+    def test_text_min_match_ratio_loaded_from_frozen_config(self, frozen_config_path):
         config = load_app_config(frozen_config_path)
 
-        assert config.query.min_text_score == 0.0
+        assert config.query.text_min_match_ratio == 0.5
 
 
 class TestFullGraphCaps:

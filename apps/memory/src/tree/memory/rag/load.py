@@ -28,9 +28,10 @@ The rows carry no ``name`` and no entity-resolution fields (``canonical_name`` /
 ``aliases`` / ``confidence``): their ``_id`` is derived from ``source_uri`` +
 position, so nothing ever resolves or merges them. The names below are only the
 graphrag extractor's edge-endpoint keys, remapped to these ``_id``s. A stored
-URI-shaped ``name`` would also be tokenised by the ``$text`` index, letting a
-query match a document through its URL instead of its content; the URI already
-lives in ``properties.source_uri``. Lineage back to the
+URI-shaped ``name`` would also be tokenised by the **Text search index**
+(``name`` is one of its text paths), letting a query match a document through
+its URL instead of its content; the URI already lives in
+``properties.source_uri``. Lineage back to the
 ``Document`` collection is ``sources``.
 
 The loader writes node types in :data:`tree.entities.memory.RAG_NODE_TYPES` and

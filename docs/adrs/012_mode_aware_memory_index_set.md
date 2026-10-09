@@ -1,6 +1,6 @@
 # ADR-012: A Mode-Aware Classic Index Set on the `memory` Collection, Owned by Beanie
 
-- **Status:** Accepted — relies on [006](006_rag_graphrag_memory_modes.md) (one `memory.mode` per deployment; switching modes drops `memory`); every ADR-006 decision stands — `active_user` scoped to `graphrag` by task 170 (`tasks/170-rag-mode-without-person-self.md`)
+- **Status:** Accepted — relies on [006](006_rag_graphrag_memory_modes.md) (one `memory.mode` per deployment; switching modes drops `memory`); every ADR-006 decision stands — `active_user` scoped to `graphrag` by task 170 (`tasks/170-rag-mode-without-person-self.md`) — §1–§2's `text_index` left the Beanie set: the lexical leg reads the mongot `text_search_index`, `ensure_indexes` owns BOTH mongot indexes and performs the one retirement drop of `text_index` (§3's "nothing drops" holds for every other index), per [015](015_atlas_search_text_leg_min_match_ratio.md) §1, §5–§7 (tasks 190–191).
 - **Date:** 2026-10-02
 - **Deciders:** Paul (project owner)
 - **Context references:**

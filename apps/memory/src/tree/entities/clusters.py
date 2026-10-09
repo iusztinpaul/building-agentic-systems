@@ -9,7 +9,7 @@ across runs.
 Why a separate collection rather than cluster nodes in ``memory`` (ADR-007 §3):
 as ``memory`` nodes they would need edges to their members (graphrag-only,
 contradicting the mode-orthogonality of clustering), they would pollute
-``$vectorSearch`` / ``$text`` results and the graph tools, and "delete the
+``$vectorSearch`` / ``$search`` results and the graph tools, and "delete the
 previous run" would become a graph mutation. Membership therefore lives on the
 chunk (``MemoryEntry.cluster_id``), which is what the **Embedding map** draws.
 

@@ -23,7 +23,6 @@ from tree.entities.memory import (
     build_rag_row_id,
     from_stored_vector,
     memory_indexes,
-    TEXT_INDEX_FIELDS,
     to_stored_vector,
 )
 from tree.entities.meta_state import KnowledgeGraphMetaState
@@ -158,7 +157,9 @@ class TestMemoryEntry:
             )
 
 
-_BASE_INDEX_NAMES = {"text_index", "user_kind_type_subtype", "user_type_name"}
+# No ``text_index``: the lexical leg reads the mongot ``text_search_index``,
+# which ``ensure_indexes`` owns (ADR-015 §1).
+_BASE_INDEX_NAMES = {"user_kind_type_subtype", "user_type_name"}
 _GRAPH_INDEX_NAMES = {"active_user", "user_kind_source_node", "user_kind_target_node"}
 
 
@@ -184,20 +185,16 @@ class TestMemoryIndexes:
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     def test_every_compound_index_leads_with_user_id(self, mode: str) -> None:
         for name, im in _by_name(mode).items():
-            if name in {"active_user", "text_index"}:
+            if name == "active_user":
                 continue
             assert next(iter(im.document["key"].items())) == ("user_id", 1), name
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_text_index_covers_names_aliases_and_content(self, mode: str) -> None:
-        # Beanie owns the $text index too (task 171), so lexical search works
-        # from the first boot. Top-level AND legacy nested aliases are covered.
-        key = _by_name(mode)["text_index"].document["key"]
-
-        assert list(key.items()) == TEXT_INDEX_FIELDS
-        assert {"name", "aliases", "properties.content", "properties.aliases"} == set(
-            key
-        )
+    def test_no_classic_text_index_in_either_mode(self, mode: str) -> None:
+        # A ``text`` key would recreate the retired ``$text`` index on every
+        # boot — Beanie only creates, and ``ensure_indexes`` would drop it again.
+        for name, im in _by_name(mode).items():
+            assert "text" not in im.document["key"].values(), name
 
     def test_compound_keys(self) -> None:
         indexes = _by_name("graphrag")

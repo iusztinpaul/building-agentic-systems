@@ -8,8 +8,13 @@ modes (ADR-006 decision 4):
    Parents and documents are never selected: they are deliberately vector-less,
    so embedding them would pull them into ``$vectorSearch`` results and break
    parent-document retrieval.
-2. Ensure the vector search index exists; reconcile the vector index's
-   ``numDimensions`` against the live embedding model on every call.
+2. Ensure BOTH mongot search indexes exist and match their declared
+   definitions: ``vector_index`` (``$vectorSearch``; ``numDimensions``
+   reconciled against the live embedding model on every call) and
+   ``text_search_index``, the **Text search index** (``$search``,
+   ``lucene.english``; definition drift → drop + recreate, ADR-015 §5–§7) —
+   then drop the classic ``$text`` index ``text_index`` it replaced, if a
+   database still carries one.
 
 Plus one operator-triggered inverse of (1): :func:`reset_embeddings`, the
 **Embedding reset** (ADR-009 §7), which empties exactly the vectors the backfill
@@ -32,6 +37,7 @@ from typing import Any
 
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient, UpdateOne
+from pymongo.errors import OperationFailure
 
 from tree.entities.memory import (
     MEMORY_COLLECTION,
@@ -49,14 +55,23 @@ logger = logging.getLogger(__name__)
 
 # Index names (shared with query module).
 VECTOR_INDEX_NAME = "vector_index"
+TEXT_SEARCH_INDEX_NAME = "text_search_index"
 
-# How long ``_ensure_vector_index`` waits for a freshly created index to answer
-# queries, and how long it sleeps between two catalogue reads. Constants, not
-# YAML knobs: a measured need would promote them (ADR-008 grooming). 300 s is
-# the fail-OPEN cap — past it the index is not "broken", just slow, and
-# retrieval already reports the degraded leg as ``text_only`` (task #124).
-_VECTOR_INDEX_READY_TIMEOUT_S = 300
-_VECTOR_INDEX_POLL_S = 5
+# The classic ``$text`` index ``text_search_index`` replaced (ADR-015 §1).
+# Beanie no longer declares it and never drops, so ``ensure_indexes`` retires
+# it once per database.
+_LEGACY_TEXT_INDEX_NAME = "text_index"
+# MongoDB's ``IndexNotFound`` error code: a drop of an index that is not there.
+_INDEX_NOT_FOUND = 27
+
+# How long ``_wait_for_search_index_ready`` waits for a freshly created mongot
+# index (either of the two) to answer queries, and how long it sleeps between
+# two catalogue reads. Constants, not YAML knobs: a measured need would promote
+# them (ADR-008 grooming). 300 s is the fail-OPEN cap — past it the index is
+# not "broken", just slow, and retrieval already reports the index's leg as
+# unavailable (``text_only`` / ``vector_only``) until it is queryable.
+_SEARCH_INDEX_READY_TIMEOUT_S = 300
+_SEARCH_INDEX_POLL_S = 5
 
 # ---------------------------------------------------------------------------
 # 1. Embed nodes
@@ -344,19 +359,34 @@ async def ensure_indexes(
     embedding_model: BaseEmbeddingModel,
     user_id: PydanticObjectId | None = None,
 ) -> None:
-    """Ensure the vector search index.
+    """Ensure BOTH mongot search indexes: ``vector_index`` then ``text_search_index``.
 
-    The classic indexes, ``$text`` included, are NOT created here: Beanie
-    creates the mode's set (:func:`tree.entities.memory.memory_indexes`) on
-    every ``init_mongodb``. This function owns only what Beanie cannot
-    express, the mongot vector index (ADR-012). ``user_id`` is optional and
-    only logged: the pipeline passes the tenant that triggered the run, the MCP
-    server boot passes none (ADR-014 §1).
+    This function owns what Beanie cannot express — the two mongot indexes
+    (ADR-012, ADR-015 §5–§7) and the ONE classic-index retirement Beanie cannot
+    perform (it only creates): the legacy ``$text`` index ``text_index`` is
+    dropped as step 3, AFTER ``text_search_index`` is ensured (ready, or the
+    fail-open timeout — the ``$text`` leg is gone either way, so the classic
+    index serves nothing). ADR-012's "nothing drops" stands for every other
+    index. The classic set is Beanie's: it creates the mode's indexes
+    (:func:`tree.entities.memory.memory_indexes`) on every ``init_mongodb``. ``user_id`` is optional and only logged: the pipeline
+    passes the tenant that triggered the run, the MCP server boot passes none
+    (ADR-014 §1).
 
-    Reads ``embedding_model.dimensions`` ONCE and uses it to drive the
-    vector-search index's ``numDimensions``. If a ``vector_index`` already
-    exists with a different dimension, logs a WARNING naming both numbers
-    and drops + recreates it.
+    Reconcile rules, per index:
+
+    * ``vector_index`` — ``numDimensions`` comes from
+      ``embedding_model.dimensions``, read ONCE. A different live dimension
+      logs a WARNING naming both numbers and drops + recreates; a missing
+      filter path quietly recreates.
+    * ``text_search_index`` (the **Text search index**) — a static definition
+      (:func:`_build_text_search_index_definition`). Definition drift
+      (``dynamic``, a text path's type / analyzer, a filter path's type)
+      logs a WARNING naming the differences and drops + recreates;
+      server-echoed defaults are not drift.
+
+    Either index is created when absent, and every create is followed by
+    :func:`_wait_for_search_index_ready`. Vector first, text second, the
+    legacy drop third.
 
     Idempotent: every step inspects live state and skips when the desired
     configuration is already in place.
@@ -380,8 +410,43 @@ async def ensure_indexes(
     # under us mid-call.
     target_dimensions = embedding_model.dimensions
 
-    # --- Vector search index (for $vectorSearch) ---
+    # --- 1. Vector search index (for $vectorSearch) ---
     await _ensure_vector_index(collection, target_dimensions)
+    # --- 2. Text search index (for $search) ---
+    await _ensure_text_search_index(collection)
+    # --- 3. Retire the classic $text index it replaced ---
+    await _drop_legacy_text_index(collection)
+
+
+async def _drop_legacy_text_index(collection: Any) -> None:
+    """Drop the classic ``text_index`` when the collection still has it.
+
+    Idempotent: absent → nothing. ``IndexNotFound`` (code 27) on the drop is
+    "already gone" too — a concurrent ``ensure_indexes`` (MCP boot vs the
+    indexing pipeline) dropped it between our check and our drop. Every OTHER
+    drop failure propagates — a silently kept ``$text`` index would cost every
+    write an index update for no reader.
+    """
+
+    if _LEGACY_TEXT_INDEX_NAME not in await collection.index_information():
+        logger.debug("No legacy $text index '%s' to drop", _LEGACY_TEXT_INDEX_NAME)
+        return
+
+    try:
+        await collection.drop_index(_LEGACY_TEXT_INDEX_NAME)
+    except OperationFailure as exc:
+        if exc.code != _INDEX_NOT_FOUND:
+            raise
+        logger.debug(
+            "Legacy $text index '%s' already dropped by a concurrent ensure_indexes",
+            _LEGACY_TEXT_INDEX_NAME,
+        )
+        return
+    logger.info(
+        "Dropped legacy $text index '%s' (replaced by '%s', ADR-015)",
+        _LEGACY_TEXT_INDEX_NAME,
+        TEXT_SEARCH_INDEX_NAME,
+    )
 
 
 def _build_vector_index_definition(dimensions: int) -> dict[str, Any]:
@@ -497,15 +562,231 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
         # Allow mongot to process the drop before recreating.
         await asyncio.sleep(2)
 
-    await collection.create_search_index(
-        model={
+    await _create_search_index(
+        collection,
+        {
             "name": VECTOR_INDEX_NAME,
             "type": "vectorSearch",
             "definition": required_definition,
-        }
+        },
     )
 
-    await _wait_for_vector_index_ready(collection)
+    await _wait_for_search_index_ready(collection, VECTOR_INDEX_NAME)
+
+
+# Atlas Search text paths of the **Text search index** — the four fields the
+# retired classic ``$text`` index covered, so the lexical leg reads the same
+# text. Declared DOTTED here (the form ``$search`` queries
+# use); :func:`_build_text_search_index_definition` nests ``properties.*``
+# through a ``document`` field, the Atlas static-mapping syntax.
+TEXT_INDEX_TEXT_PATHS: tuple[str, ...] = (
+    "name",
+    "aliases",
+    "properties.content",
+    "properties.aliases",
+)
+
+# ``lucene.english``: stemming on the corpus side (``agent`` matches
+# ``agents``) and Lucene's English stop words dropped at index AND query time —
+# verified live in task 190's spike (``the`` / ``in`` / ``a`` clauses match
+# nothing even on a row that contains them).
+_TEXT_INDEX_ANALYZER = "lucene.english"
+
+# Filter paths of the **Text search index** → their Atlas Search field type,
+# for the ``equals`` clauses of ``compound.filter`` / ``mustNot``. ``user_id``
+# is first (every query is tenant-scoped); ``token`` carries no
+# ``normalizer`` because the values are already lower-case literals.
+# ``merged_into`` is deliberately ABSENT (ADR-015 §6 — no reader needs it).
+TEXT_INDEX_FILTER_PATHS: dict[str, str] = {
+    "user_id": "objectId",
+    "kind": "token",
+    "type": "token",
+    "subtype": "token",
+}
+
+
+def _build_text_search_index_definition() -> dict[str, Any]:
+    """Atlas Search definition of ``text_search_index``: static mappings only.
+
+    ``dynamic: False`` so no other field is indexed; every text path is a
+    ``lucene.english`` string, every filter path its declared type. Dotted
+    paths are declared through nested ``document`` fields — a dotted KEY in a
+    static mapping would name a field literally called ``properties.content``.
+    """
+
+    fields: dict[str, Any] = {}
+    for path in TEXT_INDEX_TEXT_PATHS:
+        _set_static_mapping(
+            fields, path, {"type": "string", "analyzer": _TEXT_INDEX_ANALYZER}
+        )
+    for path, field_type in TEXT_INDEX_FILTER_PATHS.items():
+        _set_static_mapping(fields, path, {"type": field_type})
+    return {"mappings": {"dynamic": False, "fields": fields}}
+
+
+def _set_static_mapping(
+    fields: dict[str, Any], dotted_path: str, mapping: dict[str, Any]
+) -> None:
+    """Declare ``mapping`` at ``dotted_path``, nesting through ``document`` fields."""
+
+    head, _, rest = dotted_path.partition(".")
+    if not rest:
+        fields[head] = mapping
+        return
+    parent = fields.setdefault(head, {"type": "document", "fields": {}})
+    _set_static_mapping(parent["fields"], rest, mapping)
+
+
+def _existing_text_index_mappings(existing: dict[str, Any]) -> dict[str, Any]:
+    """``mappings`` of a live ``list_search_indexes`` entry (``latestDefinition``
+    first, ``definition`` as the fallback, as the vector helpers read it)."""
+
+    return (
+        existing.get("latestDefinition", {}).get("mappings")
+        or existing.get("definition", {}).get("mappings")
+        or {}
+    )
+
+
+def _extract_text_index_field_types(
+    existing: dict[str, Any],
+) -> dict[str, tuple[str, str | None]]:
+    """Flatten a live entry's static mappings to ``dotted path → (type, analyzer)``.
+
+    ``document`` fields are walked into dotted paths and never reported
+    themselves. Everything else the server echoes on a field (local mongot
+    adds ``indexOptions`` / ``store`` / ``norms`` to strings, and a nested
+    ``dynamic: false`` to a ``document`` — task 190's spike) is dropped here,
+    so it can never read as drift.
+    """
+
+    flat: dict[str, tuple[str, str | None]] = {}
+
+    def _walk(fields: dict[str, Any], prefix: str) -> None:
+        for name, mapping in fields.items():
+            path = f"{prefix}{name}"
+            if mapping.get("type") == "document":
+                _walk(mapping.get("fields") or {}, f"{path}.")
+            else:
+                flat[path] = (mapping.get("type"), mapping.get("analyzer"))
+
+    _walk(_existing_text_index_mappings(existing).get("fields") or {}, "")
+    return flat
+
+
+def _text_search_index_drift(
+    existing: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(have, want)`` for every declared setting the live index does not meet.
+
+    A SUBSET comparison on the declared paths — exactly as the vector helper
+    compares dimensions + the filter-path set, never the whole dict
+    (server-echoed defaults would otherwise drop + recreate on every run):
+    ``mappings.dynamic`` must be ``False`` — ABSENT counts as ``False``, Atlas's
+    default, so a catalogue that omits the key is not drift; every text path a
+    ``string`` with the ``lucene.english`` analyzer; every filter path its
+    declared type. Extra live paths are not drift. Both dicts are empty when
+    up-to-date.
+    """
+
+    have: dict[str, Any] = {}
+    want: dict[str, Any] = {}
+
+    dynamic = _existing_text_index_mappings(existing).get("dynamic", False)
+    if dynamic is not False:
+        have["dynamic"], want["dynamic"] = dynamic, False
+
+    live = _extract_text_index_field_types(existing)
+    for path in TEXT_INDEX_TEXT_PATHS:
+        declared = ("string", _TEXT_INDEX_ANALYZER)
+        if live.get(path) != declared:
+            have[path], want[path] = live.get(path), declared
+    for path, field_type in TEXT_INDEX_FILTER_PATHS.items():
+        live_type = live[path][0] if path in live else None
+        if live_type != field_type:
+            have[path], want[path] = live_type, field_type
+
+    return have, want
+
+
+async def _ensure_text_search_index(collection: Any) -> None:
+    """Create or reconcile the **Text search index** (``text_search_index``).
+
+    Absent → create + wait ready. Present → compare with
+    :func:`_text_search_index_drift`: up-to-date → one INFO and return; drift
+    → one WARNING naming the differences, drop, let mongot settle, create,
+    wait ready.
+    """
+
+    cursor = await collection.list_search_indexes()
+    existing_indexes = {idx["name"]: idx async for idx in cursor}
+
+    if TEXT_SEARCH_INDEX_NAME in existing_indexes:
+        have, want = _text_search_index_drift(existing_indexes[TEXT_SEARCH_INDEX_NAME])
+        if not want:
+            logger.info(
+                "Search index '%s' already up-to-date (analyzer=%s, text paths=%s, "
+                "filter paths=%s)",
+                TEXT_SEARCH_INDEX_NAME,
+                _TEXT_INDEX_ANALYZER,
+                list(TEXT_INDEX_TEXT_PATHS),
+                TEXT_INDEX_FILTER_PATHS,
+            )
+            return
+
+        logger.warning(
+            "Search index '%s' definition drift (have=%s, want=%s) — dropping and "
+            "recreating",
+            TEXT_SEARCH_INDEX_NAME,
+            have,
+            want,
+        )
+        await collection.drop_search_index(TEXT_SEARCH_INDEX_NAME)
+        # Allow mongot to process the drop before recreating the same name.
+        await asyncio.sleep(2)
+
+    await _create_search_index(
+        collection,
+        {
+            "name": TEXT_SEARCH_INDEX_NAME,
+            "type": "search",
+            "definition": _build_text_search_index_definition(),
+        },
+    )
+
+    await _wait_for_search_index_ready(collection, TEXT_SEARCH_INDEX_NAME)
+
+
+async def _create_search_index(collection: Any, model: dict[str, Any]) -> None:
+    """``create_search_index`` for EITHER mongot index, with the M0-cap message.
+
+    A driver error that IS the Atlas M0 3-search-index cap (its message names
+    ``MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED`` or "maximum number of FTS indexes")
+    re-raises as a ``RuntimeError`` naming the index and the stray-index fix,
+    the driver error kept through ``from exc`` chaining. Every other error
+    (auth, network, a malformed definition) propagates unchanged, so an
+    unreachable mongot never reads as a cap problem.
+    """
+
+    name = model["name"]
+    logger.info("Creating search index '%s' (type=%s)...", name, model["type"])
+    try:
+        await collection.create_search_index(model=model)
+    except Exception as exc:
+        message = str(exc)
+        if (
+            "MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED" not in message
+            and "maximum number of fts indexes" not in message.lower()
+        ):
+            raise
+        raise RuntimeError(
+            f"Could not create search index '{name}': Atlas M0 allows 3 search "
+            f"indexes per cluster (search + vectorSearch together) and Tree "
+            f"needs two, '{VECTOR_INDEX_NAME}' and '{TEXT_SEARCH_INDEX_NAME}'. "
+            f"A MAXIMUM_INDEXES_FOR_TENANT_EXCEEDED cause means a stray index: "
+            f"drop the stray index in Atlas → Search & Vector Search and re-run "
+            f"`make memory-run-indexing-pipeline`. Driver error: {exc}"
+        ) from exc
 
 
 def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
@@ -528,15 +809,16 @@ def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
 
     * ``True`` — queryable now.
     * ``False`` — present but not serving queries yet (keep polling / treat the
-      vector leg as unavailable).
+      index's leg as unavailable).
     * ``None`` — this deployment does not report readiness (local mongot);
       read it as ready. Truthiness alone would read it as ``False`` and turn
-      every healthy local run into a 5-minute wait (here) or a permanent
-      ``text_only`` (``rag/search.py``).
+      every healthy local run into a 5-minute wait (here) or a permanently
+      degraded leg (``rag/search.py``).
 
-    The ONE reader of this catalogue shape: ``_wait_for_vector_index_ready``
-    below and ``tree.memory.rag.search._vector_index_is_queryable`` both decide
-    here, so the two cannot drift apart.
+    The ONE reader of this catalogue shape: ``_wait_for_search_index_ready``
+    below and ``tree.memory.rag.search._search_index_is_queryable`` both decide
+    here — for ``vector_index`` and ``text_search_index`` alike — so the two
+    cannot drift apart.
     """
 
     queryable = entry.get("queryable")
@@ -549,10 +831,11 @@ def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
     return status == "READY"
 
 
-async def _wait_for_vector_index_ready(collection: Any) -> None:
-    """Poll the catalogue until the new vector index can actually serve queries.
+async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None:
+    """Poll the catalogue until ``index_name`` can actually serve queries.
 
-    mongot builds Atlas Search indexes out-of-band, so ``create_search_index``
+    Shared by both mongot indexes (``vector_index``, ``text_search_index``).
+    mongot builds search indexes out-of-band, so ``create_search_index``
     returning says nothing about readiness — the previous version of this loop
     waited for the entry to merely EXIST and then logged "ready", which is how
     an indexing run could report success while ``$vectorSearch`` still answered
@@ -566,22 +849,23 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
       own, so the indexing phase fails loudly instead of leaving a silent
       "ready". Checked BEFORE ``queryable`` because the docs allow a FAILED
       index to still report ``queryable: true`` — it is then serving the
-      PREVIOUS definition, i.e. exactly the stale-dimensions state
+      PREVIOUS definition, e.g. the stale-dimensions state
       :func:`assert_settings_match_live_vector_index` exists to catch.
     * **fail-open** — past the 300 s cap, WARN and return. A timeout is "not
-      yet", not "never": retrieval reports ``text_only`` until mongot catches
-      up, and the next indexing run finds the index up-to-date.
+      yet", not "never": retrieval reports the index's leg as unavailable
+      until mongot catches up, and the next indexing run finds the index
+      up-to-date.
     """
 
     logger.info(
-        "Waiting for vector search index '%s' to be ready (up to %d s)...",
-        VECTOR_INDEX_NAME,
-        _VECTOR_INDEX_READY_TIMEOUT_S,
+        "Waiting for search index '%s' to be ready (up to %d s)...",
+        index_name,
+        _SEARCH_INDEX_READY_TIMEOUT_S,
     )
 
     last_status: str | None = None
-    for _ in range(_VECTOR_INDEX_READY_TIMEOUT_S // _VECTOR_INDEX_POLL_S):
-        cursor = await collection.list_search_indexes(VECTOR_INDEX_NAME)
+    for _ in range(_SEARCH_INDEX_READY_TIMEOUT_S // _SEARCH_INDEX_POLL_S):
+        cursor = await collection.list_search_indexes(index_name)
         entries = await cursor.to_list()
 
         if entries:
@@ -590,40 +874,36 @@ async def _wait_for_vector_index_ready(collection: Any) -> None:
 
             if last_status == "FAILED":
                 raise RuntimeError(
-                    f"Vector search index '{VECTOR_INDEX_NAME}' build failed "
-                    f"(status=FAILED)"
+                    f"Search index '{index_name}' build failed (status=FAILED)"
                 )
 
             queryable = index_entry_is_queryable(entry)
             if queryable is None:
                 logger.info(
-                    "Vector search index '%s' reports neither 'status' nor "
-                    "'queryable' (local mongot); treating it as ready",
-                    VECTOR_INDEX_NAME,
+                    "Search index '%s' reports neither 'status' nor 'queryable' "
+                    "(local mongot); treating it as ready",
+                    index_name,
                 )
                 return
             if queryable:
                 logger.info(
-                    "Vector search index '%s' ready (status=%s)",
-                    VECTOR_INDEX_NAME,
-                    last_status,
+                    "Search index '%s' ready (status=%s)", index_name, last_status
                 )
                 return
 
         logger.debug(
-            "Vector search index '%s' not queryable yet (status=%s); "
-            "polling again in %d s",
-            VECTOR_INDEX_NAME,
+            "Search index '%s' not queryable yet (status=%s); polling again in %d s",
+            index_name,
             last_status,
-            _VECTOR_INDEX_POLL_S,
+            _SEARCH_INDEX_POLL_S,
         )
-        await asyncio.sleep(_VECTOR_INDEX_POLL_S)
+        await asyncio.sleep(_SEARCH_INDEX_POLL_S)
 
     logger.warning(
-        "Vector search index '%s' not queryable after %d s (last status=%s); "
-        "retrieval runs text_only until it is",
-        VECTOR_INDEX_NAME,
-        _VECTOR_INDEX_READY_TIMEOUT_S,
+        "Search index '%s' not queryable after %d s (last status=%s); its "
+        "retrieval leg stays unavailable until it is queryable",
+        index_name,
+        _SEARCH_INDEX_READY_TIMEOUT_S,
         last_status,
     )
 

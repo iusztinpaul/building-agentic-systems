@@ -86,16 +86,19 @@ query:
   max_hops: 1
   rrf_k: 60
   embedding_batch_size: 64
-  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion ($text
-  # hits clear min_text_score). Atlas normalises cosine to (1 + cos) / 2,
-  # so this is an absolute similarity (the RRF score is not). PROVISIONAL and
-  # owned by Chapter 7's evals. Override with TREE_QUERY__MIN_VECTOR_SCORE=...
+  # Bar the VECTOR leg of the hybrid search must clear BEFORE fusion (the text
+  # leg is gated by text_min_match_ratio below). Atlas normalises cosine to
+  # (1 + cos) / 2, so this is an absolute similarity (the RRF score is not).
+  # PROVISIONAL and owned by Chapter 7's evals. Override with
+  # TREE_QUERY__MIN_VECTOR_SCORE=...
   # re-pinned on voyage-4, 2026-09 — tasks/141 Log (nonsense top=0.649,
   # on-topic top=0.735; the voyage-3.5 pin of 0.75 kept nothing on topic).
   min_vector_score: 0.70
-  # Bar the $text leg must clear BEFORE fusion on the unnormalised textScore;
-  # 0.0 = off (ADR-013 §7) — shipped off by tasks/183's eval.
-  min_text_score: 0.0
+  # Minimum match ratio of the text leg: K = max(1, ceil(ratio x M)) of the
+  # query's M content terms; 0.0 = any one term (ADR-015 §2) — provisional.
+  # pinned live, 2026-10-09 — tasks/192 Log (lowest 0.1 step with all 4
+  # off-topic queries at 0 text candidates and all 6 on-topic at >= 1).
+  text_min_match_ratio: 0.5
   # Full graph (no query): documents one read embeds / the Documents slider shows
   # on load, most-recent first; `properties.date`, else `created_at`.
   full_graph_max_docs: 500

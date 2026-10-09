@@ -22,7 +22,7 @@ NOT create app data or indexes.
 * Collection (Beanie) indexes are self-healing: every `init_mongodb()` call
   (sign-up, pipelines, MCP boot) runs `init_beanie`, which ensures the declared
   indexes on all document models. No explicit step needed.
-* Atlas Search indexes (`text_index`, `vector_index` on `memory`) are
+* Atlas Search indexes (`vector_index`, `text_search_index` on `memory`) are
   NOT created here — see step 3. Mind the M0 cap ("maximum number of FTS
   indexes... for this instance size"): don't point test suites at this cluster.
 
@@ -72,6 +72,8 @@ indexing phase on, so it works right after `GROUPS=data` — that group already
 registers `offline-pipeline`. The cloud MCP server (step 4) boots with
 `MCP_SKIP_INDEX_BOOTSTRAP=true` and only QUERIES the indexes — query tools fail
 or return nothing until this run has happened.
+Re-run it after ANY deploy that changes a search-index definition (ADR-015 added
+`text_search_index`): until the run, `search_memory` answers `search_mode: vector_only`.
 
 ## 4. FastMCP server on Prefect Horizon
 
