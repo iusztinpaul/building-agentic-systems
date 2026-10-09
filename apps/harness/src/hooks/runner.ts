@@ -56,7 +56,9 @@ export async function runHook(
     end: () => unknown;
   };
   try {
-    stdin.write(`${JSON.stringify(context)}\n`);
+    // BOTH are awaited: Bun reports EPIPE from ``write`` on Linux but from
+    // ``end`` on macOS, and an un-awaited rejection escapes the ``catch``.
+    await stdin.write(`${JSON.stringify(context)}\n`);
     await stdin.end();
   } catch (err) {
     // Reading stdin is optional: a hook like `echo '{...}'` exits without it,
