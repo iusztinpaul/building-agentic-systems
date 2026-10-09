@@ -18,8 +18,8 @@ from click.testing import CliRunner
 
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.visualize.embeddings import (
-    NO_CLUSTERING_RUN_MESSAGE,
     NO_EMBEDDINGS_MESSAGE,
+    missing_2d_warning,
     render_embedding_map_file,
 )
 
@@ -59,11 +59,8 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
         clusters=[
             MemoryClusterInfo(
                 cluster_id=0,
-                label="Agent memory design",
-                summary="How agents remember.",
-                keywords=["memory", "agents", "design"],
+                label="Cluster 1",
                 size=drawn,
-                sample_chunk_ids=["chunk-0"],
                 centroid_x=0.0,
                 centroid_y=0.0,
             )
@@ -156,7 +153,7 @@ class TestRenderedMap:
             "manually or wait for the scheduled offline pipeline to compute them."
         )
 
-    def test_no_run_draws_the_preview_and_warns_on_the_first_line(
+    def test_no_run_prints_only_the_warning_and_writes_no_file(
         self, cli_module, mocked_boundaries, loaded_map
     ) -> None:
         loaded_map(
@@ -175,9 +172,10 @@ class TestRenderedMap:
 
         result = CliRunner().invoke(cli_module.main, ["--no-open"])
 
-        assert result.exit_code == 0
-        assert result.output.splitlines()[0] == NO_CLUSTERING_RUN_MESSAGE
-        mocked_boundaries.assert_called_once()
+        # Nothing has 2D coordinates: no picture, the warning is the answer.
+        assert result.exit_code == 1
+        assert result.output.strip() == missing_2d_warning(4, 4)
+        mocked_boundaries.assert_not_called()
 
     def test_a_fresh_run_prints_no_warning_line(
         self, cli_module, mocked_boundaries, loaded_map

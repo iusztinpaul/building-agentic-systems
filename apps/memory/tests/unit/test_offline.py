@@ -506,11 +506,10 @@ class TestOfflineIndexingPhase:
 class TestOfflineClusteringPhase:
     """Phase 4: clustering — the ONE phase that is OFF by default (ADR-007 §5).
 
-    The default matters as much as the behaviour: the nightly cron runs with
-    these defaults, and a clustering run costs a ~40 s cold ``import umap`` plus
-    one Gemini call per cluster. The switch is the flow PARAMETER — there is
-    deliberately no ``memory.clustering.enabled`` YAML key that could disagree
-    with it.
+    The default keeps every ad-hoc script off the UMAP stack (a ~40 s cold
+    ``import umap``); the nightly cron and the clustering script turn it on.
+    The switch is the flow PARAMETER — there is deliberately no
+    ``memory.clustering.enabled`` YAML key that could disagree with it.
     """
 
     async def test_clusters_the_target_user_once_after_indexing(self, mocker) -> None:
@@ -660,7 +659,7 @@ class TestOfflinePhaseLogLines:
         # operator is actually looking.
         assert (
             f"clustering: user_id={_USER_ID} run_id=run-1 clusters=2 "
-            "clustered=35 noise=5 fallbacks=0" in self._messages(caplog)
+            "clustered=35 noise=5" in self._messages(caplog)
         )
 
     async def test_an_up_to_date_clustering_skip_logs_at_info(
@@ -871,23 +870,12 @@ class TestPartialIngestFailsTheRun:
         cluster.return_value = ClusteringStats(
             run_id="run-2",
             chunks_total=3,
-            summaries_failed=0,
             skipped_reason="3 child embeddings < min_cluster_size 15",
         )
 
         result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
 
         assert result["clustering"][str(_USER_ID)]["skipped_reason"]
-
-    async def test_a_cluster_summary_fallback_is_not_a_failure(self, mocker) -> None:
-        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
-        cluster.return_value = _CLUSTERING_STATS.model_copy(
-            update={"summaries_failed": 1}
-        )
-
-        result = await offline_pipeline(user_id=_USER_ID, run_clustering=True)
-
-        assert result["clustering"][str(_USER_ID)]["summaries_failed"] == 1
 
     async def test_zero_pending_documents_and_zero_sources_complete(
         self, mocker

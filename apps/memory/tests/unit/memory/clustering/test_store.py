@@ -181,10 +181,7 @@ async def _insert_cluster(
         run_id=run_id,
         cluster_id=cluster_id,
         label=label or f"Old label {cluster_id}",
-        summary="An older run's summary.",
-        keywords=["memory", "agents", "rag"],
         size=size,
-        sample_chunk_ids=[f"c{cluster_id}"],
         centroid=ClusterCentroid(x=0.0, y=0.0),
         config_fingerprint=config_fingerprint,
         created_at=_NOW,
@@ -196,11 +193,8 @@ def _info(
 ) -> MemoryClusterInfo:
     return MemoryClusterInfo(
         cluster_id=cluster_id,
-        label=label or f"Agent memory {cluster_id}",
-        summary="What these chunks share.",
-        keywords=["memory", "agents", "rag"],
+        label=label or f"Cluster {cluster_id + 1}",
         size=size,
-        sample_chunk_ids=[f"c{cluster_id}"],
         centroid_x=float(cluster_id),
         centroid_y=float(cluster_id) + 0.5,
     )
@@ -300,12 +294,10 @@ class TestLoadChildEmbeddings:
 
         # The whole corpus is loaded at once — a wide projection would pull
         # every row's full properties block into memory for nothing.
+        # Only the id and the vector: clusters are named by size, no text read.
         assert recording_client.collection.find_calls[0][1] == {
             "_id": 1,
             "embedding": 1,
-            "properties.title": 1,
-            "properties.heading_path": 1,
-            "properties.content": 1,
         }
 
     async def test_returns_rows_sorted_by_id(self, mongo_client, user_id) -> None:
@@ -318,25 +310,14 @@ class TestLoadChildEmbeddings:
         # same seed => same labels and the same map.
         assert [row.chunk_id for row in rows] == ["c1", "c2", "c3"]
 
-    async def test_carries_the_display_fields_the_summariser_needs(
+    async def test_carries_only_the_id_and_the_vector(
         self, mongo_client, user_id
     ) -> None:
-        await _insert_child(
-            user_id,
-            "c1",
-            content="Agents remember what they read.",
-            heading_path=["Memory", "Retrieval"],
-        )
+        await _insert_child(user_id, "c1", content="Agents remember what they read.")
 
         rows = await load_child_embeddings(mongo_client, TEST_DATABASE, user_id)
 
-        assert rows[0] == ChildEmbeddingRow(
-            chunk_id="c1",
-            embedding=rows[0].embedding,
-            title="Memory for AI Agents",
-            heading_path=["Memory", "Retrieval"],
-            content="Agents remember what they read.",
-        )
+        assert rows[0] == ChildEmbeddingRow(chunk_id="c1", embedding=rows[0].embedding)
         assert rows[0].embedding == pytest.approx([0.1, 0.2, 0.3, 0.4])
 
     async def test_decodes_the_stored_bindata_into_floats(
@@ -442,10 +423,30 @@ class TestWriteClusteringRun:
 
         # Deterministic ``_id``s mean the delete never sees cluster 0 — the
         # upsert must be what stops yesterday's label from surviving.
-        assert row["label"] == "Agent memory 0"
+        assert row["label"] == "Cluster 1"
         assert row["size"] == 2
         assert row["centroid"] == {"x": 0.0, "y": 0.5}
-        assert row["keywords"] == ["memory", "agents", "rag"]
+
+    async def test_unsets_the_llm_fields_of_a_surviving_cluster_id(
+        self, mongo_client, user_id, previous_run, clustered_chunks
+    ) -> None:
+        # Arrange: cluster 0 was written in the LLM-labelled era.
+        clusters = mongo_client[TEST_DATABASE][MEMORY_CLUSTERS_COLLECTION]
+        await clusters.update_one(
+            {"_id": f"{user_id}:cluster:0"},
+            {
+                "$set": {
+                    "summary": "Old.",
+                    "keywords": ["a"],
+                    "sample_chunk_ids": ["c0"],
+                }
+            },
+        )
+
+        await self._write_r1(mongo_client, user_id)
+
+        row = await clusters.find_one({"_id": f"{user_id}:cluster:0"})
+        assert not {"summary", "keywords", "sample_chunk_ids"} & set(row)
 
     async def test_stamps_every_chunk_with_its_cluster_and_coordinates(
         self, mongo_client, user_id, clustered_chunks
@@ -769,54 +770,19 @@ class TestLoadEmbeddingMap:
         # A caller shows an explanatory message, never an empty picture.
         assert await load_embedding_map(mongo_client, TEST_DATABASE, user_id) is None
 
-    async def test_a_never_clustered_user_gets_the_unclustered_preview(
+    async def test_a_never_clustered_user_gets_no_points_and_all_unclustered(
         self, mongo_client, user_id
     ) -> None:
         source = await _insert_document(user_id, "doc1")
-        for index, vector in enumerate(
-            ([1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0])
-        ):
-            await _insert_child(user_id, f"c{index}", embedding=vector, source=source)
+        for index in range(3):
+            await _insert_child(user_id, f"c{index}", source=source)
 
         embedding_map = await load_embedding_map(mongo_client, TEST_DATABASE, user_id)
 
-        # Assert: drawn at read-time PCA coordinates, nothing clustered.
+        # Assert: surfaces compute no coordinates — nothing to draw, all counted.
         assert embedding_map.run_id is None
-        assert embedding_map.clusters == []
-        assert [p.chunk_id for p in embedding_map.points] == ["c0", "c1", "c2"]
-        assert {p.cluster_id for p in embedding_map.points} == {-1}
+        assert (embedding_map.points, embedding_map.clusters) == ([], [])
         assert (embedding_map.total_children, embedding_map.unclustered) == (3, 3)
-        assert (embedding_map.clustered, embedding_map.noise) == (0, 0)
-        assert len({(p.x, p.y) for p in embedding_map.points}) == 3
-
-    async def test_the_preview_is_reproducible(self, mongo_client, user_id) -> None:
-        source = await _insert_document(user_id, "doc1")
-        for index, vector in enumerate(
-            ([1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0])
-        ):
-            await _insert_child(user_id, f"c{index}", embedding=vector, source=source)
-
-        first = await load_embedding_map(mongo_client, TEST_DATABASE, user_id)
-        second = await load_embedding_map(mongo_client, TEST_DATABASE, user_id)
-
-        assert first.points == second.points
-
-    async def test_the_preview_keeps_the_document_cap(
-        self, mongo_client, user_id
-    ) -> None:
-        old = await _insert_document(user_id, "old", date="2026-01-01T00:00:00+00:00")
-        new = await _insert_document(user_id, "new", date="2026-03-01T00:00:00+00:00")
-        await _insert_child(user_id, "old-a", embedding=[1.0, 0, 0, 0], source=old)
-        await _insert_child(user_id, "new-a", embedding=[0, 1.0, 0, 0], source=new)
-        await _insert_child(user_id, "new-b", embedding=[0, 0, 1.0, 0], source=new)
-
-        embedding_map = await load_embedding_map(
-            mongo_client, TEST_DATABASE, user_id, max_docs=1
-        )
-
-        # Assert: ``old`` is cut by the cap, yet counted in the corpus.
-        assert {p.chunk_id for p in embedding_map.points} == {"new-a", "new-b"}
-        assert embedding_map.total_children == 3
 
     async def test_draws_only_this_runs_points(
         self, mongo_client, user_id, mixed_corpus
@@ -970,34 +936,39 @@ class TestLoadEmbeddingMap:
 
 
 class TestLoadQueryMap:
-    """The query view: the matches over a grey reference cloud, one PCA space."""
+    """The query view: the matches over a grey cloud, at the run's UMAP coordinates."""
 
-    async def test_splits_the_matches_from_the_reference_cloud(
+    @staticmethod
+    async def _clustered(
+        user_id: PydanticObjectId, chunk_id: str, source: PydanticObjectId, x: float
+    ) -> None:
+        await _insert_child(
+            user_id,
+            chunk_id,
+            cluster_id=0,
+            viz=ChunkViz(x=x, y=x / 2, run_id="r1"),
+            source=source,
+        )
+
+    async def test_splits_the_matches_from_the_cloud_at_stored_coordinates(
         self, mongo_client, user_id
     ) -> None:
         source = await _insert_document(user_id, "doc1")
-        for index, vector in enumerate(
-            ([1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0])
-        ):
-            await _insert_child(
-                user_id,
-                f"c{index}",
-                embedding=vector,
-                cluster_id=4,
-                viz=ChunkViz(x=50, y=50, run_id="r1"),
-                source=source,
-            )
+        for index in range(3):
+            await self._clustered(user_id, f"c{index}", source, float(index))
+        await _insert_cluster(user_id, 0, run_id="r1", size=3)
 
         query_map = await load_query_map(
             mongo_client, TEST_DATABASE, user_id, {"c0", "c2"}
         )
 
-        # Assert: the run's cluster and coordinates are ignored — one PCA of all.
-        assert [p.chunk_id for p in query_map.matched] == ["c0", "c2"]
+        # Assert: the run's own UMAP points, never recomputed.
+        assert [(p.chunk_id, p.x, p.y) for p in query_map.matched] == [
+            ("c0", 0.0, 0.0),
+            ("c2", 2.0, 1.0),
+        ]
         assert [p.chunk_id for p in query_map.reference] == ["c1"]
-        points = query_map.matched + query_map.reference
-        assert {p.cluster_id for p in points} == {-1}
-        assert len({(p.x, p.y) for p in points}) == 3
+        assert query_map.matched_without_2d == 0
         assert (query_map.plotted_documents, query_map.total_documents) == (1, 1)
 
     async def test_a_match_outside_the_document_cap_is_still_drawn(
@@ -1005,9 +976,10 @@ class TestLoadQueryMap:
     ) -> None:
         old = await _insert_document(user_id, "old", date="2026-01-01T00:00:00+00:00")
         new = await _insert_document(user_id, "new", date="2026-03-01T00:00:00+00:00")
-        await _insert_child(user_id, "old-a", embedding=[1.0, 0, 0, 0], source=old)
-        await _insert_child(user_id, "old-b", embedding=[0, 1.0, 0, 0], source=old)
-        await _insert_child(user_id, "new-a", embedding=[0, 0, 1.0, 0], source=new)
+        await self._clustered(user_id, "old-a", old, 1.0)
+        await self._clustered(user_id, "old-b", old, 2.0)
+        await self._clustered(user_id, "new-a", new, 3.0)
+        await _insert_cluster(user_id, 0, run_id="r1", size=3)
 
         query_map = await load_query_map(
             mongo_client, TEST_DATABASE, user_id, {"old-a"}, max_docs=1
@@ -1017,29 +989,51 @@ class TestLoadQueryMap:
         assert [p.chunk_id for p in query_map.matched] == ["old-a"]
         assert [p.chunk_id for p in query_map.reference] == ["new-a"]
 
-    async def test_skips_a_matched_child_without_a_vector(
+    async def test_a_match_the_run_never_placed_is_counted_not_drawn(
         self, mongo_client, user_id
     ) -> None:
-        # The text leg can match a pending child; it has nothing to project.
         source = await _insert_document(user_id, "doc1")
-        await _insert_child(user_id, "c1", embedding=[1.0, 0, 0, 0], source=source)
+        await self._clustered(user_id, "c1", source, 1.0)
+        await _insert_cluster(user_id, 0, run_id="r1", size=1)
+        # Ingested since the run, a stale older run, and a pending child.
+        await _insert_child(user_id, "new", source=source)
+        await _insert_child(
+            user_id, "stale", cluster_id=0, viz=ChunkViz(x=9, y=9, run_id="r0")
+        )
         await _insert_child(user_id, "pending", embedding=[], source=source)
 
         query_map = await load_query_map(
-            mongo_client, TEST_DATABASE, user_id, {"c1", "pending"}
+            mongo_client, TEST_DATABASE, user_id, {"c1", "new", "stale", "pending"}
         )
 
         assert [p.chunk_id for p in query_map.matched] == ["c1"]
-        assert query_map.reference == []
+        assert query_map.matched_without_2d == 3
+
+    async def test_no_clustering_run_places_nothing(
+        self, mongo_client, user_id
+    ) -> None:
+        source = await _insert_document(user_id, "doc1")
+        await _insert_child(user_id, "c1", source=source)
+
+        query_map = await load_query_map(mongo_client, TEST_DATABASE, user_id, {"c1"})
+
+        assert query_map.matched == query_map.reference == []
+        assert query_map.matched_without_2d == 1
 
     async def test_another_tenants_chunks_never_appear(
         self, mongo_client, user_id
     ) -> None:
         other = PydanticObjectId()
-        await _insert_child(other, "theirs", embedding=[1.0, 0, 0, 0])
+        source = await _insert_document(user_id, "doc1")
+        await self._clustered(user_id, "mine", source, 1.0)
+        await _insert_cluster(user_id, 0, run_id="r1", size=1)
+        await _insert_child(
+            other, "theirs", cluster_id=0, viz=ChunkViz(x=1, y=1, run_id="r1")
+        )
 
         query_map = await load_query_map(
             mongo_client, TEST_DATABASE, user_id, {"theirs"}
         )
 
-        assert query_map.matched == query_map.reference == []
+        assert query_map.matched == []
+        assert [p.chunk_id for p in query_map.reference] == ["mine"]

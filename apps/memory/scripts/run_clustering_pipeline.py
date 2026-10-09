@@ -5,11 +5,12 @@ A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
 ``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA, EXTRACTION and
 INDEXING phases OFF, so the run is the clustering **Offline phase** alone
 (ADR-007 Decision 5): ONE ``memory-clustering-etl`` subflow per target user —
-UMAP + HDBSCAN over the user's child-chunk embeddings, one LLM summary per
-**Memory cluster**, then a wholesale write of the **Clustering run**.
+UMAP + HDBSCAN over the user's child-chunk embeddings, plain ``Cluster N``
+names (no LLM), then a wholesale write of the **Clustering run**.
 
-The phase is OFF in every other entry point (the nightly cron included), so this
-is the ONE command that clusters. Re-running replaces the previous run entirely;
+The nightly cron runs the same phase; this is the on-demand way. A user whose
+latest run is still current (same chunks, same UMAP / HDBSCAN config) is
+skipped as UP TO DATE; otherwise re-running replaces the previous run entirely;
 a corpus below ``memory.clustering.hdbscan.min_cluster_size`` is skipped with a
 log line naming the knob — which has to be set where the FLOW runs (the
 ``make memory-serve-workflows`` process), not here; this command warns when it
@@ -55,11 +56,8 @@ logger = logging.getLogger(__name__)
 
 
 async def _run(user_id: str | None, user_identifier: str | None) -> None:
-    # The small-corpus knob — and the model / Modal ones the summaries run on —
-    # are read by the SERVING process, not by this one.
-    warn_ignored_config_overrides(
-        "TREE_MEMORY__CLUSTERING__", "TREE_MODELS__", "TREE_MODAL__"
-    )
+    # The small-corpus knob is read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MEMORY__CLUSTERING__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,

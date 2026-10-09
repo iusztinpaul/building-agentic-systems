@@ -1648,11 +1648,8 @@ class TestResetEmbeddings:
             user_id=tenant,
             run_id="run-1",
             cluster_id=2,
-            label="Agent memory design",
-            summary="How agents remember.",
-            keywords=["memory", "agents", "rag"],
+            label="Cluster 1",
             size=3,
-            sample_chunk_ids=[f"{tenant}:chunk:child-0"],
             centroid=ClusterCentroid(x=0.0, y=0.0),
             created_at=_RESET_NOW,
         ).insert()

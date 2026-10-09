@@ -12,8 +12,6 @@ from tree.config.app_config import (
     ChunkingConfig,
     ChunkLevelConfig,
     ClusteringConfig,
-    ClusterSamplingConfig,
-    ClusterSummariesConfig,
     ConcurrencyConfig,
     DreamConfig,
     EmbeddingConfig,
@@ -971,8 +969,6 @@ class TestClusteringConfig:
         assert clustering.umap.random_state == 42
         assert clustering.hdbscan.min_cluster_size == 15
         assert clustering.hdbscan.min_samples is None
-        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
-        assert clustering.summaries.llm_concurrency == 5
 
     def test_clustering_block_loaded_from_default_yaml(self):
         """The real, human-tuned ``default.yaml`` ships the same recipe,
@@ -984,8 +980,6 @@ class TestClusteringConfig:
         assert clustering.umap.metric == "cosine"
         assert clustering.hdbscan.min_cluster_size == 15
         assert clustering.hdbscan.min_samples is None
-        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
-        assert clustering.summaries.llm_concurrency == 5
 
     def test_clustering_defaults_when_section_absent(self, tmp_path):
         custom = tmp_path / "no_clustering.yaml"
@@ -1005,8 +999,6 @@ class TestClusteringConfig:
         assert (clustering.umap.n_components, clustering.umap.random_state) == (5, 42)
         assert clustering.hdbscan.min_cluster_size == 15
         assert clustering.hdbscan.min_samples is None
-        assert (clustering.sampling.nearest, clustering.sampling.random) == (10, 10)
-        assert clustering.summaries.llm_concurrency == 5
 
     def test_min_cluster_size_env_override(self, tmp_path, monkeypatch):
         """Story 1: an operator loosens clustering for a small corpus with
@@ -1021,7 +1013,7 @@ class TestClusteringConfig:
         assert config.memory.clustering.hdbscan.min_cluster_size == 5
         # Untouched siblings keep their defaults.
         assert config.memory.clustering.umap.n_components == 5
-        assert config.memory.clustering.sampling.nearest == 10
+        assert config.memory.clustering.hdbscan.min_samples is None
 
     def test_unknown_umap_metric_raises_naming_both_allowed_values(
         self, tmp_path, monkeypatch
@@ -1089,44 +1081,12 @@ class TestClusteringConfig:
 
         assert HdbscanConfig(min_samples=None).min_samples is None
 
-    def test_sampling_with_no_chunks_at_all_raises(self):
-        """A cluster summary needs at least one sampled chunk — ``0 + 0`` would
-        send the LLM an empty evidence set."""
-
-        with pytest.raises(ValidationError) as excinfo:
-            ClusterSamplingConfig(nearest=0, random=0)
-
-        message = str(excinfo.value)
-        assert "nearest" in message
-        assert "random" in message
-
-    @pytest.mark.parametrize(
-        "nearest,random_",
-        [(0, 1), (1, 0), (20, 0)],
-        ids=["random-only", "nearest-only", "nearest-only-20"],
-    )
-    def test_sampling_allows_one_empty_side(self, nearest, random_):
-        sampling = ClusterSamplingConfig(nearest=nearest, random=random_)
-
-        assert sampling.nearest + sampling.random >= 1
-
-    @pytest.mark.parametrize("field", ["nearest", "random"])
-    def test_negative_sampling_counts_raise(self, field):
-        with pytest.raises(ValidationError):
-            ClusterSamplingConfig(**{field: -1})
-
-    def test_summaries_llm_concurrency_below_one_raises(self):
-        with pytest.raises(ValidationError):
-            ClusterSummariesConfig(llm_concurrency=0)
-
     @pytest.mark.parametrize(
         "model",
         [
             ClusteringConfig,
             UmapConfig,
             HdbscanConfig,
-            ClusterSamplingConfig,
-            ClusterSummariesConfig,
         ],
         ids=lambda model: model.__name__,
     )

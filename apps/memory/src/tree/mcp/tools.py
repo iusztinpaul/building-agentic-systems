@@ -88,6 +88,7 @@ from tree.memory.visualize.embeddings import (
     NO_EMBEDDINGS_MESSAGE,
     to_embedding_map_payload,
     to_query_map_payload,
+    unclustered_warning,
 )
 from tree.memory.visualize.graph import to_graph_payload
 from tree.models.exceptions import ModelError
@@ -560,7 +561,7 @@ if MEMORY_MODE == "rag":
 
 
 # ---------------------------------------------------------------------------
-# Embedding map — READS the latest **Clustering run** (a PCA preview without one)
+# Embedding map — READS the latest **Clustering run**, never computes it
 # ---------------------------------------------------------------------------
 
 
@@ -579,22 +580,23 @@ async def visualize_memory_embeddings(
 ) -> str | ToolResult:
     """Show the memory's embedding space as a 2D map: the child chunks of the
     250 most-recent documents are plotted as points, coloured by their cluster
-    from the latest clustering run, with an LLM-written label per cluster; the
-    legend counts the whole run, and the summary says how many chunks are shown
-    ("N of M chunks (the 250 most-recent of D documents)"). Use when the user
-    wants to *see* what topics the memory holds or how it is organised. ``hulls=true`` outlines each
-    cluster. Clustering is never automatic: if no clustering run exists, the
-    same chunks are still drawn, without clusters (a PCA projection of the raw
-    embeddings), and the answer starts with a warning line saying the
-    clustering must be triggered manually; if the map is stale, the answer
-    starts with a warning line too.
+    from the latest clustering run (UMAP), with a plain "Cluster N" label per
+    cluster (N = size rank; there are no topic names); the legend counts the
+    whole run, and the summary says how many chunks are shown ("N of M chunks
+    (the 250 most-recent of D documents)"). Use when the user wants to *see*
+    how the memory is organised. ``hulls=true`` outlines each cluster. The
+    clustering runs nightly and on demand; chunks it has not placed yet are
+    left off and the answer starts with an "x/y chunks don’t have a 2D
+    embedding" warning — with no clustering run at all, that warning IS the
+    answer (there is nothing to draw).
 
     With a ``query``, the child chunks a hybrid (vector + text) child-chunk
     search matched are drawn in colour over every other chunk of the 250
-    most-recent documents in light grey — one PCA projection for both, no
-    clusters — so the view shows where the matches sit in the wider vector
-    space; clusters are shown only on the whole-memory map. ``hulls`` is
-    ignored with a query. A query that matches nothing answers a plain sentence
+    most-recent documents in light grey — both at the clustering run's UMAP
+    coordinates, no cluster colours — so the view shows where the matches sit
+    in the topic map's space; matched chunks without coordinates raise the
+    same warning. ``hulls`` is ignored with a query. A query that matches
+    nothing answers a plain sentence
     instead.
 
     When the client renders MCP App UIs, the map appears inline. Otherwise
@@ -644,11 +646,13 @@ async def visualize_memory_embeddings(
         )
 
     embedding_map = await load_embedding_map(lc["client"], lc["database"], user_id)
-    # Never an empty canvas: a user with no embedded chunk gets told so (ADR-007
-    # §8). A plain ``str`` — there is no payload to deliver. A user nobody has
-    # clustered still gets a picture: the unclustered preview, warning first.
+    # Never an empty canvas (ADR-007 §8): no embedded chunk → say so; nothing
+    # placed yet (no clustering run) → the missing-2D warning IS the answer. A
+    # plain ``str`` either way — there is no payload to deliver.
     if embedding_map is None:
         return NO_EMBEDDINGS_MESSAGE
+    if not embedding_map.points:
+        return unclustered_warning(embedding_map) or NO_EMBEDDINGS_MESSAGE
 
     payload = to_embedding_map_payload(embedding_map, hulls=hulls)
     summary = payload["summary"]
@@ -679,8 +683,9 @@ async def _visualize_query_embeddings(
     """The query view: the matched child chunks over the rest in grey, no clusters.
 
     Child chunks are mode-orthogonal, so the rag child search serves BOTH modes
-    — no graph import here (ADR-006 decision 5). Independent of the clustering
-    run, so it never warns about one.
+    — no graph import here (ADR-006 decision 5). Drawn at the clustering run's
+    UMAP coordinates, so matches it has not placed raise the missing-2D warning
+    (first line), or ARE the answer when none is placed.
     """
 
     lc = ctx.lifespan_context
@@ -704,15 +709,18 @@ async def _visualize_query_embeddings(
         query_map = await load_query_map(lc["client"], lc["database"], user_id, hit_ids)
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
         return _retrieval_error("visualize_memory_embeddings", exc)
-    if not query_map.matched:
-        # A plain ``str``: there is nothing to draw.
-        return NO_RESULTS_MESSAGE.format(query=query)
-
     payload = to_query_map_payload(query_map, query)
+    warning = payload["warning"]
+    if not query_map.matched:
+        # A plain ``str``: matches exist, but none has 2D coordinates yet.
+        return warning or NO_RESULTS_MESSAGE.format(query=query)
+    summary = payload["summary"]
+    if warning:
+        summary = f"{warning}\n{summary}"
     return await _graph_tool_result(
         ctx,
         payload,
-        payload["summary"],
+        summary,
         user_id=user_id,
         query=f"embedding-map {query}",
         as_html_file=as_html_file,

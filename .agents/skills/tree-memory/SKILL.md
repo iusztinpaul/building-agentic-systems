@@ -66,14 +66,13 @@ A tool marked `—` is absent in that mode; the mode file names the chain to use
 7. **Answer + picture → reuse the SAME `query` in the visual call.** Why: the picture then shows exactly the passages you quoted.
    - Good: `search_memory("Modal cold starts")`, then the mode's picture call with `"Modal cold starts"`.
    - Bad: a picture of the whole memory next to an answer about one topic.
-8. **Map → drill-down: a cluster label from `visualize_memory_embeddings` is a ready `search_memory` query.** Why: the label names a topic the memory actually holds.
-   - Good: cluster "Prefect deployment limits" → "what's in that one?" → `search_memory("Prefect deployment limits")`.
-   - Bad: summarising the cluster from its label alone.
+8. **Map labels name no topic.** Clusters are `Cluster 1 … Cluster K`, numbered by size. To say what a cluster holds, read its chunks — never guess from the label.
+   - Good: "what's in Cluster 2?" → `visualize_memory_embeddings(query=<the user's topic>)` or a `search_memory` on the user's own words.
+   - Bad: "Cluster 2 is about Prefect".
 
-**Relay the map's two fixed answers verbatim**, as the answer itself:
+**Relay the map's fixed warning verbatim**, as the first line of the answer:
 
-- A first line `No clustering run found for this user. Showing the raw embeddings. Trigger it manually.` — repeat it: the map has no topics yet, and clustering is manual only; offer to run `make memory-run-clustering-pipeline`.
-- A first line `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.` — repeat it, then the rest: the map is real but under-reports the corpus. Offer to run `make memory-run-clustering-pipeline`.
+- `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.` — repeat it. With a picture: the map is real but under-reports. Without one (no clustering run yet): that line IS the answer. Offer to run `make memory-run-clustering-pipeline`.
 
 **A visual answer carrying a `graphs://…html.gz` link** could not render inline: on `tree-memory-local` share the local path it also gives; on `tree-memory` (cloud) read the linked blob within its expiry (about 5 minutes), base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it; an expired link → re-run the visual tool once.
 

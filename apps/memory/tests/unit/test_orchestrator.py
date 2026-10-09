@@ -311,7 +311,7 @@ def test_serve_deployments_schedules_the_offline_and_dream_pipelines(mocker):
         "offline-pipeline": [
             (
                 orchestrator._SCHEDULED_INGEST_CRON,
-                {"source_files": ["sources/listen.yaml"]},
+                {"source_files": ["sources/listen.yaml"], "run_clustering": True},
             )
         ],
         "dream-consolidation-all-users": [(app_config.dream.cron, {})],

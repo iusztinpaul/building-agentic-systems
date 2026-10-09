@@ -40,8 +40,7 @@ class TestMemoryReadme:
             "#### Embedding map",  # the CLI subsection
             "make memory-visualize-embeddings",
             "visualize_memory_embeddings",  # the tool table row
-            "don’t have a 2D embedding",  # the warning contract
-            "No clustering run found for this user",  # the no-run message
+            "don’t have a 2D embedding",  # the one warning contract
         ],
     )
     def test_it_documents_both_map_surfaces(self, needle: str) -> None:
@@ -87,7 +86,6 @@ class TestTreeMemorySkill:
         "needle",
         [
             "don’t have a 2D embedding",
-            "No clustering run found for this user",
         ],
     )
     def test_it_tells_the_agent_to_relay_the_map_contract_verbatim(

@@ -169,12 +169,12 @@ def llm_identity() -> str:
 
     Decision 6's rule ("caches carry the identity of the model that produced
     them") applied to the ``models.llm`` switch of ADR-009 decision 10. The
-    ``INPUTS`` caches on ``llm-extract-entities`` (30 days) and
-    ``summarise-cluster`` (90 days) named nothing about the LLM, so after a
-    ``gemini`` -> ``modal`` flip a document / cluster already seen inside the
-    window REPLAYED the previous model's JSON and the new model was never
-    called. Both tasks take this string as an input, which puts it in the key
-    — a provider or model-id change is a cache MISS instead of a silent replay.
+    ``INPUTS`` cache on ``llm-extract-entities`` (30 days) named nothing about
+    the LLM, so after a ``gemini`` -> ``modal`` flip a document already seen
+    inside the window REPLAYED the previous model's JSON and the new model was
+    never called. The task takes this string as an input, which puts it in the
+    key — a provider or model-id change is a cache MISS instead of a silent
+    replay.
 
     Two parts only, unlike :func:`search_embedding_identity`: an LLM has no
     dimensions and no **Embedding role**.

@@ -103,7 +103,9 @@ class _GitRepoWithPipInstall(GitRepository):
 # ``offline-pipeline`` with ``source_files=["sources/listen.yaml"]`` and no
 # ``user_id`` — so it ingests the polled listen feeds fanned out across all active
 # users AND extracts + indexes them, instead of leaving the nightly documents
-# PENDING as the old data-only schedule did.
+# PENDING as the old data-only schedule did. It also clusters (UMAP + HDBSCAN,
+# no LLM), so the Embedding map's 2D coordinates trail the corpus by at most a
+# day; an unchanged corpus is skipped before any vector is loaded.
 _SCHEDULED_INGEST_CRON = "0 3 * * *"
 
 
@@ -186,7 +188,10 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "apps/memory/src/tree/offline.py:offline_pipeline",
         TAGS_OFFLINE_PIPELINE,
         cron=_SCHEDULED_INGEST_CRON,
-        schedule_parameters={"source_files": ["sources/listen.yaml"]},
+        schedule_parameters={
+            "source_files": ["sources/listen.yaml"],
+            "run_clustering": True,
+        },
     ),
     _DeploymentSpec(
         dream_consolidation_all_users,

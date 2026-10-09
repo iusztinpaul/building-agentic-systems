@@ -14,7 +14,6 @@ import asyncio
 import inspect
 import logging
 import re
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -49,10 +48,8 @@ from tree.memory.embedding_text import (
     prospective_entity_embedding_text,
 )
 from tree.memory.clustering.store import ChildEmbeddingRow, ClusterWriteCounts
-from tree.memory.clustering.summaries import fallback_summary
 from tree.memory.clustering.types import (
     ClusteringResult,
-    ClusterSummary,
 )
 from tree.memory.pipeline import (
     _CachedSingleEmbedding,
@@ -69,8 +66,6 @@ from tree.memory.pipeline import (
     _resolve_entities,
     _run_extraction_worker_body,
     _stack_embeddings,
-    _summarise_cluster,
-    _summarise_clusters,
     _validate_raws,
     child_embedding_texts,
     clean_and_chunk_task,
@@ -82,7 +77,6 @@ from tree.memory.pipeline import (
     memory_clustering,
     memory_extract_etl_worker,
     reduce_and_cluster_task,
-    summarise_cluster_task,
     write_clustering_run_task,
 )
 from tree.memory.rag.embedding import child_embedding_text
@@ -100,7 +94,6 @@ from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
 from tree.models.exceptions import ModelError
 from tree.models.fake_model import FakeEmbeddingModel, FakeLLM, MockEmbeddingModel
 from tree.models.get_model import (
-    llm_identity,
     prewarm_models,
     search_embedding_identity,
 )
@@ -1686,21 +1679,16 @@ class TestLLMTaskCacheIdentity:
     """Same rule, LLM side (ADR-009 decision 6 applied to decision 10's
     ``models.llm`` switch).
 
-    ``llm-extract-entities`` (30 d) and ``summarise-cluster`` (90 d) cached on
-    inputs that never named the LLM, so after a ``gemini`` -> ``modal`` flip a
-    document / cluster seen inside the window REPLAYED the previous model's
-    JSON and the new model was never called. Both tasks now take an
-    ``llm_identity`` input — unused in the body, part of the cache key.
+    ``llm-extract-entities`` (30 d) cached on inputs that never named the LLM,
+    so after a ``gemini`` -> ``modal`` flip a document seen inside the window
+    REPLAYED the previous model's JSON and the new model was never called. The
+    task now takes an ``llm_identity`` input — unused in the body, part of the
+    cache key.
     """
 
     # Per-task fixed inputs; only the identity moves between the two keys.
     _KEY_INPUTS: dict[str, dict[str, Any]] = {
         "llm-extract-entities": {"chunked": "doc-1", "user_id": "user-1", "llm": None},
-        "summarise-cluster": {
-            "samples": ["a", "b"],
-            "cluster_id": 0,
-            "prompt_version": "v1",
-        },
     }
 
     _GEMINI = "gemini:gemini-3.1-flash-lite"
@@ -1708,7 +1696,7 @@ class TestLLMTaskCacheIdentity:
 
     @pytest.mark.parametrize(
         "cached_task",
-        [llm_extract_entities_task, summarise_cluster_task],
+        [llm_extract_entities_task],
         ids=lambda t: t.name,
     )
     def test_cache_key_differs_across_llm_identities(self, cached_task) -> None:
@@ -1729,7 +1717,7 @@ class TestLLMTaskCacheIdentity:
 
     @pytest.mark.parametrize(
         "cached_task",
-        [llm_extract_entities_task, summarise_cluster_task],
+        [llm_extract_entities_task],
         ids=lambda t: t.name,
     )
     def test_cache_key_ignores_opik_trace_headers(self, cached_task) -> None:
@@ -1764,9 +1752,8 @@ class TestLLMTaskCacheIdentity:
                     _USER_ID,
                 ),
             ),
-            (_summarise_cluster, (["a"], 0, "v1")),
         ],
-        ids=["llm-extract-entities", "summarise-cluster"],
+        ids=["llm-extract-entities"],
     )
     def test_task_body_requires_llm_identity(self, task_fn, other_args) -> None:
         """Story 5: a new call site that forgets the kwarg is a loud
@@ -1782,7 +1769,7 @@ class TestLLMTaskCacheIdentity:
 
     @pytest.mark.parametrize(
         "cached_task",
-        [llm_extract_entities_task, summarise_cluster_task],
+        [llm_extract_entities_task],
         ids=lambda t: t.name,
     )
     def test_llm_identity_is_not_excluded_from_the_key(self, cached_task) -> None:
@@ -3381,11 +3368,10 @@ class TestRagRowIdMap:
 # Clustering flow — memory-clustering-etl (ADR-007 Decision 5, Offline phase 4)
 # ---------------------------------------------------------------------------
 #
-# The four tasks are patched and the store is faked: what this flow OWNS is the
-# orchestration — the skip guard, the per-cluster fan-out under a semaphore, the
-# fail-open fallback, and the shape of the rows it hands the writer. The recipe
-# is covered in ``clustering/test_core.py``, the queries in
-# ``clustering/test_store.py``, the prompt in ``clustering/test_summaries.py``.
+# The three tasks are patched and the store is faked: what this flow OWNS is the
+# orchestration — the skip guards and the shape of the rows it hands the writer
+# (plain ``Cluster N`` names, no LLM). The recipe is covered in
+# ``clustering/test_core.py``, the queries in ``clustering/test_store.py``.
 
 _CLUSTER_ROWS = 40
 _MIN_CLUSTER_SIZE = 15
@@ -3398,27 +3384,16 @@ def _child_rows(count: int = _CLUSTER_ROWS) -> list[ChildEmbeddingRow]:
         ChildEmbeddingRow(
             chunk_id=f"c{index:03d}",
             embedding=[0.1 * index, 0.2, 0.3, 0.4],
-            title="Memory for AI Agents",
-            heading_path=["Retrieval"],
-            content=f"chunk {index} content",
         )
         for index in range(count)
     ]
 
 
-def _summary(label: str = "Agent memory design") -> ClusterSummary:
-    return ClusterSummary(
-        label=label,
-        summary="What these chunks share.",
-        keywords=["memory", "agents", "rag"],
-    )
-
-
 @pytest.fixture
 def clustering_doubles(mocker, monkeypatch):
-    """Patch the four tasks + Mongo init; hand the test a knob for each.
+    """Patch the three tasks + Mongo init; hand the test a knob for each.
 
-    Returns a namespace with ``load`` / ``reduce`` / ``summarise`` / ``write``
+    Returns a namespace with ``unchanged`` / ``load`` / ``reduce`` / ``write``
     mocks and a ``set_labels`` helper — the labels ARE the scenario (how many
     clusters, how much noise).
     """
@@ -3440,10 +3415,6 @@ def clustering_doubles(mocker, monkeypatch):
         ),
         reduce=mocker.patch(
             "tree.memory.pipeline.reduce_and_cluster_task", new=AsyncMock()
-        ),
-        summarise=mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task",
-            new=AsyncMock(return_value=_summary()),
         ),
         write=mocker.patch(
             "tree.memory.pipeline.write_clustering_run_task",
@@ -3472,12 +3443,19 @@ class TestMemoryClusteringFlow:
     async def test_runs_each_task_once(self, clustering_doubles) -> None:
         await memory_clustering(user_id=_USER_ID)
 
-        # One load, one (expensive) fit, one summary for the single cluster,
-        # one wholesale write. Nothing here is per-chunk.
+        # One load, one (expensive) fit, one wholesale write. Nothing here is
+        # per-chunk, and nothing is per-cluster: there is no LLM step.
         clustering_doubles.load.assert_awaited_once()
         clustering_doubles.reduce.assert_awaited_once()
-        clustering_doubles.summarise.assert_awaited_once()
         clustering_doubles.write.assert_awaited_once()
+
+    async def test_never_builds_an_llm(self, clustering_doubles, mocker) -> None:
+        # Clusters are named by size: a run costs CPU only, never tokens.
+        get_llm = mocker.patch("tree.memory.pipeline.get_llm")
+
+        await memory_clustering(user_id=_USER_ID)
+
+        get_llm.assert_not_called()
 
     async def test_clusters_the_loaded_embeddings_with_the_live_config(
         self, clustering_doubles
@@ -3529,47 +3507,24 @@ class TestMemoryClusteringFlow:
         assert [cluster.cluster_id for cluster in clusters] == [0, 1]
         assert [cluster.size for cluster in clusters] == [20, 15]
 
-    async def test_a_cluster_row_carries_its_evidence_and_centroid(
-        self, clustering_doubles
-    ) -> None:
+    async def test_a_cluster_row_carries_its_centroid(self, clustering_doubles) -> None:
         await memory_clustering(user_id=_USER_ID)
 
         cluster = clustering_doubles.write.await_args.kwargs["clusters"][0]
-        # The sample is capped at nearest + random (10 + 10), even for a
-        # 40-member cluster — one call per cluster stays bounded by size.
-        assert len(cluster.sample_chunk_ids) == 20
-        assert set(cluster.sample_chunk_ids) <= {row.chunk_id for row in _child_rows()}
         # The centroid is the mean of the members' MAP points (coords are
         # (i, i + 0.5) for i in 0..39).
         assert cluster.centroid_x == pytest.approx(19.5)
         assert cluster.centroid_y == pytest.approx(20.0)
-        assert cluster.label == "Agent memory design"
 
-    async def test_summarises_every_non_noise_cluster_exactly_once(
-        self, clustering_doubles
-    ) -> None:
-        clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
+    async def test_clusters_are_named_by_size_rank(self, clustering_doubles) -> None:
+        # Arrange: HDBSCAN id 1 is the BIGGER cluster.
+        clustering_doubles.set_labels([0] * 15 + [1] * 20 + [-1] * 5)
 
         await memory_clustering(user_id=_USER_ID)
 
-        # Noise never gets a summary: it is not a topic, it is the absence of one.
-        assert clustering_doubles.summarise.await_count == 2
-        assert [
-            call.args[1] for call in clustering_doubles.summarise.await_args_list
-        ] == [
-            0,
-            1,
-        ]
-
-    async def test_the_summariser_sees_the_sampled_chunks_text(
-        self, clustering_doubles
-    ) -> None:
-        await memory_clustering(user_id=_USER_ID)
-
-        samples = clustering_doubles.summarise.await_args.args[0]
-        contents = {row.content for row in _child_rows()}
-        assert len(samples) == 20
-        assert set(samples) <= contents
+        clusters = clustering_doubles.write.await_args.kwargs["clusters"]
+        names = {cluster.cluster_id: cluster.label for cluster in clusters}
+        assert names == {1: "Cluster 1", 0: "Cluster 2"}
 
     async def test_returns_the_runs_counts(self, clustering_doubles) -> None:
         clustering_doubles.set_labels([0] * 20 + [1] * 15 + [-1] * 5)
@@ -3580,7 +3535,6 @@ class TestMemoryClusteringFlow:
         assert stats.clusters == 2
         assert stats.clustered == 35
         assert stats.noise == 5
-        assert stats.summaries_failed == 0
         assert stats.skipped_reason is None
 
     async def test_logs_the_summary_line(self, clustering_doubles, caplog) -> None:
@@ -3590,8 +3544,8 @@ class TestMemoryClusteringFlow:
             stats = await memory_clustering(user_id=_USER_ID)
 
         assert (
-            f"clustering run {stats.run_id}: 2 clusters, 35 chunks, 5 noise, "
-            "0 fallback summaries" in caplog.text
+            f"clustering run {stats.run_id}: 2 clusters, 35 chunks, 5 noise"
+            in caplog.text
         )
 
 
@@ -3622,7 +3576,6 @@ class TestMemoryClusteringSkipsATinyCorpus:
         # The previous run's rows stay readable, and no 40 s numba compile is
         # paid to discover there was nothing to do.
         clustering_doubles.reduce.assert_not_awaited()
-        clustering_doubles.summarise.assert_not_awaited()
         clustering_doubles.write.assert_not_awaited()
 
     async def test_warns_with_the_knob_that_fixes_it(
@@ -3653,7 +3606,6 @@ class TestMemoryClusteringIsCached:
             "run run-0 is still current (same chunks and config)"
         )
         clustering_doubles.load.assert_not_awaited()
-        clustering_doubles.summarise.assert_not_awaited()
         clustering_doubles.write.assert_not_awaited()
 
     async def test_a_stale_run_reclusters_and_stamps_the_checked_fingerprint(
@@ -3696,13 +3648,6 @@ class TestMemoryClusteringAllNoise:
         assert stats.noise == _CLUSTER_ROWS
         assert stats.clustered == 0
 
-    async def test_never_calls_the_llm(self, clustering_doubles) -> None:
-        clustering_doubles.set_labels([-1] * _CLUSTER_ROWS)
-
-        await memory_clustering(user_id=_USER_ID)
-
-        clustering_doubles.summarise.assert_not_awaited()
-
     async def test_warns_with_the_knob_that_fixes_it(
         self, clustering_doubles, caplog
     ) -> None:
@@ -3716,266 +3661,8 @@ class TestMemoryClusteringAllNoise:
 
 
 @pytest.mark.usefixtures("clustering_doubles")
-class TestMemoryClusteringFailsOpenPerCluster:
-    """ADR-007 §4: one cluster's dead LLM never fails the run.
-
-    The expensive part (the fit) is already paid by then; dropping the whole
-    run because Gemini 429'd on one of seven summaries would throw it away.
-    """
-
-    async def test_a_failing_cluster_is_stored_as_its_fallback(
-        self, clustering_doubles
-    ) -> None:
-        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
-
-        stats = await memory_clustering(user_id=_USER_ID)
-
-        cluster = clustering_doubles.write.await_args.kwargs["clusters"][0]
-        assert cluster.label == "Cluster 0"
-        assert cluster.summary == ""
-        assert cluster.keywords == []
-        assert stats.summaries_failed == 1
-
-    async def test_the_run_still_completes(self, clustering_doubles) -> None:
-        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
-
-        state = await memory_clustering(user_id=_USER_ID, return_state=True)
-
-        assert state.is_completed()
-
-    async def test_the_other_clusters_keep_their_real_labels(
-        self, clustering_doubles
-    ) -> None:
-        clustering_doubles.set_labels([0] * 20 + [1] * 20)
-        clustering_doubles.summarise.side_effect = [
-            RuntimeError("429 rate limited"),
-            _summary("Retrieval augmentation"),
-        ]
-
-        stats = await memory_clustering(user_id=_USER_ID)
-
-        labels = [
-            cluster.label
-            for cluster in clustering_doubles.write.await_args.kwargs["clusters"]
-        ]
-        assert labels == ["Cluster 0", "Retrieval augmentation"]
-        assert stats.summaries_failed == 1
-
-    async def test_warns_naming_the_cluster(self, clustering_doubles, caplog) -> None:
-        clustering_doubles.summarise.side_effect = RuntimeError("429 rate limited")
-
-        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
-            await memory_clustering(user_id=_USER_ID)
-
-        assert "summarise-cluster failed for cluster 0" in caplog.text
-
-
-class TestSummariseClustersPrewarm:
-    """The cluster-summary seam pre-warms, but keeps ADR-007 §4's fail-open."""
-
-    async def test_the_llm_is_prewarmed_once_before_the_fan_out(
-        self, mocker, modal_seam
-    ) -> None:
-        config = load_app_config().memory.clustering
-        modal_seam.providers(llm="modal")
-        trace: list[str] = []
-        warmed: list[tuple[object, ...]] = []
-
-        async def _prewarm(*models: object) -> None:
-            trace.append("prewarm")
-            warmed.append(models)
-
-        async def _one_summary(*_args: Any, **_kwargs: Any) -> ClusterSummary:
-            trace.append("summarise")
-            return _summary()
-
-        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
-        mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task",
-            new=AsyncMock(side_effect=_one_summary),
-        )
-
-        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
-
-        assert trace == ["prewarm", "summarise", "summarise"]
-        assert warmed == [("LLM",)]
-        assert failed == 0
-
-    @pytest.mark.parametrize("provider,expected", [("gemini", ()), ("modal", ("LLM",))])
-    async def test_summary_seam_builds_the_llm_only_under_modal(
-        self, mocker, modal_seam, provider: str, expected: tuple[str, ...]
-    ) -> None:
-        """Under ``gemini`` the seam builds nothing — the instance exists only to
-        be warmed, and a Gemini client has no gate. The summaries run either way.
-        """
-
-        config = load_app_config().memory.clustering
-        modal_seam.providers(llm=provider)
-        warmed: list[tuple[object, ...]] = []
-
-        async def _prewarm(*models: object) -> None:
-            warmed.append(models)
-
-        mocker.patch("tree.memory.pipeline.prewarm_models", new=_prewarm)
-        summarise = mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task",
-            new=AsyncMock(return_value=_summary()),
-        )
-
-        _, failed = await _summarise_clusters({0: ["a"], 1: ["b"]}, config)
-
-        assert warmed == [expected]
-        assert modal_seam.llm.call_count == len(expected)
-        assert (summarise.await_count, failed) == (2, 0)
-
-    async def test_a_missing_proxy_token_fails_the_run(
-        self, mocker, modal_seam
-    ) -> None:
-        """Construction stays OUTSIDE the ``try``: a configuration error must
-        fail the run loudly. Only the WARM fails open."""
-
-        config = load_app_config().memory.clustering
-        modal_seam.providers(llm="modal")
-        modal_seam.llm.side_effect = ModelError(
-            "MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET are required"
-        )
-        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
-
-        with pytest.raises(ModelError, match="MODAL_PROXY_TOKEN_ID"):
-            await _summarise_clusters({0: ["a"]}, config)
-
-        prewarm.assert_not_called()
-
-    async def test_no_clusters_never_wakes_a_gpu(self, mocker, modal_seam) -> None:
-        config = load_app_config().memory.clustering
-        modal_seam.providers(llm="modal")
-        prewarm = mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
-
-        summaries, failed = await _summarise_clusters({}, config)
-
-        assert (summaries, failed) == ({}, 0)
-        prewarm.assert_not_called()
-        modal_seam.llm.assert_not_called()
-
-    async def test_cluster_summaries_fail_open_when_the_llm_is_dead(
-        self, mocker, modal_seam, caplog
-    ) -> None:
-        """ONE warning and the fallback labels — not N x 600 s of polling."""
-
-        config = load_app_config().memory.clustering
-        samples_by_cluster = {0: ["a"], 1: ["b"], 2: ["c"]}
-        modal_seam.providers(llm="modal")
-        mocker.patch(
-            "tree.memory.pipeline.prewarm_models",
-            new=AsyncMock(
-                side_effect=ModelError(
-                    "Health poll of https://ep-tree-lfm2-5-350m.modal.run/health "
-                    "returned HTTP 403 — not a cold start."
-                )
-            ),
-        )
-        summarise = mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task", new=AsyncMock()
-        )
-
-        with caplog.at_level(logging.WARNING, logger="tree.memory.pipeline"):
-            summaries, failed = await _summarise_clusters(samples_by_cluster, config)
-
-        assert failed == len(samples_by_cluster)
-        assert [summaries[cid].label for cid in sorted(samples_by_cluster)] == [
-            fallback_summary(cid).label for cid in sorted(samples_by_cluster)
-        ]
-        summarise.assert_not_called()
-        skipped = [
-            r for r in caplog.records if "Cluster summaries skipped" in r.getMessage()
-        ]
-        assert len(skipped) == 1
-        assert "HTTP 403" in caplog.text
-
-
-class TestSummariseClustersLLMIdentity:
-    """Story 2: the LLM identity rides into EVERY cluster's cache key, so a
-    model upgrade re-labels the clusters instead of replaying 40-day-old
-    labels for another 50 days."""
-
-    async def test_summaries_pass_the_llm_identity_to_every_cluster(
-        self, mocker
-    ) -> None:
-        config = load_app_config().memory.clustering
-        mocker.patch("tree.memory.pipeline.prewarm_models", new=AsyncMock())
-        summarise = mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task",
-            new=AsyncMock(return_value=_summary()),
-        )
-
-        await _summarise_clusters({0: ["a"], 1: ["b"], 2: ["c"]}, config)
-
-        assert summarise.await_count == 3
-        identities = {call.kwargs["llm_identity"] for call in summarise.await_args_list}
-        # ONE identity for the whole fan-out — resolved once, not per cluster.
-        assert identities == {llm_identity()}
-
-
-class TestSummariseClustersParallelization:
-    """The per-cluster fan-out is bounded by clustering's OWN concurrency knob."""
-
-    async def test_calls_run_concurrently_under_the_semaphore(
-        self, mocker, monkeypatch
-    ) -> None:
-        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__SUMMARIES__LLM_CONCURRENCY", "4")
-        config = load_app_config().memory.clustering
-        in_flight = 0
-        max_in_flight = 0
-        started = 0
-        gate = asyncio.Event()
-
-        async def _slow_summary(*_args: Any, **_kwargs: Any) -> ClusterSummary:
-            nonlocal in_flight, max_in_flight, started
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            started += 1
-            if started >= 4:
-                gate.set()
-            await gate.wait()
-            await asyncio.sleep(0)
-            in_flight -= 1
-            return _summary()
-
-        mocker.patch(
-            "tree.memory.pipeline.summarise_cluster_task",
-            new=AsyncMock(side_effect=_slow_summary),
-        )
-
-        summaries, failed = await _summarise_clusters(
-            {cluster_id: ["sample"] for cluster_id in range(12)}, config
-        )
-
-        # Never more than the bound in flight, and the bound WAS reached (so
-        # the calls really are concurrent, not serial).
-        assert max_in_flight == 4
-        assert len(summaries) == 12
-        assert failed == 0
-
-    def test_the_fan_out_uses_its_own_knob(self) -> None:
-        """Diff-guard: gather + Semaphore + clustering's OWN concurrency key.
-
-        Reusing ``extraction.llm_concurrency`` would tie a mode-orthogonal phase
-        to a graph-only knob (ADR-007 §4).
-        """
-
-        import inspect
-
-        source = inspect.getsource(_summarise_clusters)
-        body = source.split('"""', 2)[-1]
-
-        assert "asyncio.gather" in body
-        assert "Semaphore" in body
-        assert "summaries.llm_concurrency" in body
-        assert "extraction" not in body
-
-
 class TestClusteringTaskConfiguration:
-    """Retries and caches follow ADR-002's tiers; the LLM task is Tier B."""
+    """Retries and caches follow ADR-002's tiers; the phase has no LLM task."""
 
     @pytest.mark.parametrize(
         ("clustering_task", "retries"),
@@ -3994,36 +3681,11 @@ class TestClusteringTaskConfiguration:
         assert clustering_task.retries == retries
         assert clustering_task.retry_delay_seconds == 5
 
-    def test_the_summary_task_is_capped_at_two_billable_retries(self) -> None:
-        assert summarise_cluster_task.retries == 2
-
-    def test_the_summary_tasks_retry_cap_is_documented_inline(self) -> None:
-        """ADR-002 Tier B: a billable retry count must say so where it is set."""
-
-        import inspect
-
-        source = inspect.getsource(pipeline)
-
-        assert "retries=2,  # billable — capped at 2" in source
-
-    def test_the_summary_task_caches_on_the_samples_and_prompt_version(self) -> None:
-        import inspect
-
-        # Trace headers change every run; they must not bust a 90-day cache.
-        assert "opik_trace_headers" in (
-            summarise_cluster_task.cache_policy.exclude or []
-        )
-        assert summarise_cluster_task.cache_expiration == timedelta(days=90)
-        # ``prompt_version`` is a PARAMETER, so editing the prompt (and bumping
-        # SUMMARY_PROMPT_VERSION) is a cache MISS rather than a stale label.
-        assert "prompt_version" in inspect.signature(_summarise_cluster).parameters
-
     @pytest.mark.parametrize(
         ("clustering_task", "name"),
         [
             (load_child_embeddings_task, "load-child-embeddings"),
             (reduce_and_cluster_task, "reduce-and-cluster"),
-            (summarise_cluster_task, "summarise-cluster"),
             (write_clustering_run_task, "write-clustering-run"),
         ],
     )

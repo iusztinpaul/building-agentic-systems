@@ -7,6 +7,7 @@ writer. The template that CONSUMES those keys lives in
 produces an ``EmbeddingMap`` lives in ``tree.memory.clustering.store``.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -21,14 +22,14 @@ from tree.memory.clustering.types import (
 )
 from tree.memory.visualize.embeddings import (
     CLUSTER_PALETTE,
-    NO_CLUSTERING_RUN_MESSAGE,
-    PREVIEW_COLOUR,
+    MATCHED_COLOUR,
     REFERENCE_COLOUR,
     NOISE_COLOUR,
     UNCLUSTERED_COLOUR,
     cluster_colour,
     render_embedding_map_file,
     to_embedding_map_payload,
+    missing_2d_warning,
     to_query_map_payload,
     unclustered_warning,
 )
@@ -39,10 +40,7 @@ def _cluster(cluster_id: int, label: str, size: int) -> MemoryClusterInfo:
     return MemoryClusterInfo(
         cluster_id=cluster_id,
         label=label,
-        summary=f"About {label}.",
-        keywords=["a", "b", "c"],
         size=size,
-        sample_chunk_ids=[f"chunk-{cluster_id}-0"],
         centroid_x=float(cluster_id),
         centroid_y=float(cluster_id),
     )
@@ -131,81 +129,6 @@ def test_cluster_colour_paints_noise_grey() -> None:
     assert NOISE_COLOUR not in CLUSTER_PALETTE
 
 
-def test_no_clustering_run_message_says_clustering_is_manual() -> None:
-    # Assert: the exact wording — the warning says the run must be triggered.
-    assert NO_CLUSTERING_RUN_MESSAGE == (
-        "No clustering run found for this user. Showing the raw embeddings. Trigger it manually."
-    )
-
-
-def _preview(points: int = 4, total_children: int = 6) -> EmbeddingMap:
-    """An unclustered preview: no run, every point noise-labelled."""
-
-    return EmbeddingMap(
-        run_id=None,
-        clusters=[],
-        points=[_point(index, -1) for index in range(points)],
-        total_children=total_children,
-        unclustered=total_children,
-        clustered=0,
-        noise=0,
-        plotted_documents=2,
-        total_documents=3,
-    )
-
-
-def test_preview_payload_warns_first_with_the_no_run_message() -> None:
-    payload = to_embedding_map_payload(_preview())
-
-    assert payload["warning"] == NO_CLUSTERING_RUN_MESSAGE
-
-
-def test_preview_legend_is_one_coloured_row_for_every_chunk() -> None:
-    payload = to_embedding_map_payload(_preview())
-
-    # A real hue, not noise grey: these points are unclustered, not residue.
-    assert payload["legend"] == [
-        {
-            "label": "not clustered yet",
-            "size": 6,
-            "color": PREVIEW_COLOUR,
-            "cluster_id": -1,
-        }
-    ]
-    assert {node["meta"]["cluster"] for node in payload["nodes"]} == {
-        "not clustered yet"
-    }
-
-
-def test_preview_hides_the_hull_toggle_even_when_asked() -> None:
-    # ``None`` (not a bool) is what hides the toggle: there are no clusters.
-    assert to_embedding_map_payload(_preview(), hulls=True)["hulls"] is None
-
-
-def test_preview_summary_counts_the_corpus_and_says_no_clusters() -> None:
-    payload = to_embedding_map_payload(_preview())
-
-    assert payload["summary"] == (
-        "Embedding map: 4 of 6 chunks (the 2 most-recent of 3 documents) "
-        "— no clusters yet (unclustered preview)"
-    )
-
-
-def test_a_preview_cannot_claim_clusters() -> None:
-    with pytest.raises(ValueError, match="unclustered preview"):
-        EmbeddingMap(
-            run_id=None,
-            clusters=[_cluster(0, "A", 3)],
-            points=[],
-            total_children=3,
-            unclustered=3,
-            clustered=0,
-            noise=0,
-            plotted_documents=1,
-            total_documents=1,
-        )
-
-
 # ---------------------------------------------------------------------------
 # unclustered_warning — the stale-map contract (ADR-007 §8)
 # ---------------------------------------------------------------------------
@@ -222,6 +145,15 @@ def test_unclustered_warning_reports_both_counts_and_the_command() -> None:
 
 def test_unclustered_warning_is_none_when_every_chunk_is_on_the_map() -> None:
     assert unclustered_warning(_map(unclustered=0, total_children=47)) is None
+
+
+def test_missing_2d_warning_is_the_one_shared_line() -> None:
+    # The whole map and the query view raise the SAME wording.
+    assert missing_2d_warning(2, 7) == (
+        "2/7 chunks don’t have a 2D embedding. Run the clustering algorithm "
+        "manually or wait for the scheduled offline pipeline to compute them."
+    )
+    assert missing_2d_warning(0, 7) is None
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +342,7 @@ def test_payload_legend_lists_clusters_by_size_then_the_two_greys() -> None:
         },
         {"label": "noise", "size": 5, "color": NOISE_COLOUR, "cluster_id": -1},
         {
-            "label": "unclustered / stale (not shown)",
+            "label": "no 2D embedding (not shown)",
             "size": 3,
             "color": UNCLUSTERED_COLOUR,
         },
@@ -488,10 +420,11 @@ def test_payload_summary_says_how_much_the_document_cap_cut() -> None:
     )
 
 
-def _query_map(matched: int = 2, reference: int = 3) -> QueryMap:
+def _query_map(matched: int = 2, reference: int = 3, missing: int = 0) -> QueryMap:
     return QueryMap(
-        matched=[_point(index, -1) for index in range(matched)],
-        reference=[_point(100 + index, -1) for index in range(reference)],
+        matched=[_point(index, 0) for index in range(matched)],
+        reference=[_point(100 + index, 1) for index in range(reference)],
+        matched_without_2d=missing,
         plotted_documents=4,
         total_documents=5,
     )
@@ -503,6 +436,7 @@ def test_query_payload_draws_the_cloud_first_and_the_matches_on_top() -> None:
     # Assert: Sigma draws in insertion order — the matches must come last.
     ids = [node["id"] for node in payload["nodes"]]
     assert ids == ["chunk-100", "chunk-101", "chunk-102", "chunk-0", "chunk-1"]
+    # The run's cluster ids are replaced: no cluster colours on a query view.
     assert {n["cluster_id"] for n in payload["nodes"][:3]} == {-2}
     assert {n["cluster_id"] for n in payload["nodes"][3:]} == {-1}
     assert payload["nodes"][0]["size"] < payload["nodes"][-1]["size"]
@@ -515,7 +449,7 @@ def test_query_payload_legend_is_the_matches_then_the_faint_grey_cloud() -> None
         {
             "label": "matched chunks",
             "size": 2,
-            "color": PREVIEW_COLOUR,
+            "color": MATCHED_COLOUR,
             "cluster_id": -1,
         },
         {
@@ -538,12 +472,20 @@ def test_query_payload_carries_no_cluster_hulls_or_warning() -> None:
     assert all("cluster" not in node["meta"] for node in payload["nodes"])
 
 
+def test_query_payload_warns_about_matches_without_2d_coordinates() -> None:
+    payload = to_query_map_payload(_query_map(missing=3), "agent memory")
+
+    # Counted over the MATCHED set: 3 of the 5 matches are not drawn.
+    assert payload["warning"] == missing_2d_warning(3, 5)
+
+
 def test_query_payload_summary_names_the_query_and_both_counts() -> None:
     payload = to_query_map_payload(_query_map(), "agent memory")
 
     assert payload["summary"] == (
         "Embedding map for 'agent memory': 2 matched chunks over 3 other chunks in "
-        "grey (the 4 most-recent of 5 documents; a PCA projection, no clusters)"
+        "grey (the 4 most-recent of 5 documents; the clustering run's UMAP "
+        "layout, no cluster colours)"
     )
 
 
@@ -600,16 +542,17 @@ def test_render_embedding_map_file_carries_the_warning_and_every_cluster_label(
     render_embedding_map_file(payload, out)
 
     html = out.read_text(encoding="utf-8")
-    assert "don’t have a 2D embedding" in html
-    for label in ("Cluster 0 topic", "Cluster 1 topic", "unclustered / stale"):
+    # The payload is ``json.dumps``-ed (ASCII-escaped: ``’`` becomes ``\u2019``).
+    assert json.dumps(payload["warning"])[1:-1] in html
+    for label in ("Cluster 0 topic", "Cluster 1 topic", "no 2D embedding"):
         assert label in html
 
 
 def test_render_embedding_map_file_escapes_script_close_in_a_label(
     tmp_path: Path,
 ) -> None:
-    # Arrange: an LLM-written cluster label containing </script> must not close
-    # the inline <script> block.
+    # Arrange: a cluster label containing </script> must not close the inline
+    # <script> block — labels are data, whoever wrote them.
     embedding_map = _map()
     embedding_map.clusters[0].label = "</script>evil"
     payload = to_embedding_map_payload(embedding_map)

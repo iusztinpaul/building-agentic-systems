@@ -67,24 +67,16 @@ NOISE_COLOUR = "#9e9e9e"
 UNCLUSTERED_COLOUR = "#d5d8de"
 """Light grey for the legend row of chunks that are NOT on the map at all."""
 
-NO_CLUSTERING_RUN_MESSAGE = (
-    "No clustering run found for this user. Showing the raw embeddings. "
-    "Trigger it manually."
-)
-"""The **unclustered preview**'s warning line: the map is drawn, but it is not
-the topic map — clustering is manual only (``make memory-run-clustering-pipeline``)."""
-
 NO_EMBEDDINGS_MESSAGE = (
     "No embedded chunks for this user yet — nothing to map. Ingest documents "
     "first (make memory-run-pipeline)."
 )
 """What a surface says instead of drawing an empty map (ADR-007 §8)."""
 
-PREVIEW_COLOUR = "#1f77b4"
-"""One hue for every point of the **unclustered preview** — a real colour, not
-noise grey: those points are not residue, they are simply not clustered yet."""
+MATCHED_COLOUR = "#1f77b4"
+"""One hue for the query view's matched chunks — a real colour over the grey
+reference cloud."""
 
-_PREVIEW_LABEL = "not clustered yet"
 _MATCHED_LABEL = "matched chunks"
 _REFERENCE_LABEL = "other chunks"
 _REFERENCE_ID = -2
@@ -123,25 +115,29 @@ def cluster_colour(cluster_id: int) -> str:
     return CLUSTER_PALETTE[cluster_id % len(CLUSTER_PALETTE)]
 
 
-def unclustered_warning(embedding_map: EmbeddingMap) -> str | None:
-    """The stale-map warning line, or ``None`` when every chunk is on the map.
+def missing_2d_warning(missing: int, total: int) -> str | None:
+    """The ONE missing-coordinates warning line, or ``None`` when nothing is missing.
 
-    The warning contract of ADR-007 §8: chunks ingested after the last
-    **Clustering run** (or carrying an older run's coordinates) cannot be
-    placed, so the map silently under-reports the corpus. The line names both
-    numbers and the two ways to fix it (cluster now, or wait for the offline
-    pipeline).
+    The warning contract of ADR-007 §8, shared by both views: a chunk with no
+    2D coordinates from the latest **Clustering run** (ingested since, never
+    clustered, or no run at all) cannot be drawn — surfaces compute no
+    coordinates — so the picture under-reports. The line names both numbers
+    and the two ways to fix it (cluster now, or wait for the nightly run).
     """
 
-    if embedding_map.run_id is None:
-        return NO_CLUSTERING_RUN_MESSAGE
-    if embedding_map.unclustered <= 0:
+    if missing <= 0:
         return None
     return (
-        f"{embedding_map.unclustered}/{embedding_map.total_children} chunks don’t "
-        "have a 2D embedding. Run the clustering algorithm manually or wait for "
-        "the scheduled offline pipeline to compute them."
+        f"{missing}/{total} chunks don’t have a 2D embedding. Run the clustering "
+        "algorithm manually or wait for the scheduled offline pipeline to "
+        "compute them."
     )
+
+
+def unclustered_warning(embedding_map: EmbeddingMap) -> str | None:
+    """:func:`missing_2d_warning` over the whole memory's embedded children."""
+
+    return missing_2d_warning(embedding_map.unclustered, embedding_map.total_children)
 
 
 def to_embedding_map_payload(
@@ -172,16 +168,10 @@ def to_embedding_map_payload(
     """
 
     labels = {cluster.cluster_id: cluster.label for cluster in embedding_map.clusters}
-    preview = embedding_map.run_id is None
 
     nodes: list[dict[str, Any]] = []
     for point in embedding_map.points:
-        node = _map_node(
-            point,
-            cluster=_PREVIEW_LABEL
-            if preview
-            else _cluster_label(labels, point.cluster_id),
-        )
+        node = _map_node(point, cluster=_cluster_label(labels, point.cluster_id))
         # The one exception: a cluster with NO legend row (a partially written
         # run — points stamped, ``memory_clusters`` row missing) ships its own
         # palette colour, which the template prefers. Never on a healthy map.
@@ -190,30 +180,21 @@ def to_embedding_map_payload(
         nodes.append(node)
 
     legend = _legend_rows(embedding_map)
-    clusters = (
-        "— no clusters yet (unclustered preview)"
-        if preview
-        else (
-            f"in {len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
-        )
-    )
-    # The preview has nothing to outline: ``None`` hides the hull toggle.
-    hulls_state: bool | None = None if preview else hulls
-    # The run's ``clustered`` is the preview's whole corpus of embedded chunks.
-    of = embedding_map.total_children if preview else embedding_map.clustered
 
     return {
         "nodes": nodes,
         "edges": [],
         "layout": "fixed",
         "controls": {"display": dict(_DEFAULT_DISPLAY)},
-        "hulls": hulls_state,
+        "hulls": hulls,
         "legend": legend,
         "warning": unclustered_warning(embedding_map),
         "summary": (
-            f"Embedding map: {len(embedding_map.points)} of {of} chunks "
-            f"(the {embedding_map.plotted_documents} most-recent of "
-            f"{embedding_map.total_documents} documents) {clusters}"
+            f"Embedding map: {len(embedding_map.points)} of "
+            f"{embedding_map.clustered} chunks (the "
+            f"{embedding_map.plotted_documents} most-recent of "
+            f"{embedding_map.total_documents} documents) in "
+            f"{len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
         ),
     }
 
@@ -222,10 +203,11 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
     """The query view: the matched chunks in colour over the rest in light grey.
 
     The points come from :func:`~tree.memory.clustering.store.load_query_map` —
-    ONE PCA space for both — so the grey reference cloud shows where the
-    matches sit in the wider memory. No clusters (they belong to the
-    whole-memory map), no hull toggle (``hulls: None``), no stale warning. The
-    reference nodes go FIRST: Sigma draws in insertion order, so a match is
+    the latest run's stored UMAP coordinates for both — so the grey reference
+    cloud shows where the matches sit in the topic map's own space. No cluster
+    colours (they belong to the whole-memory map), no hull toggle
+    (``hulls: None``); matches the run never placed raise the missing-2D
+    warning over the matched set. The reference nodes go FIRST: Sigma draws in insertion order, so a match is
     never buried under the cloud. Same fixed-layout template and lean nodes as
     :func:`to_embedding_map_payload`; the grey is opaque (see
     :data:`REFERENCE_COLOUR`).
@@ -238,7 +220,9 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
         {**_map_node(point), "cluster_id": _REFERENCE_ID, "size": _REFERENCE_NODE_SIZE}
         for point in query_map.reference
     ]
-    nodes += [_map_node(point) for point in query_map.matched]
+    # The run's cluster ids are dropped on purpose: a query view has no cluster
+    # colours, and an id with no legend row here would paint a match grey.
+    nodes += [{**_map_node(point), "cluster_id": -1} for point in query_map.matched]
     return {
         "nodes": nodes,
         "edges": [],
@@ -249,7 +233,7 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
             {
                 "label": _MATCHED_LABEL,
                 "size": len(query_map.matched),
-                "color": PREVIEW_COLOUR,
+                "color": MATCHED_COLOUR,
                 "cluster_id": -1,
             },
             {
@@ -259,12 +243,16 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
                 "cluster_id": _REFERENCE_ID,
             },
         ],
-        "warning": None,
+        "warning": missing_2d_warning(
+            query_map.matched_without_2d,
+            len(query_map.matched) + query_map.matched_without_2d,
+        ),
         "summary": (
             f"Embedding map for {query!r}: {len(query_map.matched)} matched chunks "
             f"over {len(query_map.reference)} other chunks in grey (the "
             f"{query_map.plotted_documents} most-recent of "
-            f"{query_map.total_documents} documents; a PCA projection, no clusters)"
+            f"{query_map.total_documents} documents; the clustering run's UMAP "
+            "layout, no cluster colours)"
         ),
     }
 
@@ -314,21 +302,8 @@ def _legend_rows(embedding_map: EmbeddingMap) -> list[dict[str, Any]]:
     The greys come last and only when they exist: an empty "noise · 0" row
     would read as a cluster the reader cannot find on the map. Every DRAWN
     row carries its ``cluster_id`` (noise ``-1``) — the template's only source
-    of a point's colour; the "unclustered / stale" row has no points, so none.
-
-    The **unclustered preview** has ONE row instead: every point, one colour,
-    under the noise id the template paints by.
+    of a point's colour; the "no 2D embedding" row has no points, so none.
     """
-
-    if embedding_map.run_id is None:
-        return [
-            {
-                "label": _PREVIEW_LABEL,
-                "size": embedding_map.total_children,
-                "color": PREVIEW_COLOUR,
-                "cluster_id": -1,
-            }
-        ]
 
     rows: list[dict[str, Any]] = [
         {
@@ -353,7 +328,7 @@ def _legend_rows(embedding_map: EmbeddingMap) -> list[dict[str, Any]]:
     if embedding_map.unclustered > 0:
         rows.append(
             {
-                "label": "unclustered / stale (not shown)",
+                "label": "no 2D embedding (not shown)",
                 "size": embedding_map.unclustered,
                 "color": UNCLUSTERED_COLOUR,
             }

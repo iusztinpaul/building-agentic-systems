@@ -571,64 +571,12 @@ class HdbscanConfig(BaseModel):
     )
 
 
-class ClusterSamplingConfig(BaseModel):
-    """How many member chunks the summariser shows the LLM (ADR-007 §4).
-
-    A cluster of 4,000 chunks is summarised from at most ``nearest + random``
-    of them, so one LLM call per cluster stays bounded regardless of size.
-    """
-
-    nearest: int = Field(
-        default=10,
-        ge=0,
-        description=(
-            "Chunks nearest the cluster centroid by cosine distance in the "
-            "ORIGINAL 1024-d embedding space (the most typical members)."
-        ),
-    )
-    random: int = Field(
-        default=10,
-        ge=0,
-        description=(
-            "Seeded random chunks drawn from the remaining members, so the "
-            "sample also shows the cluster's spread — not just its core."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _check_at_least_one_sample(self) -> "ClusterSamplingConfig":
-        """A summary needs evidence: ``nearest + random == 0`` would ask the LLM
-        to label a cluster from an empty sample."""
-
-        if self.nearest + self.random < 1:
-            raise ValueError(
-                "Misconfigured clustering: memory.clustering.sampling.nearest + "
-                "memory.clustering.sampling.random must be at least 1. Found "
-                f"nearest={self.nearest}, random={self.random}."
-            )
-        return self
-
-
-class ClusterSummariesConfig(BaseModel):
-    """Per-cluster LLM summarisation knobs (ADR-007 §4)."""
-
-    llm_concurrency: int = Field(
-        default=5,
-        ge=1,
-        description=(
-            "Concurrent per-cluster LLM calls (one call per cluster), bounded "
-            "by its own semaphore. Separate from extraction.llm_concurrency: "
-            "clustering is mode-orthogonal, extraction is graph-only."
-        ),
-    )
-
-
 class ClusteringConfig(BaseModel):
     """The BERTopic-shaped clustering recipe (ADR-007 §1).
 
     UMAP to a low-dimensional intermediate -> HDBSCAN there -> a separate UMAP
-    to 2-D for display -> one LLM summary per cluster. Every number is a knob;
-    there is deliberately NO automatic parameter search.
+    to 2-D for display; clusters are named ``Cluster N`` by size (no LLM).
+    Every number is a knob; there is deliberately NO automatic parameter search.
 
     ``extra="forbid"`` is load-bearing: the ON/OFF switch is the
     ``run_clustering`` flow parameter of ``offline_pipeline`` (ADR-007 §5), so a
@@ -645,14 +593,6 @@ class ClusteringConfig(BaseModel):
     hdbscan: HdbscanConfig = Field(
         default_factory=HdbscanConfig,
         description="HDBSCAN knobs, applied on the UMAP intermediate space.",
-    )
-    sampling: ClusterSamplingConfig = Field(
-        default_factory=ClusterSamplingConfig,
-        description="How many member chunks each cluster summary is written from.",
-    )
-    summaries: ClusterSummariesConfig = Field(
-        default_factory=ClusterSummariesConfig,
-        description="Per-cluster LLM summarisation knobs.",
     )
 
 

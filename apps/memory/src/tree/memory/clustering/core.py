@@ -191,74 +191,6 @@ def _hdbscan_labels(reduced: np.ndarray, config: ClusteringConfig) -> np.ndarray
     return clusterer.fit(reduced).labels_
 
 
-def sample_cluster_members(
-    embeddings: np.ndarray,
-    labels: Sequence[int] | np.ndarray,
-    cluster_id: int,
-    *,
-    nearest: int,
-    random: int,
-    seed: int,
-) -> list[int]:
-    """Pick the member rows one cluster is summarised from (ADR-007 §4).
-
-    ``nearest`` most typical members (highest cosine similarity to the cluster's
-    centroid in the ORIGINAL embedding space) plus ``random`` seeded draws from
-    the rest: the head shows the LLM what the cluster IS, the tail shows how far
-    it spreads. The RNG is seeded with ``seed + cluster_id`` so a re-run on an
-    unchanged corpus samples the same chunks — the summary cache stays valid —
-    while two clusters do not draw the same positions of their rankings.
-
-    Args:
-        embeddings: The SAME ``(n, d)`` array that was clustered.
-        labels: One label per row of ``embeddings``.
-        cluster_id: The cluster to sample. Noise (``-1``) is not a cluster.
-        nearest: How many members nearest the centroid to take.
-        random: How many further members to draw from the remainder.
-        seed: Base seed, offset by ``cluster_id``.
-
-    Returns:
-        Row indices into ``embeddings``: the ``nearest`` head in similarity
-        order followed by the random tail. A cluster with at most
-        ``nearest + random`` members returns ALL of them, in similarity order.
-
-    Raises:
-        ValueError: For ``cluster_id == -1`` or a cluster id nothing carries.
-    """
-
-    if cluster_id == NOISE_LABEL:
-        raise ValueError(
-            f"Noise ({NOISE_LABEL}) is not a cluster: it has no centroid and "
-            "never gets a summary or a memory_clusters row."
-        )
-
-    label_array = np.asarray(labels)
-    members = np.flatnonzero(label_array == cluster_id)
-    if members.size == 0:
-        raise ValueError(
-            f"No embedding carries cluster_id {cluster_id}; the labels hold "
-            f"{sorted({int(label) for label in label_array})}."
-        )
-
-    vectors = np.asarray(embeddings, dtype=float)[members]
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    # A zero vector has no direction; dividing by 1.0 leaves it at similarity 0
-    # instead of producing NaNs that would poison the whole ranking.
-    unit = vectors / np.where(norms == 0.0, 1.0, norms)
-    centroid = unit.mean(axis=0)
-    similarity = unit @ centroid
-
-    # Stable sort on the negated similarity: descending, ties broken by row
-    # index, so the head is reproducible down to the tie order.
-    ranked = members[np.argsort(-similarity, kind="stable")]
-    if len(ranked) <= nearest + random:
-        return [int(index) for index in ranked]
-
-    rng = np.random.default_rng(seed + cluster_id)
-    tail = rng.choice(ranked[nearest:], size=random, replace=False)
-    return [int(index) for index in ranked[:nearest]] + [int(index) for index in tail]
-
-
 def cluster_centroids_2d(
     coords: Sequence[tuple[float, float]] | np.ndarray,
     labels: Sequence[int] | np.ndarray,
@@ -288,46 +220,6 @@ def cluster_sizes(labels: Sequence[int] | np.ndarray) -> dict[int, int]:
         label: int(np.count_nonzero(label_array == label))
         for label in _cluster_labels(label_array)
     }
-
-
-PREVIEW_EXTENT = 10.0
-"""Half-width the PCA preview is scaled to. Raw cosine-normalised embeddings
-project to a ~0.5-wide cloud, which the payload's 3-decimal rounding would
-collapse onto a few hundred grid steps; ±10 keeps it sub-pixel."""
-
-
-def project_pca_2d(embeddings: np.ndarray) -> np.ndarray:
-    """Project raw embeddings to 2-D with PCA — the **unclustered preview**'s layout.
-
-    The fallback a surface draws when no **Clustering run** exists yet: numpy
-    only (an SVD of the centred matrix), so it costs milliseconds and never
-    imports the UMAP stack. Deterministic: each axis's sign is fixed so its
-    largest-magnitude loading is positive — SVD signs are otherwise arbitrary
-    and the map would mirror between two identical calls. PCA keeps global
-    variance, not local neighbourhoods, so the picture is coarser than the
-    clustering run's UMAP map; it is a preview, never mixed into a run's space.
-
-    Args:
-        embeddings: ``(n, d)`` raw vectors, ``n >= 1``.
-
-    Returns:
-        ``(n, 2)`` coordinates within ``±PREVIEW_EXTENT``; a missing axis (one
-        or two points, or collinear vectors) is zero.
-    """
-
-    matrix = np.asarray(embeddings, dtype=np.float64)
-    centred = matrix - matrix.mean(axis=0)
-    _, _, components = np.linalg.svd(centred, full_matrices=False)
-    components = components[:2]
-    pivots = np.abs(components).argmax(axis=1)
-    signs = np.sign(components[np.arange(len(components)), pivots])
-    signs[signs == 0] = 1.0
-    coords = np.zeros((matrix.shape[0], 2))
-    coords[:, : len(components)] = centred @ (components * signs[:, None]).T
-    extent = np.abs(coords).max()
-    if extent > 0:
-        coords *= PREVIEW_EXTENT / extent
-    return coords
 
 
 def noise_count(labels: Sequence[int] | np.ndarray) -> int:

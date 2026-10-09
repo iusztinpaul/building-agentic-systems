@@ -14,7 +14,7 @@ previous run" would become a graph mutation. Membership therefore lives on the
 chunk (``MemoryEntry.cluster_id``), which is what the **Embedding map** draws.
 
 Noise is NOT a row: chunks HDBSCAN could not place get ``cluster_id = -1`` and
-coordinates on the chunk, but no cluster row and no summary.
+coordinates on the chunk, but no cluster row and no name.
 """
 
 from __future__ import annotations
@@ -92,31 +92,13 @@ class MemoryCluster(BeanieDocument):
     )
     label: str = Field(
         description=(
-            "LLM-written cluster name, at most 6 words. A cluster whose summary "
-            "call fails after retries falls back to 'Cluster {cluster_id}'."
-        ),
-    )
-    summary: str = Field(
-        description=(
-            "LLM-written description of what the cluster's chunks are about, at "
-            "most 100 words. Empty when the summary call failed (fail-open)."
-        ),
-    )
-    keywords: list[str] = Field(
-        description=(
-            "3-5 LLM-written keywords for the cluster. Explicitly empty (never "
-            "absent) on a failed summary."
+            "Plain 'Cluster N' name, N = the cluster's size rank in this run "
+            "(1 = largest). No LLM: names are per run and may renumber."
         ),
     )
     size: int = Field(
         ge=1,
         description="Number of child chunks assigned to this cluster in this run.",
-    )
-    sample_chunk_ids: list[str] = Field(
-        description=(
-            "The <= 20 child chunk _ids the summariser actually saw (nearest "
-            "the centroid + seeded random) — the evidence behind label/summary."
-        ),
     )
     centroid: ClusterCentroid = Field(
         description="Cluster centre in Embedding map space; where the legend points.",
@@ -124,9 +106,9 @@ class MemoryCluster(BeanieDocument):
     config_fingerprint: str | None = Field(
         default=None,
         description=(
-            "Hash of the run's UMAP / HDBSCAN / sampling config, summary prompt "
-            "version and LLM. A re-run is skipped (cached) only while it matches; "
-            "None on rows written before the cache existed (they recluster once)."
+            "Hash of the run's UMAP / HDBSCAN config. A re-run is skipped "
+            "(cached) only while it matches; None on rows written before the "
+            "cache existed (they recluster once)."
         ),
     )
     created_at: datetime = Field(
@@ -139,7 +121,7 @@ class MemoryCluster(BeanieDocument):
         """Noise (``-1``) is never a cluster row (ADR-007 §3).
 
         HDBSCAN's ``-1`` label is "not in any cluster", so a ``-1`` row would be
-        a labelled summary of everything the algorithm refused to group. The
+        a named cluster of everything the algorithm refused to group. The
         marker lives on the chunk (``MemoryEntry.cluster_id``) instead.
         """
 

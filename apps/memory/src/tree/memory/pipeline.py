@@ -18,10 +18,10 @@ ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
   search-index reconcile, run as phase 3 of ``offline-pipeline`` (once per
   target user) and inline by ``online-pipeline`` for a single document. Returns
   the number of rows it embedded.
-* ``memory_clustering`` (flow ``memory-clustering-etl``) — the OFF-by-default
-  fourth **Offline phase** (ADR-007 Decision 5): UMAP -> HDBSCAN over one user's
-  **Child chunk** embeddings, one LLM summary per **Memory cluster**, one
-  wholesale write of the **Clustering run**. Mode-orthogonal (identical in
+* ``memory_clustering`` (flow ``memory-clustering-etl``) — the fourth
+  **Offline phase** (ADR-007 Decision 5), run nightly and on demand: UMAP ->
+  HDBSCAN over one user's **Child chunk** embeddings, plain ``Cluster N``
+  names (no LLM), one wholesale write of the **Clustering run**. Mode-orthogonal (identical in
   ``rag`` and ``graphrag``; no graph rows, no edges). Returns a
   :class:`ClusteringStats`.
 
@@ -138,7 +138,6 @@ from tree.memory.clustering.core import (
     cluster_sizes,
     noise_count,
     reduce_and_cluster,
-    sample_cluster_members,
 )
 from tree.memory.clustering.store import (
     ChildEmbeddingRow,
@@ -147,14 +146,8 @@ from tree.memory.clustering.store import (
     unchanged_run_id,
     write_clustering_run,
 )
-from tree.memory.clustering.summaries import (
-    SUMMARY_PROMPT_VERSION,
-    fallback_summary,
-    summarise_cluster,
-)
 from tree.memory.clustering.types import (
     ClusteringResult,
-    ClusterSummary,
     MemoryClusterInfo,
 )
 from tree.memory.graph.resolution.composite import CompositeResolver
@@ -174,7 +167,6 @@ from tree.memory.types import (
     make_type_name_key,
 )
 from tree.models.base import BaseEmbeddingModel, BaseLLM, EmbeddingRole
-from tree.models.exceptions import ModelError
 from tree.models.get_model import (
     get_embedding_model,
     get_llm,
@@ -2401,10 +2393,6 @@ class ClusteringStats(BaseModel):
     )
     noise: int = Field(default=0, description="Chunks labelled -1 (placed nowhere).")
     clusters: int = Field(default=0, description="Memory clusters written.")
-    summaries_failed: int = Field(
-        default=0,
-        description="Clusters stored with the fail-open 'Cluster {id}' fallback.",
-    )
     skipped_reason: str | None = Field(
         default=None,
         description="Why nothing was written; None on a run that clustered.",
@@ -2540,143 +2528,7 @@ reduce_and_cluster_task = task(
 )
 
 
-# --- Task ③ — one LLM summary per cluster -----------------------------------
-
-
-async def _summarise_cluster(
-    samples: list[str],
-    cluster_id: int,
-    prompt_version: str,
-    *,
-    llm_identity: str,
-    opik_trace_headers: dict[str, str] | None = None,
-) -> ClusterSummary:
-    """Name and describe ONE **Memory cluster** from its sampled members.
-
-    ``cluster_id`` and ``prompt_version`` are parameters so they join the
-    ``INPUTS`` cache key: a re-run on an unchanged corpus samples the same
-    chunks (seeded) and is served from cache, while editing the prompt (and
-    bumping :data:`SUMMARY_PROMPT_VERSION`) is a cache MISS.
-
-    ``get_llm()`` is built INSIDE the task: Prefect may run it in another
-    thread/process, where a handle created at flow scope is not reusable.
-
-    ``llm_identity`` (``provider:model``, from
-    :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
-    rides in the ``INPUTS`` cache key so this task's 90-day cache can never
-    replay the labels of a previous LLM after a ``models.llm`` switch (ADR-009
-    decision 6's rule applied to decision 10's provider switch).
-    """
-
-    log = _get_run_logger()
-    with span(
-        "summarise_cluster_task",
-        tags=_CLUSTERING_TAGS,
-        trace_headers=opik_trace_headers,
-    ):
-        log.info(
-            "summarise_cluster: llm=%s cluster_id=%d n_samples=%d prompt_version=%s",
-            llm_identity,
-            cluster_id,
-            len(samples),
-            prompt_version,
-        )
-        return await summarise_cluster(get_llm(), samples)
-
-
-summarise_cluster_task = task(
-    _summarise_cluster,
-    name="summarise-cluster",
-    cache_policy=_INPUTS_NO_HEADERS,
-    # 90 days: the samples are seeded and the corpus changes slowly, so a
-    # monthly re-run should not re-buy labels it already paid for.
-    cache_expiration=timedelta(days=90),
-    retries=2,  # billable — capped at 2
-    retry_delay_seconds=5,
-)
-
-
-async def _summarise_clusters(
-    samples_by_cluster: dict[int, list[str]],
-    config: ClusteringConfig,
-    opik_trace_headers: dict[str, str] | None = None,
-) -> tuple[dict[int, ClusterSummary], int]:
-    """Summarise every cluster concurrently, failing OPEN per cluster.
-
-    ADR-007 §4: one call per cluster, bounded by
-    ``memory.clustering.summaries.llm_concurrency`` — its OWN knob, because
-    clustering is mode-orthogonal while ``extraction.llm_concurrency`` is
-    graph-only in meaning.
-
-    ``return_exceptions=True`` is the fail-open: a cluster whose task blew
-    through its retries (Gemini 429s, a model that keeps returning a 9-word
-    label) is stored as ``Cluster {id}`` with an empty summary and a WARNING.
-    One bad cluster never fails a run that already did the expensive part.
-
-    Returns:
-        ``({cluster_id: summary}, n_failed)``.
-    """
-
-    log = _get_run_logger()
-    semaphore = asyncio.Semaphore(config.summaries.llm_concurrency)
-    # ADR-009 §6: the identity of the LLM rides into every cluster's cache key,
-    # so a ``models.llm`` switch re-labels the clusters instead of replaying the
-    # old model's labels for the rest of the 90-day window. Resolved ONCE before
-    # the fan-out, at run time, so an env override moves it too.
-    cluster_llm_identity = llm_identity()
-
-    async def _one(cluster_id: int) -> ClusterSummary:
-        async with semaphore:
-            return await summarise_cluster_task(
-                samples_by_cluster[cluster_id],
-                cluster_id,
-                SUMMARY_PROMPT_VERSION,
-                llm_identity=cluster_llm_identity,
-                opik_trace_headers=opik_trace_headers,
-            )
-
-    ordered = sorted(samples_by_cluster)
-    if ordered:
-        # Pre-warm before the fan-out (ADR-009 §11): without it a dead Modal
-        # LLM costs every cluster its own 600 s poll. The CONSTRUCTION sits
-        # OUTSIDE the ``try`` — a missing Proxy token is a configuration error
-        # and must fail the run loudly; only the WARM fails open, per ADR-007
-        # §4: ONE warning and the existing fallback label for every cluster,
-        # with no LLM call attempted. ``ModelError`` is the warm path's closed
-        # set: a fail-fast 4xx raises it directly, a spent deadline raises its
-        # ``ExtractionError`` subclass — nothing else escapes a warm. Under
-        # ``llm.provider != modal`` nothing is built at all: the instance exists
-        # only to be warmed (the fan-out builds its own inside each task).
-        llms = modal_backed_models("llm")
-        try:
-            await prewarm_models(*llms)
-        except ModelError as exc:
-            log.warning("Cluster summaries skipped: %s", exc)
-            return {cid: fallback_summary(cid) for cid in ordered}, len(ordered)
-
-    outcomes = await asyncio.gather(
-        *[_one(cluster_id) for cluster_id in ordered], return_exceptions=True
-    )
-
-    summaries: dict[int, ClusterSummary] = {}
-    failed = 0
-    for cluster_id, outcome in zip(ordered, outcomes, strict=True):
-        if isinstance(outcome, BaseException):
-            failed += 1
-            summaries[cluster_id] = fallback_summary(cluster_id)
-            log.warning(
-                "summarise-cluster failed for cluster %d after retries — storing "
-                "the fallback summary %r: %s",
-                cluster_id,
-                summaries[cluster_id].label,
-                outcome,
-            )
-        else:
-            summaries[cluster_id] = outcome
-    return summaries, failed
-
-
-# --- Task ④ — the wholesale write -------------------------------------------
+# --- Task ③ — the wholesale write -------------------------------------------
 
 
 async def _write_clustering_run(
@@ -2717,18 +2569,14 @@ async def _write_clustering_run(
 def _clustering_fingerprint(config: ClusteringConfig) -> str:
     """Hash every input that shapes a run's output — the clustering cache key.
 
-    The UMAP, HDBSCAN and sampling knobs decide the clusters and the summarised
-    samples; the prompt version and the LLM decide the labels. Concurrency is
-    left out: it changes how fast, not what. Sixteen hex digits (64 bits) are
-    plenty to tell a handful of configs apart.
+    The UMAP and HDBSCAN knobs decide the clusters and the coordinates — the
+    whole output, now that labels are plain ``Cluster N`` names. Sixteen hex
+    digits (64 bits) are plenty to tell a handful of configs apart.
     """
 
     payload = {
         "umap": config.umap.model_dump(mode="json"),
         "hdbscan": config.hdbscan.model_dump(mode="json"),
-        "sampling": config.sampling.model_dump(mode="json"),
-        "prompt_version": SUMMARY_PROMPT_VERSION,
-        "llm": llm_identity(),
     }
     encoded = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
@@ -2745,32 +2593,26 @@ write_clustering_run_task = task(
 
 def _build_cluster_infos(
     *,
-    rows: list[ChildEmbeddingRow],
     sizes: dict[int, int],
     centroids: dict[int, tuple[float, float]],
-    sample_indices: dict[int, list[int]],
-    summaries: dict[int, ClusterSummary],
 ) -> list[MemoryClusterInfo]:
-    """Assemble the ``memory_clusters`` rows from the run's four by-cluster maps.
+    """Assemble the ``memory_clusters`` rows, named ``Cluster 1 … Cluster K``.
 
-    ``sample_chunk_ids`` is the EVIDENCE trail: exactly the chunks the
-    summariser saw, so a reader who doubts a label can go read them.
+    No LLM: a cluster is named by its size rank (largest first; ties broken on
+    the HDBSCAN id), so the legend reads in order and a run costs no tokens.
+    The names are per run — a re-run on a changed corpus may renumber them.
     """
 
+    ranked = sorted(sizes, key=lambda cluster_id: (-sizes[cluster_id], cluster_id))
     return [
         MemoryClusterInfo(
             cluster_id=cluster_id,
-            label=summaries[cluster_id].label,
-            summary=summaries[cluster_id].summary,
-            keywords=summaries[cluster_id].keywords,
+            label=f"Cluster {rank}",
             size=sizes[cluster_id],
-            sample_chunk_ids=[
-                rows[index].chunk_id for index in sample_indices[cluster_id]
-            ],
             centroid_x=centroids[cluster_id][0],
             centroid_y=centroids[cluster_id][1],
         )
-        for cluster_id in sorted(sizes)
+        for rank, cluster_id in enumerate(ranked, start=1)
     ]
 
 
@@ -2781,11 +2623,11 @@ async def memory_clustering(
 ) -> ClusteringStats:
     """Cluster ``user_id``'s **Child chunk** embeddings and write the run.
 
-    Phase 4 of ``offline-pipeline`` (ADR-007 Decision 5), OFF by default: the
-    nightly cron never runs it — only ``make memory-run-clustering-pipeline``
-    does. Four steps —
-    load, reduce+cluster, summarise per cluster, write — each a task, so the
-    Prefect UI shows where a 40 s cold numba compile or a slow Gemini call went.
+    Phase 4 of ``offline-pipeline`` (ADR-007 Decision 5): the nightly cron runs
+    it, and so does ``make memory-run-clustering-pipeline``. Three steps —
+    load, reduce+cluster, write — each a task, so the Prefect UI shows where a
+    40 s cold numba compile went. No LLM: clusters are named ``Cluster N`` by
+    size, so a run costs CPU only, never tokens.
 
     A corpus below ``memory.clustering.hdbscan.min_cluster_size`` is SKIPPED
     without touching the store: nothing could form a cluster, and wiping the
@@ -2794,9 +2636,9 @@ async def memory_clustering(
     The run is CACHED: before loading any vector it asks
     :func:`~tree.memory.clustering.store.unchanged_run_id` whether the latest
     run is still current (same chunks, same :func:`_clustering_fingerprint`)
-    and, if so, returns ``up_to_date`` without a UMAP fit or an LLM call. A
-    changed UMAP / HDBSCAN / sampling knob, prompt version or LLM changes the
-    fingerprint, so the next run reclusters by itself — no force flag.
+    and, if so, returns ``up_to_date`` without a UMAP fit — a quiet night costs
+    two counts. A changed UMAP / HDBSCAN knob changes the fingerprint, so the
+    next run reclusters by itself — no force flag.
 
     ``run_id`` is the Prefect flow-run id, stamped on every cluster row and on
     every chunk's ``viz`` — that pairing is what lets a surface tell fresh
@@ -2866,38 +2708,7 @@ async def memory_clustering(
             sizes = cluster_sizes(result.labels)
             centroids = cluster_centroids_2d(result.coords, result.labels)
             noise = noise_count(result.labels)
-
-            # The sampling reads the ORIGINAL embedding space (cosine to the
-            # cluster centroid), not the projections — a 5-d or 2-D neighbour is
-            # a neighbour of the picture, not of the text.
-            matrix = _stack_embeddings([row.embedding for row in rows])
-            sample_indices = {
-                cluster_id: sample_cluster_members(
-                    matrix,
-                    result.labels,
-                    cluster_id,
-                    nearest=config.sampling.nearest,
-                    random=config.sampling.random,
-                    seed=config.umap.random_state,
-                )
-                for cluster_id in sorted(sizes)
-            }
-            summaries, summaries_failed = await _summarise_clusters(
-                {
-                    cluster_id: [rows[index].content for index in indices]
-                    for cluster_id, indices in sample_indices.items()
-                },
-                config,
-                opik_trace_headers=headers,
-            )
-
-            clusters = _build_cluster_infos(
-                rows=rows,
-                sizes=sizes,
-                centroids=centroids,
-                sample_indices=sample_indices,
-                summaries=summaries,
-            )
+            clusters = _build_cluster_infos(sizes=sizes, centroids=centroids)
             await write_clustering_run_task(
                 client,
                 database,
@@ -2922,13 +2733,11 @@ async def memory_clustering(
                     len(rows),
                 )
             log.info(
-                "clustering run %s: %d clusters, %d chunks, %d noise, "
-                "%d fallback summaries",
+                "clustering run %s: %d clusters, %d chunks, %d noise",
                 run_id,
                 len(clusters),
                 len(rows) - noise,
                 noise,
-                summaries_failed,
             )
             return ClusteringStats(
                 run_id=run_id,
@@ -2936,7 +2745,6 @@ async def memory_clustering(
                 clustered=len(rows) - noise,
                 noise=noise,
                 clusters=len(clusters),
-                summaries_failed=summaries_failed,
             )
     finally:
         # Flush batched Opik telemetry (fail-open; no-op without OPIK_API_KEY).

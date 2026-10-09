@@ -15,8 +15,9 @@ Four operations, and nothing else reads or writes these rows:
   the latest run?
 * :func:`load_embedding_map` — the **Embedding map** a surface renders, read
   from the run (ADR-007 §8): the chunks of the most-recent documents, counted
-  against the whole run (ADR-013 §3). With no run yet, the unclustered preview.
-* :func:`load_query_map` — a query view: the matches over a grey reference cloud.
+  against the whole run (ADR-013 §3). With no run yet, no points at all.
+* :func:`load_query_map` — a query view: the matches over a grey reference
+  cloud, both at the run's UMAP coordinates.
 
 Raw pymongo on ``MEMORY_COLLECTION`` / ``MEMORY_CLUSTERS_COLLECTION``, following
 ``rag/indexing.py``'s style rather than Beanie's: these are bulk statements over
@@ -33,7 +34,6 @@ import logging
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 from beanie import PydanticObjectId
 from pydantic import BaseModel, Field
 from pymongo import AsyncMongoClient, UpdateOne
@@ -45,7 +45,7 @@ from tree.entities.memory import (
     STORED_VECTOR_QUERY,
     from_stored_vector,
 )
-from tree.memory.clustering.core import NOISE_LABEL, project_pca_2d
+from tree.memory.clustering.core import NOISE_LABEL
 from tree.memory.clustering.types import (
     EmbeddingMap,
     MapPoint,
@@ -67,8 +67,15 @@ _POINT_PROJECTION: dict[str, int] = {
     "properties.heading_path": 1,
     "properties.content": 1,
 }
-"""What a drawn point reads — the tooltip fields, never the vector (the preview
-adds ``embedding`` for its projection)."""
+"""What a drawn point reads — the tooltip fields, never the vector."""
+
+_LEGACY_CLUSTER_FIELDS: dict[str, str] = {
+    "summary": "",
+    "keywords": "",
+    "sample_chunk_ids": "",
+}
+"""``memory_clusters`` fields of the LLM-labelled era, ``$unset`` on every write
+so a surviving cluster id never keeps an old run's summary."""
 """How much chunk text a tooltip carries. The map draws points, not documents."""
 
 _CHILD_ROW_FILTER: dict[str, Any] = {
@@ -97,23 +104,12 @@ def _embedded_children_filter(user_id: PydanticObjectId) -> dict[str, Any]:
 class ChildEmbeddingRow(BaseModel):
     """One **Child chunk** as the clustering recipe consumes it.
 
-    Carries the vector (the input to both UMAP fits) plus the three display
-    fields the summariser and the map need, so the run reads the collection
-    ONCE — the summary prompt never joins back for its evidence.
+    Only the id and the vector (the input to both UMAP fits): the run names
+    clusters by size, so it reads no text.
     """
 
     chunk_id: str = Field(description="The child chunk row's ``_id``.")
     embedding: list[float] = Field(description="Its Voyage vector, non-empty.")
-    title: str | None = Field(
-        default=None, description="Source document title; None when unknown."
-    )
-    heading_path: list[str] = Field(
-        default_factory=list,
-        description="The parent chunk's heading stack, outermost first.",
-    )
-    content: str = Field(
-        default="", description="The chunk text — the summariser's evidence."
-    )
 
 
 class ClusterWriteCounts(BaseModel):
@@ -165,13 +161,7 @@ async def load_child_embeddings(
     collection = client[database][MEMORY_COLLECTION]
     cursor = collection.find(
         _embedded_children_filter(user_id),
-        {
-            "_id": 1,
-            "embedding": 1,
-            "properties.title": 1,
-            "properties.heading_path": 1,
-            "properties.content": 1,
-        },
+        {"_id": 1, "embedding": 1},
     ).sort("_id", 1)
 
     rows = [_to_child_row(document) async for document in cursor]
@@ -187,14 +177,10 @@ async def load_child_embeddings(
 def _to_child_row(document: dict[str, Any]) -> ChildEmbeddingRow:
     """Project one raw Mongo row onto :class:`ChildEmbeddingRow`."""
 
-    properties = document.get("properties") or {}
     return ChildEmbeddingRow(
         chunk_id=str(document["_id"]),
         # ``list(Binary)`` would yield BYTE ints — decode the float32 vector.
         embedding=from_stored_vector(document.get("embedding")),
-        title=properties.get("title"),
-        heading_path=list(properties.get("heading_path") or []),
-        content=properties.get("content") or "",
     )
 
 
@@ -282,7 +268,8 @@ async def write_clustering_run(
                             run_id=run_id,
                             now=now,
                             config_fingerprint=config_fingerprint,
-                        )
+                        ),
+                        "$unset": _LEGACY_CLUSTER_FIELDS,
                     },
                     upsert=True,
                 )
@@ -341,9 +328,10 @@ def _cluster_row(
 ) -> dict[str, Any]:
     """The FULL ``memory_clusters`` row body — every field, every write.
 
-    ``$set`` of the whole row (rather than the changed keys) is what makes an
-    overwrite of a surviving cluster id total: an older run's ``keywords`` can
-    never linger beside a new run's ``label``.
+    ``$set`` of the whole row (rather than the changed keys), plus the ``$unset``
+    of :data:`_LEGACY_CLUSTER_FIELDS`, is what makes an overwrite of a
+    surviving cluster id total: an older run's LLM ``summary`` can never linger
+    beside a new run's ``Cluster N`` label.
     """
 
     return {
@@ -351,10 +339,7 @@ def _cluster_row(
         "run_id": run_id,
         "cluster_id": cluster.cluster_id,
         "label": cluster.label,
-        "summary": cluster.summary,
-        "keywords": list(cluster.keywords),
         "size": cluster.size,
-        "sample_chunk_ids": list(cluster.sample_chunk_ids),
         "centroid": {"x": cluster.centroid_x, "y": cluster.centroid_y},
         "config_fingerprint": config_fingerprint,
         "created_at": now,
@@ -405,10 +390,10 @@ async def unchanged_run_id(
 
     The clustering cache: a run is seeded, so the same chunks under the same
     config give the same clusters and labels — re-running only spends a UMAP
-    fit (and, past the summary cache, LLM calls). Current means all of:
+    fit. Current means all of:
 
     * the run has cluster rows, every one stamped with ``config_fingerprint``
-      (an all-noise run has none and always re-runs — it makes no LLM call);
+      (an all-noise run has none and always re-runs);
     * every embedded child carries the run's ``viz.run_id`` (nothing added or
       re-embedded since);
     * the rows' sizes still sum to the run's clustered children (nothing
@@ -463,11 +448,10 @@ async def load_embedding_map(
     children with no assignment or a stale one, computed from counts — never
     from the plotted set, or the cap would read as staleness in the warning.
 
-    With NO run yet, the same capped children come back as
-    the **unclustered preview** (:func:`_load_unclustered_preview`): PCA
-    coordinates computed at read time, no clusters. The one exception to
-    "surfaces never compute" — without it a user who never ran the clustering
-    phase gets no picture at all.
+    With NO run yet nothing has 2D coordinates: the map comes back with no
+    points and every child ``unclustered`` (``run_id=None``), so the caller
+    answers the missing-2D warning instead of a picture. Surfaces never compute
+    coordinates (ADR-007 §8) — they only ever draw what a run stored.
 
     Returns:
         The map, or ``None`` when the user has no embedded child at all — a
@@ -483,13 +467,17 @@ async def load_embedding_map(
     children = _embedded_children_filter(user_id)
     total_children = await memory_collection.count_documents(children)
 
+    if total_children == 0:
+        return None
     if run_id is None:
-        if total_children == 0:
-            return None
-        return await _load_unclustered_preview(
-            memory_collection,
-            {**children, **plotted},
+        return EmbeddingMap(
+            run_id=None,
+            clusters=[],
+            points=[],
             total_children=total_children,
+            unclustered=total_children,
+            clustered=0,
+            noise=0,
             plotted_documents=len(kept),
             total_documents=len(documents),
         )
@@ -539,41 +527,6 @@ async def load_embedding_map(
     )
 
 
-async def _load_unclustered_preview(
-    collection: Any,
-    point_filter: dict[str, Any],
-    *,
-    total_children: int,
-    plotted_documents: int,
-    total_documents: int,
-) -> EmbeddingMap:
-    """The **unclustered preview**: the capped children at PCA coordinates.
-
-    Reads the vectors the run would read — only for the plotted children (at
-    most the chunks of ``query.full_graph_max_docs`` documents). Every point
-    carries the noise label: there is no cluster to colour it by yet.
-    """
-
-    points = await _project_children(collection, point_filter)
-    logger.info(
-        "Embedding map preview (no clustering run): plotting %d of %d embedded "
-        "chunks at PCA coordinates",
-        len(points),
-        total_children,
-    )
-    return EmbeddingMap(
-        run_id=None,
-        clusters=[],
-        points=points,
-        total_children=total_children,
-        unclustered=total_children,
-        clustered=0,
-        noise=0,
-        plotted_documents=plotted_documents,
-        total_documents=total_documents,
-    )
-
-
 async def load_query_map(
     client: AsyncMongoClient,
     database: str,
@@ -582,31 +535,45 @@ async def load_query_map(
     *,
     max_docs: int | None = None,
 ) -> QueryMap:
-    """The query view: ``chunk_ids`` over the rest of the memory, one PCA space.
+    """The query view: ``chunk_ids`` over the rest of the memory, at UMAP coordinates.
 
-    The reference cloud is every embedded child of the ``max_docs`` most-recent
-    documents (the whole-memory map's cap); the matches are added even when
-    their document is older. ONE projection over both, so the matches land
-    where they sit among everything else. Independent of any **Clustering
-    run** on purpose: no clusters, never stale. A matched child without a
-    vector (the text leg can hit a pending one) is skipped.
+    Both lists are drawn at the latest **Clustering run**'s stored ``viz`` — the
+    same 2D space as the whole-memory map, so a match sits where the topic map
+    puts it. The reference cloud is every placed child of the ``max_docs``
+    most-recent documents; a match is added even when its document is older.
+    A match without this run's coordinates (ingested since, never clustered,
+    or a pending child the text leg hit) is counted in ``matched_without_2d``,
+    never drawn. Surfaces compute no coordinates (ADR-007 §8).
     """
 
+    run_id = await latest_run_id(client, database, user_id)
+    if run_id is None:
+        return QueryMap(
+            matched=[],
+            reference=[],
+            matched_without_2d=len(chunk_ids),
+            plotted_documents=0,
+            total_documents=0,
+        )
     collection = client[database][MEMORY_COLLECTION]
     kept, documents = await _recent_documents(collection, user_id, max_docs)
-    points = await _project_children(
-        collection,
+    cursor = collection.find(
         {
             **_embedded_children_filter(user_id),
+            "viz.run_id": run_id,
             "$or": [
                 {"sources": {"$in": _sources_of(kept)}},
                 {"_id": {"$in": list(chunk_ids)}},
             ],
         },
-    )
+        _POINT_PROJECTION,
+    ).sort("_id", 1)
+    points = [_to_map_point(document) async for document in cursor]
+    matched = [point for point in points if point.chunk_id in chunk_ids]
     return QueryMap(
-        matched=[point for point in points if point.chunk_id in chunk_ids],
+        matched=matched,
         reference=[point for point in points if point.chunk_id not in chunk_ids],
+        matched_without_2d=len(chunk_ids) - len(matched),
         plotted_documents=len(kept),
         total_documents=len(documents),
     )
@@ -637,30 +604,6 @@ def _sources_of(documents: list[dict[str, Any]]) -> list[Any]:
     return list({row["sources"][0] for row in documents if row.get("sources")})
 
 
-async def _project_children(
-    collection: Any, point_filter: dict[str, Any]
-) -> list[MapPoint]:
-    """Load the matching embedded children and place them by a 2-D PCA.
-
-    Sorted by ``_id`` so the projection is reproducible; every point carries
-    the noise label (no cluster).
-    """
-
-    cursor = collection.find(point_filter, {**_POINT_PROJECTION, "embedding": 1}).sort(
-        "_id", 1
-    )
-    documents = await cursor.to_list()
-    if not documents:
-        return []
-    coords = project_pca_2d(
-        np.asarray([from_stored_vector(row["embedding"]) for row in documents])
-    )
-    return [
-        _to_map_point({**row, "viz": {"x": x, "y": y}, "cluster_id": NOISE_LABEL})
-        for row, (x, y) in zip(documents, coords, strict=True)
-    ]
-
-
 def _to_cluster_info(row: dict[str, Any]) -> MemoryClusterInfo:
     """Flatten one ``memory_clusters`` row onto the legend's transit shape."""
 
@@ -668,10 +611,7 @@ def _to_cluster_info(row: dict[str, Any]) -> MemoryClusterInfo:
     return MemoryClusterInfo(
         cluster_id=int(row["cluster_id"]),
         label=row.get("label") or "",
-        summary=row.get("summary") or "",
-        keywords=list(row.get("keywords") or []),
         size=int(row.get("size") or 0),
-        sample_chunk_ids=list(row.get("sample_chunk_ids") or []),
         centroid_x=float(centroid.get("x", 0.0)),
         centroid_y=float(centroid.get("y", 0.0)),
     )

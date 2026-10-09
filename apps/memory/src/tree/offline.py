@@ -20,12 +20,11 @@ SEQUENTIAL BLOCKS:
    extraction Coordinator does on the side (this superseded ADR-002 §3's
    trailing-index rule).
 4. ``run_clustering`` — one ``memory_clustering`` subflow per target user: the
-   **Embedding map**'s data (UMAP + HDBSCAN + one LLM summary per **Memory
-   cluster**). OFF by default — it is a maintenance phase whose cold ``import
-   umap`` costs ~40 s on a fresh container and one LLM call per cluster, so
-   only ``make memory-run-clustering-pipeline`` asks for it — never the nightly
-   cron. A user whose latest run is still current is skipped before any vector
-   is loaded (see :func:`tree.memory.pipeline.memory_clustering`).
+   **Embedding map**'s data (UMAP + HDBSCAN, plain ``Cluster N`` names — no
+   LLM, so it costs CPU only). OFF by default; the nightly cron and ``make
+   memory-run-clustering-pipeline`` turn it on. A user whose latest run is
+   still current is skipped before any vector is loaded, so a quiet night
+   costs two counts (see :func:`tree.memory.pipeline.memory_clustering`).
 
 Worker fan-outs inside the coordinators still run as separate deployment runs;
 only the coordinators and the indexing flow execute inline here, so the
@@ -214,14 +213,12 @@ def _log_clustering_outcome(
         )
         return
     log.info(
-        "clustering: user_id=%s run_id=%s clusters=%d clustered=%d noise=%d "
-        "fallbacks=%d",
+        "clustering: user_id=%s run_id=%s clusters=%d clustered=%d noise=%d",
         user_id,
         stats.run_id,
         stats.clusters,
         stats.clustered,
         stats.noise,
-        stats.summaries_failed,
     )
 
 
@@ -242,8 +239,8 @@ def _partial_ingest_failures(result: dict[str, Any]) -> list[str]:
     * extraction — a failed shard (``failed > 0``) or a per-user exception;
     * indexing / clustering — a per-user exception.
 
-    NOT failures: a clustering skip (``skipped_reason``), a clustering run that
-    fell back on a summary (``summaries_failed``), and a phase with zero work.
+    NOT failures: a clustering skip (``skipped_reason``) and a phase with zero
+    work.
     Each line names the phase, the user, the count and the first message per
     shard. ``[]`` means a clean run.
     """
@@ -322,9 +319,9 @@ async def offline_pipeline(
 
     Phase 4 — clustering: one :func:`memory_clustering` inline subflow per
     target user (the **Embedding map**'s data), with the SAME per-user failure
-    isolation. OFF by default, so the nightly cron and every other script leave
-    ``memory_clusters`` alone and never import the UMAP stack; the result then
-    carries ``"clustering": {}``.
+    isolation. OFF by default — the nightly cron and the clustering script turn
+    it on; every other script leaves ``memory_clusters`` alone and never imports
+    the UMAP stack, and the result then carries ``"clustering": {}``.
 
     The phases run as sequential BLOCKS — every user is extracted, THEN every
     user is indexed — so the Prefect UI shows extraction and indexing as sibling
@@ -478,7 +475,7 @@ async def offline_pipeline(
                         )
                         indexing[str(uid)] = {"error": str(exc)}
 
-            # Phase 4 runs LAST and only on request: clustering reads the
+            # Phase 4 runs LAST and only when asked: clustering reads the
             # embeddings phase 3 just backfilled, so a run that does both gets a
             # map of the whole corpus rather than of yesterday's part of it.
             clustering: dict[str, Any] = {}

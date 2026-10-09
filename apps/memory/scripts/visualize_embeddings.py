@@ -13,9 +13,8 @@ Three outcomes that are NOT failures of the renderer:
 
 * No embedded chunk for this user → the command prints the "nothing to map"
   message and exits 1, rather than opening an empty canvas.
-* No run for this user → the map is drawn WITHOUT clusters (a PCA projection
-  of the raw embeddings) and the FIRST line of stdout is the "No clustering run
-  found … run make memory-run-clustering-pipeline" warning.
+* No run for this user → nothing has 2D coordinates: the command prints the
+  "N/N chunks don’t have a 2D embedding. …" warning, writes no file and exits 1.
 * Chunks ingested since the last run → the FIRST line of stdout is the warning
   "N/M chunks don’t have a 2D embedding. …"; those points are
   omitted from the map and counted in its legend.
@@ -51,6 +50,7 @@ from tree.memory.visualize.embeddings import (
     NO_EMBEDDINGS_MESSAGE,
     render_embedding_map_file,
     to_embedding_map_payload,
+    unclustered_warning,
 )
 
 init_logger()
@@ -74,6 +74,9 @@ async def _run(
     embedding_map = await load_embedding_map(client, database, resolved_user_id)
     if embedding_map is None:
         click.echo(NO_EMBEDDINGS_MESSAGE)
+        raise SystemExit(1)
+    if not embedding_map.points:
+        click.echo(unclustered_warning(embedding_map) or NO_EMBEDDINGS_MESSAGE)
         raise SystemExit(1)
 
     payload = to_embedding_map_payload(embedding_map, hulls=hulls)

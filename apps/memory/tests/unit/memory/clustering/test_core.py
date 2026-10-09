@@ -31,13 +31,10 @@ from tree.config.app_config import (
 )
 from tree.memory.clustering import core
 from tree.memory.clustering.core import (
-    PREVIEW_EXTENT,
     cluster_centroids_2d,
     cluster_sizes,
     noise_count,
-    project_pca_2d,
     reduce_and_cluster,
-    sample_cluster_members,
 )
 
 
@@ -402,121 +399,6 @@ def clustered_embeddings() -> tuple[np.ndarray, np.ndarray]:
     return embeddings, labels
 
 
-class TestSampleClusterMembers:
-    """10 nearest the centroid + a seeded random tail (ADR-007 §4)."""
-
-    def test_returns_nearest_plus_random_distinct_members(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        embeddings, labels = clustered_embeddings
-
-        sample = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-
-        assert len(sample) == 20
-        assert len(set(sample)) == 20
-        assert all(labels[index] == 0 for index in sample)
-
-    def test_the_head_is_the_ten_nearest_the_normalised_centroid(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        embeddings, labels = clustered_embeddings
-        expected = _members_in_similarity_order(embeddings, labels, 0)[:10]
-
-        sample = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-
-        assert sample[:10] == expected
-
-    def test_the_same_seed_samples_the_same_chunks(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        """A re-run on an unchanged corpus must show the LLM the same evidence,
-        so its cached summary stays valid (ADR-007 §4)."""
-
-        embeddings, labels = clustered_embeddings
-
-        first = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-        second = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-
-        assert first == second
-
-    def test_a_different_seed_changes_only_the_random_tail(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        embeddings, labels = clustered_embeddings
-
-        with_42 = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-        with_43 = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=43
-        )
-
-        assert with_42[:10] == with_43[:10]
-        assert with_42[10:] != with_43[10:]
-
-    def test_the_seed_is_offset_by_the_cluster_id(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        """``seed + cluster_id``: one seed for the whole run would draw the same
-        positions in every cluster's ranking."""
-
-        embeddings, _ = clustered_embeddings
-        labels = np.array([0] * 50 + [-1] * 5)
-        other = np.array([1] * 50 + [-1] * 5)
-
-        as_cluster_0 = sample_cluster_members(
-            embeddings, labels, 0, nearest=0, random=5, seed=42
-        )
-        as_cluster_1 = sample_cluster_members(
-            embeddings, other, 1, nearest=0, random=5, seed=42
-        )
-
-        assert as_cluster_0 != as_cluster_1
-
-    def test_a_small_cluster_returns_every_member_in_similarity_order(self) -> None:
-        rng = np.random.default_rng(3)
-        embeddings = rng.normal(size=(12, 6))
-        labels = np.zeros(12, dtype=int)
-
-        sample = sample_cluster_members(
-            embeddings, labels, 0, nearest=10, random=10, seed=42
-        )
-
-        assert sample == _members_in_similarity_order(embeddings, labels, 0)
-
-    def test_rejects_the_noise_label(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        """Noise is not a cluster: it has no centroid and never gets a summary."""
-
-        embeddings, labels = clustered_embeddings
-
-        with pytest.raises(ValueError) as error:
-            sample_cluster_members(
-                embeddings, labels, -1, nearest=10, random=10, seed=42
-            )
-
-        assert "-1" in str(error.value)
-
-    def test_rejects_an_absent_cluster_id(
-        self, clustered_embeddings: tuple[np.ndarray, np.ndarray]
-    ) -> None:
-        embeddings, labels = clustered_embeddings
-
-        with pytest.raises(ValueError) as error:
-            sample_cluster_members(embeddings, labels, 9, nearest=1, random=1, seed=42)
-
-        assert "9" in str(error.value)
-
-
 class TestClusterHelpers:
     """Noise never counts as a cluster in any of the three summaries."""
 
@@ -595,41 +477,6 @@ class TestTheRealRecipe:
         reduce_and_cluster(points, _config(min_cluster_size=10))
 
         assert [str(warning.message) for warning in recwarn.list] == []
-
-
-class TestProjectPca2d:
-    """The **unclustered preview**'s layout: numpy only, deterministic."""
-
-    def test_projects_to_two_scaled_axes(self) -> None:
-        embeddings = np.random.default_rng(0).normal(size=(30, 16))
-
-        coords = project_pca_2d(embeddings)
-
-        assert coords.shape == (30, 2)
-        assert np.abs(coords).max() == pytest.approx(PREVIEW_EXTENT)
-
-    def test_two_calls_on_the_same_input_agree_to_the_bit(self) -> None:
-        # SVD signs are arbitrary; the sign fix is what stops a mirrored map.
-        embeddings = np.random.default_rng(1).normal(size=(30, 16))
-
-        assert np.array_equal(project_pca_2d(embeddings), project_pca_2d(embeddings))
-
-    def test_keeps_the_dominant_spread_on_the_first_axis(self) -> None:
-        # Arrange: points spread along one direction, with tiny noise elsewhere.
-        rng = np.random.default_rng(2)
-        line = np.outer(np.linspace(-1, 1, 20), np.eye(8)[3])
-        embeddings = line + rng.normal(scale=1e-3, size=line.shape)
-
-        coords = project_pca_2d(embeddings)
-
-        assert np.ptp(coords[:, 0]) > 100 * np.ptp(coords[:, 1])
-
-    @pytest.mark.parametrize("n", [1, 2])
-    def test_a_tiny_corpus_still_projects(self, n: int) -> None:
-        coords = project_pca_2d(np.eye(n, 4))
-
-        assert coords.shape == (n, 2)
-        assert np.isfinite(coords).all()
 
 
 def test_module_namespace_is_free_of_the_heavy_stack() -> None:

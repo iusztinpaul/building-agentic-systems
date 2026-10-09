@@ -42,11 +42,8 @@ def _cluster_kwargs(**overrides: object) -> dict[str, object]:
         "user_id": user_id,
         "run_id": "flow-run-123",
         "cluster_id": cluster_id,
-        "label": "Agent memory design",
-        "summary": "Chunks about designing the memory layer of an agent.",
-        "keywords": ["memory", "agents", "design"],
+        "label": "Cluster 1",
         "size": 42,
-        "sample_chunk_ids": ["u:chunk:doc#0-0", "u:chunk:doc#0-1"],
         "centroid": {"x": 1.5, "y": -0.5},
         "created_at": _now(),
     }
@@ -100,8 +97,7 @@ class TestMemoryClusterRoundTrip:
         rehydrated = MemoryCluster.model_validate(original.model_dump())
 
         assert rehydrated.user_id == original.user_id
-        assert rehydrated.keywords == original.keywords
-        assert rehydrated.sample_chunk_ids == original.sample_chunk_ids
+        assert rehydrated.label == original.label
         assert rehydrated.centroid == original.centroid
 
     def test_required_fields_are_the_documented_shape(self) -> None:
@@ -114,10 +110,7 @@ class TestMemoryClusterRoundTrip:
             "run_id",
             "cluster_id",
             "label",
-            "summary",
-            "keywords",
             "size",
-            "sample_chunk_ids",
             "centroid",
             "created_at",
         } <= required

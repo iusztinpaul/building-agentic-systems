@@ -64,8 +64,8 @@ from tree.memory.rag.types import (
 )
 from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.visualize.embeddings import (
-    NO_CLUSTERING_RUN_MESSAGE,
     NO_EMBEDDINGS_MESSAGE,
+    missing_2d_warning,
 )
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.online import IngestReceipt
@@ -650,11 +650,8 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
         clusters=[
             MemoryClusterInfo(
                 cluster_id=0,
-                label="Agent memory design",
-                summary="How agents remember.",
-                keywords=["memory", "agents", "design"],
+                label="Cluster 1",
                 size=drawn,
-                sample_chunk_ids=["chunk-0"],
                 centroid_x=0.5,
                 centroid_y=0.5,
             )
@@ -698,45 +695,32 @@ class TestVisualizeMemoryEmbeddings:
         assert result == NO_EMBEDDINGS_MESSAGE
         deliver.assert_not_called()
 
-    async def test_no_clustering_run_draws_the_preview_with_the_warning_first(
+    async def test_no_clustering_run_answers_only_the_missing_2d_warning(
         self, mocker
     ) -> None:
-        # Arrange: embedded chunks, but nobody has clustered them yet.
-        preview = EmbeddingMap(
-            run_id=None,
-            clusters=[],
-            points=[
-                MapPoint(
-                    chunk_id=f"chunk-{index}",
-                    x=float(index),
-                    y=0.0,
-                    cluster_id=-1,
-                    title="Memory for AI Agents",
-                    heading_path=[],
-                    snippet="",
-                )
-                for index in range(3)
-            ],
-            total_children=3,
-            unclustered=3,
-            clustered=0,
-            noise=0,
-            plotted_documents=1,
-            total_documents=1,
-        )
+        # Arrange: embedded chunks, but nothing has 2D coordinates yet.
         mocker.patch(
             "tree.mcp.tools.load_embedding_map",
             new_callable=AsyncMock,
-            return_value=preview,
+            return_value=EmbeddingMap(
+                run_id=None,
+                clusters=[],
+                points=[],
+                total_children=3,
+                unclustered=3,
+                clustered=0,
+                noise=0,
+                plotted_documents=1,
+                total_documents=1,
+            ),
         )
+        deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
 
         result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
 
-        # Assert: a picture, and the model's first line says it is not the topic map.
-        assert isinstance(result, ToolResult)
-        summary, payload_block = result.content
-        assert summary.text.startswith(NO_CLUSTERING_RUN_MESSAGE + "\nEmbedding map:")
-        assert len(json.loads(payload_block.text)["nodes"]) == 3
+        # Assert: no picture — the warning IS the answer (surfaces never compute).
+        assert result == missing_2d_warning(3, 3)
+        deliver.assert_not_called()
 
     async def test_a_ui_capable_client_gets_the_map_inline_with_hulls_on(
         self, mocker
@@ -875,10 +859,10 @@ class TestVisualizeMemoryEmbeddings:
         )
         assert "the legend counts the whole run" in summary
         assert "every child chunk" not in summary
-        assert "no clustering run exists" in summary
-        assert "still drawn, without clusters" in summary
-        assert "triggered manually" in summary
+        assert '"Cluster N" label' in summary
+        assert "that warning IS the answer" in summary
         assert "over every other chunk" in summary
+        assert "LLM" not in summary and "PCA" not in summary
 
 
 def _query_map(*chunk_ids: str) -> QueryMap:
@@ -897,6 +881,7 @@ def _query_map(*chunk_ids: str) -> QueryMap:
     return QueryMap(
         matched=points[:-1],
         reference=points[-1:],
+        matched_without_2d=0,
         plotted_documents=1,
         total_documents=1,
     )
@@ -960,8 +945,10 @@ class TestVisualizeMemoryEmbeddingsQuery:
 
         assert result == NO_RESULTS_MESSAGE.format(query="quantum knitting")
 
-    async def test_matches_without_a_vector_answer_a_sentence(self, mocker) -> None:
-        # The text leg matched only pending children: nothing to project.
+    async def test_matches_without_2d_coordinates_answer_only_the_warning(
+        self, mocker
+    ) -> None:
+        # The search matched, but the clustering run placed none of the matches.
         mocker.patch(
             "tree.mcp.tools.retrieve_parents",
             new_callable=AsyncMock,
@@ -971,7 +958,11 @@ class TestVisualizeMemoryEmbeddingsQuery:
             "tree.mcp.tools.load_query_map",
             new_callable=AsyncMock,
             return_value=QueryMap(
-                matched=[], reference=[], plotted_documents=0, total_documents=0
+                matched=[],
+                reference=[],
+                matched_without_2d=1,
+                plotted_documents=0,
+                total_documents=0,
             ),
         )
 
@@ -979,7 +970,31 @@ class TestVisualizeMemoryEmbeddingsQuery:
             ctx=_viz_ctx(ui_supported=True), query="agent memory"
         )
 
-        assert result == NO_RESULTS_MESSAGE.format(query="agent memory")
+        assert result == missing_2d_warning(1, 1)
+
+    async def test_some_matches_without_2d_lead_with_the_warning(self, mocker) -> None:
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent("p1", 0.03)]),
+        )
+        query_map = _query_map("p1#child-0").model_copy(
+            update={"matched_without_2d": 2}
+        )
+        mocker.patch(
+            "tree.mcp.tools.load_query_map",
+            new_callable=AsyncMock,
+            return_value=query_map,
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="agent memory"
+        )
+
+        # The model's FIRST line says the picture under-reports the matches.
+        assert result.content[0].text.startswith(
+            missing_2d_warning(2, 3) + "\nEmbedding map for 'agent memory'"
+        )
 
     async def test_an_unavailable_search_is_a_retryable_envelope(self, mocker) -> None:
         mocker.patch(

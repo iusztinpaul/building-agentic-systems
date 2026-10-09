@@ -71,7 +71,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 - `models.llm` — provider + model (default: `gemini` / `gemini-3.1-flash-lite`).
 - `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-4` / 1024.
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-4` / 1024.
-- `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`, `sampling`, `summaries`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
+- `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.
 - `extraction` — `llm_concurrency`, `doc_concurrency`, `dedup_concurrency`, plus the `resolution` / `dedup` blocks.
 - `query` — `top_k`, `max_hops`, `rrf_k` (reciprocal rank fusion), `embedding_batch_size`, `min_vector_score` (the bar the vector leg must clear before RRF fusion — Atlas-normalised cosine, default `0.70`, re-pinned live on voyage-4 in `tasks/141`; provisional per ADR-008 §4), `text_min_match_ratio` (the text leg's **Minimum match ratio**: a row is a text candidate iff it contains `K = max(1, ceil(ratio × M))` of the query's M distinct content terms, `0.0` = any one term; default `0.5`, provisional per ADR-015 §2, pinned live in `tasks/192`'s Log as the lowest 0.1 step separating 4 off-topic from 6 on-topic queries).
 - `mcp` — `max_retries`, `max_results`.
@@ -147,8 +147,8 @@ they are no longer Deployments: each runs as an **inline subflow**. The Coordina
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
 `memory_indexing` runs as that same run's third **Offline phase** — once per target user, after
 every user's extraction (ADR-007) — or inline inside `online-pipeline` for a single document.
-`memory_clustering` is the fourth phase, OFF by default — only `make memory-run-clustering-pipeline`
-turns it on, never the nightly cron. Every manual single-step run is the same
+`memory_clustering` is the fourth phase, OFF by default — the nightly cron and
+`make memory-run-clustering-pipeline` turn it on. Every manual single-step run is the same
 `offline-pipeline` deployment with the other phases off (`make memory-run-data-pipeline` /
 `make memory-run-memory-pipeline` / `make memory-run-indexing-pipeline` /
 `make memory-run-clustering-pipeline`); no script runs a flow in the operator's own process.
@@ -210,7 +210,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes, fanned out across **all active users** (never clusters — that phase is manual only) (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes AND clusters them (UMAP + HDBSCAN, no LLM; an unchanged user is skipped), fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 
@@ -304,35 +304,35 @@ Three things to know:
 ### Memory clustering
 
 The clustering **Offline phase** (`memory-clustering-etl`) — the data behind the **Embedding
-map**. Works in both memory modes and writes no graph rows and no edges (ADR-007). Four tasks:
-`load-child-embeddings` (every embedded **child chunk** of the user, in `_id` order) →
-`reduce-and-cluster` (UMAP to 5-d, `sklearn` HDBSCAN there, then a SEPARATE 2-D UMAP fit on the raw
-embeddings for display) → `summarise-cluster` (one Gemini call per cluster over ≤ 20 sampled
-members: a ≤ 6-word label, a ≤ 100-word summary, 3–5 keywords) → `write-clustering-run`.
+map**. Works in both memory modes and writes no graph rows and no edges (ADR-007). Three tasks,
+no LLM — a run costs CPU only, never tokens: `load-child-embeddings` (every embedded **child
+chunk** of the user, in `_id` order) → `reduce-and-cluster` (UMAP to 5-d, `sklearn` HDBSCAN there,
+then a SEPARATE 2-D UMAP fit on the raw embeddings for display) → `write-clustering-run`. Clusters
+are named `Cluster 1 … Cluster K` by size (1 = largest); the names are per run and may renumber.
 
-Where it lands: one row per cluster in the **`memory_clusters`** collection (`label`, `summary`,
-`keywords`, `size`, `sample_chunk_ids`, `centroid`, `run_id`), plus `cluster_id` and
-`viz {x, y, run_id}` on every child chunk. Noise gets `cluster_id: -1` and coordinates but no
-row. A run REPLACES the previous one wholesale — there is no run history — so chunks ingested
-after the last run show up as "unclustered / stale" on the map until you re-run the phase.
+Where it lands: one row per cluster in the **`memory_clusters`** collection (`label`, `size`,
+`centroid`, `run_id`, `config_fingerprint`), plus `cluster_id` and `viz {x, y, run_id}` on every
+child chunk. Noise gets `cluster_id: -1` and coordinates but no row. A run REPLACES the previous
+one wholesale — there is no run history — so chunks ingested after the last run have no 2D
+embedding (they are left off the map and counted in its warning) until the next run.
 
 ```bash
 make memory-run-clustering-pipeline
 ```
 
-It is the ONLY entry point that clusters — the nightly cron never does. It is **cached**: before
-loading a vector it checks whether the latest run is still current — every embedded chunk carries
-its coordinates, no clustered chunk was deleted, and the run's config fingerprint (UMAP, HDBSCAN,
-sampling, summary prompt version, LLM) matches — and if so logs `clustering UP TO DATE` and stops:
-no UMAP fit, no LLM call. Change a knob, ingest, or delete, and the next run reclusters by itself.
+The nightly cron runs the same phase, so the map trails the corpus by at most a day. Both are
+**cached**: before loading a vector the run checks whether the latest run is still current —
+every embedded chunk carries its coordinates, no clustered chunk was deleted, and the run's config
+fingerprint (UMAP, HDBSCAN) matches — and if so logs `clustering UP TO DATE` and stops: no UMAP
+fit. Change a knob, ingest, or delete, and the next run reclusters by itself.
 What READS the result is the [Embedding map](#embedding-map) (`make
 memory-visualize-embeddings` and the `visualize_memory_embeddings` MCP tool) — surfaces draw the
 stored coordinates, they never cluster. Two notes:
 
 - **Cold start.** The first `import umap` on a machine compiles numba's kernels (~40 s; ~3 s
   afterwards from the on-disk cache), and Prefect Managed runs are fresh containers, so every
-  cloud run pays it. Nothing else imports the stack — that is why the phase is a flag, not a
-  YAML switch.
+  cloud run that actually reclusters pays it (an up-to-date night skips before the import).
+  Nothing else imports the stack — that is why the phase is a flag, not a YAML switch.
 - **Small corpora.** Below `memory.clustering.hdbscan.min_cluster_size` (default 15) embedded
   children the run is skipped and nothing is written (the previous run stays readable); if every
   chunk comes back as noise the run IS written and warns. Both log the knob to turn,
@@ -396,11 +396,10 @@ same selection, pins and Display knobs work there.
 
 The 2-D picture of the [clustering run](#memory-clustering): one point per **child chunk** of the
 250 most-recent documents (`query.full_graph_max_docs`, the structure view's cap and ranking) at its
-stored `viz {x, y}`, coloured by cluster, with the LLM-written label and size per cluster in the
-legend and the document title / heading path / snippet in the tooltip. The header counts the plot —
+stored `viz {x, y}`, coloured by cluster, with the plain `Cluster N` label and size per cluster in
+the legend and the document title / heading path / snippet in the tooltip. The header counts the plot —
 `N of M chunks (the 250 most-recent of D documents) in K clusters (+X noise)` — while the legend
-sizes, the noise row and the stale warning count the whole run; clusters are labelled from the
-whole memory. Same renderer as the graph
+sizes, the noise row and the stale warning count the whole run. Same renderer as the graph
 (fixed coordinates, no simulation — drag, pin, select, group drag and the Display knobs still work) — and identical in
 both memory modes, because the map has no edges to miss.
 
@@ -410,24 +409,24 @@ make memory-visualize-embeddings HULLS=true             # outline each cluster
 make memory-visualize-embeddings OUTPUT=/tmp/map.html USER_IDENTIFIER=pauliusztin@decodingai.com
 ```
 
-It READS; it never clusters (ADR-007 Decision 8), so three outcomes are contracts rather than bugs:
+It READS; it never clusters and never computes coordinates (ADR-007 Decision 8), so three outcomes
+are contracts rather than bugs:
 
 - **No embedded chunk for this user** — it prints `No embedded chunks for this user yet — nothing to
   map. …` and exits 1. No empty canvas.
-- **No clustering run for this user** — it still draws the chunks, unclustered: a numpy PCA
-  projection of the raw embeddings computed at read time (milliseconds, no UMAP), one colour, one
-  `not clustered yet` legend row, no hulls. The FIRST line of output is
-  `No clustering run found for this user. Showing the raw embeddings. Trigger it manually.` — trigger it with
-  `make memory-run-clustering-pipeline`.
+- **No clustering run for this user** — nothing has 2D coordinates, so it prints ONLY
+  `N/N chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the
+  scheduled offline pipeline to compute them.`, writes no file and exits 1.
 - **A stale map** — chunks ingested since the last run have no coordinates, so the FIRST line of
-  output is `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.`
-  (fix it with `make memory-run-clustering-pipeline`); those points are left off the map and counted in the legend as
-  "unclustered / stale (not shown)". Re-run the clustering phase to clear it.
+  output is that same warning (`N/M …`); those points are left off the map and counted in the
+  legend as "no 2D embedding (not shown)". The next nightly run (or `make
+  memory-run-clustering-pipeline`) clears it.
 
 The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
 and the same message — one behaviour, two surfaces. The tool also takes a `query`: it then draws
-the matched chunks in colour over every other chunk in light grey (one PCA projection, no
-clusters), which never needs a clustering run.
+the matched chunks in colour over every other chunk in light grey, both at the run's UMAP
+coordinates (no cluster colours); matched chunks without coordinates raise the same warning, and
+when none has any, the warning is the whole answer.
 
 ### MCP server
 
@@ -457,7 +456,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 | `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
-| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws the chunks that query's search matched in colour over every other chunk of the 250 most-recent documents in light grey — one PCA projection for both, no clusters, so it needs no clustering run (`hulls` is ignored). READS a run — with no run yet it draws the chunks unclustered (a PCA preview) and its answer starts with the `No clustering run found …` warning, and a stale map's answer starts with the warning line too. In both modes: the map has no edges. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws the chunks that query's search matched in colour over every other chunk of the 250 most-recent documents in light grey — both at the run's UMAP coordinates, no cluster colours (`hulls` is ignored). READS a run, never computes coordinates — chunks without them are left off and the answer starts with `x/y chunks don’t have a 2D embedding. …`; with no run yet, that warning is the whole answer. In both modes: the map has no edges. |
 
 *`graphrag` only (6 more, 14 total):*
 
@@ -796,8 +795,8 @@ Locally, export it in the shell running `make memory-serve-workflows` and
 restart that; on Prefect Managed, put it in the deployment's environment.
 
 A run whose `models.*` is `provider: modal` **Pre-warm**s every distinct Modal
-server concurrently before document 1 — extraction worker, dream consolidation,
-cluster summaries — each through its **Warm gate**: `Pre-warming 1 Modal
+server concurrently before document 1 — extraction worker and dream
+consolidation — each through its **Warm gate**: `Pre-warming 1 Modal
 server(s): ep-tree-lfm2-5-350m`, then `Still cold (HTTP 503) at … — 38s/600s`
 lines, then `Warm: … after 113s`. A server that never warms fails the run with
 ZERO documents attempted; the MCP server is deliberately NOT pre-warmed, so the
@@ -846,7 +845,7 @@ apps/memory/
                         #   judge, first_person_resolver, preference_supersession,
                         #   sharding, resolution/, review/, consolidation/,
                         #   retrieval, kgquery, nl_query
-      clustering/       # neutral: the Clustering run (core, summaries, store)
+      clustering/       # neutral: the Clustering run (core, store)
       visualize/        # neutral: the Graph renderer (graph.py) + the
                         #   Embedding map payload (embeddings.py)
     mcp/                # FastMCP server + tools; viz_app.py = the neutral

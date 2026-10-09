@@ -1,13 +1,9 @@
 """In-memory shapes the clustering layer passes around (ADR-007 §1, §3, §4).
 
-Three families live here:
+Two families live here:
 
 * The recipe's output — :class:`ClusteringResult`, one label and one 2-D point
   per input row, in input order.
-* The LLM contract — :class:`ClusterSummary`, what one ``generate_json`` call
-  per **Memory cluster** is validated against. Its bounds are enforced here,
-  once, so a chatty model produces a retry rather than a legend entry that
-  wraps over the map.
 * The read side of the **Embedding map** — :class:`MemoryClusterInfo`,
   :class:`MapPoint` and :class:`EmbeddingMap`, built from stored rows by
   ``clustering.store`` (#117) and rendered by ``visualize.embeddings`` (#118).
@@ -19,7 +15,7 @@ Three families live here:
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 _MAX_LABEL_WORDS = 6
 _MAX_SUMMARY_WORDS = 100
@@ -64,84 +60,6 @@ class ClusteringResult(BaseModel):
         return self
 
 
-class ClusterSummary(BaseModel):
-    """What ONE LLM call must return for a cluster (ADR-007 §4).
-
-    The bounds are display constraints, not taste: ``label`` is a legend row
-    beside a coloured dot, ``summary`` is a tooltip paragraph, and ``keywords``
-    is the handful of terms a reader scans. A model that ignores them fails
-    validation and the call is retried; if it keeps failing the cluster is
-    stored fail-open as ``Cluster {id}`` with an empty summary.
-    """
-
-    label: str = Field(
-        description="Cluster name, at most 6 whitespace-separated words, non-empty."
-    )
-    summary: str = Field(
-        description=(
-            "What the cluster's chunks are about, at most 100 words. May be "
-            "empty — the fail-open fallback stores no summary."
-        ),
-    )
-    keywords: list[str] = Field(
-        description=(
-            "3-5 terms, stripped and deduped case-insensitively (first spelling wins)."
-        ),
-    )
-
-    @field_validator("label", mode="after")
-    @classmethod
-    def _check_label(cls, value: str) -> str:
-        words = value.split()
-        if not words:
-            raise ValueError(
-                "label must not be empty: an unnamed cluster has no legend entry "
-                "(the fail-open fallback is 'Cluster {cluster_id}')"
-            )
-        if len(words) > _MAX_LABEL_WORDS:
-            raise ValueError(
-                f"label must be at most {_MAX_LABEL_WORDS} words; got "
-                f"{len(words)}: {value!r}"
-            )
-        return " ".join(words)
-
-    @field_validator("summary", mode="after")
-    @classmethod
-    def _check_summary(cls, value: str) -> str:
-        words = value.split()
-        if len(words) > _MAX_SUMMARY_WORDS:
-            raise ValueError(
-                f"summary must be at most {_MAX_SUMMARY_WORDS} words; got {len(words)}"
-            )
-        return value.strip()
-
-    @field_validator("keywords", mode="after")
-    @classmethod
-    def _normalise_keywords(cls, value: list[str]) -> list[str]:
-        """Strip, drop blanks, dedupe case-insensitively, THEN count.
-
-        Counting first would accept ``["AI", "ai", "Ai"]`` as three keywords and
-        render one term three times in the legend.
-        """
-
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for keyword in value:
-            stripped = keyword.strip()
-            if not stripped or stripped.casefold() in seen:
-                continue
-            seen.add(stripped.casefold())
-            deduped.append(stripped)
-
-        if not _MIN_KEYWORDS <= len(deduped) <= _MAX_KEYWORDS:
-            raise ValueError(
-                f"keywords must be {_MIN_KEYWORDS}-{_MAX_KEYWORDS} distinct "
-                f"non-empty terms after normalisation; got {len(deduped)}: "
-                f"{deduped}"
-            )
-        return deduped
-
-
 class MemoryClusterInfo(BaseModel):
     """One **Memory cluster** as the surfaces read it (a ``memory_clusters`` row).
 
@@ -151,13 +69,10 @@ class MemoryClusterInfo(BaseModel):
     """
 
     cluster_id: int = Field(description="HDBSCAN label, >= 0 (noise has no row).")
-    label: str = Field(description="LLM-written cluster name shown in the legend.")
-    summary: str = Field(description="LLM-written description; empty on a failure.")
-    keywords: list[str] = Field(description="3-5 LLM-written keywords.")
-    size: int = Field(description="Child chunks assigned to this cluster in the run.")
-    sample_chunk_ids: list[str] = Field(
-        description="The <= 20 chunk _ids the summariser actually saw."
+    label: str = Field(
+        description="Plain 'Cluster N' name (N = size rank) for the legend."
     )
+    size: int = Field(description="Child chunks assigned to this cluster in the run.")
     centroid_x: float = Field(description="Cluster centre x in Embedding map space.")
     centroid_y: float = Field(description="Cluster centre y in Embedding map space.")
 
@@ -170,8 +85,8 @@ class MapPoint(BaseModel):
     """
 
     chunk_id: str = Field(description="The child chunk row's _id.")
-    x: float = Field(description="Stored viz.x (a PCA x on the unclustered preview).")
-    y: float = Field(description="Stored viz.y (a PCA y on the unclustered preview).")
+    x: float = Field(description="Stored viz.x — a fixed coordinate, never computed.")
+    y: float = Field(description="Stored viz.y — a fixed coordinate, never computed.")
     cluster_id: int = Field(
         description="Its cluster, or -1 for noise (drawn mid-grey, no legend entry)."
     )
@@ -189,9 +104,9 @@ class MapPoint(BaseModel):
 class QueryMap(BaseModel):
     """A query's **Embedding map**: the matched chunks over a grey reference cloud.
 
-    Both lists share ONE read-time PCA projection, so a match sits where it
-    sits among the rest of the memory. Independent of any **Clustering run**:
-    no clusters, never stale.
+    Both lists are drawn at the latest **Clustering run**'s stored UMAP
+    coordinates — the whole-memory map's 2D space — so a match sits where the
+    topic map puts it. Matches the run never placed are counted, not drawn.
     """
 
     matched: list[MapPoint] = Field(
@@ -201,6 +116,12 @@ class QueryMap(BaseModel):
         description=(
             "Every other embedded child of the plotted (most-recent) documents — "
             "drawn grey, as the space the matches sit in."
+        )
+    )
+    matched_without_2d: int = Field(
+        description=(
+            "Matched chunks with no 2D coordinates from the latest run (ingested "
+            "since, never clustered, or no run at all): counted, never drawn."
         )
     )
     plotted_documents: int = Field(
@@ -220,16 +141,15 @@ class EmbeddingMap(BaseModel):
     §8): the output starts with "N/M chunks don’t have a 2D embedding. …"
     whenever ``unclustered`` is non-zero.
 
-    ``run_id is None`` is the **unclustered preview**: the user has embedded
-    children but no Clustering run yet, so the points are a read-time PCA
-    projection of the raw embeddings, ``clusters`` is empty and every point
-    carries the noise label — a map to look at, not a topic map.
+    ``run_id is None`` means no Clustering run yet: nothing has 2D
+    coordinates, so there are no points and every embedded child is
+    ``unclustered`` — a surface answers the missing-2D warning instead.
     """
 
     run_id: str | None = Field(
         description=(
-            "The Clustering run these points come from; None for the unclustered "
-            "preview (no run yet — PCA coordinates, no clusters)."
+            "The Clustering run these points come from; None when no run exists "
+            "yet (no points, every child unclustered)."
         )
     )
     clusters: list[MemoryClusterInfo] = Field(
@@ -278,18 +198,17 @@ class EmbeddingMap(BaseModel):
         """
 
         if self.run_id is None:
-            # The preview: nothing is clustered, every child is unclustered,
-            # and the plot is a subset of the corpus, not of a run.
-            if self.clusters or self.clustered or self.noise:
+            # No run: nothing is placed, so nothing is drawn or clustered.
+            if self.clusters or self.points or self.clustered or self.noise:
                 raise ValueError(
-                    "an unclustered preview (run_id=None) has no clusters, "
-                    f"clustered or noise: got {len(self.clusters)} clusters, "
+                    "a map with no Clustering run (run_id=None) has no clusters, "
+                    f"points, clustered or noise: got {len(self.clusters)} "
+                    f"clusters, {len(self.points)} points, "
                     f"clustered={self.clustered}, noise={self.noise}"
                 )
-            if not len(self.points) <= self.unclustered == self.total_children:
+            if self.unclustered != self.total_children:
                 raise ValueError(
-                    "expected len(points) <= unclustered == total_children on an "
-                    f"unclustered preview: got {len(self.points)} points, "
+                    "with no Clustering run every child is unclustered: got "
                     f"unclustered={self.unclustered}, "
                     f"total_children={self.total_children}"
                 )
