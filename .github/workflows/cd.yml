@@ -1,9 +1,12 @@
 name: CD
 
-# Sync the Prefect Cloud deployment definitions with the code on every push to
-# main — but only AFTER CI has gone green for that commit. We trigger off the CI
-# workflow's completion (workflow_run) rather than a bare `push` so a failing
-# test suite never ships a broken deployment.
+# Sync the Prefect Cloud deployments with main on every push (a direct push or a
+# merged PR) — but only AFTER CI has gone green for that commit. We trigger off
+# the CI workflow's completion (workflow_run) rather than a bare `push` so a
+# failing test suite never ships. The deployments are pinned to that commit's SHA
+# (GIT_REF below): every managed flow run clones exactly the tested code, so a
+# red push to main never runs there — it waits for the next green one. (The MCP
+# server on Prefect Horizon is NOT gated here: Horizon redeploys it on every push.)
 on:
   workflow_run:
     workflows: ["CI"]
@@ -47,18 +50,31 @@ jobs:
 
       - name: Apply Prefect deployments to Prefect Cloud
         # `prefect_pipelines.py` re-applies the Cloud deployment definitions
-        # (deploy_cloud_pipelines: git-sourced code, Managed work pool) and
-        # exits — Prefect hosts the workers. It needs ONLY the Prefect API
-        # creds: the managed-run env and the GitHub clone token are
+        # (deploy_cloud_pipelines: git-sourced code pinned to GIT_REF, Managed
+        # work pool) and exits — Prefect hosts the workers. It needs ONLY the
+        # Prefect API creds: the managed-run env and the GitHub clone token are
         # `{{ prefect.blocks/variables.* }}` references resolved at run time
         # (seeded by `prefect_pipelines_setup.py up`). The mock app keys below
         # exist because importing the flow modules constructs settings/clients;
         # the deploy itself only talks to the Prefect API.
-        run: uv run python deploy/prefect_pipelines.py
+        #
+        # Pinning makes order matter: a re-run of an OLD commit's CI would roll
+        # prod back to it, so only the tip of main deploys. A newer commit has
+        # its own CI run, and its CD deploys it once green (a red tip deploys
+        # nothing: pin by hand with `GIT_REF=<sha> make memory-deploy-prefect`).
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" != "$GIT_REF" ]; then
+            echo "::notice::Skipped: $GIT_REF is no longer the tip of main ($tip)."
+            exit 0
+          fi
+          uv run python deploy/prefect_pipelines.py
         working-directory: apps/memory
         env:
           PREFECT_API_URL: ${{ secrets.PREFECT_API_URL }}
           PREFECT_API_KEY: ${{ secrets.PREFECT_API_KEY }}
+          # The commit that passed CI — every managed run clones exactly this.
+          GIT_REF: ${{ github.event.workflow_run.head_sha }}
           GOOGLE_API_KEY: mock-google-api-key
           VOYAGE_API_KEY: mock-voyage-api-key
           MODAL_PROXY_TOKEN_ID: mock-modal-proxy-token-id

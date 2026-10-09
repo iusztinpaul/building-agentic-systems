@@ -6,6 +6,9 @@ Two surfaces:
   ``_GitRepoWithPipInstall`` pull steps, the static ``managed_env_templates``
   mapping, the ``RUNTIME_CONFIG`` coverage, the 5 core deployment specs, and
   ``_git_ref_kwarg``.
+* ``status`` in ``deploy/prefect_pipelines_setup.py``: the git ref each
+  deployment checks out, and the ORPHAN line for a deployment no spec owns
+  (the Prefect client is faked, so no network).
 * The ``up``-only ``_seed_config_stores`` in ``deploy/prefect_pipelines_setup.py``
   (loaded by file path like ``test_atlas_cluster.py``) — the Prefect ``Secret`` /
   ``Variable`` boundary is mocked, so no network.
@@ -17,8 +20,11 @@ import importlib.util
 import inspect
 import pathlib
 import sys
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
+from click.testing import CliRunner
 
 from tree import orchestrator
 
@@ -147,8 +153,6 @@ class TestGroupsSelector:
     so ``up GROUPS=data`` silently registered the memory deployments too."""
 
     def _run(self, mocker, args: list[str]):
-        from click.testing import CliRunner
-
         mocker.patch.object(_setup, "_seed_config_stores")
         mocker.patch.object(_setup, "_ensure_work_pool", new=mocker.AsyncMock())
         deploy = mocker.patch.object(_setup, "deploy_cloud_pipelines", return_value=[])
@@ -207,3 +211,120 @@ class TestSeedConfigStores:
         # Non-secret config was written as Variables.
         set_var_names = [call.args[0] for call in mock_variable.set.call_args_list]
         assert "tree_mongo_host" in set_var_names
+
+
+def _clone_step(**ref: str) -> list[dict]:
+    return [{"prefect.deployments.steps.git_clone": {"repository": "r", **ref}}]
+
+
+class TestGitRefOfPullSteps:
+    @pytest.mark.parametrize(
+        ("pull_steps", "expected"),
+        [
+            (_clone_step(commit_sha="5f5225f" + "0" * 33), "commit:5f5225f"),
+            (_clone_step(branch="main"), "branch:main"),
+            (
+                [{"prefect.deployments.steps.run_shell_script": {}}],
+                "<no git_clone step>",
+            ),
+            (None, "<no git_clone step>"),
+        ],
+    )
+    def test_names_the_ref_the_clone_checks_out(
+        self, pull_steps: list[dict] | None, expected: str
+    ) -> None:
+        assert _setup._git_ref(pull_steps) == expected
+
+
+class _FakePrefectClient:
+    """The four reads ``status`` makes, over an in-memory set of deployments."""
+
+    def __init__(self, deployments: dict[str, list[dict]]) -> None:
+        # full name ("flow/deployment") → pull steps
+        self._flows: dict = {}
+        self._by_name: dict = {}
+        for full_name, pull_steps in deployments.items():
+            flow_name, name = full_name.split("/")
+            flow_id = uuid4()
+            self._flows[flow_id] = SimpleNamespace(name=flow_name)
+            self._by_name[full_name] = SimpleNamespace(
+                name=name,
+                flow_id=flow_id,
+                work_pool_name=orchestrator.MANAGED_WORK_POOL,
+                pull_steps=pull_steps,
+            )
+
+    async def __aenter__(self) -> _FakePrefectClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def read_work_pool(self, name: str) -> SimpleNamespace:
+        return SimpleNamespace(name=name, type="prefect:managed", status="READY")
+
+    async def read_deployment_by_name(self, full_name: str) -> SimpleNamespace:
+        try:
+            return self._by_name[full_name]
+        except KeyError:
+            raise _setup.ObjectNotFound(http_exc=Exception(full_name)) from None
+
+    async def read_deployments(self, **filters: object) -> list[SimpleNamespace]:
+        return list(self._by_name.values())
+
+    async def read_flow(self, flow_id: object) -> SimpleNamespace:
+        return self._flows[flow_id]
+
+
+class TestStatus:
+    """``status`` is how an operator checks what CD left on Prefect Cloud."""
+
+    _ORPHAN = "data-etl-coordinator/data-etl-coordinator"
+
+    def _run(self, mocker, deployments: dict[str, list[dict]], args: list[str]):
+        mocker.patch.object(
+            _setup, "get_client", return_value=_FakePrefectClient(deployments)
+        )
+        return CliRunner().invoke(_setup.cli, ["status", *args], env={"GROUPS": ""})
+
+    def _every_spec(self, pull_steps: list[dict]) -> dict[str, list[dict]]:
+        return {name: pull_steps for name in orchestrator.deployment_full_names()}
+
+    def test_prints_the_commit_each_deployment_is_pinned_to(self, mocker) -> None:
+        sha = "5f5225f" + "0" * 33
+
+        result = self._run(mocker, self._every_spec(_clone_step(commit_sha=sha)), [])
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "offline-pipeline/offline-pipeline: work_pool=tree-managed "
+            "ref=commit:5f5225f"
+        ) in result.output
+
+    def test_flags_a_deployment_no_spec_owns_as_an_orphan(self, mocker) -> None:
+        deployments = self._every_spec(_clone_step(branch="main"))
+        deployments[self._ORPHAN] = _clone_step(branch="main")
+
+        result = self._run(mocker, deployments, [])
+
+        assert result.exit_code == 0, result.output
+        assert (
+            f"{self._ORPHAN}: ORPHAN — not in the specs; CD never deletes it. "
+            f"Remove it by hand: prefect deployment delete {self._ORPHAN}"
+        ) in result.output
+
+    def test_no_orphan_line_when_every_deployment_has_a_spec(self, mocker) -> None:
+        result = self._run(mocker, self._every_spec(_clone_step(branch="main")), [])
+
+        assert "ORPHAN" not in result.output
+
+    def test_a_group_scoped_status_does_not_flag_the_other_group(self, mocker) -> None:
+        # ``--groups data`` lists only the data specs, but the memory group's
+        # deployments on the pool are owned by a spec — not orphans.
+        result = self._run(
+            mocker, self._every_spec(_clone_step(branch="main")), ["--groups", "data"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ORPHAN" not in result.output
+        assert "dream-consolidation-all-users" not in result.output

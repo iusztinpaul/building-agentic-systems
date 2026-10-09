@@ -14,8 +14,10 @@ values), and the git clone authenticates via the ``tree-github-pat`` Secret bloc
 — NOT the app's secrets.
 
 ``GIT_REF`` (optional) pins the deployments to a branch or commit; defaults to
-``main`` (branch-tracking, so merges go live without a re-deploy). The CD workflow
-can pass the tested commit SHA for reproducible deploys.
+``main`` (branch-tracking: every run clones main as it is at run time). The CD
+workflow passes the commit SHA that passed CI, so managed runs execute exactly the
+tested code and a red push to ``main`` never runs there. A hand-run with the
+default tracks ``main`` again until the next green push re-pins it.
 
 ``GROUPS`` (optional, comma-separated) narrows the deploy to whole pipelines —
 ``data`` (the data ETL worker) and/or ``memory`` (extraction, indexing, dream).

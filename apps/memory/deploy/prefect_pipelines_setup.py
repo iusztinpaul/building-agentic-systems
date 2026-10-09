@@ -34,7 +34,7 @@ Commands::
 
     uv run python deploy/prefect_pipelines_setup.py up        # pool + blocks + deployments (idempotent)
     uv run python deploy/prefect_pipelines_setup.py update    # re-deploy code/spec only
-    uv run python deploy/prefect_pipelines_setup.py status    # print pool + deployment bindings
+    uv run python deploy/prefect_pipelines_setup.py status    # pool, bindings + git refs, orphans
     uv run python deploy/prefect_pipelines_setup.py down      # delete deployments + pool
 
 Every verb takes ``--groups data|memory`` (comma-separated, defaults to the
@@ -55,6 +55,7 @@ import httpx
 from prefect.blocks.system import Secret
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import WorkPoolCreate
+from prefect.client.schemas.filters import WorkPoolFilter, WorkPoolFilterName
 from prefect.exceptions import ObjectAlreadyExists, ObjectNotFound
 from prefect.variables import Variable
 
@@ -160,6 +161,23 @@ async def _ensure_work_pool(name: str) -> None:
             logger.info("Work pool %r already exists (created concurrently).", name)
 
 
+def _git_ref(pull_steps: list[dict] | None) -> str:
+    """The ref a deployment's ``git_clone`` pull step checks out.
+
+    ``commit:<sha7>`` when CD pinned it to a tested commit, ``branch:<name>`` when
+    it tracks a branch (a hand-run ``up`` / ``update`` with the default ``main``).
+    """
+
+    for step in pull_steps or []:
+        clone = step.get("prefect.deployments.steps.git_clone")
+        if clone is None:
+            continue
+        if clone.get("commit_sha"):
+            return f"commit:{clone['commit_sha'][:7]}"
+        return f"branch:{clone.get('branch')}"
+    return "<no git_clone step>"
+
+
 async def _status(work_pool: str, groups: tuple[str, ...]) -> None:
     async with get_client() as client:
         try:
@@ -171,9 +189,27 @@ async def _status(work_pool: str, groups: tuple[str, ...]) -> None:
             try:
                 dep = await client.read_deployment_by_name(full_name)
                 pool_name = dep.work_pool_name or "<none — clobbered, re-run up>"
-                click.echo(f"  {full_name}: work_pool={pool_name}")
+                click.echo(
+                    f"  {full_name}: work_pool={pool_name} "
+                    f"ref={_git_ref(dep.pull_steps)}"
+                )
             except ObjectNotFound:
                 click.echo(f"  {full_name}: <missing>")
+        # CD and ``up`` only (re)apply the current specs and never delete, so a
+        # renamed or removed spec leaves its deployment on the pool — still on
+        # its cron, still running. Compare against EVERY spec, not the group, so a
+        # group-scoped status does not flag the other group's deployments.
+        known = set(deployment_full_names())
+        on_pool = await client.read_deployments(
+            work_pool_filter=WorkPoolFilter(name=WorkPoolFilterName(any_=[work_pool]))
+        )
+        for dep in on_pool:
+            full_name = f"{(await client.read_flow(dep.flow_id)).name}/{dep.name}"
+            if full_name not in known:
+                click.echo(
+                    f"  {full_name}: ORPHAN — not in the specs; CD never deletes it. "
+                    f"Remove it by hand: prefect deployment delete {full_name}"
+                )
 
 
 async def _down(work_pool: str, purge_blocks: bool, groups: tuple[str, ...]) -> None:
@@ -277,7 +313,7 @@ def update(work_pool: str, groups: tuple[str, ...], git_ref: str) -> None:
 @_pool_option
 @_groups_option
 def status(work_pool: str, groups: tuple[str, ...]) -> None:
-    """Print the work pool + each deployment's work-pool binding."""
+    """Print the work pool, each deployment's binding + git ref, and orphans."""
 
     asyncio.run(_status(work_pool, groups))
 

@@ -51,10 +51,13 @@ was never registered on Prefect Cloud. Prod still had only the old `data-etl-*` 
 
 How the pieces actually move (verified in `orchestrator.py` + `.github/workflows/cd.yml`):
 
-- **Code** reaches a run at run time. Each managed run clones `main` (`git_clone`, ~1 s), then
-  `pip install ./apps/memory` (~75 s). A push to `main` is live on the next run, with or without CD.
-- **Deployment definitions** (names, schedules, parameters, env, pull steps) reach Prefect Cloud ONLY
-  through CD (`deploy/prefect_pipelines.py`, after CI passes on `main`). A red CD freezes them.
+- **Code** reaches a run at run time. Each managed run clones the commit CD pinned — the last one
+  that passed CI on `main` (`git_clone`, ~1 s; it cloned `main` itself until 2026-10-09), then
+  `pip install ./apps/memory` (~75 s). A push to `main` is live on the next run only once its CD is
+  green.
+- **Deployment definitions** (names, schedules, parameters, env, pull steps — the pinned SHA
+  included) reach Prefect Cloud ONLY through CD (`deploy/prefect_pipelines.py`, after CI passes on
+  `main`). A red CD freezes them, and with them the code.
 
 Lesson: check `gh run list -w cd.yml` before a prod run, and treat a red CD as a prod incident, not a
 CI nuisance.
@@ -173,15 +176,17 @@ in either number. Budget for the target's numbers, not the rehearsal's.
   (`dropDatabase`, the mode reset) and the attempt to remove the reset's confirmation step. The human
   ran those commands. The reset guard ended up simpler (one `CONFIRM=yes` on every target, dry run by
   default, PROD warning in the dry run) without losing the dry run.
-- **Run-time `git clone` of `main`** means a push lands mid-backfill in every worker that starts after
-  it. Pin `GIT_REF` to a SHA if a long backfill must run one commit end to end.
+- **Run-time `git clone`** of the pinned SHA means a green push lands mid-backfill in every worker that
+  starts after its CD re-pins the deployments. Hold merges to `main` if a long backfill must run one
+  commit end to end.
 
 ---
 
 ## Pre-flight checklist for the next prod run
 
-1. `gh run list -w cd.yml -L 1` is green, and `prefect deployment ls` lists every deployment the
-   command dispatches.
+1. `make memory-deploy-prefect-setup-status` lists every deployment the command dispatches, each
+   at `ref=commit:<sha7>` of the commit you expect, with no ORPHAN line. A green CD alone does not
+   prove a deploy: CD skips (green) when its commit is no longer the tip of `main`.
 2. Config comes from the package: the worker log's first lines show the expected `memory.mode`
    (`Processing N documents in <mode> mode`).
 3. `make env-status` shows `prod`; `db.stats()` + `listDatabases` give headroom against the tier's cap

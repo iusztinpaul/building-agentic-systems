@@ -135,7 +135,7 @@ deploy-prefect-setup-up: # IaC: provision the Prefect Cloud Managed work pool + 
 deploy-prefect-setup-update: # IaC: re-deploy code/spec only to the managed pool (assumes the pool + blocks exist). Optional GROUPS=data|memory.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py update
 
-deploy-prefect-setup-status: # IaC: print the managed work pool + each deployment's work-pool binding. Optional GROUPS=data|memory.
+deploy-prefect-setup-status: # IaC: print the managed work pool, each deployment's work-pool binding + git ref, and any ORPHAN deployment on the pool (CD never deletes one). Optional GROUPS=data|memory.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py status
 
 deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Add YES=1 to skip the prompt. Optional GROUPS=data|memory tears down only those pipelines and keeps the pool.

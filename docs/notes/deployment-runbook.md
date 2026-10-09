@@ -63,8 +63,15 @@ re-run with `memory`. A group-scoped `down` keeps the work pool.
 
 `up` is idempotent IaC (`deploy/prefect_pipelines_setup.py`); afterwards the CD
 workflow (`.github/workflows/cd.yml`) keeps the deployment specs in sync on
-every green push to `main` — flow code itself is branch-tracking (cloned from
-`main` at run time), so merges go live without a re-deploy.
+every green push to `main` (a direct push or a merged PR), pinned to that commit:
+each managed run clones exactly the SHA that passed CI, so a red push never runs.
+`up` / `update` default to `--git-ref main` (branch-tracking) until the next green
+push re-pins them. `make memory-deploy-prefect-setup-status` prints each
+deployment's `ref=commit:<sha7>` and flags any ORPHAN deployment on the pool — CD
+re-applies the current specs but never deletes a renamed or removed one. CD deploys
+only the tip of `main`, so a green commit with a red commit landed on top stays
+undeployed; `GIT_REF=<40-hex sha> make memory-deploy-prefect` pins a commit by hand
+(that case, or a rollback).
 
 The first indexing run matters: it creates the Atlas Search indexes
 (`ensure_indexes`). It dispatches the `offline-pipeline` deployment with only the
