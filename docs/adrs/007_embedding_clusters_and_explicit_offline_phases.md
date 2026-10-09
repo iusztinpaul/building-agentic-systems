@@ -267,3 +267,10 @@ flowchart TD
   concave hulls (alpha shapes) in the same overlay; an air-gapped requirement → vendor the CDN
   bundles per ADR-005; a second consumer of the recipe (e.g. entity clustering) → generalise
   `load_child_embeddings`' filter, never fork `core.py`.
+
+## Amendment (2026-10-09) — cached manual clustering, query view, unclustered preview
+
+Amends Decisions 5 and 8; the text above is kept as history.
+
+- **Decision 5.** Clustering stays manual-only (`make memory-run-clustering-pipeline`; the nightly cron never runs it), and is now CACHED. Before loading any vector the run checks whether the latest run is still current: every embedded child carries its `viz.run_id`, the cluster rows' sizes still sum to the clustered children (catches deletions), and every row's `config_fingerprint` matches — a hash of the UMAP/HDBSCAN/sampling knobs, the summary prompt version and the LLM identity. If so it exits as `up_to_date` (INFO, not a failure): no UMAP fit, no LLM call. Any changed input changes the fingerprint, so there is no force flag. An all-noise run has no row to stamp and always re-runs; it makes no LLM call.
+- **Decision 8.** Two exceptions to "surfaces never compute", both a numpy PCA at read time (no `umap` import, milliseconds). (1) With NO clustering run yet, the whole-memory map is an *unclustered preview*: one colour, one `not clustered yet` legend row, no hull toggle, and the answer starts with the `No clustering run found for this user …` warning saying clustering must be triggered manually. A user with no embedded child still gets a message, never an empty map. (2) `visualize_memory_embeddings(query=…)` draws the matched child chunks in colour over the rest of the capped memory in light grey, one PCA projection for both, with no clusters: clusters are a whole-memory view. It therefore never depends on, or warns about, a clustering run. Once a run exists, stale chunks on the whole-memory map are still omitted rather than mixed in: PCA and UMAP coordinates live in different spaces.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -3429,6 +3430,10 @@ def clustering_doubles(mocker, monkeypatch):
         "tree.memory.pipeline.init_mongodb", new=AsyncMock(return_value=MagicMock())
     )
     doubles = SimpleNamespace(
+        # The cache check: "not current" unless a test says otherwise.
+        unchanged=mocker.patch(
+            "tree.memory.pipeline.unchanged_run_id", new=AsyncMock(return_value=None)
+        ),
         load=mocker.patch(
             "tree.memory.pipeline.load_child_embeddings_task",
             new=AsyncMock(return_value=_child_rows()),
@@ -3630,6 +3635,50 @@ class TestMemoryClusteringSkipsATinyCorpus:
 
         assert "clustering skipped: 10 child embeddings" in caplog.text
         assert "TREE_MEMORY__CLUSTERING__HDBSCAN__MIN_CLUSTER_SIZE" in caplog.text
+
+
+@pytest.mark.usefixtures("clustering_doubles")
+class TestMemoryClusteringIsCached:
+    """A still-current run is served as is: no vector load, no UMAP, no LLM."""
+
+    async def test_a_current_run_is_skipped_before_anything_loads(
+        self, clustering_doubles
+    ) -> None:
+        clustering_doubles.unchanged.return_value = "run-0"
+
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        assert stats.up_to_date is True
+        assert stats.skipped_reason == (
+            "run run-0 is still current (same chunks and config)"
+        )
+        clustering_doubles.load.assert_not_awaited()
+        clustering_doubles.summarise.assert_not_awaited()
+        clustering_doubles.write.assert_not_awaited()
+
+    async def test_a_stale_run_reclusters_and_stamps_the_checked_fingerprint(
+        self, clustering_doubles
+    ) -> None:
+        stats = await memory_clustering(user_id=_USER_ID)
+
+        # The fingerprint the cache was asked about is the one written.
+        checked = clustering_doubles.unchanged.await_args.kwargs["config_fingerprint"]
+        written = clustering_doubles.write.await_args.kwargs["config_fingerprint"]
+        assert stats.up_to_date is False
+        assert checked == written
+        assert re.fullmatch(r"[0-9a-f]{16}", written)
+
+    async def test_a_changed_knob_changes_the_fingerprint(
+        self, clustering_doubles, monkeypatch
+    ) -> None:
+        await memory_clustering(user_id=_USER_ID)
+        before = clustering_doubles.write.await_args.kwargs["config_fingerprint"]
+        monkeypatch.setenv("TREE_MEMORY__CLUSTERING__UMAP__N_NEIGHBORS", "7")
+
+        await memory_clustering(user_id=_USER_ID)
+
+        after = clustering_doubles.write.await_args.kwargs["config_fingerprint"]
+        assert after != before
 
 
 @pytest.mark.usefixtures("clustering_doubles")

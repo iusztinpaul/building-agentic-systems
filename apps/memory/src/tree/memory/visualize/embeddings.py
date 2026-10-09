@@ -5,7 +5,8 @@ The map is the graph's twin, not its cousin (ADR-007 §2): the SAME
 (:mod:`tree.memory.visualize.graph`), with a handful of optional keys the
 template understands — ``layout: "fixed"`` (draw the stored coordinates, run
 no simulation), ``legend`` (cluster rows instead of node types), ``hulls`` and
-``warning``. No second renderer, no second template.
+``warning``. No second renderer, no second template — the query view
+(:func:`to_query_map_payload`) is the same shape with two legend rows.
 
 Pure and synchronous: it takes the :class:`~tree.memory.clustering.types.\
 EmbeddingMap` a surface already READ (``clustering.store.load_embedding_map``)
@@ -27,7 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tree.memory.clustering.types import EmbeddingMap
+from tree.memory.clustering.types import EmbeddingMap, MapPoint, QueryMap
 from tree.memory.visualize.graph import _DEFAULT_DISPLAY, _render_graph_file
 
 CLUSTER_PALETTE: tuple[str, ...] = (
@@ -67,10 +68,39 @@ UNCLUSTERED_COLOUR = "#d5d8de"
 """Light grey for the legend row of chunks that are NOT on the map at all."""
 
 NO_CLUSTERING_RUN_MESSAGE = (
-    "No clustering run found for this user — run make "
-    "memory-run-clustering-pipeline to build the embedding map."
+    "No clustering run found for this user. Showing the raw embeddings. "
+    "Trigger it manually."
+)
+"""The **unclustered preview**'s warning line: the map is drawn, but it is not
+the topic map — clustering is manual only (``make memory-run-clustering-pipeline``)."""
+
+NO_EMBEDDINGS_MESSAGE = (
+    "No embedded chunks for this user yet — nothing to map. Ingest documents "
+    "first (make memory-run-pipeline)."
 )
 """What a surface says instead of drawing an empty map (ADR-007 §8)."""
+
+PREVIEW_COLOUR = "#1f77b4"
+"""One hue for every point of the **unclustered preview** — a real colour, not
+noise grey: those points are not residue, they are simply not clustered yet."""
+
+_PREVIEW_LABEL = "not clustered yet"
+_MATCHED_LABEL = "matched chunks"
+_REFERENCE_LABEL = "other chunks"
+_REFERENCE_ID = -2
+"""The query view's reference cloud — a legend id of its own so the template
+paints it grey, distinct from the matches (``-1``)."""
+
+REFERENCE_COLOUR = "#bcc1c9"
+"""Light grey for the query view's reference cloud: lighter than noise grey, so
+the matched chunks read on top and the cloud reads as context. OPAQUE on
+purpose: Sigma blends with ``gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)`` (it
+expects premultiplied colours), so an ``rgba(…, 0.3)`` grey adds past 255 on the
+white canvas and renders as white — invisible."""
+
+_REFERENCE_NODE_SIZE = 3
+"""One step smaller than a matched point (``_MAP_NODE_SIZE``): the cloud is
+context, not the answer."""
 
 _MAP_NODE_SIZE = 4
 """Node radius for every map point. Smaller than a graph entity's 6: a map plots
@@ -102,6 +132,8 @@ def unclustered_warning(embedding_map: EmbeddingMap) -> str | None:
     numbers and the command that fixes it.
     """
 
+    if embedding_map.run_id is None:
+        return NO_CLUSTERING_RUN_MESSAGE
     if embedding_map.unclustered <= 0:
         return None
     return (
@@ -139,31 +171,16 @@ def to_embedding_map_payload(
     """
 
     labels = {cluster.cluster_id: cluster.label for cluster in embedding_map.clusters}
+    preview = embedding_map.run_id is None
 
     nodes: list[dict[str, Any]] = []
     for point in embedding_map.points:
-        meta: dict[str, Any] = {"cluster": _cluster_label(labels, point.cluster_id)}
-        # Omitted when empty (the ``_curated_meta`` rule): an empty tooltip row
-        # carries nothing, and on a 17k-point map every key is ~17k copies.
-        if point.heading_path:
-            meta["heading_path"] = " > ".join(point.heading_path)
-        if point.snippet:
-            meta["snippet"] = point.snippet
-        # Lean on purpose (ADR-013 §3): no ``label`` (hundreds of overlapping
-        # chunk titles are canvas noise — the template defaults it to ""), no
-        # ``color`` (the template looks it up from the legend's ``cluster_id``)
-        # and no ``meta.document`` (the tooltip rebuilds it from ``name``).
-        # Three decimals is sub-pixel on any UMAP extent a screen can show.
-        node: dict[str, Any] = {
-            "id": point.chunk_id,
-            "type": "chunk",
-            "name": point.title or _UNTITLED,  # the tooltip's heading
-            "x": round(point.x, 3),
-            "y": round(point.y, 3),
-            "cluster_id": point.cluster_id,
-            "size": _MAP_NODE_SIZE,
-            "meta": meta,
-        }
+        node = _map_node(
+            point,
+            cluster=_PREVIEW_LABEL
+            if preview
+            else _cluster_label(labels, point.cluster_id),
+        )
         # The one exception: a cluster with NO legend row (a partially written
         # run — points stamped, ``memory_clusters`` row missing) ships its own
         # palette colour, which the template prefers. Never on a healthy map.
@@ -172,22 +189,109 @@ def to_embedding_map_payload(
         nodes.append(node)
 
     legend = _legend_rows(embedding_map)
+    clusters = (
+        "— no clusters yet (unclustered preview)"
+        if preview
+        else (
+            f"in {len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
+        )
+    )
+    # The preview has nothing to outline: ``None`` hides the hull toggle.
+    hulls_state: bool | None = None if preview else hulls
+    # The run's ``clustered`` is the preview's whole corpus of embedded chunks.
+    of = embedding_map.total_children if preview else embedding_map.clustered
 
     return {
         "nodes": nodes,
         "edges": [],
         "layout": "fixed",
         "controls": {"display": dict(_DEFAULT_DISPLAY)},
-        "hulls": hulls,
+        "hulls": hulls_state,
         "legend": legend,
         "warning": unclustered_warning(embedding_map),
         "summary": (
-            f"Embedding map: {len(embedding_map.points)} of "
-            f"{embedding_map.clustered} chunks (the "
-            f"{embedding_map.plotted_documents} most-recent of "
-            f"{embedding_map.total_documents} documents) in "
-            f"{len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
+            f"Embedding map: {len(embedding_map.points)} of {of} chunks "
+            f"(the {embedding_map.plotted_documents} most-recent of "
+            f"{embedding_map.total_documents} documents) {clusters}"
         ),
+    }
+
+
+def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
+    """The query view: the matched chunks in colour over the rest in light grey.
+
+    The points come from :func:`~tree.memory.clustering.store.load_query_map` —
+    ONE PCA space for both — so the grey reference cloud shows where the
+    matches sit in the wider memory. No clusters (they belong to the
+    whole-memory map), no hull toggle (``hulls: None``), no stale warning. The
+    reference nodes go FIRST: Sigma draws in insertion order, so a match is
+    never buried under the cloud. Same fixed-layout template and lean nodes as
+    :func:`to_embedding_map_payload`; the grey is opaque (see
+    :data:`REFERENCE_COLOUR`).
+
+    Returns:
+        ``{nodes, edges, layout, controls, hulls, legend, warning, summary}``.
+    """
+
+    nodes = [
+        {**_map_node(point), "cluster_id": _REFERENCE_ID, "size": _REFERENCE_NODE_SIZE}
+        for point in query_map.reference
+    ]
+    nodes += [_map_node(point) for point in query_map.matched]
+    return {
+        "nodes": nodes,
+        "edges": [],
+        "layout": "fixed",
+        "controls": {"display": dict(_DEFAULT_DISPLAY)},
+        "hulls": None,
+        "legend": [
+            {
+                "label": _MATCHED_LABEL,
+                "size": len(query_map.matched),
+                "color": PREVIEW_COLOUR,
+                "cluster_id": -1,
+            },
+            {
+                "label": _REFERENCE_LABEL,
+                "size": len(query_map.reference),
+                "color": REFERENCE_COLOUR,
+                "cluster_id": _REFERENCE_ID,
+            },
+        ],
+        "warning": None,
+        "summary": (
+            f"Embedding map for {query!r}: {len(query_map.matched)} matched chunks "
+            f"over {len(query_map.reference)} other chunks in grey (the "
+            f"{query_map.plotted_documents} most-recent of "
+            f"{query_map.total_documents} documents; a PCA projection, no clusters)"
+        ),
+    }
+
+
+def _map_node(point: MapPoint, *, cluster: str | None = None) -> dict[str, Any]:
+    """One lean map node; ``cluster`` names the tooltip's cluster row, if any."""
+
+    meta: dict[str, Any] = {} if cluster is None else {"cluster": cluster}
+    # Omitted when empty (the ``_curated_meta`` rule): an empty tooltip row
+    # carries nothing, and on a 17k-point map every key is ~17k copies.
+    if point.heading_path:
+        meta["heading_path"] = " > ".join(point.heading_path)
+    if point.snippet:
+        meta["snippet"] = point.snippet
+    # Lean on purpose (ADR-013 §3): no ``label`` (hundreds of overlapping
+    # chunk titles are canvas noise — the template defaults it to ""), no
+    # ``color`` (the template looks it up from the legend's ``cluster_id``)
+    # and no ``meta.document`` (the tooltip rebuilds it from ``name``).
+    # Three decimals is sub-pixel on any UMAP extent a screen can show.
+    return {
+        "id": point.chunk_id,
+        "type": "chunk",
+        "name": point.title or _UNTITLED,  # the tooltip's heading
+        "x": round(point.x, 3),
+        "y": round(point.y, 3),
+        "cluster_id": point.cluster_id,
+        "size": _MAP_NODE_SIZE,
+        "meta": meta,
     }
 
 
@@ -210,7 +314,20 @@ def _legend_rows(embedding_map: EmbeddingMap) -> list[dict[str, Any]]:
     would read as a cluster the reader cannot find on the map. Every DRAWN
     row carries its ``cluster_id`` (noise ``-1``) — the template's only source
     of a point's colour; the "unclustered / stale" row has no points, so none.
+
+    The **unclustered preview** has ONE row instead: every point, one colour,
+    under the noise id the template paints by.
     """
+
+    if embedding_map.run_id is None:
+        return [
+            {
+                "label": _PREVIEW_LABEL,
+                "size": embedding_map.total_children,
+                "color": PREVIEW_COLOUR,
+                "cluster_id": -1,
+            }
+        ]
 
     rows: list[dict[str, Any]] = [
         {

@@ -22,8 +22,10 @@ SEQUENTIAL BLOCKS:
 4. ``run_clustering`` — one ``memory_clustering`` subflow per target user: the
    **Embedding map**'s data (UMAP + HDBSCAN + one LLM summary per **Memory
    cluster**). OFF by default — it is a maintenance phase whose cold ``import
-   umap`` costs ~40 s on a fresh container, so the nightly cron never pays for
-   it and nobody who does not ask for it imports the stack.
+   umap`` costs ~40 s on a fresh container and one LLM call per cluster, so
+   only ``make memory-run-clustering-pipeline`` asks for it — never the nightly
+   cron. A user whose latest run is still current is skipped before any vector
+   is loaded (see :func:`tree.memory.pipeline.memory_clustering`).
 
 Worker fan-outs inside the coordinators still run as separate deployment runs;
 only the coordinators and the indexing flow execute inline here, so the
@@ -195,9 +197,17 @@ def _log_clustering_outcome(
     A corpus below ``min_cluster_size`` is a NON-failure exit — the run
     completes having written nothing — so without this line the terminal reads
     identically whether 37 clusters were written or the corpus was skipped
-    (#117 Story 3). WARNING for the skip, because it names an action.
+    (#117 Story 3). WARNING for the skip, because it names an action — except
+    the "still current" skip, which is the cache working and logs at INFO.
     """
 
+    if stats.up_to_date:
+        log.info(
+            "clustering UP TO DATE: user_id=%s reason=%s",
+            user_id,
+            stats.skipped_reason,
+        )
+        return
     if stats.skipped_reason:
         log.warning(
             "clustering SKIPPED: user_id=%s reason=%s", user_id, stats.skipped_reason

@@ -290,6 +290,46 @@ def cluster_sizes(labels: Sequence[int] | np.ndarray) -> dict[int, int]:
     }
 
 
+PREVIEW_EXTENT = 10.0
+"""Half-width the PCA preview is scaled to. Raw cosine-normalised embeddings
+project to a ~0.5-wide cloud, which the payload's 3-decimal rounding would
+collapse onto a few hundred grid steps; ±10 keeps it sub-pixel."""
+
+
+def project_pca_2d(embeddings: np.ndarray) -> np.ndarray:
+    """Project raw embeddings to 2-D with PCA — the **unclustered preview**'s layout.
+
+    The fallback a surface draws when no **Clustering run** exists yet: numpy
+    only (an SVD of the centred matrix), so it costs milliseconds and never
+    imports the UMAP stack. Deterministic: each axis's sign is fixed so its
+    largest-magnitude loading is positive — SVD signs are otherwise arbitrary
+    and the map would mirror between two identical calls. PCA keeps global
+    variance, not local neighbourhoods, so the picture is coarser than the
+    clustering run's UMAP map; it is a preview, never mixed into a run's space.
+
+    Args:
+        embeddings: ``(n, d)`` raw vectors, ``n >= 1``.
+
+    Returns:
+        ``(n, 2)`` coordinates within ``±PREVIEW_EXTENT``; a missing axis (one
+        or two points, or collinear vectors) is zero.
+    """
+
+    matrix = np.asarray(embeddings, dtype=np.float64)
+    centred = matrix - matrix.mean(axis=0)
+    _, _, components = np.linalg.svd(centred, full_matrices=False)
+    components = components[:2]
+    pivots = np.abs(components).argmax(axis=1)
+    signs = np.sign(components[np.arange(len(components)), pivots])
+    signs[signs == 0] = 1.0
+    coords = np.zeros((matrix.shape[0], 2))
+    coords[:, : len(components)] = centred @ (components * signs[:, None]).T
+    extent = np.abs(coords).max()
+    if extent > 0:
+        coords *= PREVIEW_EXTENT / extent
+    return coords
+
+
 def noise_count(labels: Sequence[int] | np.ndarray) -> int:
     """How many rows HDBSCAN refused to place (label ``-1``)."""
 

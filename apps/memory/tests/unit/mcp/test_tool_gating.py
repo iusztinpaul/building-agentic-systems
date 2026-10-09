@@ -194,13 +194,16 @@ class TestRegisteredToolSet:
 
 
 class TestEmbeddingMapToolSignature:
-    """Two knobs, in both modes — the map takes no query and no mode branch."""
+    """The same four knobs in both modes — the query scope has no mode branch."""
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_the_tool_advertises_exactly_hulls_and_as_html_file(
-        self, mode: str
-    ) -> None:
-        assert _probe(mode)["embedding_map_parameters"] == ["as_html_file", "hulls"]
+    def test_the_tool_advertises_the_same_knobs_in_both_modes(self, mode: str) -> None:
+        assert _probe(mode)["embedding_map_parameters"] == [
+            "as_html_file",
+            "hulls",
+            "query",
+            "top_k",
+        ]
 
 
 class TestStructureToolSignaturePerMode:

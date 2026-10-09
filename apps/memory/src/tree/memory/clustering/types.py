@@ -170,8 +170,8 @@ class MapPoint(BaseModel):
     """
 
     chunk_id: str = Field(description="The child chunk row's _id.")
-    x: float = Field(description="Stored viz.x — a fixed coordinate, never computed.")
-    y: float = Field(description="Stored viz.y — a fixed coordinate, never computed.")
+    x: float = Field(description="Stored viz.x (a PCA x on the unclustered preview).")
+    y: float = Field(description="Stored viz.y (a PCA y on the unclustered preview).")
     cluster_id: int = Field(
         description="Its cluster, or -1 for noise (drawn mid-grey, no legend entry)."
     )
@@ -186,8 +186,31 @@ class MapPoint(BaseModel):
     )
 
 
+class QueryMap(BaseModel):
+    """A query's **Embedding map**: the matched chunks over a grey reference cloud.
+
+    Both lists share ONE read-time PCA projection, so a match sits where it
+    sits among the rest of the memory. Independent of any **Clustering run**:
+    no clusters, never stale.
+    """
+
+    matched: list[MapPoint] = Field(
+        description="The child chunks the query's search matched (and that have a vector)."
+    )
+    reference: list[MapPoint] = Field(
+        description=(
+            "Every other embedded child of the plotted (most-recent) documents — "
+            "drawn grey, as the space the matches sit in."
+        )
+    )
+    plotted_documents: int = Field(
+        description="Documents whose chunks form the reference cloud: the most-recent ones."
+    )
+    total_documents: int = Field(description="All documents of the user.")
+
+
 class EmbeddingMap(BaseModel):
-    """The whole picture one surface renders — read from storage, never computed.
+    """The whole picture one surface renders — read from storage.
 
     Two scopes, on purpose (ADR-013 §3): ``points`` are the PLOT — only the
     chunks of the ``plotted_documents`` most-recent documents
@@ -196,9 +219,19 @@ class EmbeddingMap(BaseModel):
     ``total_children`` and ``unclustered`` drive the warning contract (ADR-007
     §8): the output starts with "N of M chunks have no cluster assignment (or
     a stale one)" whenever ``unclustered`` is non-zero.
+
+    ``run_id is None`` is the **unclustered preview**: the user has embedded
+    children but no Clustering run yet, so the points are a read-time PCA
+    projection of the raw embeddings, ``clusters`` is empty and every point
+    carries the noise label — a map to look at, not a topic map.
     """
 
-    run_id: str = Field(description="The Clustering run these points come from.")
+    run_id: str | None = Field(
+        description=(
+            "The Clustering run these points come from; None for the unclustered "
+            "preview (no run yet — PCA coordinates, no clusters)."
+        )
+    )
     clusters: list[MemoryClusterInfo] = Field(
         description="One entry per non-noise cluster of that run (the legend)."
     )
@@ -244,16 +277,32 @@ class EmbeddingMap(BaseModel):
         than a broken query.
         """
 
+        if self.run_id is None:
+            # The preview: nothing is clustered, every child is unclustered,
+            # and the plot is a subset of the corpus, not of a run.
+            if self.clusters or self.clustered or self.noise:
+                raise ValueError(
+                    "an unclustered preview (run_id=None) has no clusters, "
+                    f"clustered or noise: got {len(self.clusters)} clusters, "
+                    f"clustered={self.clustered}, noise={self.noise}"
+                )
+            if not len(self.points) <= self.unclustered == self.total_children:
+                raise ValueError(
+                    "expected len(points) <= unclustered == total_children on an "
+                    f"unclustered preview: got {len(self.points)} points, "
+                    f"unclustered={self.unclustered}, "
+                    f"total_children={self.total_children}"
+                )
+        elif not len(self.points) <= self.clustered <= self.total_children:
+            raise ValueError(
+                "expected len(points) <= clustered <= total_children: got "
+                f"{len(self.points)} points, clustered={self.clustered}, "
+                f"total_children={self.total_children}"
+            )
         if not 0 <= self.unclustered <= self.total_children:
             raise ValueError(
                 "unclustered must be between 0 and total_children: got "
                 f"unclustered={self.unclustered}, "
-                f"total_children={self.total_children}"
-            )
-        if not len(self.points) <= self.clustered <= self.total_children:
-            raise ValueError(
-                "expected len(points) <= clustered <= total_children: got "
-                f"{len(self.points)} points, clustered={self.clustered}, "
                 f"total_children={self.total_children}"
             )
         if not 0 <= self.noise <= self.clustered:

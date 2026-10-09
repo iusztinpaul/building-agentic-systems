@@ -663,6 +663,35 @@ class TestOfflinePhaseLogLines:
             "clustered=35 noise=5 fallbacks=0" in self._messages(caplog)
         )
 
+    async def test_an_up_to_date_clustering_skip_logs_at_info(
+        self, mocker, caplog
+    ) -> None:
+        _data, _extract, _index, cluster, _users = _patch_coordinators(mocker)
+        cluster.return_value = ClusteringStats(
+            run_id="run-2",
+            skipped_reason="no new or re-embedded chunks since run run-1",
+            up_to_date=True,
+        )
+
+        with caplog.at_level(logging.INFO):
+            await offline_pipeline(
+                user_id=_USER_ID,
+                run_data=False,
+                run_extraction=False,
+                run_indexing=False,
+                run_clustering=True,
+            )
+
+        # A quiet night is routine: one INFO line, no WARNING to chase.
+        lines = [
+            record
+            for record in caplog.records
+            if record.getMessage().startswith("clustering UP TO DATE:")
+        ]
+        assert [record.levelno for record in lines] == [logging.INFO]
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+        cluster.assert_awaited_once_with(user_id=_USER_ID)
+
     async def test_a_skipped_clustering_run_warns_with_its_reason(
         self, mocker, caplog
     ) -> None:

@@ -743,7 +743,9 @@ def test_the_header_counts_read_the_map_summary_on_a_fixed_layout() -> None:
     assert 'countsEl.textContent = isFixed && typeof payload.summary === "string"' in (
         _RENDER_JS
     )
-    assert '? payload.summary.replace(/^Embedding map: /, "")' in _RENDER_JS
+    assert '? payload.summary.replace(/^Embedding map(?: for )?:? ?/, "")' in (
+        _RENDER_JS
+    )
     assert ': nodes.length + " nodes · " + edges.length + " edges";' in _RENDER_JS
 
 
@@ -2010,11 +2012,12 @@ def test_the_closure_marker_never_reaches_the_payload() -> None:
 # a JS / CSS / DOM edit made "for rag" turns this red.
 # Re-pinned by task 179 only: the lean map node's colour resolver
 # (`colourOf`, incl. its negative-id noise fallback) and the map tooltip's
-# rebuilt `document` row.
+# rebuilt `document` row. Re-pinned for the query Embedding map: the header
+# strips its "Embedding map for 'q': " prefix as well as "Embedding map: ".
 _TEMPLATE_SHA256 = {
     "_GRAPH_STYLE": "39b6d3020fedea6fe530f6ba671b5ca0a95924e0718d6d0f5fab5c37f214bbca",
     "_BODY_MARKUP": "eabb61a3b90ddd3cfea41a32ed8d8984b0fc9ceb91dab8d99cbcddbee2e5af6c",
-    "_RENDER_JS": "055947dcf2cd4ff6b5ddf6f338b5d685b37bab4744631a4ae685a3e75c95026b",
+    "_RENDER_JS": "1a80a4890c240bab7f69401c0fe41a37c356643b8875bfa377784cecddb5cd98",
     "_FILE_HTML_TEMPLATE": (
         "fe65603e2631b89c69651571bc087e00e757ce1e082c2e12380864b035b0423d"
     ),

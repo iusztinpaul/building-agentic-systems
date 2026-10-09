@@ -48,6 +48,8 @@ only when ``memory.mode == "graphrag"`` (read ONCE at flow entry):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -142,6 +144,7 @@ from tree.memory.clustering.store import (
     ChildEmbeddingRow,
     ClusterWriteCounts,
     load_child_embeddings,
+    unchanged_run_id,
     write_clustering_run,
 )
 from tree.memory.clustering.summaries import (
@@ -2380,9 +2383,10 @@ _CLUSTERING_METADATA = pipeline_metadata("clustering")
 class ClusteringStats(BaseModel):
     """What one **Clustering run** did — the flow's JSON-safe return value.
 
-    ``skipped_reason`` is the ONE non-failure exit: a corpus below
-    ``min_cluster_size`` cannot form a cluster, so the run completes having
-    written nothing and the PREVIOUS run's rows stay readable.
+    ``skipped_reason`` marks the two non-failure exits, both of which write
+    nothing and keep the PREVIOUS run's rows readable: a corpus below
+    ``min_cluster_size`` cannot form a cluster, and (``up_to_date``) the latest
+    run is still current — same chunks, same config — so it is served as is.
     """
 
     run_id: str | None = Field(
@@ -2404,6 +2408,13 @@ class ClusteringStats(BaseModel):
     skipped_reason: str | None = Field(
         default=None,
         description="Why nothing was written; None on a run that clustered.",
+    )
+    up_to_date: bool = Field(
+        default=False,
+        description=(
+            "True when the skip is 'the latest run is still current' — the "
+            "cache working, so it logs at INFO, not WARNING."
+        ),
     )
 
 
@@ -2679,6 +2690,7 @@ async def _write_clustering_run(
     coords: list[tuple[float, float]],
     clusters: list[MemoryClusterInfo],
     now: datetime,
+    config_fingerprint: str | None = None,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> ClusterWriteCounts:
     """Replace the user's previous **Clustering run** with this one."""
@@ -2698,7 +2710,28 @@ async def _write_clustering_run(
             coords=coords,
             clusters=clusters,
             now=now,
+            config_fingerprint=config_fingerprint,
         )
+
+
+def _clustering_fingerprint(config: ClusteringConfig) -> str:
+    """Hash every input that shapes a run's output — the clustering cache key.
+
+    The UMAP, HDBSCAN and sampling knobs decide the clusters and the summarised
+    samples; the prompt version and the LLM decide the labels. Concurrency is
+    left out: it changes how fast, not what. Sixteen hex digits (64 bits) are
+    plenty to tell a handful of configs apart.
+    """
+
+    payload = {
+        "umap": config.umap.model_dump(mode="json"),
+        "hdbscan": config.hdbscan.model_dump(mode="json"),
+        "sampling": config.sampling.model_dump(mode="json"),
+        "prompt_version": SUMMARY_PROMPT_VERSION,
+        "llm": llm_identity(),
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 write_clustering_run_task = task(
@@ -2749,13 +2782,21 @@ async def memory_clustering(
     """Cluster ``user_id``'s **Child chunk** embeddings and write the run.
 
     Phase 4 of ``offline-pipeline`` (ADR-007 Decision 5), OFF by default: the
-    nightly cron never runs it, and neither does any other script. Four steps —
+    nightly cron never runs it — only ``make memory-run-clustering-pipeline``
+    does. Four steps —
     load, reduce+cluster, summarise per cluster, write — each a task, so the
     Prefect UI shows where a 40 s cold numba compile or a slow Gemini call went.
 
     A corpus below ``memory.clustering.hdbscan.min_cluster_size`` is SKIPPED
     without touching the store: nothing could form a cluster, and wiping the
     previous run's labels to write nothing is strictly worse than keeping them.
+
+    The run is CACHED: before loading any vector it asks
+    :func:`~tree.memory.clustering.store.unchanged_run_id` whether the latest
+    run is still current (same chunks, same :func:`_clustering_fingerprint`)
+    and, if so, returns ``up_to_date`` without a UMAP fit or an LLM call. A
+    changed UMAP / HDBSCAN / sampling knob, prompt version or LLM changes the
+    fingerprint, so the next run reclusters by itself — no force flag.
 
     ``run_id`` is the Prefect flow-run id, stamped on every cluster row and on
     every chunk's ``viz`` — that pairing is what lets a surface tell fresh
@@ -2789,6 +2830,17 @@ async def memory_clustering(
             # Headers for THIS run's trace, passed to each task so its span
             # nests here rather than minting a root trace per task.
             headers = get_distributed_trace_headers()
+
+            fingerprint = _clustering_fingerprint(config)
+            current = await unchanged_run_id(
+                client, database, user_id, config_fingerprint=fingerprint
+            )
+            if current is not None:
+                reason = f"run {current} is still current (same chunks and config)"
+                log.info("clustering skipped (cached): %s", reason)
+                return ClusteringStats(
+                    run_id=run_id, skipped_reason=reason, up_to_date=True
+                )
 
             rows = await load_child_embeddings_task(
                 client, database, user_id, opik_trace_headers=headers
@@ -2856,6 +2908,7 @@ async def memory_clustering(
                 coords=result.coords,
                 clusters=clusters,
                 now=datetime.now(UTC),
+                config_fingerprint=fingerprint,
                 opik_trace_headers=headers,
             )
 

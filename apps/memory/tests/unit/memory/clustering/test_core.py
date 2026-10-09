@@ -31,9 +31,11 @@ from tree.config.app_config import (
 )
 from tree.memory.clustering import core
 from tree.memory.clustering.core import (
+    PREVIEW_EXTENT,
     cluster_centroids_2d,
     cluster_sizes,
     noise_count,
+    project_pca_2d,
     reduce_and_cluster,
     sample_cluster_members,
 )
@@ -593,6 +595,41 @@ class TestTheRealRecipe:
         reduce_and_cluster(points, _config(min_cluster_size=10))
 
         assert [str(warning.message) for warning in recwarn.list] == []
+
+
+class TestProjectPca2d:
+    """The **unclustered preview**'s layout: numpy only, deterministic."""
+
+    def test_projects_to_two_scaled_axes(self) -> None:
+        embeddings = np.random.default_rng(0).normal(size=(30, 16))
+
+        coords = project_pca_2d(embeddings)
+
+        assert coords.shape == (30, 2)
+        assert np.abs(coords).max() == pytest.approx(PREVIEW_EXTENT)
+
+    def test_two_calls_on_the_same_input_agree_to_the_bit(self) -> None:
+        # SVD signs are arbitrary; the sign fix is what stops a mirrored map.
+        embeddings = np.random.default_rng(1).normal(size=(30, 16))
+
+        assert np.array_equal(project_pca_2d(embeddings), project_pca_2d(embeddings))
+
+    def test_keeps_the_dominant_spread_on_the_first_axis(self) -> None:
+        # Arrange: points spread along one direction, with tiny noise elsewhere.
+        rng = np.random.default_rng(2)
+        line = np.outer(np.linspace(-1, 1, 20), np.eye(8)[3])
+        embeddings = line + rng.normal(scale=1e-3, size=line.shape)
+
+        coords = project_pca_2d(embeddings)
+
+        assert np.ptp(coords[:, 0]) > 100 * np.ptp(coords[:, 1])
+
+    @pytest.mark.parametrize("n", [1, 2])
+    def test_a_tiny_corpus_still_projects(self, n: int) -> None:
+        coords = project_pca_2d(np.eye(n, 4))
+
+        assert coords.shape == (n, 2)
+        assert np.isfinite(coords).all()
 
 
 def test_module_namespace_is_free_of_the_heavy_stack() -> None:

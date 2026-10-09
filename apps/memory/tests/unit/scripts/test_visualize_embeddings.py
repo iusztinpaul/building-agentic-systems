@@ -19,6 +19,7 @@ from click.testing import CliRunner
 from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
 from tree.memory.visualize.embeddings import (
     NO_CLUSTERING_RUN_MESSAGE,
+    NO_EMBEDDINGS_MESSAGE,
     render_embedding_map_file,
 )
 
@@ -103,10 +104,10 @@ def loaded_map(mocker, cli_module):
     return _load
 
 
-class TestNoClusteringRun:
-    """Story 4: nobody has clustered yet — an explanation, not an empty canvas."""
+class TestNothingToMap:
+    """Story 4: no embedded chunk yet — an explanation, not an empty canvas."""
 
-    def test_it_prints_the_command_to_run_and_exits_one(
+    def test_it_says_there_is_nothing_to_map_and_exits_one(
         self, cli_module, mocked_boundaries, loaded_map
     ) -> None:
         loaded_map(None)
@@ -114,7 +115,7 @@ class TestNoClusteringRun:
         result = CliRunner().invoke(cli_module.main, ["--no-open"])
 
         assert result.exit_code == 1
-        assert NO_CLUSTERING_RUN_MESSAGE in result.output
+        assert NO_EMBEDDINGS_MESSAGE in result.output
 
     def test_it_writes_no_file(self, cli_module, mocked_boundaries, loaded_map) -> None:
         loaded_map(None)
@@ -154,6 +155,29 @@ class TestRenderedMap:
             "3 of 12 chunks have no cluster assignment (or a stale one) — run "
             "make memory-run-clustering-pipeline"
         )
+
+    def test_no_run_draws_the_preview_and_warns_on_the_first_line(
+        self, cli_module, mocked_boundaries, loaded_map
+    ) -> None:
+        loaded_map(
+            EmbeddingMap(
+                run_id=None,
+                clusters=[],
+                points=[],
+                total_children=4,
+                unclustered=4,
+                clustered=0,
+                noise=0,
+                plotted_documents=1,
+                total_documents=1,
+            )
+        )
+
+        result = CliRunner().invoke(cli_module.main, ["--no-open"])
+
+        assert result.exit_code == 0
+        assert result.output.splitlines()[0] == NO_CLUSTERING_RUN_MESSAGE
+        mocked_boundaries.assert_called_once()
 
     def test_a_fresh_run_prints_no_warning_line(
         self, cli_module, mocked_boundaries, loaded_map

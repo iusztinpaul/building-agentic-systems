@@ -325,13 +325,18 @@ class TestFetchRagStructure:
         assert result == MemoryStructure()
 
 
-def _retrieved(parent_id: str, document_id: str) -> RetrievedParent:
+def _retrieved(
+    parent_id: str, document_id: str, matched: tuple[str, ...] = ("x",)
+) -> RetrievedParent:
     return RetrievedParent(
         parent_id=parent_id,
         content="parent",
         score=0.03,
         document=DocumentMeta(document_id=document_id),
-        matched_children=[MatchedChild(child_id="x", content="x", score=0.03)],
+        matched_children=[
+            MatchedChild(child_id=child_id, content="x", score=0.03)
+            for child_id in matched
+        ],
     )
 
 
@@ -343,9 +348,9 @@ class TestFetchRetrievalStructure:
         rows += tree_rows("doc2", {"p2": ["c2"], "p3": ["c3"]}, date="2025-01-01")
         retrieval = RetrievalResult(
             parents=[
-                _retrieved("p2", "doc2"),
-                _retrieved("p1", "doc1"),
-                _retrieved("p3", "doc2"),
+                _retrieved("p2", "doc2", ("c2",)),
+                _retrieved("p1", "doc1", ("c1",)),
+                _retrieved("p3", "doc2", ("c3",)),
             ]
         )
 
@@ -366,20 +371,20 @@ class TestFetchRetrievalStructure:
         }
         assert [row["_id"] for row in result.nodes][:2] == ["doc2", "doc1"]
 
-    async def test_every_child_of_a_retrieved_parent_is_read(
+    async def test_only_the_matched_children_are_read(
         self, make_collection, tree_rows
     ) -> None:
-        # Only one child matched (`matched_children`), yet the view shows all
-        # three — and nothing of the parent that was not retrieved.
+        # p1 has three children but only c2 matched; p2 was not retrieved, so
+        # its matching-looking child c4 stays out too.
         rows = tree_rows("doc1", {"p1": ["c1", "c2", "c3"], "p2": ["c4"]})
-        retrieval = RetrievalResult(parents=[_retrieved("p1", "doc1")])
+        retrieval = RetrievalResult(parents=[_retrieved("p1", "doc1", ("c2", "c4"))])
 
         result = await fetch_retrieval_structure(
             _client(make_collection(rows)), _DATABASE, _USER, retrieval
         )
 
-        assert [row["_id"] for row in result.nodes] == ["doc1", "p1", "c1", "c2", "c3"]
-        assert len(result.edges) == 4
+        assert [row["_id"] for row in result.nodes] == ["doc1", "p1", "c2"]
+        assert len(result.edges) == 2
 
     async def test_the_child_read_filters_on_subtype_and_parent_id(
         self, make_collection, tree_rows
@@ -398,6 +403,7 @@ class TestFetchRetrievalStructure:
             "type": "chunk",
             "subtype": "child",
             "parent_id": {"$in": ["p1"]},
+            "_id": {"$in": ["x"]},
         }
         assert all(f["user_id"] == _USER for f in collection.find_filters)
         assert collection.find_projections == [NO_EMBEDDING] * 3

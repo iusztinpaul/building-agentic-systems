@@ -13,15 +13,23 @@ from pathlib import Path
 import pytest
 
 from tree.config.paths import GRAPHS_DIR
-from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
+from tree.memory.clustering.types import (
+    EmbeddingMap,
+    MapPoint,
+    MemoryClusterInfo,
+    QueryMap,
+)
 from tree.memory.visualize.embeddings import (
     CLUSTER_PALETTE,
     NO_CLUSTERING_RUN_MESSAGE,
+    PREVIEW_COLOUR,
+    REFERENCE_COLOUR,
     NOISE_COLOUR,
     UNCLUSTERED_COLOUR,
     cluster_colour,
     render_embedding_map_file,
     to_embedding_map_payload,
+    to_query_map_payload,
     unclustered_warning,
 )
 from tree.memory.visualize.graph import _DEFAULT_DISPLAY
@@ -123,10 +131,79 @@ def test_cluster_colour_paints_noise_grey() -> None:
     assert NOISE_COLOUR not in CLUSTER_PALETTE
 
 
-def test_no_clustering_run_message_names_the_command_that_fixes_it() -> None:
-    # Assert: the message a surface prints instead of an empty map is
-    # actionable — it names the pipeline to run.
-    assert "make memory-run-clustering-pipeline" in NO_CLUSTERING_RUN_MESSAGE
+def test_no_clustering_run_message_says_clustering_is_manual() -> None:
+    # Assert: the exact wording — the warning says the run must be triggered.
+    assert NO_CLUSTERING_RUN_MESSAGE == (
+        "No clustering run found for this user. Showing the raw embeddings. Trigger it manually."
+    )
+
+
+def _preview(points: int = 4, total_children: int = 6) -> EmbeddingMap:
+    """An unclustered preview: no run, every point noise-labelled."""
+
+    return EmbeddingMap(
+        run_id=None,
+        clusters=[],
+        points=[_point(index, -1) for index in range(points)],
+        total_children=total_children,
+        unclustered=total_children,
+        clustered=0,
+        noise=0,
+        plotted_documents=2,
+        total_documents=3,
+    )
+
+
+def test_preview_payload_warns_first_with_the_no_run_message() -> None:
+    payload = to_embedding_map_payload(_preview())
+
+    assert payload["warning"] == NO_CLUSTERING_RUN_MESSAGE
+
+
+def test_preview_legend_is_one_coloured_row_for_every_chunk() -> None:
+    payload = to_embedding_map_payload(_preview())
+
+    # A real hue, not noise grey: these points are unclustered, not residue.
+    assert payload["legend"] == [
+        {
+            "label": "not clustered yet",
+            "size": 6,
+            "color": PREVIEW_COLOUR,
+            "cluster_id": -1,
+        }
+    ]
+    assert {node["meta"]["cluster"] for node in payload["nodes"]} == {
+        "not clustered yet"
+    }
+
+
+def test_preview_hides_the_hull_toggle_even_when_asked() -> None:
+    # ``None`` (not a bool) is what hides the toggle: there are no clusters.
+    assert to_embedding_map_payload(_preview(), hulls=True)["hulls"] is None
+
+
+def test_preview_summary_counts_the_corpus_and_says_no_clusters() -> None:
+    payload = to_embedding_map_payload(_preview())
+
+    assert payload["summary"] == (
+        "Embedding map: 4 of 6 chunks (the 2 most-recent of 3 documents) "
+        "— no clusters yet (unclustered preview)"
+    )
+
+
+def test_a_preview_cannot_claim_clusters() -> None:
+    with pytest.raises(ValueError, match="unclustered preview"):
+        EmbeddingMap(
+            run_id=None,
+            clusters=[_cluster(0, "A", 3)],
+            points=[],
+            total_children=3,
+            unclustered=3,
+            clustered=0,
+            noise=0,
+            plotted_documents=1,
+            total_documents=1,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +488,65 @@ def test_payload_summary_says_how_much_the_document_cap_cut() -> None:
     )
 
 
+def _query_map(matched: int = 2, reference: int = 3) -> QueryMap:
+    return QueryMap(
+        matched=[_point(index, -1) for index in range(matched)],
+        reference=[_point(100 + index, -1) for index in range(reference)],
+        plotted_documents=4,
+        total_documents=5,
+    )
+
+
+def test_query_payload_draws_the_cloud_first_and_the_matches_on_top() -> None:
+    payload = to_query_map_payload(_query_map(), "agent memory")
+
+    # Assert: Sigma draws in insertion order — the matches must come last.
+    ids = [node["id"] for node in payload["nodes"]]
+    assert ids == ["chunk-100", "chunk-101", "chunk-102", "chunk-0", "chunk-1"]
+    assert {n["cluster_id"] for n in payload["nodes"][:3]} == {-2}
+    assert {n["cluster_id"] for n in payload["nodes"][3:]} == {-1}
+    assert payload["nodes"][0]["size"] < payload["nodes"][-1]["size"]
+
+
+def test_query_payload_legend_is_the_matches_then_the_faint_grey_cloud() -> None:
+    payload = to_query_map_payload(_query_map(), "agent memory")
+
+    assert payload["legend"] == [
+        {
+            "label": "matched chunks",
+            "size": 2,
+            "color": PREVIEW_COLOUR,
+            "cluster_id": -1,
+        },
+        {
+            "label": "other chunks",
+            "size": 3,
+            "color": REFERENCE_COLOUR,
+            "cluster_id": -2,
+        },
+    ]
+    # Opaque: Sigma's premultiplied blending turns a translucent grey into white.
+    assert re.fullmatch(r"#[0-9a-f]{6}", REFERENCE_COLOUR)
+
+
+def test_query_payload_carries_no_cluster_hulls_or_warning() -> None:
+    payload = to_query_map_payload(_query_map(), "agent memory")
+
+    # Clusters belong to the whole-memory map only.
+    assert payload["hulls"] is None
+    assert payload["warning"] is None
+    assert all("cluster" not in node["meta"] for node in payload["nodes"])
+
+
+def test_query_payload_summary_names_the_query_and_both_counts() -> None:
+    payload = to_query_map_payload(_query_map(), "agent memory")
+
+    assert payload["summary"] == (
+        "Embedding map for 'agent memory': 2 matched chunks over 3 other chunks in "
+        "grey (the 4 most-recent of 5 documents; a PCA projection, no clusters)"
+    )
+
+
 def test_payload_legend_counts_the_whole_run_not_the_plot() -> None:
     # Arrange: every noise chunk of the run sits in a cut document.
     embedding_map = _map(noise=0, unclustered=0, total_children=45, cut_noise=3)
@@ -522,7 +658,7 @@ def test_render_embedding_map_file_headers_the_map_with_its_summary(
         '"summary": "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 '
         'documents) in 2 clusters (+5 noise)"'
     ) in html
-    assert 'payload.summary.replace(/^Embedding map: /, "")' in html
+    assert 'payload.summary.replace(/^Embedding map(?: for )?:? ?/, "")' in html
 
 
 def test_render_embedding_map_file_accepts_a_string_output_path(

@@ -44,7 +44,12 @@ from tree.mcp.tools import (
     visualize_memory_structure,
 )
 from tree.mcp.viz_app import DOWNLOAD_CONTRACT
-from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
+from tree.memory.clustering.types import (
+    EmbeddingMap,
+    MapPoint,
+    MemoryClusterInfo,
+    QueryMap,
+)
 from tree.memory.rag.structure import (
     EMPTY_MEMORY_MESSAGE,
     NO_RESULTS_MESSAGE,
@@ -58,7 +63,10 @@ from tree.memory.rag.types import (
     RetrievedParent,
 )
 from tree.memory.rag.search import SearchUnavailableError
-from tree.memory.visualize.embeddings import NO_CLUSTERING_RUN_MESSAGE
+from tree.memory.visualize.embeddings import (
+    NO_CLUSTERING_RUN_MESSAGE,
+    NO_EMBEDDINGS_MESSAGE,
+)
 from tree.models.exceptions import ExtractionError, ModelError
 from tree.online import IngestReceipt
 
@@ -675,11 +683,9 @@ def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> Embeddi
 class TestVisualizeMemoryEmbeddings:
     """READS the latest **Clustering run** and delivers it (ADR-007 §8)."""
 
-    async def test_no_clustering_run_answers_with_the_command_to_run(
-        self, mocker
-    ) -> None:
-        # Story 4: a fresh user gets an explanation, never an empty canvas —
-        # and never a ToolResult, because there is no payload to deliver.
+    async def test_no_embedded_chunk_answers_with_a_sentence(self, mocker) -> None:
+        # Story 4: a user with nothing to project gets an explanation, never an
+        # empty canvas — and never a ToolResult: there is no payload to deliver.
         mocker.patch(
             "tree.mcp.tools.load_embedding_map",
             new_callable=AsyncMock,
@@ -689,9 +695,48 @@ class TestVisualizeMemoryEmbeddings:
 
         result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
 
-        assert result == NO_CLUSTERING_RUN_MESSAGE
-        assert isinstance(result, str)
+        assert result == NO_EMBEDDINGS_MESSAGE
         deliver.assert_not_called()
+
+    async def test_no_clustering_run_draws_the_preview_with_the_warning_first(
+        self, mocker
+    ) -> None:
+        # Arrange: embedded chunks, but nobody has clustered them yet.
+        preview = EmbeddingMap(
+            run_id=None,
+            clusters=[],
+            points=[
+                MapPoint(
+                    chunk_id=f"chunk-{index}",
+                    x=float(index),
+                    y=0.0,
+                    cluster_id=-1,
+                    title="Memory for AI Agents",
+                    heading_path=[],
+                    snippet="",
+                )
+                for index in range(3)
+            ],
+            total_children=3,
+            unclustered=3,
+            clustered=0,
+            noise=0,
+            plotted_documents=1,
+            total_documents=1,
+        )
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=preview,
+        )
+
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+
+        # Assert: a picture, and the model's first line says it is not the topic map.
+        assert isinstance(result, ToolResult)
+        summary, payload_block = result.content
+        assert summary.text.startswith(NO_CLUSTERING_RUN_MESSAGE + "\nEmbedding map:")
+        assert len(json.loads(payload_block.text)["nodes"]) == 3
 
     async def test_a_ui_capable_client_gets_the_map_inline_with_hulls_on(
         self, mocker
@@ -831,6 +876,161 @@ class TestVisualizeMemoryEmbeddings:
         assert "the legend counts the whole run" in summary
         assert "every child chunk" not in summary
         assert "no clustering run exists" in summary
+        assert "still drawn, without clusters" in summary
+        assert "triggered manually" in summary
+        assert "over every other chunk" in summary
+
+
+def _query_map(*chunk_ids: str) -> QueryMap:
+    points = [
+        MapPoint(
+            chunk_id=chunk_id,
+            x=float(index),
+            y=0.0,
+            cluster_id=-1,
+            title="Memory for AI Agents",
+            heading_path=["Memory"],
+            snippet="A matching passage.",
+        )
+        for index, chunk_id in enumerate((*chunk_ids, "other-0"))
+    ]
+    return QueryMap(
+        matched=points[:-1],
+        reference=points[-1:],
+        plotted_documents=1,
+        total_documents=1,
+    )
+
+
+class TestVisualizeMemoryEmbeddingsQuery:
+    """A ``query`` draws its matches over the rest in grey — no clusters, no run."""
+
+    async def test_draws_the_matches_over_the_grey_cloud_without_clusters(
+        self, mocker
+    ) -> None:
+        # Arrange: two parents, one matched child each.
+        retrieve = mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(
+                parents=[_parent("p1", 0.03), _parent("p2", 0.02)]
+            ),
+        )
+        load_points = mocker.patch(
+            "tree.mcp.tools.load_query_map",
+            new_callable=AsyncMock,
+            return_value=_query_map("p1#child-0", "p2#child-0"),
+        )
+        load_map = mocker.patch("tree.mcp.tools.load_embedding_map")
+
+        # Act
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="  agent memory ", top_k=4
+        )
+
+        # Assert: the stripped query reached the search, its children the store,
+        # and the whole-memory map (with its clusters) was never read.
+        assert retrieve.await_args.kwargs["query"] == "agent memory"
+        assert retrieve.await_args.kwargs["top_k"] == 4
+        assert load_points.await_args.args[3] == {"p1#child-0", "p2#child-0"}
+        load_map.assert_not_called()
+        summary_block, payload_block = result.content
+        assert summary_block.text.startswith(
+            "Embedding map for 'agent memory': 2 matched chunks over 1 other chunks"
+        )
+        payload = json.loads(payload_block.text)
+        assert [row["label"] for row in payload["legend"]] == [
+            "matched chunks",
+            "other chunks",
+        ]
+        assert payload["hulls"] is None
+
+    async def test_a_query_that_matches_nothing_answers_a_sentence(
+        self, mocker
+    ) -> None:
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(outcome="nothing_found"),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="quantum knitting"
+        )
+
+        assert result == NO_RESULTS_MESSAGE.format(query="quantum knitting")
+
+    async def test_matches_without_a_vector_answer_a_sentence(self, mocker) -> None:
+        # The text leg matched only pending children: nothing to project.
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_parent("p1", 0.03)]),
+        )
+        mocker.patch(
+            "tree.mcp.tools.load_query_map",
+            new_callable=AsyncMock,
+            return_value=QueryMap(
+                matched=[], reference=[], plotted_documents=0, total_documents=0
+            ),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="agent memory"
+        )
+
+        assert result == NO_RESULTS_MESSAGE.format(query="agent memory")
+
+    async def test_an_unavailable_search_is_a_retryable_envelope(self, mocker) -> None:
+        mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            side_effect=SearchUnavailableError("both legs down"),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="agent memory"
+        )
+
+        payload = json.loads(result)
+        assert payload["error_type"] == "search_unavailable"
+        assert payload["retryable"] is True
+
+    @pytest.mark.parametrize("query", ["", "   "])
+    async def test_a_blank_query_draws_the_whole_map_without_searching(
+        self, mocker, query: str
+    ) -> None:
+        retrieve = mocker.patch(
+            "tree.mcp.tools.retrieve_parents", new_callable=AsyncMock
+        )
+        mocker.patch(
+            "tree.mcp.tools.load_embedding_map",
+            new_callable=AsyncMock,
+            return_value=_embedding_map(),
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query=query
+        )
+
+        retrieve.assert_not_awaited()
+        assert result.content[0].text.startswith("Embedding map: ")
+
+    async def test_top_k_below_one_is_invalid_input(self, mocker) -> None:
+        retrieve = mocker.patch(
+            "tree.mcp.tools.retrieve_parents", new_callable=AsyncMock
+        )
+
+        result = await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="agent memory", top_k=0
+        )
+
+        assert json.loads(result) == {
+            "error_type": "invalid_input",
+            "retryable": False,
+            "message": "top_k must be ≥ 1",
+        }
+        retrieve.assert_not_awaited()
 
 
 class TestIngestReceipt:

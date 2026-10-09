@@ -123,7 +123,8 @@ _GRAPHRAG_INSTRUCTIONS = (
     "chunks, entities and their relations) as an interactive view, optionally "
     "narrowed to a query. "
     "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
-    "(clusters of chunk embeddings) when the user asks what the memory holds."
+    "(clusters of chunk embeddings) when the user asks what the memory holds, "
+    "or, with a query, the matching chunks over the rest in grey (no clusters)."
 )
 
 _RAG_INSTRUCTIONS = (
@@ -137,7 +138,8 @@ _RAG_INSTRUCTIONS = (
     "Use 'visualize_memory_structure' to show how the memory is organised — "
     "documents and the chunks they split into — optionally narrowed to a query. "
     "Use 'visualize_memory_embeddings' to show a 2D map of the memory's topics "
-    "(clusters of chunk embeddings) when the user asks what the memory holds."
+    "(clusters of chunk embeddings) when the user asks what the memory holds, "
+    "or, with a query, the matching chunks over the rest in grey (no clusters)."
 )
 
 mcp = FastMCP(

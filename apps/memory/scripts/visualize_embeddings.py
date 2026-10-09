@@ -9,11 +9,13 @@ It plots the chunks of the ``query.full_graph_max_docs`` (250) most-recent
 documents; the summary says ``N of M chunks`` and the legend counts the whole
 run (ADR-013 §3).
 
-Two outcomes that are NOT failures of the renderer:
+Three outcomes that are NOT failures of the renderer:
 
-* No run for this user → the command prints the "run make
-  memory-run-clustering-pipeline" message and exits 1, rather than opening an
-  empty canvas.
+* No embedded chunk for this user → the command prints the "nothing to map"
+  message and exits 1, rather than opening an empty canvas.
+* No run for this user → the map is drawn WITHOUT clusters (a PCA projection
+  of the raw embeddings) and the FIRST line of stdout is the "No clustering run
+  found … run make memory-run-clustering-pipeline" warning.
 * Chunks ingested since the last run → the FIRST line of stdout is the warning
   "N of M chunks have no cluster assignment (or a stale one)"; those points are
   omitted from the map and counted in its legend.
@@ -46,7 +48,7 @@ from tree.entities.sessions import resolve_user_id
 from tree.logging import init_logger
 from tree.memory.clustering.store import load_embedding_map
 from tree.memory.visualize.embeddings import (
-    NO_CLUSTERING_RUN_MESSAGE,
+    NO_EMBEDDINGS_MESSAGE,
     render_embedding_map_file,
     to_embedding_map_payload,
 )
@@ -71,7 +73,7 @@ async def _run(
 
     embedding_map = await load_embedding_map(client, database, resolved_user_id)
     if embedding_map is None:
-        click.echo(NO_CLUSTERING_RUN_MESSAGE)
+        click.echo(NO_EMBEDDINGS_MESSAGE)
         raise SystemExit(1)
 
     payload = to_embedding_map_payload(embedding_map, hulls=hulls)

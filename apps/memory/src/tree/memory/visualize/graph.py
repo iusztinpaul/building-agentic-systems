@@ -684,7 +684,7 @@ _RENDER_JS = """\
       // a broken graph; its payload summary already counts the two things that
       // matter ("1448 chunks in 37 clusters (+63 noise)").
       countsEl.textContent = isFixed && typeof payload.summary === "string"
-        ? payload.summary.replace(/^Embedding map: /, "")
+        ? payload.summary.replace(/^Embedding map(?: for )?:? ?/, "")
         : nodes.length + " nodes · " + edges.length + " edges";
       const hullsEnabled = legendRows !== null && typeof payload.hulls === "boolean";
 

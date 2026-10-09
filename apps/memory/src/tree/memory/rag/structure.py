@@ -206,18 +206,17 @@ async def fetch_retrieval_structure(
     user_id: PydanticObjectId,
     retrieval: RetrievalResult,
 ) -> MemoryStructure:
-    """The rag query view: the retrieved parents, their documents, ALL children.
+    """The rag query view: the retrieved parents, their documents, MATCHED children.
 
     Documents rank by their best parent's position in ``retrieval.parents``
     (already best first; the first occurrence wins), ``doc_rank`` 1-based, and
     every row carries its document's rank. Three reads, all scoped to
     ``user_id``, no ``embedding``: the documents by ``_id``, the parents by
-    ``_id``, and every child whose ``parent_id`` is a retrieved parent — not only
-    the ``matched_children``. The child read is served by the
-    ``user_kind_type_subtype`` index prefix and filtered on ``parent_id``, fine at
-    personal scale; upgrade trigger: a measured slow child scan → a
-    ``(user_id, parent_id)`` index (ADR-012's rule). No parent → an empty
-    structure and no read.
+    ``_id``, and only the ``matched_children`` — the passages the search actually
+    hit, so the tree shows WHY each parent ranked rather than every child it
+    has. The child read is keyed on ``_id`` and still pinned to a retrieved
+    ``parent_id``, so a child id can never hang under a parent the view does not
+    draw. No parent → an empty structure and no read.
     """
 
     if not retrieval.parents:
@@ -227,6 +226,11 @@ async def fetch_retrieval_structure(
     for parent in retrieval.parents:
         document_rank.setdefault(parent.document.document_id, len(document_rank) + 1)
     parent_ids = [parent.parent_id for parent in retrieval.parents]
+    matched_ids = [
+        child.child_id
+        for parent in retrieval.parents
+        for child in parent.matched_children
+    ]
     collection = client[database][MEMORY_COLLECTION]
 
     documents = [
@@ -263,6 +267,7 @@ async def fetch_retrieval_structure(
                 "type": "chunk",
                 "subtype": "child",
                 "parent_id": {"$in": parent_ids},
+                "_id": {"$in": matched_ids},
             },
             NO_EMBEDDING,
         )

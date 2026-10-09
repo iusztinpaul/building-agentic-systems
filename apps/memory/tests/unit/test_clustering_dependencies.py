@@ -132,6 +132,8 @@ _SKIP_PATH_PROBE = textwrap.dedent(
         for i in range(10)
     ]
     pipeline.init_mongodb = AsyncMock(return_value=MagicMock())
+    # No current run to serve from the cache: reach the min_cluster_size skip.
+    pipeline.unchanged_run_id = AsyncMock(return_value=None)
     pipeline.load_child_embeddings_task = AsyncMock(return_value=rows)
 
     # ``.fn`` runs the flow BODY: the claim is about imports, and a real flow

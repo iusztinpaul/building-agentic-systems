@@ -11,9 +11,12 @@ Four operations, and nothing else reads or writes these rows:
   deterministic ``_id``s, and stamp every listed chunk with its ``cluster_id``
   and ``viz``. Idempotent for a given ``run_id``.
 * :func:`latest_run_id` — which **Clustering run** the surfaces should read.
+* :func:`unchanged_run_id` — the clustering cache: would a re-run reproduce
+  the latest run?
 * :func:`load_embedding_map` — the **Embedding map** a surface renders, read
-  and never computed (ADR-007 §8): the chunks of the most-recent documents,
-  counted against the whole run (ADR-013 §3).
+  from the run (ADR-007 §8): the chunks of the most-recent documents, counted
+  against the whole run (ADR-013 §3). With no run yet, the unclustered preview.
+* :func:`load_query_map` — a query view: the matches over a grey reference cloud.
 
 Raw pymongo on ``MEMORY_COLLECTION`` / ``MEMORY_CLUSTERS_COLLECTION``, following
 ``rag/indexing.py``'s style rather than Beanie's: these are bulk statements over
@@ -30,6 +33,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 from beanie import PydanticObjectId
 from pydantic import BaseModel, Field
 from pymongo import AsyncMongoClient, UpdateOne
@@ -41,17 +45,30 @@ from tree.entities.memory import (
     STORED_VECTOR_QUERY,
     from_stored_vector,
 )
-from tree.memory.clustering.core import NOISE_LABEL
+from tree.memory.clustering.core import NOISE_LABEL, project_pca_2d
 from tree.memory.clustering.types import (
     EmbeddingMap,
     MapPoint,
     MemoryClusterInfo,
+    QueryMap,
 )
 from tree.memory.rag.structure import rank_recent_documents
 
 logger = logging.getLogger(__name__)
 
 _SNIPPET_CHARS = 160
+
+_POINT_PROJECTION: dict[str, int] = {
+    "_id": 1,
+    "sources": 1,
+    "cluster_id": 1,
+    "viz": 1,
+    "properties.title": 1,
+    "properties.heading_path": 1,
+    "properties.content": 1,
+}
+"""What a drawn point reads — the tooltip fields, never the vector (the preview
+adds ``embedding`` for its projection)."""
 """How much chunk text a tooltip carries. The map draws points, not documents."""
 
 _CHILD_ROW_FILTER: dict[str, Any] = {
@@ -197,6 +214,7 @@ async def write_clustering_run(
     coords: list[tuple[float, float]],
     clusters: list[MemoryClusterInfo],
     now: datetime,
+    config_fingerprint: str | None = None,
 ) -> ClusterWriteCounts:
     """Persist one **Clustering run**, replacing the previous one wholesale.
 
@@ -225,6 +243,8 @@ async def write_clustering_run(
         coords: One ``(x, y)`` map point per entry of ``chunk_ids``.
         clusters: One entry per NON-noise cluster of this run.
         now: Timezone-aware UTC write timestamp.
+        config_fingerprint: Stamped on every cluster row — the key
+            :func:`unchanged_run_id` checks before a re-run.
 
     Raises:
         ValueError: ``chunk_ids`` / ``labels`` / ``coords`` disagree in length
@@ -255,7 +275,15 @@ async def write_clustering_run(
             [
                 UpdateOne(
                     {"_id": build_cluster_id(user_id, cluster.cluster_id)},
-                    {"$set": _cluster_row(user_id, cluster, run_id=run_id, now=now)},
+                    {
+                        "$set": _cluster_row(
+                            user_id,
+                            cluster,
+                            run_id=run_id,
+                            now=now,
+                            config_fingerprint=config_fingerprint,
+                        )
+                    },
                     upsert=True,
                 )
                 for cluster in clusters
@@ -309,6 +337,7 @@ def _cluster_row(
     *,
     run_id: str,
     now: datetime,
+    config_fingerprint: str | None,
 ) -> dict[str, Any]:
     """The FULL ``memory_clusters`` row body — every field, every write.
 
@@ -327,6 +356,7 @@ def _cluster_row(
         "size": cluster.size,
         "sample_chunk_ids": list(cluster.sample_chunk_ids),
         "centroid": {"x": cluster.centroid_x, "y": cluster.centroid_y},
+        "config_fingerprint": config_fingerprint,
         "created_at": now,
     }
 
@@ -364,6 +394,57 @@ async def latest_run_id(
     return str((child.get("viz") or {})["run_id"])
 
 
+async def unchanged_run_id(
+    client: AsyncMongoClient,
+    database: str,
+    user_id: PydanticObjectId,
+    *,
+    config_fingerprint: str,
+) -> str | None:
+    """The latest run's id when re-running it would reproduce it, else ``None``.
+
+    The clustering cache: a run is seeded, so the same chunks under the same
+    config give the same clusters and labels — re-running only spends a UMAP
+    fit (and, past the summary cache, LLM calls). Current means all of:
+
+    * the run has cluster rows, every one stamped with ``config_fingerprint``
+      (an all-noise run has none and always re-runs — it makes no LLM call);
+    * every embedded child carries the run's ``viz.run_id`` (nothing added or
+      re-embedded since);
+    * the rows' sizes still sum to the run's clustered children (nothing
+      deleted from a cluster since).
+
+    Counts only — no vector is loaded.
+    """
+
+    run_id = await latest_run_id(client, database, user_id)
+    if run_id is None:
+        return None
+    db = client[database]
+    rows = (
+        await db[MEMORY_CLUSTERS_COLLECTION]
+        .find(
+            {"user_id": user_id, "run_id": run_id},
+            {"size": 1, "config_fingerprint": 1},
+        )
+        .to_list()
+    )
+    if not rows or any(
+        row.get("config_fingerprint") != config_fingerprint for row in rows
+    ):
+        return None
+    collection = db[MEMORY_COLLECTION]
+    children = _embedded_children_filter(user_id)
+    total = await collection.count_documents(children)
+    in_run = {**children, "viz.run_id": run_id}
+    if await collection.count_documents(in_run) != total:
+        return None
+    clustered = await collection.count_documents({**in_run, "cluster_id": {"$gte": 0}})
+    if clustered != sum(int(row.get("size") or 0) for row in rows):
+        return None
+    return run_id
+
+
 async def load_embedding_map(
     client: AsyncMongoClient,
     database: str,
@@ -373,7 +454,7 @@ async def load_embedding_map(
 ) -> EmbeddingMap | None:
     """Read the **Embedding map** of ``user_id``'s latest run, capped by document.
 
-    Surfaces READ; they never compute (ADR-007 §8). Points are the embedded
+    Surfaces READ a run's coordinates (ADR-007 §8). Points are the embedded
     children carrying THIS run's ``viz.run_id`` whose document (``sources``) is
     among the ``max_docs`` most-recent ones (default
     ``query.full_graph_max_docs``; ranked by ``rank_recent_documents``, the
@@ -382,19 +463,37 @@ async def load_embedding_map(
     children with no assignment or a stale one, computed from counts — never
     from the plotted set, or the cap would read as staleness in the warning.
 
+    With NO run yet, the same capped children come back as
+    the **unclustered preview** (:func:`_load_unclustered_preview`): PCA
+    coordinates computed at read time, no clusters. The one exception to
+    "surfaces never compute" — without it a user who never ran the clustering
+    phase gets no picture at all.
+
     Returns:
-        The map, or ``None`` when the user has never been clustered — a caller
-        shows an explanatory message, never an empty picture.
+        The map, or ``None`` when the user has no embedded child at all — a
+        caller shows an explanatory message, never an empty picture.
     """
 
-    max_docs = (
-        max_docs if max_docs is not None else app_config.query.full_graph_max_docs
-    )
     run_id = await latest_run_id(client, database, user_id)
-    if run_id is None:
-        return None
 
     db = client[database]
+    memory_collection = db[MEMORY_COLLECTION]
+    kept, documents = await _recent_documents(memory_collection, user_id, max_docs)
+    plotted: dict[str, Any] = {"sources": {"$in": _sources_of(kept)}}
+    children = _embedded_children_filter(user_id)
+    total_children = await memory_collection.count_documents(children)
+
+    if run_id is None:
+        if total_children == 0:
+            return None
+        return await _load_unclustered_preview(
+            memory_collection,
+            {**children, **plotted},
+            total_children=total_children,
+            plotted_documents=len(kept),
+            total_documents=len(documents),
+        )
+
     cluster_rows = (
         await db[MEMORY_CLUSTERS_COLLECTION]
         .find({"user_id": user_id, "run_id": run_id})
@@ -406,34 +505,11 @@ async def load_embedding_map(
         reverse=True,
     )
 
-    memory_collection = db[MEMORY_COLLECTION]
-    documents = await memory_collection.find(
-        {"user_id": user_id, "kind": "node", "type": "document"},
-        {"_id": 1, "sources": 1, "properties.date": 1, "created_at": 1},
-    ).to_list()
-    kept = rank_recent_documents(documents, max_docs)
-    kept_sources = {row["sources"][0] for row in kept if row.get("sources")}
-
     point_cursor = memory_collection.find(
-        {
-            **_embedded_children_filter(user_id),
-            "viz.run_id": run_id,
-            "sources": {"$in": list(kept_sources)},
-        },
-        {
-            "_id": 1,
-            "sources": 1,
-            "cluster_id": 1,
-            "viz": 1,
-            "properties.title": 1,
-            "properties.heading_path": 1,
-            "properties.content": 1,
-        },
+        {**children, "viz.run_id": run_id, **plotted}, _POINT_PROJECTION
     )
     points = [_to_map_point(document) async for document in point_cursor]
 
-    children = _embedded_children_filter(user_id)
-    total_children = await memory_collection.count_documents(children)
     clustered = await memory_collection.count_documents(
         {**children, "viz.run_id": run_id}
     )
@@ -461,6 +537,128 @@ async def load_embedding_map(
         plotted_documents=len(kept),
         total_documents=len(documents),
     )
+
+
+async def _load_unclustered_preview(
+    collection: Any,
+    point_filter: dict[str, Any],
+    *,
+    total_children: int,
+    plotted_documents: int,
+    total_documents: int,
+) -> EmbeddingMap:
+    """The **unclustered preview**: the capped children at PCA coordinates.
+
+    Reads the vectors the run would read — only for the plotted children (at
+    most the chunks of ``query.full_graph_max_docs`` documents). Every point
+    carries the noise label: there is no cluster to colour it by yet.
+    """
+
+    points = await _project_children(collection, point_filter)
+    logger.info(
+        "Embedding map preview (no clustering run): plotting %d of %d embedded "
+        "chunks at PCA coordinates",
+        len(points),
+        total_children,
+    )
+    return EmbeddingMap(
+        run_id=None,
+        clusters=[],
+        points=points,
+        total_children=total_children,
+        unclustered=total_children,
+        clustered=0,
+        noise=0,
+        plotted_documents=plotted_documents,
+        total_documents=total_documents,
+    )
+
+
+async def load_query_map(
+    client: AsyncMongoClient,
+    database: str,
+    user_id: PydanticObjectId,
+    chunk_ids: set[str],
+    *,
+    max_docs: int | None = None,
+) -> QueryMap:
+    """The query view: ``chunk_ids`` over the rest of the memory, one PCA space.
+
+    The reference cloud is every embedded child of the ``max_docs`` most-recent
+    documents (the whole-memory map's cap); the matches are added even when
+    their document is older. ONE projection over both, so the matches land
+    where they sit among everything else. Independent of any **Clustering
+    run** on purpose: no clusters, never stale. A matched child without a
+    vector (the text leg can hit a pending one) is skipped.
+    """
+
+    collection = client[database][MEMORY_COLLECTION]
+    kept, documents = await _recent_documents(collection, user_id, max_docs)
+    points = await _project_children(
+        collection,
+        {
+            **_embedded_children_filter(user_id),
+            "$or": [
+                {"sources": {"$in": _sources_of(kept)}},
+                {"_id": {"$in": list(chunk_ids)}},
+            ],
+        },
+    )
+    return QueryMap(
+        matched=[point for point in points if point.chunk_id in chunk_ids],
+        reference=[point for point in points if point.chunk_id not in chunk_ids],
+        plotted_documents=len(kept),
+        total_documents=len(documents),
+    )
+
+
+async def _recent_documents(
+    collection: Any, user_id: PydanticObjectId, max_docs: int | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(kept, all)`` document rows: the ``max_docs`` most-recent, and every one.
+
+    ``max_docs`` defaults to ``query.full_graph_max_docs``; ranked by
+    ``rank_recent_documents``, the **Memory structure**'s ranking (ADR-013 §3).
+    """
+
+    max_docs = (
+        max_docs if max_docs is not None else app_config.query.full_graph_max_docs
+    )
+    documents = await collection.find(
+        {"user_id": user_id, "kind": "node", "type": "document"},
+        {"_id": 1, "sources": 1, "properties.date": 1, "created_at": 1},
+    ).to_list()
+    return rank_recent_documents(documents, max_docs), documents
+
+
+def _sources_of(documents: list[dict[str, Any]]) -> list[Any]:
+    """The ``sources[0]`` provenance id of each document — what a child names."""
+
+    return list({row["sources"][0] for row in documents if row.get("sources")})
+
+
+async def _project_children(
+    collection: Any, point_filter: dict[str, Any]
+) -> list[MapPoint]:
+    """Load the matching embedded children and place them by a 2-D PCA.
+
+    Sorted by ``_id`` so the projection is reproducible; every point carries
+    the noise label (no cluster).
+    """
+
+    cursor = collection.find(point_filter, {**_POINT_PROJECTION, "embedding": 1}).sort(
+        "_id", 1
+    )
+    documents = await cursor.to_list()
+    if not documents:
+        return []
+    coords = project_pca_2d(
+        np.asarray([from_stored_vector(row["embedding"]) for row in documents])
+    )
+    return [
+        _to_map_point({**row, "viz": {"x": x, "y": y}, "cluster_id": NOISE_LABEL})
+        for row, (x, y) in zip(documents, coords, strict=True)
+    ]
 
 
 def _to_cluster_info(row: dict[str, Any]) -> MemoryClusterInfo:

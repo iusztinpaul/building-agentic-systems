@@ -121,6 +121,14 @@ class MemoryCluster(BeanieDocument):
     centroid: ClusterCentroid = Field(
         description="Cluster centre in Embedding map space; where the legend points.",
     )
+    config_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "Hash of the run's UMAP / HDBSCAN / sampling config, summary prompt "
+            "version and LLM. A re-run is skipped (cached) only while it matches; "
+            "None on rows written before the cache existed (they recluster once)."
+        ),
+    )
     created_at: datetime = Field(
         description="When the row was written. Timezone-aware UTC.",
     )

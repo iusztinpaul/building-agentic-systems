@@ -75,7 +75,7 @@ from tree.mcp.server import MEMORY_MODE, mcp
 # dual-delivery helper. It imports neither this module nor the graph tools, so
 # there is no cycle and rag mode stays free of graph code.
 from tree.mcp.viz_app import GRAPH_VIEW_URI, _ORDER_ADJECTIVE, _graph_tool_result
-from tree.memory.clustering.store import load_embedding_map
+from tree.memory.clustering.store import load_embedding_map, load_query_map
 from tree.memory.rag.retrieval import retrieve_parents
 from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.rag.structure import (
@@ -85,8 +85,9 @@ from tree.memory.rag.structure import (
     fetch_retrieval_structure,
 )
 from tree.memory.visualize.embeddings import (
-    NO_CLUSTERING_RUN_MESSAGE,
+    NO_EMBEDDINGS_MESSAGE,
     to_embedding_map_payload,
+    to_query_map_payload,
 )
 from tree.memory.visualize.graph import to_graph_payload
 from tree.models.exceptions import ModelError
@@ -449,7 +450,8 @@ async def visualize_memory_structure(
     documents and their chunks.
 
     With a ``query``, the view narrows to the passages that matched: the
-    retrieved parent chunks, their documents and all their children, ranked by
+    retrieved parent chunks, their documents and only the child chunks that
+    matched (not every child of the parent), ranked by
     relevance (the ``Documents`` slider shows every match by default). With NO
     query (the default), it draws the 250 most-recent documents; the slider
     shows 100 of them and reveals the rest. A query that matches nothing, or an empty
@@ -555,7 +557,7 @@ if MEMORY_MODE == "rag":
 
 
 # ---------------------------------------------------------------------------
-# Embedding map — READS the latest **Clustering run**, never computes it
+# Embedding map — READS the latest **Clustering run** (a PCA preview without one)
 # ---------------------------------------------------------------------------
 
 
@@ -566,7 +568,11 @@ if MEMORY_MODE == "rag":
     create_duplicate_root_span=False,
 )
 async def visualize_memory_embeddings(
-    ctx: Context, hulls: bool = False, as_html_file: bool = False
+    ctx: Context,
+    query: str = "",
+    top_k: int = 10,
+    hulls: bool = False,
+    as_html_file: bool = False,
 ) -> str | ToolResult:
     """Show the memory's embedding space as a 2D map: the child chunks of the
     250 most-recent documents are plotted as points, coloured by their cluster
@@ -574,9 +580,19 @@ async def visualize_memory_embeddings(
     legend counts the whole run, and the summary says how many chunks are shown
     ("N of M chunks (the 250 most-recent of D documents)"). Use when the user
     wants to *see* what topics the memory holds or how it is organised. ``hulls=true`` outlines each
-    cluster. If no clustering run exists, this returns a message telling the
-    operator which command to run; if the map is stale, the answer starts with
-    a warning line.
+    cluster. Clustering is never automatic: if no clustering run exists, the
+    same chunks are still drawn, without clusters (a PCA projection of the raw
+    embeddings), and the answer starts with a warning line saying the
+    clustering must be triggered manually; if the map is stale, the answer
+    starts with a warning line too.
+
+    With a ``query``, the child chunks a hybrid (vector + text) child-chunk
+    search matched are drawn in colour over every other chunk of the 250
+    most-recent documents in light grey — one PCA projection for both, no
+    clusters — so the view shows where the matches sit in the wider vector
+    space; clusters are shown only on the whole-memory map. ``hulls`` is
+    ignored with a query. A query that matches nothing answers a plain sentence
+    instead.
 
     When the client renders MCP App UIs, the map appears inline. Otherwise
     (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
@@ -592,10 +608,22 @@ async def visualize_memory_embeddings(
     browser.
 
     Args:
-        hulls: Draw a convex hull around each cluster (default off).
+        query: Search query text — draws the chunks that match it over the
+            rest in grey. Omit (empty) to draw the whole memory with its
+            clusters.
+        top_k: Number of parent chunks to retrieve (default 10); the matched
+            children that made them rank are drawn. Ignored with no query.
+        hulls: Draw a convex hull around each cluster (default off). Ignored
+            with a query.
         as_html_file: Set true when the user explicitly asks for a downloadable
             / openable HTML file instead of the inline interactive view.
+
+    Errors answer ``{error_type, retryable, message}`` — retry only when
+    ``retryable`` is true.
     """
+
+    if top_k < 1:
+        return tool_error("invalid_input", "top_k must be ≥ 1", retryable=False)
 
     try:
         user_id = await request_user.resolve_request_user(ctx)
@@ -603,11 +631,18 @@ async def visualize_memory_embeddings(
         return request_user_error("visualize_memory_embeddings", exc)
     _set_retrieval_thread(ctx, "visualize_memory_embeddings", user_id=user_id)
     lc = ctx.lifespan_context
+    query = query.strip()
+    if query:
+        return await _visualize_query_embeddings(
+            ctx, query, top_k, user_id=user_id, as_html_file=as_html_file
+        )
+
     embedding_map = await load_embedding_map(lc["client"], lc["database"], user_id)
-    # Never an empty canvas: a user nobody has clustered gets the command to run
-    # (ADR-007 §8). A plain ``str`` — there is no payload to deliver.
+    # Never an empty canvas: a user with no embedded chunk gets told so (ADR-007
+    # §8). A plain ``str`` — there is no payload to deliver. A user nobody has
+    # clustered still gets a picture: the unclustered preview, warning first.
     if embedding_map is None:
-        return NO_CLUSTERING_RUN_MESSAGE
+        return NO_EMBEDDINGS_MESSAGE
 
     payload = to_embedding_map_payload(embedding_map, hulls=hulls)
     summary = payload["summary"]
@@ -623,6 +658,57 @@ async def visualize_memory_embeddings(
         summary,
         user_id=user_id,
         query="embedding-map",
+        as_html_file=as_html_file,
+    )
+
+
+async def _visualize_query_embeddings(
+    ctx: Context,
+    query: str,
+    top_k: int,
+    *,
+    user_id: PydanticObjectId,
+    as_html_file: bool,
+) -> str | ToolResult:
+    """The query view: the matched child chunks over the rest in grey, no clusters.
+
+    Child chunks are mode-orthogonal, so the rag child search serves BOTH modes
+    — no graph import here (ADR-006 decision 5). Independent of the clustering
+    run, so it never warns about one.
+    """
+
+    lc = ctx.lifespan_context
+    try:
+        retrieval = await retrieve_parents(
+            client=lc["client"],
+            database=lc["database"],
+            query=query,
+            embedding_model=lc["embedding_model"],
+            user_id=user_id,
+            top_k=top_k,
+        )
+        hit_ids = {
+            child.child_id
+            for parent in retrieval.parents
+            for child in parent.matched_children
+        }
+        if not hit_ids:
+            # A plain ``str``, and no read of the reference cloud: nothing matched.
+            return NO_RESULTS_MESSAGE.format(query=query)
+        query_map = await load_query_map(lc["client"], lc["database"], user_id, hit_ids)
+    except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
+        return _retrieval_error("visualize_memory_embeddings", exc)
+    if not query_map.matched:
+        # A plain ``str``: there is nothing to draw.
+        return NO_RESULTS_MESSAGE.format(query=query)
+
+    payload = to_query_map_payload(query_map, query)
+    return await _graph_tool_result(
+        ctx,
+        payload,
+        payload["summary"],
+        user_id=user_id,
+        query=f"embedding-map {query}",
         as_html_file=as_html_file,
     )
 

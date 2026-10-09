@@ -147,7 +147,8 @@ they are no longer Deployments: each runs as an **inline subflow**. The Coordina
 `offline-pipeline` run, which holds the single admission slot while they fan out their Workers;
 `memory_indexing` runs as that same run's third **Offline phase** — once per target user, after
 every user's extraction (ADR-007) — or inline inside `online-pipeline` for a single document.
-`memory_clustering` is the fourth phase, OFF by default. Every manual single-step run is the same
+`memory_clustering` is the fourth phase, OFF by default — only `make memory-run-clustering-pipeline`
+turns it on, never the nightly cron. Every manual single-step run is the same
 `offline-pipeline` deployment with the other phases off (`make memory-run-data-pipeline` /
 `make memory-run-memory-pipeline` / `make memory-run-indexing-pipeline` /
 `make memory-run-clustering-pipeline`); no script runs a flow in the operator's own process.
@@ -177,7 +178,7 @@ Two stages — **data** (sources → `documents`) then **memory** (documents →
 ```bash
 # Offline: every configured source -> documents -> memory collection (+ index)
 make memory-run-pipeline                                                  # default sources (backfill + listen)
-make memory-run-pipeline USER_IDENTIFIER=paul SOURCE_FILE="sources/listen.yaml"   # chosen file, another user
+make memory-run-pipeline USER_IDENTIFIER=pauliusztin@decodingai.com SOURCE_FILE="sources/listen.yaml"   # chosen file, a specific user
 
 # Online: one source -> document -> memory collection (+ index), end to end
 make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/agentic-harness-engineering"
@@ -194,7 +195,7 @@ The data pipeline produces `documents` **only** — it does NOT extract or index
 
 ```bash
 make memory-run-data-pipeline                                       # default set (backfill + listen), current user
-make memory-run-data-pipeline USER_IDENTIFIER=paul                  # default set, another user
+make memory-run-data-pipeline USER_IDENTIFIER=pauliusztin@decodingai.com  # default set, a specific user
 make memory-run-data-pipeline SOURCE_FILE="sources/listen.yaml"     # only the listen feeds
 make memory-run-data-pipeline URI="https://blog.com/feed=substack_rss https://news.site/post"  # ad-hoc URLs
 make memory-run-data-pipeline SOURCE_FILE="sources/backfill.yaml" URI="https://news.site/post" # combine both
@@ -209,7 +210,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes, fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes, fanned out across **all active users** (never clusters — that phase is manual only) (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 
@@ -320,8 +321,12 @@ after the last run show up as "unclustered / stale" on the map until you re-run 
 make memory-run-clustering-pipeline
 ```
 
-It is OFF in every other entry point, the nightly cron included: this is the only command that
-clusters. What READS the result is the [Embedding map](#embedding-map) (`make
+It is the ONLY entry point that clusters — the nightly cron never does. It is **cached**: before
+loading a vector it checks whether the latest run is still current — every embedded chunk carries
+its coordinates, no clustered chunk was deleted, and the run's config fingerprint (UMAP, HDBSCAN,
+sampling, summary prompt version, LLM) matches — and if so logs `clustering UP TO DATE` and stops:
+no UMAP fit, no LLM call. Change a knob, ingest, or delete, and the next run reclusters by itself.
+What READS the result is the [Embedding map](#embedding-map) (`make
 memory-visualize-embeddings` and the `visualize_memory_embeddings` MCP tool) — surfaces draw the
 stored coordinates, they never cluster. Two notes:
 
@@ -354,7 +359,7 @@ make memory-visualize-structure MAX_DOCS=50           # embed only the 50 most r
 make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search results
 ```
 
-With a `QUERY`, `rag` draws the retrieved parents, their documents and ALL their children;
+With a `QUERY`, `rag` draws the retrieved parents, their documents and only the child chunks that matched;
 `graphrag` the expanded subgraph around the search seeds.
 
 The no-query view embeds the `MAX_DOCS` (default 250, `query.full_graph_max_docs`) most-recent
@@ -403,20 +408,27 @@ both memory modes, because the map has no edges to miss.
 ```bash
 make memory-visualize-embeddings                        # open the latest map
 make memory-visualize-embeddings HULLS=true             # outline each cluster
-make memory-visualize-embeddings OUTPUT=/tmp/map.html USER_IDENTIFIER=paul
+make memory-visualize-embeddings OUTPUT=/tmp/map.html USER_IDENTIFIER=pauliusztin@decodingai.com
 ```
 
-It READS; it never clusters (ADR-007 Decision 8), so two outcomes are contracts rather than bugs:
+It READS; it never clusters (ADR-007 Decision 8), so three outcomes are contracts rather than bugs:
 
-- **No clustering run for this user** — it prints `No clustering run found for this user — run make
-  memory-run-clustering-pipeline to build the embedding map.` and exits 1. No empty canvas.
+- **No embedded chunk for this user** — it prints `No embedded chunks for this user yet — nothing to
+  map. …` and exits 1. No empty canvas.
+- **No clustering run for this user** — it still draws the chunks, unclustered: a numpy PCA
+  projection of the raw embeddings computed at read time (milliseconds, no UMAP), one colour, one
+  `not clustered yet` legend row, no hulls. The FIRST line of output is
+  `No clustering run found for this user. Showing the raw embeddings. Trigger it manually.` — trigger it with
+  `make memory-run-clustering-pipeline`.
 - **A stale map** — chunks ingested since the last run have no coordinates, so the FIRST line of
   output is `N of M chunks have no cluster assignment (or a stale one) — run make
   memory-run-clustering-pipeline`; those points are left off the map and counted in the legend as
   "unclustered / stale (not shown)". Re-run the clustering phase to clear it.
 
 The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
-and the same message — one behaviour, two surfaces.
+and the same message — one behaviour, two surfaces. The tool also takes a `query`: it then draws
+the matched chunks in colour over every other chunk in light grey (one PCA projection, no
+clusters), which never needs a clustering run.
 
 ### MCP server
 
@@ -446,7 +458,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 | `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
-| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them. READS only — with no run it answers with the `make memory-run-clustering-pipeline` message, and a stale map's answer starts with the warning line. In both modes: the map has no edges. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws the chunks that query's search matched in colour over every other chunk of the 250 most-recent documents in light grey — one PCA projection for both, no clusters, so it needs no clustering run (`hulls` is ignored). READS a run — with no run yet it draws the chunks unclustered (a PCA preview) and its answer starts with the `No clustering run found …` warning, and a stale map's answer starts with the warning line too. In both modes: the map has no edges. |
 
 *`graphrag` only (6 more, 14 total):*
 
