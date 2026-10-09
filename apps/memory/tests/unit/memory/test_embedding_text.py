@@ -11,12 +11,18 @@ token-budget caps, order preservation across multiple requests).
 """
 
 import ast
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 import tree.memory
+from tests.unit.models.modal_fixtures import patch_server
 from tree.entities.memory import NodeType
 from tree.memory import embedding_text
 from tree.memory.embedding_text import (
@@ -32,7 +38,11 @@ from tree.memory.graph import add_entity as add_entity_module
 from tree.memory.graph.resolution.semantic import SemanticMatchResolver
 from tree.memory.pipeline import _embed_children, _embed_entities
 from tree.memory.pipeline import prospective_entity_embedding_text as pipeline_builder
+from tree.models import modal_embedding
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
+from tree.models.exceptions import ExtractionError
+from tree.models.modal_catalog import get_embedding_entry, prompt_for
+from tree.models.modal_embedding import ModalEmbeddingModel
 
 _SRC_DIR = Path(tree.memory.__file__).parents[1]
 
@@ -824,6 +834,136 @@ class TestEmbedInBatchesAlignmentAdversarial:
             await embed_in_batches(
                 ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
             )
+
+
+# ---------------------------------------------------------------------------
+# embed_in_batches over the REAL Modal client — the same skip as Voyage
+# ---------------------------------------------------------------------------
+
+_MODAL_URL = "https://acme--ep-tree-voyage-4-nano-server.modal.run"
+_NANO = "voyageai/voyage-4-nano"
+_TOO_LONG = "graph memory retrieval " * 12000
+
+
+def _fingerprint(text: str) -> list[float]:
+    """A 2048-d (voyage-4-nano native) vector whose first component names
+    the input it was embedded from, so a swapped slot cannot pass."""
+
+    return [float(len(text))] + [1.0] * 2047
+
+
+class _VllmStub:
+    """A vLLM ``/v1/embeddings`` the REAL ``AsyncOpenAI`` talks to: one vector
+    per input, and the 400 vLLM answers when ANY input is over
+    ``max_model_len`` (the whole request fails, as on the live App)."""
+
+    def __init__(self) -> None:
+        self.requests: list[list[str]] = []
+        self.answer_status: int | None = None
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        inputs = json.loads(request.content)["input"]
+        self.requests.append(inputs)
+        if self.answer_status is not None:
+            return httpx.Response(
+                self.answer_status, request=request, json={"error": "nope"}
+            )
+        if any(_TOO_LONG in text for text in inputs):
+            return httpx.Response(
+                400,
+                request=request,
+                json={
+                    "error": {
+                        "message": "This model's maximum context length is "
+                        "32768 tokens.",
+                        "type": "BadRequestError",
+                        "code": 400,
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "object": "list",
+                "model": "served/stub",
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": _fingerprint(t)}
+                    for i, t in enumerate(inputs)
+                ],
+                "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            },
+        )
+
+
+@pytest.fixture
+async def vllm(mocker) -> AsyncIterator[SimpleNamespace]:
+    """A real ``ModalEmbeddingModel`` whose SDK talks to ``_VllmStub``."""
+
+    stub = _VllmStub()
+    server = patch_server(
+        mocker, modal_embedding, url=_MODAL_URL, served_model="served/stub"
+    )
+    clients: list[AsyncOpenAI] = []
+
+    def build(**kwargs: Any) -> AsyncOpenAI:
+        client = AsyncOpenAI(
+            **kwargs,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(stub.handle)),
+        )
+        clients.append(client)
+        return client
+
+    mocker.patch.object(modal_embedding, "AsyncOpenAI", build)
+    model = ModalEmbeddingModel(proxy_token="wk-1.ws-2", model=_NANO)
+    yield SimpleNamespace(model=model, stub=stub, server=server)
+    for client in clients:
+        await client.close()
+
+
+class TestModalContentRejectionsAreSkipped:
+    """Task 200: on Modal one un-embeddable input used to fail its whole
+    request; now it gets ``[]`` and its neighbours keep their vectors."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [_TOO_LONG, "bad \ud800 surrogate"],
+        ids=["over-max-model-len-400", "lone-surrogate"],
+    )
+    async def test_only_the_bad_input_is_skipped(
+        self, vllm: SimpleNamespace, bad: str
+    ) -> None:
+        texts = ["ok first", bad, "ok third, longer"]
+
+        # Caps wide enough that all three go out as ONE request, so the 400
+        # really forces the bisect rather than a pre-split by the token cap.
+        vectors = await embed_in_batches(
+            texts,
+            vllm.model,
+            input_type="document",
+            max_inputs=3,
+            max_total_tokens=100_000,
+        )
+
+        prompt = prompt_for(get_embedding_entry(_NANO), "document")
+        assert vectors == [
+            _fingerprint(prompt + "ok first"),
+            [],
+            _fingerprint(prompt + "ok third, longer"),
+        ]
+        # The Warm gate warmed once for the whole bisect: a 400 is not cold.
+        assert vllm.server.poll.await_count == 1
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    async def test_a_transient_status_still_fails_the_request(
+        self, vllm: SimpleNamespace, status: int
+    ) -> None:
+        vllm.stub.answer_status = status
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await embed_in_batches(["a", "b"], vllm.model, max_inputs=3)
+
+        assert excinfo.value.status_code == status
 
 
 class TestInputTypeThreading:

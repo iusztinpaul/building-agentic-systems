@@ -41,8 +41,10 @@ logger = logging.getLogger(__name__)
 # mid-flow dedup) and doesn't support /v1/multimodalembeddings (our endpoint).
 
 # Conservative chars/token bound (3 vs the ~4 typical for English) so the
-# estimate over-counts and requests stay under the Voyage token cap. The model
-# sends truncation=True, so an oversized input is truncated server-side.
+# estimate over-counts and requests stay under the Voyage token cap. Voyage
+# sends truncation=True, so an oversized input is truncated server-side; a
+# Modal (vLLM) server 400s on one over its max_model_len instead, and
+# `_embed_chunk_resilient` skips that input.
 _CHARS_PER_TOKEN: float = 3.0
 
 
@@ -66,8 +68,9 @@ def _chunk_indices_by_caps(
 
     Contiguous + left-to-right, so concatenating per-slice results restores
     input order. A single oversized text is clamped to ``max_input_tokens`` for
-    accounting (the model truncates it server-side) so it still forms a valid
-    single-input request rather than blocking the batcher.
+    accounting (Voyage truncates it server-side; a Modal server 400s on it and
+    it is skipped) so it still forms a valid single-input request rather than
+    blocking the batcher.
     """
 
     chunks: list[tuple[int, int]] = []
@@ -173,13 +176,15 @@ async def _embed_chunk_resilient(
     chunk: list[str],
     input_type: EmbeddingRole | None = None,
 ) -> list[list[float]]:
-    """Embed one request's chunk, skipping inputs Voyage rejects as content.
+    """Embed one request's chunk, skipping inputs the provider rejects as content.
 
-    On an HTTP 400 ("invalid elements / unsupported tokens" — a poison input
-    that no retry fixes) the chunk is bisected to isolate the offending text(s),
-    which are skipped with an aligned empty-vector ``[]`` placeholder so one bad
-    chunk can't fail the whole run. Rate-limit (429) and server (5xx) errors
-    propagate untouched — they are transient and must not silently drop data.
+    On an HTTP 400 (Voyage: "invalid elements / unsupported tokens"; a Modal
+    vLLM server: an input over ``max_model_len``, or a lone surrogate the SDK
+    cannot encode — a poison input that no retry fixes) the chunk is bisected
+    to isolate the offending text(s), which are skipped with an aligned
+    empty-vector ``[]`` placeholder so one bad chunk can't fail the whole run.
+    Rate-limit (429) and server (5xx) errors propagate untouched — they are
+    transient and must not silently drop data.
 
     The skip-vs-reraise decision keys off the exception's structured
     ``status_code`` (``ExtractionError.status_code``), NOT a substring of the
@@ -197,7 +202,7 @@ async def _embed_chunk_resilient(
     try:
         # ADR-002 §1: the shared ``voyage-embeddings`` rate limit lives at the
         # real network POST inside the Voyage provider clients, NOT here. Routing
-        # the inline dedup embed through this function still earns the Voyage-400
+        # the inline dedup embed through this function still earns the HTTP-400
         # bisect-and-skip resilience, but a ``_CachedSingleEmbedding`` cache hit
         # (extraction hot path) never reaches a Voyage client, so it acquires no
         # slot — that was the timeout this relocation fixes. Fail-open: an
@@ -210,9 +215,7 @@ async def _embed_chunk_resilient(
         if getattr(exc, "status_code", None) != 400:
             raise
         if len(chunk) <= 1:
-            logger.warning(
-                "skipping un-embeddable input (Voyage 400): %.120r", chunk[0]
-            )
+            logger.warning("skipping un-embeddable input (HTTP 400): %.120r", chunk[0])
             return [[]]
         mid = len(chunk) // 2
         left = await _embed_chunk_resilient(

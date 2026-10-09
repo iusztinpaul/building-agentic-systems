@@ -83,10 +83,12 @@ class EmbeddingBatchConfig(BaseModel):
     * ``max_total_tokens`` — total across all inputs per request. Defaults to
       10,000 (the shared free-tier Voyage TPM window, #054); the model's hard
       per-request ceiling is 320,000.
-    * ``max_input_tokens`` — each single input ≤ 32,000. The model sends
+    * ``max_input_tokens`` — each single input ≤ 32,000. Voyage sends
       ``truncation=True`` so an oversized input is truncated server-side
-      rather than 400-ing; this bound only governs how the batcher
-      *accounts* a single text against the per-request total.
+      rather than 400-ing; a Modal (vLLM) server 400s on an input over its
+      ``max_model_len`` and the batcher skips that input. Either way this
+      bound only governs how the batcher *accounts* a single text against
+      the per-request total.
 
     This is synchronous request batching, NOT Voyage's async Batch API —
     the async path is rejected because its 12h completion window can't

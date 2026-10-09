@@ -276,7 +276,11 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
         Raises:
             ModelError: the warm failed on something waiting cannot fix (a
                 wrong **Proxy token**, an undeployed model).
-            ExtractionError: the call failed (retryable), it outlived
+            ExtractionError: the server rejected an input (``status_code=400``:
+                vLLM 400s on one over ``max_model_len``, and a lone surrogate
+                the SDK cannot encode is classified the same — callers skip
+                it), the call failed otherwise (retryable; ``status_code`` is
+                the HTTP status when there was one), it outlived
                 ``modal.request_timeout_s`` (sent ONCE — a timeout is not a
                 cold server, so nothing re-warms and nothing retries), the
                 server stayed cold through one re-warm, or it answered with
@@ -319,6 +323,21 @@ class ModalEmbeddingModel(BaseEmbeddingModel):
                 f"{self._request_timeout_s:g}s (modal.request_timeout_s) — "
                 "raise TREE_MODAL__REQUEST_TIMEOUT_S",
                 status_code=None,
+            ) from exc
+        except UnicodeEncodeError as exc:
+            # A lone surrogate: the SDK cannot UTF-8-encode the body, so it
+            # fails client-side and nothing is sent. Voyage answers the same
+            # input with a 400, so it is the same content rejection — 400 is
+            # what lets `_embed_chunk_resilient` bisect around this one input.
+            raise ExtractionError(
+                f"Embedding call failed: {exc}", status_code=400
+            ) from exc
+        except openai.APIStatusError as exc:
+            # The status rides along so `_embed_chunk_resilient` can tell a
+            # content rejection (vLLM answers 400 for an input over
+            # `max_model_len`) from everything else, which it re-raises.
+            raise ExtractionError(
+                f"Embedding call failed: {exc}", status_code=exc.status_code
             ) from exc
         except Exception as exc:
             raise ExtractionError(f"Embedding call failed: {exc}") from exc

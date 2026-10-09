@@ -51,6 +51,16 @@ _QWEN = "Qwen/Qwen3-Embedding-0.6B"
 _VOYAGE = "voyageai/voyage-4-nano"
 _URL = "https://acme--ep-tree-voyage-4-nano-server.modal.run"
 _BEARER = "wk-1.ws-2"
+# vLLM's answer to an input over `max_model_len`, as the live probe saw it on
+# voyage-4-nano (2026-10-09).
+_VLLM_TOO_LONG = {
+    "error": {
+        "message": "This model's maximum context length is 32768 tokens. However,"
+        " you requested 36001 tokens in the input for embedding generation.",
+        "type": "BadRequestError",
+        "code": 400,
+    }
+}
 
 
 # --- doubles ----------------------------------------------------------------
@@ -177,6 +187,9 @@ class _WireStub:
         #: server that accepted the request and never finished it. Recorded
         #: first, so a test can still count the requests that were sent.
         self.raises: Exception | None = None
+        #: While this answers True for a request's ``input`` list, the server
+        #: answers vLLM's 400 for an input over ``max_model_len``.
+        self.rejects: Any = lambda inputs: False
         #: Every REAL ``AsyncOpenAI`` the client under test built, so a test
         #: can read the timeout and the retry budget off the SDK object rather
         #: than off the kwargs we happened to pass it.
@@ -188,6 +201,8 @@ class _WireStub:
             raise self.raises
         if self.cold_while():
             return httpx.Response(503, request=request, json={"error": "cold"})
+        if self.rejects(json.loads(request.content)["input"]):
+            return httpx.Response(400, request=request, json=_VLLM_TOO_LONG)
         return httpx.Response(
             200,
             request=request,
@@ -721,6 +736,86 @@ class TestEmbedFailure:
             await model.embed(["cats"])
 
 
+class TestContentRejection:
+    """A rejected INPUT is a 400 on the ``ExtractionError`` — the one status
+    ``_embed_chunk_resilient`` bisects around and skips (task 200). Every
+    other failure keeps its own status, so the batcher re-raises it."""
+
+    async def test_a_vllm_400_carries_status_400_and_does_not_re_warm(
+        self, server, wire
+    ) -> None:
+        """Through the REAL SDK: an input over ``max_model_len`` is answered
+        400, sent ONCE, and the Warm gate neither re-warms nor retries it."""
+
+        wire.rejects = lambda inputs: True
+        model = _model()
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.embed(["graph memory retrieval " * 12000])
+
+        assert excinfo.value.status_code == 400
+        assert "maximum context length is 32768 tokens" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, openai_sdk.BadRequestError)
+        assert len(wire.requests) == 1
+        assert server.poll.await_count == 1
+
+    async def test_a_lone_surrogate_is_a_client_side_content_rejection(
+        self, server, wire
+    ) -> None:
+        """The REAL SDK cannot UTF-8-encode ``\\ud800`` and raises before
+        sending; Voyage answers the same input 400, so it is classified 400."""
+
+        model = _model()
+
+        with pytest.raises(ExtractionError) as excinfo:
+            await model.embed(["bad \ud800 surrogate"])
+
+        assert excinfo.value.status_code == 400
+        assert isinstance(excinfo.value.__cause__, UnicodeEncodeError)
+        assert wire.requests == []
+        assert server.poll.await_count == 1
+
+    @pytest.mark.parametrize(
+        ("error", "status"),
+        [
+            (openai_sdk.AuthenticationError, 401),
+            (openai_sdk.PermissionDeniedError, 403),
+            (openai_sdk.NotFoundError, 404),
+            (openai_sdk.RateLimitError, 429),
+        ],
+    )
+    async def test_a_non_400_status_is_carried_unchanged(
+        self, server, openai, error: type[openai_sdk.APIStatusError], status: int
+    ) -> None:
+        """Only a 400 is a content rejection: a quota, a bad token or a wrong
+        model id keeps its own status, so no batcher can skip the input."""
+
+        request = httpx.Request("POST", f"{_URL}/v1/embeddings")
+        openai.answer = error(
+            "nope", response=httpx.Response(status, request=request), body=None
+        )
+        model = _model()
+
+        with pytest.raises(ExtractionError, match="Embedding call failed") as excinfo:
+            await model.embed(["cats"])
+
+        assert excinfo.value.status_code == status
+        assert server.poll.await_count == 1
+
+    async def test_a_5xx_after_one_re_warm_is_never_a_400(self, server, openai) -> None:
+        """A server that stays cold through the gate's one re-warm surfaces
+        as its 5xx — transient, so the batcher re-raises it."""
+
+        model = _model()
+        openai.answers = [_cold(), _cold()]
+
+        with pytest.raises(ExtractionError, match="after one re-warm") as excinfo:
+            await model.embed(["cats"])
+
+        assert excinfo.value.status_code == 503
+        assert server.poll.await_count == 2
+
+
 class TestRequestTimeout:
     """ADR-009 §11: one call, one bound, one retry — and that retry is the
     gate's. The embedding client gets the identical treatment to the LLM one:
@@ -1038,17 +1133,18 @@ class TestWarmAtUse:
         )
 
     async def test_embed_wraps_non_cold_errors(self, server, openai) -> None:
-        """A 400 is the caller's problem, not a cold start: no re-warm, and the
-        existing retryable wrapper still applies."""
+        """A 400 is the caller's problem, not a cold start: no re-warm, and it
+        reaches the caller as a ``status_code=400`` content rejection."""
 
         model = _model()
         openai.answer = _response([_vector(2048)])
         await model.embed(["warm me"])
         openai.answer = _bad_request()
 
-        with pytest.raises(ExtractionError, match="Embedding call failed"):
+        with pytest.raises(ExtractionError, match="Embedding call failed") as excinfo:
             await model.embed(["cats"])
 
+        assert excinfo.value.status_code == 400
         assert server.poll.await_count == 1
 
     async def test_the_retry_uses_the_client_the_re_warm_built(

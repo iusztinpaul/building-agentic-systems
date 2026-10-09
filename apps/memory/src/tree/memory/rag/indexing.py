@@ -122,7 +122,7 @@ async def embed_nodes(
 
     embedded_count = await _embed_batch(collection, docs, embedding_model)
 
-    # A node fetched but not persisted was skipped as un-embeddable (Voyage 400
+    # A node fetched but not persisted was skipped as un-embeddable (an HTTP 400
     # content rejection -> empty placeholder); surface the gap so operators know
     # a backfill retry is pending rather than reading the count as "all done".
     skipped = len(docs) - embedded_count

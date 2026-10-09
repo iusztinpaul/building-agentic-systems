@@ -244,7 +244,7 @@ async def add_entity(
         )
         # Route through ``_embed_chunk_resilient`` (ADR-002 §1) instead of
         # calling ``embedding_model.embed`` directly: the dedup embed gains the
-        # Voyage-400 bisect-and-skip resilience for free. The shared
+        # HTTP-400 bisect-and-skip resilience for free. The shared
         # ``voyage-embeddings`` rate limit lives at the real network POST inside
         # the Voyage clients, NOT here — so a ``_CachedSingleEmbedding`` cache
         # hit (extraction hot path) acquires no slot (fail-open: an unreachable
