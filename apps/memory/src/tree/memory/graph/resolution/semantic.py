@@ -57,8 +57,8 @@ class SemanticMatchResolver(AbstractResolver):
     async def prewarm_cache(self, names: Iterable[str]) -> None:
         """Batch-embed every uncached ``name``, then populate the LRU.
 
-        Packs all the not-yet-cached names into as few synchronous requests
-        as the Voyage per-request caps allow (via
+        Packs all the not-yet-cached names into synchronous requests bounded
+        by ``models.embedding_batch`` (via
         :func:`tree.memory.embedding_text.embed_in_batches`) and seeds the
         cache, so the subsequent cosine loop is pure cache hits — instead of
         :meth:`_embed_cached` embedding one name per request.

@@ -5,8 +5,8 @@ into the GENERIC text we embed, ``entity_embedding_text`` picks the per-type tex
 for ONE persisted entity row (the PREFERENCE / FACT exception below, generic
 otherwise), ``prospective_entity_embedding_text`` builds that persisted-row shape
 for an entity that does not exist yet and hands it over, and ``embed_texts``
-embeds already-built texts with the search model in as few requests as the
-provider caps allow. They are separate because the indexing backfill embeds
+embeds already-built texts with the search model in requests bounded by
+``models.embedding_batch``. They are separate because the indexing backfill embeds
 **Child chunk**s by their **Contextual header** rather than by a node-text. Lives at
 the ``memory/`` layer because both ``rag/`` and ``graph/`` depend on it (``rag/`` may
 not import ``graph/`` — ADR-006).
@@ -34,8 +34,9 @@ from tree.models.exceptions import ExtractionError
 logger = logging.getLogger(__name__)
 
 # Batching packs many texts into fewer synchronous /v1/multimodalembeddings
-# requests, bounded by the per-request caps below (Voyage voyage-multimodal-3:
-# max 1,000 inputs; each input ≤ 32,000 tokens; ≤ 320,000 tokens total). Not
+# requests, bounded by ``models.embedding_batch`` — set at or under the Voyage
+# voyage-multimodal-3 hard caps (max 1,000 inputs; each input ≤ 32,000 tokens;
+# ≤ 320,000 tokens total) and, by default, the 10K-TPM free-tier window. Not
 # Voyage's async Batch API: it has a ~12h completion window (too slow for
 # mid-flow dedup) and doesn't support /v1/multimodalembeddings (our endpoint).
 
@@ -100,16 +101,19 @@ async def embed_in_batches(
     embedding_model: BaseEmbeddingModel,
     *,
     input_type: EmbeddingRole | None = None,
-    max_inputs: int = 1000,
-    max_total_tokens: int = 320_000,
-    max_input_tokens: int = 32_000,
+    max_inputs: int | None = None,
+    max_total_tokens: int | None = None,
+    max_input_tokens: int | None = None,
 ) -> list[list[float]]:
-    """Embed ``texts`` in as few synchronous requests as the Voyage caps allow.
+    """Embed ``texts`` in requests bounded by the configured per-request caps.
 
     Returned vectors are positionally aligned with ``texts`` (chunks are
     contiguous and the endpoint preserves order within a request). The 429
     backoff lives inside ``.embed()``; this batcher is strictly upstream of it.
-    Defaults sit at the Voyage per-request caps for ``voyage-multimodal-3``.
+    Any cap left ``None`` comes from ``app_config.models.embedding_batch`` —
+    the ONE place caps are resolved, so no caller can fall back to the Voyage
+    hard caps (task 198: the inline ingestion embeds did, and sent a whole
+    document as one request past the 10K-TPM window).
 
     ``input_type`` is the **Embedding role** (ADR-009 §5) and is forwarded
     UNCHANGED to every request this call fans out to — one batch of texts is
@@ -120,6 +124,17 @@ async def embed_in_batches(
     if not texts:
         return []
 
+    # Imported lazily so caps reflect any env-var override applied since import.
+    from tree.config.app_config import app_config
+
+    batch_cfg = app_config.models.embedding_batch
+    max_inputs = batch_cfg.max_inputs if max_inputs is None else max_inputs
+    max_total_tokens = (
+        batch_cfg.max_total_tokens if max_total_tokens is None else max_total_tokens
+    )
+    max_input_tokens = (
+        batch_cfg.max_input_tokens if max_input_tokens is None else max_input_tokens
+    )
     chunks = _chunk_indices_by_caps(
         texts,
         max_inputs=max_inputs,
@@ -132,9 +147,7 @@ async def embed_in_batches(
     # the cross-flow ``voyage-embeddings`` GCL is the real throttle (fail-open:
     # an unreachable limiter warns and the call proceeds, task 178). The knob is
     # flipped >1 only after the Voyage cap is lifted — do NOT default it higher.
-    from tree.config.app_config import app_config
-
-    dispatch_concurrency = app_config.models.embedding_batch.dispatch_concurrency
+    dispatch_concurrency = batch_cfg.dispatch_concurrency
     logger.info(
         "embed_in_batches: %d texts -> %d request(s) "
         "(max_inputs=%d, max_total_tokens=%d, dispatch_concurrency=%d)",
@@ -341,40 +354,16 @@ async def embed_texts(
     node-texts: a **Child chunk** embeds its **Contextual header**
     (:func:`tree.memory.rag.embedding.child_embedding_text`) while an entity row
     embeds ``node_to_embedding_text``. Vectors are aligned positionally with
-    ``texts``. Caps default to ``app_config.models.embedding_batch``;
-    ``input_type`` is the **Embedding role** (ADR-009 §5), forwarded as-is.
+    ``texts``. Caps default to ``app_config.models.embedding_batch`` (resolved
+    in :func:`embed_in_batches`); ``input_type`` is the **Embedding role**
+    (ADR-009 §5), forwarded as-is.
     """
 
-    if not texts:
-        return []
-
-    caps = _resolve_batch_caps(max_inputs, max_total_tokens, max_input_tokens)
-    return await embed_in_batches(texts, embedding_model, input_type=input_type, **caps)
-
-
-def _resolve_batch_caps(
-    max_inputs: int | None,
-    max_total_tokens: int | None,
-    max_input_tokens: int | None,
-) -> dict[str, int]:
-    """Fill any unspecified batch cap from ``app_config.models.embedding_batch``.
-
-    Imported lazily so caps reflect any env-var override applied since import.
-    """
-
-    from tree.config.app_config import app_config
-
-    batch_cfg = app_config.models.embedding_batch
-    return {
-        "max_inputs": max_inputs if max_inputs is not None else batch_cfg.max_inputs,
-        "max_total_tokens": (
-            max_total_tokens
-            if max_total_tokens is not None
-            else batch_cfg.max_total_tokens
-        ),
-        "max_input_tokens": (
-            max_input_tokens
-            if max_input_tokens is not None
-            else batch_cfg.max_input_tokens
-        ),
-    }
+    return await embed_in_batches(
+        texts,
+        embedding_model,
+        input_type=input_type,
+        max_inputs=max_inputs,
+        max_total_tokens=max_total_tokens,
+        max_input_tokens=max_input_tokens,
+    )

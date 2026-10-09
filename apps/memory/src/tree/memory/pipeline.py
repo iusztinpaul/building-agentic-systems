@@ -451,14 +451,15 @@ async def _embed_children(
     embedding_identity: str,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> dict[str, list[float]]:
-    """Embed every **Child chunk** text of the run in as few requests as possible.
+    """Embed every **Child chunk** text of the run under the configured batch caps.
 
     Children are the ONLY rows the ingestion path embeds (ADR-006 decision 4):
     parents and documents are deliberately vector-less so parent-document
     retrieval can search children and return parents. Uses the **search** model
     — the persisted, index-coupled vector — through
     :func:`tree.memory.embedding_text.embed_in_batches`, which packs the texts
-    into request-sized batches; the 429 backoff lives inside ``.embed()``.
+    into requests bounded by ``models.embedding_batch``; the 429 backoff lives
+    inside ``.embed()``.
 
     Returns a ``text -> vector`` map the loader indexes by the same text it
     rebuilds per child, so a missing vector degrades to a row without an
@@ -1152,10 +1153,9 @@ async def _embed_entities(
 ) -> dict[str, list[float]]:
     """Embed every embeddable text for the run in one batched call.
 
-    All the run's node-texts are packed into as few synchronous
-    ``/v1/multimodalembeddings`` requests as the per-request caps (1000
-    inputs / 320K tokens) allow via
-    :func:`tree.memory.embedding_text.embed_in_batches`. Vectors come back
+    All the run's node-texts are packed into synchronous
+    ``/v1/multimodalembeddings`` requests bounded by ``models.embedding_batch``
+    via :func:`tree.memory.embedding_text.embed_in_batches`. Vectors come back
     positionally aligned, so we zip them to their texts and return a
     ``text -> vector`` map that task ⑤/⑥ index by embeddable text.
 
@@ -2164,8 +2164,8 @@ async def _run_extraction_worker_body(
 
     # ----- Task ⑥ — embed entities (ALL run node-texts in one batched call) -
     # Single batched embed of every unique node-text for the run.
-    # ``embed_entities_task`` packs them into as few synchronous requests as
-    # the 1000-input / 320K-token caps allow.
+    # ``embed_entities_task`` packs them into requests bounded by
+    # ``models.embedding_batch``.
     embeddable_texts = sorted(set(resolved.embeddable_text_by_key.values()))
     vectors = await embed_entities_task(
         embeddable_texts,

@@ -74,7 +74,9 @@ class EmbeddingBatchConfig(BaseModel):
     """Per-request batching caps for Voyage ``/v1/multimodalembeddings``.
 
     Bound how many texts :func:`tree.memory.embedding_text.embed_in_batches`
-    packs into a SINGLE synchronous embed request. Defaults are the Voyage
+    packs into a SINGLE synchronous embed request — on EVERY list-embed path
+    (ingestion, resolution, indexing backfill), since that function resolves
+    any unspecified cap from here. Defaults sit at or under the Voyage
     per-request caps for ``voyage-multimodal-3``:
 
     * ``max_inputs`` — max 1,000 inputs per request.

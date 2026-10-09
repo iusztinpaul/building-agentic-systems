@@ -29,6 +29,8 @@ from tree.memory.embedding_text import (
     prospective_entity_embedding_text,
 )
 from tree.memory.graph import add_entity as add_entity_module
+from tree.memory.graph.resolution.semantic import SemanticMatchResolver
+from tree.memory.pipeline import _embed_children, _embed_entities
 from tree.memory.pipeline import prospective_entity_embedding_text as pipeline_builder
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
 
@@ -514,6 +516,123 @@ class TestEmbedInBatches:
 
 
 # ---------------------------------------------------------------------------
+# Task 198 — every list embed honours ``models.embedding_batch``
+# ---------------------------------------------------------------------------
+
+
+async def _embed_via_children(model: BaseEmbeddingModel, texts: list[str]) -> None:
+    await _embed_children(texts, embedding_identity="voyage:voyage-4:1024")
+
+
+async def _embed_via_entities(model: BaseEmbeddingModel, texts: list[str]) -> None:
+    await _embed_entities(texts, embedding_identity="voyage:voyage-4:1024")
+
+
+async def _embed_via_resolution(model: BaseEmbeddingModel, texts: list[str]) -> None:
+    await SemanticMatchResolver(model).prewarm_cache(texts)
+
+
+_INGESTION_PATHS = pytest.mark.parametrize(
+    ("embed_via", "expected_role"),
+    [
+        (_embed_via_children, "document"),
+        (_embed_via_entities, "document"),
+        (_embed_via_resolution, None),
+    ],
+    ids=["embed-children", "embed-entities", "semantic-prewarm"],
+)
+
+
+class TestInlineEmbedsHonourConfiguredBatchCaps:
+    """Regression (task 198): the three ingestion embeds sent a whole run as ONE
+    request because ``embed_in_batches`` defaulted to the Voyage hard caps
+    (1000 inputs / 320K tokens) and only ``embed_texts`` read the config.
+
+    The caps are patched on the live ``app_config`` (not on the resolver
+    helper), so a ``TREE_MODELS__EMBEDDING_BATCH__*`` override is what these
+    tests model.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _search_model(self, mocker: Any) -> _OrderEncodingEmbeddingModel:
+        model = _OrderEncodingEmbeddingModel()
+        mocker.patch(
+            "tree.memory.pipeline.get_search_embedding_model", return_value=model
+        )
+        self.model = model
+        return model
+
+    @_INGESTION_PATHS
+    async def test_ingestion_embed_splits_by_configured_max_inputs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        embed_via: Any,
+        expected_role: EmbeddingRole | None,
+    ) -> None:
+        # Arrange: an operator lowers the per-request input cap to 2.
+        from tree.config.app_config import app_config
+
+        monkeypatch.setattr(app_config.models.embedding_batch, "max_inputs", 2)
+        texts = [f"text-{i}" for i in range(5)]
+
+        # Act
+        await embed_via(self.model, texts)
+
+        # Assert: 5 texts split 2 + 2 + 1, in order, role unchanged per request.
+        assert self.model.calls == [texts[0:2], texts[2:4], texts[4:5]]
+        assert self.model.roles == [expected_role] * 3
+
+    @_INGESTION_PATHS
+    async def test_ingestion_embed_splits_by_configured_max_total_tokens(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        embed_via: Any,
+        expected_role: EmbeddingRole | None,
+    ) -> None:
+        # Arrange: ~1001 estimated tokens per text under a 2500-token request
+        # cap -> 2 texts per request. Distinct texts, so resolution's
+        # normalized-key dedup keeps all five.
+        from tree.config.app_config import app_config
+
+        monkeypatch.setattr(app_config.models.embedding_batch, "max_total_tokens", 2500)
+        texts = [f"{i}" + "x" * 3000 for i in range(5)]
+
+        # Act
+        await embed_via(self.model, texts)
+
+        # Assert
+        assert [len(c) for c in self.model.calls] == [2, 2, 1]
+        assert self.model.roles == [expected_role] * 3
+
+    async def test_ingestion_vectors_stay_aligned_across_split_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: the split must not misalign the ``text -> vector`` map.
+        from tree.config.app_config import app_config
+
+        monkeypatch.setattr(app_config.models.embedding_batch, "max_inputs", 2)
+        texts = [f"text-{i}" for i in range(5)]
+
+        # Act
+        vectors = await _embed_children(texts, embedding_identity="voyage:v:1:doc")
+
+        # Assert: the global position encoded by the fake reaches the right text.
+        assert vectors == {t: [float(i)] for i, t in enumerate(texts)}
+
+    async def test_embed_in_batches_without_caps_reads_the_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The seam itself: no caller can fall back to hard-coded Voyage caps.
+        from tree.config.app_config import app_config
+
+        monkeypatch.setattr(app_config.models.embedding_batch, "max_inputs", 2)
+
+        await embed_in_batches([f"t{i}" for i in range(5)], self.model)
+
+        assert [len(c) for c in self.model.calls] == [2, 2, 1]
+
+
+# ---------------------------------------------------------------------------
 # embed_in_batches — skip-and-continue on Voyage content rejections
 # ---------------------------------------------------------------------------
 
@@ -762,8 +881,8 @@ class TestInputTypeThreading:
         assert model.roles == [None, None]
 
     async def test_embed_texts_forwards_the_role(self) -> None:
-        # ``embed_texts`` is the seam the indexing backfill calls; it resolves
-        # the caps from YAML and must not swallow the role on the way.
+        # ``embed_texts`` is the seam the indexing backfill calls; it forwards
+        # to ``embed_in_batches`` and must not swallow the role on the way.
         model = _OrderEncodingEmbeddingModel()
 
         await embed_texts(["a", "b"], model, input_type="document", max_inputs=1)

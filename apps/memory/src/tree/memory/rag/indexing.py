@@ -198,8 +198,8 @@ async def _embed_batch(
     """Embed fetched rows and write the vectors back.
 
     Embedding is delegated to :func:`tree.memory.embedding_text.embed_texts`,
-    which packs the texts into as few synchronous Voyage requests as the
-    per-request caps allow (1000 inputs / 320K tokens). The returned vectors are
+    which packs the texts into synchronous requests bounded by
+    ``models.embedding_batch``. The returned vectors are
     positionally aligned with ``docs`` (across multiple requests), so the zip
     below is safe.
 
