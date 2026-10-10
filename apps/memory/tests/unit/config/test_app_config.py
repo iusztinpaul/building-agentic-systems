@@ -601,6 +601,27 @@ class TestRemovedEmbeddingBatchKnobs:
         assert not hasattr(config.query, "embedding_batch_size")
 
 
+class TestEmbeddingBatchCapsMustBePositive:
+    """A 0 cap made the batcher emit an empty first request; reject it at load."""
+
+    @pytest.mark.parametrize(
+        "cap", ["max_inputs", "max_total_tokens", "max_input_tokens"]
+    )
+    def test_a_zero_cap_is_rejected(self, cap: str) -> None:
+        with pytest.raises(ValidationError, match=cap):
+            EmbeddingBatchConfig(**{cap: 0})
+
+    def test_a_zero_env_override_fails_the_load(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        custom = tmp_path / "caps.yaml"
+        custom.write_text("models:\n  embedding_batch:\n    max_inputs: 8\n")
+        monkeypatch.setenv("TREE_MODELS__EMBEDDING_BATCH__MAX_INPUTS", "0")
+
+        with pytest.raises(ValidationError, match="max_inputs"):
+            load_app_config(custom)
+
+
 class TestGraphFileTtlConfig:
     """ADR-014 §4: how long a **Graph file** stays readable (task 185)."""
 

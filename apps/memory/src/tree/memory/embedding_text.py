@@ -26,6 +26,8 @@ would silently stop matching.
 import logging
 from typing import Any
 
+from pydantic import BaseModel
+
 from tree.entities.memory import NodeType
 from tree.memory.rag.cleaning import strip_invalid_chars
 from tree.models.base import BaseEmbeddingModel, EmbeddingRole
@@ -46,6 +48,24 @@ logger = logging.getLogger(__name__)
 # Modal (vLLM) server 400s on one over its max_model_len instead, and
 # `_embed_chunk_resilient` skips that input.
 _CHARS_PER_TOKEN: float = 3.0
+
+# How many HTTP-400 rejections, with NOTHING embedded yet, end one request's
+# bisect as a REQUEST error instead of skipping inputs. A 400 on every input
+# (a wrong model id, an unsupported parameter) is configuration, not content:
+# skipping would turn it into rows without vectors — cached 90 days by the
+# inline embed tasks — instead of a failed run. Content poison is rare
+# (``strip_invalid_chars`` runs upstream), so 3 bad inputs in a row with no
+# good one is the config signal; it also bounds the bisect to ~log2(N) + 4
+# calls instead of 2N.
+_CONFIG_REJECTION_THRESHOLD: int = 3
+
+
+class _RequestRejections(BaseModel):
+    """What one request's bisect has seen so far: inputs embedded vs rejected."""
+
+    size: int
+    embedded: int = 0
+    rejected: int = 0
 
 
 def estimate_tokens(text: str) -> int:
@@ -138,6 +158,15 @@ async def embed_in_batches(
     max_input_tokens = (
         batch_cfg.max_input_tokens if max_input_tokens is None else max_input_tokens
     )
+    # A cap below 1 would emit an empty first request (max_inputs=0) or one
+    # request per text with a misleading budget; refuse it loudly instead.
+    for name, cap in (
+        ("max_inputs", max_inputs),
+        ("max_total_tokens", max_total_tokens),
+        ("max_input_tokens", max_input_tokens),
+    ):
+        if cap < 1:
+            raise ValueError(f"embed_in_batches: {name} must be >= 1, got {cap}")
     chunks = _chunk_indices_by_caps(
         texts,
         max_inputs=max_inputs,
@@ -158,7 +187,10 @@ async def embed_in_batches(
     for start, end in chunks:
         vectors.extend(
             await _embed_chunk_resilient(
-                embedding_model, texts[start:end], input_type=input_type
+                embedding_model,
+                texts[start:end],
+                input_type=input_type,
+                rejections=_RequestRejections(size=end - start),
             )
         )
     return vectors
@@ -168,6 +200,7 @@ async def _embed_chunk_resilient(
     embedding_model: BaseEmbeddingModel,
     chunk: list[str],
     input_type: EmbeddingRole | None = None,
+    rejections: _RequestRejections | None = None,
 ) -> list[list[float]]:
     """Embed one request's chunk, skipping inputs the provider rejects as content.
 
@@ -190,8 +223,17 @@ async def _embed_chunk_resilient(
     bisect recursion unchanged: both halves of a split chunk keep the role the
     caller asked for, so a 400 can never downgrade part of a batch to a
     different embedding space.
+
+    ``rejections`` tallies the whole top-level request across the recursion.
+    In a request of 2+ inputs, a bisect that reaches
+    ``min(size, _CONFIG_REJECTION_THRESHOLD)`` rejected inputs before ANY input
+    embedded raises ``ExtractionError`` (no ``status_code``, so it fails the
+    run): that 400 is the request's, not one input's. A single-input request
+    keeps the skip — one text alone cannot tell the two apart.
     """
 
+    if rejections is None:
+        rejections = _RequestRejections(size=len(chunk))
     try:
         # ADR-002 §1: the shared ``voyage-embeddings`` rate limit lives at the
         # real network POST inside the Voyage provider clients, NOT here. Routing
@@ -200,7 +242,7 @@ async def _embed_chunk_resilient(
         # (extraction hot path) never reaches a Voyage client, so it acquires no
         # slot — that was the timeout this relocation fixes. Fail-open: an
         # unreachable limiter warns and the call proceeds (task 178).
-        return await embedding_model.embed(chunk, input_type=input_type)
+        vectors = await embedding_model.embed(chunk, input_type=input_type)
     except ExtractionError as exc:
         # Only a structured HTTP 400 is a content rejection we skip; everything
         # else (429, 5xx, or a status-less ExtractionError) is transient/unknown
@@ -208,16 +250,32 @@ async def _embed_chunk_resilient(
         if getattr(exc, "status_code", None) != 400:
             raise
         if len(chunk) <= 1:
+            rejections.rejected += 1
+            threshold = min(rejections.size, _CONFIG_REJECTION_THRESHOLD)
+            if (
+                rejections.size >= 2
+                and rejections.embedded == 0
+                and rejections.rejected >= threshold
+            ):
+                raise ExtractionError(
+                    f"{rejections.rejected} of {rejections.size} inputs of one embed "
+                    "request were rejected with HTTP 400 and none embedded — a "
+                    "request/configuration error (model id, parameters), not bad "
+                    "content, so the whole request fails (inputs logged as skipped "
+                    f"above are not skipped). Last error: {exc}"
+                ) from exc
             logger.warning("skipping un-embeddable input (HTTP 400): %.120r", chunk[0])
             return [[]]
         mid = len(chunk) // 2
         left = await _embed_chunk_resilient(
-            embedding_model, chunk[:mid], input_type=input_type
+            embedding_model, chunk[:mid], input_type=input_type, rejections=rejections
         )
         right = await _embed_chunk_resilient(
-            embedding_model, chunk[mid:], input_type=input_type
+            embedding_model, chunk[mid:], input_type=input_type, rejections=rejections
         )
         return left + right
+    rejections.embedded += len(chunk)
+    return vectors
 
 
 def node_to_embedding_text(node: dict[str, Any]) -> str:

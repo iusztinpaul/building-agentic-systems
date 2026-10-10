@@ -96,13 +96,15 @@ class EmbeddingBatchConfig(BaseModel):
     ``/v1/multimodalembeddings``.
     """
 
-    max_inputs: int = Field(default=1000)
+    # ge=1: a 0 cap made the batcher emit an empty first request; a bad
+    # TREE_MODELS__EMBEDDING_BATCH__* override now fails at startup instead.
+    max_inputs: int = Field(default=1000, ge=1)
     # Dropped 320_000 → 10_000 (#054 / ADR-002): the shared free-tier Voyage key
     # is capped at 10K TPM, so no single synchronous request may exceed the
     # per-minute token window. The TPM cap is held by this config knob, not a
     # second token-weighted limiter (an explicit deferred follow-up).
-    max_total_tokens: int = Field(default=10_000)
-    max_input_tokens: int = Field(default=32_000)
+    max_total_tokens: int = Field(default=10_000, ge=1)
+    max_input_tokens: int = Field(default=32_000, ge=1)
 
 
 class ModelsConfig(BaseModel):

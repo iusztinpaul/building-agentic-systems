@@ -775,16 +775,6 @@ class TestEmbedInBatchesAlignmentAdversarial:
         ]
         assert len(vectors) == len(texts)
 
-    async def test_all_poison_chunk_yields_all_placeholders(self) -> None:
-        # Arrange: every input is rejected — full bisection down to singletons.
-        model = _IdentityEncodingPoisonModel(poison={"x", "y", "z"})
-        texts = ["x", "y", "z"]
-
-        vectors = await embed_in_batches(texts, model, max_inputs=1000)
-
-        # Assert: each un-embeddable input gets its own aligned [] placeholder.
-        assert vectors == [[], [], []]
-
     async def test_429_message_containing_400_still_propagates(self) -> None:
         # Arrange: a transient 429 whose human-readable message happens to contain
         # the digit-run "400" (token counts, Retry-After, request IDs, quota
@@ -834,6 +824,107 @@ class TestEmbedInBatchesAlignmentAdversarial:
             await embed_in_batches(
                 ["a", "b"], _StatusLess400MessageModel(), max_inputs=1000
             )
+
+
+class _RejectEverythingModel(BaseEmbeddingModel):
+    """400s on EVERY request — a wrong model id / unsupported parameter."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    @property
+    def dimensions(self) -> int:
+        return 1
+
+    async def embed(
+        self, texts: list[str], input_type: EmbeddingRole | None = None
+    ) -> list[list[float]]:
+        self.calls.append(list(texts))
+        raise ExtractionError(
+            "Voyage text-embeddings API error 400: Model voyage-nope is not supported",
+            status_code=400,
+        )
+
+
+class TestARequestWide400FailsInsteadOfSkipping:
+    """A 400 on every input is the REQUEST's (config), not one input's (content).
+
+    Skipping it would load rows without vectors — and the inline embed tasks
+    cache that result for 90 days — instead of failing the run.
+    """
+
+    async def test_every_input_of_a_request_rejected_raises(self) -> None:
+        model = _IdentityEncodingPoisonModel(poison={"x", "y", "z"})
+
+        with pytest.raises(ExtractionError, match="configuration") as excinfo:
+            await embed_in_batches(["x", "y", "z"], model, max_inputs=1000)
+
+        # No status_code: the batcher's caller must NOT read it as a skippable 400.
+        assert excinfo.value.status_code is None
+
+    async def test_a_config_400_on_a_large_request_stops_after_a_few_calls(
+        self,
+    ) -> None:
+        model = _RejectEverythingModel()
+        texts = [f"t{i}" for i in range(1000)]
+
+        with pytest.raises(ExtractionError, match="voyage-nope"):
+            await embed_in_batches(
+                texts, model, max_inputs=1000, max_total_tokens=1_000_000
+            )
+
+        # ~log2(1000) calls down to the first input, then two more leaves —
+        # not the ~2000 calls a full bisect to singletons costs.
+        assert len(model.calls) <= 16
+
+    async def test_a_single_input_request_still_skips_its_rejected_input(
+        self,
+    ) -> None:
+        model = _IdentityEncodingPoisonModel(poison={"P"})
+
+        vectors = await embed_in_batches(["P"], model, max_inputs=1000)
+
+        assert vectors == [[]]
+
+    async def test_two_leading_poison_inputs_before_a_good_one_are_skipped(
+        self,
+    ) -> None:
+        model = _IdentityEncodingPoisonModel(poison={"P1", "P2"})
+
+        vectors = await embed_in_batches(["P1", "P2", "c", "d"], model, max_inputs=1000)
+
+        assert vectors == [[], [], [float(ord("c"))], [float(ord("d"))]]
+
+    async def test_rejections_after_a_good_input_are_always_skipped(self) -> None:
+        # Once any input embedded, the request is valid: later 400s are content.
+        model = _IdentityEncodingPoisonModel(poison={"P1", "P2", "P3", "P4"})
+
+        vectors = await embed_in_batches(
+            ["a", "P1", "P2", "P3", "P4"], model, max_inputs=1000
+        )
+
+        assert vectors == [[float(ord("a"))], [], [], [], []]
+
+    async def test_the_tally_is_per_request_not_per_call(self) -> None:
+        # Request 1 embeds fine; request 2 is rejected end to end -> raises.
+        model = _IdentityEncodingPoisonModel(poison={"x", "y"})
+
+        with pytest.raises(ExtractionError, match="2 of 2 inputs"):
+            await embed_in_batches(["a", "b", "x", "y"], model, max_inputs=2)
+
+
+class TestBatchCapsBelowOneAreRefused:
+    @pytest.mark.parametrize(
+        "cap", ["max_inputs", "max_total_tokens", "max_input_tokens"]
+    )
+    @pytest.mark.parametrize("value", [0, -1])
+    async def test_an_explicit_cap_below_one_raises(self, cap: str, value: int) -> None:
+        model = _RecordingEmbeddingModel()
+
+        with pytest.raises(ValueError, match=f"{cap} must be >= 1"):
+            await embed_in_batches(["a", "b"], model, **{cap: value})
+
+        assert model.calls == []
 
 
 # ---------------------------------------------------------------------------
