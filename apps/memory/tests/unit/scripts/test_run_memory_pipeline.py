@@ -102,26 +102,6 @@ class TestRunMemoryPipelineCliOptions:
         assert "--source-uris" in result.output
         mock_run.assert_not_awaited()
 
-    def test_online_rejects_num_shards(self, mock_run, cli_main) -> None:
-        runner = CliRunner()
-
-        result = runner.invoke(
-            cli_main, ["--mode", "online", "--doc-ids", "68a1", "--num-shards", "2"]
-        )
-
-        assert result.exit_code != 0
-        assert "offline-only" in result.output
-        mock_run.assert_not_awaited()
-
-    def test_num_shards_below_one_is_a_usage_error(self, mock_run, cli_main) -> None:
-        runner = CliRunner()
-
-        result = runner.invoke(cli_main, ["--num-shards", "0"])
-
-        assert result.exit_code != 0
-        assert ">= 1" in result.output
-        mock_run.assert_not_awaited()
-
 
 class TestRunMemoryPipelineForwarding:
     def test_offline_default_forwards_no_doc_ids(self, mock_run, cli_main) -> None:
@@ -134,7 +114,6 @@ class TestRunMemoryPipelineForwarding:
         mock_run.assert_awaited_once()
         assert mock_run.await_args.args[2] is None  # document_ids
         assert mock_run.await_args.args[3] is None  # source_uris
-        assert mock_run.await_args.args[4] is None  # num_shards
 
     def test_online_parses_comma_separated_doc_ids(self, mock_run, cli_main) -> None:
         runner = CliRunner()
@@ -171,24 +150,23 @@ class TestRunMemoryPipelineDispatch:
         mock_flush_opik,
         resolved_user_id,
     ) -> None:
-        # Arrange — a narrowed doc set with an explicit fan-out width.
+        # Arrange — a narrowed doc set.
         document_ids = ["68a1", "68b2"]
 
-        await cli_module._run(None, None, document_ids, None, 4)
+        await cli_module._run(None, None, document_ids, None)
 
         # Assert — the extraction step is the offline flow with data disabled.
         mock_dispatch_offline.assert_awaited_once_with(
             user_id=resolved_user_id,
             document_ids=document_ids,
             source_uris=None,
-            num_shards=4,
             run_data=False,
         )
         mock_wait_for_dispatch.assert_awaited_once_with(
             mock_dispatch_offline.return_value
         )
 
-    async def test_omitted_num_shards_defaults_to_one(
+    async def test_batch_default_forwards_no_selectors(
         self,
         cli_module,
         mock_resolve_user,
@@ -196,13 +174,14 @@ class TestRunMemoryPipelineDispatch:
         mock_wait_for_dispatch,
         mock_flush_opik,
     ) -> None:
-        # Arrange — the batch default: no doc narrowing, no fan-out knob.
+        # Arrange — the batch default: no doc narrowing.
 
-        await cli_module._run(None, None, None, None, None)
+        await cli_module._run(None, None, None, None)
 
-        # Assert — one worker run, every PENDING document for the tenant.
+        # Assert — every PENDING document for the tenant; the shard count is
+        # YAML, read where the flow runs, so it is never forwarded.
         kwargs = mock_dispatch_offline.await_args.kwargs
-        assert kwargs["num_shards"] == 1
+        assert "num_shards" not in kwargs
         assert kwargs["document_ids"] is None
         assert kwargs["source_uris"] is None
 
@@ -215,17 +194,16 @@ class TestRunMemoryPipelineDispatch:
         mock_flush_opik,
         resolved_user_id,
     ) -> None:
-        # Arrange — the receipt retry shape: a URI, no id, no fan-out knob.
+        # Arrange — the receipt retry shape: a URI, no id.
         source_uris = ["https://www.youtube.com/watch?v=abc"]
 
-        await cli_module._run(None, None, None, source_uris, None)
+        await cli_module._run(None, None, None, source_uris)
 
         # Assert — the flow (not this glue) resolves URIs to document ids.
         mock_dispatch_offline.assert_awaited_once_with(
             user_id=resolved_user_id,
             document_ids=None,
             source_uris=source_uris,
-            num_shards=1,
             run_data=False,
         )
 
@@ -248,9 +226,10 @@ class TestRunMemoryPipelineIgnoredOverrides:
         # configured provider and bills it, so say so at the mistake.
         monkeypatch.setenv("TREE_MODELS__LLM__PROVIDER", "modal")
         monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
+        monkeypatch.setenv("TREE_EXTRACTION__NUM_SHARDS", "8")
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
-            await cli_module._run(None, None, None, None, None)
+            await cli_module._run(None, None, None, None)
 
         messages = [record.getMessage() for record in caplog.records]
         assert any(
@@ -259,6 +238,8 @@ class TestRunMemoryPipelineIgnoredOverrides:
             for message in messages
         )
         assert any("TREE_MODAL__REQUEST_TIMEOUT_S" in message for message in messages)
+        # The shard count is YAML read by the serving process too.
+        assert any("TREE_EXTRACTION__NUM_SHARDS" in message for message in messages)
         # It is a hint, not a gate: the run still dispatches.
         mock_dispatch_offline.assert_awaited_once()
 
@@ -276,11 +257,11 @@ class TestRunMemoryPipelineIgnoredOverrides:
         for name in [
             name
             for name in os.environ
-            if name.startswith(("TREE_MODELS__", "TREE_MODAL__"))
+            if name.startswith(("TREE_MODELS__", "TREE_MODAL__", "TREE_EXTRACTION__"))
         ]:
             monkeypatch.delenv(name, raising=False)
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
-            await cli_module._run(None, None, None, None, None)
+            await cli_module._run(None, None, None, None)
 
         assert caplog.records == []

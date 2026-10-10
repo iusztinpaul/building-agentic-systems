@@ -122,9 +122,7 @@ class TestRunPipelineCliOptions:
 
 
 class TestRunPipelineForwarding:
-    def test_offline_forwards_selectors_and_num_shards(
-        self, mock_run_offline, cli_main
-    ) -> None:
+    def test_offline_forwards_selectors(self, mock_run_offline, cli_main) -> None:
         runner = CliRunner()
 
         result = runner.invoke(
@@ -134,8 +132,6 @@ class TestRunPipelineForwarding:
                 "sources/listen.yaml",
                 "--uri",
                 "https://x.com/a",
-                "--num-shards",
-                "2",
             ],
         )
 
@@ -144,7 +140,6 @@ class TestRunPipelineForwarding:
         args = mock_run_offline.await_args.args
         assert args[2] == ["sources/listen.yaml"]
         assert args[3] == [{"uri": "https://x.com/a", "type": "web"}]
-        assert args[4] == 2
 
     def test_online_forwards_source_and_title(self, mock_run_online, cli_main) -> None:
         runner = CliRunner()
@@ -180,7 +175,7 @@ class TestRunPipelineIgnoredOverrides:
         monkeypatch.setenv("TREE_MODAL__REQUEST_TIMEOUT_S", "600")
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
-            await cli_module._run_offline(None, None, [], [], 1)
+            await cli_module._run_offline(None, None, [], [])
 
         messages = [record.getMessage() for record in caplog.records]
         assert any(
@@ -232,11 +227,11 @@ class TestRunPipelineIgnoredOverrides:
         for name in [
             name
             for name in os.environ
-            if name.startswith(("TREE_MODELS__", "TREE_MODAL__"))
+            if name.startswith(("TREE_MODELS__", "TREE_MODAL__", "TREE_EXTRACTION__"))
         ]:
             monkeypatch.delenv(name, raising=False)
 
         with caplog.at_level(logging.WARNING, logger="tree.cli"):
-            await cli_module._run_offline(None, None, [], [], 1)
+            await cli_module._run_offline(None, None, [], [])
 
         assert caplog.records == []

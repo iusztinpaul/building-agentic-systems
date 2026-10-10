@@ -299,7 +299,7 @@ concurrency cap.** A deployment is a *template*; containers track **flow RUNS**,
 decide real parallelism:
 
 - **fan-out width** — how many worker *runs* the coordinator creates (`run_deployment` per shard:
-  one per non-HF platform + `num_workers` per HF dataset for data; `NUM_SHARDS` for extraction).
+  one per non-HF platform + `num_workers` per HF dataset for data; `extraction.num_shards` for extraction).
 - **the concurrency cap** — how many of those runs execute at once. In Managed that's the
   **work-pool concurrency limit** — and since we set none and use the default queue with no
   per-queue limit, it currently falls back to **Prefect's plan managed-execution cap**. (The local

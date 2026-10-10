@@ -5,8 +5,8 @@ dispatches a DISTINCT worker deployment (``data-etl-worker``) per shard — ther
 recursion and NO indexing. These exercise the PURE fan-out core with no Prefect
 server and ``run_deployment`` mocked:
 
-* ``_partition_into_shards`` / ``_resolve_num_shards`` are re-exported from the neutral
-  ``tree.sharding`` module (#066) and exhaustively covered by ``tests/unit/test_sharding.py``;
+* ``_partition_into_shards`` (neutral ``tree.sharding``, #066) only builds test shards
+  here; it is covered by ``tests/unit/memory/graph/test_sharding.py``;
 * ``_fan_out_data`` — the gather + failure-isolation core. Each child dispatch targets
   the WORKER deployment and carries ``{user_id, sources}``. Critically, the data path
   fires NO trailing/index run (the data pipeline only produces ``documents``).

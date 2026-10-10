@@ -290,7 +290,6 @@ async def offline_pipeline(
     user_id: PydanticObjectId | None = None,
     source_files: list[str] | None = None,
     sources: list[dict[str, Any]] | None = None,
-    num_shards: int = 1,
     run_data: bool = True,
     run_extraction: bool = True,
     run_indexing: bool = True,
@@ -442,7 +441,6 @@ async def offline_pipeline(
                             stats = await memory_extract_etl_coordinator(
                                 uid,
                                 document_ids=extraction_document_ids,
-                                num_shards=num_shards,
                             )
                         extraction[str(uid)] = asdict(stats)
                         log.info(
@@ -513,7 +511,6 @@ async def dispatch_offline_pipeline(
     user_id: PydanticObjectId | None = None,
     source_files: list[str] | None = None,
     sources: list[dict[str, Any]] | None = None,
-    num_shards: int = 1,
     run_data: bool = True,
     run_extraction: bool = True,
     run_indexing: bool = True,
@@ -563,7 +560,6 @@ async def dispatch_offline_pipeline(
         "user_id": str(user_id) if user_id is not None else None,
         "source_files": source_files,
         "sources": sources,
-        "num_shards": num_shards,
         "run_data": run_data,
         "run_extraction": run_extraction,
         "run_indexing": run_indexing,

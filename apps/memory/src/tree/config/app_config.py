@@ -175,11 +175,15 @@ class ExtractionConfig(BaseModel):
     # ``extraction`` would read as graph-only. The old
     # ``chunk_size``/``chunk_overlap`` pair went out with their only consumer.
     llm_concurrency: int = 5
+    # ``num_shards`` — the cross-run fan-out: how many ``memory-extract-etl-worker``
+    # runs the coordinator splits one user's pending documents into
+    # (``min(num_shards, N)``, ADR-002 §3). Read where the coordinator RUNS (the
+    # serve process / the Managed deployment), never from the dispatching shell.
+    num_shards: int = Field(default=1, ge=1)
     # Intra-run fan-out knobs (#054). Both inherit the ``TREE_EXTRACTION__*``
     # override hatch via :func:`_apply_env_overrides`.
     # ``doc_concurrency`` — how many documents one extraction run processes in
-    # parallel (default 1 = serial; the cross-run fan-out is the
-    # ``memory-extract-etl-coordinator`` dispatching worker shards, see ADR-002).
+    # parallel (default 1 = serial; the cross-run fan-out is ``num_shards``).
     doc_concurrency: int = 1
     # ``dedup_concurrency`` — how many entities the dedup stage may resolve in
     # parallel within a run.

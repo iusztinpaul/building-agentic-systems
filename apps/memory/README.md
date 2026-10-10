@@ -240,7 +240,7 @@ the pending documents across `memory-extract-etl-worker` runs, and the indexing 
 once for the user as a sibling subflow:
 
 ```bash
-# Offline — ALL pending documents (batch fan-out; optional NUM_SHARDS=<n>),
+# Offline — ALL pending documents (batch fan-out; width = extraction.num_shards in default.yaml),
 # optionally narrowed with DOC_IDS="<id>[,<id2>]" or SOURCE_URIS="<uri>[,<uri2>]"
 make memory-run-memory-pipeline
 make memory-run-memory-pipeline DOC_IDS="507f1f77bcf86cd799439011,507f1f77bcf86cd799439012"

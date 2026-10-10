@@ -73,9 +73,14 @@ models:
     max_input_tokens: 32000
 
 extraction:
-  llm_concurrency: 5
-  doc_concurrency: 1
-  dedup_concurrency: 8
+  # Across runs: worker runs per user (min(num_shards, pending docs)).
+  # Read by the process that RUNS the flow, so a change needs a `make memory-serve-workflows` restart (local) or a push
+  # (Prefect Managed). Every shard still waits on the voyage-embeddings limit.
+  num_shards: 1
+  # Within ONE worker run (a shard, or the online pipeline's single doc):
+  llm_concurrency: 5 # parallel LLM calls over one document's parent chunks
+  doc_concurrency: 1 # documents chunked in parallel
+  dedup_concurrency: 8 # entities deduped in parallel
   resolution:
     fuzzy_threshold: 0.85
     semantic_threshold: 0.80

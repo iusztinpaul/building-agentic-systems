@@ -180,7 +180,7 @@ make memory-run-pipeline                                          # default sour
 make memory-run-pipeline MODE=online SOURCE="https://example.com/some-post"    # one source on demand
 ```
 
-Pipeline flags (`NUM_SHARDS=`, per-source parallelism) are covered in [`apps/memory/README.md`](apps/memory/README.md#serving-workflows); source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron in [Data pipelines](apps/memory/README.md#data-pipelines).
+Pipeline parallelism (`extraction.num_shards` in `default.yaml`, per-source `num_workers`) is covered in [`apps/memory/README.md`](apps/memory/README.md#serving-workflows); source selection (`SOURCE_FILE=` / `URI=`) and the nightly cron in [Data pipelines](apps/memory/README.md#data-pipelines).
 
 **7. Drive memory with the agent.**
 

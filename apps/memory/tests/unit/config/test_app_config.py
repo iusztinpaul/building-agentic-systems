@@ -72,6 +72,8 @@ class TestLoadAppConfig:
         assert config.models.embedding_batch.max_total_tokens == 10_000
         assert config.models.embedding_batch.max_input_tokens == 32_000
         assert config.extraction.llm_concurrency == 5
+        # The cross-run fan-out: one worker run unless the operator widens it.
+        assert config.extraction.num_shards == 1
         # #054: intra-run fan-out knobs.
         assert config.extraction.doc_concurrency == 1
         assert config.extraction.dedup_concurrency == 8
@@ -168,6 +170,27 @@ class TestLoadAppConfig:
         config = load_app_config(custom)
 
         assert config.prefect.deploy_optional is True
+
+    def test_num_shards_env_override(self, tmp_path, monkeypatch):
+        """``TREE_EXTRACTION__NUM_SHARDS`` widens the fan-out without a YAML edit."""
+
+        custom = tmp_path / "extraction.yaml"
+        custom.write_text("extraction:\n  num_shards: 1\n")
+        monkeypatch.setenv("TREE_EXTRACTION__NUM_SHARDS", "4")
+
+        config = load_app_config(custom)
+
+        assert config.extraction.num_shards == 4
+
+    @pytest.mark.parametrize("bad", [0, -2])
+    def test_num_shards_below_one_is_rejected(self, tmp_path, bad):
+        """A zero-shard run would silently extract nothing, so config refuses it."""
+
+        custom = tmp_path / "extraction.yaml"
+        custom.write_text(f"extraction:\n  num_shards: {bad}\n")
+
+        with pytest.raises(ValidationError, match="num_shards"):
+            load_app_config(custom)
 
     def test_single_segment_tree_env_vars_are_not_overrides(
         self, tmp_path, monkeypatch

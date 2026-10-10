@@ -9,7 +9,7 @@ ADR-006 decision 8. Every memory flow lives here so the rag/graph split is ONE
   :class:`WriteSummary`.
 * ``memory_extract_etl_coordinator`` (an inline subflow of ``offline-pipeline``,
   not a deployment) — resolve pending docs -> partition into
-  ``min(num_shards, N)`` balanced shards -> dispatch ONE
+  ``min(extraction.num_shards, N)`` balanced shards -> dispatch ONE
   ``memory-extract-etl-worker`` run per shard under
   ``asyncio.gather(return_exceptions=True)``. It does NOT index: since ADR-007
   Decision 5 indexing is its own **Offline phase**. Dispatches to the WORKER (no
@@ -106,7 +106,6 @@ from tree.memory.graph.sharding import (
     FanOutStats,
     _fan_out_extraction,
     _partition_into_shards,
-    _resolve_num_shards,
     _resolve_pending_document_ids,
 )
 from tree.memory.graph.validation import (
@@ -1748,14 +1747,14 @@ async def _coordinate_sharded_extraction(
     *,
     user_id: PydanticObjectId,
     document_ids: list[str] | None,
-    num_shards: int,
     opik_trace_headers: dict[str, str] | None = None,
 ) -> FanOutStats:
     """Run the coordinator path: resolve pending docs, partition, fan out.
 
     The body of the ``memory-extract-etl-coordinator`` flow. Resolves the user's
     pending documents when ``document_ids is None`` (an explicit list is used
-    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, then
+    verbatim), partitions them into ``min(extraction.num_shards, N)`` balanced
+    shards (YAML, read here — where the coordinator runs), then
     dispatches one ``memory-extract-etl-worker`` run per shard (each carrying only
     ``{user_id, document_ids}`` — NO ``num_shards`` key, the worker has no such
     param) under ``asyncio.gather(return_exceptions=True)``. Dispatches to the
@@ -1767,7 +1766,7 @@ async def _coordinate_sharded_extraction(
     """
 
     log = _get_run_logger()
-    effective_num_shards = _resolve_num_shards(num_shards)
+    num_shards = _live_app_config().extraction.num_shards
 
     client = await init_mongodb(
         settings.mongo.mongo_uri.get_secret_value(),
@@ -1798,13 +1797,13 @@ async def _coordinate_sharded_extraction(
         )
         return FanOutStats(shards_total=0)
 
-    shards = _partition_into_shards(ids, effective_num_shards)
+    shards = _partition_into_shards(ids, num_shards)
     log.info(
         "extraction fan-out: partitioned %d document(s) into %d shard(s) "
         "(num_shards=%d)",
         len(ids),
         len(shards),
-        effective_num_shards,
+        num_shards,
     )
 
     return await _fan_out_extraction(
@@ -1824,17 +1823,16 @@ async def _coordinate_sharded_extraction(
 async def memory_extract_etl_coordinator(
     user_id: PydanticObjectId,
     document_ids: list[str] | None = None,
-    num_shards: int = 1,
 ) -> FanOutStats:
     """Resolve → partition → dispatch ``memory-extract-etl-worker`` runs.
 
     The operator entrypoint for memory extraction (ADR-002 §3, amended #066). Resolves
     the user's pending documents when ``document_ids is None`` (an explicit list is used
-    verbatim), partitions them into ``min(num_shards, N)`` balanced shards, and dispatches
-    ONE ``memory-extract-etl-worker`` run per shard via ``run_deployment`` under
-    ``asyncio.gather(return_exceptions=True)``. Each worker dispatch carries only
-    ``{user_id, document_ids}`` — there is NO ``num_shards`` child key (the worker has no
-    such param) and NO recursion (it dispatches a DISTINCT worker deployment). One
+    verbatim), partitions them into ``min(extraction.num_shards, N)`` balanced shards
+    (``default.yaml``), and dispatches ONE ``memory-extract-etl-worker`` run per shard
+    via ``run_deployment`` under ``asyncio.gather(return_exceptions=True)``. Each worker
+    dispatch carries only ``{user_id, document_ids}`` — no shard count (the worker has
+    no such param) and NO recursion (it dispatches a DISTINCT worker deployment). One
     shard's failure is isolated and recorded in :class:`FanOutStats.failures`.
 
     Extraction ONLY: the Coordinator does not index. ``memory_indexing`` runs as
@@ -1843,7 +1841,7 @@ async def memory_extract_etl_coordinator(
     rule). A partial extraction is still indexed, because the phase runs
     regardless of how many shards failed.
 
-    ``num_shards=1`` (the default) dispatches 1 worker run — it is NOT a
+    ``extraction.num_shards: 1`` (the default) dispatches 1 worker run — it is NOT a
     byte-identical in-process extraction (that is the worker, triggered directly). An
     empty resolved/explicit doc set is a clean no-op: zero worker dispatch,
     ``FanOutStats(shards_total=0)``.
@@ -1864,7 +1862,6 @@ async def memory_extract_etl_coordinator(
             return await _coordinate_sharded_extraction(
                 user_id=user_id,
                 document_ids=document_ids,
-                num_shards=num_shards,
                 opik_trace_headers=headers,
             )
     finally:

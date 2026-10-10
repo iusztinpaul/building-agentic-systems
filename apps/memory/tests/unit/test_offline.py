@@ -137,7 +137,6 @@ class TestEtlOffline:
         result = await offline_pipeline(
             user_id=_USER_ID,
             source_files=["sources/listen.yaml"],
-            num_shards=2,
         )
 
         # Data phase: selectors forwarded untouched — the data coordinator owns
@@ -145,9 +144,9 @@ class TestEtlOffline:
         data.assert_awaited_once_with(
             user_id=_USER_ID, source_files=["sources/listen.yaml"], sources=None
         )
-        # Memory phase: one extraction coordinator per target user, with the
-        # extraction fan-out width forwarded.
-        extract.assert_awaited_once_with(_USER_ID, document_ids=None, num_shards=2)
+        # Memory phase: one extraction coordinator per target user (the fan-out
+        # width is YAML, read by the coordinator — not a forwarded parameter).
+        extract.assert_awaited_once_with(_USER_ID, document_ids=None)
         assert result["data"]["shards_total"] == 1
         assert result["extraction"][str(_USER_ID)]["succeeded"] == 1
 
@@ -192,7 +191,7 @@ class TestOfflinePipelinePhaseFlags:
         # The data phase is skipped entirely; extraction still runs, and the
         # result carries an explicit "no data phase" marker.
         data.assert_not_awaited()
-        extract.assert_awaited_once_with(_USER_ID, document_ids=None, num_shards=1)
+        extract.assert_awaited_once_with(_USER_ID, document_ids=None)
         assert result["data"] is None
 
     async def test_data_only_run_skips_user_resolution_extraction_and_indexing(
@@ -250,13 +249,11 @@ class TestOfflinePipelinePhaseFlags:
     ) -> None:
         _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
 
-        await offline_pipeline(
-            user_id=_USER_ID, document_ids=[_DOC_ID], num_shards=2, run_data=False
-        )
+        await offline_pipeline(user_id=_USER_ID, document_ids=[_DOC_ID], run_data=False)
 
         # Narrowing is verbatim pass-through: the coordinator, not this flow,
         # decides what an explicit doc-id set means.
-        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=2)
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID])
 
     async def test_document_ids_without_user_id_is_rejected(self, mocker) -> None:
         data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
@@ -292,7 +289,7 @@ class TestSourceUris:
         find.assert_called_once_with(
             {"user_id": _USER_ID, "source_uri": {"$in": [_SOURCE_URI]}}
         )
-        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID])
 
     async def test_resolves_a_tracked_uri_through_its_clean_form(self, mocker) -> None:
         _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
@@ -307,7 +304,7 @@ class TestSourceUris:
         find.assert_called_once_with(
             {"user_id": _USER_ID, "source_uri": {"$in": [_SOURCE_URI]}}
         )
-        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID])
 
     async def test_resolves_one_id_per_uri_in_caller_order(self, mocker) -> None:
         _data, extract, _index, _cluster, _users = _patch_coordinators(mocker)
@@ -328,7 +325,7 @@ class TestSourceUris:
         )
 
         extract.assert_awaited_once_with(
-            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID], num_shards=1
+            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID]
         )
 
     async def test_unions_with_document_ids(self, mocker) -> None:
@@ -351,7 +348,7 @@ class TestSourceUris:
         )
 
         extract.assert_awaited_once_with(
-            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID], num_shards=1
+            _USER_ID, document_ids=[_DOC_ID, _OTHER_DOC_ID]
         )
 
     async def test_unknown_uri_fails_loud(self, mocker) -> None:
@@ -396,7 +393,7 @@ class TestSourceUris:
         # doc-id run keep the exact I/O they had before the selector existed.
         init.assert_not_awaited()
         find.assert_not_called()
-        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID], num_shards=1)
+        extract.assert_awaited_once_with(_USER_ID, document_ids=[_DOC_ID])
 
 
 class TestOfflineIndexingPhase:
@@ -908,7 +905,7 @@ class TestDispatchOfflineIngest:
         )
 
         result = await dispatch_offline_pipeline(
-            user_id=_USER_ID, source_files=["sources/listen.yaml"], num_shards=2
+            user_id=_USER_ID, source_files=["sources/listen.yaml"]
         )
 
         assert result == {"status": "scheduled", "flow_run_id": "run-1"}
@@ -919,7 +916,6 @@ class TestDispatchOfflineIngest:
             "user_id": str(_USER_ID),
             "source_files": ["sources/listen.yaml"],
             "sources": None,
-            "num_shards": 2,
             "run_data": True,
             "run_extraction": True,
             "run_indexing": True,

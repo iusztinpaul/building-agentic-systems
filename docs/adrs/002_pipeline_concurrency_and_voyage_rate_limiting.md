@@ -625,6 +625,17 @@ shared Voyage budget.
      helpers say `batch`, not `bulk` (`_batch_build_and_load`) — one word for one
      concept.
 
+   **Amendment (`num_shards` moves to YAML).** The memory shard count is
+   `extraction.num_shards` in `default.yaml` (`Field(ge=1)`), read by the coordinator
+   where it RUNS. The `num_shards` flow parameter (`offline_pipeline`, the coordinator,
+   `dispatch_offline_pipeline`), the `--num-shards` script flags and the Makefile
+   `NUM_SHARDS` thread are removed, and so is `_resolve_num_shards` (config validation
+   replaces its clamp). Why: the nightly `offline-pipeline` cron passed no `num_shards`,
+   so scheduled extraction was stuck at 1 shard. Consequence: changing the width needs
+   a `make memory-serve-workflows` restart (local) or a push (Managed); a
+   `TREE_EXTRACTION__NUM_SHARDS=8 make …` on the dispatching shell is ignored (dispatch
+   forwards no environment) and the scripts warn about it.
+
 4. **Admission control is `serve(global_limit=concurrency.runner_global_limit)`**
    kept close to `voyage_rpm` so we don't admit far more runs than the embed
    budget can feed.

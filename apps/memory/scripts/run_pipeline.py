@@ -7,8 +7,8 @@ controlled there, this script only picks the dispatcher:
 * ``--mode offline`` (default) → :func:`tree.offline.dispatch_offline_pipeline`:
   ONE ``offline-pipeline`` flow run over the selected config sources
   (``--source-file``/``--uri``; neither → the default backfill+listen set), with
-  ``--num-shards`` extraction fan-out per user, followed by the indexing phase
-  (every phase flag left at its default).
+  ``extraction.num_shards`` fan-out per user (``default.yaml``), followed by the
+  indexing phase (every phase flag left at its default).
 * ``--mode online`` → :func:`tree.online.dispatch_online_pipeline`: ONE
   ``online-pipeline`` flow run for ONE ``--source`` (URL or local file, read here
   at the edge) that ingests AND runs extraction inline, then indexes that one
@@ -30,7 +30,7 @@ Requires:
 
 Usage:
     make memory-run-pipeline                                       # offline, default sources
-    make memory-run-pipeline SOURCE_FILE="sources/listen.yaml" NUM_SHARDS=2
+    make memory-run-pipeline SOURCE_FILE="sources/listen.yaml"
     make memory-run-pipeline MODE=online SOURCE="https://www.decodingai.com/p/some-post"
     uv run python scripts/run_pipeline.py --mode online --source /path/to/notes.md
 """
@@ -66,16 +66,14 @@ async def _run_offline(
     user_identifier: str | None,
     source_files: list[str],
     inline_sources: list[dict[str, Any]],
-    num_shards: int,
 ) -> None:
-    # The model / Modal knobs are read by the SERVING process, not by this one.
-    warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__")
+    # These knobs are read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__", "TREE_EXTRACTION__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,
         source_files=source_files or None,
         sources=inline_sources or None,
-        num_shards=num_shards,
     )
     await wait_for_dispatch(result)
 
@@ -126,12 +124,6 @@ async def _run_online(
     ),
 )
 @click.option(
-    "--num-shards",
-    default=1,
-    show_default=True,
-    help="[offline] Extraction fan-out width (forwarded per user; ``>= 1``).",
-)
-@click.option(
     "--source",
     default=None,
     help="[online] The ONE source to ingest: http(s) URL or local file path.",
@@ -147,7 +139,6 @@ def main(
     user_identifier: str | None,
     source_files: tuple[str, ...],
     uris: tuple[str, ...],
-    num_shards: int,
     source: str | None,
     title: str | None,
 ) -> None:
@@ -163,16 +154,12 @@ def main(
 
     if source or title:
         raise click.UsageError("--source/--title are online-only (pass --mode online).")
-    if num_shards < 1:
-        raise click.UsageError(f"--num-shards must be >= 1 (got {num_shards}).")
     # Parse + build inline sources from --uri tokens up front so a bad token
     # (e.g. an explicit huggingface_dataset) fails fast BEFORE any flow runs.
     specs = [parse_uri_token(token) for token in uris]
     inline_sources = [s.model_dump() for s in build_uri_sources(specs)]
     asyncio.run(
-        _run_offline(
-            user_id, user_identifier, list(source_files), inline_sources, num_shards
-        )
+        _run_offline(user_id, user_identifier, list(source_files), inline_sources)
     )
 
 

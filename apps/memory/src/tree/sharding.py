@@ -1,18 +1,15 @@
 """Neutral, pipeline-agnostic shard helpers (ADR-002 §3).
 
-These PURE functions are the single home for the balanced-contiguous
-partitioning math — and for the shard-OUTCOME rule (#095) — shared by BOTH
-coordinators:
+These PURE functions hold the balanced-contiguous partitioning math, used by
+the memory-extraction coordinator to shard a ``list[str]`` of pending document
+ids, and the shard-OUTCOME rule (#095), shared by BOTH coordinators. The data
+coordinator groups its sources by platform instead (#072), so it imports only
+``_shard_failure_reason``. Living at the ``tree`` top level — not under
+``memory/`` or ``data/`` — lets both import it with no cross-module
+(memory↔data) dependency.
 
-* the memory-extraction coordinator, which shards a ``list[str]`` of pending
-  document ids (``tree.memory.graph``), and
-* the data coordinator (#068), which shards the configured ``sources:`` list.
-
-The partitioning pair depends only on ``len()`` and slicing, so it is generic
-over the element type (``list[T] -> list[list[T]]``). Living at the ``tree`` top
-level — not under ``memory/`` or ``data/`` — lets both coordinators import the
-IDENTICAL logic with zero copy-paste and no cross-module (memory↔data)
-dependency.
+The shard count itself is ``extraction.num_shards`` in ``default.yaml``
+(validated ``>= 1``).
 
 There is NO Prefect ``@flow`` and NO deployment here — these are pure decision
 helpers, unit-tested directly.
@@ -23,21 +20,6 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 T = TypeVar("T")
-
-
-def _resolve_num_shards(num_shards: int) -> int:
-    """Resolve the effective shard count, clamped to ``>= 1``.
-
-    The shard count is always an explicit per-run choice
-    (``NUM_SHARDS`` / ``--num-shards`` / ``-p num_shards``). A non-positive value
-    — 0 or negative, only reachable via a DIRECT Prefect API/UI trigger that
-    bypasses the guarded ``--num-shards`` script path — clamps to ``1`` so the
-    run shards everything into a single shard instead of becoming a silent
-    zero-shard no-op (``_partition_into_shards``'s ``min(num_shards, N)`` would
-    otherwise go non-positive on a truthy negative).
-    """
-
-    return max(1, num_shards)
 
 
 def _partition_into_shards(items: list[T], num_shards: int) -> list[list[T]]:

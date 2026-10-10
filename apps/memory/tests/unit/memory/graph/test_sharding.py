@@ -1,9 +1,7 @@
 """Unit tests for the neutral, pipeline-agnostic shard-partitioning helpers.
 
-#066 relocated the pure partitioning math (``_partition_into_shards`` /
-``_resolve_num_shards``) into :mod:`tree.sharding` so BOTH the memory-extraction
-coordinator and the data coordinator (#068) import the IDENTICAL helpers without
-copy-paste (ADR-002 §3 Amendment #066).
+#066 relocated the pure partitioning math (``_partition_into_shards``) into
+:mod:`tree.sharding` (ADR-002 §3 Amendment #066).
 
 The memory document-shard partitioning (``list[str]``) is exhaustively covered by
 ``tests/unit/memory/graph/test_fanout.py`` (which imports the SAME functions
@@ -31,7 +29,6 @@ from prefect.client.schemas.objects import FlowRun, StateType
 from tests.prefect_doubles import completed_flow_run, flow_run_in_state
 from tree.sharding import (
     _partition_into_shards,
-    _resolve_num_shards,
     _shard_failure_reason,
 )
 
@@ -91,21 +88,6 @@ def test_partition_preserves_object_identity() -> None:
     flat = [src for shard in shards for src in shard]
     for original, sharded in zip(sources, flat, strict=True):
         assert sharded is original
-
-
-# ---------------------------------------------------------------------------
-# Effective-shard-count resolution / clamp (type-agnostic int -> int)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("bad", [0, -1, -3])
-def test_resolve_num_shards_clamps_nonpositive_to_one(bad) -> None:
-    assert _resolve_num_shards(bad) == 1
-
-
-@pytest.mark.parametrize("good", [1, 2, 4, 9])
-def test_resolve_num_shards_positive_is_unchanged(good) -> None:
-    assert _resolve_num_shards(good) == good
 
 
 # ---------------------------------------------------------------------------

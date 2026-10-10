@@ -9,18 +9,16 @@ A light CLI shim (glue lives in :mod:`tree.cli`) that dispatches the
 ``offline-pipeline`` flow (:mod:`tree.offline`) with the DATA phase OFF, so the
 run is the extraction phase plus the indexing phase. Inside it, the extraction
 coordinator (#067) resolves the doc set, partitions it into
-``min(num_shards, N)`` shards and dispatches one ``memory-extract-etl-worker``
-run per shard; then the indexing phase runs once for the user. Two modes select
-the doc set:
+``min(extraction.num_shards, N)`` shards (``default.yaml``) and dispatches one
+``memory-extract-etl-worker`` run per shard; then the indexing phase runs once
+for the user. Two modes select the doc set:
 
 * ``--mode offline`` (default) — batch: every PENDING document for the
-  resolved user (optionally narrowed with ``--doc-ids``); ``--num-shards``
-  sets the fan-out width.
+  resolved user (optionally narrowed with ``--doc-ids``).
 * ``--mode online`` — realtime: exactly the documents you select with
   ``--doc-ids`` (e.g. the id printed by ``run_data_pipeline.py --mode online``)
   and/or ``--source-uris`` (the ``source_uri`` an **Ingest receipt** carries,
-  resolved to ids by the flow) — one of the two is required. No shard fan-out —
-  a handful of docs needs one worker.
+  resolved to ids by the flow) — one of the two is required.
 
 The command blocks streaming the run's logs and exits non-zero on failure. The
 ``offline-pipeline`` deployment is core (always registered), and dispatch needs
@@ -37,7 +35,6 @@ Requires:
 
 Usage:
     make memory-run-memory-pipeline                                # offline, all pending docs
-    make memory-run-memory-pipeline NUM_SHARDS=4
     make memory-run-memory-pipeline MODE=online DOC_IDS="<id1>,<id2>"
     make memory-run-memory-pipeline MODE=online SOURCE_URIS="<uri>[,<uri2>]"
     uv run python scripts/run_memory_pipeline.py --mode online --doc-ids "id1,id2"
@@ -69,16 +66,14 @@ async def _run(
     user_identifier: str | None,
     document_ids: list[str] | None,
     source_uris: list[str] | None,
-    num_shards: int | None,
 ) -> None:
-    # The model / Modal knobs are read by the SERVING process, not by this one.
-    warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__")
+    # These knobs are read by the SERVING process, not by this one.
+    warn_ignored_config_overrides("TREE_MODELS__", "TREE_MODAL__", "TREE_EXTRACTION__")
     resolved_user_id = await connect_and_resolve_user(user_id, user_identifier)
     result = await dispatch_offline_pipeline(
         user_id=resolved_user_id,
         document_ids=document_ids,
         source_uris=source_uris,
-        num_shards=num_shards if num_shards is not None else 1,
         run_data=False,
     )
     await wait_for_dispatch(result)
@@ -117,23 +112,12 @@ def _parse_csv(raw: str | None) -> list[str] | None:
         "combined with it."
     ),
 )
-@click.option(
-    "--num-shards",
-    default=None,
-    type=int,
-    help=(
-        "[offline] Document-shard fan-out width (#067, ``>= 1``): the coordinator "
-        "dispatches one worker run per shard; the indexing phase then runs once "
-        "for the user. Omit or 1 → 1 worker run + 1 indexing subflow."
-    ),
-)
 def main(
     mode: str,
     user_id: str | None,
     user_identifier: str | None,
     doc_ids: str | None,
     source_uris: str | None,
-    num_shards: int | None,
 ) -> None:
     """Run the memory extraction pipeline: offline batch or specific online docs."""
 
@@ -144,10 +128,6 @@ def main(
                 "by run_data_pipeline.py --mode online) or --source-uris "
                 "'<uri>[,<uri2>]' (the source_uri an ingest receipt carries)."
             )
-        if num_shards is not None:
-            raise click.UsageError("--num-shards is an offline-only fan-out knob.")
-    if num_shards is not None and num_shards < 1:
-        raise click.UsageError(f"--num-shards must be >= 1 (got {num_shards}).")
 
     asyncio.run(
         _run(
@@ -155,7 +135,6 @@ def main(
             user_identifier,
             _parse_csv(doc_ids),
             _parse_csv(source_uris),
-            num_shards,
         )
     )
 

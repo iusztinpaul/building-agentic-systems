@@ -7,13 +7,11 @@ resolve → partition → dispatch ``memory-extract-etl-worker`` runs (see
 holds the reusable PURE helpers — there is NO Prefect ``@flow`` and NO deployment
 here.
 
-The pure, pipeline-agnostic partitioning math (``_partition_into_shards`` /
-``_resolve_num_shards``) now lives in the neutral :mod:`tree.sharding` module
-(ADR-002 §3 Amendment #066) so the data coordinator (#068) reuses the IDENTICAL
-helpers without copy-paste. They are re-exported here so memory call sites and
-tests keep their existing import paths; the MEMORY-specific helpers
-(``_resolve_pending_document_ids``, ``_fan_out_extraction``, ``FanOutStats``)
-remain in this module.
+The pure partitioning math (``_partition_into_shards``) lives in the neutral
+:mod:`tree.sharding` module (ADR-002 §3 Amendment #066) and is re-exported here
+so memory call sites and tests keep their existing import paths; the
+MEMORY-specific helpers (``_resolve_pending_document_ids``,
+``_fan_out_extraction``, ``FanOutStats``) remain in this module.
 
 The fan-out axis is document-shards of ONE user. Topology (coordinator path):
 
@@ -22,8 +20,8 @@ The fan-out axis is document-shards of ONE user. Topology (coordinator path):
    ingested iff its ``_id`` appears in some ``memory`` object's
    ``sources`` array (there is no status flag on ``Document``). An explicit list
    is used verbatim. Empty result ⇒ no-op returning a zero report.
-2. **Partition.** Split into ``min(num_shards, N)`` contiguous, disjoint, balanced
-   shards; ``N < num_shards`` collapses to ``N`` shards.
+2. **Partition.** Split into ``min(extraction.num_shards, N)`` contiguous,
+   disjoint, balanced shards; ``N < num_shards`` collapses to ``N`` shards.
 3. **Fan out extraction.** One ``memory-extract-etl-worker`` run per shard via
    ``run_deployment`` under ``asyncio.gather(return_exceptions=True)`` so one
    shard's failure is isolated and recorded, never aborting the others. The
@@ -55,14 +53,10 @@ from prefect import get_run_logger
 from tree.entities.memory import MEMORY_COLLECTION
 from tree.entities.documents import Document
 
-# The balanced-contiguous partitioning math now lives in the neutral, pipeline-
-# agnostic ``tree.sharding`` module (ADR-002 §3 Amendment #066) so BOTH the memory
-# and data coordinators import the IDENTICAL helpers without copy-paste. Memory
-# extraction keeps importing them through this module (behaviour unchanged); the
-# functions are re-exported so existing call sites and tests are untouched.
+# Re-exported from the neutral ``tree.sharding`` module (ADR-002 §3 Amendment
+# #066) so memory call sites and tests keep their import paths.
 from tree.sharding import (
     _partition_into_shards,
-    _resolve_num_shards,
     _shard_failure_reason,
 )
 
@@ -72,7 +66,6 @@ __all__ = [
     "FanOutStats",
     "_fan_out_extraction",
     "_partition_into_shards",
-    "_resolve_num_shards",
     "_resolve_pending_document_ids",
 ]
 

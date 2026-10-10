@@ -1800,6 +1800,44 @@ class TestLLMTaskCacheIdentity:
 # ---------------------------------------------------------------------------
 
 
+class TestCoordinatorShardCount:
+    """The coordinator reads ``extraction.num_shards`` where it RUNS — no parameter."""
+
+    async def test_partitions_by_the_configured_shard_count(
+        self, mocker, monkeypatch
+    ) -> None:
+        # Arrange: 5 explicit docs (no pending-doc DB query) and a YAML width of 2.
+        monkeypatch.setenv("TREE_EXTRACTION__NUM_SHARDS", "2")
+        mocker.patch("tree.memory.pipeline.init_mongodb", new=AsyncMock())
+        fan_out = mocker.patch(
+            "tree.memory.pipeline._fan_out_extraction", new=AsyncMock()
+        )
+        user_id = PydanticObjectId()
+        document_ids = [f"d{i}" for i in range(5)]
+
+        await pipeline._coordinate_sharded_extraction(
+            user_id=user_id, document_ids=document_ids
+        )
+
+        # Assert: min(2, 5) balanced contiguous shards reach the fan-out.
+        assert fan_out.await_args.kwargs["shards"] == [
+            ["d0", "d1", "d2"],
+            ["d3", "d4"],
+        ]
+
+    def test_the_flow_has_no_num_shards_parameter(self) -> None:
+        # A Prefect parameter would shadow the YAML and bring back the per-run
+        # value the nightly cron never set.
+        params = inspect.signature(
+            pipeline.memory_extract_etl_coordinator.fn
+        ).parameters
+        assert "num_shards" not in params
+        assert (
+            "num_shards"
+            not in inspect.signature(offline.offline_pipeline.fn).parameters
+        )
+
+
 class TestPipelineExports:
     """ADR-006 decision 8: ONE module holding the rag tasks, the graph tasks and
     all three memory flows — under their UNCHANGED names."""

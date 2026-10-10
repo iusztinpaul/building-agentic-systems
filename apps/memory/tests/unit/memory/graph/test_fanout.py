@@ -6,7 +6,6 @@
 the PURE logic with no Prefect server and ``run_deployment`` mocked:
 
 * ``_partition_into_shards`` — contiguous, disjoint, balanced shard partitioning;
-* ``_resolve_num_shards`` — the non-positive→1 clamp;
 * ``_fan_out_extraction`` — the gather + failure-isolation core. Each
   child dispatch targets the WORKER deployment and carries only
   ``{user_id, document_ids}`` (NO ``num_shards`` key — the worker has no such
@@ -37,7 +36,6 @@ from tree.memory.graph.sharding import (
     FanOutStats,
     _fan_out_extraction,
     _partition_into_shards,
-    _resolve_num_shards,
 )
 
 
@@ -121,42 +119,6 @@ def test_explicit_six_ids_four_shards_sizes_2_2_1_1() -> None:
 
     assert [len(s) for s in shards] == [2, 2, 1, 1]
     assert [doc_id for shard in shards for doc_id in shard] == ids
-
-
-# ---------------------------------------------------------------------------
-# Effective-shard-count resolution / clamp
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("bad", [0, -1, -3])
-def test_resolve_num_shards_clamps_nonpositive_to_one(bad) -> None:
-    """A DIRECT-trigger 0 / negative ``num_shards`` clamps to a single shard.
-
-    Guards the silent zero-shard no-op: ``_partition_into_shards``'s
-    ``min(num_shards, N)`` would go non-positive on a truthy negative.
-    """
-
-    assert _resolve_num_shards(bad) == 1
-
-
-@pytest.mark.parametrize("good", [1, 2, 4, 7])
-def test_resolve_num_shards_positive_is_unchanged(good) -> None:
-    assert _resolve_num_shards(good) == good
-
-
-@pytest.mark.parametrize("bad", [0, -3])
-def test_clamped_nonpositive_shards_into_one_shard_with_all_ids(bad) -> None:
-    """End-to-end: a 0 / negative direct-trigger value runs everything in ONE
-    shard (NOT a no-op) — the resolved count feeds ``_partition_into_shards``."""
-
-    ids = [str(PydanticObjectId()) for _ in range(6)]
-
-    effective = _resolve_num_shards(bad)
-    shards = _partition_into_shards(ids, effective)
-
-    # One shard, containing every id in order — not a zero-shard no-op.
-    assert len(shards) == 1
-    assert shards[0] == ids
 
 
 # ---------------------------------------------------------------------------
