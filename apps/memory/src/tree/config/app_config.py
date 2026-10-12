@@ -256,9 +256,8 @@ class ConcurrencyConfig(BaseModel):
     * ``voyage_rpm`` — requests/minute the shared free-tier Voyage key allows.
       Drives the server-side ``voyage-embeddings`` Prefect global concurrency
       limit (limit = ``voyage_rpm``, slot-decay-per-second = ``voyage_rpm / 60``),
-      created with ``prefect gcl create voyage-embeddings --limit <voyage_rpm>
-      --slot-decay-per-second <voyage_rpm/60>``. Fail-open: an unreachable
-      limiter warns and the call proceeds (task 178).
+      created/updated by ``make memory-deploy-prefect-setup-up``. Fail-open: an
+      unreachable limiter warns and the call proceeds (task 178).
     * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
       ``max_total_tokens`` cap), not yet a second token-weighted limiter.
     * ``runner_global_limit`` — admission control for ``serve(limit=...)``;

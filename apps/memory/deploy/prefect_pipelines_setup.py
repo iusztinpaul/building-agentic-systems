@@ -3,7 +3,8 @@
 Provision the **persistent worker** side of the pipelines — entirely through code,
 mirroring ``deploy/atlas_cluster.py``. Where ``atlas_cluster.py`` owns the MongoDB
 cluster, this owns the Prefect Cloud **Managed work pool**, the config blocks the
-flows read at run time, and the 4 core deployments bound to that pool
+flows read at run time, the ``voyage-embeddings`` global concurrency limit that
+paces Voyage embed POSTs (ADR-002 §1), and the 4 core deployments bound to that pool
 (``data-etl-worker``, ``memory-extract-etl-worker``, ``online-pipeline``,
 ``offline-pipeline``). Once ``up`` runs,
 Prefect hosts the workers, so flow runs the MCP submits (async ingestion) execute
@@ -13,7 +14,8 @@ Split of responsibilities:
 
 * **This script** (``up`` / ``update`` / ``status`` / ``down``) owns the *infra*:
   the Managed work pool, the Secret blocks + Variables that carry runtime config,
-  and the deployment definitions (git-sourced from ``main``).
+  the ``voyage-embeddings`` limit, and the deployment definitions (git-sourced
+  from ``main``).
 * **The CD path** (``deploy/prefect_pipelines.py``) only pushes *code/spec updates*
   to the same deployments — it reuses :func:`managed_env_templates` (whose values
   are block/variable references, never raw secrets) so CI needs only the Prefect
@@ -32,10 +34,10 @@ blocks/variables (Mongo creds, Voyage/Gemini/Bright Data/Opik keys).
 
 Commands::
 
-    uv run python deploy/prefect_pipelines_setup.py up        # pool + blocks + deployments (idempotent)
+    uv run python deploy/prefect_pipelines_setup.py up        # pool + blocks + limit + deployments (idempotent)
     uv run python deploy/prefect_pipelines_setup.py update    # re-deploy code/spec only
-    uv run python deploy/prefect_pipelines_setup.py status    # pool, bindings + git refs, orphans
-    uv run python deploy/prefect_pipelines_setup.py down      # delete deployments + pool
+    uv run python deploy/prefect_pipelines_setup.py status    # pool, limit, bindings + git refs, orphans
+    uv run python deploy/prefect_pipelines_setup.py down      # delete deployments + pool + limit
 
 Every verb takes ``--groups data|memory`` (comma-separated, defaults to the
 ``GROUPS`` env var) to scope it to whole pipelines; unset means all. The groups
@@ -59,7 +61,9 @@ from prefect.client.schemas.filters import WorkPoolFilter, WorkPoolFilterName
 from prefect.exceptions import ObjectAlreadyExists, ObjectNotFound
 from prefect.variables import Variable
 
+from tree.config.app_config import app_config
 from tree.logging import init_logger
+from tree.models.throttle import VOYAGE_EMBED_LIMIT
 from tree.orchestrator import (
     GIT_URL,
     MANAGED_WORK_POOL,
@@ -161,6 +165,23 @@ async def _ensure_work_pool(name: str) -> None:
             logger.info("Work pool %r already exists (created concurrently).", name)
 
 
+async def _ensure_voyage_limit() -> None:
+    """Create or update the ``voyage-embeddings`` limit from ``voyage_rpm``.
+
+    One slot per Voyage POST, refilled at ``voyage_rpm / 60`` slots/s, so every
+    run in the workspace shares the key's requests-per-minute budget. Raising
+    ``voyage_rpm`` (e.g. 3 → 2000 after adding a payment method) and re-running
+    ``up`` updates the limit in place.
+    """
+
+    rpm = app_config.concurrency.voyage_rpm
+    async with get_client() as client:
+        await client.upsert_global_concurrency_limit_by_name(
+            VOYAGE_EMBED_LIMIT, limit=rpm, slot_decay_per_second=rpm / 60
+        )
+    logger.info("Upserted limit %r (%d RPM).", VOYAGE_EMBED_LIMIT, rpm)
+
+
 def _git_ref(pull_steps: list[dict] | None) -> str:
     """The ref a deployment's ``git_clone`` pull step checks out.
 
@@ -185,6 +206,14 @@ async def _status(work_pool: str, groups: tuple[str, ...]) -> None:
             click.echo(f"work pool: {pool.name} type={pool.type} status={pool.status}")
         except ObjectNotFound:
             click.echo(f"work pool: {work_pool} <missing — run `up`>")
+        try:
+            gcl = await client.read_global_concurrency_limit_by_name(VOYAGE_EMBED_LIMIT)
+            click.echo(
+                f"limit: {gcl.name} limit={gcl.limit} "
+                f"decay={gcl.slot_decay_per_second}/s active={gcl.active}"
+            )
+        except ObjectNotFound:
+            click.echo(f"limit: {VOYAGE_EMBED_LIMIT} <missing — run `up`>")
         for full_name in deployment_full_names(groups):
             try:
                 dep = await client.read_deployment_by_name(full_name)
@@ -221,8 +250,8 @@ async def _down(work_pool: str, purge_blocks: bool, groups: tuple[str, ...]) -> 
                 logger.info("Deleted deployment %s", full_name)
             except ObjectNotFound:
                 logger.info("Deployment %s already absent", full_name)
-        # A group-scoped teardown leaves the pool alone — the other group's
-        # deployments may still be bound to it.
+        # A group-scoped teardown leaves the pool and the limit alone — the other
+        # group's deployments may still use them.
         if groups:
             logger.info("Kept work pool %s (group-scoped down).", work_pool)
         else:
@@ -231,6 +260,11 @@ async def _down(work_pool: str, purge_blocks: bool, groups: tuple[str, ...]) -> 
                 logger.info("Deleted work pool %s", work_pool)
             except ObjectNotFound:
                 logger.info("Work pool %s already absent", work_pool)
+            try:
+                await client.delete_global_concurrency_limit_by_name(VOYAGE_EMBED_LIMIT)
+                logger.info("Deleted limit %s", VOYAGE_EMBED_LIMIT)
+            except ObjectNotFound:
+                logger.info("Limit %s already absent", VOYAGE_EMBED_LIMIT)
     if purge_blocks:
         logger.warning(
             "Block/variable purge not automated — delete %s and the tree-* "
@@ -280,10 +314,11 @@ def cli() -> None:
 @_groups_option
 @click.option("--git-ref", default="main", show_default=True, help="Branch or commit.")
 def up(work_pool: str, groups: tuple[str, ...], git_ref: str) -> None:
-    """Provision blocks + Managed work pool + deployments (idempotent)."""
+    """Provision blocks + Managed work pool + limit + deployments (idempotent)."""
 
     _seed_config_stores()
     asyncio.run(_ensure_work_pool(work_pool))
+    asyncio.run(_ensure_voyage_limit())
     ids = deploy_cloud_pipelines(
         work_pool_name=work_pool,
         git_ref=git_ref,
@@ -313,7 +348,7 @@ def update(work_pool: str, groups: tuple[str, ...], git_ref: str) -> None:
 @_pool_option
 @_groups_option
 def status(work_pool: str, groups: tuple[str, ...]) -> None:
-    """Print the work pool, each deployment's binding + git ref, and orphans."""
+    """Print the work pool, the limit, each deployment's binding + git ref, and orphans."""
 
     asyncio.run(_status(work_pool, groups))
 
@@ -326,10 +361,14 @@ def status(work_pool: str, groups: tuple[str, ...]) -> None:
 def down(
     work_pool: str, groups: tuple[str, ...], yes: bool, purge_blocks: bool
 ) -> None:
-    """Delete the deployments (+ the Managed work pool when unscoped)."""
+    """Delete the deployments (+ the Managed work pool and limit when unscoped)."""
 
     scope = f"the {', '.join(groups)} " if groups else "all tree "
-    pool_note = "" if groups else f" and the '{work_pool}' work pool"
+    pool_note = (
+        ""
+        if groups
+        else f", the '{work_pool}' work pool and the {VOYAGE_EMBED_LIMIT} limit"
+    )
     if not yes:
         click.confirm(f"Delete {scope}deployments{pool_note}?", abort=True)
     asyncio.run(_down(work_pool, purge_blocks, groups))

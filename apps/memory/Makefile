@@ -129,16 +129,16 @@ serve-workflows: # LOCAL dev: serve workflow deployments from local code (point 
 deploy-prefect: # CD entrypoint: push code/spec updates to the Cloud managed deployments (needs only PREFECT_API_URL/PREFECT_API_KEY). Assumes deploy-prefect-setup-up has run. Used by .github/workflows/cd.yml on push to main. Optional GROUPS=data|memory (comma-separated) deploys only those pipelines; unset deploys all.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines.py
 
-deploy-prefect-setup-up: # IaC: provision the Prefect Cloud Managed work pool + config blocks + deployments (idempotent). Needs PREFECT_API_URL/KEY, GITHUB_PAT, and the app runtime env (Mongo creds, VOYAGE/GOOGLE/BRIGHTDATA/OPIK keys). Optional GROUPS=data|memory deploys only those pipelines; unset deploys all.
+deploy-prefect-setup-up: # IaC: provision the Prefect Cloud Managed work pool + config blocks + voyage-embeddings rate limit + deployments (idempotent). Needs PREFECT_API_URL/KEY, GITHUB_PAT, and the app runtime env (Mongo creds, VOYAGE/GOOGLE/BRIGHTDATA/OPIK keys). Optional GROUPS=data|memory deploys only those pipelines; unset deploys all.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py up
 
 deploy-prefect-setup-update: # IaC: re-deploy code/spec only to the managed pool (assumes the pool + blocks exist). Optional GROUPS=data|memory.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py update
 
-deploy-prefect-setup-status: # IaC: print the managed work pool, each deployment's work-pool binding + git ref, and any ORPHAN deployment on the pool (CD never deletes one). Optional GROUPS=data|memory.
+deploy-prefect-setup-status: # IaC: print the managed work pool, the voyage-embeddings limit, each deployment's work-pool binding + git ref, and any ORPHAN deployment on the pool (CD never deletes one). Optional GROUPS=data|memory.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py status
 
-deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool. Add YES=1 to skip the prompt. Optional GROUPS=data|memory tears down only those pipelines and keeps the pool.
+deploy-prefect-setup-down: # IaC: delete the managed deployments + work pool + voyage-embeddings limit. Add YES=1 to skip the prompt. Optional GROUPS=data|memory tears down only those pipelines and keeps the pool and limit.
 	GROUPS="$(GROUPS)" uv run python deploy/prefect_pipelines_setup.py down $(if $(YES),--yes,)
 
 

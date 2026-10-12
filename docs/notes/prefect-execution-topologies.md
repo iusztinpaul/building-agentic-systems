@@ -240,7 +240,7 @@ local-start`) and the serve runner.
 |---|---|
 | Deployment topology (single source of truth) | `orchestrator.py` → `_DEPLOYMENT_SPECS` (4 core + 1 optional) |
 | Local serve | `serve_deployments()` ← `make memory-serve-workflows` |
-| Managed deploy (IaC: pool + blocks + deployments) | `deploy/prefect_pipelines_setup.py up` ← `make memory-deploy-prefect-setup-up` |
+| Managed deploy (IaC: pool + blocks + Voyage limit + deployments) | `deploy/prefect_pipelines_setup.py up` ← `make memory-deploy-prefect-setup-up` |
 | Managed CD (code/spec only, on push to `main`) | `deploy/prefect_pipelines.py` ← `make memory-deploy-prefect` (`.github/workflows/cd.yml`) |
 | Managed image + pull steps | `MANAGED_IMAGE`, `_GitRepoWithPipInstall` in `orchestrator.py` |
 | Runtime secrets/config → blocks/variables | `RUNTIME_CONFIG` + `managed_env_templates()` |
@@ -283,8 +283,8 @@ wins:
 - **`voyage-embeddings` global concurrency limit** — the one **machine-count-invariant** layer:
   a server-side GCL (`limit = voyage_rpm = 3`, `slot_decay = rpm/60`) that caps Voyage embedding
   POSTs across *every* run/container/topology at once. `strict=False` → no-ops when absent
-  (dev/tests). Created out-of-band: `prefect gcl create voyage-embeddings --limit <rpm>
-  --slot-decay-per-second <rpm/60>`. See ADR-002. Fail-open (ADR-013 §5, task 178): if the
+  (dev/tests). Created/updated from `voyage_rpm` by `make memory-deploy-prefect-setup-up`.
+  See ADR-002. Fail-open (ADR-013 §5, task 178): if the
   limiter can't be reached or doesn't reply within `voyage_slot_acquire_timeout_seconds`, the POST
   proceeds with one WARNING — Voyage's own 429 backoff remains the quota guard.
 

@@ -155,6 +155,7 @@ class TestGroupsSelector:
     def _run(self, mocker, args: list[str]):
         mocker.patch.object(_setup, "_seed_config_stores")
         mocker.patch.object(_setup, "_ensure_work_pool", new=mocker.AsyncMock())
+        mocker.patch.object(_setup, "_ensure_voyage_limit", new=mocker.AsyncMock())
         deploy = mocker.patch.object(_setup, "deploy_cloud_pipelines", return_value=[])
         # env: don't let a GROUPS in the dev shell leak into the unscoped case.
         result = CliRunner().invoke(_setup.cli, args, env={"GROUPS": ""})
@@ -179,6 +180,24 @@ class TestGroupsSelector:
         assert "Unknown deployment group" in result.output
         deploy.assert_not_called()
         _setup._seed_config_stores.assert_not_called()
+
+
+class TestEnsureVoyageLimit:
+    """``up`` creates the ``voyage-embeddings`` limit the Voyage clients acquire,
+    so no operator has to run ``prefect gcl create`` by hand."""
+
+    async def test_upserts_the_limit_from_voyage_rpm(self, mocker, monkeypatch) -> None:
+        monkeypatch.setattr(_setup.app_config.concurrency, "voyage_rpm", 3)
+        client = mocker.AsyncMock()
+        client.__aenter__.return_value = client
+        mocker.patch.object(_setup, "get_client", return_value=client)
+
+        await _setup._ensure_voyage_limit()
+
+        # 3 slots, refilled at 3/60 per second = 3 POSTs per minute.
+        client.upsert_global_concurrency_limit_by_name.assert_awaited_once_with(
+            "voyage-embeddings", limit=3, slot_decay_per_second=0.05
+        )
 
 
 class TestSeedConfigStores:
@@ -237,9 +256,12 @@ class TestGitRefOfPullSteps:
 
 
 class _FakePrefectClient:
-    """The four reads ``status`` makes, over an in-memory set of deployments."""
+    """The reads ``status`` makes, over an in-memory set of deployments."""
 
-    def __init__(self, deployments: dict[str, list[dict]]) -> None:
+    def __init__(
+        self, deployments: dict[str, list[dict]], has_limit: bool = True
+    ) -> None:
+        self._has_limit = has_limit
         # full name ("flow/deployment") → pull steps
         self._flows: dict = {}
         self._by_name: dict = {}
@@ -263,6 +285,13 @@ class _FakePrefectClient:
     async def read_work_pool(self, name: str) -> SimpleNamespace:
         return SimpleNamespace(name=name, type="prefect:managed", status="READY")
 
+    async def read_global_concurrency_limit_by_name(self, name: str) -> SimpleNamespace:
+        if not self._has_limit:
+            raise _setup.ObjectNotFound(http_exc=Exception(name))
+        return SimpleNamespace(
+            name=name, limit=3, slot_decay_per_second=0.05, active=True
+        )
+
     async def read_deployment_by_name(self, full_name: str) -> SimpleNamespace:
         try:
             return self._by_name[full_name]
@@ -281,14 +310,38 @@ class TestStatus:
 
     _ORPHAN = "data-etl-coordinator/data-etl-coordinator"
 
-    def _run(self, mocker, deployments: dict[str, list[dict]], args: list[str]):
+    def _run(
+        self,
+        mocker,
+        deployments: dict[str, list[dict]],
+        args: list[str],
+        has_limit: bool = True,
+    ):
         mocker.patch.object(
-            _setup, "get_client", return_value=_FakePrefectClient(deployments)
+            _setup,
+            "get_client",
+            return_value=_FakePrefectClient(deployments, has_limit=has_limit),
         )
         return CliRunner().invoke(_setup.cli, ["status", *args], env={"GROUPS": ""})
 
     def _every_spec(self, pull_steps: list[dict]) -> dict[str, list[dict]]:
         return {name: pull_steps for name in orchestrator.deployment_full_names()}
+
+    def test_prints_the_voyage_limit(self, mocker) -> None:
+        result = self._run(mocker, self._every_spec(_clone_step(branch="main")), [])
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "limit: voyage-embeddings limit=3 decay=0.05/s active=True"
+        ) in result.output
+
+    def test_flags_a_missing_voyage_limit(self, mocker) -> None:
+        result = self._run(
+            mocker, self._every_spec(_clone_step(branch="main")), [], has_limit=False
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "limit: voyage-embeddings <missing — run `up`>" in result.output
 
     def test_prints_the_commit_each_deployment_is_pinned_to(self, mocker) -> None:
         sha = "5f5225f" + "0" * 33

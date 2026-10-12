@@ -49,7 +49,7 @@ Must run BEFORE anything that resolves a user:
 ## 3. Prefect Cloud (pipelines)
 
 ```
-make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + the 3 data deployments
+make memory-deploy-prefect-setup-up GROUPS=data   # pool + blocks + Voyage limit + the 3 data deployments
 make memory-deploy-prefect-setup-up GROUPS=memory # add extraction + dream when you need them
 make memory-run-indexing-pipeline USER_ID=<oid>   # first indexing run (dispatches offline-pipeline)
 ```
@@ -60,6 +60,11 @@ the data worker + both end-to-end pipelines; `memory` selects 4: the extraction 
 both end-to-end pipelines, which carry BOTH identity tags). Start with
 `data` so nothing but ingestion is registered while you verify the cluster, then
 re-run with `memory`. A group-scoped `down` keeps the work pool.
+
+`up` also creates the `voyage-embeddings` Prefect global concurrency limit from
+`concurrency.voyage_rpm` (3 slots, refilled at 3/60 per second = 3 Voyage POSTs per
+minute across every run). After adding a Voyage payment method, raise `voyage_rpm`
+and re-run `up`; it updates the limit in place.
 
 `up` is idempotent IaC (`deploy/prefect_pipelines_setup.py`); afterwards the CD
 workflow (`.github/workflows/cd.yml`) keeps the deployment specs in sync on

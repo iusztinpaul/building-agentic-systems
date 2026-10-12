@@ -641,7 +641,7 @@ shared Voyage budget.
    budget can feed.
 
 5. **YAML is the single source of truth; the server limit is derived from it.**
-   A `make memory-sync-concurrency-limits` target creates/updates the
+   `make memory-deploy-prefect-setup-up` (the Prefect Cloud IaC) creates/updates the
    `voyage-embeddings` GCL from `app_config.concurrency`. Raising the cap after a
    payment method is added is: edit `voyage_rpm`, re-run the target — no code change.
 
@@ -699,8 +699,9 @@ The defaults (`doc_concurrency: 1`, `dedup_concurrency: 8`) live in
   hold a slot up to 5 min under a 3-slot limit. We prefer `rate_limit`
   (fire-and-decay) over `concurrency` (held context) and keep the wrap tight.
 - **`strict=False` masks misconfiguration:** a missing limit silently disables
-  throttling. Mitigated by making `sync-concurrency-limits` part of the documented
-  serve workflow and asserting limit existence in the throttling integration test.
+  throttling. Mitigated by creating the limit in `make memory-deploy-prefect-setup-up`;
+  `make memory-deploy-prefect-setup-status` flags it when missing. A local `serve`
+  against a local Prefect server runs without it.
 - **Honest expectation:** with 3 RPM shared across 4 runs, embedding is the
   throughput floor. Parallelism speeds CPU/DB phases and keeps runs legal; it does
   not make embedding faster until the cap is lifted.
