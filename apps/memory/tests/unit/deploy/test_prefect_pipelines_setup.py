@@ -94,11 +94,12 @@ class TestDeploymentSpecs:
         # inline subflow went to ``dream-consolidation-all-users``. There is no
         # spare slot: a 6th spec must displace one of these or be gated behind
         # ``optional=True`` (see ``_active_deployment_specs``), so registering one
-        # more must fail here rather than at ``deploy`` time against Cloud.
-        full_names = orchestrator.deployment_full_names()
+        # more must fail here rather than at ``deploy`` time against Cloud. Counts
+        # the full topology: ``rag`` mode deactivates dream, freeing its slot.
+        names = [spec.name for spec in orchestrator._DEPLOYMENT_SPECS]
 
-        assert len(full_names) == 5
-        assert {name.split("/")[-1] for name in full_names} == {
+        assert len(names) == 5
+        assert set(names) == {
             "data-etl-worker",
             "memory-extract-etl-worker",
             "online-pipeline",

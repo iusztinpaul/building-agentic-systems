@@ -27,6 +27,7 @@ admission-control guards (``limit`` not ``global_limit``; binding to the real
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import inspect
 from pathlib import Path
@@ -43,6 +44,26 @@ from tree.config.app_config import app_config
 # four levels is the repo root.
 _REPO_ROOT = Path(tree.__file__).parents[4]
 _SRC_PREFIX = "apps/memory/src/"
+# The import-time specs, captured before the autouse fixture swaps in a copy.
+_REAL_SPECS = orchestrator._DEPLOYMENT_SPECS
+
+
+@pytest.fixture(autouse=True)
+def _all_specs_activated(mocker) -> None:
+    """Activate every spec so the topology tests see the full core 5.
+
+    ``activated`` is computed from the memory mode at import, and ``rag`` (the
+    shipped default) deactivates dream. The activation tests below cover that.
+    """
+
+    mocker.patch.object(
+        orchestrator,
+        "_DEPLOYMENT_SPECS",
+        [
+            dataclasses.replace(s, activated=True)
+            for s in orchestrator._DEPLOYMENT_SPECS
+        ],
+    )
 
 
 def _module_name(entrypoint_path: str) -> str:
@@ -276,6 +297,51 @@ def test_deploy_optional_gate_filters_an_optional_spec(
     # Assert — the core 5 always register; only the optional spec follows the flag.
     assert ("fake-optional-etl" in names) is registers_the_optional_spec
     assert len(names) == (6 if registers_the_optional_spec else 5)
+
+
+def test_only_dream_follows_the_memory_mode() -> None:
+    """Dream is activated exactly in ``graphrag`` mode; every other spec always.
+
+    Dream consolidates the knowledge graph, which ``rag`` mode never builds, so
+    registering it there would spend a free-tier slot on a nightly no-op.
+    """
+
+    # Act
+    activated = {spec.name: spec.activated for spec in _REAL_SPECS}
+
+    # Assert
+    graphrag = app_config.memory.mode == "graphrag"
+    assert activated.pop("dream-consolidation-all-users") is graphrag
+    assert all(activated.values())
+
+
+def test_a_deactivated_spec_registers_on_neither_path(mocker) -> None:
+    """``activated=False`` (dream in ``rag`` mode) skips serve AND Cloud deploy."""
+
+    # Arrange
+    mocker.patch.object(
+        orchestrator,
+        "_DEPLOYMENT_SPECS",
+        [
+            dataclasses.replace(s, activated=s.name != "dream-consolidation-all-users")
+            for s in orchestrator._DEPLOYMENT_SPECS
+        ],
+    )
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    # Act
+    orchestrator.serve_deployments(limit=4)
+    full_names = orchestrator.deployment_full_names()
+
+    # Assert
+    assert {dep.name for dep in spy.call_args.args} == {
+        "data-etl-worker",
+        "memory-extract-etl-worker",
+        "online-pipeline",
+        "offline-pipeline",
+    }
+    assert not any("dream-consolidation-all-users" in name for name in full_names)
+    assert len(full_names) == 4
 
 
 def test_serve_deployments_schedules_the_offline_and_dream_pipelines(mocker):
