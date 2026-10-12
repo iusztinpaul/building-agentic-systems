@@ -138,7 +138,7 @@ def get_search_embedding_model() -> BaseEmbeddingModel:
 def search_embedding_identity() -> str:
     """Identity of the persisted embedding space: ``provider:model:dims:role``.
 
-    ADR-009 decision 6: the 90-day Prefect ``INPUTS`` cache on
+    ADR-009 decision 6: the 1-day Prefect ``INPUTS`` cache on
     ``embed-children`` / ``embed-entities`` was keyed on the text list alone,
     so re-extracting an already-seen document after a model swap replayed
     vectors from the OLD embedding space. Both tasks take this string as an
@@ -169,7 +169,7 @@ def llm_identity() -> str:
 
     Decision 6's rule ("caches carry the identity of the model that produced
     them") applied to the ``models.llm`` switch of ADR-009 decision 10. The
-    ``INPUTS`` cache on ``llm-extract-entities`` (30 days) named nothing about
+    ``INPUTS`` cache on ``llm-extract-entities`` (1 day) named nothing about
     the LLM, so after a ``gemini`` -> ``modal`` flip a document already seen
     inside the window REPLAYED the previous model's JSON and the new model was
     never called. The task takes this string as an input, which puts it in the

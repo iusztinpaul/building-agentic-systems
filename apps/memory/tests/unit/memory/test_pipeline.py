@@ -1602,7 +1602,7 @@ class TestEmbeddingRoles:
 
 
 class TestEmbedTaskCacheIdentity:
-    """The 90-day ``INPUTS`` cache on ``embed-children`` / ``embed-entities``
+    """The 1-day ``INPUTS`` cache on ``embed-children`` / ``embed-entities``
     was keyed on the text list alone, so re-extracting an already-seen document
     after a model swap replayed vectors from the OLD embedding space. Both
     tasks now take an ``embedding_identity`` input — unused in the body, but
@@ -2360,7 +2360,7 @@ class TestFlowEmbeddingModelSplit:
         self, mocker, stubbed_graph_stages
     ) -> None:
         """Story 1: the operator flips ``models.llm`` to their own Modal
-        server — the extraction task's 30-day cache key must move with it
+        server — the extraction task's 1-day cache key must move with it
         instead of replaying Gemini's JSON."""
 
         mocker.patch(

@@ -207,9 +207,12 @@ _EXTRACTION_METADATA = pipeline_metadata("extraction")
 # Cache policy for the cached tasks: INPUTS minus the per-run trace-header param,
 # so changing trace headers between runs is NOT a cache miss (Prefect 3).
 _INPUTS_NO_HEADERS = INPUTS - "opik_trace_headers"
+# Every cached task expires after 1 day. Results persist to the local disk of
+# the machine running the flow (no shared result storage), so the cache only
+# serves same-machine reruns; a fresh Prefect Managed container never sees it.
 # Task ① also keys on its own source: its output is persisted as rows, so a
 # splitting change (e.g. the summary fallback) must re-chunk instead of serving
-# a 30-day-old payload built by the old code.
+# a day-old payload built by the old code.
 _INPUTS_AND_SOURCE_NO_HEADERS = _INPUTS_NO_HEADERS + TASK_SOURCE
 
 
@@ -327,7 +330,7 @@ async def _clean_and_chunk(
     ``chunking`` is an explicit PARAMETER, not a config read inside the body, so
     it is part of the ``INPUTS`` cache key: an operator who flips
     ``memory.chunking.strategy`` to ``fixed_tokens``, drops ``memory`` and
-    re-runs gets re-chunked parents instead of a 30-day-old cached payload
+    re-runs gets re-chunked parents instead of a day-old cached payload
     built by the other splitter. Pydantic models hash cleanly under the
     ``INPUTS`` policy (JSON-serialised), so an unchanged config still hits.
 
@@ -375,7 +378,7 @@ clean_and_chunk_task = task(
     _clean_and_chunk,
     name="clean-and-chunk",
     cache_policy=_INPUTS_AND_SOURCE_NO_HEADERS,
-    cache_expiration=timedelta(days=30),
+    cache_expiration=timedelta(days=1),
     retries=1,
 )
 
@@ -470,7 +473,7 @@ async def _embed_children(
 
     ``embedding_identity`` (``provider:model:dimensions:role``, from
     :func:`tree.models.get_model.search_embedding_identity`) is NOT used by the
-    body — it rides in the ``INPUTS`` cache key so this task's 90-day cache can
+    body — it rides in the ``INPUTS`` cache key so this task's 1-day cache can
     never replay vectors from a previous embedding space (ADR-009 decision 6).
     """
 
@@ -499,7 +502,7 @@ embed_children_task = task(
     _embed_children,
     name="embed-children",
     cache_policy=_INPUTS_NO_HEADERS,
-    cache_expiration=timedelta(days=90),
+    cache_expiration=timedelta(days=1),
     retries=2,
 )
 
@@ -591,7 +594,7 @@ async def _llm_extract_entities(
 
     ``llm_identity`` (``provider:model``, from
     :func:`tree.models.get_model.llm_identity`) is NOT used by the body — it
-    rides in the ``INPUTS`` cache key so this task's 30-day cache can never
+    rides in the ``INPUTS`` cache key so this task's 1-day cache can never
     replay the JSON of a previous LLM after a ``models.llm`` switch (ADR-009
     decision 6's rule applied to decision 10's provider switch).
 
@@ -655,7 +658,7 @@ llm_extract_entities_task = task(
     _llm_extract_entities,
     name="llm-extract-entities",
     cache_policy=_INPUTS_NO_HEADERS,
-    cache_expiration=timedelta(days=30),
+    cache_expiration=timedelta(days=1),
     retries=2,
     retry_delay_seconds=15,
 )
@@ -1163,7 +1166,7 @@ async def _embed_entities(
     space is a cache hit; partial-overlap re-runs and model swaps re-embed.
     ``embedding_identity`` (``provider:model:dimensions:role``, from
     :func:`tree.models.get_model.search_embedding_identity`) is unused by the
-    body and exists only to keep the 90-day cache from replaying vectors from
+    body and exists only to keep the 1-day cache from replaying vectors from
     a previous embedding space (ADR-009 decision 6). Per-run dedup of identical
     texts happens upstream (the flow embeds ``sorted(set(...))``).
 
@@ -1202,7 +1205,7 @@ embed_entities_task = task(
     _embed_entities,
     name="embed-entities",
     cache_policy=_INPUTS_NO_HEADERS,
-    cache_expiration=timedelta(days=90),
+    cache_expiration=timedelta(days=1),
     retries=2,
 )
 
@@ -2029,13 +2032,13 @@ async def _run_extraction_worker_body(
 
     # ----- Task ② — embed every child's contextual-header text --------------
     # The identity of the persisted embedding space rides into BOTH embed tasks
-    # as a cache-key input (ADR-009 decision 6), so their 90-day cache cannot
+    # as a cache-key input (ADR-009 decision 6), so their 1-day cache cannot
     # serve vectors embedded by a previous model. Resolved once per run, at run
     # time, so an env-override of the model moves it too.
     embedding_identity = search_embedding_identity()
     # Same rule for the LLM behind the cached extraction task (ADR-009 decision
     # 6 applied to the decision-10 ``models.llm`` switch): without it, a
-    # gemini -> modal flip REPLAYS the old model's JSON out of the 30-day
+    # gemini -> modal flip REPLAYS the old model's JSON out of the 1-day
     # cache. Resolved once per run, next to the embedding identity.
     extraction_llm_identity = llm_identity()
     child_vectors = await embed_children_task(

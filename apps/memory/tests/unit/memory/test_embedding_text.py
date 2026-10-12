@@ -850,7 +850,7 @@ class TestARequestWide400FailsInsteadOfSkipping:
     """A 400 on every input is the REQUEST's (config), not one input's (content).
 
     Skipping it would load rows without vectors — and the inline embed tasks
-    cache that result for 90 days — instead of failing the run.
+    cache that result for a day — instead of failing the run.
     """
 
     async def test_every_input_of_a_request_rejected_raises(self) -> None:

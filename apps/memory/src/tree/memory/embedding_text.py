@@ -52,7 +52,7 @@ _CHARS_PER_TOKEN: float = 3.0
 # How many HTTP-400 rejections, with NOTHING embedded yet, end one request's
 # bisect as a REQUEST error instead of skipping inputs. A 400 on every input
 # (a wrong model id, an unsupported parameter) is configuration, not content:
-# skipping would turn it into rows without vectors — cached 90 days by the
+# skipping would turn it into rows without vectors — cached for a day by the
 # inline embed tasks — instead of a failed run. Content poison is rare
 # (``strip_invalid_chars`` runs upstream), so 3 bad inputs in a row with no
 # good one is the config signal; it also bounds the bisect to ~log2(N) + 4
