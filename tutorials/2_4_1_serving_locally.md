@@ -32,9 +32,9 @@ if __name__ == "__main__":
     serve_deployments(app_config.concurrency.runner_global_limit)
 ```
 
-Within the `_active_deployment_specs` function we load all our Prefect deployment specs and filter out optional deployments in case `app_config.prefect.deploy_optional = False`. We added this because Prefect's Cloud free tier gives you a maximum of 5 deployments. The always-on core set now spends all 5 slots, so no spec is optional today and the flag registers nothing extra — it is kept as the extension point for the next deployment that has to be gated. The function also takes an optional `groups` argument that narrows the set to whole pipelines (`data` or `memory`) by the identity tag every spec already carries; it is used by the cloud deploy path, while the local `serve()` registers everything.
+Within the `_active_deployment_specs` function we load all our Prefect deployment specs, drop the ones the current config deactivates (`activated=False`), and filter out optional deployments in case `app_config.prefect.deploy_optional = False`. We added this because Prefect's Cloud free tier gives you a maximum of 5 deployments. The always-on core set now spends all 5 slots, so no spec is optional today and the flag registers nothing extra — it is kept as the extension point for the next deployment that has to be gated. The function also takes an optional `groups` argument that narrows the set to whole pipelines (`data` or `memory`) by the identity tag every spec already carries; it is used by the cloud deploy path, while the local `serve()` registers everything.
 
-Within `_DEPLOYMENT_SPECS` we define all your deployment specs, where a `_DeploymentSpec` is a wrapper over a Prefect flow, packaging important metadata such as the flow's name, tags and optional scheduling parameters. We scheduled the end-to-end `offline-pipeline` deployment to run every night at 03:00 UTC via the `"0 3 * * *"` cron job, and the `dream-consolidation-all-users` deployment an hour later at 04:00 UTC. Via the `TAGS_DATA_OFFLINE`/`TAGS_ONLINE_PIPELINE`/`TAGS_OFFLINE_PIPELINE` constants we flag the deployments as data-pipeline / memory-pipeline + offline/online, to easily filter the runs within Prefect.
+Within `_DEPLOYMENT_SPECS` we define all your deployment specs, where a `_DeploymentSpec` is a wrapper over a Prefect flow, packaging important metadata such as the flow's name, tags and optional scheduling parameters. We scheduled the end-to-end `offline-pipeline` deployment to run every night at 03:00 UTC via the `"0 3 * * *"` cron job (`prefect.offline_cron` in the YAML), and the `dream-consolidation-all-users` deployment an hour later at 04:00 UTC. The offline schedule ships paused (`prefect.offline_cron_active: false`): it is still registered, just inactive, so flipping the flag to `true` and deploying again turns it on. Dream consolidates the knowledge graph, so it is activated only in `graphrag` mode; in `rag` mode only the other 4 deployments are registered. Via the `TAGS_DATA_OFFLINE`/`TAGS_ONLINE_PIPELINE`/`TAGS_OFFLINE_PIPELINE` constants we flag the deployments as data-pipeline / memory-pipeline + offline/online, to easily filter the runs within Prefect.
 
 **The topology registry, from [apps/memory/src/tree/orchestrator.py](../apps/memory/src/tree/orchestrator.py):**
 
@@ -50,8 +50,10 @@ class _DeploymentSpec:
     entrypoint: str  # cloud only: the repo path the worker clones
     tags: list[str]
     cron: str | None = None
+    cron_active: bool = True  # false registers the schedule paused
     schedule_parameters: dict[str, Any] = field(default_factory=dict)
     optional: bool = False  # beyond Prefect Cloud's free-tier 5
+    activated: bool = True  # false skips registration (e.g. dream in rag mode)
 
 
 _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
@@ -78,8 +80,12 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "offline-pipeline",
         "apps/memory/src/tree/offline.py:offline_pipeline",
         TAGS_OFFLINE_PIPELINE,
-        cron=_SCHEDULED_INGEST_CRON,
-        schedule_parameters={"source_files": ["sources/listen.yaml"]},
+        cron=app_config.prefect.offline_cron,
+        cron_active=app_config.prefect.offline_cron_active,
+        schedule_parameters={
+            "source_files": ["sources/listen.yaml"],
+            "run_clustering": True,
+        },
     ),
     _DeploymentSpec(
         dream_consolidation_all_users,
@@ -88,6 +94,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "dream.py:dream_consolidation_all_users",
         ["memory-pipeline", "dream", "consolidation"],
         cron=app_config.dream.cron,
+        activated=app_config.memory.mode == "graphrag",
     ),
 ]
 ```

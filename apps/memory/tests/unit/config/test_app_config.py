@@ -158,6 +158,26 @@ class TestLoadAppConfig:
 
         assert config.prefect.deploy_optional is True
 
+    def test_prefect_offline_cron_defaults_active_when_absent(self, tmp_path):
+        custom = tmp_path / "no_prefect.yaml"
+        custom.write_text("query:\n  top_k: 5\n")
+
+        config = load_app_config(custom)
+
+        assert config.prefect.offline_cron == "0 3 * * *"
+        assert config.prefect.offline_cron_active is True
+
+    def test_prefect_offline_cron_loaded_from_yaml(self, tmp_path):
+        custom = tmp_path / "prefect.yaml"
+        custom.write_text(
+            'prefect:\n  offline_cron: "30 2 * * *"\n  offline_cron_active: false\n'
+        )
+
+        config = load_app_config(custom)
+
+        assert config.prefect.offline_cron == "30 2 * * *"
+        assert config.prefect.offline_cron_active is False
+
     def test_prefect_deploy_optional_env_override(self, tmp_path, monkeypatch):
         """``TREE_PREFECT__DEPLOY_OPTIONAL`` overrides YAML — the documented
         escape hatch reaches sections beyond ``extraction.*`` (it was silently

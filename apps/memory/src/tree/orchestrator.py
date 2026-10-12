@@ -99,16 +99,6 @@ class _GitRepoWithPipInstall(GitRepository):
         ]
 
 
-# Nightly schedule for the end-to-end offline run (UTC). The cron fires
-# ``offline-pipeline`` with ``source_files=["sources/listen.yaml"]`` and no
-# ``user_id`` — so it ingests the polled listen feeds fanned out across all active
-# users AND extracts + indexes them, instead of leaving the nightly documents
-# PENDING as the old data-only schedule did. It also clusters (UMAP + HDBSCAN,
-# no LLM), so the Embedding map's 2D coordinates trail the corpus by at most a
-# day; an unchanged corpus is skipped before any vector is loaded.
-_SCHEDULED_INGEST_CRON = "0 3 * * *"
-
-
 @dataclass(frozen=True)
 class _DeploymentSpec:
     """One deployment's topology — shared by the local-serve and cloud paths.
@@ -119,6 +109,7 @@ class _DeploymentSpec:
     ``cron`` (+ optional ``schedule_parameters``) attaches ONE schedule to the
     deployment whose runs override the flow's default parameters — e.g.
     ``offline-pipeline``'s nightly cron passes ``source_files=["sources/listen.yaml"]``.
+    ``cron_active`` false registers that schedule paused.
     ``optional`` marks a deployment as beyond the free-tier budget — registered only
     when ``app_config.prefect.deploy_optional`` is true. ``activated`` false
     withholds a deployment the current config has no use for (e.g. dream in
@@ -130,6 +121,7 @@ class _DeploymentSpec:
     entrypoint: str
     tags: list[str]
     cron: str | None = None
+    cron_active: bool = True
     schedule_parameters: dict[str, Any] = field(default_factory=dict)
     optional: bool = False
     activated: bool = True
@@ -144,7 +136,11 @@ class _DeploymentSpec:
 
         if self.cron is None:
             return None
-        return [Cron(self.cron, parameters=self.schedule_parameters)]
+        return [
+            Cron(
+                self.cron, active=self.cron_active, parameters=self.schedule_parameters
+            )
+        ]
 
 
 # All 5 specs below are the CORE set, exactly filling Prefect's free-tier cap of
@@ -192,7 +188,13 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
         "offline-pipeline",
         "apps/memory/src/tree/offline.py:offline_pipeline",
         TAGS_OFFLINE_PIPELINE,
-        cron=_SCHEDULED_INGEST_CRON,
+        # Nightly: ingests the polled listen feeds for ALL active users (no
+        # ``user_id``) AND extracts + indexes them, so nightly documents never sit
+        # PENDING. It also clusters (UMAP + HDBSCAN, no LLM), so the Embedding
+        # map's 2D coordinates trail the corpus by at most a day; an unchanged
+        # corpus is skipped before any vector is loaded.
+        cron=app_config.prefect.offline_cron,
+        cron_active=app_config.prefect.offline_cron_active,
         schedule_parameters={
             "source_files": ["sources/listen.yaml"],
             "run_clustering": True,

@@ -372,11 +372,10 @@ def test_serve_deployments_schedules_the_offline_and_dream_pipelines(mocker):
         for dep in call.args
     }
     scheduled = {name: scheds for name, scheds in schedules_by_name.items() if scheds}
-    assert orchestrator._SCHEDULED_INGEST_CRON == "0 3 * * *"
     assert scheduled == {
         "offline-pipeline": [
             (
-                orchestrator._SCHEDULED_INGEST_CRON,
+                app_config.prefect.offline_cron,
                 {"source_files": ["sources/listen.yaml"], "run_clustering": True},
             )
         ],
@@ -388,6 +387,48 @@ def test_serve_deployments_schedules_the_offline_and_dream_pipelines(mocker):
         "memory-extract-etl-worker",
         "online-pipeline",
     }
+
+
+def test_the_offline_schedule_follows_the_cron_config() -> None:
+    """``prefect.offline_cron`` / ``offline_cron_active`` drive the offline spec."""
+
+    # Act
+    offline = next(s for s in _REAL_SPECS if s.name == "offline-pipeline")
+
+    # Assert
+    assert offline.cron == app_config.prefect.offline_cron
+    assert offline.cron_active is app_config.prefect.offline_cron_active
+
+
+@pytest.mark.parametrize("cron_active", [True, False])
+def test_a_paused_cron_registers_an_inactive_schedule(
+    mocker, cron_active: bool
+) -> None:
+    """``cron_active=False`` keeps the schedule but registers it paused.
+
+    A deploy re-sends every schedule, so the pause must travel with the
+    deployment itself; dropping the cron would lose it instead.
+    """
+
+    # Arrange
+    mocker.patch.object(
+        orchestrator,
+        "_DEPLOYMENT_SPECS",
+        [
+            dataclasses.replace(s, cron_active=cron_active)
+            if s.name == "offline-pipeline"
+            else s
+            for s in orchestrator._DEPLOYMENT_SPECS
+        ],
+    )
+    spy = mocker.patch("tree.orchestrator.serve")
+
+    # Act
+    orchestrator.serve_deployments(limit=4)
+
+    # Assert
+    offline = next(dep for dep in spy.call_args.args if dep.name == "offline-pipeline")
+    assert [sched.active for sched in offline.schedules] == [cron_active]
 
 
 def test_serve_deployments_serves_the_built_topology(mocker):

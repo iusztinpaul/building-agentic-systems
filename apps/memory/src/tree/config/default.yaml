@@ -194,6 +194,13 @@ prefect:
   # 5 — see README.md "Serving workflows". Set true on a paid plan or a self-hosted
   # server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
   deploy_optional: false
+  # Nightly offline-pipeline schedule (UTC): ingests sources/listen.yaml for every
+  # active user, then extracts, indexes and clusters it.
+  offline_cron: "0 3 * * *"
+  # false registers the schedule PAUSED. Every deploy re-sends the schedule, so a
+  # pause in the Prefect UI only lasts until the next push to main; this flag is
+  # the durable one. Flip to true (then deploy) to resume the nightly run.
+  offline_cron_active: false
 
 mcp:
   max_retries: 1

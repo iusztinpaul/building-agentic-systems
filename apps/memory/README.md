@@ -138,8 +138,8 @@ The deployments registered by `src/tree/orchestrator.py` (the always-on core 5, 
 - `online-pipeline`, `offline-pipeline` (the two end-to-end flows in `tree/online.py` /
   `tree/offline.py`; `offline-pipeline` also carries the [nightly cron](#offline--selecting-sources))
 - `dream-consolidation-all-users` (the nightly incremental dedup sweep across every active
-  user, on its own cron — `dream.cron`, `0 4 * * *` UTC; a no-op in `rag` mode, which has
-  no entity nodes to dedup)
+  user, on its own cron — `dream.cron`, `0 4 * * *` UTC; registered only in `graphrag`
+  mode, since `rag` mode has no entity nodes to dedup)
 
 The two **Coordinators** (`data_etl_coordinator`, `memory_extract_etl_coordinator`) and the
 indexing step (`memory_indexing` — embeddings backfill, search indexes) are still FLOWS, but
@@ -210,7 +210,7 @@ Source selection is freely combinable (ADR-003):
 - **`URI="..."`** (space-separated, repeatable) → ad-hoc URLs; suffix a token `=TYPE` to force a type (e.g. `…/feed=substack_rss`), otherwise the type is inferred. `huggingface_dataset` is rejected here — define HF datasets in a source file instead.
 - Files and URIs combine: the resolved set is the loaded files followed by the built URLs.
 
-The **nightly cron** (`0 3 * * *` UTC) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes AND clusters them (UMAP + HDBSCAN, no LLM; an unchanged user is skipped), fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
+The **nightly cron** (`prefect.offline_cron`, `0 3 * * *` UTC; ships **paused** — set `prefect.offline_cron_active: true` and deploy again to turn it on) fires the `offline-pipeline` deployment with `source_files=["sources/listen.yaml"]` and no `user_id` — so it ingests the polled listen feeds AND writes them to the `memory` collection AND indexes AND clusters them (UMAP + HDBSCAN, no LLM; an unchanged user is skipped), fanned out across **all active users** (nightly documents no longer sit `PENDING` waiting for a manual extraction run). The cadence is the filename: there is no per-source flag.
 
 #### Online — one source on demand
 

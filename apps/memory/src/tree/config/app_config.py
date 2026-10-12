@@ -290,9 +290,17 @@ class PrefectConfig(BaseModel):
       path: ``online-pipeline`` is one of the core deployments, so
       ``dispatch_online_pipeline`` always submits it — there is no in-process
       fallback, and a missing deployment is an error, not a mode.)
+    * ``offline_cron`` — the nightly ``offline-pipeline`` schedule (UTC cron).
+    * ``offline_cron_active`` — false registers that schedule PAUSED. Every
+      deploy (CD on push to ``main``, ``make memory-deploy-prefect-setup-up``)
+      re-sends it, so a pause made in the Prefect UI lasts only until the next
+      deploy; this flag is the durable pause. Override per-environment via
+      ``TREE_PREFECT__OFFLINE_CRON_ACTIVE=true``.
     """
 
     deploy_optional: bool = False
+    offline_cron: str = "0 3 * * *"
+    offline_cron_active: bool = True
 
 
 class YouTubeConfig(BaseModel):

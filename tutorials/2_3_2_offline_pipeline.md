@@ -2,7 +2,7 @@
 
 This is the tutorial used to run the data pipeline in offline batch mode, from Chapter 2, section `2.3.2 Offline Batch Processing: Backfills and Crons` of the book.
 
-In our data layer, we will need both offline modes: backfill and cron jobs. The backfill mode, which will be run once "manually" by an engineer or an agent via the CLI. The cron jobs will be configured to run each night at 3 AM via Prefect's scheduled jobs.
+In our data layer, we will need both offline modes: backfill and cron jobs. The backfill mode, which will be run once "manually" by an engineer or an agent via the CLI. The cron jobs will be configured to run each night at 3 AM UTC via Prefect's scheduled jobs. The repository ships with this schedule paused; set `prefect.offline_cron_active: true` in [apps/memory/src/tree/config/default.yaml](../apps/memory/src/tree/config/default.yaml) and deploy again to turn it on.
 
 ![The two offline sub-modes. A backfill runs once over historical data; scheduled batch processing re-runs on a cron over sources that keep changing.](assets/2_3_2_offline_sub_modes.png)
 

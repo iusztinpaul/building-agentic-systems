@@ -102,7 +102,7 @@ Optionally, run it over the listen sources too (the RSS feeds the nightly cron p
 make memory-run-pipeline SOURCE_FILE="sources/listen.yaml"
 ```
 
-You don't have to run `listen.yaml` by hand: the scheduled offline pipeline loads it every night at 3 AM and carries it through ingestion and indexing.
+Once the nightly schedule is on, you don't have to run `listen.yaml` by hand: the scheduled offline pipeline loads it every night at 3 AM UTC and carries it through ingestion, indexing, and clustering. The repository ships with that schedule **paused**, so it never runs (or spends tokens) until you opt in. To turn it on, set `prefect.offline_cron_active: true` in [apps/memory/src/tree/config/default.yaml](../apps/memory/src/tree/config/default.yaml) and deploy again (a push to `main`, or `make memory-deploy-prefect-setup-up`).
 
 To confirm the memory landed, run `make memory-check-db`. After the backfill, the `memory` collection should hold one row per document, parent chunk, and child chunk (35,270 rows in our run).
 
@@ -124,7 +124,7 @@ This will pop up an interactive visualization in your browser, like the one in F
 
 ![Figure 5.8 The embedding space after the offline run. Every dot is a child chunk; every hull is a cluster of chunks on the same topic.](assets/5_2_1_embedding_space.png)
 
-Once you run the clustering pipeline, all the clusters are cached within MongoDB. Plus, we also compute them when running the scheduled offline pipeline each night automatically. Note that you can view the embeddings without clustering them, but this makes looking at them so much easier!
+Once you run the clustering pipeline, all the clusters are cached within MongoDB. Plus, once you turn on the nightly schedule (`prefect.offline_cron_active: true`), the scheduled offline pipeline recomputes them each night automatically. Note that you can view the embeddings without clustering them, but this makes looking at them so much easier!
 
 To see how the memory is organized instead (each document, its parent chunks, and their child chunks), render the structure view. Add `QUERY` to narrow it to the results of a search:
 
