@@ -110,8 +110,7 @@ class _DeploymentSpec:
     deployment whose runs override the flow's default parameters — e.g.
     ``offline-pipeline``'s nightly cron passes ``source_files=["sources/listen.yaml"]``.
     ``cron_active`` false registers that schedule paused.
-    ``optional`` marks a deployment as beyond the free-tier budget — registered only
-    when ``app_config.prefect.deploy_optional`` is true. ``activated`` false
+    ``activated`` false
     withholds a deployment the current config has no use for (e.g. dream in
     ``rag`` mode); it is computed from ``app_config`` when the spec is built.
     """
@@ -123,7 +122,6 @@ class _DeploymentSpec:
     cron: str | None = None
     cron_active: bool = True
     schedule_parameters: dict[str, Any] = field(default_factory=dict)
-    optional: bool = False
     activated: bool = True
 
     def schedules(self) -> list[Cron] | None:
@@ -147,12 +145,9 @@ class _DeploymentSpec:
 # 5 deployments per workspace. ``dream-consolidation-all-users`` is activated only
 # in ``graphrag`` mode: it consolidates the knowledge graph, which ``rag`` mode
 # never builds, so a ``rag`` deployment registers the other 4. Indexing gave its slot back when
-# it became an inline subflow, and ``dream-consolidation-all-users`` took it —
-# promoted out of ``optional=True`` so its cron actually fires (a cron on an
-# unregistered deployment does nothing). NO spec is optional today; the
-# ``optional`` flag and ``app_config.prefect.deploy_optional`` are retained as
-# the extension point for the next deployment that must be gated — see
-# ``_active_deployment_specs``.
+# it became an inline subflow, and ``dream-consolidation-all-users`` took it. A
+# 6th deployment must displace one of these, or be ``activated`` only where the
+# budget allows it (a paid plan or a self-hosted server).
 # Deployable subsets, keyed by the pipeline-identity tag every spec already
 # carries — so a group never drifts from the specs it selects. NOTE the groups do
 # NOT partition: ``online-pipeline`` / ``offline-pipeline`` carry BOTH identity
@@ -214,11 +209,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
 def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSpec]:
     """The deployments to register: the activated core specs.
 
-    Drops every spec with ``activated=False`` (dream in ``rag`` mode). Reads
-    ``app_config.prefect.deploy_optional`` at call time so the gate honours YAML,
-    the ``TREE_PREFECT__DEPLOY_OPTIONAL`` env override, and test patches. The gate
-    currently selects nothing — every spec is core — but is kept as the
-    extension point for the next spec that needs gating.
+    Drops every spec with ``activated=False`` (dream in ``rag`` mode).
 
     ``groups`` narrows the set to whole pipelines by their identity tag —
     ``("data",)`` keeps the ``data-pipeline``-tagged specs, ``("memory",)`` keeps
@@ -229,12 +220,7 @@ def _active_deployment_specs(groups: tuple[str, ...] = ()) -> list[_DeploymentSp
     by EITHER group. Empty (the default) deploys everything.
     """
 
-    deploy_optional = app_config.prefect.deploy_optional
-    specs = [
-        s
-        for s in _DEPLOYMENT_SPECS
-        if s.activated and (deploy_optional or not s.optional)
-    ]
+    specs = [s for s in _DEPLOYMENT_SPECS if s.activated]
     if not groups:
         return specs
     unknown = set(groups) - set(DEPLOYMENT_GROUPS)

@@ -18,9 +18,8 @@ The nightly cron moves onto ``offline-pipeline`` so scheduled ingests also extra
 phase** of ``offline-pipeline``, plus ``online-pipeline``'s single-doc index — and
 ``dream-consolidation-all-users`` took the slot it freed — promoted out of
 ``optional=True`` so its cron actually fires. So the CORE set is 5, EXACTLY the
-Prefect free-tier cap, with NO spare slot and NO optional spec left; the
-``optional`` flag / ``prefect.deploy_optional`` gate are retained as an extension
-point and are pinned here with a synthetic optional spec. The #065
+Prefect free-tier cap, with NO spare slot; in ``rag`` mode dream is deactivated,
+leaving 4. The #065
 admission-control guards (``limit`` not ``global_limit``; binding to the real
 ``prefect.serve`` signature) and the schedule guard are preserved.
 """
@@ -236,67 +235,6 @@ class TestEveryEntrypointResolves:
 
     def test_the_topology_is_exactly_the_free_tier_five(self) -> None:
         assert len(orchestrator._DEPLOYMENT_SPECS) == 5
-
-
-def test_every_spec_registers_with_deploy_optional_off(mocker):
-    """All 5 specs register under the default flag — because NONE is optional.
-
-    ``prefect.deploy_optional`` defaults to false, and that no longer withholds
-    anything: dream was promoted into the core set, so the shipped topology has no
-    optional spec. Pins both halves — the flag is off, and the registered set is
-    still the full 5 — so re-marking a spec ``optional=True`` (which would silently
-    unregister it, and with it any cron it carries) fails here.
-    """
-
-    # Arrange — pin the flag off explicitly: an exported
-    # ``TREE_PREFECT__DEPLOY_OPTIONAL=true`` in the dev shell must not steer this test.
-    mocker.patch.object(app_config.prefect, "deploy_optional", False)
-    spy = mocker.patch("tree.orchestrator.serve")
-
-    orchestrator.serve_deployments(limit=4)
-
-    assert type(app_config.prefect).model_fields["deploy_optional"].default is False
-    assert not any(spec.optional for spec in orchestrator._DEPLOYMENT_SPECS)
-    assert len(spy.call_args.args) == 5
-
-
-@pytest.mark.parametrize(
-    ("deploy_optional", "registers_the_optional_spec"), [(False, False), (True, True)]
-)
-def test_deploy_optional_gate_filters_an_optional_spec(
-    mocker, deploy_optional: bool, registers_the_optional_spec: bool
-) -> None:
-    """The retained ``optional`` gate still filters — pinned with a synthetic spec.
-
-    No shipped spec is optional today, so the ``optional`` field, the
-    ``prefect.deploy_optional`` config knob and the filtering in
-    ``_active_deployment_specs`` currently gate nothing. They are kept deliberately
-    as the extension point for the next deployment that must sit outside the
-    free-tier budget — so this appends a fake optional spec to
-    ``_DEPLOYMENT_SPECS`` and asserts the flag still decides its fate. Without this
-    the mechanism would rot untested until someone needed it.
-    """
-
-    # Arrange — reuse a real flow so the spec is well-formed; only ``optional`` matters.
-    fake_optional = orchestrator._DeploymentSpec(
-        orchestrator._DEPLOYMENT_SPECS[0].flow,
-        "fake-optional-etl",
-        "apps/memory/src/tree/data/offline_pipeline.py:data_etl_worker",
-        ["data-pipeline"],
-        optional=True,
-    )
-    mocker.patch.object(
-        orchestrator,
-        "_DEPLOYMENT_SPECS",
-        [*orchestrator._DEPLOYMENT_SPECS, fake_optional],
-    )
-    mocker.patch.object(app_config.prefect, "deploy_optional", deploy_optional)
-
-    names = {spec.name for spec in orchestrator._active_deployment_specs()}
-
-    # Assert — the core 5 always register; only the optional spec follows the flag.
-    assert ("fake-optional-etl" in names) is registers_the_optional_spec
-    assert len(names) == (6 if registers_the_optional_spec else 5)
 
 
 def test_only_dream_follows_the_memory_mode() -> None:

@@ -32,7 +32,7 @@ if __name__ == "__main__":
     serve_deployments(app_config.concurrency.runner_global_limit)
 ```
 
-Within the `_active_deployment_specs` function we load all our Prefect deployment specs, drop the ones the current config deactivates (`activated=False`), and filter out optional deployments in case `app_config.prefect.deploy_optional = False`. We added this because Prefect's Cloud free tier gives you a maximum of 5 deployments. The always-on core set now spends all 5 slots, so no spec is optional today and the flag registers nothing extra — it is kept as the extension point for the next deployment that has to be gated. The function also takes an optional `groups` argument that narrows the set to whole pipelines (`data` or `memory`) by the identity tag every spec already carries; it is used by the cloud deploy path, while the local `serve()` registers everything.
+Within the `_active_deployment_specs` function we load all our Prefect deployment specs, and drop the ones the current config deactivates (`activated=False`), such as dream consolidation in `rag` mode. This matters because Prefect's Cloud free tier gives you a maximum of 5 deployments, and the core set spends all 5 slots. The function also takes an optional `groups` argument that narrows the set to whole pipelines (`data` or `memory`) by the identity tag every spec already carries; it is used by the cloud deploy path, while the local `serve()` registers everything.
 
 Within `_DEPLOYMENT_SPECS` we define all your deployment specs, where a `_DeploymentSpec` is a wrapper over a Prefect flow, packaging important metadata such as the flow's name, tags and optional scheduling parameters. We scheduled the end-to-end `offline-pipeline` deployment to run every night at 03:00 UTC via the `"0 3 * * *"` cron job (`prefect.offline_cron` in the YAML), and the `dream-consolidation-all-users` deployment an hour later at 04:00 UTC. The offline schedule ships paused (`prefect.offline_cron_active: false`): it is still registered, just inactive, so flipping the flag to `true` and deploying again turns it on. Dream consolidates the knowledge graph, so it is activated only in `graphrag` mode; in `rag` mode only the other 4 deployments are registered. Via the `TAGS_DATA_OFFLINE`/`TAGS_ONLINE_PIPELINE`/`TAGS_OFFLINE_PIPELINE` constants we flag the deployments as data-pipeline / memory-pipeline + offline/online, to easily filter the runs within Prefect.
 
@@ -52,7 +52,6 @@ class _DeploymentSpec:
     cron: str | None = None
     cron_active: bool = True  # false registers the schedule paused
     schedule_parameters: dict[str, Any] = field(default_factory=dict)
-    optional: bool = False  # beyond Prefect Cloud's free-tier 5
     activated: bool = True  # false skips registration (e.g. dream in rag mode)
 
 
@@ -101,7 +100,7 @@ _DEPLOYMENT_SPECS: list[_DeploymentSpec] = [
 
 The `data-etl-worker` and `memory-extract-etl-worker` deployments are the per-user workers fanned out by the coordinators, while `online-pipeline` and `offline-pipeline` are the end-to-end entrypoints that run data + memory in one go — they are also key at understanding the difference between the two execution models in practice. Note that `data_etl_coordinator` is *not* a deployment of its own: `offline_pipeline` calls it as an inline subflow, and memory indexing is likewise an inline subflow — its own phase of `offline_pipeline`, run after extraction. That's by design — it avoids a useless serialization/deserialization step plus a deployment slot. In this chapter we only exercise the data half (`data-etl-worker`, driven by the coordinator inside `offline-pipeline`); the memory deployments arrive in the next chapter.
 
-Via the [apps/memory/src/tree/config/default.yaml](../apps/memory/src/tree/config/default.yaml) config, we can control `runner_global_limit: 6` which defines how many flow runs we can run concurrently at a time. A flow run is an invocation of any of the deployments we defined above. Meanwhile `deploy_optional: false` is used to turn off or on the optional deployments. Note that this limitation exists only when deploying to Prefect Cloud. As the Prefect engine is open-source, when deploying locally or on a self-managed solution, you don't have it.
+Via the [apps/memory/src/tree/config/default.yaml](../apps/memory/src/tree/config/default.yaml) config, we can control `runner_global_limit: 6` which defines how many flow runs we can run concurrently at a time. A flow run is an invocation of any of the deployments we defined above. Note that the 5-deployment limit exists only when deploying to Prefect Cloud. As the Prefect engine is open-source, when deploying locally or on a self-managed solution, you don't have it.
 
 ## The Local Stack Behind `make local-start`
 

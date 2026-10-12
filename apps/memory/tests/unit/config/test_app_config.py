@@ -133,31 +133,6 @@ class TestLoadAppConfig:
         assert config.dream.max_pairs == 10_000
         assert config.dream.enable_supersession_judge is False
 
-    def test_prefect_deploy_optional_false_in_default_yaml(self, frozen_config_path):
-        """``prefect.deploy_optional`` is false in default.yaml (free-tier safe)."""
-
-        config = load_app_config(frozen_config_path)
-
-        assert config.prefect.deploy_optional is False
-
-    def test_prefect_deploy_optional_defaults_false_when_absent(self, tmp_path):
-        custom = tmp_path / "no_prefect.yaml"
-        custom.write_text("query:\n  top_k: 5\n")
-
-        config = load_app_config(custom)
-
-        assert config.prefect.deploy_optional is False
-
-    def test_prefect_deploy_optional_loaded_from_yaml(self, tmp_path):
-        """An operator can opt into the optional deployments via YAML."""
-
-        custom = tmp_path / "prefect.yaml"
-        custom.write_text("prefect:\n  deploy_optional: true\n")
-
-        config = load_app_config(custom)
-
-        assert config.prefect.deploy_optional is True
-
     def test_prefect_offline_cron_defaults_active_when_absent(self, tmp_path):
         custom = tmp_path / "no_prefect.yaml"
         custom.write_text("query:\n  top_k: 5\n")
@@ -178,18 +153,18 @@ class TestLoadAppConfig:
         assert config.prefect.offline_cron == "30 2 * * *"
         assert config.prefect.offline_cron_active is False
 
-    def test_prefect_deploy_optional_env_override(self, tmp_path, monkeypatch):
-        """``TREE_PREFECT__DEPLOY_OPTIONAL`` overrides YAML — the documented
+    def test_prefect_env_override(self, tmp_path, monkeypatch):
+        """``TREE_PREFECT__OFFLINE_CRON_ACTIVE`` overrides YAML — the documented
         escape hatch reaches sections beyond ``extraction.*`` (it was silently
         extraction-only before, contradicting its own docs)."""
 
         custom = tmp_path / "prefect.yaml"
-        custom.write_text("prefect:\n  deploy_optional: false\n")
-        monkeypatch.setenv("TREE_PREFECT__DEPLOY_OPTIONAL", "true")
+        custom.write_text("prefect:\n  offline_cron_active: false\n")
+        monkeypatch.setenv("TREE_PREFECT__OFFLINE_CRON_ACTIVE", "true")
 
         config = load_app_config(custom)
 
-        assert config.prefect.deploy_optional is True
+        assert config.prefect.offline_cron_active is True
 
     def test_num_shards_env_override(self, tmp_path, monkeypatch):
         """``TREE_EXTRACTION__NUM_SHARDS`` widens the fan-out without a YAML edit."""

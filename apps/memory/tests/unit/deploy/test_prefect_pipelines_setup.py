@@ -92,8 +92,8 @@ class TestDeploymentSpecs:
         # Prefect Cloud's free tier caps a workspace at 5 deployments and the core
         # set now spends EXACTLY 5 — the slot indexing gave back when it became an
         # inline subflow went to ``dream-consolidation-all-users``. There is no
-        # spare slot: a 6th spec must displace one of these or be gated behind
-        # ``optional=True`` (see ``_active_deployment_specs``), so registering one
+        # spare slot: a 6th spec must displace one of these or be ``activated``
+        # only where the budget allows it, so registering one
         # more must fail here rather than at ``deploy`` time against Cloud. Counts
         # the full topology: ``rag`` mode deactivates dream, freeing its slot.
         names = [spec.name for spec in orchestrator._DEPLOYMENT_SPECS]

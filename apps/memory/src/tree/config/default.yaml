@@ -189,11 +189,6 @@ concurrency:
   voyage_slot_acquire_timeout_seconds: 120
 
 prefect:
-  # Register the OPTIONAL deployments (optional=True in orchestrator.py). Prefect
-  # Cloud's FREE TIER caps a workspace at 5 deployments and the core set spends all
-  # 5 — see README.md "Serving workflows". Set true on a paid plan or a self-hosted
-  # server. (Env override: TREE_PREFECT__DEPLOY_OPTIONAL=true.)
-  deploy_optional: false
   # Nightly offline-pipeline schedule (UTC): ingests sources/listen.yaml for every
   # active user, then extracts, indexes and clusters it.
   offline_cron: "0 3 * * *"

@@ -276,20 +276,6 @@ class ConcurrencyConfig(BaseModel):
 class PrefectConfig(BaseModel):
     """Prefect deployment-topology knobs.
 
-    * ``deploy_optional`` — register the deployments marked ``optional=True`` in
-      ``orchestrator.py`` on top of the always-on core ones. Prefect Cloud's **free
-      tier caps a workspace at 5 deployments** and the core set now spends ALL 5
-      (the two workers, both end-to-end pipelines, and the scheduled dream
-      consolidation), so NO spec is optional today and this flag registers nothing
-      extra — it is kept as the extension point for the next deployment that must
-      sit outside the budget. Defaults to ``false``; flip it to ``true`` on a paid
-      plan or a self-hosted Prefect server. Both the local serve
-      (``make memory-serve-workflows``) and the Cloud deploy path honour it.
-      Override per-environment without editing YAML via
-      ``TREE_PREFECT__DEPLOY_OPTIONAL=true``. (No flag for the online ingest
-      path: ``online-pipeline`` is one of the core deployments, so
-      ``dispatch_online_pipeline`` always submits it — there is no in-process
-      fallback, and a missing deployment is an error, not a mode.)
     * ``offline_cron`` — the nightly ``offline-pipeline`` schedule (UTC cron).
     * ``offline_cron_active`` — false registers that schedule PAUSED. Every
       deploy (CD on push to ``main``, ``make memory-deploy-prefect-setup-up``)
@@ -298,7 +284,6 @@ class PrefectConfig(BaseModel):
       ``TREE_PREFECT__OFFLINE_CRON_ACTIVE=true``.
     """
 
-    deploy_optional: bool = False
     offline_cron: str = "0 3 * * *"
     offline_cron_active: bool = True
 
@@ -1146,7 +1131,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """Layer ``TREE_<SECTION>__<KEY>...`` env vars on top of the YAML dict.
 
     The operator escape hatch documented in CLAUDE.md: ANY YAML key can be
-    overridden per-environment, e.g. ``TREE_PREFECT__DEPLOY_OPTIONAL=true`` or
+    overridden per-environment, e.g. ``TREE_PREFECT__OFFLINE_CRON_ACTIVE=true`` or
     ``TREE_EXTRACTION__DEDUP__AUTO_MERGE_THRESHOLD=0.99``.
 
     Reads ``TREE_<SECTION>__<KEY>`` style keys, splitting on ``__`` and
@@ -1186,7 +1171,7 @@ def load_app_config(path: str | Path | None = None) -> AppConfig:
 
     ``TREE_<SECTION>__<KEY>`` env vars override the corresponding YAML keys;
     this lets operators flip a single knob (e.g.
-    ``TREE_PREFECT__DEPLOY_OPTIONAL``) without editing the YAML and ensures
+    ``TREE_PREFECT__OFFLINE_CRON_ACTIVE``) without editing the YAML and ensures
     cross-key validators (e.g. on :class:`ExtractionConfig`) see the actual
     runtime values.
     """

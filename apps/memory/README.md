@@ -158,9 +158,8 @@ deployment groups: a group-scoped teardown (`make memory-deploy-prefect-setup-do
 deletes them too, and the next `...-up` restores them.
 
 That is 5 of the 5 deployments the Prefect free tier allows, with **no slot spare**: a sixth
-deployment must either displace one of these or be marked `optional=True` and registered only
-when `prefect.deploy_optional: true` (a paid plan or a self-hosted server) — see
-[Configuration](#configuration).
+deployment must either displace one of these or be `activated` only where the budget allows
+it (a paid plan or a self-hosted server). In `rag` mode dream is deactivated, so 4 register.
 
 ### Pipelines at a glance
 

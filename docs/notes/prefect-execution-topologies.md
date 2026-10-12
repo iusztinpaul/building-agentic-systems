@@ -187,8 +187,7 @@ opaque). We never draw or run it.
   Free tier caps a workspace at **1 work pool** (hence read-first pool creation) and **5
   deployments** — spent EXACTLY by the 5 core ones: the two end-to-end pipelines + the two workers
   + `dream-consolidation-all-users`, with the Coordinators AND indexing demoted to inline subflows.
-  No spec is `optional=True` any more (`deploy_optional: false` therefore withholds nothing) and
-  **no slot is spare**. Raising concurrency = paid plan.
+  **No slot is spare** (in `rag` mode dream is deactivated, so 4 register). Raising concurrency = paid plan.
 - Per-run **cold start = clone + `pip install` every container** — real latency; keep the
   install slim (heavy `sentence-transformers`/`modal` backends live in the opt-in `local-models`
   extra, *not* pulled).

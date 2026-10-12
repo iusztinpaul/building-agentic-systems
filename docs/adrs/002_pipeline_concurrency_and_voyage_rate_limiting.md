@@ -404,6 +404,9 @@ shared Voyage budget.
      as the extension point for the next deployment that must sit outside the budget; no
      shipped spec sets `optional=True`. Unit tests pin the gate with a synthetic optional
      spec so the unused mechanism cannot rot.
+     *(Superseded: `optional` and `prefect.deploy_optional` were removed. The generic
+     `_DeploymentSpec.activated` flag, computed from config, now gates registration —
+     e.g. dream is activated only in `graphrag` mode.)*
    - **Consequence — the budget is full.** A sixth deployment (e.g. the still-unregistered
      `ingest-web-url-batch-etl`) must displace a core one, be marked `optional=True`, or wait
      for a paid/self-hosted Prefect.
