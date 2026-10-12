@@ -12,7 +12,7 @@ modes (ADR-006 decision 4):
    definitions: ``vector_index`` (``$vectorSearch``; ``numDimensions``
    reconciled against the live embedding model on every call) and
    ``text_search_index``, the **Text search index** (``$search``,
-   ``lucene.english``; definition drift → drop + recreate, ADR-015 §5–§7) —
+   ``lucene.english``; definition drift → in-place update, ADR-015 §5–§7) —
    then drop the classic ``$text`` index ``text_index`` it replaced, if a
    database still carries one.
 
@@ -64,7 +64,7 @@ _LEGACY_TEXT_INDEX_NAME = "text_index"
 # MongoDB's ``IndexNotFound`` error code: a drop of an index that is not there.
 _INDEX_NOT_FOUND = 27
 
-# How long ``_wait_for_search_index_ready`` waits for a freshly created mongot
+# How long ``_wait_for_search_index_ready`` waits for a created or updated mongot
 # index (either of the two) to answer queries, and how long it sleeps between
 # two catalogue reads. Constants, not YAML knobs: a measured need would promote
 # them (ADR-008 grooming). 300 s is the fail-OPEN cap — past it the index is
@@ -341,7 +341,7 @@ async def reset_embeddings(
 # lets dedup exclude tombstones without a post-aggregation $match; ``subtype``
 # (ADR-006 decision 2) is what restricts the seed search to CHILD chunks. Adding
 # ``subtype`` makes the live index miss a required path once per environment,
-# which the quiet drop-and-recreate branch in ``_ensure_vector_index`` heals on
+# which the quiet in-place update branch in ``_ensure_vector_index`` heals on
 # the next indexing run.
 _VECTOR_INDEX_FILTER_PATHS: tuple[str, ...] = (
     "user_id",
@@ -376,17 +376,20 @@ async def ensure_indexes(
 
     * ``vector_index`` — ``numDimensions`` comes from
       ``embedding_model.dimensions``, read ONCE. A different live dimension
-      logs a WARNING naming both numbers and drops + recreates; a missing
-      filter path quietly recreates.
+      logs a WARNING naming both numbers and updates in place; a missing
+      filter path quietly updates in place.
     * ``text_search_index`` (the **Text search index**) — a static definition
       (:func:`_build_text_search_index_definition`). Definition drift
       (``dynamic``, a text path's type / analyzer, a filter path's type)
-      logs a WARNING naming the differences and drops + recreates;
+      logs a WARNING naming the differences and updates in place;
       server-echoed defaults are not drift.
 
-    Either index is created when absent, and every create is followed by
-    :func:`_wait_for_search_index_ready`. Vector first, text second, the
-    legacy drop third.
+    Either index is created when absent. Drift goes through
+    ``update_search_index``, never drop + create: mongot rebuilds in the
+    background and the previous definition keeps serving queries until the
+    new one replaces it, so the leg never goes dark. Every create or update is
+    followed by :func:`_wait_for_search_index_ready`. Vector first, text
+    second, the legacy drop third.
 
     Idempotent: every step inspects live state and skips when the desired
     configuration is already in place.
@@ -510,8 +513,8 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
     The live index is considered up-to-date when (a) its ``numDimensions``
     matches ``target_dimensions`` and (b) every path in
     ``_VECTOR_INDEX_FILTER_PATHS`` is declared as a filter. A dimension
-    mismatch triggers a WARNING-logged drop + recreate; missing filter
-    paths trigger a quiet recreate.
+    mismatch triggers a WARNING-logged in-place update; missing filter
+    paths trigger a quiet one.
     """
 
     required_definition = _build_vector_index_definition(target_dimensions)
@@ -544,7 +547,7 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
         if dimension_mismatch:
             logger.warning(
                 "Vector search index '%s' dimension mismatch: "
-                "existing=%d, target=%d. Dropping and recreating.",
+                "existing=%d, target=%d. Updating in place.",
                 VECTOR_INDEX_NAME,
                 existing_dimensions,
                 target_dimensions,
@@ -552,24 +555,22 @@ async def _ensure_vector_index(collection: Any, target_dimensions: int) -> None:
         else:
             logger.info(
                 "Vector search index '%s' missing filter paths "
-                "(have=%s, want=%s) — recreating",
+                "(have=%s, want=%s) — updating in place",
                 VECTOR_INDEX_NAME,
                 sorted(existing_filter_paths),
                 sorted(_VECTOR_INDEX_FILTER_PATHS),
             )
 
-        await collection.drop_search_index(VECTOR_INDEX_NAME)
-        # Allow mongot to process the drop before recreating.
-        await asyncio.sleep(2)
-
-    await _create_search_index(
-        collection,
-        {
-            "name": VECTOR_INDEX_NAME,
-            "type": "vectorSearch",
-            "definition": required_definition,
-        },
-    )
+        await collection.update_search_index(VECTOR_INDEX_NAME, required_definition)
+    else:
+        await _create_search_index(
+            collection,
+            {
+                "name": VECTOR_INDEX_NAME,
+                "type": "vectorSearch",
+                "definition": required_definition,
+            },
+        )
 
     await _wait_for_search_index_ready(collection, VECTOR_INDEX_NAME)
 
@@ -681,7 +682,7 @@ def _text_search_index_drift(
 
     A SUBSET comparison on the declared paths — exactly as the vector helper
     compares dimensions + the filter-path set, never the whole dict
-    (server-echoed defaults would otherwise drop + recreate on every run):
+    (server-echoed defaults would otherwise update on every run):
     ``mappings.dynamic`` must be ``False`` — ABSENT counts as ``False``, Atlas's
     default, so a catalogue that omits the key is not drift; every text path a
     ``string`` with the ``lucene.english`` analyzer; every filter path its
@@ -714,8 +715,7 @@ async def _ensure_text_search_index(collection: Any) -> None:
 
     Absent → create + wait ready. Present → compare with
     :func:`_text_search_index_drift`: up-to-date → one INFO and return; drift
-    → one WARNING naming the differences, drop, let mongot settle, create,
-    wait ready.
+    → one WARNING naming the differences, update in place, wait ready.
     """
 
     cursor = await collection.list_search_indexes()
@@ -735,24 +735,23 @@ async def _ensure_text_search_index(collection: Any) -> None:
             return
 
         logger.warning(
-            "Search index '%s' definition drift (have=%s, want=%s) — dropping and "
-            "recreating",
+            "Search index '%s' definition drift (have=%s, want=%s) — updating in place",
             TEXT_SEARCH_INDEX_NAME,
             have,
             want,
         )
-        await collection.drop_search_index(TEXT_SEARCH_INDEX_NAME)
-        # Allow mongot to process the drop before recreating the same name.
-        await asyncio.sleep(2)
-
-    await _create_search_index(
-        collection,
-        {
-            "name": TEXT_SEARCH_INDEX_NAME,
-            "type": "search",
-            "definition": _build_text_search_index_definition(),
-        },
-    )
+        await collection.update_search_index(
+            TEXT_SEARCH_INDEX_NAME, _build_text_search_index_definition()
+        )
+    else:
+        await _create_search_index(
+            collection,
+            {
+                "name": TEXT_SEARCH_INDEX_NAME,
+                "type": "search",
+                "definition": _build_text_search_index_definition(),
+            },
+        )
 
     await _wait_for_search_index_ready(collection, TEXT_SEARCH_INDEX_NAME)
 
@@ -831,6 +830,30 @@ def index_entry_is_queryable(entry: dict[str, Any]) -> bool | None:
     return status == "READY"
 
 
+def _serves_latest_definition(entry: dict[str, Any]) -> bool:
+    """Has every host swapped in the entry's latest definition?
+
+    Atlas versions each definition: ``latestDefinitionVersion.version`` is the
+    newest one, ``statusDetail[].mainIndex.definitionVersion.version`` is the
+    one each host is SERVING (the next one builds in ``stagedIndex``):
+    https://www.mongodb.com/docs/manual/reference/operator/aggregation/listSearchIndexes/
+
+    Versions, not ``status``: the first poll right after
+    ``update_search_index`` can still read the old index's ``READY``. An entry
+    without version info (a fresh create's first polls, or a deployment that
+    omits them) passes, leaving the decision to ``queryable``.
+    """
+
+    latest = (entry.get("latestDefinitionVersion") or {}).get("version")
+    if latest is None:
+        return True
+    return all(
+        ((detail.get("mainIndex") or {}).get("definitionVersion") or {}).get("version")
+        == latest
+        for detail in entry.get("statusDetail") or []
+    )
+
+
 async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None:
     """Poll the catalogue until ``index_name`` can actually serve queries.
 
@@ -843,8 +866,12 @@ async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None
 
     Three exits:
 
-    * **ready** — :func:`index_entry_is_queryable` says ``True`` (Atlas) or
-      ``None`` (local mongot, which reports no readiness fields at all).
+    * **ready** — :func:`index_entry_is_queryable` says ``True`` AND
+      :func:`_serves_latest_definition` (Atlas), or ``None`` (local mongot,
+      which reports no readiness fields at all). ``queryable`` alone is not
+      enough after ``update_search_index``: the PREVIOUS definition keeps the
+      index queryable (``status: BUILDING, queryable: true``) while the new
+      one builds.
     * **raise** — ``status == "FAILED"``: the build will never finish on its
       own, so the indexing phase fails loudly instead of leaving a silent
       "ready". Checked BEFORE ``queryable`` because the docs allow a FAILED
@@ -852,9 +879,9 @@ async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None
       PREVIOUS definition, e.g. the stale-dimensions state
       :func:`assert_settings_match_live_vector_index` exists to catch.
     * **fail-open** — past the 300 s cap, WARN and return. A timeout is "not
-      yet", not "never": retrieval reports the index's leg as unavailable
-      until mongot catches up, and the next indexing run finds the index
-      up-to-date.
+      yet", not "never": retrieval keeps the previous definition (after an
+      update) or reports the index's leg as unavailable (after a create) until
+      mongot catches up, and the next indexing run finds the index up-to-date.
     """
 
     logger.info(
@@ -885,14 +912,15 @@ async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None
                     index_name,
                 )
                 return
-            if queryable:
+            if queryable and _serves_latest_definition(entry):
                 logger.info(
                     "Search index '%s' ready (status=%s)", index_name, last_status
                 )
                 return
 
         logger.debug(
-            "Search index '%s' not queryable yet (status=%s); polling again in %d s",
+            "Search index '%s' not serving its latest definition yet (status=%s); "
+            "polling again in %d s",
             index_name,
             last_status,
             _SEARCH_INDEX_POLL_S,
@@ -900,8 +928,9 @@ async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None
         await asyncio.sleep(_SEARCH_INDEX_POLL_S)
 
     logger.warning(
-        "Search index '%s' not queryable after %d s (last status=%s); its "
-        "retrieval leg stays unavailable until it is queryable",
+        "Search index '%s' not serving its latest definition after %d s (last "
+        "status=%s); retrieval keeps the previous definition, or reports the "
+        "leg unavailable when there is none, until it does",
         index_name,
         _SEARCH_INDEX_READY_TIMEOUT_S,
         last_status,

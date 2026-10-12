@@ -57,11 +57,11 @@ _TEST_USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
 
 @pytest.fixture(autouse=True)
 def _no_mongot_sync_sleeps(mocker):
-    """Zero out the real ``asyncio.sleep`` waits in ``_ensure_vector_index``.
+    """Zero out the real ``asyncio.sleep`` waits of the readiness poll.
 
-    The production code sleeps 2-3s per call to let mongot process index
-    drops/creates — pointless against the mocked collections used here, yet it
-    made each test in this file take 3-5 wall-clock seconds (~28s of the suite).
+    ``_wait_for_search_index_ready`` sleeps between catalogue reads —
+    pointless against the mocked collections used here, and up to 300 s per
+    test on the timeout paths.
 
     The stub MUST replace the ``asyncio`` binding ON the core module, not
     ``asyncio.sleep`` itself: ``core.asyncio`` IS the shared asyncio module, so
@@ -144,8 +144,8 @@ def _make_collection(
     ``index_information()`` answers ``classic_indexes`` (default: only
     ``_id_``), so the legacy ``text_index`` drop is opt-in per test.
 
-    ``collection.events`` records every create / drop / named poll / classic
-    ``drop_index`` in call order, so a test can assert "drop → create → wait"
+    ``collection.events`` records every create / update / drop / named poll /
+    classic ``drop_index`` in call order, so a test can assert "update → wait"
     across the mocks.
     """
 
@@ -162,6 +162,9 @@ def _make_collection(
     async def _create(*, model: dict) -> None:
         events.append(("create", model["name"]))
 
+    async def _update(name: str, definition: dict) -> None:
+        events.append(("update", name))
+
     async def _drop(name: str) -> None:
         events.append(("drop", name))
 
@@ -170,6 +173,7 @@ def _make_collection(
 
     collection.list_search_indexes = _list_search
     collection.create_search_index = AsyncMock(side_effect=_create)
+    collection.update_search_index = AsyncMock(side_effect=_update)
     collection.drop_search_index = AsyncMock(side_effect=_drop)
     collection.index_information = AsyncMock(
         return_value=classic_indexes or {"_id_": {"key": [("_id", 1)]}}
@@ -361,11 +365,11 @@ class TestEnsureIndexes:
         )
         assert vector_field["numDimensions"] == 42
 
-    async def test_dimension_mismatch_drops_and_recreates_with_warning(
+    async def test_dimension_mismatch_updates_in_place_with_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Existing vector index with a different ``numDimensions`` must
-        be dropped + recreated, with a WARNING that names both numbers."""
+        """Existing vector index with a different ``numDimensions`` must be
+        updated in place (never dropped), with a WARNING naming both numbers."""
 
         existing = {
             "name": VECTOR_INDEX_NAME,
@@ -394,8 +398,11 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
-        collection.create_search_index.assert_awaited_once()
+        collection.update_search_index.assert_awaited_once_with(
+            VECTOR_INDEX_NAME, _build_vector_index_definition(768)
+        )
+        collection.drop_search_index.assert_not_awaited()
+        assert VECTOR_INDEX_NAME not in _created_models(collection)
 
         warning_text = " ".join(
             record.getMessage()
@@ -409,8 +416,7 @@ class TestEnsureIndexes:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """When the live vector index already has the target dimension AND
-        every required filter path, the reconcile logic must NOT drop or
-        recreate it."""
+        every required filter path, the reconcile logic must NOT touch it."""
 
         existing = {
             "name": VECTOR_INDEX_NAME,
@@ -442,14 +448,15 @@ class TestEnsureIndexes:
             )
 
         collection.drop_search_index.assert_not_awaited()
+        collection.update_search_index.assert_not_awaited()
         collection.create_search_index.assert_not_awaited()
 
     async def test_pre_adr006_index_missing_subtype_self_heals(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """The live index of an environment provisioned before ADR-006 has every
-        filter path EXCEPT ``subtype`` — the next indexing run must quietly drop
-        and recreate it (no WARNING; only a dimension mismatch warns)."""
+        filter path EXCEPT ``subtype`` — the next indexing run must quietly
+        update it in place (no WARNING; only a dimension mismatch warns)."""
 
         existing = {
             "name": VECTOR_INDEX_NAME,
@@ -479,18 +486,17 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
-        collection.create_search_index.assert_awaited_once()
+        collection.update_search_index.assert_awaited_once_with(
+            VECTOR_INDEX_NAME, _build_vector_index_definition(8)
+        )
+        collection.drop_search_index.assert_not_awaited()
         assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert warnings == []
-
-    async def test_missing_filter_paths_triggers_recreate_without_warning(
+    async def test_missing_filter_paths_triggers_update_without_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An existing index missing a filter path must be recreated,
-        but with no WARNING (only dimension mismatch warns)."""
+        """An existing index missing a filter path must be updated in place,
+        then waited on, with no WARNING (only dimension mismatch warns)."""
 
         existing = {
             "name": VECTOR_INDEX_NAME,
@@ -518,8 +524,11 @@ class TestEnsureIndexes:
                 user_id=_TEST_USER_ID,
             )
 
-        collection.drop_search_index.assert_awaited_once_with(VECTOR_INDEX_NAME)
-        collection.create_search_index.assert_awaited_once()
+        assert collection.events[:2] == [
+            ("update", VECTOR_INDEX_NAME),
+            ("wait", VECTOR_INDEX_NAME),
+        ]
+        collection.drop_search_index.assert_not_awaited()
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert warnings == []
 
@@ -550,6 +559,24 @@ class _ScriptedCatalogue:
 
 def _entry(index_name: str, **fields) -> dict:
     return {"name": index_name, **fields}
+
+
+def _versioned_entry(
+    index_name: str, status: str, *, latest: int, serving: list[int]
+) -> dict:
+    """An Atlas entry: ``latest`` is the newest definition version, ``serving``
+    the version each host's ``mainIndex`` answers queries with."""
+
+    return _entry(
+        index_name,
+        status=status,
+        queryable=True,
+        latestDefinitionVersion={"version": latest},
+        statusDetail=[
+            {"mainIndex": {"definitionVersion": {"version": version}}}
+            for version in serving
+        ],
+    )
 
 
 @pytest.mark.parametrize("index_name", [VECTOR_INDEX_NAME, TEXT_SEARCH_INDEX_NAME])
@@ -612,7 +639,7 @@ class TestSearchIndexReadiness:
         """FAILED is checked BEFORE ``queryable``.
 
         The docs allow a FAILED index to report ``queryable: true`` — it is
-        then serving the PREVIOUS definition, which right after a recreate is
+        then serving the PREVIOUS definition, which right after an update is
         a stale definition, not a success.
         """
 
@@ -638,11 +665,47 @@ class TestSearchIndexReadiness:
         assert len(collection.probes) == expected_polls
         assert _no_mongot_sync_sleeps.await_count == expected_polls
         warning = caplog.text
-        assert f"Search index '{index_name}' not queryable after 300 s" in warning
+        assert (
+            f"Search index '{index_name}' not serving its latest definition "
+            "after 300 s" in warning
+        )
         assert "last status=BUILDING" in warning
-        assert "retrieval leg stays unavailable until it is queryable" in warning
+        assert "retrieval keeps the previous definition" in warning
         # The helper serves both legs, so it names no one fallback mode.
         assert "text_only" not in warning
+
+    async def test_update_keeps_polling_while_the_old_definition_serves(
+        self, _no_mongot_sync_sleeps, index_name: str
+    ) -> None:
+        """Right after ``update_search_index`` Atlas reports the OLD definition
+        as queryable — first still ``READY``, then ``BUILDING`` — while v1
+        builds in ``stagedIndex``. Only the swap (every host's ``mainIndex`` on
+        v1) is ready."""
+
+        collection = _ScriptedCatalogue(
+            [
+                [_versioned_entry(index_name, "READY", latest=1, serving=[0, 0])],
+                [_versioned_entry(index_name, "BUILDING", latest=1, serving=[0, 0])],
+                [_versioned_entry(index_name, "BUILDING", latest=1, serving=[1, 0])],
+                [_versioned_entry(index_name, "READY", latest=1, serving=[1, 1])],
+            ]
+        )
+
+        await _wait_for_search_index_ready(collection, index_name)
+
+        assert len(collection.probes) == 4
+        assert _no_mongot_sync_sleeps.await_count == 3
+
+    async def test_fresh_create_with_versions_is_ready_once_queryable(
+        self, index_name: str
+    ) -> None:
+        collection = _ScriptedCatalogue(
+            [[_versioned_entry(index_name, "READY", latest=0, serving=[0])]]
+        )
+
+        await _wait_for_search_index_ready(collection, index_name)
+
+        assert collection.probes == [index_name]
 
     async def test_entry_without_readiness_fields_is_ready(
         self, caplog, _no_mongot_sync_sleeps, index_name: str
@@ -831,7 +894,7 @@ class TestEnsureTextSearchIndex:
             pytest.param(_LIVE_TEXT_INDEX, id="local-mongot-echo"),
             pytest.param(_with_echoed_extras(), id="echoed-defaults-and-extra-path"),
             # Atlas's default for ``mappings.dynamic`` is ``false``: an echo
-            # that omits the key must not drop + recreate on every run.
+            # that omits the key must not update on every run.
             pytest.param(_without_dynamic(), id="dynamic-absent"),
         ],
     )
@@ -842,6 +905,7 @@ class TestEnsureTextSearchIndex:
             await _ensure_text_search_index(collection)
 
         collection.create_search_index.assert_not_awaited()
+        collection.update_search_index.assert_not_awaited()
         collection.drop_search_index.assert_not_awaited()
         assert collection.events == []
         assert (
@@ -875,26 +939,24 @@ class TestEnsureTextSearchIndex:
             pytest.param(_live_text_index(dynamic=True), "dynamic", id="dynamic-true"),
         ],
     )
-    async def test_drift_warns_then_drops_and_recreates(
-        self, caplog, _no_mongot_sync_sleeps, live_entry: dict, drifted: str
+    async def test_drift_warns_then_updates_in_place(
+        self, caplog, live_entry: dict, drifted: str
     ) -> None:
         collection = _make_collection(initial_indexes=[live_entry])
-        _no_mongot_sync_sleeps.side_effect = lambda seconds: collection.events.append(
-            ("sleep", seconds)
-        )
 
         with caplog.at_level("WARNING", logger="tree.memory.rag.indexing"):
             await _ensure_text_search_index(collection)
 
         assert collection.events == [
-            ("drop", TEXT_SEARCH_INDEX_NAME),
-            ("sleep", 2),
-            ("create", TEXT_SEARCH_INDEX_NAME),
+            ("update", TEXT_SEARCH_INDEX_NAME),
             ("wait", TEXT_SEARCH_INDEX_NAME),
         ]
+        collection.update_search_index.assert_awaited_once_with(
+            TEXT_SEARCH_INDEX_NAME, _build_text_search_index_definition()
+        )
         (warning,) = [r.getMessage() for r in caplog.records]
         assert f"Search index '{TEXT_SEARCH_INDEX_NAME}' definition drift" in warning
-        assert "dropping and recreating" in warning
+        assert "updating in place" in warning
         have, want = warning.split("want=")
         assert f"'{drifted}'" in have.split("have=")[1]
         assert f"'{drifted}'" in want
