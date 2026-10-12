@@ -69,6 +69,8 @@ models:
     dimensions: 1024
   embedding_batch:
     max_inputs: 1000
+    # Tokens per embed request. 10K fits the no-credit-card key's 10K
+    # tokens/minute window; voyage-4's hard per-request cap is 320K.
     max_total_tokens: 10000
     max_input_tokens: 32000
 
@@ -76,7 +78,7 @@ extraction:
   # Across runs: worker runs per user (min(num_shards, pending docs)).
   # Read by the process that RUNS the flow, so a change needs a `make memory-serve-workflows` restart (local) or a push
   # (Prefect Managed). Every shard still waits on the voyage-embeddings limit.
-  num_shards: 1
+  num_shards: 4
   # Within ONE worker run (a shard, or the online pipeline's single doc):
   llm_concurrency: 5 # parallel LLM calls over one document's parent chunks
   doc_concurrency: 1 # documents chunked in parallel
@@ -163,24 +165,27 @@ dream:
 
 # Pipeline-parallelism + Voyage rate-limiting
 concurrency:
-  # Requests/minute the shared free-tier Voyage key allows. Drives the
-  # server-side `voyage-embeddings` Prefect global concurrency limit
-  # (limit = voyage_rpm, slot-decay-per-second = voyage_rpm / 60), which
-  # `make memory-deploy-prefect-setup-up` creates/updates. Raise this + re-run
-  # that target after adding a payment method — no code change needed.
+  # Voyage key limits for voyage-4, Tier 1 (unlocked by adding a payment
+  # method; https://docs.voyageai.com/docs/rate-limits). Without a payment
+  # method Voyage caps the key at 3 RPM / 10K TPM, so on a no-credit-card key
+  # swap in the commented value — the Tier 1 number would only buy 429s
+  # (the TPM side is held by models.embedding_batch.max_total_tokens):
+  # voyage_rpm: 3
+  #
+  # Requests/minute. Drives the server-side `voyage-embeddings` Prefect global
+  # concurrency limit (limit = voyage_rpm, slot-decay-per-second =
+  # voyage_rpm / 60), which `make memory-deploy-prefect-setup-up`
+  # creates/updates — re-run it after changing this, no code change needed.
   # Fail-open: an unreachable limiter warns and the call proceeds (task 178);
   # Voyage's own 429 backoff remains the quota guard.
-  voyage_rpm: 3
-  # Tokens/minute the key allows. Held by config (the embedding_batch
-  # max_total_tokens cap), not yet a second token-weighted limiter.
-  voyage_tpm: 10000
+  voyage_rpm: 2000
   # Prefect runner global concurrency limit
   runner_global_limit: 6
   # Wall-clock bound (s) on one `voyage-embeddings` slot acquire (task 178). A
   # limiter that accepts but never replies fails open after this instead of
-  # Prefect's ~6-8 min retry budget. It also caps a LEGITIMATE throttling wait:
-  # 120 = runner_global_limit (6) x one slot's decay (60 / voyage_rpm = 20 s),
-  # so ordinary contention finishes first. Re-derive it if you change either.
+  # Prefect's ~6-8 min retry budget. It also caps a LEGITIMATE throttling wait,
+  # so keep it above runner_global_limit x one slot's decay (60 / voyage_rpm):
+  # 6 x 0.03 s at 2000 RPM, 6 x 20 s = 120 s at the free-tier 3 RPM.
   voyage_slot_acquire_timeout_seconds: 120
 
 prefect:

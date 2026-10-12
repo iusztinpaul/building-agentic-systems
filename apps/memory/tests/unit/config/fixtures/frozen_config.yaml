@@ -108,7 +108,6 @@ dream:
 
 concurrency:
   voyage_rpm: 3
-  voyage_tpm: 10000
   runner_global_limit: 4
 
 mcp:

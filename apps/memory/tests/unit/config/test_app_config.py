@@ -397,7 +397,6 @@ class TestConcurrencyConfig:
         config = load_app_config(frozen_config_path)
 
         assert config.concurrency.voyage_rpm == 3
-        assert config.concurrency.voyage_tpm == 10_000
         assert config.concurrency.runner_global_limit == 4
 
     def test_concurrency_defaults_when_absent(self, tmp_path):
@@ -408,22 +407,15 @@ class TestConcurrencyConfig:
 
         assert config.concurrency == ConcurrencyConfig()
         assert config.concurrency.voyage_rpm == 3
-        assert config.concurrency.voyage_tpm == 10_000
         assert config.concurrency.runner_global_limit == 4
 
     def test_concurrency_block_loaded_from_custom_yaml(self, tmp_path):
         custom = tmp_path / "concurrency.yaml"
-        custom.write_text(
-            "concurrency:\n"
-            "  voyage_rpm: 60\n"
-            "  voyage_tpm: 1000000\n"
-            "  runner_global_limit: 8\n"
-        )
+        custom.write_text("concurrency:\n  voyage_rpm: 60\n  runner_global_limit: 8\n")
 
         config = load_app_config(custom)
 
         assert config.concurrency.voyage_rpm == 60
-        assert config.concurrency.voyage_tpm == 1_000_000
         assert config.concurrency.runner_global_limit == 8
 
 

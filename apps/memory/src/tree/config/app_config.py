@@ -258,8 +258,6 @@ class ConcurrencyConfig(BaseModel):
       limit (limit = ``voyage_rpm``, slot-decay-per-second = ``voyage_rpm / 60``),
       created/updated by ``make memory-deploy-prefect-setup-up``. Fail-open: an
       unreachable limiter warns and the call proceeds (task 178).
-    * ``voyage_tpm`` — tokens/minute the key allows. Held by config (the
-      ``max_total_tokens`` cap), not yet a second token-weighted limiter.
     * ``runner_global_limit`` — admission control for ``serve(limit=...)``;
       kept close to ``voyage_rpm`` so we don't admit far more runs than the
       embed budget can feed.
@@ -271,7 +269,6 @@ class ConcurrencyConfig(BaseModel):
     """
 
     voyage_rpm: int = 3
-    voyage_tpm: int = 10_000
     runner_global_limit: int = 4
     voyage_slot_acquire_timeout_seconds: float = 120.0
 
