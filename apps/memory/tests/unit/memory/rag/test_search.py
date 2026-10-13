@@ -510,7 +510,8 @@ class TestSearchMode:
         warnings = [
             record
             for record in caplog.records
-            if record.levelno == logging.WARNING and "Vector search leg" in record.msg
+            if record.levelno == logging.WARNING
+            and "Vector search unavailable" in record.msg
         ]
         assert len(warnings) == 1
         assert warnings[0].exc_info is not None
@@ -746,7 +747,7 @@ class TestMinVectorScore:
             )
 
         assert (
-            "vector leg: 2 candidate(s), 1 kept at min_vector_score=0.65 (top=0.923)"
+            "vector search: 2 candidate(s), 1 kept at min_vector_score=0.65 (top=0.923)"
             in caplog.text
         )
 
@@ -822,7 +823,7 @@ def _text_leg_lines(caplog) -> list[str]:
     return [
         record.getMessage()
         for record in caplog.records
-        if record.getMessage().startswith("text leg:")
+        if record.getMessage().startswith("text search:")
     ]
 
 
@@ -1158,7 +1159,7 @@ class TestMinimumMatchRatio:
         assert result.hits == []
         assert result.search_mode == "hybrid"
         assert _text_leg_lines(caplog) == [
-            "text leg: 0 candidate(s), 8 query term(s), min_should_match=4"
+            "text search: 0 candidate(s), 8 query term(s), min_should_match=4"
         ]
 
     async def test_decimal_query_term_never_matches_its_bare_digits(
@@ -1185,7 +1186,7 @@ class TestMinimumMatchRatio:
 
         assert [hit.doc["_id"] for hit in result.hits] == ["on-topic"]
         assert _text_leg_lines(caplog) == [
-            "text leg: 1 candidate(s), 3 query term(s), min_should_match=2"
+            "text search: 1 candidate(s), 3 query term(s), min_should_match=2"
         ]
 
     async def test_long_query_sends_capped_clauses_and_k_over_the_cap(
@@ -1213,7 +1214,7 @@ class TestMinimumMatchRatio:
         assert compound["minimumShouldMatch"] == 32
         assert result.search_mode == "hybrid"
         assert _text_leg_lines(caplog) == [
-            "text leg: 0 candidate(s), 64 query term(s), min_should_match=32"
+            "text search: 0 candidate(s), 64 query term(s), min_should_match=32"
         ]
 
     async def test_all_stop_word_query_sends_no_search_and_stays_hybrid(
@@ -1244,7 +1245,7 @@ class TestMinimumMatchRatio:
         assert result.search_mode == "hybrid"
         assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
         assert _text_leg_lines(caplog) == [
-            "text leg: 0 candidate(s), 0 query term(s), min_should_match=0"
+            "text search: 0 candidate(s), 0 query term(s), min_should_match=0"
         ]
 
     async def test_logs_the_line_on_a_leg_with_candidates(
@@ -1268,7 +1269,7 @@ class TestMinimumMatchRatio:
             )
 
         assert _text_leg_lines(caplog) == [
-            "text leg: 2 candidate(s), 5 query term(s), min_should_match=3"
+            "text search: 2 candidate(s), 5 query term(s), min_should_match=3"
         ]
 
     async def test_no_line_on_a_raised_leg(
@@ -1291,7 +1292,7 @@ class TestMinimumMatchRatio:
         assert result.search_mode == "vector_only"
         assert [hit.doc["_id"] for hit in result.hits] == ["v0"]
         assert _text_leg_lines(caplog) == []
-        assert "Text search leg unavailable" in caplog.text
+        assert "Text search unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("node_filter", "message"),
@@ -1370,7 +1371,7 @@ class TestMinimumMatchRatio:
         # The leg RAN (it did not raise), so its line is written before the
         # probe decides availability.
         assert _text_leg_lines(caplog) == [
-            "text leg: 0 candidate(s), 5 query term(s), min_should_match=3"
+            "text search: 0 candidate(s), 5 query term(s), min_should_match=3"
         ]
 
     async def test_empty_leg_on_a_readiness_less_entry_stays_hybrid(

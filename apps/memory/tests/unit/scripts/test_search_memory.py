@@ -147,7 +147,7 @@ class TestPrintedRanking:
         result = CliRunner().invoke(cli_module.main, ["--query", "voyage rate limit"])
 
         assert result.output.splitlines()[0] == (
-            "Search ran text_only — the other leg was unavailable; "
+            "Search ran text_only — the other search was unavailable; "
             "results may miss matches."
         )
         assert "[0.032] Memory for AI Agents" in result.output

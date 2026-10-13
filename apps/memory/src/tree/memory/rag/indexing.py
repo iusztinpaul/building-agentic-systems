@@ -930,7 +930,7 @@ async def _wait_for_search_index_ready(collection: Any, index_name: str) -> None
     logger.warning(
         "Search index '%s' not serving its latest definition after %d s (last "
         "status=%s); retrieval keeps the previous definition, or reports the "
-        "leg unavailable when there is none, until it does",
+        "search unavailable when there is none, until it does",
         index_name,
         _SEARCH_INDEX_READY_TIMEOUT_S,
         last_status,

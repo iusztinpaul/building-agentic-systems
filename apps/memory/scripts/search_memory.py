@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # is not a safe read of a short list. Printed FIRST, and also above
 # "No results." — degraded-and-empty is exactly when the operator needs it.
 DEGRADED_SEARCH_CAVEAT = (
-    "Search ran {mode} — the other leg was unavailable; results may miss matches."
+    "Search ran {mode} — the other search was unavailable; results may miss matches."
 )
 
 # BOTH legs down (``SearchUnavailableError``) is an operator-facing outcome, not

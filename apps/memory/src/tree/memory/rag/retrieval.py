@@ -79,7 +79,7 @@ async def retrieve_parents(
 
     ``top_k <= 0`` asks for no results and gets an empty one, without a query:
     passing ``limit=0`` down made BOTH search stages raise and log
-    "Vector/Text search leg unavailable ...", which reads as an Atlas outage to
+    "Vector/Text search unavailable ...", which reads as an Atlas outage to
     whoever is on call (and now raises :class:`SearchUnavailableError`).
 
     Every returned result carries the seed search's **Search mode** and its

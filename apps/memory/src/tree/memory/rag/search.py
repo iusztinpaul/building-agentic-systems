@@ -266,7 +266,7 @@ async def _vector_search(
             results.append(doc)
     except Exception:
         logger.warning(
-            "Vector search leg unavailable; the query runs text-only", exc_info=True
+            "Vector search unavailable; the query runs text-only", exc_info=True
         )
         return None
 
@@ -302,7 +302,7 @@ def _gate_vector_candidates(
     threshold = app_config.query.min_vector_score
     kept = [doc for doc in candidates if doc["_search_score"] >= threshold]
     logger.info(
-        "vector leg: %d candidate(s), %d kept at min_vector_score=%.2f (top=%.3f)",
+        "vector search: %d candidate(s), %d kept at min_vector_score=%.2f (top=%.3f)",
         len(candidates),
         len(kept),
         threshold,
@@ -357,7 +357,7 @@ async def _search_index_is_queryable(
 
     if not entries:
         logger.warning(
-            "Search leg unavailable: search index '%s' absent; the query runs %s",
+            "Search unavailable: search index '%s' absent; the query runs %s",
             index_name,
             fallback_mode,
         )
@@ -366,7 +366,7 @@ async def _search_index_is_queryable(
     entry = entries[0]
     if index_entry_is_queryable(entry) is False:
         logger.warning(
-            "Search leg unavailable: search index '%s' is not queryable "
+            "Search unavailable: search index '%s' is not queryable "
             "(status=%s, queryable=%s); the query runs %s",
             index_name,
             entry.get("status"),
@@ -503,7 +503,7 @@ async def _text_search(
             results.append(doc)
     except Exception:
         logger.warning(
-            "Text search leg unavailable; the query runs vector-only", exc_info=True
+            "Text search unavailable; the query runs vector-only", exc_info=True
         )
         return None
 
@@ -542,7 +542,7 @@ def _log_text_leg(candidates: int, term_count: int, k: int) -> None:
     """The per-query line of every text leg that RAN (ADR-015 §4)."""
 
     logger.info(
-        "text leg: %d candidate(s), %d query term(s), min_should_match=%d",
+        "text search: %d candidate(s), %d query term(s), min_should_match=%d",
         candidates,
         term_count,
         k,
