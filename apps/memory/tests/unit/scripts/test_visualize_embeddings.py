@@ -271,3 +271,19 @@ class TestMakefileWiring:
         assert "scripts/visualize_embeddings.py $(USER_FLAGS)" in makefile
         assert "$(if $(filter true,$(HULLS)),--hulls,)" in makefile
         assert '$(if $(OUTPUT),--output "$(OUTPUT)",)' in makefile
+
+
+class TestDocumentCap:
+    """The CLI caps at ``query.cli_max_docs``; the MCP tool keeps the 250 cap."""
+
+    def test_it_reads_the_map_with_the_cli_cap(
+        self, cli_module, mocked_boundaries, loaded_map
+    ) -> None:
+        load = loaded_map(_embedding_map())
+
+        CliRunner().invoke(cli_module.main, ["--no-open"])
+
+        assert (
+            load.await_args.kwargs["max_docs"]
+            == cli_module.app_config.query.cli_max_docs
+        )

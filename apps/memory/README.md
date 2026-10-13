@@ -352,7 +352,7 @@ at read time and never stored), in `graphrag` the knowledge graph. An empty memo
 nothing `No results for "<query>" — nothing to draw.`; both exit 1 without a file.
 
 ```bash
-make memory-visualize-structure                       # the 250 most-recent documents, 100 shown
+make memory-visualize-structure                       # the 1000 most-recent documents, 100 shown
 make memory-visualize-structure MAX_DOCS=50           # embed only the 50 most recent
 make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search results
 ```
@@ -360,7 +360,8 @@ make memory-visualize-structure QUERY="Paul Iusztin"  # narrowed to the search r
 With a `QUERY`, `rag` draws the retrieved parents, their documents and only the child chunks that matched;
 `graphrag` the expanded subgraph around the search seeds.
 
-The no-query view embeds the `MAX_DOCS` (default 250, `query.full_graph_max_docs`) most-recent
+The no-query view embeds the `MAX_DOCS` (default 1000 from make, `query.cli_max_docs`; 250 from the
+MCP tools, `query.full_graph_max_docs`, whose resource read fails through Horizon on a larger view) most-recent
 documents — by `properties.date`, else `created_at` — with their chunks, entities and edges, and
 shows the 100 most recent (`query.full_graph_shown_docs`). Drag the `Documents` slider (`Most recent`)
 at the top of the Controls panel to reveal older ones; hidden nodes leave the simulation, pins survive,
@@ -400,7 +401,9 @@ the legend and the document title / heading path / snippet in the tooltip. The h
 `N of M chunks (the 250 most-recent of D documents) in K clusters (+X noise)` — while the legend
 sizes, the noise row and the stale warning count the whole run. Same renderer as the graph
 (fixed coordinates, no simulation — drag, pin, select, group drag and the Display knobs still work) — and identical in
-both memory modes, because the map has no edges to miss.
+both memory modes, because the map has no edges to miss. `make memory-visualize-embeddings` plots the
+1000 most-recent documents (`query.cli_max_docs`); the `visualize_memory_embeddings` MCP tool keeps
+250 (`query.full_graph_max_docs`), because its resource read fails through Horizon on a larger map.
 
 ```bash
 make memory-visualize-embeddings                        # open the latest map

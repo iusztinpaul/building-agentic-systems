@@ -5,9 +5,10 @@ READS the latest **Clustering run** and draws it (ADR-007 Decision 8) — it nev
 clusters. `make memory-run-clustering-pipeline` is what produces the data; this
 command only turns the stored `cluster_id` / `viz {x, y, run_id}` fields into a
 picture, so it is instant and needs no served workflows, no Prefect and no LLM.
-It plots the chunks of the ``query.full_graph_max_docs`` (250) most-recent
-documents; the summary says ``N of M chunks`` and the legend counts the whole
-run (ADR-013 §3).
+It plots the chunks of the ``query.cli_max_docs`` (1000) most-recent documents;
+the ``visualize_memory_embeddings`` MCP tool keeps ``query.full_graph_max_docs``
+(250) because its resource read fails through Horizon on a larger map. The
+summary says ``N of M chunks`` and the legend counts the whole run.
 
 Three outcomes that are NOT failures of the renderer:
 
@@ -41,6 +42,7 @@ import webbrowser
 import click
 
 from tree.cli import user_options
+from tree.config.app_config import app_config
 from tree.config.settings import settings
 from tree.db import init_mongodb
 from tree.entities.sessions import resolve_user_id
@@ -71,7 +73,9 @@ async def _run(
     database = settings.mongo.mongo_initdb_database
     resolved_user_id = await resolve_user_id(user_id, user_identifier)
 
-    embedding_map = await load_embedding_map(client, database, resolved_user_id)
+    embedding_map = await load_embedding_map(
+        client, database, resolved_user_id, max_docs=app_config.query.cli_max_docs
+    )
     if embedding_map is None:
         click.echo(NO_EMBEDDINGS_MESSAGE)
         raise SystemExit(1)

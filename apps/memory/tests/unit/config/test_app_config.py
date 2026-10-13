@@ -875,6 +875,11 @@ class TestFullGraphCaps:
             == (250, 100)
         )
 
+    def test_the_cli_cap_ships_at_1000_and_matches_the_typed_default(self) -> None:
+        shipped = load_app_config(_DEFAULT_CONFIG_PATH).query
+
+        assert shipped.cli_max_docs == QueryConfig().cli_max_docs == 1000
+
     def test_defaults_when_the_keys_are_absent(self, tmp_path) -> None:
         custom = tmp_path / "query.yaml"
         custom.write_text("query:\n  top_k: 5\n")
@@ -890,7 +895,9 @@ class TestFullGraphCaps:
 
         assert (query.full_graph_max_docs, query.full_graph_shown_docs) == (50, 100)
 
-    @pytest.mark.parametrize("key", ["full_graph_max_docs", "full_graph_shown_docs"])
+    @pytest.mark.parametrize(
+        "key", ["full_graph_max_docs", "full_graph_shown_docs", "cli_max_docs"]
+    )
     def test_a_cap_below_one_is_refused(self, key: str) -> None:
         with pytest.raises(ValidationError) as excinfo:
             QueryConfig(**{key: 0})

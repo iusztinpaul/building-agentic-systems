@@ -15,8 +15,10 @@ mode stores, through the ONE **Graph renderer** (ADR-005):
   (``graph-<stamp>.html``), the expanded subgraph around the search seeds with
   one.
 
-Either mode, no query: the 250 most-recent documents are embedded and the
-``Documents`` slider shows 100 (``--max-docs`` embeds fewer); a query view ranks
+Either mode, no query: the ``query.cli_max_docs`` (1000) most-recent documents
+are embedded and the ``Documents`` slider shows 100 (``--max-docs`` overrides).
+The MCP tools keep ``query.full_graph_max_docs`` (250): their resource read
+fails through Horizon on a larger view. A query view ranks
 its documents by relevance and shows them all. An empty memory, a query that
 finds nothing and both search legs down each print ONE line and exit 1 without
 writing a file. Text instead of a picture: ``make memory-search``.
@@ -27,7 +29,7 @@ current-session user; override with ``USER_ID=<ObjectId>`` or
 :func:`tree.entities.sessions.resolve_user_id` for the resolution precedence.
 
 Usage:
-    # The current user's memory structure: 250 most-recent documents embedded,
+    # The current user's memory structure: 1000 most-recent documents embedded,
     # 100 shown by the Documents slider
     make memory-visualize-structure
 
@@ -192,7 +194,7 @@ async def _run(
 @click.option(
     "--max-docs",
     type=click.IntRange(min=1),
-    default=app_config.query.full_graph_max_docs,
+    default=app_config.query.cli_max_docs,
     show_default=True,
     help=(
         "Most-recent documents embedded with no --query; the browser's "

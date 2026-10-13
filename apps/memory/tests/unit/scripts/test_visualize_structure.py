@@ -118,7 +118,7 @@ class TestRagMode:
 
         assert result.exit_code == 0, result.output
         assert rag_readers["fetch_rag_structure"].await_args.kwargs == {
-            "max_docs": cli_module.app_config.query.full_graph_max_docs
+            "max_docs": cli_module.app_config.query.cli_max_docs
         }
         assert render.call_args.args[0] is _TREE
         assert render.call_args.kwargs["query"] == "structure"
@@ -216,16 +216,16 @@ class TestGraphragMode:
         assert result.exit_code == 0
         assert graph_readers["fetch_full_graph"].await_args.kwargs == {"max_docs": 7}
 
-    def test_max_docs_defaults_to_the_configured_cap(
+    def test_max_docs_defaults_to_the_cli_cap(
         self, cli_module, graphrag_mode, render, graph_readers
     ) -> None:
         CliRunner().invoke(cli_module.main, ["--no-open"])
 
         assert graph_readers["fetch_full_graph"].await_args.kwargs == {
-            "max_docs": cli_module.app_config.query.full_graph_max_docs
+            "max_docs": cli_module.app_config.query.cli_max_docs
         }
         option = next(o for o in cli_module.main.params if o.name == "max_docs")
-        assert option.default == cli_module.app_config.query.full_graph_max_docs
+        assert option.default == cli_module.app_config.query.cli_max_docs
         assert option.show_default is True
 
     def test_an_empty_graph_exits_one(

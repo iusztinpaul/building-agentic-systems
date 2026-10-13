@@ -148,6 +148,10 @@ query:
   # views downloaded fine; the per-view Documents slider still shows
   # `full_graph_shown_docs`.
   full_graph_max_docs: 250
+  # The same cap for the make commands (`visualize-structure`,
+  # `visualize-embeddings`): a local HTML file, so Horizon's limit does not
+  # apply; 1000 keeps the browser responsive (10k documents = 35k nodes).
+  cli_max_docs: 1000
   full_graph_shown_docs: 100
 
 dream:
