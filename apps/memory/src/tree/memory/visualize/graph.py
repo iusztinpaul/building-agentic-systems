@@ -3,7 +3,7 @@
 Single home of the **Graph renderer** (ADR-005, ADR-011): the browser-side
 graphology (graph model) + d3-force (live layout) + Sigma.js (WebGL) stack,
 loaded as pinned ESM from jsdelivr. Every graph surface — the
-``visualize_structure.py`` CLI, the ``visualize_memory_structure`` MCP App
+``visualize_structure.py`` CLI, the ``visualize_memory_structure`` MCP tool
 (both modes: the rag **Memory structure** tree and the graphrag knowledge
 graph), the ``query_memory`` / ``search_memory`` tools — consumes the same
 **Graph payload** built here and the same HTML templates; no surface owns
@@ -46,9 +46,8 @@ Needs network at VIEW time (the libraries load from the CDN rather than being
 vendored — ADR-005 decision 2); offline, the page renders an empty canvas.
 
 Dependency direction is memory ← mcp: this module imports NOTHING from
-``tree.mcp``. MCP-only concerns (the tools, the ``ui://`` / ``graphs://``
-resources, CSP wiring, the ext-apps iframe runtime) live in
-``tree.mcp.viz_app``, which imports from here.
+``tree.mcp``. MCP-only concerns (the tools, the ``graphs://`` download
+resource) live in ``tree.mcp.graph_download``, which imports from here.
 
 The template also draws the **Embedding map** (ADR-007 §2) through four
 OPTIONAL payload keys — ``layout: "fixed"`` (use each node's ``x``/``y`` and
@@ -79,7 +78,7 @@ _FALLBACK_COLOUR = Colours.BLACK_LEVEL_1  # unknown / unmapped node types
 # Node-type palette tuned for a WHITE background, drawn from the brand palette
 # (``Colours``). Three hue families: brown = entities, blue = documents/
 # structure, orange = knowledge/events. The ONE palette of the Graph
-# renderer — every surface (CLI file, MCP App iframe) draws from it.
+# renderer — every surface (CLI file, MCP download) draws from it.
 _NODE_COLOURS: dict[str, str] = {
     # Structural
     "document": Colours.GREEN_LEVEL_3,
@@ -372,7 +371,7 @@ def _payload_noun(payload: dict[str, Any]) -> str:
     """What this payload IS, in the operator's words: a map or a graph.
 
     ONE mechanism behind every user-visible string about a rendered payload
-    (this module's log line and ``tree.mcp.viz_app``'s three delivery
+    (this module's log line and ``tree.mcp.graph_download``'s delivery
     sentences): an **Embedding map** is the payload that draws stored
     coordinates (``layout: "fixed"``), everything else is a **Graph payload**.
     Calling a map a "graph" is wrong in `rag` mode, where no graph exists at
@@ -387,10 +386,10 @@ def render_graph_html(payload: dict[str, Any]) -> str:
 
     Takes any payload the ONE template understands: a **Graph payload** or an
     **Embedding map** payload. The page carries its data directly
-    (``const DATA = …``) rather than waiting for the ext-apps ``ontoolresult``
-    channel, so it works as a plain ``file://`` page. Shared by
+    (``const DATA = …``), so it works as a plain ``file://`` page. Shared by
     :func:`_render_graph_file` (the CLI and the local stdio server write it to
-    disk) and the MCP file branch (which stores its gzip as a **Graph file**).
+    disk) and the MCP **Graph download** (which stores its gzip as a **Graph
+    file**).
     """
 
     # Guard against ``</script>`` (or ``</`` generally) appearing inside a
@@ -518,11 +517,7 @@ _GRAPH_STYLE = """\
       --bg: #ffffff; --panel: #f5f6f8; --border: #d9dde4; --muted: #6b7280;
       --text: #1f2430; --accent1: #ea580c; --accent2: #f59e0b;
     }
-    /* Height is per-variant (see __APP_HEIGHT__): the MCP App iframe gets a
-       fixed 760px (hosts size the iframe to the body's height; 100vh would
-       collapse to a tiny default), while the standalone HTML file gets 100vh
-       so it fills the browser window. */
-    html, body { margin: 0; height: __APP_HEIGHT__; background: var(--bg); color: var(--text);
+    html, body { margin: 0; height: 100vh; background: var(--bg); color: var(--text);
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
       overflow: hidden; }
     #wrap { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; }
@@ -608,7 +603,7 @@ _GRAPH_STYLE = """\
     #zoom button:hover { border-color: var(--accent1); color: var(--accent2); }
   </style>"""
 
-# Shared DOM markup for both the iframe and the file variant.
+# The page's DOM markup.
 _BODY_MARKUP = """\
   <div id="wrap">
     <div id="header">
@@ -660,8 +655,8 @@ _RENDER_JS = """\
       const { nodes, edges } = payload;
       const container = document.getElementById("sigma-container");
       container.innerHTML = "";
-      // The iframe calls render() once per tool result: rebuild the panel's
-      // rows (bound to the previous renderer) from this payload.
+      // Rebuild the panel's rows (bound to any previous renderer) from this
+      // payload.
       const panelBody = document.getElementById("panel-body");
       panelBody.textContent = "";
       delete document.body.dataset.docs;   // set again below on a ranked payload only
@@ -1524,7 +1519,7 @@ _RENDER_JS = """\
       drawOverlay();
     }"""
 
-# Self-contained file: data embedded inline, no ext-apps round-trip.
+# Self-contained file: data embedded inline.
 _FILE_HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html>
@@ -1549,20 +1544,11 @@ __RENDER_JS__
 </html>"""
 
 
-def _resolve_static(template: str, app_height: str) -> str:
-    """Splice shared markup/JS + pinned CDN URLs into a template (not data).
-
-    ``app_height`` is the CSS height for ``html, body`` — ``"760px"`` for the
-    iframe variant, ``"100vh"`` for the standalone file (fills the window).
-
-    Deliberately does NOT resolve ``__EXT_APPS_CDN__``: the MCP Apps iframe
-    runtime is an MCP-layer concern, so ``tree.mcp.viz_app`` splices that
-    token itself and this module stays free of any ``tree.mcp`` coupling.
-    """
+def _resolve_static(template: str) -> str:
+    """Splice shared markup/JS + pinned CDN URLs into a template (not data)."""
 
     return (
         template.replace("__STYLE__", _GRAPH_STYLE)
-        .replace("__APP_HEIGHT__", app_height)
         .replace("__BODY__", _BODY_MARKUP)
         .replace("__RENDER_JS__", _RENDER_JS)
         .replace("__GRAPHOLOGY_CDN__", _GRAPHOLOGY_CDN)
@@ -1572,4 +1558,4 @@ def _resolve_static(template: str, app_height: str) -> str:
 
 
 # Everything but the per-call ``__DATA__`` substitution is resolved once here.
-_FILE_HTML_BASE = _resolve_static(_FILE_HTML_TEMPLATE, "100vh")
+_FILE_HTML_BASE = _resolve_static(_FILE_HTML_TEMPLATE)

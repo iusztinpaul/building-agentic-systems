@@ -8,7 +8,7 @@ side: a payload without them must still render the force-directed graph it
 always did. The map payload that switches those keys on is built (and its
 rendering asserted) in ``test_embeddings.py``; the MCP-layer concerns (tool
 result channels, ``graphs://`` resource) live in
-``tests/unit/mcp/test_viz_app.py``.
+``tests/unit/mcp/test_graph_download.py``.
 """
 
 import hashlib
@@ -2014,10 +2014,12 @@ def test_the_closure_marker_never_reaches_the_payload() -> None:
 # (`colourOf`, incl. its negative-id noise fallback) and the map tooltip's
 # rebuilt `document` row. Re-pinned for the query Embedding map: the header
 # strips its "Embedding map for 'q': " prefix as well as "Embedding map: ".
+# Re-pinned when the MCP App iframe variant was dropped: a fixed 100vh height
+# and the iframe-only comments removed.
 _TEMPLATE_SHA256 = {
-    "_GRAPH_STYLE": "39b6d3020fedea6fe530f6ba671b5ca0a95924e0718d6d0f5fab5c37f214bbca",
+    "_GRAPH_STYLE": "ad7e150000366de38643f9254f24c3b4c14460719e4f5b6ec7f86a9a70bcac0c",
     "_BODY_MARKUP": "eabb61a3b90ddd3cfea41a32ed8d8984b0fc9ceb91dab8d99cbcddbee2e5af6c",
-    "_RENDER_JS": "1a80a4890c240bab7f69401c0fe41a37c356643b8875bfa377784cecddb5cd98",
+    "_RENDER_JS": "19e06f8c3723314b28d4324c6adf6fdd8c6102be9756818405cec2f7180cdd04",
     "_FILE_HTML_TEMPLATE": (
         "fe65603e2631b89c69651571bc087e00e757ce1e082c2e12380864b035b0423d"
     ),

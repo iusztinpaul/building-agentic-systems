@@ -549,9 +549,8 @@ async def load_query_map(
     same 2D space as the whole-memory map, so a match sits where the topic map
     puts it. The reference cloud is every placed child of the ``max_docs``
     most-recent documents (every document with ``capped=False``); a match is
-    added even when its document is older. ``with_reference=False`` reads the matches alone (``reference`` empty): the
-    MCP tool's inline view, whose payload Horizon fails to deliver once ~450
-    grey points ride along (226k characters for 21 matches).
+    added even when its document is older. ``with_reference=False`` reads the
+    matches alone (``reference`` empty): the MCP tool's view, kept to the hits.
     A match without this run's coordinates (ingested since, never clustered,
     or a pending child the text leg hit) is counted in ``matched_without_2d``,
     never drawn. Surfaces compute no coordinates (ADR-007 §8).

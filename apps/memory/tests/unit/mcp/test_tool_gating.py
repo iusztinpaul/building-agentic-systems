@@ -32,10 +32,9 @@ _SHARED_TOOLS = [
     "visualize_memory_structure",
 ]
 
-# The six tools that presuppose edges. Absent — not degraded — in rag mode.
+# The five tools that presuppose edges. Absent — not degraded — in rag mode.
 _GRAPH_ONLY_TOOLS = [
     "deep_search_memory",
-    "memory_dashboard",
     "query_memory",
     "review_confirm",
     "review_list_pending",
@@ -47,24 +46,20 @@ _GRAPH_ONLY_TOOLS = [
 # (``tests/unit/test_structure_view_docs.py``).
 _RETIRED_GRAPH_VIEW_TOOL = "visualize_memory" + "_graph"
 
-# Modules that may only ever be imported by a graphrag server: the graph tool
-# module plus the dashboard MCP App it pulls in as a side-effect import.
-# ``tree.mcp.viz_app`` is deliberately NOT here — it is the MODE-NEUTRAL MCP App
-# layer (the ``ui://`` / ``graphs://`` resources and the one dual-delivery
-# helper), which rag mode is free to import (and now DOES, through
+# Modules that may only ever be imported by a graphrag server.
+# ``tree.mcp.graph_download`` is deliberately NOT here — it is the MODE-NEUTRAL
+# **Graph download** (the ``graphs://`` resource and the one delivery helper),
+# which rag mode is free to import (and DOES, through
 # ``visualize_memory_embeddings``).
-_GRAPH_MODULES = [
-    "tree.mcp.graph_tools",
-    "tree.mcp.dashboard_app",
-]
+_GRAPH_MODULES = ["tree.mcp.graph_tools"]
 
 # The clustering recipe's heavy dependencies (ADR-007 §6): imported ONLY inside
 # the function bodies that reduce and cluster, so no server — rag or graphrag —
 # pays the ~40 s cold numba compile just to READ a stored **Embedding map**.
 _LAZY_MODULES = ["umap", "sklearn"]
 
-# The MODE-NEUTRAL MCP App layer every visualization tool delivers through.
-_NEUTRAL_MODULE = "tree.mcp.viz_app"
+# The MODE-NEUTRAL Graph download every visualization tool delivers through.
+_NEUTRAL_MODULE = "tree.mcp.graph_download"
 
 # The Modal SDK and the two clients that pull it (ADR-009 §10): lazy-imported
 # inside ``get_model``'s dispatch branches, never at module level. Importing
@@ -112,10 +107,10 @@ _PROBE = textwrap.dedent(
                 (await server.mcp.get_tool("visualize_memory_structure"))
                 .parameters["properties"]
             ),
-            "structure_ui": (
+            "structure_meta": (
                 (await server.mcp.get_tool("visualize_memory_structure")).meta
                 or {{}}
-            ).get("ui", {{}}).get("resourceUri"),
+            ),
         }}
 
     print("{_MARKER}" + json.dumps(asyncio.run(probe())))
@@ -147,11 +142,11 @@ class TestRegisteredToolSet:
         assert _probe("rag")["tools"] == _SHARED_TOOLS
         assert len(_SHARED_TOOLS) == 8
 
-    def test_graphrag_mode_adds_exactly_the_six_graph_tools(self) -> None:
+    def test_graphrag_mode_adds_exactly_the_five_graph_tools(self) -> None:
         tools = _probe("graphrag")["tools"]
 
         assert tools == sorted(_SHARED_TOOLS + _GRAPH_ONLY_TOOLS)
-        assert len(tools) == 14
+        assert len(tools) == 13
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     def test_the_retired_graph_view_tool_is_gone(self, mode: str) -> None:
@@ -184,9 +179,9 @@ class TestRegisteredToolSet:
         assert _probe(mode)["modal_modules_imported"] == []
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_both_modes_import_the_neutral_mcp_app_layer(self, mode: str) -> None:
-        # The Embedding map tool is registered in BOTH modes, so the ``ui://``
-        # and ``graphs://`` resources it delivers through exist in both.
+    def test_both_modes_import_the_neutral_graph_download(self, mode: str) -> None:
+        # The Embedding map tool is registered in BOTH modes, so the
+        # ``graphs://`` resource it delivers through exists in both.
         assert _probe(mode)["neutral_module_imported"] is True
 
     def test_graphrag_mode_imports_the_graph_modules(self) -> None:
@@ -199,7 +194,6 @@ class TestEmbeddingMapToolSignature:
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
     def test_the_tool_advertises_the_same_knobs_in_both_modes(self, mode: str) -> None:
         assert _probe(mode)["embedding_map_parameters"] == [
-            "as_html_file",
             "hulls",
             "query",
             "top_k",
@@ -211,7 +205,6 @@ class TestStructureToolSignaturePerMode:
 
     def test_rag_advertises_no_max_hops(self) -> None:
         assert _probe("rag")["structure_parameters"] == [
-            "as_html_file",
             "max_docs",
             "query",
             "top_k",
@@ -219,7 +212,6 @@ class TestStructureToolSignaturePerMode:
 
     def test_graphrag_adds_max_hops(self) -> None:
         assert _probe("graphrag")["structure_parameters"] == [
-            "as_html_file",
             "max_docs",
             "max_hops",
             "query",
@@ -227,8 +219,9 @@ class TestStructureToolSignaturePerMode:
         ]
 
     @pytest.mark.parametrize("mode", ["rag", "graphrag"])
-    def test_both_modes_deliver_through_the_shared_ui_resource(self, mode: str) -> None:
-        assert _probe(mode)["structure_ui"] == "ui://tree-memory/graph.html"
+    def test_no_mode_declares_an_mcp_app_view(self, mode: str) -> None:
+        # Every view is a Graph download — no ``ui://`` resource to point at.
+        assert "ui" not in _probe(mode)["structure_meta"]
 
 
 class TestSearchMemorySignaturePerMode:

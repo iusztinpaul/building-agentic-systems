@@ -27,12 +27,11 @@ If no arguments are provided, ask the user what they want to know or do with Tre
 |---|---|---|---|
 | `search_memory` | ✅ | ✅ | First reader for any question. |
 | `visualize_memory_structure` | ✅ | ✅ | Picture of an answer, or of the whole memory. |
-| `visualize_memory_embeddings` | ✅ | ✅ | Topic map; with `query`, the matched chunks over the rest in grey (no clusters). |
+| `visualize_memory_embeddings` | ✅ | ✅ | Topic map; with `query`, only the matched chunks (no clusters). |
 | `ingest_url` / `ingest_file` / `ingest_conversation` | ✅ | ✅ | Writes. |
 | `search_web` / `scrape_web` | ✅ | ✅ | Find and read web pages. |
 | `query_memory` | — | ✅ | Exact counts and filters. |
 | `deep_search_memory` | — | ✅ | Wide sweep → index → selective reads. |
-| `memory_dashboard` | — | ✅ | Summary view. |
 | `review_list_pending` / `review_confirm` / `review_reject` | — | ✅ | Dedup review loop. |
 
 A tool marked `—` is absent in that mode; the mode file names the chain to use instead.
@@ -74,7 +73,7 @@ A tool marked `—` is absent in that mode; the mode file names the chain to use
 
 - `N/M chunks don’t have a 2D embedding. Run the clustering algorithm manually or wait for the scheduled offline pipeline to compute them.` — repeat it. With a picture: the map is real but under-reports. Without one (no clustering run yet): that line IS the answer. Offer to run `make memory-run-clustering-pipeline`.
 
-**A visual answer carrying a `graphs://…html.gz` link** could not render inline: on `tree-memory-local` share the local path it also gives; on `tree-memory` (cloud) read the linked blob within its expiry (about 5 minutes), base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it; an expired link → re-run the visual tool once.
+**Every visual answer carries a `graphs://…html.gz` link**: on `tree-memory-local` share the local path it also gives; on `tree-memory` (cloud) read the linked blob within its expiry (about 5 minutes), base64-decode + gunzip it to a local `.html` (`base64 -d < blob.b64 | gunzip > map.html`) and open it; an expired link → re-run the visual tool once.
 
 ---
 

@@ -410,10 +410,10 @@ def test_no_legacy_error_keys(module) -> None:
 
 
 # Every tool that CAN answer an envelope from its own work, in both modules.
-# ``visualize_memory_embeddings`` and the dashboard are absent: their only
+# ``visualize_memory_embeddings`` is absent: its only
 # envelope is the **Request user** seam's (``configuration_error`` /
 # ``storage_unavailable``, swept in ``test_tools_request_user.py``) — they have
-# no catch-all of their own to promise yet.
+# no catch-all of its own to promise yet.
 _ENVELOPE_TOOLS = [
     ("rag:search_memory", tools.search_memory),
     ("rag:visualize_memory_structure", tools.visualize_memory_structure),

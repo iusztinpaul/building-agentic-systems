@@ -12,7 +12,7 @@ The memory is a knowledge graph: documents and chunks plus extracted entities (p
    |---|---|---|
    | Open-ended, semantic, unsure | `search_memory` | `deep_search_memory` when the answer clearly spans more than the 5 returned rows |
    | Count, filter, aggregate, exact lookup | `query_memory` | `search_memory` when the aggregate comes back empty — the generated pipeline may have filtered on the wrong field |
-   | "Summarise what's in my memory" | `memory_dashboard` | `query_memory` / `search_memory` for the details a row or bar points at |
+   | "Summarise what's in my memory" | `query_memory` (counts by type) | `search_memory` for the details a count points at |
    | "Show me how X connects" / "show me the graph" | `visualize_memory_structure` (with `query` for X, none for the whole graph) | `search_memory` on the nodes the picture surfaces |
 
    - Good: "how many open tasks?" → `query_memory` → an aggregate row (e.g. a count of 4) → answer.

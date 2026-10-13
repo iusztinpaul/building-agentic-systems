@@ -10,9 +10,9 @@ presuppose edges live in :mod:`tree.mcp.graph_tools`, imported only in
 The **Embedding map** tool is here rather than with the graph tools because
 clustering is mode-orthogonal (ADR-007 §8): the map draws points and their
 clusters, never edges, so it says exactly as much in ``rag`` as in ``graphrag``.
-It delivers through the SAME dual path as the graph tools, which is why this
-module imports the MODE-NEUTRAL :mod:`tree.mcp.viz_app` (whose ``ui://`` and
-``graphs://`` resources therefore exist in rag mode too) and never
+It delivers through the SAME **Graph download** as the graph tools, which is
+why this module imports the MODE-NEUTRAL :mod:`tree.mcp.graph_download` (whose
+``graphs://`` resource therefore exists in rag mode too) and never
 :mod:`tree.mcp.graph_tools`.
 
 ``search_memory`` and ``visualize_memory_structure`` are the two tools whose
@@ -33,7 +33,6 @@ from typing import Any, Literal
 import httpx
 from beanie import PydanticObjectId
 from fastmcp import Context
-from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
 from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pydantic import BaseModel, Field
@@ -71,11 +70,11 @@ from tree.data.web.web_unlocker import (
 from tree.mcp import request_user
 from tree.mcp.server import MEMORY_MODE, mcp
 
-# viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
-# ``ui://`` and ``graphs://`` resources as a side effect and owns the one
-# dual-delivery helper. It imports neither this module nor the graph tools, so
-# there is no cycle and rag mode stays free of graph code.
-from tree.mcp.viz_app import GRAPH_VIEW_URI, _ORDER_ADJECTIVE, _graph_tool_result
+# graph_download: MODE-NEUTRAL — it registers the ``graphs://`` resource as a
+# side effect and owns the one delivery helper. It imports neither this module
+# nor the graph tools, so there is no cycle and rag mode stays free of graph
+# code.
+from tree.mcp.graph_download import _ORDER_ADJECTIVE, _graph_tool_result
 from tree.memory.clustering.store import load_embedding_map, load_query_map
 from tree.memory.rag.retrieval import retrieve_parents
 from tree.memory.rag.search import SearchUnavailableError
@@ -322,8 +321,8 @@ def _retrieval_error(tool: str, exc: Exception) -> str:
 #:         return request_user_error("search_memory", exc)
 #:
 #: The seam is called through its MODULE so one patch of
-#: ``tree.mcp.request_user.resolve_request_user`` reaches ``tools``,
-#: ``graph_tools`` and ``dashboard_app`` alike.
+#: ``tree.mcp.request_user.resolve_request_user`` reaches ``tools`` and
+#: ``graph_tools`` alike.
 REQUEST_USER_ERRORS = (request_user.RequestUserError, PyMongoError)
 
 
@@ -445,7 +444,6 @@ async def visualize_memory_structure(
     ctx: Context,
     query: str = "",
     top_k: int = 10,
-    as_html_file: bool = False,
     max_docs: int | None = None,
 ) -> str | ToolResult:
     """Show how the memory is organised: every document and the chunks it was
@@ -462,9 +460,7 @@ async def visualize_memory_structure(
     shows 100 of them and reveals the rest. A query that matches nothing, or an empty
     memory, answers a plain sentence instead of a picture.
 
-    When the client renders MCP App UIs, the tree appears inline. Otherwise
-    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
-    file; the result carries a
+    The view is rendered as a self-contained HTML file: the result carries a
     ``graphs://<name>.html.gz`` resource link that expires after a few
     minutes (and, on a local stdio server, the file path too) — do NOT
     re-author the HTML yourself. If a local path is given just share it.
@@ -473,18 +469,13 @@ async def visualize_memory_structure(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser. A client that cannot display interactive MCP App views (e.g. a
-    terminal client such as Claude Code) should pass ``as_html_file=true``: it
-    then gets only the download, never the inline view's data.
+    browser.
 
     Args:
         query: Search query text — narrows the view to the matching passages.
             Omit (empty) to draw the whole memory.
         top_k: Number of parent chunks to retrieve (default 10). Ignored with
             no query.
-        as_html_file: Set true when the user explicitly asks for a downloadable
-            / openable HTML file instead of the inline interactive view, or
-            when this client cannot display it.
         max_docs: With no ``query``: how many most-recent documents to embed
             (default from config, 250); the view shows the 100 most recent and
             a slider reveals the rest. Ignored with a ``query``.
@@ -556,12 +547,11 @@ async def visualize_memory_structure(
         summary,
         user_id=user_id,
         query=query or "structure",
-        as_html_file=as_html_file,
     )
 
 
 if MEMORY_MODE == "rag":
-    mcp.tool(visualize_memory_structure, app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+    mcp.tool(visualize_memory_structure)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +559,7 @@ if MEMORY_MODE == "rag":
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+@mcp.tool
 @track(
     tags=TAGS_RETRIEVAL_MCP,
     name="visualize_memory_embeddings",
@@ -580,7 +570,6 @@ async def visualize_memory_embeddings(
     query: str = "",
     top_k: int = 10,
     hulls: bool = False,
-    as_html_file: bool = False,
 ) -> str | ToolResult:
     """Show the memory's embedding space as a 2D map: the child chunks of the
     250 most-recent documents are plotted as points, coloured by their cluster
@@ -602,9 +591,7 @@ async def visualize_memory_embeddings(
     nothing answers a plain sentence
     instead.
 
-    When the client renders MCP App UIs, the map appears inline. Otherwise
-    (or when ``as_html_file`` is set) it is rendered as a self-contained HTML
-    file; the result carries a
+    The view is rendered as a self-contained HTML file: the result carries a
     ``graphs://<name>.html.gz`` resource link that expires after a few
     minutes (and, on a local stdio server, the file path too) — do NOT
     re-author the HTML yourself. If a local path is given just share it.
@@ -613,9 +600,7 @@ async def visualize_memory_embeddings(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser. A client that cannot display interactive MCP App views (e.g. a
-    terminal client such as Claude Code) should pass ``as_html_file=true``: it
-    then gets only the download, never the inline view's data.
+    browser.
 
     Args:
         query: Search query text — draws only the chunks that match it. Omit (empty) to draw the whole memory with its
@@ -625,9 +610,6 @@ async def visualize_memory_embeddings(
             no query.
         hulls: Draw a convex hull around each cluster (default off). Ignored
             with a query.
-        as_html_file: Set true when the user explicitly asks for a downloadable
-            / openable HTML file instead of the inline interactive view, or
-            when this client cannot display it.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
     ``retryable`` is true.
@@ -644,9 +626,7 @@ async def visualize_memory_embeddings(
     lc = ctx.lifespan_context
     query = query.strip()
     if query:
-        return await _visualize_query_embeddings(
-            ctx, query, top_k, user_id=user_id, as_html_file=as_html_file
-        )
+        return await _visualize_query_embeddings(ctx, query, top_k, user_id=user_id)
 
     embedding_map = await load_embedding_map(lc["client"], lc["database"], user_id)
     # Never an empty canvas (ADR-007 §8): no embedded chunk → say so; nothing
@@ -671,7 +651,6 @@ async def visualize_memory_embeddings(
         summary,
         user_id=user_id,
         query="embedding-map",
-        as_html_file=as_html_file,
     )
 
 
@@ -681,13 +660,11 @@ async def _visualize_query_embeddings(
     top_k: int,
     *,
     user_id: PydanticObjectId,
-    as_html_file: bool,
 ) -> str | ToolResult:
     """The query view: the matched child chunks alone, no clusters.
 
-    No grey reference cloud: its ~450 extra points pushed the inline payload
-    past what Horizon delivers (226k characters for 21 matches). The grey
-    context view is ``make memory-visualize-embeddings QUERY=…``.
+    No grey reference cloud — the view stays on the hits; the grey context view
+    is ``make memory-visualize-embeddings QUERY=…``.
 
     Child chunks are mode-orthogonal, so the rag child search serves BOTH modes
     — no graph import here (ADR-006 decision 5). Drawn at the clustering run's
@@ -735,7 +712,6 @@ async def _visualize_query_embeddings(
         summary,
         user_id=user_id,
         query=f"embedding-map {query}",
-        as_html_file=as_html_file,
     )
 
 

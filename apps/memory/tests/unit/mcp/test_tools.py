@@ -8,14 +8,15 @@ gets registered per mode is asserted in ``test_tool_gating.py``.
 ``visualize_memory_embeddings`` is here for the same reason it lives in
 ``tree.mcp.tools``: clustering is mode-orthogonal, so the map tool is part of
 BOTH surfaces. Its payload builder is tested in
-``tests/unit/memory/visualize/test_embeddings.py`` and its dual delivery in
-``tests/unit/mcp/test_viz_app.py`` — what is asserted here is the tool's
+``tests/unit/memory/visualize/test_embeddings.py`` and its delivery in
+``tests/unit/mcp/test_graph_download.py`` — what is asserted here is the tool's
 contract: read, warn, deliver.
 
 ``visualize_memory_structure`` here is the rag form (the document → parent →
 child tree, task 173); its graphrag twin is tested in ``test_graph_tools.py``.
 """
 
+import gzip
 import inspect
 import json
 import logging
@@ -44,7 +45,7 @@ from tree.mcp.tools import (
     visualize_memory_embeddings,
     visualize_memory_structure,
 )
-from tree.mcp.viz_app import DOWNLOAD_CONTRACT
+from tree.mcp.graph_download import DOWNLOAD_CONTRACT
 from tree.memory.clustering.types import (
     EmbeddingMap,
     MapPoint,
@@ -633,13 +634,22 @@ class TestDispatchErrors:
 # ---------------------------------------------------------------------------
 
 
-def _viz_ctx(*, ui_supported: bool) -> MagicMock:
+def _viz_ctx() -> MagicMock:
     ctx = _make_ctx()
-    ctx.client_supports_extension.return_value = ui_supported
-    # A remote (Horizon-shaped) server: the file branch stores a Graph file
-    # and writes nothing to disk. The stdio extras are covered in test_viz_app.
+    # A remote (Horizon-shaped) server: the tool stores a Graph file and writes
+    # nothing to disk. The stdio extras are covered in test_graph_download.
     ctx.transport = "streamable-http"
     return ctx
+
+
+async def _delivered_payload(result: ToolResult) -> dict:
+    """The payload inside the **Graph file** a visualize tool linked."""
+
+    row = await GraphFile.find_one(GraphFile.name == result.content[1].name)
+    assert row is not None
+    html = gzip.decompress(row.html_gz).decode("utf-8")
+    data = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    return json.loads(data.replace("<\\/", "</"))
 
 
 def _embedding_map(*, unclustered: int = 0, total_children: int = 12) -> EmbeddingMap:
@@ -691,7 +701,7 @@ class TestVisualizeMemoryEmbeddings:
         )
         deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
 
-        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+        result = await visualize_memory_embeddings(ctx=_viz_ctx())
 
         assert result == NO_EMBEDDINGS_MESSAGE
         deliver.assert_not_called()
@@ -717,16 +727,16 @@ class TestVisualizeMemoryEmbeddings:
         )
         deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
 
-        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+        result = await visualize_memory_embeddings(ctx=_viz_ctx())
 
         # Assert: no picture — the warning IS the answer (surfaces never compute).
         assert result == missing_2d_warning(3, 3)
         deliver.assert_not_called()
 
-    async def test_a_ui_capable_client_gets_the_map_inline_with_hulls_on(
+    async def test_the_delivered_map_carries_the_fixed_layout_and_hulls_on(
         self, mocker
     ) -> None:
-        # Story 2: the iframe gets the full payload (fixed layout, hulls on);
+        # Story 2: the download holds the full payload (fixed layout, hulls on);
         # the model reads only the summary line.
         mocker.patch(
             "tree.mcp.tools.load_embedding_map",
@@ -734,15 +744,13 @@ class TestVisualizeMemoryEmbeddings:
             return_value=_embedding_map(),
         )
 
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), hulls=True
-        )
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(), hulls=True)
 
         assert isinstance(result, ToolResult)
-        summary_block, payload_block = result.content
+        summary_block, link_block = result.content
         assert summary_block.text.startswith("Embedding map:")
-        assert payload_block.annotations.audience == ["user"]
-        payload = json.loads(payload_block.text)
+        assert link_block.type == "resource_link"
+        payload = await _delivered_payload(result)
         assert payload["layout"] == "fixed"
         assert payload["hulls"] is True
 
@@ -753,9 +761,9 @@ class TestVisualizeMemoryEmbeddings:
             return_value=_embedding_map(),
         )
 
-        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+        result = await visualize_memory_embeddings(ctx=_viz_ctx())
 
-        assert json.loads(result.content[1].text)["hulls"] is False
+        assert (await _delivered_payload(result))["hulls"] is False
 
     async def test_a_stale_map_answers_with_the_warning_line_first(
         self, mocker
@@ -768,7 +776,7 @@ class TestVisualizeMemoryEmbeddings:
             return_value=_embedding_map(unclustered=2),
         )
 
-        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+        result = await visualize_memory_embeddings(ctx=_viz_ctx())
 
         assert result.content[0].text.startswith(
             "2/12 chunks don’t have a 2D embedding. Run the clustering algorithm "
@@ -776,20 +784,20 @@ class TestVisualizeMemoryEmbeddings:
         )
         assert "Embedding map:" in result.content[0].text
 
-    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+    async def test_the_map_is_a_graph_file_behind_its_resource_link(
         self, mocker, tmp_path, request_user_id
     ) -> None:
-        # Story 1: a client that renders no MCP App UI gets the same map as a
-        # downloadable Graph file the request user owns — no server file.
+        # Story 1: the map is a downloadable Graph file the request user owns —
+        # no server file.
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
         mocker.patch(
             "tree.mcp.tools.load_embedding_map",
             new_callable=AsyncMock,
             return_value=_embedding_map(),
         )
 
-        result = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=False))
+        result = await visualize_memory_embeddings(ctx=_viz_ctx())
 
         _, link_block = result.content
         assert link_block.type == "resource_link"
@@ -806,17 +814,16 @@ class TestVisualizeMemoryEmbeddings:
     ) -> None:
         # Story 1 in rag mode: there is no graph anywhere in this server, so
         # "I saved a self-contained interactive graph" is a lie the model
-        # relays. Both delivery branches name the **Embedding map**.
+        # relays. The delivery names the **Embedding map**.
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
         mocker.patch(
             "tree.mcp.tools.load_embedding_map",
             new_callable=AsyncMock,
             return_value=_embedding_map(),
         )
 
-        answer = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=False))
-        inline = await visualize_memory_embeddings(ctx=_viz_ctx(ui_supported=True))
+        answer = await visualize_memory_embeddings(ctx=_viz_ctx())
 
         text_block, link_block = answer.content
         assert "self-contained interactive embedding map as a download" in (
@@ -828,26 +835,6 @@ class TestVisualizeMemoryEmbeddings:
             "base64-decode the blob, gunzip, open the .html"
         )
         assert DOWNLOAD_CONTRACT in text_block.text
-        assert inline.content[0].text.endswith("(interactive embedding map view).")
-
-    async def test_as_html_file_forces_the_file_branch_for_a_ui_client(
-        self, mocker, tmp_path
-    ) -> None:
-        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-        mocker.patch(
-            "tree.mcp.tools.load_embedding_map",
-            new_callable=AsyncMock,
-            return_value=_embedding_map(),
-        )
-
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), as_html_file=True
-        )
-
-        assert result.content[1].type == "resource_link"
-        assert "you asked for an HTML file" in result.content[0].text
-        assert list(tmp_path.iterdir()) == []
 
     async def test_the_docstring_tells_the_model_when_to_draw_a_map(self) -> None:
         # The docstring IS the tool description an MCP client shows the model.
@@ -912,23 +899,23 @@ class TestVisualizeMemoryEmbeddingsQuery:
 
         # Act
         result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="  agent memory ", top_k=4
+            ctx=_viz_ctx(), query="  agent memory ", top_k=4
         )
 
         # Assert: the stripped query reached the search, its children the store
-        # WITHOUT the grey cloud (it overflowed Horizon's delivery limit), and
+        # WITHOUT the grey cloud (the view stays on the hits), and
         # the whole-memory map (with its clusters) was never read.
         assert retrieve.await_args.kwargs["query"] == "agent memory"
         assert retrieve.await_args.kwargs["top_k"] == 4
         assert load_points.await_args.args[3] == {"p1#child-0", "p2#child-0"}
         assert load_points.await_args.kwargs["with_reference"] is False
         load_map.assert_not_called()
-        summary_block, payload_block = result.content
+        summary_block, _ = result.content
         assert summary_block.text.startswith(
             "Embedding map for 'agent memory': 2 matched chunks (the clustering "
             "run's UMAP layout, no cluster colours)"
         )
-        payload = json.loads(payload_block.text)
+        payload = await _delivered_payload(result)
         assert [row["label"] for row in payload["legend"]] == ["matched chunks"]
         assert len(payload["nodes"]) == 2
         assert payload["hulls"] is None
@@ -942,7 +929,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
         )
 
         await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="agent memory", top_k=5000
+            ctx=_viz_ctx(), query="agent memory", top_k=5000
         )
 
         assert retrieve.await_args.kwargs["top_k"] == (
@@ -959,7 +946,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
         )
 
         result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="quantum knitting"
+            ctx=_viz_ctx(), query="quantum knitting"
         )
 
         assert result == NO_RESULTS_MESSAGE.format(query="quantum knitting")
@@ -985,9 +972,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
             ),
         )
 
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="agent memory"
-        )
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(), query="agent memory")
 
         assert result == missing_2d_warning(1, 1)
 
@@ -1006,9 +991,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
             return_value=query_map,
         )
 
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="agent memory"
-        )
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(), query="agent memory")
 
         # The model's FIRST line says the picture under-reports the matches.
         assert result.content[0].text.startswith(
@@ -1022,9 +1005,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
             side_effect=SearchUnavailableError("both legs down"),
         )
 
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="agent memory"
-        )
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(), query="agent memory")
 
         payload = json.loads(result)
         assert payload["error_type"] == "search_unavailable"
@@ -1043,9 +1024,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
             return_value=_embedding_map(),
         )
 
-        result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query=query
-        )
+        result = await visualize_memory_embeddings(ctx=_viz_ctx(), query=query)
 
         retrieve.assert_not_awaited()
         assert result.content[0].text.startswith("Embedding map: ")
@@ -1056,7 +1035,7 @@ class TestVisualizeMemoryEmbeddingsQuery:
         )
 
         result = await visualize_memory_embeddings(
-            ctx=_viz_ctx(ui_supported=True), query="agent memory", top_k=0
+            ctx=_viz_ctx(), query="agent memory", top_k=0
         )
 
         assert json.loads(result) == {
@@ -1192,36 +1171,33 @@ class TestRagVisualizeMemoryStructure:
             },
         }
 
-    async def test_a_ui_capable_client_gets_the_tree_inline_with_the_summary(
-        self, readers
-    ) -> None:
-        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True))
+    async def test_the_tree_is_delivered_with_the_summary(self, readers) -> None:
+        result = await visualize_memory_structure(ctx=_viz_ctx())
 
         assert isinstance(result, ToolResult)
-        summary_block, payload_block = result.content
+        summary_block, _ = result.content
         assert summary_block.text.startswith(
             "Memory structure (rag: document → parent chunk → child chunk) for "
             "your full memory: 1 of 1 most-recent documents shown by default, "
             "3 nodes, 2 edges"
         )
-        assert payload_block.annotations.audience == ["user"]
-        payload = json.loads(payload_block.text)
+        payload = await _delivered_payload(result)
         assert {e["type"] for e in payload["edges"]} == {"part_of"}
         assert payload["controls"]["documents"]["order"] == "recency"
 
     async def test_no_query_reads_the_recent_tree_with_max_docs(self, readers) -> None:
-        await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True), max_docs=7)
+        await visualize_memory_structure(ctx=_viz_ctx(), max_docs=7)
 
         assert readers["fetch_rag_structure"].await_args.kwargs == {"max_docs": 7}
         readers["retrieve_parents"].assert_not_awaited()
 
-    async def test_a_non_ui_client_gets_a_graph_file_and_its_resource_link(
+    async def test_the_tree_is_a_graph_file_behind_its_resource_link(
         self, mocker, tmp_path, readers, request_user_id
     ) -> None:
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+        mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
 
-        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=False))
+        result = await visualize_memory_structure(ctx=_viz_ctx())
 
         text_block, link_block = result.content
         assert text_block.text.startswith("Memory structure (rag:")
@@ -1234,23 +1210,11 @@ class TestRagVisualizeMemoryStructure:
         assert list(tmp_path.iterdir()) == []
         assert DOWNLOAD_CONTRACT in text_block.text
 
-    async def test_as_html_file_forces_the_file_for_a_ui_client(
-        self, mocker, tmp_path, readers
-    ) -> None:
-        mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-
-        result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), as_html_file=True
-        )
-
-        assert result.content[1].type == "resource_link"
-
     async def test_a_query_retrieves_parents_and_ranks_by_relevance(
         self, readers
     ) -> None:
         result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), query="memory", top_k=4
+            ctx=_viz_ctx(), query="memory", top_k=4
         )
 
         assert readers["retrieve_parents"].await_args.kwargs["top_k"] == 4
@@ -1258,16 +1222,16 @@ class TestRagVisualizeMemoryStructure:
         retrieval = readers["fetch_retrieval_structure"].await_args.args[-1]
         assert retrieval.parents[0].parent_id == "p1"
         readers["fetch_rag_structure"].assert_not_awaited()
-        summary_block, payload_block = result.content
+        summary_block, _ = result.content
         assert "for 'memory': 1 of 1 most-relevant documents" in summary_block.text
-        assert json.loads(payload_block.text)["controls"]["documents"]["order"] == (
+        assert (await _delivered_payload(result))["controls"]["documents"]["order"] == (
             "relevance"
         )
 
     async def test_a_whitespace_query_is_the_no_query_view(self, readers) -> None:
         # Never sent to the embedder as a blank string (its raw 400), and not an
         # error either: an empty query MEANS "draw the whole memory" here.
-        await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True), query="   ")
+        await visualize_memory_structure(ctx=_viz_ctx(), query="   ")
 
         readers["fetch_rag_structure"].assert_awaited_once()
         readers["retrieve_parents"].assert_not_awaited()
@@ -1281,7 +1245,7 @@ class TestRagVisualizeMemoryStructure:
         deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
 
         result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), query="zzzq wamble frobnitz"
+            ctx=_viz_ctx(), query="zzzq wamble frobnitz"
         )
 
         assert result == 'No results for "zzzq wamble frobnitz" — nothing to draw.'
@@ -1295,15 +1259,13 @@ class TestRagVisualizeMemoryStructure:
         readers["fetch_rag_structure"].return_value = MemoryStructure()
         deliver = mocker.patch("tree.mcp.tools._graph_tool_result")
 
-        result = await visualize_memory_structure(ctx=_viz_ctx(ui_supported=True))
+        result = await visualize_memory_structure(ctx=_viz_ctx())
 
         assert result == EMPTY_MEMORY_MESSAGE
         deliver.assert_not_called()
 
     async def test_max_docs_below_one_is_invalid_input(self, readers) -> None:
-        result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), max_docs=0
-        )
+        result = await visualize_memory_structure(ctx=_viz_ctx(), max_docs=0)
 
         assert json.loads(result) == {
             "error_type": "invalid_input",
@@ -1313,9 +1275,7 @@ class TestRagVisualizeMemoryStructure:
         readers["fetch_rag_structure"].assert_not_awaited()
 
     async def test_top_k_below_one_is_invalid_input(self, readers) -> None:
-        result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), query="q", top_k=0
-        )
+        result = await visualize_memory_structure(ctx=_viz_ctx(), query="q", top_k=0)
 
         assert json.loads(result) == {
             "error_type": "invalid_input",
@@ -1334,9 +1294,7 @@ class TestRagVisualizeMemoryStructure:
     ) -> None:
         readers[reader].side_effect = SearchUnavailableError("both legs down")
 
-        result = await visualize_memory_structure(
-            ctx=_viz_ctx(ui_supported=True), **kwargs
-        )
+        result = await visualize_memory_structure(ctx=_viz_ctx(), **kwargs)
 
         payload = json.loads(result)
         assert payload["error_type"] == "search_unavailable"
@@ -1360,4 +1318,4 @@ class TestRagVisualizeMemoryStructure:
     def test_the_signature_has_no_max_hops(self) -> None:
         params = set(inspect.signature(visualize_memory_structure).parameters)
 
-        assert params == {"ctx", "query", "top_k", "as_html_file", "max_docs"}
+        assert params == {"ctx", "query", "top_k", "max_docs"}

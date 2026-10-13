@@ -8,7 +8,7 @@ verifier to cluster before rendering. These are grep-level assertions on purpose
 warning contract silently dropped) without pinning prose.
 
 Also guards the ADR-007 §7 rename: the pre-ADR-007, graph-only MCP App module
-is `tree.mcp.viz_app` everywhere except the ADRs, which record the history.
+name appears nowhere except the ADRs, which record the history.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class TestMemoryReadme:
     def test_it_documents_both_map_surfaces(self, needle: str) -> None:
         assert needle in _read(_MEMORY_README)
 
-    @pytest.mark.parametrize("needle", ["*Both modes (8 tools):*", "6 more, 14 total"])
+    @pytest.mark.parametrize("needle", ["*Both modes (8 tools):*", "5 more, 13 total"])
     def test_the_tool_counts_match_the_registered_surface(self, needle: str) -> None:
         # The map and structure tools are registered in both modes, so rag is 8
         # and graphrag 14 — asserted against the real servers in
@@ -110,9 +110,9 @@ class TestE2eSkill:
         assert needle in _read(_E2E_SKILL)
 
 
-def test_the_mcp_app_layer_is_named_viz_app_in_the_code_and_its_docs() -> None:
-    # ADR-007 §7 renamed the graph-only MCP App module to ``tree.mcp.viz_app``
-    # (it is mode-neutral, and it serves maps as well as graphs). The ADRs and the
+def test_the_pre_adr_007_module_name_is_gone_from_the_code_and_its_docs() -> None:
+    # ADR-007 §7 renamed the graph-only MCP App module (it is mode-neutral, and
+    # it serves maps as well as graphs; it is now ``tree.mcp.graph_download``). The ADRs and the
     # task files keep the old name because they record the decision; the code, the
     # skills, the glossary and the READMEs a reader follows may not.
     #

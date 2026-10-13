@@ -260,7 +260,7 @@ class TestVisualizeNeverDependsOnGraphOrStorage:
     def test_no_visualize_module_imports_the_mcp_layer(self, path: Path) -> None:
         """The dependency direction is memory ← mcp, and only that way.
 
-        ``tree.mcp.viz_app`` imports the renderer; the renderer importing back
+        ``tree.mcp.graph_download`` imports the renderer; the renderer importing back
         would make a cycle and drag FastMCP into the CLI's render path.
         """
 

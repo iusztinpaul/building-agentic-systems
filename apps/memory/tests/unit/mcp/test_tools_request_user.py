@@ -1,8 +1,8 @@
 """Every MCP tool runs as the **Request user** its call resolves (ADR-014 §1).
 
 Two sides of one contract, parametrised over EVERY tool function of both
-modes (the eight in ``tools``, the seven in ``graph_tools`` and the
-dashboard — a graphrag server registers 14 of these 16, a rag server 8):
+modes (the eight in ``tools``, the seven in ``graph_tools`` — a graphrag
+server registers 13 of these 15, a rag server 8):
 
 * the id the seam resolves is the id the business-logic call receives;
 * a seam that raises answers the **Tool error envelope** — ``configuration_error``
@@ -25,7 +25,7 @@ import pytest
 from beanie import PydanticObjectId
 from pymongo.errors import ServerSelectionTimeoutError
 
-from tree.mcp import dashboard_app, request_user
+from tree.mcp import request_user
 from tree.mcp import graph_tools as mcp_graph_tools
 from tree.mcp import tools as mcp_tools
 from tree.mcp.request_user import (
@@ -188,13 +188,6 @@ _CASES: dict[str, ToolCase] = {
         _REVIEW_PAIR,
         "tree.mcp.graph_tools._review_duplicate",
         _REVIEWED,
-        "user_id",
-    ),
-    "memory_dashboard": ToolCase(
-        dashboard_app.memory_dashboard,
-        {},
-        "tree.mcp.dashboard_app.fetch_full_graph",
-        QueryResult(nodes=[], edges=[]),
         "user_id",
     ),
 }

@@ -2,8 +2,8 @@
 
 Imported by :mod:`tree.mcp.server` ONLY when ``app_config.memory.mode ==
 "graphrag"`` (ADR-006 decision 5), so every tool registered here — including
-the graph form of ``visualize_memory_structure`` — plus the side-effect app module it pulls in
-(:mod:`tree.mcp.dashboard_app`) is absent from a rag-mode server. That gating
+the graph form of ``visualize_memory_structure`` — is absent from a rag-mode
+server. That gating
 is the reason this module exists at all: in rag mode the collection holds node
 rows only, so ``max_hops``, edge expansion and the dedup review queue have
 nothing to operate on, and a registered-but-degraded tool would be worse than no
@@ -24,7 +24,6 @@ from typing import Any
 from beanie import PydanticObjectId
 from bson import json_util
 from fastmcp import Context
-from fastmcp.apps import AppConfig
 from fastmcp.tools import ToolResult
 from pymongo.errors import PyMongoError
 
@@ -34,9 +33,6 @@ from tree.config.constants import (
 )
 from tree.entities.memory import NodeType
 
-# dashboard_app: side-effect import — registers the custom-HTML dashboard
-# (memory_dashboard tool + ui:// resource).
-from tree.mcp import dashboard_app  # noqa: F401
 from tree.mcp import request_user
 from tree.mcp.deep_search import MODEL_HIDDEN_KEYS, write_deep_search_results
 
@@ -52,10 +48,10 @@ from tree.mcp.tools import (
     tool_error,
 )
 
-# viz_app: the MODE-NEUTRAL MCP App layer (ADR-007 §7) — it registers the
-# ``ui://`` and ``graphs://`` resources as a side effect and owns the one
-# dual-delivery helper. It does NOT import this module, so there is no cycle.
-from tree.mcp.viz_app import GRAPH_VIEW_URI, _ORDER_ADJECTIVE, _graph_tool_result
+# graph_download: MODE-NEUTRAL — it registers the ``graphs://`` resource as a
+# side effect and owns the one delivery helper. It does NOT import this module,
+# so there is no cycle.
+from tree.mcp.graph_download import _ORDER_ADJECTIVE, _graph_tool_result
 from tree.memory.graph.nl_query import execute_nl_query
 from tree.memory.graph.retrieval import fetch_full_graph
 from tree.memory.graph.retrieval import query_memory as structured_query_memory
@@ -97,21 +93,19 @@ async def _dual_graph_result(
     *,
     user_id: PydanticObjectId,
 ) -> str | ToolResult:
-    """Answer with the serialized docs AND the graph, on whichever channel fits.
+    """Answer with the serialized docs AND the graph as a **Graph download**.
 
     The ONE visualization seam shared by ``query_memory`` and ``search_memory``
     — both have the same shape (serialized docs + optional graph), so neither
-    builds a **Graph payload** nor branches on client capability itself. That
-    branching lives once, in :func:`~tree.mcp.viz_app._graph_tool_result`,
-    which also serves ``visualize_memory_structure`` (ADR-005, decision 4): inline
-    MCP App iframe when the client renders App UIs, a **Graph file** owned by
-    ``user_id`` behind an expiring ``graphs://`` resource link when it does
-    not, and both when a stateless request cannot tell.
+    builds a **Graph payload** delivery itself. That lives once, in
+    :func:`~tree.mcp.graph_download._graph_tool_result`, which also serves
+    ``visualize_memory_structure`` (ADR-005, decision 4): a **Graph file** owned
+    by ``user_id`` behind an expiring ``graphs://`` resource link.
 
     ``serialized`` is carried VERBATIM into the model-visible text of whatever
     comes back: these tools' contract is answering the user's question, so the
-    model must never lose the data to the visualization. The full node/edge
-    dump rides ONLY in the ``audience=["user"]`` block the iframe reads.
+    model must never lose the data to the visualization. The node/edge dump
+    travels only inside the gzipped HTML.
 
     Returns the plain ``str`` — never a ``ToolResult`` — when the rows carry no
     ``kind`` field, i.e. an aggregation or a projection dropped it and there is
@@ -147,13 +141,12 @@ async def _dual_graph_result(
     return await _graph_tool_result(ctx, payload, summary, user_id=user_id, query=query)
 
 
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+@mcp.tool
 async def visualize_memory_structure(
     ctx: Context,
     query: str = "",
     top_k: int = 15,
     max_hops: int = 2,
-    as_html_file: bool = False,
     max_docs: int | None = None,
 ) -> str | ToolResult:
     """Visualize the memory structure — in graphrag this is the knowledge graph.
@@ -167,9 +160,7 @@ async def visualize_memory_structure(
     in an interactive Sigma.js force-directed view — use this when the user wants
     to *see* the graph rather than read node/edge JSON.
 
-    When the client renders MCP App UIs, the graph appears inline. Otherwise
-    (or when ``as_html_file`` is set) the same graph is rendered as a
-    self-contained HTML file; the result carries a
+    The view is rendered as a self-contained HTML file: the result carries a
     ``graphs://<name>.html.gz`` resource link that expires after a few
     minutes (and, on a local stdio server, the file path too) — do NOT
     re-author the HTML yourself. If a local path is given just share it.
@@ -178,9 +169,7 @@ async def visualize_memory_structure(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser. A client that cannot display interactive MCP App views (e.g. a
-    terminal client such as Claude Code) should pass ``as_html_file=true``: it
-    then gets only the download, never the inline view's data.
+    browser.
 
     Args:
         query: Search query text — seeds the subgraph to visualize. Omit (empty)
@@ -188,11 +177,8 @@ async def visualize_memory_structure(
         top_k: Number of seed nodes to retrieve (default 15). Ignored with no query.
         max_hops: Hops of graph expansion around the seeds (default 2). Ignored
             with no query.
-        as_html_file: Set true when the user explicitly asks for a downloadable
-            / openable HTML file instead of the inline interactive view, or
-            when this client cannot display it.
         max_docs: With no ``query``: how many most-recent documents to embed
-            (default from config, 250); the inline view shows the 100 most
+            (default from config, 250); the view shows the 100 most
             recent and a slider reveals the rest. Ignored with a ``query``.
 
     Errors answer ``{error_type, retryable, message}`` — retry only when
@@ -252,11 +238,10 @@ async def visualize_memory_structure(
         summary,
         user_id=user_id,
         query=query,
-        as_html_file=as_html_file,
     )
 
 
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+@mcp.tool
 @track(tags=TAGS_RETRIEVAL_MCP, name="query_memory", create_duplicate_root_span=False)
 async def query_memory(
     query: str,
@@ -271,8 +256,8 @@ async def query_memory(
     and aggregations.
 
     The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    same graph view as ``visualize_memory_structure`` comes along as a
+    self-contained HTML file: the result carries a
     ``graphs://<name>.html.gz`` resource link that expires after a few
     minutes (and, on a local stdio server, the file path too) — do NOT
     re-author the HTML yourself. If a local path is given just share it.
@@ -281,10 +266,7 @@ async def query_memory(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser. A client that cannot display interactive MCP App views (e.g. a
-    terminal client such as Claude Code) should leave ``visualize`` false and,
-    for a picture, call ``visualize_memory_structure`` with
-    ``as_html_file=true``.
+    browser.
 
     Args:
         query: Natural language question about the knowledge graph.
@@ -325,7 +307,7 @@ async def query_memory(
     return output
 
 
-@mcp.tool(app=AppConfig(resource_uri=GRAPH_VIEW_URI))
+@mcp.tool
 @track(tags=TAGS_RETRIEVAL_MCP, name="search_memory", create_duplicate_root_span=False)
 async def search_memory(
     query: str,
@@ -341,8 +323,8 @@ async def search_memory(
     then expands the graph around them. Reliable fallback for semantic similarity.
 
     The answer always carries the serialized results. With ``visualize`` the
-    same graph view as ``visualize_memory_structure`` comes along: inline when the
-    client renders MCP App UIs, otherwise a self-contained HTML file: the result carries a
+    same graph view as ``visualize_memory_structure`` comes along as a
+    self-contained HTML file: the result carries a
     ``graphs://<name>.html.gz`` resource link that expires after a few
     minutes (and, on a local stdio server, the file path too) — do NOT
     re-author the HTML yourself. If a local path is given just share it.
@@ -351,10 +333,7 @@ async def search_memory(
     base64 `blob` to a file and run
     `base64 -d < blob.b64 | gunzip > <name>.html` (Python:
     `gzip.decompress(base64.b64decode(blob))`), then open the `.html` in a
-    browser. A client that cannot display interactive MCP App views (e.g. a
-    terminal client such as Claude Code) should leave ``visualize`` false and,
-    for a picture, call ``visualize_memory_structure`` with
-    ``as_html_file=true``.
+    browser.
 
     Args:
         query: Search query text.

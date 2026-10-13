@@ -164,9 +164,8 @@ mcp = FastMCP(
 sys.modules.setdefault("tree.mcp.server", sys.modules[__name__])
 
 # The tool set IS the mode (ADR-006 decision 5). ``tools`` holds the eight tools
-# both modes serve; the six graph tools live behind this ``if`` so that in rag
-# mode ``tree.mcp.graph_tools`` — and, through it, ``dashboard_app`` — never
-# even reach ``sys.modules``. A graph tool called against a rag server gets the
+# both modes serve; the five graph tools live behind this ``if`` so that in rag
+# mode ``tree.mcp.graph_tools`` never even reaches ``sys.modules``. A graph tool called against a rag server gets the
 # standard "unknown tool" error rather than a half-working path.
 import tree.mcp.tools  # noqa: E402, F401 — registers tools on `mcp`
 

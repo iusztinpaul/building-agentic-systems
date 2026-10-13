@@ -458,16 +458,15 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_url` | Ingest a web page (Substack, arXiv, custom) through the data + memory pipelines. For a custom page the main content is extracted with trafilatura (nav/sidebar/footer dropped); falls back to Bright Data markdown when the extraction has fewer than 300 non-whitespace characters. The stored document records which in `metadata.extraction` (and, for trafilatura, `metadata.extraction_variant`: `default` or `pre_unwrapped`, the code-preserving rerun). |
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
-| `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
+| `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
 | `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws only the chunks that query's search matched, at the run's UMAP coordinates, no cluster colours (`hulls` is ignored); the grey context view is `make memory-visualize-embeddings QUERY="…"`. READS a run, never computes coordinates — chunks without them are left off and the answer starts with `x/y chunks don’t have a 2D embedding. …`; with no run yet, that warning is the whole answer. In both modes: the map has no edges. |
 
-*`graphrag` only (6 more, 14 total):*
+*`graphrag` only (5 more, 13 total):*
 
 | Tool | Description |
 |---|---|
 | `query_memory` | Translates natural language to MongoDB aggregation pipelines via LLM. Best for structured questions, counts, filters. |
 | `deep_search_memory` | Broader exploration — persists results to disk for follow-up. |
-| `memory_dashboard` | Graph-statistics dashboard (node/edge counts by type). |
 | `review_list_pending` / `review_confirm` / `review_reject` | Human review of the flagged `same_as` duplicate queue. |
 
 *The two `search_memory` signatures* — one name, one registered function per mode, no parameter the mode cannot honour:
@@ -851,8 +850,8 @@ apps/memory/
       clustering/       # neutral: the Clustering run (core, store)
       visualize/        # neutral: the Graph renderer (graph.py) + the
                         #   Embedding map payload (embeddings.py)
-    mcp/                # FastMCP server + tools; viz_app.py = the neutral
-                        #   MCP App layer (ui:// + graphs:// + dual delivery)
+    mcp/                # FastMCP server + tools; graph_download.py = the
+                        #   neutral graphs:// gzip download every view uses
     db.py               # Mongo + Beanie init
     orchestrator.py     # Prefect `serve(...)` registering deployments
   deploy/               # Modal App deploy scripts (vLLM embeddings, SGLang LLMs), Prefect, Atlas

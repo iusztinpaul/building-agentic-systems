@@ -8,6 +8,7 @@ ADR-007 §7) and the embedding-stripping serializer — is unchanged by either
 move.
 """
 
+import gzip
 import json
 import re
 from datetime import datetime, timezone
@@ -35,8 +36,7 @@ from tree.mcp.graph_tools import (
 from tests.unit.memory.conftest import FakeMemoryCollection, chunk_star_rows
 from tree.entities.graph_files import GraphFile
 from tree.entities.memory import MEMORY_COLLECTION, to_stored_vector
-from tree.mcp.server import mcp
-from tree.mcp.viz_app import DOWNLOAD_CONTRACT, GRAPH_VIEW_URI
+from tree.mcp.graph_download import DOWNLOAD_CONTRACT
 from tree.memory.rag.search import SearchUnavailableError
 from tree.memory.graph import retrieval
 from tree.memory.graph.retrieval import expand_graph
@@ -103,9 +103,9 @@ class TestSerialize:
 
 
 # ---------------------------------------------------------------------------
-# query_memory / search_memory with visualize=True — the dual delivery
+# query_memory / search_memory with visualize=True — the Graph download
 # (ADR-005, decision 4): both tools route through the ONE shared seam
-# ``_dual_graph_result`` → ``viz_app._graph_tool_result``, so from a
+# ``_dual_graph_result`` → ``graph_download._graph_tool_result``, so from a
 # visualization standpoint they behave exactly like visualize_memory_structure.
 # ---------------------------------------------------------------------------
 
@@ -153,11 +153,10 @@ def _tool_fn(tool):
     return getattr(tool, "fn", tool)
 
 
-def _make_graph_ctx(*, ui_supported: bool) -> MagicMock:
+def _make_graph_ctx() -> MagicMock:
     ctx = MagicMock()
-    ctx.client_supports_extension.return_value = ui_supported
-    # A remote (Horizon-shaped) server: the file branch stores a Graph file
-    # and writes nothing to disk. The stdio extras are covered in test_viz_app.
+    # A remote (Horizon-shaped) server: the tool stores a Graph file and writes
+    # nothing to disk. The stdio extras are covered in test_graph_download.
     ctx.transport = "streamable-http"
     ctx.lifespan_context = {
         "client": MagicMock(),
@@ -177,18 +176,15 @@ def _seed_result() -> QueryResult:
     )
 
 
-def _content_payload(result: ToolResult) -> dict[str, Any]:
-    """Extract the JSON payload block the iframe reads (mirrors its JS)."""
+async def _content_payload(result: ToolResult) -> dict[str, Any]:
+    """The payload inside the **Graph file** the tool's resource link names."""
 
-    for block in result.content:
-        if block.type == "text":
-            try:
-                parsed = json.loads(block.text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and isinstance(parsed.get("nodes"), list):
-                return parsed
-    raise AssertionError("No JSON payload content block found in tool result.")
+    link = next(b for b in result.content if b.type == "resource_link")
+    row = await GraphFile.find_one(GraphFile.name == link.name)
+    assert row is not None, link.name
+    html = gzip.decompress(row.html_gz).decode("utf-8")
+    data = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+    return json.loads(data.replace("<\\/", "</"))
 
 
 def _patch_query(mocker, tool_name: str, docs: list[dict[str, Any]]) -> None:
@@ -216,11 +212,11 @@ class TestGraphToolsDualDelivery:
         self, mocker, tool_name, tool
     ) -> None:
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
-        ctx = _make_graph_ctx(ui_supported=True)
+        ctx = _make_graph_ctx()
 
         result = await tool(query="alice", ctx=ctx)
 
-        # Assert: unchanged contract — no ToolResult, no graph, no iframe payload.
+        # Assert: unchanged contract — no ToolResult, no graph.
         assert isinstance(result, str)
         assert not isinstance(result, ToolResult)
         assert result == _serialize(_GRAPH_DOCS)
@@ -229,7 +225,7 @@ class TestGraphToolsDualDelivery:
         self, mocker, tool_name, tool
     ) -> None:
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
-        ctx = _make_graph_ctx(ui_supported=True)
+        ctx = _make_graph_ctx()
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
@@ -238,30 +234,27 @@ class TestGraphToolsDualDelivery:
         assert isinstance(result, ToolResult)
         assert _serialize(_GRAPH_DOCS) in result.content[0].text
 
-    async def test_visualize_ships_the_graph_payload_to_the_iframe_only(
+    async def test_visualize_ships_the_graph_payload_in_the_download(
         self, mocker, tool_name, tool
     ) -> None:
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
-        ctx = _make_graph_ctx(ui_supported=True)
+        ctx = _make_graph_ctx()
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
-        # Assert: node/edge dump rides in the audience=["user"] block — once.
-        payload_block = result.content[1]
-        assert payload_block.annotations.audience == ["user"]
-        payload = json.loads(payload_block.text)
+        # Assert: the node/edge dump travels inside the Graph file only.
+        payload = await _content_payload(result)
         assert len(payload["nodes"]) == 2
         assert len(payload["edges"]) == 1
         assert result.structured_content is None
 
-    async def test_visualize_falls_back_to_a_graph_file_and_resource_link(
+    async def test_visualize_answers_a_graph_file_and_resource_link(
         self, mocker, tool_name, tool, tmp_path: Path, request_user_id
     ) -> None:
-        # Arrange: a client that renders no MCP App UIs (e.g. the terminal).
         _patch_query(mocker, tool_name, _GRAPH_DOCS)
         mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-        mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-        ctx = _make_graph_ctx(ui_supported=False)
+        mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
+        ctx = _make_graph_ctx()
 
         result = await tool(query="alice", ctx=ctx, visualize=True)
 
@@ -284,7 +277,7 @@ class TestGraphToolsDualDelivery:
         # Arrange: an aggregation / projection that dropped the ``kind`` field.
         docs = [{"_id": "agg", "count": 7}]
         _patch_query(mocker, tool_name, docs)
-        ctx = _make_graph_ctx(ui_supported=True)
+        ctx = _make_graph_ctx()
 
         result = await tool(query="how many", ctx=ctx, visualize=True)
 
@@ -322,7 +315,7 @@ async def _star_search(
     with nullcontext() if closure else closure_off:
         return await search_memory(
             query="q",
-            ctx=_make_graph_ctx(ui_supported=True),
+            ctx=_make_graph_ctx(),
             max_results=max_results,
             **kwargs,
         )
@@ -362,28 +355,20 @@ async def test_search_memory_never_leaks_the_closure_marker_to_the_graph(
 
     assert isinstance(result, ToolResult)
     # The graph payload rides only in the content blocks scanned here.
-    assert all("_closure_added" not in block.text for block in result.content)
+    assert all(
+        "_closure_added" not in block.text
+        for block in result.content
+        if block.type == "text"
+    )
+    assert "_closure_added" not in json.dumps(await _content_payload(result))
     assert result.structured_content is None
 
 
 # ---------------------------------------------------------------------------
 # visualize_memory_structure (graphrag form) — moved here with the split
-# (ADR-007 §7): the rendering-channel contract of the tool itself. The helper
-# it delivers through lives in the neutral ``viz_app`` and is tested there.
+# (ADR-007 §7): the delivery contract of the tool itself. The helper it
+# delivers through lives in the neutral ``graph_download`` and is tested there.
 # ---------------------------------------------------------------------------
-
-
-async def test_all_three_graph_tools_declare_the_shared_ui_resource() -> None:
-    # Arrange / Act: importing ``tree.mcp.graph_tools`` (module level) registered
-    # all three graph tools on the server.
-    uris = {
-        name: ((await mcp.get_tool(name)).meta or {}).get("ui", {}).get("resourceUri")
-        for name in ("visualize_memory_structure", "query_memory", "search_memory")
-    }
-
-    # Assert: one ui:// resource serves all three (ADR-005, decision 4).
-    assert set(uris.values()) == {GRAPH_VIEW_URI}
-    assert (await mcp.get_resource(GRAPH_VIEW_URI)) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -391,27 +376,24 @@ async def test_all_three_graph_tools_declare_the_shared_ui_resource() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_visualize_ships_payload_in_content_block_for_ui_clients(
+async def test_visualize_ships_the_payload_in_the_graph_file(
     mocker,
 ) -> None:
     mocker.patch(
         "tree.mcp.graph_tools.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
-    ctx = _make_graph_ctx(ui_supported=True)
+    ctx = _make_graph_ctx()
 
     result = await visualize_memory_structure(ctx, query="alice")
 
-    # Assert: payload rides in a content JSON block (the channel the iframe
-    # actually receives), marked audience=["user"] so the model skips it.
+    # Assert: the payload travels inside the Graph file, never as a JSON block
+    # in the answer.
     assert isinstance(result, ToolResult)
-    payload = _content_payload(result)
+    payload = await _content_payload(result)
     assert len(payload["nodes"]) == 2
     assert len(payload["edges"]) == 1
-    json_block = next(
-        b for b in result.content if b.type == "text" and b.text.startswith("{")
-    )
-    assert json_block.annotations.audience == ["user"]
+    assert not any(b.type == "text" and b.text.startswith("{") for b in result.content)
     assert result.structured_content is None
 
 
@@ -423,7 +405,7 @@ async def test_visualize_empty_query_fetches_full_graph(mocker) -> None:
         "tree.mcp.graph_tools.fetch_full_graph",
         new=AsyncMock(return_value=_seed_result()),
     )
-    ctx = _make_graph_ctx(ui_supported=True)
+    ctx = _make_graph_ctx()
 
     result = await visualize_memory_structure(ctx)
 
@@ -448,7 +430,7 @@ async def test_visualize_forwards_max_docs_to_the_full_graph_read(mocker) -> Non
         new=AsyncMock(return_value=_ranked_result(3)),
     )
 
-    await visualize_memory_structure(_make_graph_ctx(ui_supported=True), max_docs=7)
+    await visualize_memory_structure(_make_graph_ctx(), max_docs=7)
 
     assert full_graph_mock.await_args.kwargs["max_docs"] == 7
 
@@ -459,7 +441,7 @@ async def test_visualize_without_max_docs_leaves_the_cap_to_config(mocker) -> No
         new=AsyncMock(return_value=_ranked_result(3)),
     )
 
-    await visualize_memory_structure(_make_graph_ctx(ui_supported=True))
+    await visualize_memory_structure(_make_graph_ctx())
 
     # None -> fetch_full_graph reads query.full_graph_max_docs itself.
     assert full_graph_mock.await_args.kwargs["max_docs"] is None
@@ -476,9 +458,7 @@ async def test_visualize_refuses_max_docs_below_one_before_any_read(
         "tree.mcp.graph_tools.structured_query_memory", new=AsyncMock()
     )
 
-    result = await visualize_memory_structure(
-        _make_graph_ctx(ui_supported=True), max_docs=max_docs
-    )
+    result = await visualize_memory_structure(_make_graph_ctx(), max_docs=max_docs)
 
     assert json.loads(result) == {
         "error_type": "invalid_input",
@@ -499,7 +479,7 @@ async def test_visualize_never_forwards_max_docs_with_a_query(mocker) -> None:
     )
 
     result = await visualize_memory_structure(
-        _make_graph_ctx(ui_supported=True), query="alice", max_docs=7
+        _make_graph_ctx(), query="alice", max_docs=7
     )
 
     assert "max_docs" not in query_mock.await_args.kwargs
@@ -515,7 +495,7 @@ async def test_visualize_full_graph_summary_says_how_many_documents_show(
         new=AsyncMock(return_value=_ranked_result(3)),
     )
 
-    result = await visualize_memory_structure(_make_graph_ctx(ui_supported=True))
+    result = await visualize_memory_structure(_make_graph_ctx())
 
     # Assert: the model reads that the view is capped, not "everything".
     assert result.content[0].text.startswith(
@@ -538,7 +518,7 @@ def _ranked_docs() -> list[dict[str, Any]]:
 async def test_search_memory_text_never_carries_the_relevance_rank(mocker) -> None:
     _patch_query(mocker, "search_memory", _ranked_docs())
 
-    result = await search_memory(query="q", ctx=_make_graph_ctx(ui_supported=True))
+    result = await search_memory(query="q", ctx=_make_graph_ctx())
 
     # Assert: byte-identical to the unranked rows' serialization.
     assert "doc_rank" not in result
@@ -551,12 +531,10 @@ async def test_search_memory_visualize_ranks_its_graph_by_relevance(mocker) -> N
         "tree.mcp.graph_tools.to_graph_payload", wraps=to_graph_payload
     )
 
-    result = await search_memory(
-        query="q", ctx=_make_graph_ctx(ui_supported=True), visualize=True
-    )
+    result = await search_memory(query="q", ctx=_make_graph_ctx(), visualize=True)
 
     assert build.call_args.kwargs == {"document_order": "relevance"}
-    assert _content_payload(result)["controls"]["documents"] == {
+    assert (await _content_payload(result))["controls"]["documents"] == {
         "shown": 1,
         "total": 1,
         "order": "relevance",
@@ -597,14 +575,14 @@ async def test_a_truncated_search_view_is_never_empty_at_one(
 
     result = await search_memory(
         query="q",
-        ctx=_make_graph_ctx(ui_supported=True),
+        ctx=_make_graph_ctx(),
         max_results=max_results,
         visualize=True,
     )
 
     # Assert: either no slider at all, or one whose total is the stars drawn
     # and whose position 1 leaves exactly one star (and never an empty view).
-    payload = _content_payload(result)
+    payload = await _content_payload(result)
     stars = [n for n in payload["nodes"] if n["type"] == "document"]
     documents = payload["controls"].get("documents")
     if not stars:
@@ -621,12 +599,12 @@ async def test_a_truncated_search_view_renumbers_the_drawn_stars(mocker) -> None
     _patch_query(mocker, "search_memory", _truncation_corpus())
 
     result = await search_memory(
-        query="q", ctx=_make_graph_ctx(ui_supported=True), max_results=5, visualize=True
+        query="q", ctx=_make_graph_ctx(), max_results=5, visualize=True
     )
 
     # Assert: A (rank 1) was cut; B and C are drawn as 1 and 2; the model's
     # text is the same as before the renumbering.
-    payload = _content_payload(result)
+    payload = await _content_payload(result)
     ranks = {n["id"].rsplit(":", 1)[1]: n.get("docRank") for n in payload["nodes"]}
     assert ranks == {"b-p0": 1, "b-p1": 1, "b": 1, "c-p0": 2, "c": 2}
     assert payload["controls"]["documents"] == {
@@ -640,12 +618,10 @@ async def test_a_truncated_search_view_renumbers_the_drawn_stars(mocker) -> None
 async def test_an_nl_query_view_carries_no_documents_control(mocker) -> None:
     _patch_query(mocker, "query_memory", _GRAPH_DOCS)
 
-    result = await query_memory(
-        query="q", ctx=_make_graph_ctx(ui_supported=True), visualize=True
-    )
+    result = await query_memory(query="q", ctx=_make_graph_ctx(), visualize=True)
 
     # Assert: NL pipeline rows carry no rank, so there is nothing to slide.
-    payload = _content_payload(result)
+    payload = await _content_payload(result)
     assert "documents" not in payload["controls"]
     assert all("docRank" not in node for node in payload["nodes"])
 
@@ -662,7 +638,7 @@ async def test_visualize_query_summary_says_how_many_relevant_documents_show(
     )
 
     result = await visualize_memory_structure(
-        _make_graph_ctx(ui_supported=True), query="memory for ai agents"
+        _make_graph_ctx(), query="memory for ai agents"
     )
 
     # Assert: a query view shows every document by default, most relevant first.
@@ -682,10 +658,12 @@ async def test_visualize_full_graph_ranks_by_recency(mocker) -> None:
         "tree.mcp.graph_tools.to_graph_payload", wraps=to_graph_payload
     )
 
-    result = await visualize_memory_structure(_make_graph_ctx(ui_supported=True))
+    result = await visualize_memory_structure(_make_graph_ctx())
 
     assert build.call_args.kwargs == {"document_order": "recency"}
-    assert _content_payload(result)["controls"]["documents"]["order"] == "recency"
+    assert (await _content_payload(result))["controls"]["documents"][
+        "order"
+    ] == "recency"
 
 
 async def test_visualize_an_unranked_query_keeps_the_plain_summary(mocker) -> None:
@@ -694,27 +672,25 @@ async def test_visualize_an_unranked_query_keeps_the_plain_summary(mocker) -> No
         new=AsyncMock(return_value=_seed_result()),
     )
 
-    result = await visualize_memory_structure(
-        _make_graph_ctx(ui_supported=True), query="alice"
-    )
+    result = await visualize_memory_structure(_make_graph_ctx(), query="alice")
 
     assert result.content[0].text.startswith(
         "Knowledge graph for 'alice': 2 nodes, 1 edges"
     )
-    assert "documents" not in _content_payload(result)["controls"]
+    assert "documents" not in (await _content_payload(result))["controls"]
 
 
-async def test_visualize_fallback_returns_a_graph_file_resource_link(
+async def test_visualize_returns_a_graph_file_resource_link(
     mocker, tmp_path: Path, request_user_id
 ) -> None:
-    # Arrange: no UI extension → file fallback (browser-open suppressed).
+    # Arrange: browser-open suppressed.
     mocker.patch(
         "tree.mcp.graph_tools.structured_query_memory",
         new=AsyncMock(return_value=_seed_result()),
     )
     mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-    ctx = _make_graph_ctx(ui_supported=False)
+    mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
+    ctx = _make_graph_ctx()
 
     result = await visualize_memory_structure(ctx, query="alice")
 
@@ -731,24 +707,6 @@ async def test_visualize_fallback_returns_a_graph_file_resource_link(
     assert row is not None and str(row.user_id) == str(request_user_id)
     assert list(tmp_path.iterdir()) == []
     assert DOWNLOAD_CONTRACT in text_block.text
-
-
-async def test_visualize_as_html_file_forces_fallback_for_ui_clients(
-    mocker, tmp_path: Path
-) -> None:
-    # Arrange: UI extension present but the caller asked for a file.
-    mocker.patch(
-        "tree.mcp.graph_tools.structured_query_memory",
-        new=AsyncMock(return_value=_seed_result()),
-    )
-    mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", tmp_path)
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
-    ctx = _make_graph_ctx(ui_supported=True)
-
-    result = await visualize_memory_structure(ctx, query="alice", as_html_file=True)
-
-    assert result.content[0].text.count("you asked for an HTML file") == 1
-    assert result.content[1].type == "resource_link"
 
 
 # ---------------------------------------------------------------------------
@@ -796,9 +754,7 @@ class TestReaderErrors:
             new=AsyncMock(side_effect=SearchUnavailableError("both legs down")),
         )
 
-        payload = json.loads(
-            await tool(ctx=_make_graph_ctx(ui_supported=False), **kwargs)
-        )
+        payload = json.loads(await tool(ctx=_make_graph_ctx(), **kwargs))
 
         assert payload["error_type"] == "search_unavailable"
         assert payload["retryable"] is True
@@ -812,9 +768,7 @@ class TestReaderErrors:
             new=AsyncMock(side_effect=RuntimeError("aggregation blew up")),
         )
 
-        payload = json.loads(
-            await tool(ctx=_make_graph_ctx(ui_supported=False), **kwargs)
-        )
+        payload = json.loads(await tool(ctx=_make_graph_ctx(), **kwargs))
 
         assert payload["error_type"] == "internal_error"
         assert payload["retryable"] is False
@@ -828,9 +782,7 @@ async def test_full_graph_visualization_shares_the_retrieval_envelope(mocker) ->
         new=AsyncMock(side_effect=PyMongoError("connection refused")),
     )
 
-    payload = json.loads(
-        await visualize_memory_structure(_make_graph_ctx(ui_supported=False))
-    )
+    payload = json.loads(await visualize_memory_structure(_make_graph_ctx()))
 
     assert payload["error_type"] == "search_unavailable"
     assert payload["retryable"] is True
@@ -853,9 +805,7 @@ class TestReviewToolErrors:
             new=AsyncMock(side_effect=ServerSelectionTimeoutError("no servers")),
         )
 
-        payload = json.loads(
-            await _tool_fn(review_list_pending)(_make_graph_ctx(ui_supported=False))
-        )
+        payload = json.loads(await _tool_fn(review_list_pending)(_make_graph_ctx()))
 
         assert payload == {
             "error_type": "storage_unavailable",
@@ -873,9 +823,7 @@ class TestReviewToolErrors:
         )
 
         payload = json.loads(
-            await _tool_fn(tool)(
-                "node-a", "node-b", "paul", _make_graph_ctx(ui_supported=False)
-            )
+            await _tool_fn(tool)("node-a", "node-b", "paul", _make_graph_ctx())
         )
 
         assert payload["error_type"] == "storage_unavailable"
@@ -910,7 +858,7 @@ async def test_blank_query_is_invalid_input(
     )
     nl_engine = mocker.patch("tree.mcp.graph_tools.execute_nl_query", new=AsyncMock())
 
-    result = await tool(query=query, ctx=_make_graph_ctx(ui_supported=False))
+    result = await tool(query=query, ctx=_make_graph_ctx())
 
     assert json.loads(result) == {
         "error_type": "invalid_input",
@@ -931,9 +879,9 @@ async def test_visualize_memory_structure_still_draws_the_whole_graph_on_no_quer
         new=AsyncMock(return_value=_seed_result()),
     )
     mocker.patch("tree.memory.visualize.graph.GRAPHS_DIR", Path("/tmp"))
-    mocker.patch("tree.mcp.viz_app.webbrowser.open", return_value=False)
+    mocker.patch("tree.mcp.graph_download.webbrowser.open", return_value=False)
 
-    result = await visualize_memory_structure(_make_graph_ctx(ui_supported=True))
+    result = await visualize_memory_structure(_make_graph_ctx())
 
     assert isinstance(result, ToolResult)
 

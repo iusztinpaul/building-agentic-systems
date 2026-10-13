@@ -52,6 +52,6 @@ TAGS_INGESTION_MCP = [TAG_INGESTION, TAG_MCP]
 # MCP retrieval tools (query_memory / search_memory / deep_search_memory and any
 # utility tool that reads memory, e.g. visualize_memory_structure).
 TAGS_RETRIEVAL_MCP = [TAG_RETRIEVAL, TAG_MCP]
-# MCP utility tools that neither read nor write memory (scrape_web, review_*,
-# memory_dashboard) — just the surface marker.
+# MCP utility tools that neither read nor write memory (scrape_web, review_*) —
+# just the surface marker.
 TAGS_MCP = [TAG_MCP]
