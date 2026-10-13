@@ -5,15 +5,15 @@ READS the latest **Clustering run** and draws it (ADR-007 Decision 8) — it nev
 clusters. `make memory-run-clustering-pipeline` is what produces the data; this
 command only turns the stored `cluster_id` / `viz {x, y, run_id}` fields into a
 picture, so it is instant and needs no served workflows, no Prefect and no LLM.
-It plots the chunks of the ``query.cli_max_docs`` (1000) most-recent documents;
-the ``visualize_memory_embeddings`` MCP tool keeps ``query.full_graph_max_docs``
+It plots the chunks of EVERY document — a local file has no size limit; the
+``visualize_memory_embeddings`` MCP tool keeps ``query.full_graph_max_docs``
 (250) because its resource read fails through Horizon on a larger map. The
 summary says ``N of M chunks`` and the legend counts the whole run.
 
 ``--query`` draws the child chunks a hybrid search matched in colour over every
-other chunk of those documents in grey — no cluster colours. Only this command
-draws the grey cloud: the MCP tool shows the matches alone, because the cloud
-pushed its inline payload past what Horizon delivers.
+other chunk in grey — no cluster colours. Only this command draws the grey
+cloud: the MCP tool shows the matches alone, because the cloud pushed its
+inline payload past what Horizon delivers.
 
 Three outcomes that are NOT failures of the renderer:
 
@@ -92,9 +92,7 @@ async def _query_payload(
     if not hit_ids:
         click.echo(NO_RESULTS_MESSAGE.format(query=query))
         raise SystemExit(1)
-    query_map = await load_query_map(
-        client, database, user_id, hit_ids, max_docs=app_config.query.cli_max_docs
-    )
+    query_map = await load_query_map(client, database, user_id, hit_ids, capped=False)
     payload = to_query_map_payload(query_map, query)
     if not query_map.matched:
         click.echo(payload["warning"] or NO_RESULTS_MESSAGE.format(query=query))
@@ -122,7 +120,7 @@ async def _run(
         payload = await _query_payload(client, database, resolved_user_id, query, top_k)
     else:
         embedding_map = await load_embedding_map(
-            client, database, resolved_user_id, max_docs=app_config.query.cli_max_docs
+            client, database, resolved_user_id, capped=False
         )
         if embedding_map is None:
             click.echo(NO_EMBEDDINGS_MESSAGE)

@@ -30,6 +30,7 @@ from fastmcp.tools import ToolResult
 from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
+from tree.config.app_config import app_config
 from tree.data.online_pipeline import UrlSource
 from tree.entities.graph_files import GraphFile
 from tree.mcp.tools import (
@@ -931,6 +932,22 @@ class TestVisualizeMemoryEmbeddingsQuery:
         assert [row["label"] for row in payload["legend"]] == ["matched chunks"]
         assert len(payload["nodes"]) == 2
         assert payload["hulls"] is None
+
+    async def test_top_k_is_capped_at_the_document_cap(self, mocker) -> None:
+        # At most ``full_graph_max_docs`` parents → at most that many documents.
+        retrieve = mocker.patch(
+            "tree.mcp.tools.retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(outcome="nothing_found"),
+        )
+
+        await visualize_memory_embeddings(
+            ctx=_viz_ctx(ui_supported=True), query="agent memory", top_k=5000
+        )
+
+        assert retrieve.await_args.kwargs["top_k"] == (
+            app_config.query.full_graph_max_docs
+        )
 
     async def test_a_query_that_matches_nothing_answers_a_sentence(
         self, mocker

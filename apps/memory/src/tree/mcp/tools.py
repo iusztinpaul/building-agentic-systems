@@ -39,6 +39,7 @@ from prefect.exceptions import ObjectNotFound, PrefectHTTPStatusError
 from pydantic import BaseModel, Field
 from pymongo.errors import PyMongoError
 
+from tree.config.app_config import app_config
 from tree.config.constants import (
     TAGS_INGESTION_MCP,
     TAGS_MCP,
@@ -619,8 +620,9 @@ async def visualize_memory_embeddings(
     Args:
         query: Search query text — draws only the chunks that match it. Omit (empty) to draw the whole memory with its
             clusters.
-        top_k: Number of parent chunks to retrieve (default 10); the matched
-            children that made them rank are drawn. Ignored with no query.
+        top_k: Number of parent chunks to retrieve (default 10, at most 250);
+            the matched children that made them rank are drawn. Ignored with
+            no query.
         hulls: Draw a convex hull around each cluster (default off). Ignored
             with a query.
         as_html_file: Set true when the user explicitly asks for a downloadable
@@ -694,6 +696,9 @@ async def _visualize_query_embeddings(
     """
 
     lc = ctx.lifespan_context
+    # Capped like the no-query map: at most ``full_graph_max_docs`` parents, so
+    # the matches span at most that many documents.
+    top_k = min(top_k, app_config.query.full_graph_max_docs)
     try:
         retrieval = await retrieve_parents(
             client=lc["client"],

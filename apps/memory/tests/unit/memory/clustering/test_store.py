@@ -824,6 +824,20 @@ class TestLoadEmbeddingMap:
             3,
         )
 
+    async def test_uncapped_it_plots_every_document(
+        self, mongo_client, user_id, three_documents
+    ) -> None:
+        # The make command's view: ``max_docs`` is ignored.
+        embedding_map = await load_embedding_map(
+            mongo_client, TEST_DATABASE, user_id, max_docs=2, capped=False
+        )
+
+        assert "old-a" in {point.chunk_id for point in embedding_map.points}
+        assert (embedding_map.plotted_documents, embedding_map.total_documents) == (
+            3,
+            3,
+        )
+
     async def test_the_run_wide_counts_ignore_the_document_cap(
         self, mongo_client, user_id, three_documents
     ) -> None:
@@ -970,6 +984,23 @@ class TestLoadQueryMap:
         assert [p.chunk_id for p in query_map.reference] == ["c1"]
         assert query_map.matched_without_2d == 0
         assert (query_map.plotted_documents, query_map.total_documents) == (1, 1)
+
+    async def test_uncapped_the_cloud_spans_every_document(
+        self, mongo_client, user_id
+    ) -> None:
+        # The make command's view: a local file, so no document cap.
+        old = await _insert_document(user_id, "old", date="2026-01-01T00:00:00+00:00")
+        new = await _insert_document(user_id, "new", date="2026-03-01T00:00:00+00:00")
+        await self._clustered(user_id, "old-a", old, 1.0)
+        await self._clustered(user_id, "new-a", new, 2.0)
+        await _insert_cluster(user_id, 0, run_id="r1", size=2)
+
+        query_map = await load_query_map(
+            mongo_client, TEST_DATABASE, user_id, {"new-a"}, max_docs=1, capped=False
+        )
+
+        assert [p.chunk_id for p in query_map.reference] == ["old-a"]
+        assert (query_map.plotted_documents, query_map.total_documents) == (2, 2)
 
     async def test_without_the_reference_only_the_matches_are_read(
         self, mongo_client, user_id

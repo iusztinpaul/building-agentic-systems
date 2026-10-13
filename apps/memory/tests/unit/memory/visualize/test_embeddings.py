@@ -395,8 +395,7 @@ def test_payload_summary_counts_chunks_clusters_and_noise() -> None:
     payload = to_embedding_map_payload(_map())
 
     assert payload["summary"] == (
-        "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 documents) "
-        "in 2 clusters (+5 noise)"
+        "Embedding map: 47 of 47 chunks (all 10 documents) in 2 clusters (+5 noise)"
     )
 
 
@@ -498,6 +497,16 @@ def test_a_matches_only_query_payload_drops_the_grey_row_and_clause() -> None:
         "Embedding map for 'agent memory': 2 matched chunks (the clustering "
         "run's UMAP layout, no cluster colours)"
     )
+
+
+def test_query_payload_summary_says_all_documents_when_none_is_cut() -> None:
+    query_map = _query_map().model_copy(
+        update={"plotted_documents": 5, "total_documents": 5}
+    )
+
+    payload = to_query_map_payload(query_map, "agent memory")
+
+    assert "grey (all 5 documents; " in payload["summary"]
 
 
 def test_payload_legend_counts_the_whole_run_not_the_plot() -> None:
@@ -605,12 +614,12 @@ def test_render_embedding_map_file_headers_the_map_with_its_summary(
     render_embedding_map_file(payload, out)
 
     # The header line the reader sees is "47 of 47 chunks (the 10 most-recent
-    # of 10 documents) in 2 clusters (+5 noise)", not "47 nodes · 0 edges" —
+    # of 10 documents) in 2 clusters (+5 noise)" (all 10 here), not "47 nodes · 0 edges" —
     # both the summary and the branch that shows it have to reach the browser.
     html = out.read_text(encoding="utf-8")
     assert (
-        '"summary": "Embedding map: 47 of 47 chunks (the 10 most-recent of 10 '
-        'documents) in 2 clusters (+5 noise)"'
+        '"summary": "Embedding map: 47 of 47 chunks (all 10 documents) in 2 '
+        'clusters (+5 noise)"'
     ) in html
     assert 'payload.summary.replace(/^Embedding map(?: for )?:? ?/, "")' in html
 

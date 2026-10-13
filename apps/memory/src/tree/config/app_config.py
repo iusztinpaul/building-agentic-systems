@@ -359,10 +359,10 @@ class QueryConfig(BaseModel):
     # clamped where it is read (``to_graph_payload``), so one lowered key never
     # fails every entry point.
     full_graph_max_docs: int = Field(250, ge=1)
-    # The same cap for the make commands (`visualize-structure`,
-    # `visualize-embeddings`): they write a local HTML file, so Horizon's limit
-    # does not apply; 1000 keeps the browser responsive (10k documents = 35k
-    # structure nodes).
+    # The same cap for `make memory-visualize-structure`: it writes a local HTML
+    # file, so Horizon's limit does not apply; 1000 keeps the browser responsive
+    # (10k documents = 35k structure nodes). `visualize-embeddings` plots every
+    # document — a point map stays responsive at 15k chunks.
     cli_max_docs: int = Field(1000, ge=1)
     full_graph_shown_docs: int = Field(100, ge=1)
 

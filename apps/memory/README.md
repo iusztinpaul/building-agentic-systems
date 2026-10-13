@@ -401,9 +401,9 @@ the legend and the document title / heading path / snippet in the tooltip. The h
 `N of M chunks (the 250 most-recent of D documents) in K clusters (+X noise)` — while the legend
 sizes, the noise row and the stale warning count the whole run. Same renderer as the graph
 (fixed coordinates, no simulation — drag, pin, select, group drag and the Display knobs still work) — and identical in
-both memory modes, because the map has no edges to miss. `make memory-visualize-embeddings` plots the
-1000 most-recent documents (`query.cli_max_docs`); the `visualize_memory_embeddings` MCP tool keeps
-250 (`query.full_graph_max_docs`), because its resource read fails through Horizon on a larger map.
+both memory modes, because the map has no edges to miss. `make memory-visualize-embeddings` plots
+every document; the `visualize_memory_embeddings` MCP tool keeps the 250 most recent
+(`query.full_graph_max_docs`), because its resource read fails through Horizon on a larger map.
 
 ```bash
 make memory-visualize-embeddings                        # open the latest map
@@ -427,8 +427,7 @@ are contracts rather than bugs:
 The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
 and the same message — one behaviour, two surfaces. Both also take a query. `make
 memory-visualize-embeddings QUERY="…" [TOP_K=N]` draws the matched chunks in colour over every other
-chunk of the 1000 most-recent documents in light grey; the MCP tool's `query` draws the matched
-chunks alone, because the grey cloud pushed its inline payload past what Horizon delivers (226k
+chunk in light grey; the MCP tool's `query` draws the matched chunks alone (`top_k` capped at 250), because the grey cloud pushed its inline payload past what Horizon delivers (226k
 characters for 21 matches). Both use the run's UMAP coordinates (no cluster colours); matched chunks
 without coordinates raise the same warning, and when none has any, the warning is the whole answer.
 

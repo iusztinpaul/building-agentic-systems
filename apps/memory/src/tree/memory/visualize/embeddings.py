@@ -191,10 +191,10 @@ def to_embedding_map_payload(
         "warning": unclustered_warning(embedding_map),
         "summary": (
             f"Embedding map: {len(embedding_map.points)} of "
-            f"{embedding_map.clustered} chunks (the "
-            f"{embedding_map.plotted_documents} most-recent of "
-            f"{embedding_map.total_documents} documents) in "
-            f"{len(embedding_map.clusters)} clusters (+{embedding_map.noise} noise)"
+            f"{embedding_map.clustered} chunks ("
+            f"{_documents_clause(embedding_map.plotted_documents, embedding_map.total_documents)}"
+            f") in {len(embedding_map.clusters)} clusters "
+            f"(+{embedding_map.noise} noise)"
         ),
     }
 
@@ -244,9 +244,8 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
         )
         context = (
             f"matched chunks over {len(query_map.reference)} other chunks in grey "
-            f"(the {query_map.plotted_documents} most-recent of "
-            f"{query_map.total_documents} documents; the clustering run's UMAP "
-            "layout, no cluster colours)"
+            f"({_documents_clause(query_map.plotted_documents, query_map.total_documents)}"
+            "; the clustering run's UMAP layout, no cluster colours)"
         )
     return {
         "nodes": nodes,
@@ -261,6 +260,14 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
         ),
         "summary": f"Embedding map for {query!r}: {len(query_map.matched)} {context}",
     }
+
+
+def _documents_clause(plotted: int, total: int) -> str:
+    """Which documents the map plots: all of them, or the most-recent cut."""
+
+    if plotted >= total:
+        return f"all {total} documents"
+    return f"the {plotted} most-recent of {total} documents"
 
 
 def _map_node(point: MapPoint, *, cluster: str | None = None) -> dict[str, Any]:

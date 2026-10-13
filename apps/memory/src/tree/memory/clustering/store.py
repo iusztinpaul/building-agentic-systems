@@ -436,8 +436,12 @@ async def load_embedding_map(
     user_id: PydanticObjectId,
     *,
     max_docs: int | None = None,
+    capped: bool = True,
 ) -> EmbeddingMap | None:
     """Read the **Embedding map** of ``user_id``'s latest run, capped by document.
+
+    ``capped=False`` plots every document (``max_docs`` ignored): the make
+    command writes a local file, so no delivery limit applies.
 
     Surfaces READ a run's coordinates (ADR-007 §8). Points are the embedded
     children carrying THIS run's ``viz.run_id`` whose document (``sources``) is
@@ -462,8 +466,10 @@ async def load_embedding_map(
 
     db = client[database]
     memory_collection = db[MEMORY_COLLECTION]
-    kept, documents = await _recent_documents(memory_collection, user_id, max_docs)
-    plotted: dict[str, Any] = {"sources": {"$in": _sources_of(kept)}}
+    kept, documents = await _recent_documents(
+        memory_collection, user_id, max_docs, capped=capped
+    )
+    plotted: dict[str, Any] = {"sources": {"$in": _sources_of(kept)}} if capped else {}
     children = _embedded_children_filter(user_id)
     total_children = await memory_collection.count_documents(children)
 
@@ -534,6 +540,7 @@ async def load_query_map(
     chunk_ids: set[str],
     *,
     max_docs: int | None = None,
+    capped: bool = True,
     with_reference: bool = True,
 ) -> QueryMap:
     """The query view: ``chunk_ids`` over the rest of the memory, at UMAP coordinates.
@@ -541,8 +548,8 @@ async def load_query_map(
     Both lists are drawn at the latest **Clustering run**'s stored ``viz`` — the
     same 2D space as the whole-memory map, so a match sits where the topic map
     puts it. The reference cloud is every placed child of the ``max_docs``
-    most-recent documents; a match is added even when its document is older.
-    ``with_reference=False`` reads the matches alone (``reference`` empty): the
+    most-recent documents (every document with ``capped=False``); a match is
+    added even when its document is older. ``with_reference=False`` reads the matches alone (``reference`` empty): the
     MCP tool's inline view, whose payload Horizon fails to deliver once ~450
     grey points ride along (226k characters for 21 matches).
     A match without this run's coordinates (ingested since, never clustered,
@@ -560,10 +567,14 @@ async def load_query_map(
             total_documents=0,
         )
     collection = client[database][MEMORY_COLLECTION]
-    kept, documents = await _recent_documents(collection, user_id, max_docs)
+    kept, documents = await _recent_documents(
+        collection, user_id, max_docs, capped=capped
+    )
     scope: dict[str, Any] = {"_id": {"$in": list(chunk_ids)}}
     if with_reference:
-        scope = {"$or": [{"sources": {"$in": _sources_of(kept)}}, scope]}
+        scope = (
+            {"$or": [{"sources": {"$in": _sources_of(kept)}}, scope]} if capped else {}
+        )
     cursor = collection.find(
         {**_embedded_children_filter(user_id), "viz.run_id": run_id, **scope},
         _POINT_PROJECTION,
@@ -580,12 +591,17 @@ async def load_query_map(
 
 
 async def _recent_documents(
-    collection: Any, user_id: PydanticObjectId, max_docs: int | None
+    collection: Any,
+    user_id: PydanticObjectId,
+    max_docs: int | None,
+    *,
+    capped: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``(kept, all)`` document rows: the ``max_docs`` most-recent, and every one.
 
     ``max_docs`` defaults to ``query.full_graph_max_docs``; ranked by
     ``rank_recent_documents``, the **Memory structure**'s ranking (ADR-013 §3).
+    ``capped=False`` keeps every document.
     """
 
     max_docs = (
@@ -595,6 +611,8 @@ async def _recent_documents(
         {"user_id": user_id, "kind": "node", "type": "document"},
         {"_id": 1, "sources": 1, "properties.date": 1, "created_at": 1},
     ).to_list()
+    if not capped:
+        return documents, documents
     return rank_recent_documents(documents, max_docs), documents
 
 

@@ -148,8 +148,7 @@ class TestRenderedMap:
         assert "Wrote " in result.output
         assert "embedding-map-20260906-101500.html" in result.output
         assert (
-            "Embedding map: 12 of 12 chunks (the 3 most-recent of 3 documents) "
-            "in 1 clusters (+0 noise)"
+            "Embedding map: 12 of 12 chunks (all 3 documents) in 1 clusters (+0 noise)"
         ) in result.output
 
     def test_a_stale_run_warns_on_the_very_first_line(
@@ -288,19 +287,16 @@ class TestMakefileWiring:
 
 
 class TestDocumentCap:
-    """The CLI caps at ``query.cli_max_docs``; the MCP tool keeps the 250 cap."""
+    """The CLI plots every document; the MCP tool keeps the 250 cap."""
 
-    def test_it_reads_the_map_with_the_cli_cap(
+    def test_it_reads_the_map_uncapped(
         self, cli_module, mocked_boundaries, loaded_map
     ) -> None:
         load = loaded_map(_embedding_map())
 
         CliRunner().invoke(cli_module.main, ["--no-open"])
 
-        assert (
-            load.await_args.kwargs["max_docs"]
-            == cli_module.app_config.query.cli_max_docs
-        )
+        assert load.await_args.kwargs["capped"] is False
 
 
 def _hit(parent_id: str) -> RetrievedParent:
@@ -341,7 +337,7 @@ class TestQueryView:
             return_value=RetrievalResult(parents=[_hit("p1")]),
         )
 
-    def test_it_draws_the_matches_over_the_grey_cloud_at_the_cli_cap(
+    def test_it_draws_the_matches_over_the_uncapped_grey_cloud(
         self, mocker, cli_module, mocked_boundaries, retrieve
     ) -> None:
         load = mocker.patch.object(
@@ -364,10 +360,7 @@ class TestQueryView:
         assert result.exit_code == 0
         assert retrieve.await_args.kwargs["top_k"] == 3
         assert load.await_args.args[3] == {"p1#child-0"}
-        assert (
-            load.await_args.kwargs["max_docs"]
-            == cli_module.app_config.query.cli_max_docs
-        )
+        assert load.await_args.kwargs["capped"] is False
         assert "with_reference" not in load.await_args.kwargs
         payload = mocked_boundaries.call_args.args[0]
         assert [row["label"] for row in payload["legend"]] == [
