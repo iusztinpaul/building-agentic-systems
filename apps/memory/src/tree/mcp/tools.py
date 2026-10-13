@@ -593,9 +593,8 @@ async def visualize_memory_embeddings(
     embedding" warning — with no clustering run at all, that warning IS the
     answer (there is nothing to draw).
 
-    With a ``query``, the child chunks a hybrid (vector + text) child-chunk
-    search matched are drawn in colour over every other chunk of the 250
-    most-recent documents in light grey — both at the clustering run's UMAP
+    With a ``query``, only the child chunks a hybrid (vector + text)
+    child-chunk search matched are drawn, at the clustering run's UMAP
     coordinates, no cluster colours — so the view shows where the matches sit
     in the topic map's space; matched chunks without coordinates raise the
     same warning. ``hulls`` is ignored with a query. A query that matches
@@ -618,8 +617,7 @@ async def visualize_memory_embeddings(
     then gets only the download, never the inline view's data.
 
     Args:
-        query: Search query text — draws the chunks that match it over the
-            rest in grey. Omit (empty) to draw the whole memory with its
+        query: Search query text — draws only the chunks that match it. Omit (empty) to draw the whole memory with its
             clusters.
         top_k: Number of parent chunks to retrieve (default 10); the matched
             children that made them rank are drawn. Ignored with no query.
@@ -683,7 +681,11 @@ async def _visualize_query_embeddings(
     user_id: PydanticObjectId,
     as_html_file: bool,
 ) -> str | ToolResult:
-    """The query view: the matched child chunks over the rest in grey, no clusters.
+    """The query view: the matched child chunks alone, no clusters.
+
+    No grey reference cloud: its ~450 extra points pushed the inline payload
+    past what Horizon delivers (226k characters for 21 matches). The grey
+    context view is ``make memory-visualize-embeddings QUERY=…``.
 
     Child chunks are mode-orthogonal, so the rag child search serves BOTH modes
     — no graph import here (ADR-006 decision 5). Drawn at the clustering run's
@@ -709,7 +711,9 @@ async def _visualize_query_embeddings(
         if not hit_ids:
             # A plain ``str``, and no read of the reference cloud: nothing matched.
             return NO_RESULTS_MESSAGE.format(query=query)
-        query_map = await load_query_map(lc["client"], lc["database"], user_id, hit_ids)
+        query_map = await load_query_map(
+            lc["client"], lc["database"], user_id, hit_ids, with_reference=False
+        )
     except Exception as exc:  # noqa: BLE001 — every failure becomes an envelope
         return _retrieval_error("visualize_memory_embeddings", exc)
     payload = to_query_map_payload(query_map, query)

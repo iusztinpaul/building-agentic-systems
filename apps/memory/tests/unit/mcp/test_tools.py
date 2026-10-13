@@ -861,7 +861,8 @@ class TestVisualizeMemoryEmbeddings:
         assert "every child chunk" not in summary
         assert '"Cluster N" label' in summary
         assert "that warning IS the answer" in summary
-        assert "over every other chunk" in summary
+        assert "only the child chunks a hybrid" in summary
+        assert "grey" not in summary
         assert "LLM" not in summary and "PCA" not in summary
 
 
@@ -888,11 +889,9 @@ def _query_map(*chunk_ids: str) -> QueryMap:
 
 
 class TestVisualizeMemoryEmbeddingsQuery:
-    """A ``query`` draws its matches over the rest in grey — no clusters, no run."""
+    """A ``query`` draws its matches alone — no grey cloud, no clusters, no run."""
 
-    async def test_draws_the_matches_over_the_grey_cloud_without_clusters(
-        self, mocker
-    ) -> None:
+    async def test_draws_only_the_matches_without_clusters(self, mocker) -> None:
         # Arrange: two parents, one matched child each.
         retrieve = mocker.patch(
             "tree.mcp.tools.retrieve_parents",
@@ -904,7 +903,9 @@ class TestVisualizeMemoryEmbeddingsQuery:
         load_points = mocker.patch(
             "tree.mcp.tools.load_query_map",
             new_callable=AsyncMock,
-            return_value=_query_map("p1#child-0", "p2#child-0"),
+            return_value=_query_map("p1#child-0", "p2#child-0").model_copy(
+                update={"reference": []}
+            ),
         )
         load_map = mocker.patch("tree.mcp.tools.load_embedding_map")
 
@@ -913,21 +914,22 @@ class TestVisualizeMemoryEmbeddingsQuery:
             ctx=_viz_ctx(ui_supported=True), query="  agent memory ", top_k=4
         )
 
-        # Assert: the stripped query reached the search, its children the store,
-        # and the whole-memory map (with its clusters) was never read.
+        # Assert: the stripped query reached the search, its children the store
+        # WITHOUT the grey cloud (it overflowed Horizon's delivery limit), and
+        # the whole-memory map (with its clusters) was never read.
         assert retrieve.await_args.kwargs["query"] == "agent memory"
         assert retrieve.await_args.kwargs["top_k"] == 4
         assert load_points.await_args.args[3] == {"p1#child-0", "p2#child-0"}
+        assert load_points.await_args.kwargs["with_reference"] is False
         load_map.assert_not_called()
         summary_block, payload_block = result.content
         assert summary_block.text.startswith(
-            "Embedding map for 'agent memory': 2 matched chunks over 1 other chunks"
+            "Embedding map for 'agent memory': 2 matched chunks (the clustering "
+            "run's UMAP layout, no cluster colours)"
         )
         payload = json.loads(payload_block.text)
-        assert [row["label"] for row in payload["legend"]] == [
-            "matched chunks",
-            "other chunks",
-        ]
+        assert [row["label"] for row in payload["legend"]] == ["matched chunks"]
+        assert len(payload["nodes"]) == 2
         assert payload["hulls"] is None
 
     async def test_a_query_that_matches_nothing_answers_a_sentence(

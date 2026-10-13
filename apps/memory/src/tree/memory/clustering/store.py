@@ -534,6 +534,7 @@ async def load_query_map(
     chunk_ids: set[str],
     *,
     max_docs: int | None = None,
+    with_reference: bool = True,
 ) -> QueryMap:
     """The query view: ``chunk_ids`` over the rest of the memory, at UMAP coordinates.
 
@@ -541,6 +542,9 @@ async def load_query_map(
     same 2D space as the whole-memory map, so a match sits where the topic map
     puts it. The reference cloud is every placed child of the ``max_docs``
     most-recent documents; a match is added even when its document is older.
+    ``with_reference=False`` reads the matches alone (``reference`` empty): the
+    MCP tool's inline view, whose payload Horizon fails to deliver once ~450
+    grey points ride along (226k characters for 21 matches).
     A match without this run's coordinates (ingested since, never clustered,
     or a pending child the text leg hit) is counted in ``matched_without_2d``,
     never drawn. Surfaces compute no coordinates (ADR-007 §8).
@@ -557,15 +561,11 @@ async def load_query_map(
         )
     collection = client[database][MEMORY_COLLECTION]
     kept, documents = await _recent_documents(collection, user_id, max_docs)
+    scope: dict[str, Any] = {"_id": {"$in": list(chunk_ids)}}
+    if with_reference:
+        scope = {"$or": [{"sources": {"$in": _sources_of(kept)}}, scope]}
     cursor = collection.find(
-        {
-            **_embedded_children_filter(user_id),
-            "viz.run_id": run_id,
-            "$or": [
-                {"sources": {"$in": _sources_of(kept)}},
-                {"_id": {"$in": list(chunk_ids)}},
-            ],
-        },
+        {**_embedded_children_filter(user_id), "viz.run_id": run_id, **scope},
         _POINT_PROJECTION,
     ).sort("_id", 1)
     points = [_to_map_point(document) async for document in cursor]

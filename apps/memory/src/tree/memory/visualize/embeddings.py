@@ -210,7 +210,8 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
     warning over the matched set. The reference nodes go FIRST: Sigma draws in insertion order, so a match is
     never buried under the cloud. Same fixed-layout template and lean nodes as
     :func:`to_embedding_map_payload`; the grey is opaque (see
-    :data:`REFERENCE_COLOUR`).
+    :data:`REFERENCE_COLOUR`). An empty reference (the MCP tool's matches-only
+    view) drops the grey legend row and the summary's grey clause.
 
     Returns:
         ``{nodes, edges, layout, controls, hulls, legend, warning, summary}``.
@@ -223,37 +224,42 @@ def to_query_map_payload(query_map: QueryMap, query: str) -> dict[str, Any]:
     # The run's cluster ids are dropped on purpose: a query view has no cluster
     # colours, and an id with no legend row here would paint a match grey.
     nodes += [{**_map_node(point), "cluster_id": -1} for point in query_map.matched]
+    legend = [
+        {
+            "label": _MATCHED_LABEL,
+            "size": len(query_map.matched),
+            "color": MATCHED_COLOUR,
+            "cluster_id": -1,
+        }
+    ]
+    context = "matched chunks (the clustering run's UMAP layout, no cluster colours)"
+    if query_map.reference:
+        legend.append(
+            {
+                "label": _REFERENCE_LABEL,
+                "size": len(query_map.reference),
+                "color": REFERENCE_COLOUR,
+                "cluster_id": _REFERENCE_ID,
+            }
+        )
+        context = (
+            f"matched chunks over {len(query_map.reference)} other chunks in grey "
+            f"(the {query_map.plotted_documents} most-recent of "
+            f"{query_map.total_documents} documents; the clustering run's UMAP "
+            "layout, no cluster colours)"
+        )
     return {
         "nodes": nodes,
         "edges": [],
         "layout": "fixed",
         "controls": {"display": dict(_DEFAULT_DISPLAY)},
         "hulls": None,
-        "legend": [
-            {
-                "label": _MATCHED_LABEL,
-                "size": len(query_map.matched),
-                "color": MATCHED_COLOUR,
-                "cluster_id": -1,
-            },
-            {
-                "label": _REFERENCE_LABEL,
-                "size": len(query_map.reference),
-                "color": REFERENCE_COLOUR,
-                "cluster_id": _REFERENCE_ID,
-            },
-        ],
+        "legend": legend,
         "warning": missing_2d_warning(
             query_map.matched_without_2d,
             len(query_map.matched) + query_map.matched_without_2d,
         ),
-        "summary": (
-            f"Embedding map for {query!r}: {len(query_map.matched)} matched chunks "
-            f"over {len(query_map.reference)} other chunks in grey (the "
-            f"{query_map.plotted_documents} most-recent of "
-            f"{query_map.total_documents} documents; the clustering run's UMAP "
-            "layout, no cluster colours)"
-        ),
+        "summary": f"Embedding map for {query!r}: {len(query_map.matched)} {context}",
     }
 
 

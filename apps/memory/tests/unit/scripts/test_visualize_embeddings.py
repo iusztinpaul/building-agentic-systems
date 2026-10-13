@@ -16,7 +16,19 @@ import pytest
 from beanie import PydanticObjectId
 from click.testing import CliRunner
 
-from tree.memory.clustering.types import EmbeddingMap, MapPoint, MemoryClusterInfo
+from tree.memory.clustering.types import (
+    EmbeddingMap,
+    MapPoint,
+    MemoryClusterInfo,
+    QueryMap,
+)
+from tree.memory.rag.structure import NO_RESULTS_MESSAGE
+from tree.memory.rag.types import (
+    DocumentMeta,
+    MatchedChild,
+    RetrievalResult,
+    RetrievedParent,
+)
 from tree.memory.visualize.embeddings import (
     NO_EMBEDDINGS_MESSAGE,
     missing_2d_warning,
@@ -271,6 +283,8 @@ class TestMakefileWiring:
         assert "scripts/visualize_embeddings.py $(USER_FLAGS)" in makefile
         assert "$(if $(filter true,$(HULLS)),--hulls,)" in makefile
         assert '$(if $(OUTPUT),--output "$(OUTPUT)",)' in makefile
+        assert '$(if $(QUERY),--query "$(QUERY)",)' in makefile
+        assert '$(if $(TOP_K),--top-k "$(TOP_K)",)' in makefile
 
 
 class TestDocumentCap:
@@ -287,3 +301,89 @@ class TestDocumentCap:
             load.await_args.kwargs["max_docs"]
             == cli_module.app_config.query.cli_max_docs
         )
+
+
+def _hit(parent_id: str) -> RetrievedParent:
+    return RetrievedParent(
+        parent_id=parent_id,
+        heading_path=[],
+        content="Body.",
+        score=0.03,
+        document=DocumentMeta(document_id="doc-1", source_uri="https://e.com/p"),
+        matched_children=[
+            MatchedChild(child_id=f"{parent_id}#child-0", content="Hit.", score=0.03)
+        ],
+    )
+
+
+def _point(chunk_id: str) -> MapPoint:
+    return MapPoint(
+        chunk_id=chunk_id,
+        x=0.0,
+        y=0.0,
+        cluster_id=-1,
+        title=None,
+        heading_path=[],
+        snippet="",
+    )
+
+
+class TestQueryView:
+    """``--query``: the matches over the grey cloud — only the CLI draws the cloud."""
+
+    @pytest.fixture
+    def retrieve(self, mocker, cli_module):
+        mocker.patch.object(cli_module, "get_embedding_model")
+        return mocker.patch.object(
+            cli_module,
+            "retrieve_parents",
+            new_callable=AsyncMock,
+            return_value=RetrievalResult(parents=[_hit("p1")]),
+        )
+
+    def test_it_draws_the_matches_over_the_grey_cloud_at_the_cli_cap(
+        self, mocker, cli_module, mocked_boundaries, retrieve
+    ) -> None:
+        load = mocker.patch.object(
+            cli_module,
+            "load_query_map",
+            new_callable=AsyncMock,
+            return_value=QueryMap(
+                matched=[_point("p1#child-0")],
+                reference=[_point("other")],
+                matched_without_2d=0,
+                plotted_documents=1,
+                total_documents=1,
+            ),
+        )
+
+        result = CliRunner().invoke(
+            cli_module.main, ["--query", "agentic rag", "--top-k", "3", "--no-open"]
+        )
+
+        assert result.exit_code == 0
+        assert retrieve.await_args.kwargs["top_k"] == 3
+        assert load.await_args.args[3] == {"p1#child-0"}
+        assert (
+            load.await_args.kwargs["max_docs"]
+            == cli_module.app_config.query.cli_max_docs
+        )
+        assert "with_reference" not in load.await_args.kwargs
+        payload = mocked_boundaries.call_args.args[0]
+        assert [row["label"] for row in payload["legend"]] == [
+            "matched chunks",
+            "other chunks",
+        ]
+
+    def test_a_query_that_matches_nothing_exits_one_without_a_file(
+        self, cli_module, mocked_boundaries, retrieve
+    ) -> None:
+        retrieve.return_value = RetrievalResult(outcome="nothing_found")
+
+        result = CliRunner().invoke(
+            cli_module.main, ["--query", "knitting", "--no-open"]
+        )
+
+        assert result.exit_code == 1
+        assert NO_RESULTS_MESSAGE.format(query="knitting") in result.output
+        mocked_boundaries.assert_not_called()

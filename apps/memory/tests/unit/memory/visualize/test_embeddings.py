@@ -489,6 +489,17 @@ def test_query_payload_summary_names_the_query_and_both_counts() -> None:
     )
 
 
+def test_a_matches_only_query_payload_drops_the_grey_row_and_clause() -> None:
+    # The MCP tool's view: no reference cloud was read.
+    payload = to_query_map_payload(_query_map(reference=0), "agent memory")
+
+    assert [row["label"] for row in payload["legend"]] == ["matched chunks"]
+    assert payload["summary"] == (
+        "Embedding map for 'agent memory': 2 matched chunks (the clustering "
+        "run's UMAP layout, no cluster colours)"
+    )
+
+
 def test_payload_legend_counts_the_whole_run_not_the_plot() -> None:
     # Arrange: every noise chunk of the run sits in a cut document.
     embedding_map = _map(noise=0, unclustered=0, total_children=45, cut_noise=3)

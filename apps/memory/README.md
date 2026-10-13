@@ -425,10 +425,12 @@ are contracts rather than bugs:
   memory-run-clustering-pipeline`) clears it.
 
 The `visualize_memory_embeddings` MCP tool below answers with the same map, the same warning line
-and the same message — one behaviour, two surfaces. The tool also takes a `query`: it then draws
-the matched chunks in colour over every other chunk in light grey, both at the run's UMAP
-coordinates (no cluster colours); matched chunks without coordinates raise the same warning, and
-when none has any, the warning is the whole answer.
+and the same message — one behaviour, two surfaces. Both also take a query. `make
+memory-visualize-embeddings QUERY="…" [TOP_K=N]` draws the matched chunks in colour over every other
+chunk of the 1000 most-recent documents in light grey; the MCP tool's `query` draws the matched
+chunks alone, because the grey cloud pushed its inline payload past what Horizon delivers (226k
+characters for 21 matches). Both use the run's UMAP coordinates (no cluster colours); matched chunks
+without coordinates raise the same warning, and when none has any, the warning is the whole answer.
 
 ### MCP server
 
@@ -458,7 +460,7 @@ Every tool answers failures as data, never as an MCP protocol error: `{"error_ty
 | `ingest_file` | Ingest a local file. |
 | `ingest_conversation` | Ingest a chat transcript into memory. |
 | `visualize_memory_structure` | Draws the [Memory structure](#structure-view) as an interactive view: the document → parent chunk → child chunk tree in `rag` (signature `query, top_k, as_html_file, max_docs`), the knowledge graph in `graphrag` (adds `max_hops`). With no `query` the most-recent documents; with one, the search results. An empty memory / no match answers a plain sentence instead of a picture. |
-| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws the chunks that query's search matched in colour over every other chunk of the 250 most-recent documents in light grey — both at the run's UMAP coordinates, no cluster colours (`hulls` is ignored). READS a run, never computes coordinates — chunks without them are left off and the answer starts with `x/y chunks don’t have a 2D embedding. …`; with no run yet, that warning is the whole answer. In both modes: the map has no edges. |
+| `visualize_memory_embeddings` | Draws the [Embedding map](#embedding-map) of the latest clustering run: the chunks of the 250 most-recent documents as points coloured by cluster ("N of M chunks"; the legend counts the whole run), `hulls=true` outlines them; `query="…"` (+ `top_k`) instead draws only the chunks that query's search matched, at the run's UMAP coordinates, no cluster colours (`hulls` is ignored); the grey context view is `make memory-visualize-embeddings QUERY="…"`. READS a run, never computes coordinates — chunks without them are left off and the answer starts with `x/y chunks don’t have a 2D embedding. …`; with no run yet, that warning is the whole answer. In both modes: the map has no edges. |
 
 *`graphrag` only (6 more, 14 total):*
 

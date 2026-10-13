@@ -971,6 +971,22 @@ class TestLoadQueryMap:
         assert query_map.matched_without_2d == 0
         assert (query_map.plotted_documents, query_map.total_documents) == (1, 1)
 
+    async def test_without_the_reference_only_the_matches_are_read(
+        self, mongo_client, user_id
+    ) -> None:
+        # The MCP tool's view: the grey cloud overflowed Horizon's delivery limit.
+        source = await _insert_document(user_id, "doc1")
+        for index in range(3):
+            await self._clustered(user_id, f"c{index}", source, float(index))
+        await _insert_cluster(user_id, 0, run_id="r1", size=3)
+
+        query_map = await load_query_map(
+            mongo_client, TEST_DATABASE, user_id, {"c0", "c2"}, with_reference=False
+        )
+
+        assert [p.chunk_id for p in query_map.matched] == ["c0", "c2"]
+        assert query_map.reference == []
+
     async def test_a_match_outside_the_document_cap_is_still_drawn(
         self, mongo_client, user_id
     ) -> None:
