@@ -14,6 +14,10 @@ export interface ToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  // Gemini 3 signs function calls and rejects the next request of the same
+  // turn unless each signature comes back on its call (only the first of
+  // parallel calls is signed). Opaque — store and echo, never inspect.
+  thought_signature?: string;
 }
 
 export interface ToolResultBlock {
@@ -36,5 +40,10 @@ export interface Message {
 // its own higher-level events (assistant_text, tool_use, tool_result, done, error).
 export type StreamEvent =
   | { type: "text_delta"; text: string }
-  | { type: "function_call"; name: string; args: Record<string, unknown> }
+  | {
+      type: "function_call";
+      name: string;
+      args: Record<string, unknown>;
+      thoughtSignature?: string;
+    }
   | { type: "done" };

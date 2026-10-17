@@ -23,7 +23,10 @@ export function createClient(): GoogleGenAI {
 
 type GeminiPart =
   | { text: string }
-  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | {
+      functionCall: { name: string; args: Record<string, unknown> };
+      thoughtSignature?: string;
+    }
   | { functionResponse: { name: string; response: Record<string, unknown> } };
 
 type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
@@ -46,6 +49,8 @@ function toGeminiContents(messages: Message[]): GeminiContent[] {
       } else if (b.type === "tool_use") {
         parts.push({
           functionCall: { name: b.name, args: b.input ?? {} },
+          // A sibling of `functionCall` on the Part, not nested inside it.
+          ...(b.thought_signature ? { thoughtSignature: b.thought_signature } : {}),
         });
       } else if (b.type === "tool_result") {
         const response: Record<string, unknown> = { result: b.content };
@@ -99,6 +104,7 @@ export async function* streamText(
           type: "function_call",
           name: part.functionCall.name,
           args: part.functionCall.args ?? {},
+          ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
         };
       }
     }

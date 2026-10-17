@@ -14,7 +14,11 @@ export interface FakeTurn {
   text?: string | string[];
   // Emitted together as a single chunk after the text chunks (real Gemini
   // tends to batch function calls at the end of a turn).
-  functionCalls?: Array<{ name: string; args?: Record<string, unknown> }>;
+  functionCalls?: Array<{
+    name: string;
+    args?: Record<string, unknown>;
+    thoughtSignature?: string;
+  }>;
   // If set, generateContentStream rejects with an Error(error) for this turn.
   error?: string;
 }
@@ -28,7 +32,11 @@ interface StreamChunk {
   candidates: Array<{
     content: {
       parts: Array<
-        { text: string } | { functionCall: { name: string; args: Record<string, unknown> } }
+        | { text: string }
+        | {
+            functionCall: { name: string; args: Record<string, unknown> };
+            thoughtSignature?: string;
+          }
       >;
     };
   }>;
@@ -49,6 +57,7 @@ function* toChunks(turn: FakeTurn): Generator<StreamChunk> {
           content: {
             parts: turn.functionCalls.map((fc) => ({
               functionCall: { name: fc.name, args: fc.args ?? {} },
+              ...(fc.thoughtSignature ? { thoughtSignature: fc.thoughtSignature } : {}),
             })),
           },
         },

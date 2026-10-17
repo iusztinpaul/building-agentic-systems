@@ -82,7 +82,12 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
   const maxIterations = opts.maxIterations ?? 10;
 
   for (let iter = 0; iter < maxIterations; iter++) {
-    const pending: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+    const pending: Array<{
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      thoughtSignature?: string;
+    }> = [];
     const assistantText: string[] = [];
 
     try {
@@ -97,7 +102,7 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
           yield { type: "assistant_text", text: ev.text };
         } else if (ev.type === "function_call") {
           const id = `call_${randomUUID().slice(0, 8)}`;
-          pending.push({ id, name: ev.name, args: ev.args });
+          pending.push({ id, name: ev.name, args: ev.args, thoughtSignature: ev.thoughtSignature });
           yield { type: "tool_use", id, name: ev.name, input: ev.args };
         }
         // "done" from streamText is per-turn; the loop decides whether to iterate.
@@ -114,7 +119,13 @@ export async function* loop(opts: LoopOptions): AsyncGenerator<LoopEvent> {
     const joined = assistantText.join("");
     if (joined) assistantBlocks.push({ type: "text", text: joined });
     for (const c of pending) {
-      assistantBlocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.args });
+      assistantBlocks.push({
+        type: "tool_use",
+        id: c.id,
+        name: c.name,
+        input: c.args,
+        ...(c.thoughtSignature ? { thought_signature: c.thoughtSignature } : {}),
+      });
     }
     if (assistantBlocks.length > 0) {
       const assistantMessage: Message = { role: "assistant", content: assistantBlocks };

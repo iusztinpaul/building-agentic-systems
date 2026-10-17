@@ -12,4 +12,4 @@
 // without re-entering client.ts, so it's always initialized before any
 // consumer touches it. The underlying cycle still exists and should be
 // cleaned up later, but this closes the immediate TDZ window.
-export const DEFAULT_MODEL = "gemini-2.5-flash";
+export const DEFAULT_MODEL = "gemini-3.8-flash";

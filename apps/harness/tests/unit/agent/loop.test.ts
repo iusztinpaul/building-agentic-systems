@@ -99,6 +99,42 @@ describe("loop", () => {
     }
   });
 
+  test("thought signatures are echoed back on their function calls", async () => {
+    // Gemini 3 rejects the next request of a turn when a signed call comes back
+    // unsigned; of parallel calls only the first is signed.
+    const stub = makeStubTool({ name: "stub_read" });
+    const { client, calls } = makeFakeGeminiClient({
+      turns: [
+        {
+          functionCalls: [
+            { name: "stub_read", args: { city: "Paris" }, thoughtSignature: "sig-1" },
+            { name: "stub_read", args: { city: "Tokyo" } },
+          ],
+        },
+        { text: "done" },
+      ],
+    });
+
+    await collect(
+      loop({
+        client,
+        messages: [{ role: "user", content: "do it" }],
+        systemPrompt: SYSTEM_PROMPT,
+        tools: [stub],
+        toolContext: ctx(),
+      }),
+    );
+
+    const contents = calls[1]?.contents as Array<{ role: string; parts: unknown[] }>;
+    expect(contents[1]).toEqual({
+      role: "model",
+      parts: [
+        { functionCall: { name: "stub_read", args: { city: "Paris" } }, thoughtSignature: "sig-1" },
+        { functionCall: { name: "stub_read", args: { city: "Tokyo" } } },
+      ],
+    });
+  });
+
   test("onMessage fires for every assistant turn + tool_result turn (including final text)", async () => {
     const stub = makeStubTool({ name: "stub", call: () => ({ content: "r" }) });
     const { client } = makeFakeGeminiClient({
