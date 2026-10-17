@@ -181,9 +181,9 @@ def llm_identity() -> str:
 
     Read from ``app_config`` at CALL time (never a module constant): Prefect
     re-imports this module inside flow-run subprocesses, and a
-    ``TREE_MODELS__LLM__MODEL=gemini-2.5-flash`` override must move the
+    ``TREE_MODELS__LLM__MODEL=gemini-3.8-flash`` override must move the
     identity with it. With the shipped defaults the value is
-    ``"gemini:gemini-3.1-flash-lite"``.
+    ``"gemini:gemini-3.5-flash-lite"``.
     """
 
     cfg = app_config.models.llm

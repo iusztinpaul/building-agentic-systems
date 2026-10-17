@@ -3,13 +3,14 @@
 These tests are fully mocked: no real Gemini calls, no network. The fetcher
 is exercised against a stubbed `google.genai.Client` so that the assertions
 focus exclusively on the fetcher's contract (Protocol conformance, order
-preservation, error semantics, and call-site shape — `Part.from_uri(...)`
-with `mime_type="video/*"`).
+preservation, error semantics, and call-site shape — an
+`aio.interactions.create(...)` call with an agentic `video` input).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -26,14 +27,34 @@ VIDEO_ID_B = "AAAaaaBBBcc"
 VIDEO_ID_C = "CCCdddEEEff"
 
 
-def _stub_response(text: str) -> SimpleNamespace:
-    """Mimic the relevant attributes of a `google.genai` response."""
+def _stub_response(text: str, *, status: str = "completed") -> SimpleNamespace:
+    """Mimic the relevant attributes of a `google.genai` Interaction."""
 
-    return SimpleNamespace(text=text)
+    return SimpleNamespace(
+        status=status,
+        output_text=json.dumps({"transcript": text}),
+        errors=None,
+        model="gemini-3.8-flash",
+        usage=SimpleNamespace(
+            total_input_tokens=162,
+            total_tool_use_tokens=812,
+            total_output_tokens=113,
+            total_thought_tokens=593,
+            total_tokens=1680,
+        ),
+    )
 
 
-class _FakeAsyncModels:
-    """Async-models stand-in for `client.aio.models`."""
+def _video_uri(kwargs: dict[str, Any]) -> str:
+    """Return the `uri` of the single `video` input of an interactions call."""
+
+    videos = [i for i in kwargs["input"] if i.get("type") == "video"]
+    assert len(videos) == 1, f"expected one video input, got {kwargs['input']!r}"
+    return videos[0]["uri"]
+
+
+class _FakeAsyncInteractions:
+    """Async-interactions stand-in for `client.aio.interactions`."""
 
     def __init__(self, side_effect: Any) -> None:
         self._side_effect = side_effect
@@ -42,7 +63,7 @@ class _FakeAsyncModels:
         self.max_in_flight = 0
         self._lock = asyncio.Lock()
 
-    async def generate_content(self, **kwargs: Any) -> Any:
+    async def create(self, **kwargs: Any) -> Any:
         async with self._lock:
             self.in_flight += 1
             if self.in_flight > self.max_in_flight:
@@ -66,10 +87,10 @@ class _FakeAsyncModels:
 
 
 class _FakeClient:
-    """Minimal stand-in for `google.genai.Client` that exposes `aio.models`."""
+    """Minimal stand-in for `google.genai.Client` that exposes `aio.interactions`."""
 
     def __init__(self, side_effect: Any) -> None:
-        self.aio = SimpleNamespace(models=_FakeAsyncModels(side_effect))
+        self.aio = SimpleNamespace(interactions=_FakeAsyncInteractions(side_effect))
 
 
 def _patch_genai(mocker, side_effect: Any) -> _FakeClient:
@@ -106,7 +127,7 @@ class TestInit:
 
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
 
-        assert fetcher.model == "gemini-3.5-flash"
+        assert fetcher.model == "gemini-3.8-flash"
 
     def test_settings_key_used_when_no_explicit_key(self, mocker):
         mocker.patch(
@@ -118,7 +139,7 @@ class TestInit:
         # Should not raise.
         fetcher = GeminiTranscriptFetcher()
 
-        assert fetcher.model == "gemini-3.5-flash"
+        assert fetcher.model == "gemini-3.8-flash"
 
 
 # --- Happy path & call-site shape -------------------------------------------
@@ -143,27 +164,44 @@ class TestFetchMany:
         assert transcript.segments[0].start_seconds == 0.0
         assert transcript.segments[0].duration_seconds == 0.0
 
-        # Verify the call shape: Part.from_uri(file_uri=<canonical>, mime_type="video/*")
-        assert len(client.aio.models.calls) == 1
-        call = client.aio.models.calls[0]
-        assert call["model"] == "gemini-3.5-flash"
-        contents = call["contents"]
-        # contents is expected to be a list[Content] OR list[Part]; check parts.
-        flat_parts: list[Any] = []
-        for item in contents if isinstance(contents, list) else [contents]:
-            parts = getattr(item, "parts", None)
-            if parts is not None:
-                flat_parts.extend(parts)
-            else:
-                flat_parts.append(item)
+        # Verify the call shape: one agentic video input + the text prompt,
+        # not stored server-side.
+        assert len(client.aio.interactions.calls) == 1
+        call = client.aio.interactions.calls[0]
+        assert call["model"] == "gemini-3.8-flash"
+        assert call["store"] is False
+        assert call["response_mime_type"] == "application/json"
+        assert call["response_format"]["required"] == ["transcript"]
+        video, prompt = call["input"]
+        assert video == {
+            "type": "video",
+            "uri": "https://www.youtube.com/watch?v=" + VIDEO_ID_A,
+            "processing": "agentic",
+        }
+        assert prompt["type"] == "text"
+        assert "transcript" in prompt["text"]
 
-        file_parts = [
-            p for p in flat_parts if getattr(p, "file_data", None) is not None
-        ]
-        assert len(file_parts) == 1
-        file_data = file_parts[0].file_data
-        assert file_data.file_uri == "https://www.youtube.com/watch?v=" + VIDEO_ID_A
-        assert (file_data.mime_type or "").startswith("video/")
+    async def test_records_token_usage_on_opik_span(self, mocker):
+        # Opik's genai integration never sees `interactions.create`, so the
+        # fetcher records usage itself: video (tool-use) tokens count as
+        # prompt tokens, thought tokens as completion tokens.
+        _patch_genai(mocker, _stub_response("hello"))
+        update_span = mocker.patch(
+            "tree.data.youtube.gemini_transcript_fetcher.update_current_span"
+        )
+        fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
+
+        await fetcher.fetch_many([VIDEO_ID_A])
+
+        update_span.assert_called_once_with(
+            provider="google_ai",
+            model="gemini-3.8-flash",
+            usage={
+                "prompt_tokens": 162 + 812,
+                "completion_tokens": 113 + 593,
+                "total_tokens": 1680,
+            },
+        )
 
     async def test_order_preservation_with_distinct_text_per_id(self, mocker):
         ids = [VIDEO_ID_A, VIDEO_ID_B, VIDEO_ID_C]
@@ -174,14 +212,7 @@ class TestFetchMany:
         }
 
         def _side_effect(**kwargs: Any) -> Any:
-            contents = kwargs["contents"]
-            for item in contents if isinstance(contents, list) else [contents]:
-                parts = getattr(item, "parts", None) or []
-                for p in parts:
-                    file_data = getattr(p, "file_data", None)
-                    if file_data is not None:
-                        return _stub_response(text_for[file_data.file_uri])
-            raise AssertionError("no file_data Part found in call")
+            return _stub_response(text_for[_video_uri(kwargs)])
 
         _patch_genai(mocker, _side_effect)
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
@@ -227,17 +258,9 @@ class TestFetchMany:
         ok = _stub_response("ok-text")
 
         def _side_effect(**kwargs: Any) -> Any:
-            contents = kwargs["contents"]
-            for item in contents if isinstance(contents, list) else [contents]:
-                parts = getattr(item, "parts", None) or []
-                for p in parts:
-                    file_data = getattr(p, "file_data", None)
-                    if file_data is None:
-                        continue
-                    if VIDEO_ID_A in file_data.file_uri:
-                        return Exception("rate limited")
-                    return ok
-            raise AssertionError("no file_data Part found in call")
+            if VIDEO_ID_A in _video_uri(kwargs):
+                return Exception("rate limited")
+            return ok
 
         _patch_genai(mocker, _side_effect)
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
@@ -265,7 +288,7 @@ class TestFetchMany:
             results = await fetcher.fetch_many(["not-a-youtube-url"])
 
         assert results == [None]
-        assert client.aio.models.calls == []
+        assert client.aio.interactions.calls == []
         warnings = [
             r
             for r in caplog.records
@@ -273,12 +296,43 @@ class TestFetchMany:
         ]
         assert warnings == []
 
+    @pytest.mark.parametrize(
+        "output_text",
+        [
+            "thought\nLet's see:\n00:01 hello",  # leaked notes, not JSON
+            '{"text": "hello"}',  # wrong field
+        ],
+    )
+    async def test_malformed_transcript_object_returns_none(self, mocker, output_text):
+        response = _stub_response("ignored")
+        response.output_text = output_text
+        _patch_genai(mocker, response)
+        fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
+
+        results = await fetcher.fetch_many([VIDEO_ID_A])
+
+        assert results == [None]
+
+    async def test_incomplete_interaction_returns_none(self, mocker, caplog):
+        # A failed / cancelled interaction must not be read as a transcript,
+        # even when it carries partial output text.
+        _patch_genai(mocker, _stub_response("partial", status="failed"))
+        fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"))
+
+        with caplog.at_level(logging.DEBUG, logger=FETCHER_LOGGER):
+            results = await fetcher.fetch_many([VIDEO_ID_A])
+
+        assert results == [None]
+        assert any("status 'failed'" in r.getMessage() for r in caplog.records)
+
     async def test_refusal_safety_block_returns_none(self, mocker):
-        # Simulate a response object whose `.text` access raises (matches what
-        # `google-genai` does on a safety-block response with no candidates).
+        # Simulate a response object whose `.output_text` access raises.
         class _RefusalResponse:
+            status = "completed"
+            usage = None
+
             @property
-            def text(self) -> str:
+            def output_text(self) -> str:
                 raise ValueError("blocked by safety filter")
 
         _patch_genai(mocker, _RefusalResponse())
@@ -295,10 +349,10 @@ class TestFetchMany:
             return _stub_response("ok")
 
         client = _patch_genai(mocker, _slow_side_effect)
-        # Patch generate_content to use our slow side effect directly (the
-        # _FakeAsyncModels already supports awaitable side effects via
+        # Patch create to use our slow side effect directly (the
+        # _FakeAsyncInteractions already supports awaitable side effects via
         # callable that returns a coroutine; here we set it on the instance).
-        client.aio.models._side_effect = _slow_side_effect
+        client.aio.interactions._side_effect = _slow_side_effect
 
         fetcher = GeminiTranscriptFetcher(api_key=SecretStr("test"), concurrency=2)
 
@@ -306,9 +360,9 @@ class TestFetchMany:
 
         await asyncio.wait_for(fetcher.fetch_many(ids), timeout=5.0)
 
-        assert client.aio.models.max_in_flight <= 2
-        assert client.aio.models.max_in_flight >= 1
-        assert len(client.aio.models.calls) == 10
+        assert client.aio.interactions.max_in_flight <= 2
+        assert client.aio.interactions.max_in_flight >= 1
+        assert len(client.aio.interactions.calls) == 10
 
     async def test_empty_input_list(self, mocker):
         client = _patch_genai(mocker, _stub_response("never"))
@@ -317,4 +371,4 @@ class TestFetchMany:
         results = await fetcher.fetch_many([])
 
         assert results == []
-        assert client.aio.models.calls == []
+        assert client.aio.interactions.calls == []

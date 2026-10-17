@@ -188,3 +188,11 @@ flowchart TD
   single-operator project — add a cap only if measured spend says so).
 - Snapshots persist on Bright Data for 30 days — irrelevant to correctness (we download
   within the run) but useful for postmortems.
+
+## Amendment (2026-10-17) — Gemini fallback uses agentic video processing
+
+Amends how the Gemini fallback calls the model; the chain, its triggers and the `fetch_many` contract are unchanged.
+
+- **Call path.** `GeminiTranscriptFetcher._call_gemini` (still the single patchable seam) calls `client.aio.interactions.create` with a `{"type": "video", "uri": <youtube url>, "processing": "agentic"}` input on `gemini-3.8-flash` instead of `generate_content` with `Part.from_uri` on `gemini-3.5-flash`. Google describes agentic processing as the model choosing what to look at instead of sampling a fixed 1 FPS. Measured live on an 18 min video, 2026-10-17: 14,906 tokens agentic vs 111,810 static (−87%), the same transcript length and ~1 min either way. On a 19 s clip it costs more (~3,560 vs ~2,344), so the win is long-form only. It runs only on 3.8 Flash, 3.6 Flash and 3.5 Flash-Lite. The Interactions API requires `google-genai >= 2.0.0` (pinned `>=2.31.0`), and interactions are not stored server-side (`store=False`).
+- **Structured output is mandatory.** As plain text, agentic answers leaked the model's working notes into the transcript (`thought / Let's see: / 00:01 "…"`). Measured live on a 19 s clip: static 0/8 leaked, agentic plain text 6/16, agentic with a `{"transcript": str}` JSON schema 0/12. A malformed object is a per-slot `None`, like any other Gemini-side error.
+- **Observability.** Opik's genai integration patches only `models.generate_content` (checked up to opik 2.2.103), so the fetcher no longer wraps its client with `track_genai_client`. `_call_gemini` opens its own `@track(type="llm")` span instead and records `interaction.usage`: input + tool-use (video) tokens as prompt tokens, output + thought tokens as completion tokens.

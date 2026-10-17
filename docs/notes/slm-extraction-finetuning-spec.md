@@ -256,7 +256,7 @@ in the live graph — reproduce the tendency, it is not a strict grammar:
 
 ## D. Building a training set (distill + human-correct)
 
-**Teacher.** `gemini-3.1-flash-lite` (`configs/default.yaml → models.llm`; any capable model works).
+**Teacher.** `gemini-3.5-flash-lite` (`configs/default.yaml → models.llm`; any capable model works).
 Called with `response_mime_type="application/json"`, `system_instruction =` the assembled prompt,
 `contents =` the chunk, no `response_schema` (so the teacher *will* emit some invalid rows — that's
 what the cleaner below is for). Use low temperature (≈0–0.3) for label stability.

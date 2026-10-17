@@ -52,7 +52,7 @@ class TestLoadAppConfig:
         config = load_app_config(frozen_config_path)
 
         assert config.models.llm.provider == "gemini"
-        assert config.models.llm.model == "gemini-3.1-flash-lite"
+        assert config.models.llm.model == "gemini-3.5-flash-lite"
         # #048 flipped the default from the multimodal ``voyage-multimodal-3``
         # to a TEXT model (routed to /v1/embeddings); ADR-009 then pinned the
         # current ``voyage-4``, still 1024-d, so the dim never moved. #039
@@ -298,7 +298,7 @@ class TestLoadAppConfig:
             textwrap.dedent("""\
                 models:
                   llm:
-                    model: gemini-2.0-flash
+                    model: gemini-3.8-flash
                 extraction:
                   llm_concurrency: 9
                   resolution:
@@ -308,7 +308,7 @@ class TestLoadAppConfig:
 
         config = load_app_config(custom)
 
-        assert config.models.llm.model == "gemini-2.0-flash"
+        assert config.models.llm.model == "gemini-3.8-flash"
         assert config.models.llm.provider == "gemini"
         assert config.extraction.llm_concurrency == 9
         assert config.extraction.resolution.fuzzy_threshold == 0.9

@@ -17,9 +17,9 @@ def mock_genai_client(mocker) -> MagicMock:
 
 class TestGeminiLLM:
     def test_init_sets_model(self, mock_genai_client) -> None:
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
 
-        assert llm._model == "gemini-2.0-flash"
+        assert llm._model == "gemini-3.8-flash"
 
     @pytest.mark.asyncio
     async def test_generate_json_returns_parsed_dict(self, mock_genai_client) -> None:
@@ -30,7 +30,7 @@ class TestGeminiLLM:
             return_value=mock_response
         )
 
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
         result = await llm.generate_json("Extract entities")
 
         assert result == expected
@@ -45,7 +45,7 @@ class TestGeminiLLM:
             return_value=mock_response
         )
 
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
         result = await llm.generate_json("prompt", system="You are helpful")
 
         assert result == {"ok": True}
@@ -59,7 +59,7 @@ class TestGeminiLLM:
             side_effect=RuntimeError("API down")
         )
 
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
 
         with pytest.raises(ExtractionError, match="Gemini API call failed"):
             await llm.generate_json("prompt")
@@ -74,7 +74,7 @@ class TestGeminiLLM:
             return_value=mock_response
         )
 
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
 
         with pytest.raises(ExtractionError, match="empty response"):
             await llm.generate_json("prompt")
@@ -89,7 +89,7 @@ class TestGeminiLLM:
             return_value=mock_response
         )
 
-        llm = GeminiLLM(api_key="fake-key", model="gemini-2.0-flash")
+        llm = GeminiLLM(api_key="fake-key", model="gemini-3.8-flash")
 
         with pytest.raises(ExtractionError, match="invalid JSON"):
             await llm.generate_json("prompt")

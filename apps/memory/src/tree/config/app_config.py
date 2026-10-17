@@ -43,7 +43,7 @@ class LLMConfig(BaseModel):
     """
 
     provider: str = "gemini"
-    model: str = "gemini-2.5-flash-lite"
+    model: str = "gemini-3.5-flash-lite"
 
 
 class EmbeddingConfig(BaseModel):

@@ -61,7 +61,7 @@ def _mock_settings(mocker) -> None:
 def _mock_app_config(mocker) -> None:
     mock_config = MagicMock()
     mock_config.models.llm.provider = "gemini"
-    mock_config.models.llm.model = "gemini-2.0-flash"
+    mock_config.models.llm.model = "gemini-3.8-flash"
     # #039: get_embedding_model() reads the SEARCH model (the persisted /
     # behavior-identical path for existing call sites).
     mock_config.models.search_embedding.provider = "mock"
@@ -455,7 +455,7 @@ class TestLLMIdentity:
 
     def test_default_identity(self, mocker) -> None:
         """The shipped ``default.yaml`` renders
-        ``gemini:gemini-3.1-flash-lite``.
+        ``gemini:gemini-3.5-flash-lite``.
 
         The module-level ``_mock_app_config`` fixture installs a ``MagicMock``
         for ``app_config``; this test puts the REAL import-time singleton back
@@ -464,7 +464,7 @@ class TestLLMIdentity:
 
         mocker.patch("tree.models.get_model.app_config", real_app_config)
 
-        assert llm_identity() == "gemini:gemini-3.1-flash-lite"
+        assert llm_identity() == "gemini:gemini-3.5-flash-lite"
 
     def test_reads_the_config_at_call_time(self, mocker) -> None:
         """Nothing is frozen at import time: Prefect re-imports this module in
@@ -479,18 +479,18 @@ class TestLLMIdentity:
         assert llm_identity() == f"modal:{_CATALOG_LLM}"
 
     def test_env_override_moves_the_identity(self, mocker, tmp_path, monkeypatch):
-        """Story 3: ``TREE_MODELS__LLM__MODEL=gemini-2.5-flash`` for ONE run
+        """Story 3: ``TREE_MODELS__LLM__MODEL=gemini-3.8-flash`` for ONE run
         neither reads nor pollutes the default model's cache entries."""
 
         custom = tmp_path / "models.yaml"
         custom.write_text(
-            "models:\n  llm:\n    provider: gemini\n    model: gemini-3.1-flash-lite\n"
+            "models:\n  llm:\n    provider: gemini\n    model: gemini-3.5-flash-lite\n"
         )
-        monkeypatch.setenv("TREE_MODELS__LLM__MODEL", "gemini-2.5-flash")
+        monkeypatch.setenv("TREE_MODELS__LLM__MODEL", "gemini-3.8-flash")
 
         mocker.patch("tree.models.get_model.app_config", load_app_config(custom))
 
-        assert llm_identity() == "gemini:gemini-2.5-flash"
+        assert llm_identity() == "gemini:gemini-3.8-flash"
 
     def test_two_parts_only(self, mocker) -> None:
         """An LLM has no dimensions and no **Embedding role** — the identity is

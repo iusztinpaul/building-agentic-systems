@@ -68,7 +68,7 @@ Each file is a flat top-level YAML list of entries; an entry is a dict with a `u
 
 ### `default.yaml` sections
 
-- `models.llm` — provider + model (default: `gemini` / `gemini-3.1-flash-lite`).
+- `models.llm` — provider + model (default: `gemini` / `gemini-3.5-flash-lite`).
 - `models.resolution_embedding` — provider + model + dimensions for the **transient** resolution embedding (computed on the entity name during resolution's semantic stage, never persisted). Default: `voyage` / `voyage-4` / 1024.
 - `models.search_embedding` — provider + model + dimensions for the **persisted** embedding used for dedup + search/query. Its `dimensions` is what the live mongot `vector_index` is asserted against at boot. Default: `voyage` / `voyage-4` / 1024.
 - `memory` — `mode` (`rag` | `graphrag`), `chunking` (`strategy`, `parent.size/overlap`, `child.size/overlap`) and `clustering` (`umap`, `hdbscan`). `clustering` has no `enabled` key on purpose: the ON/OFF switch is the `run_clustering` flow parameter of `offline-pipeline` (default off), not YAML — an `enabled` key is a hard `ValidationError` at boot.

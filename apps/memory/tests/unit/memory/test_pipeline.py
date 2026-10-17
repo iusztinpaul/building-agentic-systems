@@ -121,7 +121,7 @@ _PERSON_RESPONSE = {
 # The cache-key identity of the LLM the two cached LLM tasks take as a required
 # input. Cache-key material only — the bodies never read it — so direct calls of
 # the bodies can pin any concrete ``provider:model`` string.
-_TEST_LLM_IDENTITY = "gemini:gemini-3.1-flash-lite"
+_TEST_LLM_IDENTITY = "gemini:gemini-3.5-flash-lite"
 
 # A stable user_id used across the unit suite.
 _USER_ID = PydanticObjectId("507f1f77bcf86cd799439011")
@@ -1708,7 +1708,7 @@ class TestLLMTaskCacheIdentity:
         "llm-extract-entities": {"chunked": "doc-1", "user_id": "user-1", "llm": None},
     }
 
-    _GEMINI = "gemini:gemini-3.1-flash-lite"
+    _GEMINI = "gemini:gemini-3.5-flash-lite"
     _MODAL = "modal:LiquidAI/LFM2.5-350M"
 
     @pytest.mark.parametrize(
@@ -1730,7 +1730,7 @@ class TestLLMTaskCacheIdentity:
         # Story 1 — the provider flip.
         assert _key(self._GEMINI) != _key(self._MODAL)
         # Story 2 — same provider, a newer model id.
-        assert _key(self._GEMINI) != _key("gemini:gemini-2.5-flash")
+        assert _key(self._GEMINI) != _key("gemini:gemini-3.8-flash")
 
     @pytest.mark.parametrize(
         "cached_task",

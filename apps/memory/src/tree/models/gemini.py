@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # The **Embedding role** → Gemini's ``task_type`` (ADR-009 §5). Gemini has a
 # richer taxonomy (CLASSIFICATION, CLUSTERING, QUESTION_ANSWERING, …); the two
 # retrieval ones are the only ones the role expresses.
-# Verified on the pinned ``google-genai`` 1.65.0, where
+# Verified on ``google-genai`` 1.65.0 and again on 2.31.0, where
 # ``EmbedContentConfig.task_type`` is a free-form ``Optional[str]``, and
 # against https://ai.google.dev/gemini-api/docs/embeddings (read 2026-09-19).
 _ROLE_TO_TASK_TYPE: dict[EmbeddingRole, str] = {
