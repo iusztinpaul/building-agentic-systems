@@ -2,7 +2,7 @@
 
 Spin up, update, inspect, and tear down the shared Atlas cluster **entirely
 through code** — no console clicking. The desired state lives in
-:class:`ClusterSpec` (defaults mirror the current prod cluster: an M0 free-tier
+:class:`ClusterSpec` (defaults mirror the current prod cluster: a Free-tier
 replica set on GCP / ``WESTERN_EUROPE`` in project ``Tree``); the CLI reconciles
 Atlas to that spec idempotently.
 
@@ -47,9 +47,11 @@ ATLAS_OAUTH_TOKEN_URL = "https://cloud.mongodb.com/api/oauth/token"
 ATLAS_API_VERSION = "2025-03-12"
 ATLAS_ACCEPT = f"application/vnd.atlas.{ATLAS_API_VERSION}+json"
 
-# Dedicated tiers (M10+) use ``providerName`` directly; shared/free M0 is a
-# TENANT cluster backed by a cloud provider.
-FREE_TIER = "M0"
+# Dedicated tiers (M10+) use ``providerName`` directly; the Free tier is a
+# TENANT cluster backed by a cloud provider. Atlas now labels it "Free"
+# (formerly "M0"), but the Admin API still expects ``instanceSize: "M0"``.
+FREE_TIER = "Free"
+FREE_TIER_INSTANCE_SIZE = "M0"
 
 # Prefect Horizon's serverless MCP runner connects from a dynamic egress IP that
 # cannot be pinned, so Atlas rejects its TLS handshake
@@ -82,12 +84,13 @@ class ClusterSpec:
 
     @property
     def is_free_tier(self) -> bool:
-        return self.tier.upper() == FREE_TIER
+        # Accept the legacy "M0" name so older ``--tier M0`` invocations still work.
+        return self.tier.upper() in {FREE_TIER.upper(), FREE_TIER_INSTANCE_SIZE}
 
     def region_config(self) -> dict:
         """Build the ``regionConfigs[0]`` entry for this spec.
 
-        Free tier (M0) is a TENANT cluster (``backingProviderName`` names the
+        The Free tier is a TENANT cluster (``backingProviderName`` names the
         real cloud); dedicated tiers (M10+) name the provider directly and carry
         a 3-node electable set.
         """
@@ -98,7 +101,7 @@ class ClusterSpec:
                 "backingProviderName": self.provider,
                 "regionName": self.region,
                 "priority": 7,
-                "electableSpecs": {"instanceSize": self.tier},
+                "electableSpecs": {"instanceSize": FREE_TIER_INSTANCE_SIZE},
             }
         return {
             "providerName": self.provider,

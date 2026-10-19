@@ -106,7 +106,7 @@ check-db: # Read-only connectivity check against the configured MongoDB target (
 ### --- MongoDB Atlas IaC ---
 # Manage the shared Atlas cluster through code. Requires Atlas service-account
 # creds MDB_MCP_API_CLIENT_ID / MDB_MCP_API_CLIENT_SECRET (in .env / .env.prod).
-# Defaults target project "Tree" / cluster "tree" (M0 free, GCP, WESTERN_EUROPE);
+# Defaults target project "Tree" / cluster "tree" (Free tier, GCP, WESTERN_EUROPE);
 # override with ATLAS_ARGS="--tier M10 --provider AWS --region US_EAST_1 ...".
 
 atlas-up: # Create the Atlas cluster (idempotent) + seed DB user + IP access list, wait until IDLE.

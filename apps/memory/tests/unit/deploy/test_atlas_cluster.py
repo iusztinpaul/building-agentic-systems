@@ -29,11 +29,12 @@ HORIZON_EGRESS_CIDR = _module.HORIZON_EGRESS_CIDR
 
 
 def test_free_tier_region_config_is_tenant_backed() -> None:
-    spec = ClusterSpec(tier="M0", provider="GCP", region="WESTERN_EUROPE")
+    spec = ClusterSpec(tier="Free", provider="GCP", region="WESTERN_EUROPE")
 
     config = spec.region_config()
 
-    # Assert — M0 is a TENANT cluster naming the backing cloud; no nodeCount.
+    # Assert — Free is a TENANT cluster naming the backing cloud; no nodeCount.
+    # The Admin API still names the Free tier's instanceSize "M0".
     assert config["providerName"] == "TENANT"
     assert config["backingProviderName"] == "GCP"
     assert config["regionName"] == "WESTERN_EUROPE"
@@ -52,12 +53,13 @@ def test_dedicated_tier_region_config_names_provider_directly() -> None:
 
 
 def test_is_free_tier_flag() -> None:
-    assert ClusterSpec(tier="M0").is_free_tier is True
+    assert ClusterSpec(tier="Free").is_free_tier is True
+    assert ClusterSpec(tier="M0").is_free_tier is True  # legacy name
     assert ClusterSpec(tier="M10").is_free_tier is False
 
 
 def test_create_body_is_a_replicaset_with_one_region_config() -> None:
-    spec = ClusterSpec(cluster_name="tree", tier="M0")
+    spec = ClusterSpec(cluster_name="tree", tier="Free")
 
     body = spec.create_body()
 
