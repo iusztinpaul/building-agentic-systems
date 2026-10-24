@@ -11,14 +11,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
 import { type Provider, ProviderError, type StreamEvent } from "../src/provider/types.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
+import { discoverSkills } from "../src/skills/skills.ts";
 import type { AgentEvent, ToolCall } from "../src/types.ts";
 import { fakeFetch, fixture, jsonResponse, sseResponse } from "./helpers/http.ts";
 import { FakeTerminal, settle } from "./helpers/terminal.ts";
@@ -37,8 +38,9 @@ afterEach(() => {
 });
 
 function spawnCli(args: string[], extraEnv: Record<string, string> = {}) {
-  // A clean env: no inherited OPENROUTER_API_KEY, a scratch TREE_AGENT_HOME.
-  const env = { PATH: process.env.PATH ?? "", TREE_AGENT_HOME: home, ...extraEnv };
+  // A clean env: no inherited OPENROUTER_API_KEY, a scratch TREE_AGENT_HOME
+  // and HOME (so the real ~/.agents/skills is never read).
+  const env = { PATH: process.env.PATH ?? "", HOME: home, TREE_AGENT_HOME: home, ...extraEnv };
   return spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env });
 }
 
@@ -48,21 +50,28 @@ interface RunOptions {
   env?: NodeJS.ProcessEnv;
   signals?: CliDeps["signals"];
   terminal?: FakeTerminal;
+  discoverSkills?: CliDeps["discoverSkills"];
 }
 
 async function run(
   argv: string[],
   provider: Provider | (() => Provider),
-  { key = "test-key", stdin, env = {}, signals, terminal }: RunOptions = {},
+  { key = "test-key", stdin, env = {}, signals, terminal, discoverSkills }: RunOptions = {},
 ) {
   const out: string[] = [];
   const err: string[] = [];
   const created: string[] = [];
   const deps: CliDeps = {
-    env: { TREE_AGENT_HOME: home, ...(key && { OPENROUTER_API_KEY: key }), ...env },
+    env: {
+      HOME: home,
+      TREE_AGENT_HOME: home,
+      ...(key && { OPENROUTER_API_KEY: key }),
+      ...env,
+    },
     stdin,
     signals,
     terminal,
+    discoverSkills,
     stdout: { write: (t: string) => out.push(t) },
     stderr: { write: (t: string) => err.push(t) },
     createProvider: (apiKey) => {
@@ -241,7 +250,11 @@ describe("resolveMode", () => {
         continue: false,
         permissionMode: undefined,
         onBlocked: "stop",
+        skills: true,
       },
+    });
+    expect(resolveMode(["x", "--no-skills"], true, false)).toMatchObject({
+      args: { skills: false },
     });
     expect(
       resolveMode(
@@ -457,6 +470,182 @@ describe("main (headless)", () => {
     expect(calls).toEqual(["write", "edit"]);
     expect(events.filter((e) => e.type === "tool_result").every((e) => !e.isError)).toBe(true);
     expect(events.at(-1)).toEqual({ type: "agent_end", reason: "completed" });
+  });
+});
+
+describe("main (skills)", () => {
+  // `x` and the hidden `tree-memory` in the project, `mine` in ~/.agents/skills.
+  function project(): string {
+    const cwd = join(home, "proj");
+    const put = (dir: string, name: string, extra = "") => {
+      mkdirSync(join(dir, name), { recursive: true });
+      writeFileSync(
+        join(dir, name, "SKILL.md"),
+        `---\nname: ${name}\ndescription: does ${name}\n${extra}---\n# ${name}\nDo the ${name} steps.\n`,
+      );
+    };
+    put(join(cwd, ".agents", "skills"), "x");
+    put(join(cwd, ".agents", "skills"), "tree-memory", "disable-model-invocation: true\n");
+    put(join(home, ".agents", "skills"), "mine");
+    return cwd;
+  }
+  const listed = (fake: FakeProvider) =>
+    [...(fake.requests[0]?.context.system ?? "").matchAll(/<name>([^<]+)<\/name>/g)].map(
+      (m) => m[1],
+    );
+
+  it("lists the skills of a trusted cwd and the user's, hidden ones left out", async () => {
+    const cwd = project();
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--trust"], fake);
+
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(listed(fake)).toEqual(["mine", "x"]);
+    expect(fake.requests[0]?.context.system).toContain(
+      `<location>${join(cwd, ".agents", "skills", "x", "SKILL.md")}</location>`,
+    );
+  });
+
+  it("lists only the user-level skills in an untrusted cwd", async () => {
+    const cwd = project();
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    await run(["hi", "--cwd", cwd], fake);
+
+    expect(listed(fake)).toEqual(["mine"]);
+  });
+
+  it("--no-skills: no skills section and the walker is never called", async () => {
+    const cwd = project();
+    const walker = vi.fn(discoverSkills);
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
+
+    const off = await run(["hi", "--cwd", cwd, "--trust", "--no-skills"], fake, {
+      discoverSkills: walker,
+    });
+
+    expect(off.code).toBe(0);
+    expect(walker).not.toHaveBeenCalled();
+    expect(fake.requests[0]?.context.system).not.toContain("<skills>");
+
+    await run(["hi", "--cwd", cwd, "--trust"], fake, { discoverSkills: walker });
+
+    expect(walker).toHaveBeenCalledTimes(1);
+    expect(fake.requests[1]?.context.system).toContain("<skills>");
+  });
+
+  it("/skill:<name> arg1 arg2 sends the SKILL.md body + the args as the user message", async () => {
+    const cwd = project();
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["/skill:x", "arg1", "arg2", "--cwd", cwd, "--trust"], fake);
+
+    expect(result.code).toBe(0);
+    expect(fake.requests[0]?.context.messages).toEqual([
+      { role: "user", content: "# x\nDo the x steps.\n\narg1 arg2" },
+    ]);
+  });
+
+  it("/skill: reaches a hidden skill, also as the first stdin line", async () => {
+    const cwd = project();
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
+
+    const result = await run(["--cwd", cwd, "--trust"], fake, {
+      stdin: piped("/skill:tree-memory what do I know about Modal?\nthanks\n"),
+    });
+
+    expect(result.code).toBe(0);
+    expect(fake.requests[1]?.context.messages.map((m) => m.content)).toEqual([
+      "# tree-memory\nDo the tree-memory steps.\n\nwhat do I know about Modal?",
+      "ok",
+      "thanks",
+    ]);
+  });
+
+  it("/skill:nope answers one line with the known names, sends nothing and exits 1", async () => {
+    const cwd = project();
+    const fake = new FakeProvider();
+
+    const result = await run(["/skill:nope", "--cwd", cwd, "--trust", "--json"], fake);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stdout: "",
+      stderr: 'unknown skill "nope"; known: mine, tree-memory, x\n',
+    });
+    expect(fake.requests).toEqual([]);
+  });
+
+  it("resolves a /skill: follow-up stdin line like the first line", async () => {
+    const cwd = project();
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
+
+    const result = await run(["--cwd", cwd, "--trust"], fake, {
+      stdin: piped("/skill:x a\n/SKILL:tree-memory b\n"),
+    });
+
+    expect(result.code).toBe(0);
+    expect(fake.requests[1]?.context.messages.map((m) => m.content)).toEqual([
+      "# x\nDo the x steps.\n\na",
+      "ok",
+      "# tree-memory\nDo the tree-memory steps.\n\nb",
+    ]);
+  });
+
+  it.each([
+    [
+      "an unknown follow-up",
+      ["--cwd"],
+      "hi\n/skill:nope\n",
+      'unknown skill "nope"; known: mine, tree-memory, x',
+    ],
+    ["a bare /skill:", ["/skill:", "--cwd"], "", 'unknown skill ""; known: mine, tree-memory, x'],
+    [
+      "a bare /skill: line",
+      ["--cwd"],
+      "/skill:\n",
+      'unknown skill ""; known: mine, tree-memory, x',
+    ],
+  ])("%s answers one line, sends nothing and exits 1", async (_label, head, stdin, line) => {
+    const cwd = project();
+    const fake = new FakeProvider();
+
+    const result = await run([...head, cwd, "--trust"], fake, stdin ? { stdin: piped(stdin) } : {});
+
+    expect(result).toMatchObject({ code: 1, stdout: "", stderr: `${line}\n` });
+    expect(fake.requests).toEqual([]);
+  });
+
+  it("--no-skills + /skill:x says skills are disabled", async () => {
+    const cwd = project();
+    const fake = new FakeProvider();
+
+    const result = await run(["/skill:x", "--cwd", cwd, "--trust", "--no-skills"], fake);
+
+    expect(result).toMatchObject({
+      code: 1,
+      stderr: 'unknown skill "x"; skills are disabled (--no-skills)\n',
+    });
+    expect(fake.requests).toEqual([]);
+  });
+
+  it("prints each skill diagnostic once on stderr and still runs, stdout pure JSONL", async () => {
+    const cwd = project();
+    const bad = join(cwd, ".agents", "skills", "bad", "SKILL.md");
+    mkdirSync(dirname(bad));
+    writeFileSync(bad, "no frontmatter at all\n");
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--trust", "--json"], fake);
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe(
+      `skills: ${bad}: bad frontmatter: the file must start with a --- line\n`,
+    );
+    for (const line of result.stdout.trimEnd().split("\n"))
+      expect(() => JSON.parse(line)).not.toThrow();
+    expect(listed(fake)).toEqual(["mine", "x"]);
   });
 });
 

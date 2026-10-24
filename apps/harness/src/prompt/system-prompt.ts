@@ -4,6 +4,7 @@
 
 import { readFile } from "node:fs/promises";
 import { userPaths } from "../config/paths.ts";
+import type { Skill } from "../skills/skills.ts";
 import type { ToolDefinition } from "../tools/registry.ts";
 
 export interface PromptSections {
@@ -62,6 +63,61 @@ export function toolsSection(tools: ToolDefinition[]): string {
 
 export function rulesSection(): string {
   return RULES.map((rule) => `- ${rule}`).join("\n");
+}
+
+// The token estimate used for prompt budgets: 4 chars per token.
+export const CHARS_PER_TOKEN = 4;
+
+export const SKILLS_INTRO =
+  "The following skills provide specialized instructions. Use `read` " +
+  "on a skill's file\nwhen the task matches its description. Resolve " +
+  "relative paths against the skill dir.";
+
+export const DESCRIPTION_CAP = 250; // chars, the last one `…`
+
+// Spec §9, progressive disclosure: name + description + location per
+// model-invocable skill, in the given order, until the section would
+// pass `budgetTokens` (wrapper included). The rest is `dropped`; with
+// nothing listed the section is empty (and omitted).
+export function skillsSection(
+  skills: readonly Skill[],
+  budgetTokens: number,
+): { text: string; dropped: string[] } {
+  const head = `${SKILLS_INTRO}\n<available_skills>`;
+  const tail = "</available_skills>";
+  const budget = budgetTokens * CHARS_PER_TOKEN;
+  let size = head.length + 1 + tail.length;
+  const lines: string[] = [];
+  const dropped: string[] = [];
+  for (const s of skills) {
+    if (s.disableModelInvocation) continue;
+    const line =
+      `  <skill><name>${xml(s.name)}</name>` +
+      `<description>${xml(capDescription(s.description))}</description>` +
+      `<location>${xml(s.location)}</location></skill>`;
+    if (dropped.length > 0 || size + line.length + 1 > budget) {
+      dropped.push(s.name);
+      continue;
+    }
+    lines.push(line);
+    size += line.length + 1;
+  }
+  if (lines.length === 0) return { text: "", dropped };
+  return { text: [head, ...lines, tail].join("\n"), dropped };
+}
+
+// One line, at most DESCRIPTION_CAP code points.
+export function capDescription(description: string): string {
+  const chars = [...description.replace(/\s+/g, " ").trim()];
+  if (chars.length <= DESCRIPTION_CAP) return chars.join("");
+  return `${chars.slice(0, DESCRIPTION_CAP - 1).join("")}…`;
+}
+
+function xml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 // Today's date as ISO YYYY-MM-DD in UTC.

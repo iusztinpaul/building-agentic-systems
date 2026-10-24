@@ -24,6 +24,30 @@ describe("route", () => {
       want: { kind: "command", name: "skill:x", arg: "go" },
     },
     {
+      text: "/skill:run-pipelines-e2e now",
+      running: false,
+      alt: false,
+      want: { kind: "command", name: "skill:run-pipelines-e2e", arg: "now" },
+    },
+    {
+      text: "/skill:Tree-Memory hi",
+      running: false,
+      alt: false,
+      want: { kind: "command", name: "skill:Tree-Memory", arg: "hi" },
+    },
+    {
+      text: "/SKILL:x",
+      running: true,
+      alt: false,
+      want: { kind: "command", name: "skill:x", arg: "" },
+    },
+    {
+      text: "/skill:",
+      running: false,
+      alt: false,
+      want: { kind: "command", name: "skill:", arg: "" },
+    },
+    {
       text: "/usr/bin/env is odd",
       running: false,
       alt: false,

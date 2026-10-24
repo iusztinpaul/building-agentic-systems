@@ -24,10 +24,17 @@ import {
   cwdSection,
   loadPreamble,
   rulesSection,
+  skillsSection,
   toolsSection,
 } from "./prompt/system-prompt.ts";
 import type { ModelInfo, Provider } from "./provider/types.ts";
 import { type EntryBody, SessionStore } from "./session-store/jsonl.ts";
+import {
+  type DiscoverSkills,
+  discoverSkills,
+  type Skill,
+  skillMessage,
+} from "./skills/skills.ts";
 import type { ToolRegistry, ToolResult } from "./tools/registry.ts";
 import { headTail } from "./tools/truncate.ts";
 import type {
@@ -60,6 +67,9 @@ export interface SessionOptions {
   // only answers the model `Blocked: …` (continue).
   onBlocked?: "stop" | "continue";
   decisionModel?: string; // the auto classifier's; settings default
+  // Absent or null (--no-skills): no discovery, no `skills` section.
+  // The listing may take budgetRatio × the model's contextLength.
+  skills?: { budgetRatio: number; discover?: DiscoverSkills } | null;
 
   now?: () => Date;
 }
@@ -94,6 +104,9 @@ export class AgentSession {
   #cost = 0;
   #preamble = "";
   #contextFiles: ContextFile[] = [];
+  #skills: Skill[] = [];
+  #skillDiagnostics: string[] = [];
+  #skillsListing = { text: "", dropped: [] as string[] };
   #run: AbortController | undefined;
   #mode: PermissionMode;
   // Per session, never persisted: cleared by clear().
@@ -142,7 +155,8 @@ export class AgentSession {
     }
   }
 
-  // Re-reads SYSTEM.md and the context files (session start, /reload).
+  // Re-reads SYSTEM.md, the context files and the skills (session
+  // start, /reload).
   async reload(): Promise<void> {
     const { cwd, trusted, contextMaxChars: maxChars, env } = this.#o;
     this.#preamble = await loadPreamble(env);
@@ -152,10 +166,73 @@ export class AgentSession {
       maxChars,
       env,
     });
+    const skills = this.#o.skills;
+    if (skills) {
+      const discover = skills.discover ?? discoverSkills;
+      const found = await discover({ cwd, trusted, env });
+      this.#skills = found.skills;
+      this.#skillDiagnostics = found.diagnostics;
+    }
+    this.#listSkills();
   }
 
   get contextFiles(): readonly ContextFile[] {
     return this.#contextFiles;
+  }
+
+  // Every discovered skill, the hidden ones too (all are invocable).
+  get skills(): readonly Skill[] {
+    return this.#skills;
+  }
+
+  // What the front end shows once at startup: discovery diagnostics
+  // and, if the listing budget cut skills, one line naming them.
+  get skillNotices(): string[] {
+    const notices = this.#skillDiagnostics.map((d) => `skills: ${d}`);
+    const { dropped } = this.#skillsListing;
+    if (dropped.length > 0) {
+      const tokens = this.#skillBudget();
+      notices.push(
+        `skills: over the listing budget (${tokens} tokens), ` +
+          `not listed: ${dropped.join(", ")}`,
+      );
+    }
+    return notices;
+  }
+
+  // The user message for `/skill:<name> [args]`. Throws one line for
+  // an unknown name (with the known ones), for disabled skills and
+  // for an empty message (an empty body and no args).
+  skillMessage(name: string, args: string): string {
+    if (!this.#o.skills) {
+      throw new Error(
+        `unknown skill "${name}"; skills are disabled (--no-skills)`,
+      );
+    }
+    const skill = this.#skills.find((s) => s.name === name);
+    if (!skill) {
+      const known = this.#skills.map((s) => s.name).join(", ");
+      throw new Error(
+        `unknown skill "${name}"; known: ${known || "(none)"}`,
+      );
+    }
+    const message = skillMessage(skill, args);
+    if (!message) {
+      throw new Error(
+        `skill "${name}" has an empty body and no args; nothing sent`,
+      );
+    }
+    return message;
+  }
+
+  // The listing follows the model: its contextLength is the budget.
+  #listSkills(): void {
+    this.#skillsListing = skillsSection(this.#skills, this.#skillBudget());
+  }
+
+  #skillBudget(): number {
+    const ratio = this.#o.skills?.budgetRatio ?? 0;
+    return Math.floor(ratio * (this.#info?.contextLength ?? 0));
   }
 
   get messages(): readonly Message[] {
@@ -200,6 +277,7 @@ export class AgentSession {
     const info = await this.#o.provider.modelInfo(model);
     this.#model = info.id;
     this.#info = info;
+    this.#listSkills();
     this.#append({ type: "model_change", model: info.id });
   }
 
@@ -292,6 +370,7 @@ export class AgentSession {
       tools: toolsSection(this.#o.tools.declared()),
       rules: rulesSection(),
       project_context: formatContextFiles(this.#contextFiles),
+      skills: this.#skillsListing.text,
       cwd: cwdSection(this.#o.cwd, (this.#o.now ?? now)()),
     });
   }

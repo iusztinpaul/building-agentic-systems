@@ -1,17 +1,22 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   buildSystemPrompt,
+  CHARS_PER_TOKEN,
+  capDescription,
   cwdSection,
   DEFAULT_PREAMBLE,
   loadPreamble,
   RULES,
   rulesSection,
   SECTION_ORDER,
+  SKILLS_INTRO,
+  skillsSection,
   toolsSection,
 } from "../../src/prompt/system-prompt.ts";
+import type { Skill } from "../../src/skills/skills.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
 import { useTmpDir } from "../helpers/tmp.ts";
 
@@ -122,5 +127,102 @@ describe("loadPreamble", () => {
     writeFileSync(join(home(), "SYSTEM.md"), "You are a pirate.\n");
 
     await expect(loadPreamble({ TREE_AGENT_HOME: home() })).resolves.toBe("You are a pirate.");
+  });
+});
+
+describe("skillsSection", () => {
+  const skill = (name: string, o: Partial<Skill> = {}): Skill => ({
+    name,
+    description: `does ${name}`,
+    location: `/abs/${name}/SKILL.md`,
+    body: "",
+    disableModelInvocation: false,
+    ...o,
+  });
+
+  it("matches the spec §9 block: wrapper text, available_skills, one <skill> line each", () => {
+    const spec = readFileSync(
+      new URL("../../../../docs/notes/tree-agent-harness-spec.md", import.meta.url),
+      "utf8",
+    );
+    const block = /## 9\. Skills[\s\S]*?```\n([\s\S]*?)\n```/.exec(spec)?.[1] ?? "";
+    const [one, two, open, line, close] = block.split("\n");
+
+    expect(SKILLS_INTRO).toBe(`${one}\n${two}`);
+    expect(skillsSection([skill("a")], 1000).text).toBe(
+      [
+        SKILLS_INTRO,
+        open,
+        line
+          ?.replace("<name>…</name>", "<name>a</name>")
+          .replace("<description>…</description>", "<description>does a</description>")
+          .replace("/abs/SKILL.md", "/abs/a/SKILL.md"),
+        close,
+      ].join("\n"),
+    );
+    expect(open).toBe("<available_skills>");
+  });
+
+  it("lists a 400-char description as its first 249 chars + …", () => {
+    const long = "abcdefghij".repeat(40);
+
+    const text = skillsSection([skill("a", { description: long })], 1000).text;
+
+    expect(text).toContain(`<description>${long.slice(0, 249)}…</description>`);
+    expect(capDescription(long)).toHaveLength(250);
+    expect(capDescription("x".repeat(250))).toBe("x".repeat(250));
+  });
+
+  it("caps by code points, so an emoji at the cut is never split", () => {
+    const capped = capDescription(`${"x".repeat(248)}😀😀😀`);
+
+    expect(capped).toBe(`${"x".repeat(248)}😀…`);
+  });
+
+  it("puts a multi-line description on one line", () => {
+    expect(capDescription("  one\n\n  two\tthree ")).toBe("one two three");
+  });
+
+  it("stops at the budget (200 tokens ≈ 800 chars) and returns every name after it as dropped", () => {
+    const skills = Array.from({ length: 10 }, (_, i) => skill(`skill-${i}`));
+
+    const { text, dropped } = skillsSection(skills, 200);
+
+    expect(text.length).toBeLessThanOrEqual(200 * CHARS_PER_TOKEN);
+    const listed = [...text.matchAll(/<name>([^<]+)<\/name>/g)].map((m) => m[1]);
+    expect(listed.length).toBeGreaterThan(0);
+    expect([...listed, ...dropped]).toEqual(skills.map((s) => s.name));
+    const withOneMore = skillsSection(skills.slice(0, listed.length + 1), 10_000).text;
+    expect(withOneMore.length).toBeGreaterThan(200 * CHARS_PER_TOKEN);
+  });
+
+  it("stops at the first skill that does not fit, even if a later, shorter one would", () => {
+    const skills = [skill("a"), skill("long", { description: "x".repeat(240) }), skill("b")];
+    const fitsAB = skillsSection([skill("a"), skill("b")], 10_000).text.length;
+
+    const { text, dropped } = skillsSection(skills, Math.ceil(fitsAB / CHARS_PER_TOKEN));
+
+    expect(text).toContain("<name>a</name>");
+    expect(dropped).toEqual(["long", "b"]);
+  });
+
+  it("keeps a disable-model-invocation skill out of the listing and out of dropped", () => {
+    const { text, dropped } = skillsSection(
+      [skill("shown"), skill("hidden", { disableModelInvocation: true })],
+      0,
+    );
+
+    expect(text).toBe("");
+    expect(dropped).toEqual(["shown"]);
+    expect(skillsSection([skill("hidden", { disableModelInvocation: true })], 1000)).toEqual({
+      text: "",
+      dropped: [],
+    });
+  });
+
+  it("escapes &, < and > in the listing", () => {
+    const text = skillsSection([skill("a", { description: "a <b> & c" })], 1000).text;
+
+    expect(text).toContain("<description>a &lt;b&gt; &amp; c</description>");
   });
 });

@@ -22,6 +22,7 @@ import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
 import { AgentSession } from "./session.ts";
 import { SessionStore } from "./session-store/jsonl.ts";
+import type { DiscoverSkills } from "./skills/skills.ts";
 import { builtinRegistry } from "./tools/builtins.ts";
 import { runTui } from "./tui/app.ts";
 import type { PermissionMode, PermissionPrompter } from "./types.ts";
@@ -32,7 +33,7 @@ const USAGE = `usage: tree-agent [flags]              (TUI, needs a terminal)
        tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
 flags: --resume <id> | --continue  --model <id>  --cwd <dir>
-       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json
+       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json  --no-skills
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
        --on-blocked stop|continue (headless deny: exit 2, or go on)`;
 
@@ -47,6 +48,7 @@ export interface CliArgs {
   continue: boolean; // the newest session of this cwd
   permissionMode?: PermissionMode;
   onBlocked: "stop" | "continue";
+  skills: boolean; // false: --no-skills
 }
 
 export type Mode =
@@ -69,6 +71,7 @@ export interface CliDeps {
   terminal?: Terminal; // the TUI's; default: process stdin/stdout
   // The provider seam: tests inject a FakeProvider here.
   createProvider?: (apiKey: string) => Provider;
+  discoverSkills?: DiscoverSkills; // the skills walker; tests spy
 }
 
 // Pure: which front end runs, from argv and what stdin is.
@@ -157,6 +160,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         prompter,
         onBlocked: args.onBlocked,
         decisionModel: settings.decisionModel,
+        skills: args.skills
+          ? {
+              budgetRatio: settings.skills.listingBudgetRatio,
+              discover: deps.discoverSkills,
+            }
+          : null,
       });
       // A resumed session keeps its model unless --model says.
       if (args.model && args.model !== session.model) {
@@ -202,6 +211,7 @@ function parseCli(argv: string[]): CliArgs {
       continue: { type: "boolean", default: false },
       "permission-mode": { type: "string" },
       "on-blocked": { type: "string", default: "stop" },
+      "no-skills": { type: "boolean", default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -236,6 +246,7 @@ function parseCli(argv: string[]): CliArgs {
     continue: values.continue,
     permissionMode: mode,
     onBlocked,
+    skills: !values["no-skills"],
   };
 }
 

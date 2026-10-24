@@ -113,6 +113,23 @@ async function start(provider: Provider, o: Partial<SessionOptions> & { askTrust
   return { terminal, exit, opened, screen, session: current, events, cwd, home };
 }
 
+// One skill `x` and one diagnostic, without touching the disk.
+const skillsFixture = (): SessionOptions["skills"] => ({
+  budgetRatio: 0.01,
+  discover: async () => ({
+    skills: [
+      {
+        name: "x",
+        description: "does x",
+        location: "/skills/x/SKILL.md",
+        body: "# X\nDo it.",
+        disableModelInvocation: false,
+      },
+    ],
+    diagnostics: ["/a/SKILL.md: missing name"],
+  }),
+});
+
 let lastScreen = () => "";
 const until = async (check: () => boolean) => {
   for (let i = 0; i < 100 && !check(); i++) await settle(20);
@@ -294,6 +311,57 @@ describe("runTui", () => {
       content: "Blocked: denied by the user",
       isError: true,
     });
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("shows skill diagnostics at startup and sends /skill:x args as the SKILL.md body + args", async () => {
+    const fake = new FakeProvider({ streams: [[fakeDone("ok")]] });
+    const t = await start(fake, { skills: skillsFixture() });
+    expect(t.screen()).toContain("skills: /a/SKILL.md: missing name");
+
+    t.terminal.type("/skill:x go now");
+    t.terminal.send("\r");
+    await until(() => fake.requests.length === 1 && !t.session().running);
+
+    expect(fake.requests[0]?.context.messages).toEqual([
+      { role: "user", content: "# X\nDo it.\n\ngo now" },
+    ]);
+    expect(t.screen()).toContain("› /skill:x go now");
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("answers /skill:X (uppercase) with the unknown-skill notice and sends nothing", async () => {
+    const fake = new FakeProvider({ streams: [[fakeDone("ok")]] });
+    const t = await start(fake, { skills: skillsFixture() });
+
+    t.terminal.type("/skill:X hi");
+    t.terminal.send("\r");
+    await until(() => t.screen().includes('unknown skill "X"; known: x'));
+
+    expect(fake.requests).toEqual([]);
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("steers with the skill body when /skill: is sent during a run", async () => {
+    const provider = new HeldProvider();
+    const t = await start(provider, { skills: skillsFixture() });
+    t.terminal.type("start");
+    t.terminal.send("\r");
+    await until(() => t.session().running);
+
+    t.terminal.type("/skill:x more");
+    t.terminal.send("\r");
+    await until(() => t.screen().includes("› /skill:x more (steer)"));
+    provider.release();
+    await until(() => provider.requests.length === 2);
+    provider.release();
+    await until(() => !t.session().running);
+
+    const users = provider.requests[1]?.context.messages.filter((m) => m.role === "user");
+    expect(users?.map((m) => m.content)).toEqual(["start", "# X\nDo it.\n\nmore"]);
     t.terminal.send("\x03");
     await t.exit;
   });

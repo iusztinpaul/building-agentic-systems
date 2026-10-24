@@ -7,7 +7,7 @@ import type { StreamEvent } from "../../src/provider/types.ts";
 import { AgentSession } from "../../src/session.ts";
 import { type Entry, SessionStore } from "../../src/session-store/jsonl.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
-import { COMMANDS, runCommand } from "../../src/tui/commands.ts";
+import { COMMANDS, commandsFor, runCommand } from "../../src/tui/commands.ts";
 import { useTmpDir } from "../helpers/tmp.ts";
 
 const root = useTmpDir("commands");
@@ -185,5 +185,96 @@ describe("runCommand", () => {
       lines: ["unknown command /nope (see /help)"],
       error: true,
     });
+  });
+});
+
+describe("runCommand /skill:", () => {
+  // `x` and the hidden `secret` under ~/.agents/skills.
+  async function withSkills() {
+    const home = join(root(), "home");
+    const skills = join(home, ".agents", "skills");
+    for (const [name, extra] of [
+      ["x", ""],
+      ["secret", "disable-model-invocation: true\n"],
+    ] as const) {
+      mkdirSync(join(skills, name), { recursive: true });
+      writeFileSync(
+        join(skills, name, "SKILL.md"),
+        `---\nname: ${name}\ndescription: does ${name}\n${extra}---\n# ${name}\nSteps.\n`,
+      );
+    }
+    const cwd = join(root(), "repo");
+    mkdirSync(cwd, { recursive: true });
+    const session = await AgentSession.create({
+      provider: new FakeProvider(),
+      model: "test/model",
+      tools: builtinRegistry({ tmpDir: join(home, "tmp") }),
+      cwd,
+      maxTurns: 5,
+      trusted: false,
+      contextMaxChars: 40_000,
+      env: { HOME: home, TREE_AGENT_HOME: join(home, ".tree-agent") },
+      skills: { budgetRatio: 0.01 },
+    });
+    return { session, skills };
+  }
+
+  it("/skill:x arg1 arg2 answers with the prompt to send: the body + the args", async () => {
+    const t = await withSkills();
+
+    expect(await runCommand(t.session, "skill:x", "arg1 arg2")).toEqual({
+      lines: [],
+      prompt: "# x\nSteps.\n\narg1 arg2",
+    });
+    expect(await runCommand(t.session, "skill:secret", "")).toEqual({
+      lines: [],
+      prompt: "# secret\nSteps.",
+    });
+  });
+
+  it("/skill:nope answers one error line with the known names", async () => {
+    const t = await withSkills();
+
+    expect(await runCommand(t.session, "skill:nope", "x")).toEqual({
+      lines: ['unknown skill "nope"; known: secret, x'],
+      error: true,
+    });
+  });
+
+  it.each([
+    ["skill:Tree-Memory", 'unknown skill "Tree-Memory"; known: secret, x'],
+    ["skill:", 'unknown skill ""; known: secret, x'],
+  ])("/%s (exact-name lookup) answers one error line", async (name, line) => {
+    const t = await withSkills();
+
+    expect(await runCommand(t.session, name, "hi")).toEqual({ lines: [line], error: true });
+  });
+
+  it("/help lists /skill:<name> with every skill, the hidden one too", async () => {
+    const t = await withSkills();
+
+    const { lines } = await runCommand(t.session, "help", "");
+
+    expect(lines).toContain("/skill:<name> [args] — run a skill (2): secret, x");
+  });
+
+  it("/reload re-discovers and shows the skill diagnostics", async () => {
+    const t = await withSkills();
+    const bad = join(t.skills, "bad", "SKILL.md");
+    mkdirSync(join(t.skills, "bad"));
+    writeFileSync(bad, "---\nname: bad\n---\n");
+
+    const { lines } = await runCommand(t.session, "reload", "");
+
+    expect(lines).toEqual(["reloaded 0 context file(s)", `skills: ${bad}: missing description`]);
+  });
+
+  it("offers skill:<name> per skill for autocompletion", async () => {
+    const t = await withSkills();
+
+    expect(commandsFor(t.session).slice(COMMANDS.length)).toEqual([
+      { name: "skill:secret", description: "does secret", argumentHint: "[args]" },
+      { name: "skill:x", description: "does x", argumentHint: "[args]" },
+    ]);
   });
 });

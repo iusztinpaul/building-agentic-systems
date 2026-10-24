@@ -13,6 +13,7 @@ import {
   type SlashCommand,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { parseSkillCommand } from "../skills/skills.ts";
 import { editorTheme } from "./style.ts";
 
 export type InputAction =
@@ -20,7 +21,7 @@ export type InputAction =
   | { kind: "command"; name: string; arg: string };
 
 // "/model x" is a command; "/usr/bin/env is odd" is a prompt.
-const COMMAND = /^\/([a-z][a-z:-]*)(?:\s+([\s\S]*))?$/;
+const COMMAND = /^\/([a-z][a-z0-9:-]*)(?:\s+([\s\S]*))?$/;
 
 export function route(
   text: string,
@@ -29,6 +30,14 @@ export function route(
 ): InputAction | undefined {
   const trimmed = text.trim();
   if (!trimmed) return undefined;
+  // "/skill:" in any case, so "/skill:Tree-Memory" gets its notice.
+  const skill = parseSkillCommand(trimmed);
+  if (skill)
+    return {
+      kind: "command",
+      name: `skill:${skill.name}`,
+      arg: skill.args,
+    };
   const command = COMMAND.exec(trimmed);
   if (command) {
     const [, name = "", arg = ""] = command;

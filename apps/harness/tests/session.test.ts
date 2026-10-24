@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import type { Provider, StreamEvent } from "../src/provider/types.ts";
 import { AgentSession, type SessionOptions } from "../src/session.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
+import { discoverSkills } from "../src/skills/skills.ts";
 import { builtinRegistry } from "../src/tools/builtins.ts";
 import type { ToolRegistry } from "../src/tools/registry.ts";
 import type { AgentEvent, Message, PermissionPrompter, ToolCall } from "../src/types.ts";
@@ -859,3 +860,171 @@ function registerDeferred(tools: ToolRegistry): void {
     execute: async () => ({ content: "found" }),
   });
 }
+
+describe("AgentSession skills", () => {
+  // Skills under ~/.agents/skills (HOME is a scratch dir); the model's
+  // contextLength sets the listing budget (1 % of it).
+  async function withSkills(
+    names: string[],
+    o: Partial<SessionOptions> = {},
+    contextLength = 200_000,
+    extra: Record<string, string> = {},
+  ) {
+    const home = join(root(), "home");
+    const skills = join(home, ".agents", "skills");
+    for (const name of names) {
+      mkdirSync(join(skills, name), { recursive: true });
+      writeFileSync(
+        join(skills, name, "SKILL.md"),
+        `---\nname: ${name}\ndescription: does ${name}\n${extra[name] ?? ""}---\n# ${name}\n`,
+      );
+    }
+    const cwd = join(root(), "repo");
+    mkdirSync(cwd, { recursive: true });
+    const fake = new FakeProvider({
+      streams: [textTurn("ok"), textTurn("ok")],
+      models: [
+        fakeModel("test/model", { contextLength }),
+        fakeModel("big/model", { contextLength: 1_000_000 }),
+      ],
+    });
+    const discover = vi.fn(discoverSkills);
+    const session = await AgentSession.create({
+      provider: fake,
+      model: "test/model",
+      tools: builtinRegistry({ tmpDir: join(home, "tmp") }),
+      cwd,
+      maxTurns: 5,
+      trusted: false,
+      contextMaxChars: 40_000,
+      env: { HOME: home, TREE_AGENT_HOME: join(home, ".tree-agent") },
+      skills: { budgetRatio: 0.01, discover },
+      ...o,
+    });
+    return { fake, session, discover, skills };
+  }
+  const listed = (system: string) =>
+    [...system.matchAll(/<skill><name>([^<]+)<\/name>/g)].map((m) => m[1]);
+
+  it("adds the skills section between project_context and cwd", async () => {
+    const t = await withSkills(["alpha"]);
+
+    await t.session.prompt("hi");
+
+    const system = t.fake.requests[0]?.context.system ?? "";
+    const tags = sections(system).filter((tag) => tag !== "available_skills");
+    expect(tags).toEqual(["tools", "rules", "skills", "cwd"]);
+    expect(listed(system)).toEqual(["alpha"]);
+    expect(t.session.skillNotices).toEqual([]);
+  });
+
+  it("with contextLength 20 000 stops the listing at 200 tokens and warns once with the dropped names", async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `skill-${String(i).padStart(2, "0")}`);
+    const t = await withSkills(names, {}, 20_000);
+
+    await t.session.prompt("hi");
+
+    const system = t.fake.requests[0]?.context.system ?? "";
+    const section = system.split("<skills>\n")[1]?.split("\n</skills>")[0] ?? "";
+    expect(section.length).toBeLessThanOrEqual(800);
+    const shown = listed(system);
+    const dropped = names.slice(shown.length);
+    expect(shown).toEqual(names.slice(0, shown.length));
+    expect(dropped.length).toBeGreaterThan(0);
+    expect(t.session.skillNotices).toEqual([
+      `skills: over the listing budget (200 tokens), not listed: ${dropped.join(", ")}`,
+    ]);
+  });
+
+  it("re-budgets the listing on /model: a bigger context lists every skill", async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `skill-${String(i).padStart(2, "0")}`);
+    const t = await withSkills(names, {}, 20_000);
+
+    await t.session.setModel("big/model");
+    await t.session.prompt("hi");
+
+    expect(listed(t.fake.requests[0]?.context.system ?? "")).toEqual(names);
+    expect(t.session.skillNotices).toEqual([]);
+  });
+
+  it("hides a disable-model-invocation skill from the section and keeps it for /skill:", async () => {
+    const t = await withSkills(["shown", "secret"], {}, 200_000, {
+      secret: "disable-model-invocation: true\n",
+    });
+
+    await t.session.prompt("hi");
+
+    const system = t.fake.requests[0]?.context.system ?? "";
+    expect(listed(system)).toEqual(["shown"]);
+    expect(system).not.toContain("secret");
+    expect(t.session.skills.map((s) => s.name)).toEqual(["secret", "shown"]);
+    expect(t.session.skillMessage("secret", "why?")).toBe("# secret\n\nwhy?");
+  });
+
+  it("answers an unknown skill name with the known ones", async () => {
+    const t = await withSkills(["alpha", "beta"]);
+
+    expect(() => t.session.skillMessage("nope", "")).toThrow(
+      'unknown skill "nope"; known: alpha, beta',
+    );
+  });
+
+  it("prefixes each discovery diagnostic for the startup notice", async () => {
+    const t = await withSkills(["alpha"]);
+    const bad = join(t.skills, "bad", "SKILL.md");
+    mkdirSync(join(t.skills, "bad"));
+    writeFileSync(bad, "---\ndescription: x\n---\n");
+
+    await t.session.reload();
+
+    expect(t.session.skillNotices).toEqual([`skills: ${bad}: missing name`]);
+    expect(t.session.skills.map((s) => s.name)).toEqual(["alpha"]);
+  });
+
+  it("re-discovers on reload()", async () => {
+    const t = await withSkills(["alpha"]);
+    mkdirSync(join(t.skills, "later"));
+    writeFileSync(join(t.skills, "later", "SKILL.md"), "---\nname: later\ndescription: d\n---\n");
+
+    await t.session.reload();
+    await t.session.prompt("hi");
+
+    expect(listed(t.fake.requests[0]?.context.system ?? "")).toEqual(["alpha", "later"]);
+    expect(t.discover).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["null (--no-skills)", null],
+  ])("skills %s: no walker call and no section", async (_label, skills) => {
+    const discover = vi.fn(discoverSkills);
+    const t = await withSkills(["alpha"], { skills: skills && { budgetRatio: 0.01, discover } });
+
+    await t.session.prompt("hi");
+
+    expect(t.fake.requests[0]?.context.system).not.toContain("<skills>");
+    expect(discover).not.toHaveBeenCalled();
+    expect(() => t.session.skillMessage("alpha", "")).toThrow(
+      'unknown skill "alpha"; skills are disabled (--no-skills)',
+    );
+  });
+
+  it("says known: (none) when skills are enabled and none were found", async () => {
+    const t = await withSkills([]);
+
+    expect(() => t.session.skillMessage("alpha", "")).toThrow(
+      'unknown skill "alpha"; known: (none)',
+    );
+  });
+
+  it("sends an empty-body skill's args alone and refuses an empty message", async () => {
+    const t = await withSkills(["empty"]);
+    writeFileSync(join(t.skills, "empty", "SKILL.md"), "---\nname: empty\ndescription: d\n---\n\n");
+    await t.session.reload();
+
+    expect(t.session.skillMessage("empty", "q")).toBe("q");
+    expect(() => t.session.skillMessage("empty", " ")).toThrow(
+      'skill "empty" has an empty body and no args; nothing sent',
+    );
+  });
+});

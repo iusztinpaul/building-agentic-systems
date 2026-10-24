@@ -4,6 +4,7 @@
 // AgentEvent as one JSON line on stdout.
 
 import type { AgentSession } from "../session.ts";
+import { parseSkillCommand } from "../skills/skills.ts";
 import type { AgentEndReason, AgentEvent } from "../types.ts";
 
 export interface Out {
@@ -28,17 +29,35 @@ export interface HeadlessOptions {
 }
 
 // Returns the exit code: 0 completed, 2 blocked by the permission
-// gate, 1 anything else, including a signal-aborted run.
+// gate, 1 anything else, including a signal-aborted run or an
+// unusable `/skill:` line: unknown name, empty message or
+// --no-skills (nothing is sent then).
 export async function runHeadless(o: HeadlessOptions): Promise<number> {
+  for (const notice of o.session.skillNotices) {
+    o.stderr.write(`${notice}\n`);
+  }
+  // Every `/skill:` line (the prompt and each follow-up) is resolved
+  // before anything runs, so one bad name sends nothing.
+  let texts: string[];
+  try {
+    texts = [o.prompt, ...o.followUps].map((text) => {
+      const skill = parseSkillCommand(text);
+      return skill ? o.session.skillMessage(skill.name, skill.args) : text;
+    });
+  } catch (err) {
+    o.stderr.write(`${(err as Error).message}\n`);
+    return 1;
+  }
+  const [prompt = "", ...followUps] = texts;
   const sink = o.json ? jsonSink(o.stdout) : textSink(o.stdout, o.stderr);
   const off = o.session.on(sink);
   // `once`: a second Ctrl+C falls through to Node's default exit.
   const abort = () => o.session.abort();
   o.signals?.once("SIGINT", abort);
   o.signals?.once("SIGTERM", abort);
-  for (const text of o.followUps) o.session.followUp(text);
+  for (const text of followUps) o.session.followUp(text);
   try {
-    const reason = await o.session.prompt(o.prompt);
+    const reason = await o.session.prompt(prompt);
     return EXIT_CODES[reason] ?? 1;
   } finally {
     o.signals?.off("SIGINT", abort);

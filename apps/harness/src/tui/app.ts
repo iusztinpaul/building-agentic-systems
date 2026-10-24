@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../session.ts";
 import type { PermissionPrompter } from "../types.ts";
-import { COMMANDS, runCommand } from "./commands.ts";
+import { commandsFor, runCommand } from "./commands.ts";
 import { type InputAction, PromptInput, route } from "./input.ts";
 import { tuiPrompter } from "./permission-prompt.ts";
 import { StatusBar } from "./status-bar.ts";
@@ -98,12 +98,15 @@ class App {
           else void this.#quit();
         },
       },
-      COMMANDS,
+      commandsFor(session),
       cwd,
     );
     this.#transcript.load(session.messages);
     if (session.messages.length > 0) {
       this.#transcript.addNotice(`resumed session ${session.id}`);
+    }
+    for (const notice of session.skillNotices) {
+      this.#transcript.addNotice(notice, true);
     }
     for (const c of [
       this.#transcript,
@@ -168,6 +171,17 @@ class App {
   async #command(name: string, arg: string): Promise<void> {
     if (name === "exit") return this.#quit();
     const result = await runCommand(this.#session, name, arg);
+    if (result.prompt !== undefined) {
+      // The transcript shows what was typed; the model gets the body.
+      const typed = `/${name}${arg ? ` ${arg}` : ""}`;
+      if (this.#session.running) {
+        this.#session.steer(result.prompt);
+        this.#transcript.addUser(typed, "steer");
+      } else {
+        this.#transcript.addUser(typed);
+        this.#run = this.#prompt(result.prompt);
+      }
+    }
     if (result.cleared) this.#transcript.clear();
     for (const line of result.lines) {
       this.#transcript.addNotice(line, result.error);

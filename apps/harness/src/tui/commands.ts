@@ -1,6 +1,7 @@
 // The slash commands of this milestone. Each one is a call on
-// AgentSession's public API plus the lines the TUI shows; /skill:
-// (207), /mcp (209) and /compact (212) join later.
+// AgentSession's public API plus the lines the TUI shows; /mcp (209)
+// and /compact (212) join later. /skill:<name> [args] answers with
+// the prompt to run (the SKILL.md body + args) instead of lines.
 
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../session.ts";
@@ -19,6 +20,16 @@ export const COMMANDS: SlashCommand[] = [
   { name: "exit", description: "quit" },
 ];
 
+// COMMANDS plus one /skill:<name> per skill, for autocompletion.
+export function commandsFor(session: AgentSession): SlashCommand[] {
+  const skills = session.skills.map((s) => ({
+    name: `skill:${s.name}`,
+    description: clip(s.description.replace(/\s+/g, " "), 60),
+    argumentHint: "[args]",
+  }));
+  return [...COMMANDS, ...skills];
+}
+
 const KEYS = [
   "Enter send (during a run: steer) · Alt+Enter follow-up",
   "Shift+Enter new line · Up/Down history · Esc abort the run",
@@ -31,6 +42,7 @@ export interface CommandResult {
   error?: boolean;
   exit?: boolean;
   cleared?: boolean; // a new session: the transcript starts over
+  prompt?: string; // /skill: — the user message to send
 }
 
 export async function runCommand(
@@ -50,6 +62,9 @@ async function run(
   name: string,
   arg: string,
 ): Promise<CommandResult> {
+  if (name.startsWith("skill:")) {
+    return { lines: [], prompt: session.skillMessage(name.slice(6), arg) };
+  }
   switch (name) {
     case "help":
       return { lines: help(session) };
@@ -73,7 +88,8 @@ async function run(
     case "reload": {
       await session.reload();
       const n = session.contextFiles.length;
-      return { lines: [`reloaded ${n} context file(s)`] };
+      const notices = session.skillNotices;
+      return { lines: [`reloaded ${n} context file(s)`, ...notices] };
     }
     case "clear":
       session.clear();
@@ -95,14 +111,21 @@ function help(session: AgentSession): string[] {
       ` — ${c.description}`,
   );
   const files = session.contextFiles.map((f) => `  ${f.path}`);
+  const skills = session.skills.map((s) => s.name);
   const trust = session.trusted
     ? "trusted directory: project files loaded"
     : "untrusted directory: user-level config only";
   return [
     ...commands,
+    `/skill:<name> [args] — run a skill (${skills.length}): ` +
+      (skills.join(", ") || "none"),
     ...KEYS,
     `session: ${session.id ?? "(not saved yet)"} · ${trust}`,
     files.length ? "context files:" : "context files: none",
     ...files,
   ];
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
