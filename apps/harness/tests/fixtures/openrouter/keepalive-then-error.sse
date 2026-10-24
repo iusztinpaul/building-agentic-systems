@@ -1,0 +1,10 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Anthropic","choices":[{"index":0,"delta":{"content":"Hello","role":"assistant"},"finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-fixture","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Anthropic","choices":[{"index":0,"delta":{"content":" there","role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"gen-fixture","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Anthropic","error":{"code":"server_error","message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}
+

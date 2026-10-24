@@ -1,0 +1,16 @@
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"id":"toolu_01BZ6ec43sAmwsyUQrMpFUQk","type":"function","function":{"name":"search_memory","arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"{\"query\": \"pricing"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":null,"role":"assistant","tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}]}
+
+data: {"id":"gen-1792870400-9mnjhS7anLb2jmD6xhJb","object":"chat.completion.chunk","created":1792870400,"model":"anthropic/claude-sonnet-5.5","provider":"Claude Platform on AWS","service_tier":"default","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"tool_calls","native_finish_reason":"tool_use"}],"usage":{"prompt_tokens":399,"completion_tokens":50,"total_tokens":449,"cost":0.001298,"is_byok":false,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":0,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0.001298,"upstream_inference_prompt_cost":0.000798,"upstream_inference_completions_cost":0.0005},"completion_tokens_details":{"reasoning_tokens":0,"image_tokens":0,"audio_tokens":0}}}
+
+data: [DONE]
+
