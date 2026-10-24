@@ -2,7 +2,10 @@
 // the context, the steering and follow-up queues and the hooks, and
 // runs one runLoop per prompt(). Front ends never touch the context:
 // mid-run input goes to a queue the loop drains at a turn boundary.
+// Every finalized message is appended to the session store as the
+// loop produces it, so an aborted or crashed run is on disk too.
 
+import { log } from "./log.ts";
 import { runLoop } from "./loop/agent-loop.ts";
 import type { LoopHooks } from "./loop/hooks.ts";
 import {
@@ -17,7 +20,8 @@ import {
   rulesSection,
   toolsSection,
 } from "./prompt/system-prompt.ts";
-import type { Provider } from "./provider/types.ts";
+import type { ModelInfo, Provider } from "./provider/types.ts";
+import { type EntryBody, SessionStore } from "./session-store/jsonl.ts";
 import type { ToolRegistry, ToolResult } from "./tools/registry.ts";
 import { headTail } from "./tools/truncate.ts";
 import type {
@@ -25,38 +29,37 @@ import type {
   AgentEvent,
   Context,
   Message,
+  PermissionMode,
+  Usage,
 } from "./types.ts";
-
-// Where finished messages go. In memory for now; task 205 adds the
-// JSONL store behind the same interface.
-export interface SessionStore {
-  append(message: Message): void;
-  load(): Message[];
-}
-
-export class InMemorySessionStore implements SessionStore {
-  readonly #messages: Message[] = [];
-
-  append(message: Message): void {
-    this.#messages.push(structuredClone(message));
-  }
-
-  load(): Message[] {
-    return structuredClone(this.#messages);
-  }
-}
 
 export interface SessionOptions {
   provider: Provider;
-  model: string;
+  model: string; // a resumed session keeps its recorded model
   tools: ToolRegistry;
   cwd: string; // absolute
   maxTurns: number;
   trusted: boolean; // project context files load only when true
   contextMaxChars: number;
   env?: NodeJS.ProcessEnv;
-  store?: SessionStore;
+  store?: SessionStore; // default: SessionStore.inMemory()
+  resume?: string; // a session id in `store`
+  // Shown in the status bar; the gate that uses it is task 206.
+  permissionMode?: PermissionMode;
   now?: () => Date;
+}
+
+// What the status bar shows; the same numbers in every front end.
+export interface SessionStatus {
+  model: string;
+  mode: PermissionMode;
+  // The last request's input tokens (usage.inputTokens) until the
+  // estimator of task 212; undefined before the first answer.
+  tokens: number | undefined;
+  contextLength: number;
+  cost: number; // USD, usage × the model's pricing
+  mcpServers: number;
+  activatedTools: number;
 }
 
 type Listener = (event: AgentEvent) => void;
@@ -67,23 +70,51 @@ export class AgentSession {
   readonly #listeners = new Set<Listener>();
   readonly #steering: Message[] = [];
   readonly #followUps: Message[] = [];
-  #context: Context;
-  #saved: number; // messages already in the store
+  #id: string | undefined; // set when the first entry is written
+  #model: string;
+  #info: ModelInfo | undefined;
+  #context: Context = { system: "", messages: [] };
+  #saved = 0; // messages of #context already in the store
+  #tokens: number | undefined;
+  #cost = 0;
   #preamble = "";
   #contextFiles: ContextFile[] = [];
   #run: AbortController | undefined;
 
   private constructor(o: SessionOptions) {
     this.#o = o;
-    this.#store = o.store ?? new InMemorySessionStore();
-    this.#context = { system: "", messages: this.#store.load() };
-    this.#saved = this.#context.messages.length;
+    this.#store = o.store ?? SessionStore.inMemory(o.now);
+    this.#model = o.model;
   }
 
+  // Throws for an unknown `resume` id (SessionNotFound) or model.
   static async create(o: SessionOptions): Promise<AgentSession> {
     const session = new AgentSession(o);
+    if (o.resume) await session.#restore(o.resume);
+    session.#info = await o.provider.modelInfo(session.#model);
     await session.reload();
     return session;
+  }
+
+  async #restore(id: string): Promise<void> {
+    const restored = this.#store.load(id);
+    this.#id = id;
+    this.#model = restored.model;
+    this.#context = { system: "", messages: restored.messages };
+    this.#saved = restored.messages.length;
+    this.#o.tools.activate(restored.activated);
+    this.#tokens = lastInputTokens(restored.messages);
+    const prices = new Map<string, ModelInfo["pricing"]>();
+    for (const { model, usage } of restored.spend) {
+      if (!prices.has(model)) {
+        const info = await this.#o.provider.modelInfo(model).catch(() => {
+          log.warn(`no pricing for ${model}; its turns cost 0`);
+          return undefined;
+        });
+        prices.set(model, info?.pricing ?? { prompt: 0, completion: 0 });
+      }
+      this.#cost += costOf(usage, prices.get(model));
+    }
   }
 
   // Re-reads SYSTEM.md and the context files (session start, /reload).
@@ -104,6 +135,61 @@ export class AgentSession {
 
   get messages(): readonly Message[] {
     return this.#context.messages;
+  }
+
+  // The store's id for this session; undefined until something is
+  // saved (an opened-and-closed TUI leaves no file behind).
+  get id(): string | undefined {
+    return this.#id;
+  }
+
+  get model(): string {
+    return this.#model;
+  }
+
+  get trusted(): boolean {
+    return this.#o.trusted;
+  }
+
+  status(): SessionStatus {
+    return {
+      model: this.#model,
+      mode: this.#o.permissionMode ?? "ask",
+      tokens: this.#tokens,
+      contextLength: this.#info?.contextLength ?? 0,
+      cost: this.#cost,
+      mcpServers: 0, // the MCP client arrives in task 209
+      activatedTools: this.#o.tools.activated().length,
+    };
+  }
+
+  // What the model sees: direct ∪ activated tool names.
+  toolNames(): string[] {
+    return this.#o.tools.declared().map((tool) => tool.name);
+  }
+
+  // The next prompt() uses `model`. Throws for an unknown id (the
+  // provider's model list) and while a prompt runs.
+  async setModel(model: string): Promise<void> {
+    this.#idle("switch the model");
+    const info = await this.#o.provider.modelInfo(model);
+    this.#model = info.id;
+    this.#info = info;
+    this.#append({ type: "model_change", model: info.id });
+  }
+
+  // A new, empty session (a new file on its first entry). The model
+  // and the context files stay.
+  clear(): void {
+    this.#idle("clear the session");
+    this.#id = undefined;
+    this.#context = { system: "", messages: [] };
+    this.#saved = 0;
+    this.#steering.length = 0;
+    this.#followUps.length = 0;
+    this.#o.tools.deactivateAll();
+    this.#tokens = undefined;
+    this.#cost = 0;
   }
 
   get running(): boolean {
@@ -132,7 +218,7 @@ export class AgentSession {
     try {
       this.#context = await runLoop(this.#context, {
         provider: this.#o.provider,
-        model: this.#o.model,
+        model: this.#model,
         tools: this.#o.tools,
         hooks: this.#hooks(),
         maxTurns: this.#o.maxTurns,
@@ -177,7 +263,12 @@ export class AgentSession {
     return {
       // Rebuilt every turn: activation changes the tools section.
       // Task 212 adds compaction here.
-      prepareTurn: async (ctx) => ({ ...ctx, system: this.systemPrompt() }),
+      // The returned context is the one the loop pushes to, so the
+      // session keeps it to save each message as it lands.
+      prepareTurn: async (ctx) => {
+        this.#context = { ...ctx, system: this.systemPrompt() };
+        return this.#context;
+      },
       // Pass-through: every call runs until task 206 replaces this
       // with the permission gate.
       beforeToolCall: async () => ({ run: true }),
@@ -188,15 +279,56 @@ export class AgentSession {
     };
   }
 
+  // The loop pushes a message before the event that reports it
+  // (user → turn_start, assistant → turn_end, tool → tool_result),
+  // so saving here writes each one as soon as it is final, before
+  // any listener sees the event.
   #emit(event: AgentEvent): void {
+    this.#persist();
+    if (event.type === "turn_end" && event.message.usage) {
+      this.#tokens = event.message.usage.inputTokens;
+      this.#cost += costOf(event.message.usage, this.#info?.pricing);
+    }
     for (const listener of this.#listeners) listener(event);
   }
 
   #persist(): void {
     const fresh = this.#context.messages.slice(this.#saved);
-    for (const message of fresh) this.#store.append(message);
+    for (const message of fresh) {
+      this.#append({ type: "message", message });
+    }
     this.#saved = this.#context.messages.length;
   }
+
+  #append(body: EntryBody): void {
+    this.#id ??= this.#store.create(this.#o.cwd, this.#model);
+    this.#store.append(this.#id, body);
+  }
+
+  #idle(action: string): void {
+    if (this.#run) {
+      throw new Error(`cannot ${action} while a prompt is running`);
+    }
+  }
+}
+
+function costOf(
+  usage: Usage,
+  pricing: ModelInfo["pricing"] | undefined,
+): number {
+  if (!pricing) return 0;
+  return (
+    usage.inputTokens * pricing.prompt +
+    usage.outputTokens * pricing.completion
+  );
+}
+
+function lastInputTokens(messages: Message[]): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "assistant" && m.usage) return m.usage.inputTokens;
+  }
+  return undefined;
 }
 
 // The truncation point: the built-in tools cap their own output at

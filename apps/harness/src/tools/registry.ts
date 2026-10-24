@@ -70,6 +70,11 @@ export class ToolRegistry {
     return [...this.#activated];
   }
 
+  // A new session (/clear) starts with nothing activated.
+  deactivateAll(): void {
+    this.#activated.clear();
+  }
+
   // What the model sees: direct ∪ activated, in registration order.
   declared(): ToolDefinition[] {
     return this.list().filter(

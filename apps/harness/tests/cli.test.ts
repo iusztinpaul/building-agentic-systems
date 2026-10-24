@@ -1,6 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +18,10 @@ import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
 import type { Provider, StreamEvent } from "../src/provider/types.ts";
+import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import type { AgentEvent, ToolCall } from "../src/types.ts";
 import { fakeFetch, fixture, jsonResponse, sseResponse } from "./helpers/http.ts";
+import { FakeTerminal, settle } from "./helpers/terminal.ts";
 import { gone } from "./helpers/tmp.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -36,12 +47,13 @@ interface RunOptions {
   stdin?: Stdin;
   env?: NodeJS.ProcessEnv;
   signals?: CliDeps["signals"];
+  terminal?: FakeTerminal;
 }
 
 async function run(
   argv: string[],
   provider: Provider | (() => Provider),
-  { key = "test-key", stdin, env = {}, signals }: RunOptions = {},
+  { key = "test-key", stdin, env = {}, signals, terminal }: RunOptions = {},
 ) {
   const out: string[] = [];
   const err: string[] = [];
@@ -50,6 +62,7 @@ async function run(
     env: { TREE_AGENT_HOME: home, ...(key && { OPENROUTER_API_KEY: key }), ...env },
     stdin,
     signals,
+    terminal,
     stdout: { write: (t: string) => out.push(t) },
     stderr: { write: (t: string) => err.push(t) },
     createProvider: (apiKey) => {
@@ -157,6 +170,13 @@ describe("main", () => {
     const models = {
       data: [
         {
+          id: "anthropic/claude-sonnet-5.5",
+          context_length: 1_000_000,
+          top_provider: { max_completion_tokens: 128_000 },
+          supported_parameters: ["structured_outputs", "tools"],
+          pricing: { prompt: "0.000003", completion: "0.000015" },
+        },
+        {
           id: "anthropic/claude-haiku-5.5",
           context_length: 1_000_000,
           top_provider: { max_completion_tokens: 128_000 },
@@ -215,6 +235,8 @@ describe("resolveMode", () => {
         cwd: undefined,
         trust: false,
         json: false,
+        resume: undefined,
+        continue: false,
       },
     });
     expect(
@@ -228,15 +250,31 @@ describe("resolveMode", () => {
     });
   });
 
-  it.each([["--nope"], ["--max-turns", "0"], ["--max-turns", "two"], ["--model"]])(
-    "answers usage with an error for %s",
-    (...argv) => {
-      const mode = resolveMode(["hi", ...argv], true, false);
+  it("parses --resume <id> and --continue", () => {
+    expect(resolveMode(["--resume", "abc"], true, false)).toMatchObject({
+      kind: "tui",
+      args: { resume: "abc", continue: false },
+    });
+    expect(resolveMode(["hi", "--continue"], true, false)).toMatchObject({
+      kind: "headless",
+      args: { continue: true },
+    });
+  });
 
-      expect(mode.kind).toBe("usage");
-      expect(mode).toHaveProperty("error");
-    },
-  );
+  it.each([
+    ["--nope"],
+    ["--max-turns", "0"],
+    ["--max-turns", "two"],
+    ["--model"],
+    ["--resume"],
+    ["--resume", " "],
+    ["--resume", "abc", "--continue"],
+  ])("answers usage with an error for %s", (...argv) => {
+    const mode = resolveMode(["hi", ...argv], true, false);
+
+    expect(mode.kind).toBe("usage");
+    expect(mode).toHaveProperty("error");
+  });
 });
 
 describe("main (headless)", () => {
@@ -278,13 +316,6 @@ describe("main (headless)", () => {
     await run(["positional"], fake, { stdin: piped("from stdin\n") });
 
     expect(fake.requests[0]?.context.messages).toEqual([{ role: "user", content: "positional" }]);
-  });
-
-  it("prints usage and exits 1 on a TTY with no prompt (TUI placeholder until task 205)", async () => {
-    const result = await run([], new FakeProvider(), { stdin: tty });
-
-    expect(result).toMatchObject({ code: 1, stdout: "", created: [] });
-    expect(result.stderr).toMatch(/^usage: tree-agent /);
   });
 
   it("prints usage and exits 1 with no TTY and no prompt", async () => {
@@ -477,5 +508,187 @@ describe("main (trust)", () => {
 
     expect(untrusted.requests[0]?.model).toBe("anthropic/claude-sonnet-5.5");
     expect(trusted.requests[0]?.model).toBe("proj/m");
+  });
+});
+
+describe("main (sessions)", () => {
+  const sessions = () => join(home, "sessions");
+  const filesOf = (cwd: string) => {
+    const dir = join(sessions(), readdirSync(sessions()).find((d) => d === slugOf(cwd)) ?? "-");
+    return existsSync(dir) ? readdirSync(dir).map((f) => join(dir, f)) : [];
+  };
+  const slugOf = (cwd: string) => `--${cwd.replace(/^\//, "").replace(/[/\\:]/g, "-")}--`;
+  const entries = (file: string) =>
+    readFileSync(file, "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Entry);
+  const scratch = (name: string) => {
+    const dir = join(home, name);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  it("saves a headless run as a session file and --resume <id> appends to it", async () => {
+    const cwd = scratch("repo");
+    await run(["first", "--cwd", cwd], new FakeProvider({ streams: [textTurn("one")] }));
+    const [file = ""] = filesOf(cwd);
+    const id = /_(.+)\.jsonl$/.exec(file)?.[1] ?? "";
+    const fake = new FakeProvider({ streams: [textTurn("two")] });
+
+    const result = await run(["second", "--cwd", cwd, "--resume", id], fake);
+
+    expect(result.code).toBe(0);
+    expect(filesOf(cwd)).toEqual([file]);
+    expect(fake.requests[0]?.context.messages.map((m) => m.content)).toEqual([
+      "first",
+      "one",
+      "second",
+    ]);
+    const all = entries(file);
+    expect(all.map((e) => e.type)).toEqual(["session", "message", "message", "message", "message"]);
+    for (let i = 1; i < all.length; i++) expect(all[i]?.parentId).toBe(all[i - 1]?.id);
+  });
+
+  it("--continue picks the newest session of this cwd, not another cwd's", async () => {
+    const cwd = scratch("repo");
+    const other = scratch("other");
+    const store = SessionStore.jsonl(sessions());
+    const older = store.create(cwd, "anthropic/claude-sonnet-5.5");
+    store.append(older, { type: "message", message: { role: "user", content: "older" } });
+    const newer = store.create(cwd, "anthropic/claude-sonnet-5.5");
+    store.append(newer, { type: "message", message: { role: "user", content: "newer" } });
+    const elsewhere = store.create(other, "anthropic/claude-sonnet-5.5");
+    store.append(elsewhere, { type: "message", message: { role: "user", content: "other cwd" } });
+    const past = Date.now() / 1000 - 3600;
+    for (const f of filesOf(cwd)) if (f.includes(older)) utimesSync(f, past, past);
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    await run(["go on", "--cwd", cwd, "--continue"], fake);
+
+    expect(fake.requests[0]?.context.messages.map((m) => m.content)).toEqual(["newer", "go on"]);
+  });
+
+  it("--continue with no session for this cwd starts a new one", async () => {
+    const cwd = scratch("fresh");
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--continue"], fake);
+
+    expect(result.code).toBe(0);
+    expect(fake.requests[0]?.context.messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(filesOf(cwd)).toHaveLength(1);
+  });
+
+  it.each([
+    ["headless", ["hi"], undefined],
+    ["the TUI", [], tty],
+  ])("--resume <unknown> exits 1 with one line (%s)", async (_mode, argv, stdin) => {
+    const terminal = new FakeTerminal();
+
+    const result = await run(
+      [...argv, "--resume", "nope", "--cwd", scratch("r")],
+      new FakeProvider(),
+      {
+        stdin,
+        terminal,
+      },
+    );
+
+    expect(result).toMatchObject({ code: 1, stdout: "", stderr: "no session nope\n", created: [] });
+    expect(terminal.started).toBe(false);
+  });
+
+  it("an explicit --model on --resume switches the model with a model_change", async () => {
+    const cwd = scratch("repo");
+    await run(["first", "--cwd", cwd], new FakeProvider({ streams: [textTurn("one")] }));
+    const [file = ""] = filesOf(cwd);
+    const id = /_(.+)\.jsonl$/.exec(file)?.[1] ?? "";
+    const fake = new FakeProvider({ streams: [textTurn("two")] });
+
+    await run(["second", "--cwd", cwd, "--resume", id, "--model", "x/y"], fake);
+
+    expect(fake.requests[0]?.model).toBe("x/y");
+    expect(entries(file).filter((e) => e.type === "model_change")).toMatchObject([
+      { model: "x/y" },
+    ]);
+  });
+});
+
+describe("main (TUI)", () => {
+  async function tui(argv: string[], env: NodeJS.ProcessEnv = {}) {
+    const cwd = join(home, "proj");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(cwd, "AGENTS.md"), "project rule");
+    const terminal = new FakeTerminal();
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+    const result = run(["--cwd", cwd, ...argv], fake, { stdin: tty, terminal, env });
+    await shown(
+      terminal,
+      argv.includes("--trust") || trusted(cwd) ? STATUS : "Trust this directory?",
+    );
+    return { cwd, terminal, fake, result };
+  }
+
+  const STATUS = " · 0 MCP · "; // the status bar: the session is open
+  const trusted = (cwd: string) =>
+    existsSync(join(home, "trusted.json")) &&
+    readFileSync(join(home, "trusted.json"), "utf8").includes(cwd);
+  // Polls up to 2 s for `text` in what the TUI wrote to the terminal.
+  async function shown(terminal: FakeTerminal, text: string): Promise<void> {
+    for (let i = 0; i < 100 && !terminal.written.join("").includes(text); i++) await settle(20);
+    expect(terminal.written.join("")).toContain(text);
+  }
+
+  it("opens the TUI on a TTY with no prompt and exits 0 on /exit", async () => {
+    const t = await tui(["--trust"]);
+
+    t.terminal.type("/exit");
+    t.terminal.send("\r");
+
+    expect(await t.result).toMatchObject({ code: 0, stderr: "" });
+    expect(t.terminal.stopped).toBe(true);
+  });
+
+  it("asks once in an untrusted cwd: y writes trusted.json and loads the project's AGENTS.md", async () => {
+    const t = await tui([]);
+    expect(t.terminal.written.join("")).toContain("Trust this directory?");
+
+    t.terminal.send("y");
+    await shown(t.terminal, STATUS);
+    t.terminal.type("hi");
+    t.terminal.send("\r");
+    for (let i = 0; i < 100 && t.fake.requests.length === 0; i++) await settle(20);
+    t.terminal.send("\x03");
+    await t.result;
+
+    expect(JSON.parse(readFileSync(join(home, "trusted.json"), "utf8"))).toEqual([t.cwd]);
+    expect(t.fake.requests[0]?.context.system).toContain("project rule");
+  });
+
+  it("n keeps the run to user-level config and writes nothing", async () => {
+    const t = await tui([]);
+
+    t.terminal.send("n");
+    await shown(t.terminal, STATUS);
+    t.terminal.type("hi");
+    t.terminal.send("\r");
+    for (let i = 0; i < 100 && t.fake.requests.length === 0; i++) await settle(20);
+    t.terminal.send("\x03");
+    await t.result;
+
+    expect(existsSync(join(home, "trusted.json"))).toBe(false);
+    expect(t.fake.requests[0]?.context.system).not.toContain("project rule");
+  });
+
+  it("does not ask in a cwd listed in trusted.json", async () => {
+    const cwd = join(home, "proj");
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(home, "trusted.json"), JSON.stringify([cwd]));
+    const t = await tui([]);
+
+    expect(t.terminal.written.join("")).not.toContain("Trust this directory?");
+    t.terminal.send("\x03");
+    expect((await t.result).code).toBe(0);
   });
 });

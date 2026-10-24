@@ -1,7 +1,7 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isTrusted } from "../../src/config/trust.ts";
+import { isTrusted, trustDirectory } from "../../src/config/trust.ts";
 import { useTmpDir } from "../helpers/tmp.ts";
 
 const root = useTmpDir("trust");
@@ -52,5 +52,44 @@ describe("isTrusted", () => {
       const { cwd, env } = setup(bad);
       await expect(isTrusted(cwd, { env })).resolves.toBe(false);
     }
+  });
+});
+
+describe("trustDirectory", () => {
+  const file = () => join(root(), "home", "trusted.json");
+  const read = () => JSON.parse(readFileSync(file(), "utf8")) as unknown;
+
+  it("creates trusted.json, and the cwd is trusted from then on", async () => {
+    const { cwd, env } = setup();
+
+    await trustDirectory(join(cwd, "sub", ".."), env);
+
+    expect(read()).toEqual([cwd]);
+    await expect(isTrusted(cwd, { env })).resolves.toBe(true);
+  });
+
+  it("appends to the existing entries once, without duplicates", async () => {
+    const { cwd, env } = setup(["/elsewhere"]);
+
+    await trustDirectory(cwd, env);
+    await trustDirectory(cwd, env);
+
+    expect(read()).toEqual(["/elsewhere", cwd]);
+  });
+
+  it("creates the home directory when it does not exist", async () => {
+    const { cwd, env } = setup();
+    rmSync(join(root(), "home"), { recursive: true });
+
+    await trustDirectory(cwd, env);
+
+    expect(read()).toEqual([cwd]);
+  });
+
+  it("refuses to overwrite a trusted.json that is not a JSON array of paths", async () => {
+    const { cwd, env } = setup("{ hand edit gone wrong");
+
+    await expect(trustDirectory(cwd, env)).rejects.toThrow(/not a JSON array of paths/);
+    expect(readFileSync(file(), "utf8")).toBe("{ hand edit gone wrong");
   });
 });

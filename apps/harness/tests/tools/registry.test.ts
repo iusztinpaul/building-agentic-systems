@@ -59,6 +59,16 @@ describe("ToolRegistry", () => {
     expect(r.schemasForRequest().map((s) => s.name)).toEqual(["a", "b"]);
   });
 
+  it("forgets every activation on deactivateAll() (a new session)", () => {
+    const r = registry(tool("a"), tool("b", "deferred"));
+    r.activate(["b"]);
+
+    r.deactivateAll();
+
+    expect(r.activated()).toEqual([]);
+    expect(r.schemasForRequest().map((s) => s.name)).toEqual(["a"]);
+  });
+
   it("never activates codemode, hidden, direct or unknown tools", () => {
     const r = registry(tool("a"), tool("c", "codemode"), tool("d", "hidden"));
 

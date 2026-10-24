@@ -1,32 +1,37 @@
 #!/usr/bin/env node
 // tree-agent entry: argument parsing and mode dispatch (spec §15).
 // A positional prompt, piped stdin or --json run headless; a TTY
-// with no prompt is the TUI (task 205; until then: usage, exit 1).
+// with no prompt is the TUI. Both open the same AgentSession over
+// the JSONL session store, new or resumed (--resume, --continue).
 
 import { fstatSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { text } from "node:stream/consumers";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
 import { userPaths } from "./config/paths.ts";
 import {
   checkDecisionModel,
   loadSettings,
   requireApiKey,
 } from "./config/settings.ts";
-import { isTrusted } from "./config/trust.ts";
+import { isTrusted, trustDirectory } from "./config/trust.ts";
 import { type Out, runHeadless, type Signals } from "./headless/print.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
 import { AgentSession } from "./session.ts";
+import { SessionStore } from "./session-store/jsonl.ts";
 import { builtinRegistry } from "./tools/builtins.ts";
+import { runTui } from "./tui/app.ts";
 
 export const DEFAULT_MAX_TURNS = 50;
 
-const USAGE = `usage: tree-agent [flags] "<prompt>"
+const USAGE = `usage: tree-agent [flags]              (TUI, needs a terminal)
+       tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
-flags: --model <id>  --max-turns <n> (${DEFAULT_MAX_TURNS})  --cwd <dir>
-       --trust  --json`;
+flags: --resume <id> | --continue  --model <id>  --cwd <dir>
+       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json`;
 
 export interface CliArgs {
   prompt: string;
@@ -35,6 +40,8 @@ export interface CliArgs {
   cwd?: string;
   trust: boolean;
   json: boolean;
+  resume?: string; // a session id
+  continue: boolean; // the newest session of this cwd
 }
 
 export type Mode =
@@ -54,6 +61,7 @@ export interface CliDeps {
   stderr: Out;
   stdin?: Stdin; // default: not a TTY, nothing piped
   signals?: Signals; // SIGINT / SIGTERM abort the headless run
+  terminal?: Terminal; // the TUI's; default: process stdin/stdout
   // The provider seam: tests inject a FakeProvider here.
   createProvider?: (apiKey: string) => Provider;
 }
@@ -81,14 +89,14 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   const { env, stdout, stderr } = deps;
   const stdin = deps.stdin ?? noStdin;
   const mode = resolveMode(argv, stdin.isTTY, stdin.isPipe);
-  if (mode.kind !== "headless") {
-    const error = mode.kind === "usage" ? mode.error : undefined;
+  if (mode.kind === "usage") {
+    const { error } = mode;
     stderr.write(`${error ? `${error}\n` : ""}${USAGE}\n`);
     return 1;
   }
   const { args } = mode;
   let followUps: string[] = [];
-  if (mode.from === "stdin") {
+  if (mode.kind === "headless" && mode.from === "stdin") {
     const lines = (await stdin.read())
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -107,24 +115,52 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
       throw new Error(`--cwd ${cwd} is not a directory`);
     }
     const trusted = await isTrusted(cwd, { env, flag: args.trust });
-    const settings = await loadSettings({
-      env,
-      flags: { model: args.model },
-      projectDir: trusted ? cwd : undefined,
-    });
-    const provider = (deps.createProvider ?? openRouter)(apiKey);
-    await checkDecisionModel(provider, settings);
+    const store = SessionStore.jsonl(userPaths(env).sessions);
+    // Before the TUI starts: an unknown id is one line and exit 1.
+    const resume = args.continue ? store.list(cwd)[0]?.id : args.resume;
+    if (resume) store.load(resume);
 
-    const session = await AgentSession.create({
-      provider,
-      model: settings.model,
-      tools: builtinRegistry({ tmpDir: userPaths(env).tmp, env }),
-      cwd,
-      maxTurns: args.maxTurns,
-      trusted,
-      contextMaxChars: settings.contextFiles.maxChars,
-      env,
-    });
+    const open = async (trustNow: boolean): Promise<AgentSession> => {
+      if (trustNow) await trustDirectory(cwd, env);
+      const projectTrusted = trusted || trustNow;
+      const settings = await loadSettings({
+        env,
+        flags: { model: args.model },
+        projectDir: projectTrusted ? cwd : undefined,
+      });
+      const provider = (deps.createProvider ?? openRouter)(apiKey);
+      await checkDecisionModel(provider, settings);
+      const session = await AgentSession.create({
+        provider,
+        model: settings.model,
+        tools: builtinRegistry({ tmpDir: userPaths(env).tmp, env }),
+        cwd,
+        maxTurns: args.maxTurns,
+        trusted: projectTrusted,
+        contextMaxChars: settings.contextFiles.maxChars,
+        env,
+        store,
+        resume,
+        // Headless runs in auto (spec §11); the gate is task 206.
+        permissionMode:
+          mode.kind === "tui" ? settings.permissions.mode : "auto",
+      });
+      // A resumed session keeps its model unless --model says.
+      if (args.model && args.model !== session.model) {
+        await session.setModel(args.model);
+      }
+      return session;
+    };
+
+    if (mode.kind === "tui") {
+      return await runTui({
+        terminal: deps.terminal ?? new ProcessTerminal(),
+        cwd,
+        askTrust: !trusted,
+        open,
+      });
+    }
+    const session = await open(false);
     return await runHeadless({
       session,
       prompt: args.prompt,
@@ -149,6 +185,8 @@ function parseCli(argv: string[]): CliArgs {
       cwd: { type: "string" },
       trust: { type: "boolean", default: false },
       json: { type: "boolean", default: false },
+      resume: { type: "string" },
+      continue: { type: "boolean", default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -158,6 +196,12 @@ function parseCli(argv: string[]): CliArgs {
   if (!Number.isInteger(maxTurns) || maxTurns < 1) {
     throw new Error(`--max-turns must be a positive integer: ${turns}`);
   }
+  if (values.resume !== undefined && values.continue) {
+    throw new Error("use --resume <id> or --continue, not both");
+  }
+  if (values.resume !== undefined && !values.resume.trim()) {
+    throw new Error("--resume needs a session id");
+  }
   return {
     prompt: positionals.join(" ").trim(),
     model: values.model,
@@ -165,6 +209,8 @@ function parseCli(argv: string[]): CliArgs {
     cwd: values.cwd,
     trust: values.trust,
     json: values.json,
+    resume: values.resume?.trim(),
+    continue: values.continue,
   };
 }
 
