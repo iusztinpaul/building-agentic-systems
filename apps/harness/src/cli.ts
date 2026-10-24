@@ -1,94 +1,192 @@
 #!/usr/bin/env node
-// tree-agent entry. For now one streamed request, no tools: the
-// prompt goes in, the model's text comes out on stdout. Task 204
-// replaces this with the full mode matrix (spec §15).
+// tree-agent entry: argument parsing and mode dispatch (spec §15).
+// A positional prompt, piped stdin or --json run headless; a TTY
+// with no prompt is the TUI (task 205; until then: usage, exit 1).
 
-import { realpathSync } from "node:fs";
+import { fstatSync, realpathSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { text } from "node:stream/consumers";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { userPaths } from "./config/paths.ts";
 import {
   checkDecisionModel,
   loadSettings,
   requireApiKey,
 } from "./config/settings.ts";
+import { isTrusted } from "./config/trust.ts";
+import { type Out, runHeadless, type Signals } from "./headless/print.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
+import { AgentSession } from "./session.ts";
+import { builtinRegistry } from "./tools/builtins.ts";
 
-const USAGE = 'usage: tree-agent [flags] "<prompt>"  (--model <id>)';
-const SYSTEM = "You are tree-agent, a concise, helpful assistant.";
+export const DEFAULT_MAX_TURNS = 50;
 
-interface Out {
-  write(text: string): unknown;
+const USAGE = `usage: tree-agent [flags] "<prompt>"
+       <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
+flags: --model <id>  --max-turns <n> (${DEFAULT_MAX_TURNS})  --cwd <dir>
+       --trust  --json`;
+
+export interface CliArgs {
+  prompt: string;
+  model?: string;
+  maxTurns: number;
+  cwd?: string;
+  trust: boolean;
+  json: boolean;
+}
+
+export type Mode =
+  | { kind: "headless"; args: CliArgs; from: "argv" | "stdin" }
+  | { kind: "tui"; args: CliArgs }
+  | { kind: "usage"; error?: string };
+
+export interface Stdin {
+  isTTY: boolean;
+  isPipe: boolean; // a pipe or a redirected file
+  read(): Promise<string>;
 }
 
 export interface CliDeps {
   env: NodeJS.ProcessEnv;
   stdout: Out;
   stderr: Out;
+  stdin?: Stdin; // default: not a TTY, nothing piped
+  signals?: Signals; // SIGINT / SIGTERM abort the headless run
+  // The provider seam: tests inject a FakeProvider here.
   createProvider?: (apiKey: string) => Provider;
 }
 
-// Returns the process exit code: 0 done, 1 any error.
-export async function main(argv: string[], deps: CliDeps): Promise<number> {
-  const { env, stdout, stderr } = deps;
-  let args: ReturnType<typeof parseCli>;
+// Pure: which front end runs, from argv and what stdin is.
+export function resolveMode(
+  argv: string[],
+  isTTY: boolean,
+  stdinIsPipe: boolean,
+): Mode {
+  let args: CliArgs;
   try {
     args = parseCli(argv);
   } catch (err) {
-    stderr.write(`${(err as Error).message}\n${USAGE}\n`);
+    return { kind: "usage", error: (err as Error).message };
+  }
+  if (args.prompt) return { kind: "headless", args, from: "argv" };
+  if (stdinIsPipe) return { kind: "headless", args, from: "stdin" };
+  if (args.json || !isTTY) return { kind: "usage" };
+  return { kind: "tui", args };
+}
+
+// Returns the process exit code: 0 completed, 1 error or max_turns.
+export async function main(argv: string[], deps: CliDeps): Promise<number> {
+  const { env, stdout, stderr } = deps;
+  const stdin = deps.stdin ?? noStdin;
+  const mode = resolveMode(argv, stdin.isTTY, stdin.isPipe);
+  if (mode.kind !== "headless") {
+    const error = mode.kind === "usage" ? mode.error : undefined;
+    stderr.write(`${error ? `${error}\n` : ""}${USAGE}\n`);
     return 1;
   }
-  if (!args.prompt) {
-    stderr.write(`${USAGE}\n`);
-    return 1;
+  const { args } = mode;
+  let followUps: string[] = [];
+  if (mode.from === "stdin") {
+    const lines = (await stdin.read())
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) {
+      stderr.write(`${USAGE}\n`);
+      return 1;
+    }
+    [args.prompt = "", ...followUps] = lines;
   }
 
   try {
     const apiKey = requireApiKey(env);
+    const cwd = resolve(args.cwd ?? process.cwd());
+    if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error(`--cwd ${cwd} is not a directory`);
+    }
+    const trusted = await isTrusted(cwd, { env, flag: args.trust });
     const settings = await loadSettings({
       env,
       flags: { model: args.model },
+      projectDir: trusted ? cwd : undefined,
     });
     const provider = (deps.createProvider ?? openRouter)(apiKey);
     await checkDecisionModel(provider, settings);
 
-    const request = {
+    const session = await AgentSession.create({
+      provider,
       model: settings.model,
-      context: {
-        system: SYSTEM,
-        messages: [{ role: "user" as const, content: args.prompt }],
-      },
-      tools: [],
-    };
-    let text = "";
-    const signal = new AbortController().signal;
-    for await (const event of provider.stream(request, signal)) {
-      if (event.type === "text_delta") {
-        text += event.text;
-        stdout.write(event.text);
-      } else if (event.type === "error") {
-        stderr.write(`${event.message}\n`);
-        return 1;
-      } else if (event.type === "done") {
-        if (text && !text.endsWith("\n")) stdout.write("\n");
-        return event.message.stopReason === "error" ? 1 : 0;
-      }
-    }
-    stderr.write("stream ended without a result\n");
-    return 1;
+      tools: builtinRegistry({ tmpDir: userPaths(env).tmp, env }),
+      cwd,
+      maxTurns: args.maxTurns,
+      trusted,
+      contextMaxChars: settings.contextFiles.maxChars,
+      env,
+    });
+    return await runHeadless({
+      session,
+      prompt: args.prompt,
+      followUps,
+      json: args.json,
+      stdout,
+      stderr,
+      signals: deps.signals,
+    });
   } catch (err) {
     stderr.write(`${(err as Error).message}\n`);
     return 1;
   }
 }
 
-function parseCli(argv: string[]): { prompt: string; model?: string } {
+function parseCli(argv: string[]): CliArgs {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { model: { type: "string" } },
+    options: {
+      model: { type: "string" },
+      "max-turns": { type: "string" },
+      cwd: { type: "string" },
+      trust: { type: "boolean", default: false },
+      json: { type: "boolean", default: false },
+    },
     allowPositionals: true,
+    strict: true,
   });
-  return { prompt: positionals.join(" ").trim(), model: values.model };
+  const turns = values["max-turns"] ?? String(DEFAULT_MAX_TURNS);
+  const maxTurns = Number(turns);
+  if (!Number.isInteger(maxTurns) || maxTurns < 1) {
+    throw new Error(`--max-turns must be a positive integer: ${turns}`);
+  }
+  return {
+    prompt: positionals.join(" ").trim(),
+    model: values.model,
+    maxTurns,
+    cwd: values.cwd,
+    trust: values.trust,
+    json: values.json,
+  };
+}
+
+const noStdin: Stdin = {
+  isTTY: false,
+  isPipe: false,
+  read: async () => "",
+};
+
+function processStdin(): Stdin {
+  let isPipe = false;
+  try {
+    const stat = fstatSync(0);
+    isPipe = stat.isFIFO() || stat.isFile();
+  } catch {
+    // no stdin at all
+  }
+  return {
+    isTTY: process.stdin.isTTY === true,
+    isPipe,
+    read: () => text(process.stdin),
+  };
 }
 
 function openRouter(apiKey: string): Provider {
@@ -112,5 +210,7 @@ if (isEntryPoint()) {
     env: process.env,
     stdout: process.stdout,
     stderr: process.stderr,
+    stdin: processStdin(),
+    signals: process,
   });
 }

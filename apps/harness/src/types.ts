@@ -60,6 +60,13 @@ export type DecisionSource =
   | "classifier"
   | "headless";
 
+export type AgentEndReason =
+  | "completed"
+  | "max_turns"
+  | "aborted"
+  | "error"
+  | "blocked";
+
 export type AgentEvent =
   | { type: "turn_start" }
   | { type: "text_delta"; text: string }
@@ -81,8 +88,5 @@ export type AgentEvent =
   | { type: "llm_call"; depth: number; model: string; usage?: Usage }
   | { type: "compaction"; before: number; after: number }
   | { type: "turn_end"; message: AssistantMessage }
-  | {
-      type: "agent_end";
-      reason: "completed" | "max_turns" | "aborted" | "error" | "blocked";
-    }
+  | { type: "agent_end"; reason: AgentEndReason }
   | { type: "error"; message: string };

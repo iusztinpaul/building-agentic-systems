@@ -1,5 +1,6 @@
 // Settings (spec §16): a zod schema whose defaults are the defaults.
-// Layers merge defaults → ~/.tree-agent/settings.json → CLI flags;
+// Layers merge defaults → ~/.tree-agent/settings.json →
+// <cwd>/.tree-agent/settings.json (trusted cwd only) → CLI flags;
 // later layers replace earlier ones key by key. Every object is
 // strict, so a typo in settings.json fails loudly instead of being
 // ignored.
@@ -7,7 +8,7 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { Provider } from "../provider/types.ts";
-import { userPaths } from "./paths.ts";
+import { projectPaths, userPaths } from "./paths.ts";
 
 export const Settings = z
   .object({
@@ -64,12 +65,22 @@ export class SettingsError extends Error {
   override name = "SettingsError";
 }
 
+export interface LoadSettingsOptions {
+  env?: NodeJS.ProcessEnv;
+  flags?: SettingsLayer;
+  // A trusted cwd: its .tree-agent/settings.json is a layer too.
+  projectDir?: string;
+}
+
 export async function loadSettings(
-  options: { env?: NodeJS.ProcessEnv; flags?: SettingsLayer } = {},
+  options: LoadSettingsOptions = {},
 ): Promise<Settings> {
-  const file = userPaths(options.env).settings;
-  const user = await readLayer(file);
-  return validate(merge(user, options.flags ?? {}), "settings");
+  const user = await readLayer(userPaths(options.env).settings);
+  const project = options.projectDir
+    ? await readLayer(projectPaths(options.projectDir).settings)
+    : {};
+  const merged = merge(merge(user, project), options.flags ?? {});
+  return validate(merged, "settings");
 }
 
 export function requireApiKey(

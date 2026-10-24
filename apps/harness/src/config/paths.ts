@@ -10,8 +10,10 @@ export interface UserPaths {
   mcp: string;
   trusted: string;
   agentsMd: string;
+  systemMd: string; // replaces the prompt preamble when present
   skills: string;
   sessions: string;
+  tmp: string; // full tool output that was truncated for the model
 }
 
 export function userPaths(env: NodeJS.ProcessEnv = process.env): UserPaths {
@@ -24,7 +26,15 @@ export function userPaths(env: NodeJS.ProcessEnv = process.env): UserPaths {
     mcp: join(home, "mcp.json"),
     trusted: join(home, "trusted.json"),
     agentsMd: join(home, "AGENTS.md"),
+    systemMd: join(home, "SYSTEM.md"),
     skills: join(home, "skills"),
     sessions: join(home, "sessions"),
+    tmp: join(home, "tmp"),
   };
+}
+
+// Project-level config under <cwd>/.tree-agent, read only when the
+// cwd is trusted (spec §16).
+export function projectPaths(cwd: string): { settings: string } {
+  return { settings: join(cwd, ".tree-agent", "settings.json") };
 }

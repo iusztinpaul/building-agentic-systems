@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -78,6 +78,32 @@ describe("loadSettings", () => {
     expect(flagged.model).toBe("x/flag");
     expect(flagged.decisionModel).toBe("openai/gpt-5-mini");
     expect(unset.model).toBe("openai/gpt-5");
+  });
+
+  it("layers <projectDir>/.tree-agent/settings.json between the user file and the flags", async () => {
+    writeSettings({ model: "user/model", decisionModel: "user/decision" });
+    const project = join(home, "repo");
+    mkdirSync(join(project, ".tree-agent"), { recursive: true });
+    writeFileSync(
+      join(project, ".tree-agent", "settings.json"),
+      JSON.stringify({ model: "project/model", contextFiles: { maxChars: 9 } }),
+    );
+
+    const trusted = await loadSettings({ env: env(), projectDir: project });
+    const flagged = await loadSettings({
+      env: env(),
+      projectDir: project,
+      flags: { model: "x/flag" },
+    });
+    const untrusted = await loadSettings({ env: env() });
+
+    expect(trusted).toMatchObject({
+      model: "project/model",
+      decisionModel: "user/decision",
+      contextFiles: { maxChars: 9 },
+    });
+    expect(flagged.model).toBe("x/flag");
+    expect(untrusted.model).toBe("user/model");
   });
 
   it("rejects an unknown key with the zod issue list naming the file", async () => {
