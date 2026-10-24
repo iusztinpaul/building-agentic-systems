@@ -17,7 +17,8 @@ export interface FakeScript {
   // One script per stream() call, consumed in order.
   streams?: StreamEvent[][];
   // Answers for complete(), validated with the request's schema; an
-  // Error rejects the call.
+  // Error rejects the call. A FakeAnswer function computes the answer
+  // per request (it may delay, or never settle).
   answers?: unknown[];
   // Answers for completeText(); an Error rejects the call.
   texts?: (string | Error)[];
@@ -25,6 +26,11 @@ export interface FakeScript {
   // resolves to fakeModel(id).
   models?: ModelInfo[];
 }
+
+export type FakeAnswer = (
+  req: StructuredRequest<unknown>,
+  signal?: AbortSignal,
+) => unknown;
 
 export class FakeProvider implements Provider {
   readonly requests: ChatRequest[] = [];
@@ -76,12 +82,19 @@ export class FakeProvider implements Provider {
     }
   }
 
-  async complete<T>(req: StructuredRequest<T>): Promise<T> {
+  async complete<T>(
+    req: StructuredRequest<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     this.structuredRequests.push(req);
     if (this.#answers.length === 0) {
       throw new Error("FakeProvider: no complete() answer scripted");
     }
-    const answer = this.#answers.shift();
+    const next = this.#answers.shift();
+    const answer =
+      typeof next === "function"
+        ? await (next as FakeAnswer)(req, signal)
+        : next;
     if (answer instanceof Error) throw answer;
     return req.schema.parse(answer);
   }

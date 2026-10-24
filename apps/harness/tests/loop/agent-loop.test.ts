@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CUT_OFF, runLoop, TRUNCATED } from "../../src/loop/agent-loop.ts";
+import { BLOCKED, CUT_OFF, runLoop, TRUNCATED } from "../../src/loop/agent-loop.ts";
 import type { LoopHooks } from "../../src/loop/hooks.ts";
 import { FakeProvider, fakeDone } from "../../src/provider/fake.ts";
 import type { StreamEvent } from "../../src/provider/types.ts";
@@ -245,6 +245,43 @@ describe("runLoop", () => {
       "Not run: aborted.",
     ]);
     expect(steering).toHaveLength(1); // not drained
+    expect(ends(t.events)).toEqual([{ type: "agent_end", reason: "aborted" }]);
+  });
+
+  it("ends with agent_end(blocked) when a gate aborts with BLOCKED, answering the rest unrun", async () => {
+    const t = setup([[done("", [call("a"), call("b")], "tool_calls")], [fakeDone("never")]], {
+      beforeToolCall: async () => {
+        t.controller.abort(BLOCKED);
+        return { run: false, reason: "dangerous: deletes ~/Downloads" };
+      },
+    });
+
+    const ctx = await t.run();
+
+    expect(t.ran).toEqual([]);
+    expect(ctx.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
+      "Blocked: dangerous: deletes ~/Downloads",
+      "Not run: aborted.",
+    ]);
+    expect(t.fake.requests).toHaveLength(1);
+    expect(ends(t.events)).toEqual([{ type: "agent_end", reason: "blocked" }]);
+  });
+
+  it("answers Not run: aborted. when aborted while the gate waited, even if it then allows", async () => {
+    const t = setup([[done("", [call("a"), call("b")], "tool_calls")], [fakeDone("never")]], {
+      beforeToolCall: async () => {
+        t.controller.abort(); // e.g. Esc while the classifier is asked
+        return { run: true };
+      },
+    });
+
+    const ctx = await t.run();
+
+    expect(t.ran).toEqual([]);
+    expect(ctx.messages.filter((m) => m.role === "tool").map((m) => m.content)).toEqual([
+      "Not run: aborted.",
+      "Not run: aborted.",
+    ]);
     expect(ends(t.events)).toEqual([{ type: "agent_end", reason: "aborted" }]);
   });
 

@@ -58,11 +58,13 @@ export class Transcript extends Container {
           .get(event.callId)
           ?.setResult(event.content, event.isError);
         break;
-      case "permission":
-        this.addNotice(
-          `${event.call.name}: ${event.decision} (${event.source})`,
-        );
+      case "permission": {
+        if (event.source === "readOnly") break; // nothing was decided
+        const { call, decision, source, reason } = event;
+        const why = reason ? ` — ${reason}` : "";
+        this.addNotice(`${call.name}: ${decision} (${source})${why}`);
         break;
+      }
       case "tool_activation":
         this.addNotice(`activated: ${event.names.join(", ")}`);
         break;

@@ -54,7 +54,7 @@ export async function runLoop(
       }
       cutOff = false;
       for (const call of calls) await runCall(call, msg, ctx, cfg);
-      if (cfg.signal.aborted) return end(ctx, cfg, "aborted");
+      if (cfg.signal.aborted) return end(ctx, cfg, stopped(cfg));
       pending = hooks.getSteeringMessages?.() ?? [];
       if (calls.length === 0 && pending.length === 0) break;
     }
@@ -145,6 +145,11 @@ async function execute(
   if (msg.stopReason === "length") return refuse(TRUNCATED);
   if (call.parseError) return refuse(call.parseError);
   const gate = (await cfg.hooks.beforeToolCall?.(call)) ?? { run: true };
+  // An abort while the gate waited (classifier, prompt) beats its
+  // answer; a BLOCKED abort is the gate's own deny.
+  if (stopped(cfg) === "aborted" && cfg.signal.aborted) {
+    return refuse("Not run: aborted.");
+  }
   if (!gate.run) return refuse(`Blocked: ${gate.reason}`);
   return cfg.tools.execute(call, {
     cwd: cfg.cwd,
@@ -156,6 +161,13 @@ async function execute(
 
 function refuse(content: string): ToolResult {
   return { content, isError: true };
+}
+
+// A hook that aborts with reason BLOCKED (the headless fail-stop)
+// ends the run `blocked`; any other abort is `aborted`.
+export const BLOCKED = "blocked";
+function stopped(cfg: LoopConfig): AgentEndReason {
+  return cfg.signal.reason === BLOCKED ? "blocked" : "aborted";
 }
 
 function end(

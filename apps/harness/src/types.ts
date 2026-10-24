@@ -1,6 +1,6 @@
 // Core types shared by the provider, the loop and both front ends
-// (spec §4). Decision types (spec §11) live here so AgentEvent
-// compiles before the permission layer exists.
+// (spec §4). The decision types (spec §11) live here too, so the
+// TUI's prompter needs nothing from the permission layer.
 
 export type StopReason =
   | "stop"
@@ -60,6 +60,15 @@ export type DecisionSource =
   | "classifier"
   | "headless";
 
+// The TUI's dialog; headless runs have none (a prompt is a deny).
+export interface PermissionPrompter {
+  ask(
+    call: ToolCall,
+    summary: string,
+    reason?: string,
+  ): Promise<"once" | "session" | "deny">;
+}
+
 export type AgentEndReason =
   | "completed"
   | "max_turns"
@@ -82,6 +91,7 @@ export type AgentEvent =
       call: ToolCall;
       decision: Decision;
       source: DecisionSource;
+      reason?: string;
     }
   | { type: "tool_activation"; names: string[] }
   // from the sandbox llm()

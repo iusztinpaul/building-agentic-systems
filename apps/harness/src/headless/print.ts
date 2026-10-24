@@ -4,7 +4,7 @@
 // AgentEvent as one JSON line on stdout.
 
 import type { AgentSession } from "../session.ts";
-import type { AgentEvent } from "../types.ts";
+import type { AgentEndReason, AgentEvent } from "../types.ts";
 
 export interface Out {
   write(text: string): unknown;
@@ -27,9 +27,8 @@ export interface HeadlessOptions {
   signals?: Signals; // Ctrl+C / kill abort the run (and its bash)
 }
 
-// Returns the exit code: 0 completed, 1 anything else, including a
-// signal-aborted run (2 for a blocked call arrives with the
-// permission gate, task 206).
+// Returns the exit code: 0 completed, 2 blocked by the permission
+// gate, 1 anything else, including a signal-aborted run.
 export async function runHeadless(o: HeadlessOptions): Promise<number> {
   const sink = o.json ? jsonSink(o.stdout) : textSink(o.stdout, o.stderr);
   const off = o.session.on(sink);
@@ -40,13 +39,18 @@ export async function runHeadless(o: HeadlessOptions): Promise<number> {
   for (const text of o.followUps) o.session.followUp(text);
   try {
     const reason = await o.session.prompt(o.prompt);
-    return reason === "completed" ? 0 : 1;
+    return EXIT_CODES[reason] ?? 1;
   } finally {
     o.signals?.off("SIGINT", abort);
     o.signals?.off("SIGTERM", abort);
     off();
   }
 }
+
+const EXIT_CODES: Partial<Record<AgentEndReason, number>> = {
+  completed: 0,
+  blocked: 2,
+};
 
 export function jsonSink(stdout: Out): (event: AgentEvent) => void {
   return (event) => stdout.write(`${JSON.stringify(event)}\n`);

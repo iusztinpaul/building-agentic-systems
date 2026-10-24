@@ -100,6 +100,24 @@ describe("FakeProvider.complete / completeText", () => {
     await expect(fake.complete(structured)).rejects.toThrow(/Expected boolean/);
   });
 
+  it("computes a function answer from the request and its signal, then validates it", async () => {
+    const seen: unknown[] = [];
+    const fake = new FakeProvider({
+      answers: [
+        async (req: { input: string }, signal?: AbortSignal) => {
+          seen.push(req.input, signal);
+          return { dangerous: req.input === "i" };
+        },
+        () => ({ dangerous: "no" }),
+      ],
+    });
+    const signal = new AbortController().signal;
+
+    await expect(fake.complete(structured, signal)).resolves.toEqual({ dangerous: true });
+    await expect(fake.complete(structured)).rejects.toThrow(/Expected boolean/);
+    expect(seen).toEqual(["i", signal]);
+  });
+
   it("returns scripted texts with estimated usage", async () => {
     const fake = new FakeProvider({ texts: ["summary"] });
 

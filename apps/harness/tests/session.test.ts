@@ -8,7 +8,7 @@ import { AgentSession, type SessionOptions } from "../src/session.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import { builtinRegistry } from "../src/tools/builtins.ts";
 import type { ToolRegistry } from "../src/tools/registry.ts";
-import type { AgentEvent, ToolCall } from "../src/types.ts";
+import type { AgentEvent, Message, PermissionPrompter, ToolCall } from "../src/types.ts";
 import { useTmpDir } from "./helpers/tmp.ts";
 
 const root = useTmpDir("session");
@@ -25,12 +25,19 @@ function toolTurn(...calls: ToolCall[]): StreamEvent[] {
 
 const textTurn = (text: string): StreamEvent[] => [{ type: "text_delta", text }, fakeDone(text)];
 
-async function setup(streams: StreamEvent[][], o: Partial<SessionOptions> = {}) {
+// Approves every call once, as a user pressing "y" would.
+const approveAll: PermissionPrompter = { ask: async () => "once" };
+
+async function setup(
+  streams: StreamEvent[][],
+  o: Partial<SessionOptions> = {},
+  answers: unknown[] = [], // the classifier's, in auto
+) {
   const home = join(root(), "home");
   const cwd = join(root(), "repo", "sub");
   mkdirSync(home, { recursive: true });
   mkdirSync(cwd, { recursive: true });
-  const fake = new FakeProvider({ streams });
+  const fake = new FakeProvider({ streams, answers });
   const env = { TREE_AGENT_HOME: home };
   const session = await AgentSession.create({
     provider: fake,
@@ -42,6 +49,7 @@ async function setup(streams: StreamEvent[][], o: Partial<SessionOptions> = {}) 
     contextMaxChars: 40_000,
     env,
     now: () => new Date("2026-10-24T12:00:00Z"),
+    prompter: approveAll,
     ...o,
   });
   const events: AgentEvent[] = [];
@@ -332,11 +340,12 @@ describe("AgentSession persistence", () => {
 
     await t.session.prompt("go");
 
-    expect(seen).toEqual(["session", "user", "assistant"]);
+    expect(seen).toEqual(["session", "user", "assistant", "permission"]);
     expect(entries().map((e) => (e.type === "message" ? e.message.role : e.type))).toEqual([
       "session",
       "user",
       "assistant",
+      "permission",
       "tool",
       "assistant",
     ]);
@@ -542,6 +551,268 @@ describe("AgentSession persistence", () => {
       resume: t.session.id,
     });
     expect(resumed.session.status()).toMatchObject({ tokens: 1000, cost: 2 });
+  });
+});
+
+describe("AgentSession permissions", () => {
+  const bash = (id: string, command = "true"): ToolCall => ({
+    id,
+    name: "bash",
+    arguments: { command },
+  });
+  const safe = { dangerous: false, risk: "low", reason: "cwd-scoped" };
+  const results = (messages: readonly Message[]) =>
+    messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
+
+  it("records every resolution as a permission entry, then event, before the tool runs", async () => {
+    const sessions = join(root(), "sessions");
+    const store = SessionStore.jsonl(sessions);
+    const t = await setup(
+      [toolTurn({ id: "r", name: "read", arguments: { path: "x" } }, bash("b")), textTurn("ok")],
+      { store, permissionMode: "auto" },
+      [safe],
+    );
+
+    await t.session.prompt("go");
+
+    const types = t.events.map((e) => e.type);
+    expect(types.slice(3, 9)).toEqual([
+      "tool_call",
+      "permission",
+      "tool_result",
+      "tool_call",
+      "permission",
+      "tool_result",
+    ]);
+    const permissions = t.events.filter((e) => e.type === "permission");
+    expect(permissions).toEqual([
+      {
+        type: "permission",
+        call: { id: "r", name: "read", arguments: { path: "x" } },
+        decision: "allow",
+        source: "readOnly",
+      },
+      {
+        type: "permission",
+        call: bash("b"),
+        decision: "allow",
+        source: "classifier",
+        reason: "cwd-scoped",
+      },
+    ]);
+    const [dir = ""] = readdirSync(sessions);
+    const [file = ""] = readdirSync(join(sessions, dir));
+    const entries = readFileSync(join(sessions, dir, file), "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Entry);
+    const kinds = entries.map((e) => (e.type === "message" ? e.message.role : e.type));
+    expect(kinds).toEqual([
+      "session",
+      "user",
+      "assistant",
+      "permission",
+      "tool",
+      "permission",
+      "tool",
+      "assistant",
+    ]);
+    expect(entries[5]).toMatchObject({
+      type: "permission",
+      call: bash("b"),
+      decision: "allow",
+      source: "classifier",
+      reason: "cwd-scoped",
+    });
+    expect(entries[3]).not.toHaveProperty("reason");
+  });
+
+  it("in ask without a prompter: denies the first write, ends blocked, runs nothing else", async () => {
+    const t = await setup([toolTurn(writeCall("w", "a.md", "a"), bash("b")), textTurn("never")], {
+      prompter: null,
+      permissionMode: "ask",
+    });
+
+    const reason = await t.session.prompt("write a.md");
+
+    expect(reason).toBe("blocked");
+    expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "blocked" });
+    expect(existsSync(join(t.cwd, "a.md"))).toBe(false);
+    expect(results(t.session.messages)).toEqual([
+      "Blocked: needs approval (permission mode ask) and a headless run cannot prompt",
+      "Not run: aborted.",
+    ]);
+    expect(t.events.filter((e) => e.type === "permission")).toEqual([
+      expect.objectContaining({ decision: "deny", source: "headless" }),
+    ]);
+    expect(t.fake.requests).toHaveLength(1);
+    expect(t.fake.structuredRequests).toEqual([]);
+  });
+
+  it("with onBlocked continue: the model gets Blocked: … and the run completes", async () => {
+    const t = await setup(
+      [toolTurn(writeCall("w", "a.md", "a")), textTurn("I could not write it.")],
+      { prompter: null, permissionMode: "auto", onBlocked: "continue" },
+      [{ dangerous: true, risk: "high", reason: "overwrites a file" }],
+    );
+
+    const reason = await t.session.prompt("write a.md");
+
+    expect(reason).toBe("completed");
+    expect(t.fake.requests[1]?.context.messages.at(-1)).toEqual({
+      role: "tool",
+      toolCallId: "w",
+      name: "write",
+      content: "Blocked: dangerous: overwrites a file",
+      isError: true,
+    });
+  });
+
+  it("uses the decision model and sends the user's last 3 messages to the classifier", async () => {
+    const t = await setup(
+      [textTurn("1"), textTurn("2"), textTurn("3"), toolTurn(bash("b")), textTurn("ok")],
+      { permissionMode: "auto", decisionModel: "test/decider" },
+      [safe],
+    );
+
+    for (const text of ["one", "two", "three", "four"]) await t.session.prompt(text);
+
+    const [sent] = t.fake.structuredRequests;
+    expect(sent?.model).toBe("test/decider");
+    expect(sent?.input).toContain("1. two\n2. three\n3. four\n");
+  });
+
+  it("switches the mode for the rest of the session: the next call is classified", async () => {
+    const asked: string[] = [];
+    const t = await setup(
+      [toolTurn(bash("b1", "ls")), toolTurn(bash("b2", "pwd")), textTurn("ok")],
+      {
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.id);
+            t.session.setPermissionMode("auto"); // e.g. Shift+Tab while asked
+            return "once";
+          },
+        },
+      },
+      [safe],
+    );
+
+    await t.session.prompt("go");
+
+    expect(asked).toEqual(["b1"]);
+    expect(t.fake.structuredRequests).toHaveLength(1);
+    expect(t.session.status().mode).toBe("auto");
+  });
+
+  it("forgets session approvals and cached verdicts on clear()", async () => {
+    const asked: string[] = [];
+    const t = await setup(
+      [
+        toolTurn(bash("b1")),
+        toolTurn(bash("b2")),
+        textTurn("a"),
+        toolTurn(bash("b3")),
+        textTurn("b"),
+      ],
+      {
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.id);
+            return "session";
+          },
+        },
+      },
+    );
+
+    await t.session.prompt("one");
+    t.session.clear();
+    await t.session.prompt("two");
+
+    expect(asked).toEqual(["b1", "b3"]);
+  });
+
+  // Regression (task 206 QA): the write ran after an abort during
+  // the classifier call.
+  it("runs nothing when aborted while the classifier is asked, and records no decision", async () => {
+    let classifierSignal: AbortSignal | undefined;
+    const t = await setup(
+      [toolTurn(writeCall("w", "a.txt", "x")), textTurn("never")],
+      { permissionMode: "auto", prompter: null },
+      [
+        // Ignores the abort and answers "safe" late, as a slow
+        // upstream would.
+        async (_req: unknown, signal?: AbortSignal) => {
+          classifierSignal = signal;
+          await new Promise((r) => setTimeout(r, 150));
+          return safe;
+        },
+      ],
+    );
+    t.session.on((e) => {
+      if (e.type === "tool_call") setTimeout(() => t.session.abort(), 20);
+    });
+
+    const reason = await t.session.prompt("write a.txt");
+    await new Promise((r) => setTimeout(r, 200)); // the late answer lands
+
+    expect(reason).toBe("aborted");
+    expect(existsSync(join(t.cwd, "a.txt"))).toBe(false);
+    expect(classifierSignal?.aborted).toBe(true);
+    expect(results(t.session.messages)).toEqual(["Not run: aborted."]);
+    expect(t.events.some((e) => e.type === "permission")).toBe(false);
+    expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "aborted" });
+  });
+
+  it("does not gate a registered tool the model cannot call yet; activated, it is gated", async () => {
+    const asked: string[] = [];
+    const tools = builtinRegistry({ tmpDir: join(root(), "tmp") });
+    tools.register({
+      name: "mcp__fs__delete",
+      description: "d",
+      promptSnippet: "s",
+      parameters: z.object({ path: z.string() }),
+      exposure: "deferred",
+      isReadOnly: false,
+      execute: async () => ({ content: "deleted" }),
+    });
+    const del = (id: string): ToolCall => ({
+      id,
+      name: "mcp__fs__delete",
+      arguments: { path: "x" },
+    });
+    const t = await setup(
+      [toolTurn(del("d1")), textTurn("a"), toolTurn(del("d2")), textTurn("b")],
+      {
+        tools,
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.id);
+            return "session";
+          },
+        },
+      },
+    );
+
+    await t.session.prompt("one");
+    tools.activate(["mcp__fs__delete"]);
+    await t.session.prompt("two");
+
+    expect(results(t.session.messages)).toEqual(["Unknown tool: mcp__fs__delete", "deleted"]);
+    expect(asked).toEqual(["d2"]);
+    expect(t.events.filter((e) => e.type === "permission")).toHaveLength(1);
+  });
+
+  it("does not gate an unknown tool: the registry answers it", async () => {
+    const t = await setup([toolTurn({ id: "x", name: "nope", arguments: {} }), textTurn("ok")], {
+      prompter: null,
+    });
+
+    expect(await t.session.prompt("go")).toBe("completed");
+    expect(t.events.some((e) => e.type === "permission")).toBe(false);
+    expect(results(t.session.messages)).toEqual(["Unknown tool: nope"]);
   });
 });
 

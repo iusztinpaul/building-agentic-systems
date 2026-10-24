@@ -1,7 +1,8 @@
 // The prompt editor (pi-tui's Editor: multiline with Shift+Enter,
 // history on Up/Down) and the routing of what the user submits:
 // idle → prompt; during a run Enter → steer, Alt+Enter → follow-up
-// (spec §6); "/name args" → a slash command. Esc aborts the run.
+// (spec §6); "/name args" → a slash command. Esc aborts the run;
+// Shift+Tab toggles the permission mode.
 
 import {
   CombinedAutocompleteProvider,
@@ -41,6 +42,7 @@ export interface InputHandlers {
   submit(text: string, alt: boolean): void;
   escape(): void; // abort the run
   tab(): void; // with an empty editor: expand tool results
+  toggleMode(): void; // Shift+Tab: ask ↔ auto
   interrupt(): void; // Ctrl+C
 }
 
@@ -81,6 +83,8 @@ export class PromptInput implements Component, Focusable {
       this.#submit(text, true);
     } else if (matchesKey(data, "escape") && !menu) {
       this.#on.escape();
+    } else if (matchesKey(data, "shift+tab")) {
+      this.#on.toggleMode();
     } else if (matchesKey(data, "ctrl+c")) {
       this.#on.interrupt();
     } else if (matchesKey(data, "tab") && !this.editor.getText()) {

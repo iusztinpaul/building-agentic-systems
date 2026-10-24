@@ -24,6 +24,7 @@ import { AgentSession } from "./session.ts";
 import { SessionStore } from "./session-store/jsonl.ts";
 import { builtinRegistry } from "./tools/builtins.ts";
 import { runTui } from "./tui/app.ts";
+import type { PermissionMode, PermissionPrompter } from "./types.ts";
 
 export const DEFAULT_MAX_TURNS = 50;
 
@@ -31,7 +32,9 @@ const USAGE = `usage: tree-agent [flags]              (TUI, needs a terminal)
        tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
 flags: --resume <id> | --continue  --model <id>  --cwd <dir>
-       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json`;
+       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json
+       --permission-mode ask|auto (TUI: settings, ask; headless: auto)
+       --on-blocked stop|continue (headless deny: exit 2, or go on)`;
 
 export interface CliArgs {
   prompt: string;
@@ -42,6 +45,8 @@ export interface CliArgs {
   json: boolean;
   resume?: string; // a session id
   continue: boolean; // the newest session of this cwd
+  permissionMode?: PermissionMode;
+  onBlocked: "stop" | "continue";
 }
 
 export type Mode =
@@ -84,7 +89,8 @@ export function resolveMode(
   return { kind: "tui", args };
 }
 
-// Returns the process exit code: 0 completed, 1 error or max_turns.
+// Returns the process exit code: 0 completed, 1 error or max_turns,
+// 2 a headless run blocked by the permission gate.
 export async function main(argv: string[], deps: CliDeps): Promise<number> {
   const { env, stdout, stderr } = deps;
   const stdin = deps.stdin ?? noStdin;
@@ -120,7 +126,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     const resume = args.continue ? store.list(cwd)[0]?.id : args.resume;
     if (resume) store.load(resume);
 
-    const open = async (trustNow: boolean): Promise<AgentSession> => {
+    const open = async (
+      trustNow: boolean,
+      prompter: PermissionPrompter | null,
+    ): Promise<AgentSession> => {
       if (trustNow) await trustDirectory(cwd, env);
       const projectTrusted = trusted || trustNow;
       const settings = await loadSettings({
@@ -141,9 +150,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         env,
         store,
         resume,
-        // Headless runs in auto (spec §11); the gate is task 206.
+        // settings.permissions.mode is the TUI's; headless is auto.
         permissionMode:
-          mode.kind === "tui" ? settings.permissions.mode : "auto",
+          args.permissionMode ??
+          (mode.kind === "tui" ? settings.permissions.mode : "auto"),
+        prompter,
+        onBlocked: args.onBlocked,
+        decisionModel: settings.decisionModel,
       });
       // A resumed session keeps its model unless --model says.
       if (args.model && args.model !== session.model) {
@@ -160,7 +173,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         open,
       });
     }
-    const session = await open(false);
+    const session = await open(false, null);
     return await runHeadless({
       session,
       prompt: args.prompt,
@@ -187,6 +200,8 @@ function parseCli(argv: string[]): CliArgs {
       json: { type: "boolean", default: false },
       resume: { type: "string" },
       continue: { type: "boolean", default: false },
+      "permission-mode": { type: "string" },
+      "on-blocked": { type: "string", default: "stop" },
     },
     allowPositionals: true,
     strict: true,
@@ -202,6 +217,14 @@ function parseCli(argv: string[]): CliArgs {
   if (values.resume !== undefined && !values.resume.trim()) {
     throw new Error("--resume needs a session id");
   }
+  const mode = values["permission-mode"];
+  if (mode !== undefined && mode !== "ask" && mode !== "auto") {
+    throw new Error(`--permission-mode must be ask or auto: ${mode}`);
+  }
+  const onBlocked = values["on-blocked"];
+  if (onBlocked !== "stop" && onBlocked !== "continue") {
+    throw new Error(`--on-blocked must be stop or continue: ${onBlocked}`);
+  }
   return {
     prompt: positionals.join(" ").trim(),
     model: values.model,
@@ -211,6 +234,8 @@ function parseCli(argv: string[]): CliArgs {
     json: values.json,
     resume: values.resume?.trim(),
     continue: values.continue,
+    permissionMode: mode,
+    onBlocked,
   };
 }
 

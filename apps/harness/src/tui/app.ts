@@ -12,8 +12,10 @@ import {
   TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../session.ts";
+import type { PermissionPrompter } from "../types.ts";
 import { COMMANDS, runCommand } from "./commands.ts";
 import { type InputAction, PromptInput, route } from "./input.ts";
+import { tuiPrompter } from "./permission-prompt.ts";
 import { StatusBar } from "./status-bar.ts";
 import { cyan, dim } from "./style.ts";
 import { Transcript } from "./transcript.ts";
@@ -24,8 +26,9 @@ export interface TuiOptions {
   cwd: string;
   askTrust: boolean; // an untrusted cwd: ask before opening
   // Builds the session once trust is settled; `trust` is the user's
-  // "y" (the caller records it in trusted.json).
-  open(trust: boolean): Promise<AgentSession>;
+  // "y" (the caller records it in trusted.json). `prompter` asks
+  // permission questions on this screen.
+  open(trust: boolean, prompter: PermissionPrompter): Promise<AgentSession>;
   onStart?(tui: TUI): void; // tests read the screen through it
 }
 
@@ -37,7 +40,7 @@ export async function runTui(o: TuiOptions): Promise<number> {
   o.onStart?.(tui);
   try {
     const trust = o.askTrust ? await askTrust(tui, o.cwd) : false;
-    const session = await o.open(trust);
+    const session = await o.open(trust, tuiPrompter(tui));
     return await new App(tui, session, o.cwd).done;
   } finally {
     tui.stop();
@@ -82,6 +85,12 @@ class App {
         escape: () => session.abort(),
         tab: () => {
           this.#transcript.toggleToolResults();
+          this.#render();
+        },
+        toggleMode: () => {
+          const next = session.permissionMode === "ask" ? "auto" : "ask";
+          session.setPermissionMode(next);
+          this.#transcript.addNotice(`permission mode: ${next}`);
           this.#render();
         },
         interrupt: () => {

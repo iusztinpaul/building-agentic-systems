@@ -73,6 +73,23 @@ describe("Transcript", () => {
     expect(screen(t)).toEqual(["✓ read a.md", "one", "two"]);
   });
 
+  it("shows a permission's reason and skips read-only allows (nothing was decided)", () => {
+    const t = new Transcript("/repo");
+    const call = { id: "c1", name: "edit", arguments: { path: "~/.zshrc" } };
+    play(t, [
+      { type: "permission", call, decision: "allow", source: "readOnly" },
+      {
+        type: "permission",
+        call,
+        decision: "deny",
+        source: "user",
+        reason: "denied by the user",
+      },
+    ]);
+
+    expect(screen(t)).toEqual(["edit: deny (user) — denied by the user"]);
+  });
+
   it("shows permission, activation, compaction and error events inline", () => {
     const t = new Transcript("/repo");
     const call = { id: "c1", name: "bash", arguments: { command: "rm x" } };

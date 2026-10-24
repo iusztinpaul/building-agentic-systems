@@ -1,6 +1,6 @@
 // The slash commands of this milestone. Each one is a call on
-// AgentSession's public API plus the lines the TUI shows; /mode
-// (206), /skill: (207), /mcp (209) and /compact (212) join later.
+// AgentSession's public API plus the lines the TUI shows; /skill:
+// (207), /mcp (209) and /compact (212) join later.
 
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../session.ts";
@@ -8,6 +8,11 @@ import type { AgentSession } from "../session.ts";
 export const COMMANDS: SlashCommand[] = [
   { name: "help", description: "commands, keys, context files" },
   { name: "model", description: "switch the model", argumentHint: "<id>" },
+  {
+    name: "mode",
+    description: "permission mode for this session",
+    argumentHint: "ask|auto",
+  },
   { name: "tools", description: "the tools the model can call" },
   { name: "reload", description: "re-read AGENTS.md / CLAUDE.md" },
   { name: "clear", description: "start a new session" },
@@ -18,6 +23,7 @@ const KEYS = [
   "Enter send (during a run: steer) · Alt+Enter follow-up",
   "Shift+Enter new line · Up/Down history · Esc abort the run",
   "Tab (empty input) expand/collapse tool results · Ctrl+C abort/quit",
+  "Shift+Tab toggle the permission mode (ask ↔ auto)",
 ];
 
 export interface CommandResult {
@@ -51,6 +57,15 @@ async function run(
       if (!arg) return { lines: [`model: ${session.model}`] };
       await session.setModel(arg);
       return { lines: [`model: ${session.model}`] };
+    case "mode":
+      if (arg === "ask" || arg === "auto") session.setPermissionMode(arg);
+      else if (arg) {
+        return {
+          lines: [`usage: /mode ask|auto (got ${arg})`],
+          error: true,
+        };
+      }
+      return { lines: [`permission mode: ${session.permissionMode}`] };
     case "tools": {
       const names = session.toolNames();
       return { lines: [`tools (${names.length}): ${names.join(", ")}`] };

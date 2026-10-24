@@ -134,6 +134,28 @@ describe("runCommand", () => {
     expect(t.fake.requests[1]?.context.messages).toEqual([{ role: "user", content: "two" }]);
   });
 
+  it("/mode ask|auto switches the session's permission mode and shows it", async () => {
+    const t = await setup();
+
+    expect(await runCommand(t.session, "mode", "")).toEqual({ lines: ["permission mode: ask"] });
+    expect(await runCommand(t.session, "mode", "auto")).toEqual({
+      lines: ["permission mode: auto"],
+    });
+    expect(t.session.status().mode).toBe("auto");
+    expect(await runCommand(t.session, "mode", "ask")).toEqual({ lines: ["permission mode: ask"] });
+    expect(t.session.permissionMode).toBe("ask");
+  });
+
+  it("/mode with another value is an error line and keeps the mode", async () => {
+    const t = await setup();
+
+    expect(await runCommand(t.session, "mode", "bypass")).toEqual({
+      lines: ["usage: /mode ask|auto (got bypass)"],
+      error: true,
+    });
+    expect(t.session.permissionMode).toBe("ask");
+  });
+
   it("/exit asks the TUI to exit", async () => {
     const t = await setup();
 

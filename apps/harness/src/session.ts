@@ -6,8 +6,14 @@
 // loop produces it, so an aborted or crashed run is on disk too.
 
 import { log } from "./log.ts";
-import { runLoop } from "./loop/agent-loop.ts";
-import type { LoopHooks } from "./loop/hooks.ts";
+import { BLOCKED, runLoop } from "./loop/agent-loop.ts";
+import type { GateResult, LoopHooks } from "./loop/hooks.ts";
+import {
+  type Classifier,
+  type DangerCheck,
+  dangerClassifier,
+} from "./permissions/decision-model.ts";
+import { resolve, USER_DENIED } from "./permissions/gate.ts";
 import {
   type ContextFile,
   formatContextFiles,
@@ -30,6 +36,8 @@ import type {
   Context,
   Message,
   PermissionMode,
+  PermissionPrompter,
+  ToolCall,
   Usage,
 } from "./types.ts";
 
@@ -44,8 +52,15 @@ export interface SessionOptions {
   env?: NodeJS.ProcessEnv;
   store?: SessionStore; // default: SessionStore.inMemory()
   resume?: string; // a session id in `store`
-  // Shown in the status bar; the gate that uses it is task 206.
-  permissionMode?: PermissionMode;
+  permissionMode?: PermissionMode; // default "ask"
+  // The TUI's dialog; none (the default) is headless: a call that
+  // needs a prompt is denied.
+  prompter?: PermissionPrompter | null;
+  // A headless deny ends the run `blocked` (stop, the default) or
+  // only answers the model `Blocked: …` (continue).
+  onBlocked?: "stop" | "continue";
+  decisionModel?: string; // the auto classifier's; settings default
+
   now?: () => Date;
 }
 
@@ -80,11 +95,21 @@ export class AgentSession {
   #preamble = "";
   #contextFiles: ContextFile[] = [];
   #run: AbortController | undefined;
+  #mode: PermissionMode;
+  // Per session, never persisted: cleared by clear().
+  readonly #sessionAllow = new Set<string>();
+  readonly #verdicts = new Map<string, DangerCheck>();
+  readonly #classifier: Classifier;
 
   private constructor(o: SessionOptions) {
     this.#o = o;
     this.#store = o.store ?? SessionStore.inMemory(o.now);
     this.#model = o.model;
+    this.#mode = o.permissionMode ?? "ask";
+    this.#classifier = dangerClassifier(o.provider, {
+      model: o.decisionModel,
+      cache: this.#verdicts,
+    });
   }
 
   // Throws for an unknown `resume` id (SessionNotFound) or model.
@@ -154,7 +179,7 @@ export class AgentSession {
   status(): SessionStatus {
     return {
       model: this.#model,
-      mode: this.#o.permissionMode ?? "ask",
+      mode: this.#mode,
       tokens: this.#tokens,
       contextLength: this.#info?.contextLength ?? 0,
       cost: this.#cost,
@@ -178,8 +203,18 @@ export class AgentSession {
     this.#append({ type: "model_change", model: info.id });
   }
 
-  // A new, empty session (a new file on its first entry). The model
-  // and the context files stay.
+  get permissionMode(): PermissionMode {
+    return this.#mode;
+  }
+
+  // For the rest of this session, effective from the next call (also
+  // mid-run). Never written to settings.json.
+  setPermissionMode(mode: PermissionMode): void {
+    this.#mode = mode;
+  }
+
+  // A new, empty session (a new file on its first entry). The model,
+  // the permission mode and the context files stay.
   clear(): void {
     this.#idle("clear the session");
     this.#id = undefined;
@@ -190,6 +225,8 @@ export class AgentSession {
     this.#o.tools.deactivateAll();
     this.#tokens = undefined;
     this.#cost = 0;
+    this.#sessionAllow.clear();
+    this.#verdicts.clear();
   }
 
   get running(): boolean {
@@ -269,14 +306,50 @@ export class AgentSession {
         this.#context = { ...ctx, system: this.systemPrompt() };
         return this.#context;
       },
-      // Pass-through: every call runs until task 206 replaces this
-      // with the permission gate.
-      beforeToolCall: async () => ({ run: true }),
+      beforeToolCall: (call) => this.#gate(call),
       afterToolCall: async (_call, result) => capResult(result),
       getSteeringMessages: () => this.#steering.splice(0),
       getFollowUpMessages: () => this.#followUps.splice(0),
       emit: (event) => this.#emit(event),
     };
+  }
+
+  // Every resolution is saved, then emitted, before the call runs.
+  // A tool the model cannot call (unknown, not activated, hidden) is
+  // not gated: the registry answers it. An abort while resolving
+  // records nothing: no decision was made (the loop answers it).
+  async #gate(call: ToolCall): Promise<GateResult> {
+    const tool = this.#o.tools.declared().find((t) => t.name === call.name);
+    if (!tool) return { run: true };
+    const users = this.#context.messages.flatMap((m) =>
+      m.role === "user" ? [m.content] : [],
+    );
+    const signal = this.#run?.signal;
+    const resolved = await resolve(
+      { call, tool, cwd: this.#o.cwd, recentUserMessages: users.slice(-3) },
+      {
+        mode: this.#mode,
+        prompter: this.#o.prompter ?? null,
+        classifier: this.#classifier,
+        sessionAllow: this.#sessionAllow,
+        signal,
+      },
+    ).catch((err: unknown) => {
+      if (signal?.aborted) return undefined;
+      throw err;
+    });
+    if (!resolved || signal?.aborted)
+      return { run: false, reason: "aborted" };
+    const { decision, source, reason } = resolved;
+    const why = reason === undefined ? {} : { reason };
+    this.#persist();
+    this.#append({ type: "permission", call, decision, source, ...why });
+    this.#emit({ type: "permission", call, decision, source, ...why });
+    if (decision === "allow") return { run: true };
+    if (source === "headless" && this.#o.onBlocked !== "continue") {
+      this.#run?.abort(BLOCKED); // the rest of the batch does not run
+    }
+    return { run: false, reason: reason ?? USER_DENIED };
   }
 
   // The loop pushes a message before the event that reports it

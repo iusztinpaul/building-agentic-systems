@@ -45,6 +45,7 @@ function setup() {
     submit: (text, alt) => calls.push(`${alt ? "alt" : "enter"}:${text}`),
     escape: () => calls.push("escape"),
     tab: () => calls.push("tab"),
+    toggleMode: () => calls.push("toggleMode"),
     interrupt: () => calls.push("interrupt"),
   };
   const input = new PromptInput(tui, on, [{ name: "help" }], "/tmp");
@@ -103,6 +104,17 @@ describe("PromptInput", () => {
     input.handleInput("\t");
 
     expect(calls).toEqual(["escape", "interrupt", "tab"]);
+  });
+
+  it("sends Shift+Tab to toggleMode(), with or without text, and keeps the text", () => {
+    const { input, calls, type } = setup();
+
+    input.handleInput("\x1b[Z");
+    type("half typed");
+    input.handleInput("\x1b[Z");
+
+    expect(calls).toEqual(["toggleMode", "toggleMode"]);
+    expect(input.editor.getText()).toBe("half typed");
   });
 
   it("leaves Tab to the editor when there is text", () => {

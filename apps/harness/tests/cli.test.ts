@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
-import type { Provider, StreamEvent } from "../src/provider/types.ts";
+import { type Provider, ProviderError, type StreamEvent } from "../src/provider/types.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import type { AgentEvent, ToolCall } from "../src/types.ts";
 import { fakeFetch, fixture, jsonResponse, sseResponse } from "./helpers/http.ts";
@@ -207,6 +207,8 @@ const tty: Stdin = { isTTY: true, isPipe: false, read: async () => "" };
 const textTurn = (text: string): StreamEvent[] => [{ type: "text_delta", text }, fakeDone(text)];
 const toolTurn = (...calls: ToolCall[]): StreamEvent[] => [fakeDone("", calls)];
 const bashCall = (id: string): ToolCall => ({ id, name: "bash", arguments: { command: "true" } });
+// The auto-mode classifier's answer for a harmless call.
+const safe = { dangerous: false, risk: "low", reason: "cwd-scoped and asked for" };
 
 describe("resolveMode", () => {
   it.each([
@@ -237,6 +239,8 @@ describe("resolveMode", () => {
         json: false,
         resume: undefined,
         continue: false,
+        permissionMode: undefined,
+        onBlocked: "stop",
       },
     });
     expect(
@@ -328,7 +332,10 @@ describe("main (headless)", () => {
   });
 
   it("emits JSONL with --json: every line parses to an AgentEvent", async () => {
-    const fake = new FakeProvider({ streams: [toolTurn(bashCall("c1")), textTurn("done")] });
+    const fake = new FakeProvider({
+      streams: [toolTurn(bashCall("c1")), textTurn("done")],
+      answers: [safe],
+    });
 
     const result = await run(["go", "--json", "--cwd", home], fake);
 
@@ -339,6 +346,7 @@ describe("main (headless)", () => {
       "turn_start",
       "text_delta",
       "tool_call",
+      "permission",
       "tool_result",
       "turn_end",
       "agent_end",
@@ -349,6 +357,7 @@ describe("main (headless)", () => {
       "turn_start",
       "turn_end",
       "tool_call",
+      "permission",
       "tool_result",
       "turn_start",
       "text_delta",
@@ -367,7 +376,10 @@ describe("main (headless)", () => {
         name: "bash",
         arguments: { command: `sleep 30 & echo $! > '${pidFile}'; wait` },
       };
-      const fake = new FakeProvider({ streams: [toolTurn(sleep), textTurn("never")] });
+      const fake = new FakeProvider({
+        streams: [toolTurn(sleep), textTurn("never")],
+        answers: [safe],
+      });
       const signals = new EventEmitter();
       const started = Date.now();
 
@@ -391,6 +403,7 @@ describe("main (headless)", () => {
   it("exits 1 on max_turns", async () => {
     const fake = new FakeProvider({
       streams: [toolTurn(bashCall("c1")), toolTurn(bashCall("c2"))],
+      answers: [safe],
     });
 
     const result = await run(["loop", "--max-turns", "1", "--cwd", home], fake);
@@ -427,6 +440,7 @@ describe("main (headless)", () => {
         }),
         textTurn("Created notes.md with two bullets."),
       ],
+      answers: [safe, safe],
     });
 
     const result = await run(["--json", "--trust", "--cwd", cwd], fake, {
@@ -690,5 +704,255 @@ describe("main (TUI)", () => {
     expect(t.terminal.written.join("")).not.toContain("Trust this directory?");
     t.terminal.send("\x03");
     expect((await t.result).code).toBe(0);
+  });
+});
+
+describe("main (permissions)", () => {
+  const work = () => {
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    return cwd;
+  };
+  const writeA: ToolCall = { id: "w", name: "write", arguments: { path: "a.md", content: "a" } };
+  const events = (stdout: string) =>
+    stdout
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as AgentEvent);
+  const sessionEntries = (): Entry[] => {
+    const dir = join(home, "sessions", readdirSync(join(home, "sessions"))[0] ?? "");
+    const [file = ""] = readdirSync(dir);
+    return readFileSync(join(dir, file), "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Entry);
+  };
+
+  it("headless defaults to auto: a write is classified on the decision model, then runs", async () => {
+    const cwd = work();
+    // settings.permissions.mode is the TUI's: headless ignores it.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ permissions: { mode: "ask" } }));
+    const fake = new FakeProvider({
+      streams: [toolTurn(writeA), textTurn("done")],
+      answers: [safe],
+    });
+
+    const result = await run(["write a.md", "--cwd", cwd], fake);
+
+    expect(result.code).toBe(0);
+    expect(readFileSync(join(cwd, "a.md"), "utf8")).toBe("a");
+    expect(fake.structuredRequests.map((r) => [r.name, r.model])).toEqual([
+      ["danger_check", "anthropic/claude-haiku-5.5"],
+    ]);
+  });
+
+  it("--permission-mode ask headless: the first write is denied (headless), blocked, exit 2", async () => {
+    const cwd = work();
+    const fake = new FakeProvider({ streams: [toolTurn(writeA), textTurn("never")] });
+
+    const result = await run(["write a.md", "--cwd", cwd, "--permission-mode", "ask"], fake);
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("run ended: blocked\n");
+    expect(existsSync(join(cwd, "a.md"))).toBe(false);
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.structuredRequests).toEqual([]);
+    expect(sessionEntries().filter((e) => e.type === "permission")).toMatchObject([
+      { type: "permission", call: writeA, decision: "deny", source: "headless" },
+    ]);
+  });
+
+  it("--on-blocked continue: the model receives Blocked: … and the run exits 0", async () => {
+    const cwd = work();
+    const fake = new FakeProvider({
+      streams: [toolTurn(writeA), textTurn("I was blocked; here is the text instead.")],
+    });
+
+    const result = await run(
+      ["write a.md", "--cwd", cwd, "--permission-mode", "ask", "--on-blocked", "continue"],
+      fake,
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe("I was blocked; here is the text instead.\n");
+    expect(fake.requests[1]?.context.messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: "Blocked: needs approval (permission mode ask) and a headless run cannot prompt",
+      isError: true,
+    });
+  });
+
+  it("--permission-mode auto with a classifier answering dangerous: true exits 2", async () => {
+    const cwd = work();
+    const push: ToolCall = { id: "p", name: "bash", arguments: { command: "git push --force" } };
+    const fake = new FakeProvider({
+      streams: [toolTurn(push), textTurn("never")],
+      answers: [{ dangerous: true, risk: "high", reason: "force-push rewrites remote history" }],
+    });
+
+    const result = await run(
+      ["clean up and push", "--cwd", cwd, "--permission-mode", "auto"],
+      fake,
+    );
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("! Blocked: dangerous: force-push rewrites remote history\n");
+    expect(sessionEntries().filter((e) => e.type === "permission")).toMatchObject([
+      {
+        decision: "deny",
+        source: "headless",
+        reason: "dangerous: force-push rewrites remote history",
+      },
+    ]);
+  });
+
+  it("the classifier is down: the call is treated as dangerous, exit 2 — never a silent allow", async () => {
+    const cwd = work();
+    const fake = new FakeProvider({
+      streams: [toolTurn(writeA), textTurn("never")],
+      answers: [new ProviderError("network_error", "fetch failed")],
+    });
+
+    const result = await run(["write a.md", "--cwd", cwd], fake);
+
+    expect(result.code).toBe(2);
+    expect(existsSync(join(cwd, "a.md"))).toBe(false);
+  });
+
+  it("--json shows each permission event before the matching tool_result", async () => {
+    const cwd = work();
+    const fake = new FakeProvider({
+      streams: [
+        toolTurn({ id: "r", name: "read", arguments: { path: "." } }, writeA),
+        textTurn("done"),
+      ],
+      answers: [safe],
+    });
+
+    const result = await run(["go", "--json", "--cwd", cwd], fake);
+
+    expect(result.code).toBe(0);
+    const seq = events(result.stdout).flatMap((e) =>
+      e.type === "permission"
+        ? [`permission:${e.call.id}:${e.source}`]
+        : e.type === "tool_result"
+          ? [`result:${e.callId}`]
+          : [],
+    );
+    expect(seq).toEqual([
+      "permission:r:readOnly",
+      "result:r",
+      "permission:w:classifier",
+      "result:w",
+    ]);
+  });
+
+  it.each([
+    [["--permission-mode", "bypass"], "--permission-mode must be ask or auto: bypass"],
+    [["--on-blocked", "ignore"], "--on-blocked must be stop or continue: ignore"],
+  ])("exits 1 with usage on %j", async (flags, message) => {
+    const result = await run(["hi", ...flags], new FakeProvider());
+
+    expect(result.code).toBe(1);
+    expect(result.stderr.startsWith(`${message}\nusage: `)).toBe(true);
+  });
+
+  it("parses --permission-mode and --on-blocked", () => {
+    expect(
+      resolveMode(["x", "--permission-mode", "ask", "--on-blocked", "continue"], true, false),
+    ).toMatchObject({ args: { permissionMode: "ask", onBlocked: "continue" } });
+  });
+});
+
+describe("main (TUI permissions)", () => {
+  const STATUS = " · 0 MCP · ";
+  async function shown(terminal: FakeTerminal, text: string): Promise<void> {
+    for (let i = 0; i < 100 && !terminal.written.join("").includes(text); i++) await settle(20);
+    expect(terminal.written.join("")).toContain(text);
+  }
+  async function tui(fake: FakeProvider, argv: string[] = []) {
+    const cwd = join(home, "proj");
+    mkdirSync(cwd, { recursive: true });
+    const terminal = new FakeTerminal();
+    const result = run(["--cwd", cwd, "--trust", ...argv], fake, { stdin: tty, terminal });
+    await shown(terminal, STATUS);
+    return { cwd, terminal, result };
+  }
+  const writeCall = (id: string, path: string): ToolCall => ({
+    id,
+    name: "write",
+    arguments: { path, content: id },
+  });
+
+  it("defaults to ask: a write shows the prompt with its path relative to cwd; n blocks it", async () => {
+    const fake = new FakeProvider({
+      streams: [toolTurn(writeCall("w", "docs/a.md")), textTurn("It was blocked.")],
+    });
+    const t = await tui(fake);
+    expect(t.terminal.written.join("")).toContain(" · ask · ");
+
+    t.terminal.type("write it");
+    t.terminal.send("\r");
+    await shown(t.terminal, "Allow write?");
+    t.terminal.send("n");
+    await shown(t.terminal, "It was blocked.");
+    t.terminal.send("\x03");
+
+    expect((await t.result).code).toBe(0);
+    expect(t.terminal.written.join("")).toContain("docs/a.md");
+    expect(existsSync(join(t.cwd, "docs", "a.md"))).toBe(false);
+    expect(fake.requests[1]?.context.messages.at(-1)).toMatchObject({
+      content: "Blocked: denied by the user",
+    });
+    expect(fake.structuredRequests).toEqual([]);
+  });
+
+  it.each([
+    ["Shift+Tab", (t: FakeTerminal) => t.send("\x1b[Z")],
+    [
+      "/mode auto",
+      (t: FakeTerminal) => {
+        t.type("/mode auto");
+        t.send("\r");
+      },
+    ],
+  ])(
+    "%s switches to auto: the status bar says so, the next write is classified, settings.json is untouched",
+    async (_name, toAuto) => {
+      const settingsFile = join(home, "settings.json");
+      const settings = `${JSON.stringify({ permissions: { mode: "ask" } }, null, 2)}\n`;
+      writeFileSync(settingsFile, settings);
+      const fake = new FakeProvider({
+        streams: [toolTurn(writeCall("w", "a.md")), textTurn("written")],
+        answers: [safe],
+      });
+      const t = await tui(fake);
+
+      toAuto(t.terminal);
+      await shown(t.terminal, " · auto · ");
+      t.terminal.type("write it");
+      t.terminal.send("\r");
+      await shown(t.terminal, "written");
+      t.terminal.send("\x03");
+      await t.result;
+
+      expect(t.terminal.written.join("")).not.toContain("Allow write?");
+      expect(fake.structuredRequests).toHaveLength(1);
+      expect(readFileSync(join(t.cwd, "a.md"), "utf8")).toBe("w");
+      expect(readFileSync(settingsFile, "utf8")).toBe(settings);
+    },
+  );
+
+  it("starts in settings.permissions.mode, and --permission-mode overrides it", async () => {
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ permissions: { mode: "auto" } }));
+    const fromSettings = await tui(new FakeProvider());
+    expect(fromSettings.terminal.written.join("")).toContain(" · auto · ");
+    fromSettings.terminal.send("\x03");
+    await fromSettings.result;
+
+    const fromFlag = await tui(new FakeProvider(), ["--permission-mode", "ask"]);
+    expect(fromFlag.terminal.written.join("")).toContain(" · ask · ");
+    fromFlag.terminal.send("\x03");
+    await fromFlag.result;
   });
 });

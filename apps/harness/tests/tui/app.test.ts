@@ -80,7 +80,7 @@ async function start(provider: Provider, o: Partial<SessionOptions> & { askTrust
     terminal,
     cwd,
     askTrust: o.askTrust ?? false,
-    open: async (trust) => {
+    open: async (trust, prompter) => {
       opened.push(trust);
       session = await AgentSession.create({
         provider,
@@ -91,6 +91,7 @@ async function start(provider: Provider, o: Partial<SessionOptions> & { askTrust
         trusted: trust,
         contextMaxChars: 40_000,
         env: { TREE_AGENT_HOME: home },
+        prompter,
         ...o,
       });
       session.on((e) => events.push(e));
@@ -214,6 +215,8 @@ describe("runTui", () => {
     );
     t.terminal.type("run it");
     t.terminal.send("\r");
+    await until(() => t.screen().includes("Allow bash?"));
+    t.terminal.send("y");
     await until(() => t.screen().includes("done"));
     expect(t.screen()).toContain("one (+1 lines, Tab)");
 
@@ -221,6 +224,76 @@ describe("runTui", () => {
     await settle();
 
     expect(t.screen()).toContain("two");
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("s on bash approves bash for the session: the next bash call is not prompted", async () => {
+    const bash = (id: string, command: string) => ({ id, name: "bash", arguments: { command } });
+    const t = await start(
+      new FakeProvider({
+        streams: [
+          [fakeDone("", [bash("b1", "echo one")])],
+          [fakeDone("", [bash("b2", "echo two")])],
+          [fakeDone("done")],
+        ],
+      }),
+    );
+    t.terminal.type("run");
+    t.terminal.send("\r");
+    await until(() => t.screen().includes("Allow bash?"));
+    expect(t.screen()).toContain("echo one");
+
+    t.terminal.send("s");
+    await until(() => t.screen().includes("done"));
+
+    const permissions = t.events.flatMap((e) =>
+      e.type === "permission" ? [`${e.call.id}:${e.decision}:${e.source}`] : [],
+    );
+    expect(permissions).toEqual(["b1:allow:user", "b2:allow:session"]);
+    expect(t.screen().join("\n")).not.toContain("Allow bash?");
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("toggles ask/auto on Shift+Tab; the status bar shows the live mode", async () => {
+    const t = await start(new FakeProvider());
+    expect(t.screen().at(-1)).toContain(" · ask · ");
+
+    t.terminal.send("\x1b[Z");
+    await until(() => t.screen().at(-1)?.includes(" · auto · ") ?? false);
+    expect(t.session().permissionMode).toBe("auto");
+    expect(t.screen()).toContain("permission mode: auto");
+
+    t.terminal.send("\x1b[Z");
+    await until(() => t.screen().at(-1)?.includes(" · ask · ") ?? false);
+    t.terminal.send("\x03");
+    await t.exit;
+  });
+
+  it("shows the classifier's reason in the prompt in auto, and n tells the model it was blocked", async () => {
+    const edit = {
+      id: "e",
+      name: "edit",
+      arguments: { path: "~/.zshrc", oldText: "a", newText: "b" },
+    };
+    const fake = new FakeProvider({
+      streams: [[fakeDone("", [edit])], [fakeDone("ok, I will not")]],
+      answers: [{ dangerous: true, risk: "high", reason: "edits a shell rc file" }],
+    });
+    const t = await start(fake, { permissionMode: "auto" });
+    t.terminal.type("add an alias");
+    t.terminal.send("\r");
+    await until(() => t.screen().includes("Allow edit?"));
+
+    expect(t.screen()).toContain("classifier: edits a shell rc file");
+    expect(t.screen()).toContain("~/.zshrc");
+    t.terminal.send("n");
+    await until(() => t.screen().includes("ok, I will not"));
+    expect(fake.requests[1]?.context.messages.at(-1)).toMatchObject({
+      content: "Blocked: denied by the user",
+      isError: true,
+    });
     t.terminal.send("\x03");
     await t.exit;
   });
