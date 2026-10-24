@@ -22,10 +22,10 @@ install: # Install dependencies via bun.
 	bun install
 
 dev: # Watch mode — re-runs on save. Interactive Ink mode (requires a TTY).
-	bun --watch run src/index.tsx $(ARGS)
+	bun --watch run src/index.ts $(ARGS)
 
 run: # Run tree. Pass PROMPT="..." for one-shot; ARGS="..." for flags like --resume, --continue.
-	bun run src/index.tsx $(ARGS) $(if $(PROMPT),--print "$(PROMPT)",)
+	bun run src/index.ts $(ARGS) $(if $(PROMPT),--print "$(PROMPT)",)
 
 typecheck: # Run the TypeScript compiler in type-check-only mode.
 	bun tsc --noEmit
@@ -49,7 +49,7 @@ lint-check: # Check lint + format + organize-imports via Biome (no writes).
 	bunx biome check src tests
 
 build: # Compile to a standalone binary at dist/tree.
-	bun build src/index.tsx --compile --outfile dist/tree
+	bun build src/index.ts --compile --outfile dist/tree
 
 clean: # Remove build artifacts and installed deps.
 	rm -rf dist node_modules
