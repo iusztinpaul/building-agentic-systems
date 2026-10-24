@@ -11,6 +11,8 @@ repos:
     hooks:
       - id: prettier
         types_or: [yaml, json5]
+        # pnpm owns its lockfile's formatting; prettier rewriting it would churn on every `pnpm add`.
+        exclude: ^apps/harness/pnpm-lock\.yaml$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version. Keep in sync with the ruff dev dep in apps/memory/pyproject.toml
@@ -23,13 +25,14 @@ repos:
       # Run the formatter.
       - id: ruff-format
 
-  # Harness (TypeScript/Bun) — Biome covers format + lint + organize-imports in one pass.
-  # Uses the harness's local biome.json via `bunx biome`; requires Bun to be installed locally.
+  # Harness (TypeScript) — Biome covers format + lint + organize-imports in one pass.
+  # Uses the harness's local biome.json via `pnpm exec biome`; needs Node >= 22 with
+  # corepack/pnpm (`corepack enable pnpm`) and `make harness-install` run once.
   - repo: local
     hooks:
       - id: biome-check-harness
         name: biome check (harness)
         language: system
-        entry: bash -c 'cd apps/harness && bunx biome check --write src tests'
+        entry: bash -c 'cd apps/harness && pnpm exec biome check --write src tests'
         pass_filenames: false
         files: ^apps/harness/.*\.(ts|tsx|js|jsx|json)$

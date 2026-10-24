@@ -1,10 +1,11 @@
-# Tree — Coding-Agent Harness
+# tree-agent — Coding-Agent Harness
 
 The agent half of **Tree: Your Rooted Personal Assistant**, pairing with the `tree-memory` MCP server in `apps/memory/`.
 
-The harness is being rewritten from scratch. Only the scaffolding is kept: the Bun + TypeScript project (`package.json`, `tsconfig.json`, `biome.json`), the per-app `Makefile` behind the root `make harness-*` targets, a stub entry at `src/index.ts`, and a smoke test under `tests/unit/` so the CI and pre-commit wiring stay green.
+`tree-agent` is being rewritten as a light pi clone on Node ≥ 22, TypeScript, `pnpm`, `vitest` and Biome. Today it is a project skeleton: `src/cli.ts` prints a usage line and exits 1.
 
 ```bash
+corepack enable pnpm   # once; if `corepack --version` fails, first run `npm i -g corepack`
 make harness-install
 make harness-run
 make harness-tests

@@ -34,7 +34,7 @@ Before writing code against any dependency or external service, use the `tech-do
 
 # Running Commands
 
-We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run everything with `make ...`. `uv` manages the `apps/memory` Python project (`uv run <command>`); `bun` manages the `apps/harness` TypeScript project (`bun run <command>`).
+We manage all core commands through GNU Make (see [`Makefile`](Makefile)); run everything with `make ...`. `uv` manages the `apps/memory` Python project (`uv run <command>`); `pnpm` (via `corepack enable pnpm`, Node ≥ 22) manages the `apps/harness` TypeScript project (`pnpm run <command>` / `pnpm exec <tool>`).
 
 - `make help` — list all root targets.
 
@@ -52,7 +52,7 @@ Run `uv`-managed CLIs from the repo root with `uv --directory apps/memory run ..
 
 # Testing & QA
 
-Always call the `/squid-testing-python` skill from the Squid plugin when writing tests.
+Always call the `/squid-testing-python` skill from the Squid plugin when writing Python tests (`apps/memory`). It does not apply to the harness: `apps/harness/tests/` holds one `vitest` file per module, per `docs/notes/tree-agent-harness-spec.md` §17.
 
 **Always run tests via the `make memory-*` targets, not a bare `uv run pytest`.** The Makefile does `include .env`/`export`, so credentials like `VOYAGE_API_KEY` are present; a bare `uv run pytest` does NOT load `.env`, so live-model tests fail with "Voyage API key is required" — which looks like real breakage but is just a missing-env artifact of the wrong invocation.
 
@@ -66,9 +66,11 @@ After every commit to git:
 2. Pre-commit: `make pre-commit`
 3. Tests: `make memory-tests`
 
+For a harness commit run instead: `make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests && make pre-commit` — the Makefile exports `.env`, so the live OpenRouter tests run; a bare `pnpm vitest` sees no `OPENROUTER_API_KEY`, silently skips them, and a broken provider looks green. Good: `make harness-tests`. Bad: `cd apps/harness && pnpm vitest run`.
+
 When a feature is done and ready for PR, ALWAYS run:
 
-4. Run and verify the code end-to-end with the `run-pipelines-e2e` skill (`.agents/skills/run-pipelines-e2e/SKILL.md`), adapted to the changes you made.
+4. Run and verify the code end-to-end with the `run-pipelines-e2e` skill (`.agents/skills/run-pipelines-e2e/SKILL.md`), adapted to the changes you made. For the harness, e2e is a headless `tree-agent "<prompt>"` run against `tree-memory-local` (`make local-start`) with a live `OPENROUTER_API_KEY`, recorded as a `[HUMAN]` acceptance criterion in the task.
 
 NEITHER app has an integration test suite (deleted deliberately — too slow for feedback loops); each `make <app>-tests` target runs the unit suite, and e2e verification happens by running the real pipelines instead.
 

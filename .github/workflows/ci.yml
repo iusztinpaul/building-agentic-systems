@@ -147,23 +147,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Install pnpm
+        # Reads the `packageManager` pin from the harness package.json (not
+        # the repo root, which has none). Must run before setup-node so its
+        # pnpm cache can resolve the store path.
+        uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          package_json_file: apps/harness/package.json
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/harness/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
         working-directory: apps/harness
 
       - name: Biome check (format + lint + organize-imports)
-        run: bunx biome check src tests
+        run: pnpm exec biome check src tests
         working-directory: apps/harness
 
       - name: Typecheck
-        run: bun tsc --noEmit
+        run: pnpm exec tsc --noEmit
         working-directory: apps/harness
 
       - name: Tests
-        run: bun test
+        run: pnpm exec vitest run
         working-directory: apps/harness
