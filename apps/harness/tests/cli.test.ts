@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
+import { startMcp } from "../src/mcp/client.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
 import { type Provider, ProviderError, type StreamEvent } from "../src/provider/types.ts";
@@ -51,12 +52,21 @@ interface RunOptions {
   signals?: CliDeps["signals"];
   terminal?: FakeTerminal;
   discoverSkills?: CliDeps["discoverSkills"];
+  startMcp?: CliDeps["startMcp"];
 }
 
 async function run(
   argv: string[],
   provider: Provider | (() => Provider),
-  { key = "test-key", stdin, env = {}, signals, terminal, discoverSkills }: RunOptions = {},
+  {
+    key = "test-key",
+    stdin,
+    env = {},
+    signals,
+    terminal,
+    discoverSkills,
+    startMcp,
+  }: RunOptions = {},
 ) {
   const out: string[] = [];
   const err: string[] = [];
@@ -72,6 +82,7 @@ async function run(
     signals,
     terminal,
     discoverSkills,
+    startMcp,
     stdout: { write: (t: string) => out.push(t) },
     stderr: { write: (t: string) => err.push(t) },
     createProvider: (apiKey) => {
@@ -251,10 +262,14 @@ describe("resolveMode", () => {
         permissionMode: undefined,
         onBlocked: "stop",
         skills: true,
+        mcp: true,
       },
     });
     expect(resolveMode(["x", "--no-skills"], true, false)).toMatchObject({
       args: { skills: false },
+    });
+    expect(resolveMode(["x", "--no-mcp"], true, false)).toMatchObject({
+      args: { mcp: false, skills: true },
     });
     expect(
       resolveMode(
@@ -1143,5 +1158,103 @@ describe("main (TUI permissions)", () => {
     expect(fromFlag.terminal.written.join("")).toContain(" · ask · ");
     fromFlag.terminal.send("\x03");
     await fromFlag.result;
+  });
+});
+
+describe("main (mcp)", () => {
+  const SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.mjs", import.meta.url));
+  const marker = () => join(home, "mcp-pids");
+  const pids = () =>
+    existsSync(marker()) ? readFileSync(marker(), "utf8").trim().split("\n").map(Number) : [];
+  const fakeServer = () => ({
+    command: process.execPath,
+    args: [SERVER],
+    env: { FAKE_MCP_MARKER: marker() },
+  });
+  const writeMcp = (file: string, value: unknown) => {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
+  };
+  // A scratch project dir next to the fake home.
+  const project = () => {
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    return cwd;
+  };
+
+  it("starts the configured stdio server at startup and ends it when main returns", async () => {
+    writeMcp(join(home, "mcp.json"), { mcpServers: { fake: fakeServer() } });
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", project()], fake);
+
+    expect(result.code).toBe(0);
+    expect(pids()).toHaveLength(1);
+    expect(await gone(pids()[0] as number)).toBe(true);
+    // The child's stderr ("fake-mcp-server: ready") is log-only.
+    expect(result.stdout).toBe("ok\n");
+    expect(result.stderr).toBe("");
+  });
+
+  it("--no-mcp: no mcp.json read (an invalid one passes), no child spawned, no startMcp call", async () => {
+    writeMcp(join(home, "mcp.json"), "{ not json");
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), { mcpServers: { fake: fakeServer() } });
+    const spy = vi.fn(startMcp);
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
+
+    const off = await run(["hi", "--cwd", cwd, "--trust", "--no-mcp"], fake, { startMcp: spy });
+
+    expect(off).toMatchObject({ code: 0, stderr: "" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(pids()).toEqual([]);
+
+    const on = await run(["hi", "--cwd", cwd, "--trust"], fake, { startMcp: spy });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(on.code).toBe(1);
+    expect(on.stderr).toContain(`${join(home, "mcp.json")}: invalid JSON`);
+    expect(pids()).toEqual([]);
+  });
+
+  it("a url without a scheme: one line naming the server and the key, exit 1", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), {
+      mcpServers: { "tree-memory": { url: "tree-memory.fastmcp.app/mcp" } },
+    });
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--trust"], fake);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe(
+      `${join(cwd, ".tree-agent", "mcp.json")}: server "tree-memory": url must be a valid URL\n`,
+    );
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("an untrusted cwd reads the user mcp.json only", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), {
+      mcpServers: { "tree-memory": { url: "tree-memory.fastmcp.app/mcp" } },
+    });
+    writeMcp(join(cwd, ".mcp.json"), "{ Claude Code's file, never parsed");
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd], fake);
+
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+  });
+
+  it("a trusted cwd starts the project server, and .mcp.json is never parsed", async () => {
+    const cwd = project();
+    writeMcp(join(cwd, ".tree-agent", "mcp.json"), { mcpServers: { fake: fakeServer() } });
+    writeMcp(join(cwd, ".mcp.json"), "{ Claude Code's file, never parsed");
+    const fake = new FakeProvider({ streams: [textTurn("ok")] });
+
+    const result = await run(["hi", "--cwd", cwd, "--trust"], fake);
+
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(pids()).toHaveLength(1);
   });
 });

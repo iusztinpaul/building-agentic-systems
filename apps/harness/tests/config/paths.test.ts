@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { userPaths } from "../../src/config/paths.ts";
+import { projectPaths, userPaths } from "../../src/config/paths.ts";
 
 describe("userPaths", () => {
   it("resolves every path under TREE_AGENT_HOME when it is set", () => {
@@ -24,5 +24,14 @@ describe("userPaths", () => {
 
   it("makes a relative TREE_AGENT_HOME absolute", () => {
     expect(userPaths({ TREE_AGENT_HOME: "rel/home" }).home).toBe(join(process.cwd(), "rel/home"));
+  });
+});
+
+describe("projectPaths", () => {
+  it("puts settings.json and mcp.json under <cwd>/.tree-agent, never <cwd>/.mcp.json", () => {
+    expect(projectPaths("/w")).toEqual({
+      settings: "/w/.tree-agent/settings.json",
+      mcp: "/w/.tree-agent/mcp.json",
+    });
   });
 });

@@ -34,7 +34,15 @@ export function userPaths(env: NodeJS.ProcessEnv = process.env): UserPaths {
 }
 
 // Project-level config under <cwd>/.tree-agent, read only when the
-// cwd is trusted (spec §16).
-export function projectPaths(cwd: string): { settings: string } {
-  return { settings: join(cwd, ".tree-agent", "settings.json") };
+// cwd is trusted (spec §16). Never <cwd>/.mcp.json: that is Claude
+// Code's file, with another schema and owner (ADR-016 §3).
+export function projectPaths(cwd: string): {
+  settings: string;
+  mcp: string;
+} {
+  const dir = join(cwd, ".tree-agent");
+  return {
+    settings: join(dir, "settings.json"),
+    mcp: join(dir, "mcp.json"),
+  };
 }

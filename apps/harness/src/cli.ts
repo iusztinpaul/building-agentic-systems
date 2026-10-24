@@ -18,6 +18,7 @@ import {
 } from "./config/settings.ts";
 import { isTrusted, trustDirectory } from "./config/trust.ts";
 import { type Out, runHeadless, type Signals } from "./headless/print.ts";
+import { type McpClient, type StartMcp, startMcp } from "./mcp/client.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
 import { AgentSession } from "./session.ts";
@@ -33,7 +34,8 @@ const USAGE = `usage: tree-agent [flags]              (TUI, needs a terminal)
        tree-agent [flags] "<prompt>"
        <command> | tree-agent [flags]   (line 1: prompt, rest: follow-ups)
 flags: --resume <id> | --continue  --model <id>  --cwd <dir>
-       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json  --no-skills
+       --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json
+       --no-skills  --no-mcp (no mcp.json read, no server started)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
        --on-blocked stop|continue (headless deny: exit 2, or go on)`;
 
@@ -49,6 +51,7 @@ export interface CliArgs {
   permissionMode?: PermissionMode;
   onBlocked: "stop" | "continue";
   skills: boolean; // false: --no-skills
+  mcp: boolean; // false: --no-mcp
 }
 
 export type Mode =
@@ -72,6 +75,7 @@ export interface CliDeps {
   // The provider seam: tests inject a FakeProvider here.
   createProvider?: (apiKey: string) => Provider;
   discoverSkills?: DiscoverSkills; // the skills walker; tests spy
+  startMcp?: StartMcp; // reads mcp.json, connects; tests spy
 }
 
 // Pure: which front end runs, from argv and what stdin is.
@@ -117,6 +121,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     [args.prompt = "", ...followUps] = lines;
   }
 
+  // Connected at startup, closed (children ended) when main returns.
+  const mcpClients: McpClient[] = [];
   try {
     const apiKey = requireApiKey(env);
     const cwd = resolve(args.cwd ?? process.cwd());
@@ -142,6 +148,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
       });
       const provider = (deps.createProvider ?? openRouter)(apiKey);
       await checkDecisionModel(provider, settings);
+      if (args.mcp) {
+        const start = deps.startMcp ?? startMcp;
+        mcpClients.push(
+          ...(await start({ env, cwd, trusted: projectTrusted })),
+        );
+      }
       const session = await AgentSession.create({
         provider,
         model: settings.model,
@@ -195,6 +207,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   } catch (err) {
     stderr.write(`${(err as Error).message}\n`);
     return 1;
+  } finally {
+    await Promise.all(mcpClients.map((client) => client.close()));
   }
 }
 
@@ -212,6 +226,7 @@ function parseCli(argv: string[]): CliArgs {
       "permission-mode": { type: "string" },
       "on-blocked": { type: "string", default: "stop" },
       "no-skills": { type: "boolean", default: false },
+      "no-mcp": { type: "boolean", default: false },
     },
     allowPositionals: true,
     strict: true,
@@ -247,6 +262,7 @@ function parseCli(argv: string[]): CliArgs {
     permissionMode: mode,
     onBlocked,
     skills: !values["no-skills"],
+    mcp: !values["no-mcp"],
   };
 }
 
