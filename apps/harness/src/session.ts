@@ -5,6 +5,8 @@
 // Every finalized message is appended to the session store as the
 // loop produces it, so an aborted or crashed run is on disk too.
 
+import type { LlmCallEvent } from "./codemode/llm.ts";
+import { DEFAULT_MODEL } from "./decision/decide.ts";
 import { log } from "./log.ts";
 import { BLOCKED, runLoop } from "./loop/agent-loop.ts";
 import type { GateResult, LoopHooks } from "./loop/hooks.ts";
@@ -76,7 +78,7 @@ export interface SessionOptions {
   // The configured MCP servers, their tools already in `tools`.
   mcpServers?: readonly McpServerInfo[];
   // Registers `codemode` (when a codemode tool exists) with this
-  // session's gate; absent: no codemode.
+  // session's gate, provider and cost; absent: no codemode.
   codemode?: CodemodeLimits & { tmpDir: string };
 
   now?: () => Date;
@@ -90,7 +92,7 @@ export interface SessionStatus {
   // estimator of task 212; undefined before the first answer.
   tokens: number | undefined;
   contextLength: number;
-  cost: number; // USD, usage × the model's pricing
+  cost: number; // USD, usage × pricing, llm() calls included
   mcpServers: number; // connected now
   activatedTools: number;
 }
@@ -116,6 +118,7 @@ export class AgentSession {
   #skillDiagnostics: string[] = [];
   #skillsListing = { text: "", dropped: [] as string[] };
   #run: AbortController | undefined;
+  #ended = false; // the run's agent_end is out: nothing follows it
   #mode: PermissionMode;
   // Per session, never persisted: cleared by clear().
   readonly #sessionAllow = new Set<string>();
@@ -140,8 +143,13 @@ export class AgentSession {
   static async create(o: SessionOptions): Promise<AgentSession> {
     const session = new AgentSession(o);
     if (o.codemode) {
-      const gate = (call: ToolCall) => session.#gate(call);
-      registerCodemode(o.tools, { ...o.codemode, gate });
+      registerCodemode(o.tools, {
+        ...o.codemode,
+        gate: (call) => session.#gate(call),
+        provider: o.provider,
+        decisionModel: o.decisionModel ?? DEFAULT_MODEL,
+        onLlmCall: (event, pricing) => session.#llmCall(event, pricing),
+      });
     }
     if (o.resume) await session.#restore(o.resume);
     session.#info = await o.provider.modelInfo(session.#model);
@@ -346,6 +354,7 @@ export class AgentSession {
     }
     const run = new AbortController();
     this.#run = run;
+    this.#ended = false;
     this.#steering.push({ role: "user", content: text });
     let reason: AgentEndReason = "error";
     const off = this.on((e) => {
@@ -462,6 +471,18 @@ export class AgentSession {
     return { run: false, reason: reason ?? USER_DENIED };
   }
 
+  // A script's llm() call: costed, saved (the cost survives a
+  // resume) and shown under its codemode card. Never gated. A call
+  // torn down by an abort can settle after agent_end: it is still
+  // costed and saved, but not emitted (agent_end is a run's last).
+  #llmCall(event: LlmCallEvent, pricing: ModelInfo["pricing"]): void {
+    if (event.usage) this.#cost += costOf(event.usage, pricing);
+    const { type, depth, model, usage } = event;
+    this.#persist();
+    this.#append({ type, depth, model, ...(usage && { usage }) });
+    if (!this.#ended) this.#emit(event);
+  }
+
   // tool_search activated tools: saved (restored by --resume) and
   // shown once, before the result that reports them.
   #announceActivation(): void {
@@ -480,6 +501,7 @@ export class AgentSession {
   // so saving here writes each one as soon as it is final, before
   // any listener sees the event.
   #emit(event: AgentEvent): void {
+    if (event.type === "agent_end") this.#ended = true;
     this.#persist();
     if (event.type === "turn_end" && event.message.usage) {
       this.#tokens = event.message.usage.inputTokens;

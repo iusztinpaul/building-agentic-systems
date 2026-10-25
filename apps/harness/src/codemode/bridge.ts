@@ -1,5 +1,5 @@
 // What a codemode script sees (spec §10.4–10.5): `tools.<name>()`,
-// `searchTools()` and `describeTool()`. Every `tools.x()` is a
+// `searchTools()`, `describeTool()` and, when given, `llm()`. Every `tools.x()` is a
 // ToolCall with origin "codemode" through the session's own gate
 // (ADR-016 §5: one permission path), then registry.execute; the
 // script gets `structured ?? content`. A deny rejects the promise;
@@ -24,6 +24,7 @@ export interface BridgeOptions {
   callId: string; // prefix of the inner calls' ids
   maxToolCalls: number;
   exclude: string; // codemode itself: never nested
+  llm?: AsyncHostFn; // llm.ts: never through the gate
 }
 
 export interface Bridge {
@@ -98,11 +99,22 @@ export function createBridge(o: BridgeOptions): Bridge {
   };
 
   return {
-    prelude: prelude([...byName.keys()]),
-    async: { call },
+    prelude: prelude([...byName.keys()]) + (o.llm ? LLM_PRELUDE : ""),
+    async: o.llm ? { call, llm: o.llm } : { call },
     sync: { searchTools, describeTool },
   };
 }
+
+// The answer is JSON: a string, or the parsed object for a schema.
+const LLM_PRELUDE = `
+const ask = host.llm;
+globalThis.llm = async (prompt, opts) => {
+  if (typeof prompt !== "string") {
+    throw new TypeError("llm(prompt): prompt must be a string");
+  }
+  return JSON.parse(await ask(JSON.stringify([prompt, opts === undefined ? {} : opts])));
+};
+`;
 
 // The script's globals, built in the VM from the host functions.
 function prelude(names: string[]): string {

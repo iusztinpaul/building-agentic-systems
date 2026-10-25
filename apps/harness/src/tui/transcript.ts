@@ -13,6 +13,7 @@ export type UserNote = "steer" | "follow-up";
 export class Transcript extends Container {
   readonly #cwd: string;
   readonly #cards = new Map<string, ToolCard>();
+  #codemode: ToolCard | undefined; // the running script's card
   #answer: Markdown | undefined; // the turn being streamed
   #text = "";
   #expanded = false;
@@ -81,7 +82,10 @@ export class Transcript extends Container {
           this.addNotice(`run ended: ${event.reason}`);
         }
         break;
-      case "llm_call": // rows under a codemode card: task 211
+      case "llm_call": // the loop runs one call at a time
+        if (this.#codemode && !this.#codemode.done) {
+          this.#codemode.addLlmCall(event);
+        }
         break;
     }
   }
@@ -111,6 +115,7 @@ export class Transcript extends Container {
   override clear(): void {
     super.clear();
     this.#cards.clear();
+    this.#codemode = undefined;
     this.#answer = undefined;
   }
 
@@ -124,6 +129,7 @@ export class Transcript extends Container {
     const card = new ToolCard(call, this.#cwd);
     card.expanded = this.#expanded;
     this.#cards.set(call.id, card);
+    if (call.name === "codemode") this.#codemode = card;
     this.addChild(card);
   }
 }

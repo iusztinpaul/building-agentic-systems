@@ -56,6 +56,38 @@ describe("Transcript", () => {
     expect(screen(t)).toEqual(["partial", "(aborted)"]);
   });
 
+  it("nests llm_call rows under the running codemode card only", () => {
+    const t = new Transcript("/repo");
+    const cm = {
+      id: "c1",
+      name: "codemode",
+      arguments: { script: "return 1", description: "map" },
+    };
+    const llm = (model: string): AgentEvent => ({
+      type: "llm_call",
+      depth: 1,
+      model,
+      usage: { inputTokens: 10, outputTokens: 2 },
+    });
+    play(t, [
+      llm("before/any-card"), // no card: dropped
+      { type: "tool_call", call: cm },
+      llm("a/m"),
+      llm("b/m"),
+      { type: "tool_result", callId: "c1", content: "1", isError: false },
+      llm("after/result"), // the card is done: dropped
+    ]);
+    t.toggleToolResults();
+
+    expect(screen(t)).toEqual([
+      "✓ codemode map",
+      "return 1",
+      "llm depth 1 · a/m · 10 in / 2 out",
+      "llm depth 1 · b/m · 10 in / 2 out",
+      "1",
+    ]);
+  });
+
   it("puts a card per tool call and fills in its result", () => {
     const t = new Transcript("/repo");
     const call = { id: "c1", name: "read", arguments: { path: "/repo/a.md" } };

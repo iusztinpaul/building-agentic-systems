@@ -68,6 +68,35 @@ describe("ToolCard", () => {
     ]);
   });
 
+  it("nests one row per llm() call under a codemode card, collapsed like the script", () => {
+    const card = new ToolCard(
+      call("codemode", { script: "return 1", description: "map-reduce" }),
+      "/r",
+    );
+    card.addLlmCall({
+      type: "llm_call",
+      depth: 1,
+      model: "anthropic/claude-haiku-5.5",
+      usage: { inputTokens: 1_234, outputTokens: 300 },
+    });
+    card.addLlmCall({ type: "llm_call", depth: 2, model: "x/m" });
+    expect(plain(card.render(80))).toEqual([
+      " … codemode map-reduce",
+      "    return 1",
+      "    llm depth 1 · anthropic/claude-haiku-5.5 · 1.2k in / 300 out (+1 lines, Tab)",
+    ]);
+
+    card.expanded = true;
+    card.setResult("1", false);
+    expect(plain(card.render(80))).toEqual([
+      " ✓ codemode map-reduce",
+      "    return 1",
+      "    llm depth 1 · anthropic/claude-haiku-5.5 · 1.2k in / 300 out",
+      "    llm depth 2 · x/m · no usage",
+      "    1",
+    ]);
+  });
+
   it("marks an error result", () => {
     const card = new ToolCard(call("bash", { command: "false" }), "/r");
     card.setResult("Command exited with code 1", true);

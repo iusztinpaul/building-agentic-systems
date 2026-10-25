@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { Settings } from "../src/config/settings.ts";
 import { type RegistrableClient, registerMcpTools } from "../src/mcp/register.ts";
-import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
-import type { Provider, StreamEvent } from "../src/provider/types.ts";
+import { FakeProvider, type FakeScript, fakeDone, fakeModel } from "../src/provider/fake.ts";
+import type { Provider, StreamEvent, TextRequest } from "../src/provider/types.ts";
 import { AgentSession, type SessionOptions } from "../src/session.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import { discoverSkills } from "../src/skills/skills.ts";
@@ -34,13 +35,14 @@ const approveAll: PermissionPrompter = { ask: async () => "once" };
 async function setup(
   streams: StreamEvent[][],
   o: Partial<SessionOptions> = {},
-  answers: unknown[] = [], // the classifier's, in auto
+  answers: unknown[] = [], // the classifier's, in auto; llm()'s schema answers
+  more: Pick<FakeScript, "texts" | "models"> = {}, // llm() answers, prices
 ) {
   const home = join(root(), "home");
   const cwd = join(root(), "repo", "sub");
   mkdirSync(home, { recursive: true });
   mkdirSync(cwd, { recursive: true });
-  const fake = new FakeProvider({ streams, answers });
+  const fake = new FakeProvider({ streams, answers, ...more });
   const env = { TREE_AGENT_HOME: home };
   const session = await AgentSession.create({
     provider: fake,
@@ -1250,6 +1252,7 @@ describe("AgentSession with codemode", () => {
     maxToolCalls: 50,
     outputMaxBytes: 20_000,
     concurrency: 4,
+    llm: Settings.parse({}).codemode.llm,
   };
   const codemode = () => ({ ...LIMITS, tmpDir: join(root(), "home", "tmp") });
   // A registry with the built-ins and one codemode-exposed MCP tool.
@@ -1563,5 +1566,295 @@ describe("AgentSession with codemode", () => {
     );
     expect(asked).toEqual(["codemode", "mcp__tree_memory_local__scrape_web"]);
     expect(toolResult(t.session.messages)).toEqual(['"scrape_web ran"']);
+  });
+
+  // spec §10.6: pull 40 hits into the sandbox, map with llm(), reduce with a schema.
+  const WORKED_EXAMPLE = `
+    const hits = await tools.mcp__tree_memory_local__search_memory({
+      query: "pricing decisions", limit: 40 });
+    const facts = await Promise.all(hits.map(h => llm(
+      \`Extract pricing facts as bullets:\\n\${h.text}\`)));
+    const answer = await llm(
+      \`Merge into one list, dedupe:\\n\${facts.join("\\n")}\`,
+      { schema: { type: "object", properties: {
+          facts: { type: "array", items: { type: "string" } } },
+        required: ["facts"] } });
+    return answer.facts;`;
+  const DECISION = "anthropic/claude-haiku-5.5"; // the settings default
+  const PRICES = [
+    fakeModel("test/model", { pricing: { prompt: 0.000003, completion: 0.000015 } }),
+    fakeModel(DECISION, { pricing: { prompt: 0.000001, completion: 0.000002 } }),
+  ];
+  const withHits = () => {
+    const hits = Array.from({ length: 40 }, (_, i) => ({ text: `HIT-${i}: pricing note ${i}` }));
+    const server = memoryLike();
+    return withMcp({
+      ...server,
+      // read-only, as the real search_memory declares itself
+      tools: server.tools.map((tool) => ({ ...tool, annotations: { readOnlyHint: true } })),
+      callTool: async () => ({
+        content: [{ type: "text", text: JSON.stringify(hits) }],
+        isError: false,
+      }),
+    });
+  };
+  const workedExample = async (o: Partial<SessionOptions> = {}) => {
+    const asked: string[] = [];
+    const t = await setup(
+      [toolTurn(script(WORKED_EXAMPLE)), textTurn("Two facts.")],
+      {
+        ...withHits(),
+        // 41 calls: past the default maxCalls (16), as the spec's example is
+        codemode: { ...codemode(), llm: { ...LIMITS.llm, maxCalls: 41 } },
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.name);
+            return "once";
+          },
+        },
+        ...o,
+      },
+      [{ facts: ["Pro is $5", "Team is $20"] }],
+      { texts: Array.from({ length: 40 }, (_, i) => `- fact ${i}`), models: PRICES },
+    );
+    return { ...t, asked };
+  };
+
+  it("the §10.6 worked example grows the context by exactly 2 and no hit text enters it", async () => {
+    const t = await workedExample();
+    let before = -1;
+    let after = -1;
+    t.session.on((e) => {
+      if (e.type === "tool_call") before = t.session.messages.length - 1; // the call's message is in
+      if (e.type === "tool_result") after = t.session.messages.length;
+    });
+
+    const reason = await t.session.prompt("summarise every pricing decision");
+
+    expect(reason).toBe("completed");
+    expect(after - before).toBe(2); // the assistant codemode call and its tool result
+    expect(t.session.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(toolResult(t.session.messages)).toEqual(['["Pro is $5","Team is $20"]']);
+    const context = JSON.stringify(t.session.messages);
+    expect(context).not.toContain("HIT-");
+    expect(context).not.toContain("fact 7");
+    expect(t.fake.textRequests).toHaveLength(40);
+    expect(t.fake.textRequests.every((r) => r.input.includes("HIT-"))).toBe(true);
+    expect(t.fake.structuredRequests).toHaveLength(1);
+    const llmCalls = t.events.filter((e) => e.type === "llm_call");
+    expect(llmCalls).toHaveLength(41);
+    expect(llmCalls.every((e) => e.depth === 1 && e.model === DECISION && e.usage)).toBe(true);
+  });
+
+  it("ask mode: llm() never prompts; the only question is the codemode call itself", async () => {
+    const t = await workedExample();
+
+    await t.session.prompt("summarise");
+
+    expect(t.asked).toEqual(["codemode"]);
+    const decided = t.events.flatMap((e) =>
+      e.type === "permission" ? [[e.call.name, e.source]] : [],
+    );
+    expect(decided).toEqual([
+      ["codemode", "user"],
+      ["mcp__tree_memory_local__search_memory", "readOnly"],
+    ]); // 41 llm() calls, no permission entry for any of them
+  });
+
+  it("the session cost sums the main turns and every llm_call's usage × its model's pricing, and survives a resume", async () => {
+    const store = SessionStore.inMemory();
+    const t = await workedExample({ store });
+
+    await t.session.prompt("summarise");
+
+    const turns = t.events.flatMap((e) =>
+      e.type === "turn_end" && e.message.usage ? [e.message.usage] : [],
+    );
+    const calls = t.events.flatMap((e) => (e.type === "llm_call" && e.usage ? [e.usage] : []));
+    const main = turns.reduce(
+      (sum, u) => sum + u.inputTokens * 0.000003 + u.outputTokens * 0.000015,
+      0,
+    );
+    const sub = calls.reduce(
+      (sum, u) => sum + u.inputTokens * 0.000001 + u.outputTokens * 0.000002,
+      0,
+    );
+    expect(calls).toHaveLength(41);
+    expect(sub).toBeGreaterThan(0);
+    expect(t.session.status().cost).toBeCloseTo(main + sub, 12);
+
+    const id = t.session.id ?? "";
+    expect(store.load(id).spend.filter((s) => s.model === DECISION)).toHaveLength(41);
+    const resumed = await setup([], { store, resume: id }, [], { models: PRICES });
+    expect(resumed.session.status().cost).toBeCloseTo(main + sub, 12);
+  });
+
+  it("the cost rises with each llm_call as it arrives, before the codemode result", async () => {
+    const t = await workedExample();
+    const costs: number[] = [];
+    t.session.on((e) => {
+      if (e.type === "llm_call") costs.push(t.session.status().cost);
+    });
+
+    await t.session.prompt("summarise");
+
+    expect(costs).toHaveLength(41);
+    for (let i = 1; i < costs.length; i++) {
+      expect(costs[i]).toBeGreaterThan(costs[i - 1] ?? 0);
+    }
+  });
+
+  it("headless depth 2: a dangerous call inside the sub-loop ends the run blocked; the script's catch never runs", async () => {
+    const t = await setup(
+      [
+        toolTurn(
+          script(`
+            try { return await llm("configure ssh", {tools: true}); }
+            catch (e) { console.log("caught"); return "swallowed"; }
+          `),
+        ),
+        toolTurn(writeCall("s1", "~/.ssh/config", "x")), // the sub-loop
+        textTurn("never"),
+        textTurn("never"),
+      ],
+      {
+        ...withMcp(),
+        codemode: { ...codemode(), llm: { ...LIMITS.llm, depth: 2 } },
+        prompter: null,
+        permissionMode: "auto",
+      },
+      [safe, { dangerous: true, risk: "high", reason: "writes ~/.ssh/config" }],
+    );
+
+    const reason = await t.session.prompt("configure ssh");
+
+    expect(reason).toBe("blocked");
+    expect(t.events.filter((e) => e.type === "agent_end")).toEqual([
+      { type: "agent_end", reason: "blocked" },
+    ]);
+    expect(toolResult(t.session.messages)).toEqual([
+      "Error: the script was stopped: a tool call was blocked",
+    ]);
+    expect(t.fake.requests).toHaveLength(2); // the main turn and one sub-loop turn
+    expect(t.events.filter((e) => e.type === "permission")).toMatchObject([
+      { call: { name: "codemode" }, decision: "allow", source: "classifier" },
+      { call: { name: "write" }, decision: "deny", source: "headless" },
+    ]);
+  });
+
+  it("depth 2: the sub-loop's read never prompts, its write goes through the same gate in ask mode", async () => {
+    const asked: string[] = [];
+    const subRead: ToolCall = { id: "s1", name: "read", arguments: { path: "notes.md" } };
+    const subWrite = writeCall("s2", "out.md", "summary");
+    const t = await setup(
+      [
+        toolTurn(script('return await llm("Summarise notes.md into out.md", {tools: true})')),
+        toolTurn(subRead), // the sub-loop
+        toolTurn(subWrite),
+        textTurn("Wrote the summary."),
+        textTurn("Done."), // the main loop again
+      ],
+      {
+        ...withMcp(),
+        codemode: { ...codemode(), llm: { ...LIMITS.llm, depth: 2 } },
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.name);
+            return "once";
+          },
+        },
+      },
+    );
+    writeFileSync(join(t.cwd, "notes.md"), "a note");
+
+    const reason = await t.session.prompt("summarise my notes");
+
+    expect(reason).toBe("completed");
+    expect(asked).toEqual(["codemode", "write"]);
+    expect(t.events.filter((e) => e.type === "permission")).toMatchObject([
+      { call: { name: "codemode" }, source: "user" },
+      { call: { name: "read" }, decision: "allow", source: "readOnly" },
+      { call: { name: "write" }, decision: "allow", source: "user" },
+    ]);
+    expect(readFileSync(join(t.cwd, "out.md"), "utf8")).toBe("summary");
+    expect(t.fake.requests[1]?.tools.map((s) => s.name)).not.toContain("codemode");
+    expect(toolResult(t.session.messages)).toEqual(['"Wrote the summary."']);
+    expect(t.session.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(t.events.filter((e) => e.type === "llm_call")).toMatchObject([{ depth: 2 }]);
+    expect(t.events.filter((e) => e.type === "agent_end")).toEqual([
+      { type: "agent_end", reason: "completed" },
+    ]);
+  });
+  it("depth 2: the sub-loop has no tool_search, so it never activates a deferred tool in the main registry", async () => {
+    const mcp = withMcp(memoryLike({ "visualize_*": "deferred" }));
+    const t = await setup(
+      [
+        toolTurn(script('return await llm("visualize my memory", {tools: true})')),
+        toolTurn({ id: "s1", name: "tool_search", arguments: { query: "visualize memory" } }),
+        textTurn("No visualize tool here."), // the sub-loop's answer
+        textTurn("Done."), // the main loop again
+      ],
+      { ...mcp, codemode: { ...codemode(), llm: { ...LIMITS.llm, depth: 2 } } },
+    );
+
+    expect(await t.session.prompt("visualize")).toBe("completed");
+
+    const sub = t.fake.requests[1]?.tools.map((s) => s.name) ?? [];
+    expect(sub).not.toContain("codemode");
+    expect(sub).not.toContain("tool_search");
+    expect(t.fake.requests[2]?.context.messages[2]).toMatchObject({
+      role: "tool",
+      name: "tool_search",
+      isError: true,
+    });
+    expect(mcp.tools.activated()).toEqual([]);
+    expect(t.events.filter((e) => e.type === "tool_activation")).toEqual([]);
+    const main = t.fake.requests[3]?.tools.map((s) => s.name) ?? [];
+    expect(main).toContain("tool_search");
+    expect(main.filter((n) => n.includes("visualize"))).toEqual([]);
+  });
+
+  it("an llm() call settling after an abort reports nothing after agent_end, but is still saved", async () => {
+    // Notices the abort late, as a hung request torn down by fetch.
+    class LateAbort extends FakeProvider {
+      override async completeText(_req: TextRequest, signal?: AbortSignal): Promise<never> {
+        await new Promise((resolve) => signal?.addEventListener("abort", resolve));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("This operation was aborted");
+      }
+    }
+    const provider = new LateAbort({
+      streams: [toolTurn(script('return await llm("hang")')), textTurn("never")],
+    });
+    const store = SessionStore.inMemory();
+    const saved: string[] = [];
+    const append = store.append.bind(store);
+    store.append = (id, body) => {
+      saved.push(body.type);
+      return append(id, body);
+    };
+    const t = await setup([], { ...withMcp(), provider, store });
+    t.session.on((e) => {
+      if (e.type === "tool_call") setTimeout(() => t.session.abort(), 10);
+    });
+
+    expect(await t.session.prompt("hang")).toBe("aborted");
+    await new Promise((resolve) => setTimeout(resolve, 60)); // the late settle
+
+    expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "aborted" });
+    expect(t.events.filter((e) => e.type === "llm_call")).toEqual([]);
+    expect(saved).toContain("llm_call"); // the --resume cost stays true
   });
 });

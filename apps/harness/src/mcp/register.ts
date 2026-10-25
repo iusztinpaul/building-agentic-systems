@@ -178,8 +178,9 @@ function providerSchema(schema: Record<string, unknown>): JsonSchema {
 
 // Text content joined by newlines (other kinds as a placeholder);
 // over 20 KB the model gets head + tail and the tmp path. A codemode
-// script gets `structuredContent`, else the text parsed as JSON,
-// else the text itself.
+// script gets `structuredContent` (FastMCP's `{result: "<json>"}`
+// wrapper of a `str` return unwrapped), else the text parsed as
+// JSON, else the text itself.
 export function toToolResult(
   result: McpCallResult,
   tmpDir: string,
@@ -200,8 +201,30 @@ export function toToolResult(
   return {
     content: spillOver(content || "(no output)", MAX_RESULT_BYTES, tmpDir),
     isError: result.isError,
-    structured: result.structuredContent ?? parseJson(text),
+    structured:
+      result.structuredContent === undefined
+        ? parseJson(text)
+        : unwrapResult(result.structuredContent),
   };
+}
+
+// Exactly `{result: <string>}` whose string is JSON → the parsed
+// value; anything else as is.
+function unwrapResult(structured: Record<string, unknown>): unknown {
+  const keys = Object.keys(structured);
+  const { result } = structured;
+  if (
+    keys.length !== 1 ||
+    keys[0] !== "result" ||
+    typeof result !== "string"
+  ) {
+    return structured;
+  }
+  try {
+    return JSON.parse(result);
+  } catch {
+    return structured;
+  }
 }
 
 function parseJson(text: string): unknown {

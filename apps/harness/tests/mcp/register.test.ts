@@ -338,6 +338,17 @@ describe("MCP tool results", () => {
     expect(plain.structured).toBe("hello");
   });
 
+  it("unwraps FastMCP's {result: <json string>} to the parsed value; anything else stays as is", () => {
+    const structured = (structuredContent: Record<string, unknown>) =>
+      toToolResult({ content: [text("t")], structuredContent, isError: false }, tmp()).structured;
+
+    expect(structured({ result: '{"parents":[1]}' })).toEqual({ parents: [1] });
+    expect(structured({ result: "null" })).toBeNull();
+    expect(structured({ result: "plain text" })).toEqual({ result: "plain text" });
+    expect(structured({ result: '{"a":1}', other: 1 })).toEqual({ result: '{"a":1}', other: 1 });
+    expect(structured({ result: { a: 1 } })).toEqual({ result: { a: 1 } });
+  });
+
   it("names non-text content and falls back to structuredContent or (no output)", () => {
     const image = toToolResult(
       {
@@ -432,5 +443,29 @@ describe("MCP registration against the stdio fixture", () => {
       isError: false,
       structured: { id: "7", body: "note 7" },
     });
+  });
+
+  it("a script gets the parsed JSON of a {result: <json string>} wrapper; the model gets the text as sent", async () => {
+    client = new McpClient(
+      "fake-server",
+      { command: process.execPath, args: [SERVER], env: {}, toolExposure: {} },
+      { log: silent() },
+    );
+    await client.listTools();
+    const { registry } = register(client);
+    const echo = (structured: unknown) =>
+      registry.execute(
+        { id: "c", name: "mcp__fake_server__echo", arguments: { structured } },
+        { ...toolCtx(tmp()), origin: "codemode" },
+      );
+
+    const wrapped = { result: '{"parents":[{"id":"p1"}]}' };
+    expect(await echo(wrapped)).toEqual({
+      content: JSON.stringify(wrapped),
+      isError: false,
+      structured: { parents: [{ id: "p1" }] },
+    });
+    expect((await echo({ result: "plain text" })).structured).toEqual({ result: "plain text" });
+    expect((await echo({ result: "{}", other: 1 })).structured).toEqual({ result: "{}", other: 1 });
   });
 });

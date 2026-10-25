@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { createBridge, firstLine, isRecord } from "../codemode/bridge.ts";
+import { createLlm, type LlmOptions } from "../codemode/llm.ts";
 import { runSandbox } from "../codemode/sandbox.ts";
 import type { Settings } from "../config/settings.ts";
 import { BLOCKED } from "../loop/agent-loop.ts";
@@ -22,23 +23,30 @@ import { spillOver } from "./truncate.ts";
 
 export const CODEMODE = "codemode";
 
-// Task 211 adds the llm() sentence.
 export const CODEMODE_PREAMBLE = [
   "Run a JavaScript (ES2020, async) script in a sandbox to call many " +
     "tools at once.",
   "`tools.<name>(args)` calls a tool and returns its structured result.",
   "`searchTools(query)` and `describeTool(name)` discover tools.",
+  "`llm(prompt, {schema?, model?, system?})` calls a language model " +
+    "and returns text or parsed JSON.",
   "Only console.log output and the returned value reach you; keep " +
     "data in variables.",
   "Available tools:",
 ].join("\n");
 
-export type CodemodeLimits = Omit<Settings["codemode"], "llm">;
+export type CodemodeLimits = Settings["codemode"];
 
 export interface CodemodeOptions extends CodemodeLimits {
   tmpDir: string; // where output over outputMaxBytes is saved
-  // The session's permission gate, the same as the model's calls.
+  // The session's permission gate, the same as the model's calls
+  // (and a depth-2 llm() sub-loop's).
   gate: (call: ToolCall) => Promise<GateResult>;
+  // llm(): its provider, the default model's fallback and the
+  // session's cost and event sink.
+  provider: LlmOptions["provider"];
+  decisionModel: string;
+  onLlmCall?: LlmOptions["onCall"];
 }
 
 const Params = z.object({
@@ -73,6 +81,16 @@ export function codemodeTool(
     exposure: "direct",
     isReadOnly: false,
     async execute({ script }, ctx) {
+      const llm = createLlm({
+        provider: o.provider,
+        settings: o.llm,
+        decisionModel: o.decisionModel,
+        registry,
+        gate: o.gate,
+        ctx,
+        exclude: CODEMODE,
+        onCall: o.onLlmCall,
+      });
       const bridge = createBridge({
         registry,
         gate: o.gate,
@@ -80,6 +98,7 @@ export function codemodeTool(
         callId: `codemode-${randomUUID().slice(0, 8)}`,
         maxToolCalls: o.maxToolCalls,
         exclude: CODEMODE,
+        llm,
       });
       const result = await runSandbox({
         script,

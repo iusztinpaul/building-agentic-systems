@@ -11,6 +11,8 @@
 // tool and a never-seen cursor.
 // `echo` args: {hang: true} never answers; {probe: true} first sends
 // a server→client request and answers with what the client replied.
+// {structured: <value>} answers with it as `structuredContent` (e.g.
+// FastMCP's `{result: "<json string>"}` wrapper of a `str` return).
 
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -86,6 +88,9 @@ function handle(message) {
         waiting.set("srv-1", id);
         send({ id: "srv-1", method: "sampling/createMessage", params: { messages: [] } });
         return;
+      }
+      if ("structured" in args) {
+        return answerCall(id, { ...text(args.structured), structuredContent: args.structured });
       }
       answerCall(id, text(args));
     } else if (params.name === "read_note") {

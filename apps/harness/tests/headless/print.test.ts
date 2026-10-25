@@ -79,10 +79,12 @@ describe("jsonSink", () => {
 
     sink({ type: "turn_start" });
     sink({ type: "text_delta", text: 'a "quoted"\nline' });
+    sink({ type: "llm_call", depth: 1, model: "m", usage: { inputTokens: 3, outputTokens: 1 } });
 
     expect(out).toEqual([
       '{"type":"turn_start"}\n',
       '{"type":"text_delta","text":"a \\"quoted\\"\\nline"}\n',
+      '{"type":"llm_call","depth":1,"model":"m","usage":{"inputTokens":3,"outputTokens":1}}\n',
     ]);
   });
 });

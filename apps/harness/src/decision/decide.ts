@@ -23,7 +23,7 @@ export class DecisionTimeout extends Error {
   override name = "DecisionTimeout";
 }
 
-const DEFAULT_MODEL = Settings.parse({}).decisionModel;
+export const DEFAULT_MODEL = Settings.parse({}).decisionModel;
 
 // Rejects on a provider error, a second invalid answer, the deadline
 // or `signal` (with its reason; the request is cancelled too); only

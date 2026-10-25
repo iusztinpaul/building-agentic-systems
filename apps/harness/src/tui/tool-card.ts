@@ -1,8 +1,8 @@
 // One tool call in the transcript: the tool's name and its primary
 // argument, then the result, collapsed to its first line until the
 // user expands it (Tab). A codemode card shows its description and,
-// under it, the script, collapsed the same way. Task 211 nests
-// llm() rows under codemode.
+// under it, the script and one row per llm() call the script made,
+// collapsed the same way.
 
 import { isAbsolute, relative, resolve } from "node:path";
 import {
@@ -11,7 +11,8 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { ToolCall } from "../types.ts";
+import type { AgentEvent, ToolCall } from "../types.ts";
+import { compact } from "./status-bar.ts";
 import { bold, dim, green, red, sanitize, yellow } from "./style.ts";
 
 // What identifies the call at a glance: a path relative to the cwd,
@@ -39,6 +40,7 @@ export class ToolCard implements Component {
   expanded = false;
   #arg: string;
   #script: string[] | undefined; // codemode only
+  readonly #llmCalls: string[] = []; // codemode only
   #result: { content: string; isError: boolean } | undefined;
 
   constructor(call: ToolCall, cwd: string) {
@@ -48,6 +50,22 @@ export class ToolCard implements Component {
     if (call.name === "codemode" && typeof script === "string") {
       this.#script = textLines(script);
     }
+  }
+
+  get done(): boolean {
+    return this.#result !== undefined;
+  }
+
+  // `llm depth 1 · <model> · 1.2k in / 300 out`
+  addLlmCall(event: AgentEvent & { type: "llm_call" }): void {
+    const { depth, model, usage } = event;
+    const spent = usage
+      ? `${compact(usage.inputTokens)} in / ` +
+        `${compact(usage.outputTokens)} out`
+      : "no usage";
+    this.#llmCalls.push(
+      sanitize(`llm depth ${depth} · ${model} · ${spent}`),
+    );
   }
 
   setResult(content: string, isError: boolean): void {
@@ -60,6 +78,9 @@ export class ToolCard implements Component {
     const head = ` ${mark} ${bold(this.call.name)} ${this.#arg}`;
     const lines = [truncateToWidth(head, width)];
     if (this.#script) lines.push(...this.#block(this.#script, dim, width));
+    if (this.#llmCalls.length > 0) {
+      lines.push(...this.#block(this.#llmCalls, dim, width));
+    }
     if (!r) return lines;
     const style = r.isError ? red : dim;
     return [...lines, ...this.#block(textLines(r.content), style, width)];

@@ -2,7 +2,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { Settings } from "../../src/config/settings.ts";
 import type { GateResult } from "../../src/loop/hooks.ts";
+import { FakeProvider } from "../../src/provider/fake.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
 import {
   CODEMODE,
@@ -50,6 +52,7 @@ function fake(
 }
 
 const allow = async (): Promise<GateResult> => ({ run: true });
+const LLM = Settings.parse({}).codemode.llm;
 
 function setup(tools: ToolDefinition[], o: Partial<CodemodeOptions> = {}) {
   const registry = new ToolRegistry();
@@ -62,6 +65,9 @@ function setup(tools: ToolDefinition[], o: Partial<CodemodeOptions> = {}) {
     maxToolCalls: 50,
     outputMaxBytes: 20_000,
     concurrency: 4,
+    llm: LLM,
+    provider: new FakeProvider(),
+    decisionModel: "test/decision",
     tmpDir: join(tmp(), "tmp"),
     gate: async (call) => {
       gated.push(call);
@@ -88,7 +94,7 @@ describe("registerCodemode", () => {
     expect(one.registry.schemasForRequest().map((s) => s.name)).toEqual([CODEMODE]);
   });
 
-  it("describes the sandbox API without llm() and declares the codemode tools", () => {
+  it("describes the sandbox API, llm() included, and declares the codemode tools", () => {
     const t = setup([
       fake("mcp__m__get_doc", "codemode", undefined, {
         inputSchema: {
@@ -105,7 +111,9 @@ describe("registerCodemode", () => {
     expect(description).toBe(
       `${CODEMODE_PREAMBLE}\nmcp__m__get_doc(params: {id: string, limit?: number}): Does mcp__m__get_doc.`,
     );
-    expect(description).not.toContain("llm");
+    expect(description).toContain(
+      "\n`llm(prompt, {schema?, model?, system?})` calls a language model and returns text or parsed JSON.\n",
+    );
   });
 });
 
@@ -263,17 +271,12 @@ describe("codemode scripts", () => {
     expect(JSON.parse(result.content)).toEqual(["cm_tool", "direct_tool", "active"]);
   });
 
-  it("llm() is not defined yet (task 211): a ReferenceError", async () => {
+  it("llm() is defined in a script (task 211); fetch and require still are not", async () => {
     const t = setup([fake("x")]);
 
     const result = await t.script("return [typeof llm, typeof fetch, typeof require]; ");
-    const call = await t.script('await llm("hi")');
 
-    expect(result.content).toBe('["undefined","undefined","undefined"]');
-    expect(call).toEqual({
-      content: "ReferenceError: 'llm' is not defined",
-      isError: true,
-    });
+    expect(result.content).toBe('["function","undefined","undefined"]');
   });
 
   it("a timeout is an isError result naming it, and the next script runs", async () => {
@@ -502,6 +505,9 @@ describe("codemodeTool", () => {
       maxToolCalls: 1,
       outputMaxBytes: 1,
       concurrency: 1,
+      llm: LLM,
+      provider: new FakeProvider(),
+      decisionModel: "test/decision",
       tmpDir: "/tmp",
       gate: allow,
     });

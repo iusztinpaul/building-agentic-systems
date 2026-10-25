@@ -41,7 +41,9 @@ export type EntryBody =
       reason?: string;
     }
   | { type: "tool_activation"; names: string[] }
-  | { type: "model_change"; model: string };
+  | { type: "model_change"; model: string }
+  // A codemode script's llm() call (its usage is session cost).
+  | { type: "llm_call"; depth: number; model: string; usage?: Usage };
 
 export type Entry = Envelope & EntryBody;
 
@@ -52,8 +54,8 @@ export interface RestoredSession {
   model: string; // the header's, or the last model_change's
   messages: Message[]; // after the last compaction, summary first
   activated: string[];
-  // Every assistant usage on the chain with the model that ran it,
-  // so the session cost survives a resume.
+  // Every assistant and llm() usage on the chain with the model that
+  // ran it, so the session cost survives a resume.
   spend: { model: string; usage: Usage }[];
 }
 
@@ -142,6 +144,8 @@ export function restore(id: string, entries: Entry[]): RestoredSession {
       for (const name of e.names) activated.add(name);
     } else if (e.type === "model_change") {
       model = e.model;
+    } else if (e.type === "llm_call") {
+      if (e.usage) spend.push({ model: e.model, usage: e.usage });
     } else if (e.type !== "session" && e.type !== "permission") {
       log.warn(`session ${id}: skipping unknown entry type`);
     }

@@ -45,6 +45,8 @@ export interface StructuredRequest<T> {
   schema: z.ZodType<T>;
   name: string;
   maxOutputTokens?: number;
+  // Called with each attempt's usage (a parse retry is a second).
+  onUsage?: (usage: Usage) => void;
 }
 
 export interface TextRequest {

@@ -104,7 +104,7 @@ export class OpenRouterProvider implements Provider {
     };
     let input = req.input;
     for (let attempt = 1; ; attempt++) {
-      const { text } = await this.#completion(
+      const { text, usage } = await this.#completion(
         {
           model: req.model,
           messages: [
@@ -117,6 +117,7 @@ export class OpenRouterProvider implements Provider {
         },
         signal,
       );
+      req.onUsage?.(usage);
       try {
         return req.schema.parse(JSON.parse(text));
       } catch (err) {

@@ -20,12 +20,15 @@ export interface FakeScript {
   // Error rejects the call. A FakeAnswer function computes the answer
   // per request (it may delay, or never settle).
   answers?: unknown[];
-  // Answers for completeText(); an Error rejects the call.
-  texts?: (string | Error)[];
+  // Answers for completeText(); an Error rejects the call. A bare
+  // string's usage is estimated (chars / 4); `{text, usage}` scripts it.
+  texts?: FakeText[];
   // When set, modelInfo() serves only these ids; otherwise any id
   // resolves to fakeModel(id).
   models?: ModelInfo[];
 }
+
+export type FakeText = string | Error | { text: string; usage: Usage };
 
 export type FakeAnswer = (
   req: StructuredRequest<unknown>,
@@ -38,7 +41,7 @@ export class FakeProvider implements Provider {
   readonly textRequests: TextRequest[] = [];
   readonly #streams: StreamEvent[][];
   readonly #answers: unknown[];
-  readonly #texts: (string | Error)[];
+  readonly #texts: FakeText[];
   readonly #models: Map<string, ModelInfo> | undefined;
 
   constructor(script: FakeScript = {}) {
@@ -96,6 +99,7 @@ export class FakeProvider implements Provider {
         ? await (next as FakeAnswer)(req, signal)
         : next;
     if (answer instanceof Error) throw answer;
+    req.onUsage?.(estimate(req.input, JSON.stringify(answer) ?? ""));
     return req.schema.parse(answer);
   }
 
@@ -108,14 +112,16 @@ export class FakeProvider implements Provider {
       throw new Error("FakeProvider: no completeText() answer scripted");
     }
     if (answer instanceof Error) throw answer;
-    return {
-      text: answer,
-      usage: {
-        inputTokens: Math.ceil(req.input.length / 4),
-        outputTokens: Math.ceil(answer.length / 4),
-      },
-    };
+    if (typeof answer !== "string") return answer;
+    return { text: answer, usage: estimate(req.input, answer) };
   }
+}
+
+function estimate(input: string, output: string): Usage {
+  return {
+    inputTokens: Math.ceil(input.length / 4),
+    outputTokens: Math.ceil(output.length / 4),
+  };
 }
 
 // A capable model: 200k context, tools + structured outputs.

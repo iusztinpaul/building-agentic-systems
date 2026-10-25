@@ -123,6 +123,22 @@ describe("JsonlSessionStore", () => {
     expect(restored.spend.map((s) => s.model)).toEqual(["a/model", "a/model", "b/model"]);
   });
 
+  it("restores llm_call usage as spend on its own model; one without usage costs nothing", () => {
+    const dir = join(root(), "sessions");
+    const store = SessionStore.jsonl(dir);
+    const id = store.create("/w", "a/model");
+    store.append(id, { type: "message", message: answer("1") });
+    const usage = { inputTokens: 7, outputTokens: 3 };
+    store.append(id, { type: "llm_call", depth: 1, model: "cheap/model", usage });
+    store.append(id, { type: "llm_call", depth: 2, model: "cheap/model" });
+
+    const restored = new JsonlSessionStore(dir).load(id);
+
+    expect(restored.spend.map((s) => s.model)).toEqual(["a/model", "cheap/model"]);
+    expect(restored.spend[1]?.usage).toEqual(usage);
+    expect(restored.messages).toEqual([answer("1")]);
+  });
+
   it("loads only the last entry's ancestry when a parentId skips an entry", () => {
     const dir = join(root(), "sessions");
     const store = SessionStore.jsonl(dir);
