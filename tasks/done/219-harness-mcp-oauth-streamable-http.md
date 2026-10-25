@@ -690,3 +690,18 @@ Pipeline re-runs from the inner loop with the rollup task; on green, re-run acce
 **VERDICT: ACCEPT**
 
 Story 1 "First login from the TUI" now holds, verified on a real pty against the fake OAuth server (details in `tasks/done/220-…md`): the `log in at <url>` line is on the TUI screen under `starting… (Ctrl+C quits)`, the browser is opened once, the session opens with `1 MCP` and `/mcp` shows `tree-memory … connected`; Ctrl+C during the wait exits 1 with the terminal restored; the redirected-stderr case shows the `needs a login` line on screen with 0 bytes on stderr. Stories 2–7 unchanged since round 2 (`--mcp-login`, headless TTY rule, logout, static header; 1011/1011). Note: this story's text still says "stderr shows …" — the done task is not edited; the README and spec §10.2.1 describe the TUI screen, which is what the user reads. One follow-up (mid-session login not cancellable; TUI unquittable for ≤ 5 min in that case) is recorded on 220 for the orchestrator's follow-up task. Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-10-25 13:50 — Review (round 3, range `5ed92c4..ac40eeb`)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed the nine commits 73de787..ac40eeb (tasks 218 and 219, rollup 220, task 221 filed): 52 files, +6 515 / −483, every changed file read. `make harness-lint-check`, `make harness-typecheck`, `make harness-tests` green (50 files, 1011 tests, the four live OpenRouter tests included). Blockers: 0; Nits: 6, appended to PR #48 under "Review nits, round 3" (R3-1 … R3-6).
+
+- R3-1 [Standards] `src/mcp/auth.ts:311-316` — `secure()` is not applied to the PRM URL nor to the MCP `url` itself; two lines at the top of `discover()`.
+- R3-2 [Simplicity] `src/mcp/auth.ts:52,252` — `delete:` `LoginUi.timeoutMs`, never set (the timeout tests use fake timers); spec §10.2.1 "tests inject it" is false.
+- R3-3 [Standards] `src/cli.ts:154-156` — `interactive` requires a TTY stderr in TUI mode, where the URL goes to the startup screen since 220.
+- R3-4 [Standards] `src/mcp/auth.ts:319-323` — no OIDC-discovery fallback (MCP auth §2.3.3); Horizon serves RFC 8414, ADR upgrade trigger covers it.
+- R3-5 [Clean code] `src/mcp/auth.ts:39` — `OAuthError` exported, no external reader.
+- R3-6 [Documentation] (PA) spec §11.1 `0.87–0.995` vs ADR/README `0.87–0.99`; spec §15 status-bar cost wording vs README; spec §10.2.1 "tests inject it".
+
+Pipeline may advance to hand-off. Not findings (settled or already filed): hand-rolled OAuth, `--mcp-login` forcing a fresh login, 60 s `initializeTimeoutMs`, `dangerThreshold` 0.3, the user-level hosted entry, task 221 (mid-session login not cancellable), tasks 214 and 216, the open 218 `[HUMAN]` item.

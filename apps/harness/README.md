@@ -275,14 +275,16 @@ would warn or wait every time, and its tools would duplicate `tree-memory-local`
   "toolExposure": { "search_memory": "direct", "visualize_*": "deferred" } } } }
 ```
 
-`tree-agent` follows the MCP authorization flow: on the server's 401 it discovers the authorization
+`tree-agent` follows the MCP authorization flow (the server, its metadata and the authorization
+server must be https or a loopback address): on the server's 401 it discovers the authorization
 server, registers itself once, and opens your browser (printing the URL as well: on stderr, or in the
 TUI on its screen, where Ctrl+C quits the wait) for a one-time Horizon login; the token and the
 registered client are stored in `~/.tree-agent/mcp-auth/tree-memory.json` (mode 0600) and refreshed
 silently afterwards. Log in once with `tree-agent --mcp-login tree-memory` (no `OPENROUTER_API_KEY`
 needed); every later run — TUI or headless — reuses the token. The first request after idle can take
 tens of seconds while Horizon cold-starts the server (hence the 60 s `mcp.initializeTimeoutMs`
-default). Headless runs without a terminal (piped stdin, CI) never wait for a login: a server that
+default). The TUI shows the login on its screen even with stderr redirected; headless runs without a
+terminal on stdin and stderr (piped stdin, redirected stderr, CI) never wait for a login: a server that
 needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory
 once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
 `tree-agent --mcp-logout tree-memory` (it deletes the file). Its tools register as

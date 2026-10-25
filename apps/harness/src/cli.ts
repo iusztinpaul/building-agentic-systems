@@ -151,9 +151,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
   const { args } = mode;
-  // TTYs on both ends: a server that needs a login may prompt.
+  // A server that needs a login may prompt where the URL is seen:
+  // the TUI's screen, or a TTY stderr.
   const interactive =
-    stdin.isTTY && (deps.stderrIsTTY ?? process.stderr.isTTY === true);
+    stdin.isTTY &&
+    (mode.kind === "tui" ||
+      (deps.stderrIsTTY ?? process.stderr.isTTY === true));
   let followUps: string[] = [];
   if (mode.kind === "headless" && mode.from === "stdin") {
     const lines = (await stdin.read())

@@ -36,7 +36,7 @@ export class McpAuthRequired extends Error {
 }
 
 // An OAuth error answer (`invalid_client`, `invalid_grant`, …).
-export class OAuthError extends Error {
+class OAuthError extends Error {
   override name = "OAuthError";
   readonly code: string;
   constructor(code: string, message: string) {
@@ -49,7 +49,6 @@ export class OAuthError extends Error {
 export interface LoginUi {
   notify(line: string): void; // `mcp "<server>": log in at <url>`
   open?(url: string): void; // the browser; absent: the URL only
-  timeoutMs?: number; // default LOGIN_TIMEOUT_MS
   signal?: AbortSignal; // Ctrl+C under --mcp-login
 }
 
@@ -137,7 +136,7 @@ export class McpAuth {
     return this.#refreshing;
   }
 
-  // The interactive flow, bounded by `ui.timeoutMs`.
+  // The interactive flow, bounded by LOGIN_TIMEOUT_MS.
   async login(challenge: string, ui: LoginUi): Promise<void> {
     const found = await discover(this.#fetch, this.#o.url, challenge);
     const { server, client } = await this.#client(found);
@@ -249,9 +248,7 @@ export class McpAuth {
   // wait goes on; `error=` ends it; so do the timeout and the signal.
   #wait(server: Server, state: string, ui: LoginUi): Promise<string> {
     const { name } = this.#o;
-    const ms = ui.timeoutMs ?? LOGIN_TIMEOUT_MS;
-    const after =
-      ms % 60_000 === 0 ? `${ms / 60_000} min` : `${ms / 1000} s`;
+    const after = `${LOGIN_TIMEOUT_MS / 60_000} min`;
     return new Promise((resolve, reject) => {
       const done = (err: Error | undefined, code = ""): void => {
         clearTimeout(timer);
@@ -266,7 +263,7 @@ export class McpAuth {
             `login timed out after ${after}; run tree-agent ` +
               `--mcp-login ${name} to log in`,
           ),
-        ms,
+        LOGIN_TIMEOUT_MS,
       );
       const cancel = () => fail("login cancelled");
       if (ui.signal?.aborted) return cancel();
@@ -298,10 +295,10 @@ export class McpAuth {
   }
 }
 
-// RFC 9728 then RFC 8414. The PRM must describe this server's
-// origin; the AS (checked before it is fetched) and every endpoint
-// must be HTTPS (or loopback); the AS metadata's `issuer` must be the
-// AS URL (RFC 8414 §3.3).
+// RFC 9728 then RFC 8414. The server, the PRM and the AS (each
+// checked before anything is fetched) and every endpoint must be
+// HTTPS (or loopback); the PRM must describe this server's origin;
+// the AS metadata's `issuer` must be the AS URL (RFC 8414 §3.3).
 export async function discover(
   fetchFn: typeof fetch,
   url: string,
@@ -310,6 +307,8 @@ export async function discover(
   const named = /resource_metadata="?([^"\s,]+)/.exec(challenge)?.[1];
   const prmUrl =
     named ?? new URL("/.well-known/oauth-protected-resource", url).href;
+  secure(url, "the MCP server");
+  secure(prmUrl, "the resource metadata");
   const prm = await getJson(fetchFn, prmUrl, Prm);
   if (new URL(prm.resource).origin !== new URL(url).origin) {
     throw new Error(`${prmUrl}: resource ${prm.resource} is not ${url}`);
@@ -510,7 +509,9 @@ function secure(url: string, what: string): void {
   const { protocol, hostname } = new URL(url);
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(hostname);
   if (protocol !== "https:" && !loopback) {
-    throw new Error(`${url}: ${what} must use https`);
+    throw new Error(
+      `${url}: OAuth needs https (or a loopback address) for ${what}`,
+    );
   }
 }
 

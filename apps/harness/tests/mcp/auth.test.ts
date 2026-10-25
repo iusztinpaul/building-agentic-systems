@@ -119,23 +119,37 @@ describe("discover (RFC 9728 → RFC 8414)", () => {
       "no dynamic client registration",
     );
 
-    await expect(discover(fake.fetch, "http://127.0.0.2:1/mcp", challenge())).rejects.toThrow(
-      `resource ${fake.base} is not http://127.0.0.2:1/mcp`,
+    await expect(discover(fake.fetch, "https://127.0.0.2:1/mcp", challenge())).rejects.toThrow(
+      `resource ${fake.base} is not https://127.0.0.2:1/mcp`,
     );
 
     const { fetch: remote } = remoteAs("https://as.example", "http://as.example/authorize");
-    await expect(discover(remote, "http://mcp.example/mcp", "")).rejects.toThrow(
-      "http://as.example/authorize: authorization endpoints must use https",
+    await expect(discover(remote, "https://mcp.example/mcp", "")).rejects.toThrow(
+      "http://as.example/authorize: OAuth needs https (or a loopback address) for authorization endpoints",
     );
   });
 
   it("refuses a plain-http authorization server before fetching its metadata", async () => {
     const { fetch: remote, seen } = remoteAs("http://as.example", "https://as.example/authorize");
 
-    await expect(discover(remote, "http://mcp.example/mcp", "")).rejects.toThrow(
-      "http://as.example: the authorization server must use https",
+    await expect(discover(remote, "https://mcp.example/mcp", "")).rejects.toThrow(
+      "http://as.example: OAuth needs https (or a loopback address) for the authorization server",
     );
-    expect(seen).toEqual(["http://mcp.example/.well-known/oauth-protected-resource"]);
+    expect(seen).toEqual(["https://mcp.example/.well-known/oauth-protected-resource"]);
+  });
+
+  it("refuses a plain-http MCP server or resource metadata URL before any request", async () => {
+    const { fetch: remote, seen } = remoteAs("https://as.example", "https://as.example/authorize");
+
+    await expect(discover(remote, "http://mcp.example/mcp", "")).rejects.toThrow(
+      "http://mcp.example/mcp: OAuth needs https (or a loopback address) for the MCP server",
+    );
+    const named =
+      'Bearer resource_metadata="http://mcp.example/.well-known/oauth-protected-resource"';
+    await expect(discover(remote, "https://mcp.example/mcp", named)).rejects.toThrow(
+      "http://mcp.example/.well-known/oauth-protected-resource: OAuth needs https (or a loopback address) for the resource metadata",
+    );
+    expect(seen).toEqual([]);
   });
 
   it("names the URL when the metadata cannot be fetched", async () => {
@@ -157,14 +171,14 @@ describe("discover (RFC 9728 → RFC 8414)", () => {
   });
 });
 
-// A PRM on http://mcp.example naming `as`, whose metadata lists `authorize`.
+// A PRM on https://mcp.example naming `as`, whose metadata lists `authorize`.
 function remoteAs(as: string, authorize: string): { fetch: typeof fetch; seen: string[] } {
   const seen: string[] = [];
   const remote = (async (input: string | URL | Request) => {
     const url = String(input);
     seen.push(url);
     if (url.endsWith("oauth-protected-resource")) {
-      return Response.json({ resource: "http://mcp.example", authorization_servers: [as] });
+      return Response.json({ resource: "https://mcp.example", authorization_servers: [as] });
     }
     return Response.json({
       issuer: as,

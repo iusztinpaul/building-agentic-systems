@@ -2045,19 +2045,24 @@ describe("main (MCP login)", () => {
     expect(await gone(Number(readFileSync(pidFile, "utf8")))).toBe(true);
   });
 
-  it("TUI with a redirected stderr: the 'needs a login' warning is on the screen, stderr stays empty", async () => {
+  it("TUI with a redirected stderr: the login URL is still on the screen and the browser opens, no 'needs a login' skip", async () => {
     writeConfig();
-    const opened = vi.fn();
+    const opened: string[] = [];
 
-    const t = tuiRun({ stderrIsTTY: false, openUrl: opened });
-    await t.shown(" · 0 MCP · ");
+    const t = tuiRun({
+      stderrIsTTY: false,
+      openUrl: (url) => {
+        opened.push(url);
+        browse(url);
+      },
+    });
+    await t.shown('mcp "tree-memory": log in at');
+    await t.shown(" · 1 MCP · ");
     t.terminal.send("\x03");
 
     expect(await t.result).toMatchObject({ code: 0, stderr: "" });
-    expect(t.screen()).toContain(
-      'mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run',
-    );
-    expect(opened).not.toHaveBeenCalled();
+    expect(opened).toHaveLength(1);
+    expect(t.screen()).not.toContain("needs a login");
   });
 
   it("no token, code, code_verifier or Authorization value in any log call or stderr line", async () => {
