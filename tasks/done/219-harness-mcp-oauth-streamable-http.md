@@ -684,3 +684,9 @@ Scratch `TREE_AGENT_HOME`, `mcp.json` = the owner's exact `{"type": "http", "url
 Found 5 issues (1 product, 4 wording). Filed rollup task: `tasks/220-pa-rejection-harness-mcp-oauth-streamable-http.md`.
 Lead issue: story 1 "First login from the TUI" does not hold — `runTui` starts the TUI before `open()`, so the `log in at <url>` line (and the timeout / skip warnings) land on a stderr the TUI overdraws, and with nothing focused during `open()` Ctrl+C is swallowed for the whole 5-minute wait (`tui/app.ts:39`, `cli.ts` `loginUi`). The `--mcp-login` path, the headless TTY rule, the messages, the token file and the docs' hosted-server walkthrough are right from the user POV; `make harness-tests` 995/995 (4 live) on my run.
 Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
+
+### [PA] 2026-10-25 13:30 — Acceptance Review (round 3, after rollup 220)
+
+**VERDICT: ACCEPT**
+
+Story 1 "First login from the TUI" now holds, verified on a real pty against the fake OAuth server (details in `tasks/done/220-…md`): the `log in at <url>` line is on the TUI screen under `starting… (Ctrl+C quits)`, the browser is opened once, the session opens with `1 MCP` and `/mcp` shows `tree-memory … connected`; Ctrl+C during the wait exits 1 with the terminal restored; the redirected-stderr case shows the `needs a login` line on screen with 0 bytes on stderr. Stories 2–7 unchanged since round 2 (`--mcp-login`, headless TTY rule, logout, static header; 1011/1011). Note: this story's text still says "stderr shows …" — the done task is not edited; the README and spec §10.2.1 describe the TUI screen, which is what the user reads. One follow-up (mid-session login not cancellable; TUI unquittable for ≤ 5 min in that case) is recorded on 220 for the orchestrator's follow-up task. Hand off to the PR Reviewer.

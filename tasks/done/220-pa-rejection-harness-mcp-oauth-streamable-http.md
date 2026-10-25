@@ -54,7 +54,7 @@ login, the 60 s `initializeTimeoutMs` default, the user-level hosted entry, `dec
       `--mcp-login` flag row.
 - [x] Tester re-runs the full QA suite and PASSES (`make harness-lint-fix && make harness-lint-check && make
       harness-typecheck && make harness-tests && make pre-commit`).
-- [ ] PA re-runs the acceptance review on 219 (and the 218 wording item) and ACCEPTS.
+- [x] PA re-runs the acceptance review on 219 (and the 218 wording item) and ACCEPTS.
 
 ## Issues (detail)
 
@@ -229,3 +229,27 @@ run 4 (token now stored): no 'log in at' on screen, browser not opened again (op
 ### [SWE] 2026-10-25 13:40 — Tester fold-ins
 
 Folded in: (1) `McpClient` takes the startup `signal` (TUI Ctrl+C), so a pending handshake rejects at once (`connect cancelled`) and drops its child / HTTP session. pty run: hung HTTP server (timeout 20 s) exits 1 at 0.0 s after Ctrl+C. Deaf stdio server: 0.9 s (its SIGTERM), no child left. Tests: `client.test.ts` +5, `cli.test.ts` +1 plus a headless `signal: undefined` check, 1011 passing. (2) The startup screen is in spec §15 and the `startup.ts` header. (3) The ADR-016 amendment and the README hosted-server paragraph are re-wrapped. The mid-session-login Ctrl+C gap stays as logged.
+
+### [PA] 2026-10-25 13:30 — Acceptance Review (round 3)
+
+**VERDICT: ACCEPT**
+
+Re-verified every issue of this rollup against head `a893fc4`, then re-walked 219's seven stories and 218's wording item from the user's POV.
+
+**Issue 1 (option a) — verified on a real pty**, `node src/cli.ts --cwd <scratch>/work --trust`, 100 cols, scratch `HOME`/`TREE_AGENT_HOME`, the hosted entry pointed at `startFakeOAuth()`, a stub `open` on `PATH`, a dummy `OPENROUTER_API_KEY` (`.env` untouched), ANSI stripped from the raw bytes:
+- No token, browser does nothing: `mcp "tree-memory": log in at` + the hard-wrapped authorize URL ON THE SCREEN at +0.5 s under `starting… (Ctrl+C quits)`; Ctrl+C → `quitting…`, `mcp "tree-memory": login cancelled`, exit 1 in 0.0 s; raw tail carries `ESC[?25h` and `ESC[?2004l` (terminal restored); token file `tokens: null` with the registered client kept (0600).
+- Stub browser `curl -L`s the URL after 1 s: `· 1 MCP ·` status bar at +1.4 s with the login lines carried into the transcript; `/mcp` → `tree-memory: 2 tools; direct 0, deferred 0, codemode 2 · connected` (story 1's last clause, not shown on a screen before); tokens stored; Ctrl+C when idle → exit 0.
+- Stderr redirected to a file, no token: `mcp "tree-memory": needs a login; run tree-agent --mcp-login tree-memory once, then re-run` on screen, `0 MCP`, stderr file 0 bytes, browser not called, exit 0.
+- Token stored: no `log in at`, browser not re-opened (`opened.log` still 1 line), `1 MCP` at +0.4 s.
+- Secret hygiene: neither stored token value, `code_verifier=` nor a `code-…` appears in any pty transcript (0 hits).
+- The Tester's fold-in (the startup `signal` reaching every `McpClient`) is pinned by `cli.test.ts` "Ctrl+C while one server logs in and another hangs in initialize (20 s): exit 1 within 1 s, no child left".
+
+**Issues 2–5 — in the tree:** ADR-016 line 223 `0.87–0.99`; the amendment and spec §1 row `~650 lines (mcp/auth.ts + mcp/auth-store.ts), no new dependency … zod`; glossary row names both `mcp__tree_memory_local__<tool>` and `mcp__tree_memory__<tool>`; `did not ask for a login` in the README `--mcp-login` row and spec §10.2.1 CLI bullet. README Ctrl+C row, exit-code-1 row, hosted paragraph and spec §15 `startup` bullet describe the behaviour I observed.
+
+**Suite:** `make harness-tests` → 50 files, 1011/1011, exit 0 (live tests ran).
+
+**Deferral judged acceptable (follow-up, not a blocker):** Ctrl+C cannot cancel a login that starts MID-session (a refresh that fails inside a tool call). Outside story 1 and this rollup's AC; pre-existing; bounded at 5 min; the URL is now visible as a transcript notice, so the user can finish the login in the browser to unblock. Severity for the follow-up's grooming: `App.#quit` awaits the running prompt (`tui/app.ts` "Ends a running prompt first"), and `McpClient.callTool` ignores the run's abort, so during that wait Esc, a second Ctrl+C AND `/exit` are all stuck behind it — the TUI is unquittable for up to 5 min, not merely "the run is slow". Fix shape: `callTool` honours the signal the agent loop already passes (`agent-loop.ts:156`) the way `#attempt` now honours `options.signal`.
+
+**Trivial follow-up (not grounds for a 3rd REJECT):** the README rewrap for Issue 3 dropped the blank line between the hosted paragraph (ending `` `mcp__tree_memory__*`. ``, line 289) and "A static token also works…" (line 290), so markdown renders them as one paragraph. One blank line; fold into the follow-up task above.
+
+Hand off to the PR Reviewer.

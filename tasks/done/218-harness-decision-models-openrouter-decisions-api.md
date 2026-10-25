@@ -615,3 +615,9 @@ $ node tests/fixtures/fake-mcp-server.mjs  (5 cold starts): real 0.28 0.32 0.24 
 **VERDICT: REJECT** (one wording item, folded into the round's single rollup)
 
 All acceptance criteria verified from the user POV: the `checkModels` messages, the generated `decision model: p(dangerous)=…, risk … (…)` reason, the settings rows, Permissions step 4, the cost note, the glossary **Decision model** / **Small model** rows and spec §11.1 (`DANGER_QUESTIONS` toEqual, green in `make harness-tests` 995/995). The one defect is in the ADR-016 amendment text: "destructive ones 0.95–0.99" contradicts the recorded 0.87 (spec/README say 0.87–0.99). Filed in `tasks/220-pa-rejection-harness-mcp-oauth-streamable-http.md` (Issue 2) with 219's issues; re-run acceptance on this task with 219's.
+
+### [PA] 2026-10-25 13:30 — Acceptance Review (round 3, after rollup 220)
+
+**VERDICT: ACCEPT**
+
+The one wording item is fixed: `docs/adrs/016_tree_agent_harness.md:223` reads "destructive ones 0.87–0.99", matching the recorded jev-1.14 fixture, spec §11.1 and README Permissions step 4. Everything else was verified from the user POV in round 2; `make harness-tests` 1011/1011. Hand off to the PR Reviewer.

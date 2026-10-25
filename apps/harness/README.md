@@ -287,6 +287,7 @@ needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mc
 once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
 `tree-agent --mcp-logout tree-memory` (it deletes the file). Its tools register as
 `mcp__tree_memory__*`.
+
 A static token also works and disables the flow: `"headers": {"Authorization": "Bearer <token>"}`. A
 personal Horizon API key (`fmcp_…`) is reported to work as that bearer (`apps/memory/src/tree/mcp/
 client.py`); this is unverified from the harness — `.env.example` describes the key as a platform
