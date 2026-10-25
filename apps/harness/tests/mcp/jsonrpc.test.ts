@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "../../src/log.ts";
-import { INITIALIZE_TIMEOUT_MS } from "../../src/mcp/client.ts";
 import {
   CALL_TIMEOUT_MS,
   JsonRpcError,
@@ -148,11 +147,12 @@ describe("JsonRpcPeer", () => {
     });
   });
 
-  it("a per-call timeout (initialize's 30 s default) overrides the 60 s default", async () => {
+  it("a per-call timeout (30 s) overrides the 60 s default", async () => {
     vi.useFakeTimers();
     const { rpc, sent } = peer();
+    const PER_CALL_MS = 30_000;
 
-    const init = rpc.request("initialize", {}, { timeoutMs: INITIALIZE_TIMEOUT_MS });
+    const init = rpc.request("initialize", {}, { timeoutMs: PER_CALL_MS });
     const initOutcome = init.then(
       () => "resolved",
       (e: Error) => e.message,
@@ -162,7 +162,7 @@ describe("JsonRpcPeer", () => {
       () => "resolved",
       (e: Error) => e.message,
     );
-    await vi.advanceTimersByTimeAsync(INITIALIZE_TIMEOUT_MS - 1);
+    await vi.advanceTimersByTimeAsync(PER_CALL_MS - 1);
     const early = await Promise.race([initOutcome, Promise.resolve("pending")]);
     await vi.advanceTimersByTimeAsync(1);
 
@@ -175,7 +175,7 @@ describe("JsonRpcPeer", () => {
     });
     const callEarly = await Promise.race([callOutcome, Promise.resolve("pending")]);
     expect(callEarly).toBe("pending");
-    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS - INITIALIZE_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS - PER_CALL_MS);
     await expect(callOutcome).resolves.toBe("tools/call timed out after 60 s");
   });
 

@@ -69,13 +69,14 @@ export const Settings = z
       .default({}),
     mcp: z
       .object({
-        // One wait for every server; the memory server takes 11–28 s.
+        // One wait for every server; the memory server takes 11–28 s
+        // locally, the hosted one up to 60 s cold.
         initializeTimeoutMs: z
           .number()
           .int()
           .positive()
           .max(MAX_TIMER_MS)
-          .default(30_000),
+          .default(60_000),
       })
       .strict()
       .default({}),

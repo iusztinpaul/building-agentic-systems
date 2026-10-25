@@ -1489,7 +1489,7 @@ describe("main (mcp)", () => {
     expect(pids()).toEqual([]);
   });
 
-  it("passes settings.json mcp.initializeTimeoutMs to startMcp (default 30 000)", async () => {
+  it("passes settings.json mcp.initializeTimeoutMs to startMcp (default 60 000)", async () => {
     const spy = vi.fn(startMcp);
     const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
 
@@ -1500,7 +1500,7 @@ describe("main (mcp)", () => {
     );
     await run(["hi", "--cwd", project()], fake, { startMcp: spy });
 
-    expect(spy.mock.calls.map(([o]) => o.initializeTimeoutMs)).toEqual([30_000, 90_000]);
+    expect(spy.mock.calls.map(([o]) => o.initializeTimeoutMs)).toEqual([60_000, 90_000]);
   });
 
   it("a url without a scheme: one line naming the server and the key, exit 1", async () => {
@@ -1845,6 +1845,38 @@ describe("main (MCP login)", () => {
       tokens: null,
     });
     expect(signals.listenerCount("SIGINT")).toBe(0);
+  });
+
+  it("--mcp-login: stored tokens, then an initialize that never answers: one warning, 'logged in', exit 0", async () => {
+    writeConfig();
+    writeFileSync(
+      join(home, "settings.json"),
+      JSON.stringify({ mcp: { initializeTimeoutMs: 300 } }),
+    );
+    oauth.hangInitialize();
+
+    const result = await run(["--mcp-login", "tree-memory"], new FakeProvider(), {
+      key: "",
+      stdin: tty,
+      stderrIsTTY: true,
+      openUrl: browse,
+    });
+
+    expect(result).toMatchObject({
+      code: 0,
+      stdout: `logged in to "tree-memory" (${tokenFile()})\n`,
+    });
+    const lines = result.stderr.trimEnd().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^mcp "tree-memory": log in at /);
+    expect(lines[1]).toBe(
+      'mcp "tree-memory": logged in, but initialize timed out after 0.3 s ' +
+        "(settings.json: mcp.initializeTimeoutMs); the server may be cold-starting, retry or raise it",
+    );
+    const saved = JSON.parse(readFileSync(tokenFile(), "utf8"));
+    expect(saved.tokens.access_token).toBe(oauth.issued[0]);
+    const inits = oauth.mcp.filter((r) => r.body?.method === "initialize");
+    expect(inits.map((r) => r.authorization)).toEqual([null, `Bearer ${oauth.issued[0]}`]);
   });
 
   it("--mcp-logout deletes the file, then reports not logged in; both exit 0", async () => {

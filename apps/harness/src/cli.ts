@@ -26,6 +26,7 @@ import {
 } from "./mcp/auth-store.ts";
 import { McpClient, type StartMcp, startMcp } from "./mcp/client.ts";
 import { loadMcpConfig } from "./mcp/config.ts";
+import { JsonRpcTimeoutError } from "./mcp/jsonrpc.ts";
 import { type McpServerInfo, registerMcpTools } from "./mcp/register.ts";
 import { OpenRouterProvider } from "./provider/openrouter.ts";
 import type { Provider } from "./provider/types.ts";
@@ -283,7 +284,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
 // --mcp-logout deletes the token file (mcp.json not read: a removed
 // server can still be logged out of). --mcp-login runs the flow
 // whatever the TTYs, with cached tokens ignored and the registered
-// client kept; Ctrl+C cancels it (exit 1).
+// client kept; Ctrl+C cancels it (exit 1). Stored tokens are a
+// success: a failed handshake after them is one warning, exit 0.
 async function mcpAuthCommand(
   mode: McpAuthMode,
   deps: CliDeps,
@@ -302,10 +304,8 @@ async function mcpAuthCommand(
   }
   const cwd = resolve(mode.cwd ?? process.cwd());
   const trusted = await isTrusted(cwd, { env, flag: mode.trust });
-  const servers = await loadMcpConfig({
-    env,
-    projectDir: trusted ? cwd : undefined,
-  });
+  const projectDir = trusted ? cwd : undefined;
+  const servers = await loadMcpConfig({ env, projectDir });
   const server = servers[name];
   if (!server) {
     const known = Object.keys(servers).join(", ") || "none";
@@ -323,6 +323,7 @@ async function mcpAuthCommand(
     );
     return 0;
   }
+  const settings = await loadSettings({ env, projectDir });
   const cancel = new AbortController();
   const onSignal = () => cancel.abort();
   deps.signals?.once("SIGINT", onSignal);
@@ -333,6 +334,7 @@ async function mcpAuthCommand(
   const client = new McpClient(name, server, {
     env,
     cwd,
+    initializeTimeoutMs: settings.mcp.initializeTimeoutMs,
     freshLogin: true,
     login: { ...loginUi(deps, tty), signal: cancel.signal },
   });
@@ -341,9 +343,21 @@ async function mcpAuthCommand(
   } catch (err) {
     const message = (err as Error).message;
     const label = `mcp "${name}": `;
-    const line = message.startsWith(label) ? message : label + message;
-    stderr.write(`${line}\n`);
-    return 1;
+    const bare = message.startsWith(label)
+      ? message.slice(label.length)
+      : message;
+    if (!client.loggedIn) {
+      stderr.write(`${label}${bare}\n`);
+      return 1;
+    }
+    // The timeout message already names mcp.initializeTimeoutMs.
+    const hint =
+      err instanceof JsonRpcTimeoutError
+        ? "; the server may be cold-starting, retry or raise it"
+        : "";
+    stderr.write(`${label}logged in, but ${bare}${hint}\n`);
+    stdout.write(`logged in to "${name}" (${file})\n`);
+    return 0;
   } finally {
     deps.signals?.off("SIGINT", onSignal);
     deps.signals?.off("SIGTERM", onSignal);

@@ -585,7 +585,7 @@ describe("connectMcpServers / startMcp", () => {
     expect(connected[0]?.tools).toEqual([]);
   });
 
-  it("initialize waits 30 s by default: pending at 29 999 ms, a warn naming the setting at 30 000 ms", async () => {
+  it("initialize waits 60 s by default: pending at 59 999 ms, a warn naming the setting at 60 000 ms", async () => {
     vi.useFakeTimers();
     const { log, lines } = sink();
 
@@ -596,10 +596,10 @@ describe("connectMcpServers / startMcp", () => {
     const connected = await pending;
     clients.push(...connected);
 
-    expect(INITIALIZE_TIMEOUT_MS).toBe(30_000);
+    expect(INITIALIZE_TIMEOUT_MS).toBe(60_000);
     expect(early).toEqual([]);
     expect(lines.filter((l) => l.includes("warn:"))).toEqual([
-      '[tree-agent] warn: mcp "silent": initialize timed out after 30 s (settings.json: mcp.initializeTimeoutMs)\n',
+      '[tree-agent] warn: mcp "silent": initialize timed out after 60 s (settings.json: mcp.initializeTimeoutMs)\n',
     ]);
     expect(connected[0]?.connected).toBe(false);
   });

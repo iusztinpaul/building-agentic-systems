@@ -670,3 +670,6 @@ but not for pasting — `headless.out`, `headless.err`).
 
 ### [SWE] 2026-10-25 12:05 — Tester fold-ins
 Folded in the Tester's issues 1–5, each with a test: `expires_in` coerced (missing → 1 h) and the unexpected-answer error names the field (`auth.test.ts`); a 401 on an already-replaced token retries with the new one, else joins McpAuth's in-flight refresh (`transport-http.test.ts`, 3 concurrent 401s → 1 token request); `discover()` checks the AS scheme before fetching, wraps network failures as `GET <url>: …` and refuses an `issuer` mismatch (`auth.test.ts`); a token file read with a mode other than 0600 is chmodded back with one warning, and a key outside `[A-Za-z0-9._-]` gets a `~<sha256[:8]>` suffix so `a/b` and `a_b` no longer share a file (`auth-store.test.ts`; spec §10.2.1 updated).
+
+### [SWE] 2026-10-25 12:25 — Post-login handshake fix
+`--mcp-login` now exits 0 with `logged in to "<server>" (<file>)` once the tokens are stored, turning a failed follow-up `initialize` (the hosted server cold-starting past 30 s) into one `logged in, but …` warning; it also honours `settings.json` `mcp.initializeTimeoutMs`, whose default rose 30 000 → 60 000 (Horizon's 60 s readiness window) — `tests/cli.test.ts` "stored tokens, then an initialize that never answers".

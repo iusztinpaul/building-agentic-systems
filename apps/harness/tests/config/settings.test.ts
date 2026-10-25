@@ -33,7 +33,7 @@ const DEFAULTS = {
       maxSubTurns: 8,
     },
   },
-  mcp: { initializeTimeoutMs: 30_000 },
+  mcp: { initializeTimeoutMs: 60_000 },
   contextFiles: { maxChars: 40_000 },
   skills: { listingBudgetRatio: 0.01 },
 };

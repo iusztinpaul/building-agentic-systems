@@ -41,6 +41,7 @@ export interface FakeOAuth {
   denyNext(): void; // the next authorize redirects with error=
   expiresIn(value: unknown): void; // in token answers; undefined: omitted
   badIssuer(): void; // the AS metadata names https://evil.example
+  hangInitialize(): void; // an authorized `initialize` never answers (a cold start)
   // GET the authorize URL (no redirect following), then the loopback
   // Location (optionally tampered with): the callback's answer.
   browse(authorizeUrl: string, tamper?: (location: URL) => void): Promise<Response>;
@@ -66,6 +67,7 @@ export async function startFakeOAuth(options: { prmScopes?: string[] } = {}): Pr
     acceptTokens: true,
     deny: false,
     badIssuer: false,
+    hangInitialize: false,
   };
   let expiresIn: unknown = 3600;
   const valid = new Set<string>();
@@ -142,7 +144,7 @@ export async function startFakeOAuth(options: { prmScopes?: string[] } = {}): Pr
     return new Response(null, { status: 302, headers: { location: location.href } });
   };
 
-  const mcp = (req: Request, text: string, open: boolean): Response => {
+  const mcp = (req: Request, text: string, open: boolean): Response | Promise<Response> => {
     const body = text ? JSON.parse(text) : undefined;
     const authorization = req.headers.get("authorization");
     if (!open) fake.mcp.push({ authorization, body });
@@ -159,6 +161,8 @@ export async function startFakeOAuth(options: { prmScopes?: string[] } = {}): Pr
       );
     }
     if (body?.id === undefined) return new Response(null, { status: 202 });
+    // Open until close()'s closeAllConnections().
+    if (flags.hangInitialize && body.method === "initialize") return new Promise(() => {});
     return json(200, { jsonrpc: "2.0", id: body.id, ...answer(body) });
   };
 
@@ -276,6 +280,9 @@ export async function startFakeOAuth(options: { prmScopes?: string[] } = {}): Pr
     },
     badIssuer: () => {
       flags.badIssuer = true;
+    },
+    hangInitialize: () => {
+      flags.hangInitialize = true;
     },
     browse: async (authorizeUrl, tamper) => {
       const first = await inMemory(authorizeUrl, { redirect: "manual" });

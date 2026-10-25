@@ -474,7 +474,7 @@ The MCP authorization spec (2025-06-18, OAuth 2.1) for streamable-HTTP servers, 
   ```
 
   `tokens: null` = registered, not logged in. A file whose `url` is not the configured one is ignored and overwritten by the next login. Token values, codes, the verifier and `Authorization` values are never logged.
-- **CLI.** `tree-agent --mcp-login <server>` (no `OPENROUTER_API_KEY`, no session) runs the flow whatever the TTYs (the browser opens only on a TTY), ignoring cached tokens but reusing the registered client, and prints `logged in to "<server>" (<file>)`; Ctrl+C, a timeout, an `error=` callback or a token error → the message, exit 1. `tree-agent --mcp-logout <server>` deletes the file (§15).
+- **CLI.** `tree-agent --mcp-login <server>` (no `OPENROUTER_API_KEY`, no session) runs the flow whatever the TTYs (the browser opens only on a TTY), ignoring cached tokens but reusing the registered client, and prints `logged in to "<server>" (<file>)`, exit 0 — once the tokens are stored, a failed `initialize` after them is one warning (`mcp "<server>": logged in, but <error>`), not a failure; Ctrl+C, a timeout, an `error=` callback or a token error → the message, exit 1. `tree-agent --mcp-logout <server>` deletes the file (§15).
 
 ### 10.3 Registration (`mcp/register.ts`) and the `codemode` tool
 
@@ -796,7 +796,7 @@ export const Settings = z.object({
       maxCalls: z.number().default(64), maxInputChars: z.number().default(200_000),
       maxTotalTokens: z.number().default(400_000), maxSubTurns: z.number().default(8) }).default({}),
   }).default({}),
-  mcp: z.object({ initializeTimeoutMs: z.number().default(30_000) }).default({}),  // one `initialize` wait per server; the memory server takes 11–28 s
+  mcp: z.object({ initializeTimeoutMs: z.number().default(60_000) }).default({}),  // one `initialize` wait per server; the memory server takes 11–28 s locally, the hosted one up to 60 s cold
   contextFiles: z.object({ maxChars: z.number().default(40_000) }).default({}),
   skills: z.object({ listingBudgetRatio: z.number().default(0.01) }).default({}),
 });

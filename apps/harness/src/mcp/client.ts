@@ -29,9 +29,10 @@ import { StdioTransport } from "./transport-stdio.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "tree-agent", version: "0.1.0" };
-// A silent server costs startup this, not the 60 s of a tools/call;
-// settings.mcp.initializeTimeoutMs (same default) overrides it.
-export const INITIALIZE_TIMEOUT_MS = 30_000;
+// The hosted server's 60 s cold-start window; a silent server costs
+// startup this. settings.mcp.initializeTimeoutMs (same default)
+// overrides it.
+export const INITIALIZE_TIMEOUT_MS = 60_000;
 const INITIALIZE_HINT = " (settings.json: mcp.initializeTimeoutMs)";
 // With the repeated-cursor guard: a server minting endless cursors.
 export const MAX_TOOL_PAGES = 100;
@@ -86,6 +87,7 @@ export class McpClient {
   #connecting: Promise<JsonRpcPeer> | undefined;
   #tools: McpTool[] = [];
   #closed = false;
+  #loggedIn = false;
 
   constructor(
     name: string,
@@ -111,6 +113,11 @@ export class McpClient {
 
   get connected(): boolean {
     return this.#peer !== undefined;
+  }
+
+  // A login stored its tokens, whatever the handshake after it did.
+  get loggedIn(): boolean {
+    return this.#loggedIn;
   }
 
   // The last successful listTools().
@@ -189,6 +196,7 @@ export class McpClient {
     } catch (err) {
       if (!(err instanceof McpAuthRequired) || !this.#auth) throw err;
       await this.#login(this.#auth, err.challenge);
+      this.#loggedIn = true;
     }
     try {
       return await this.#attempt();

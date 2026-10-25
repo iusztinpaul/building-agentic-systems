@@ -105,7 +105,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 | `--json` | off | headless JSONL event stream on stdout; alone, with no prompt and no stdin, it prints usage |
 | `--no-skills` | off | no skill discovery, no `skills` prompt section, `/skill:` answers "skills are disabled" |
 | `--no-mcp` | off | no `mcp.json` read, no server started, so no `tool_search` and no `codemode` tool |
-| `--mcp-login <server>` | — | the [MCP login](#the-hosted-tree-memory-server) for an HTTP server of `mcp.json` (user, plus project for a trusted cwd / `--trust`); needs no `OPENROUTER_API_KEY`; prints the URL on stderr, opens the browser on a TTY, waits ≤ 5 min, prints `logged in to "<server>" (<file>)`, exit 0. Unknown or stdio server, timeout, Ctrl+C or a refused login: exit 1. A server with a configured `Authorization` header: "nothing to log in to", exit 0. |
+| `--mcp-login <server>` | — | the [MCP login](#the-hosted-tree-memory-server) for an HTTP server of `mcp.json` (user, plus project for a trusted cwd / `--trust`); needs no `OPENROUTER_API_KEY`; prints the URL on stderr, opens the browser on a TTY, waits ≤ 5 min, prints `logged in to "<server>" (<file>)`, exit 0 — also when the `initialize` after the stored login fails (one warning on stderr). Unknown or stdio server, timeout, Ctrl+C or a refused login: exit 1. A server with a configured `Authorization` header: "nothing to log in to", exit 0. |
 | `--mcp-logout <server>` | — | delete `mcp-auth/<server>.json` (`logged out of …`, or `not logged in to …`), exit 0 |
 
 ### Exit codes
@@ -187,7 +187,7 @@ Layers merge key by key, later wins: defaults → `~/.tree-agent/settings.json` 
 | `codemode.llm.maxInputChars` | 200 000 | per call |
 | `codemode.llm.maxTotalTokens` | 400 000 | per script, summed usage |
 | `codemode.llm.maxSubTurns` | 8 | depth-2 sub-loop turns |
-| `mcp.initializeTimeoutMs` | 30 000 | wait for each MCP server's `initialize` at startup; one value for every server (`tools/call` stays 60 s) |
+| `mcp.initializeTimeoutMs` | 60 000 | wait for each MCP server's `initialize` at startup; one value for every server (`tools/call` stays 60 s) |
 | `contextFiles.maxChars` | 40 000 | per context file |
 | `skills.listingBudgetRatio` | 0.01 | the skills section's share of `contextLength` |
 
@@ -223,7 +223,7 @@ export const McpConfig = z.object({ mcpServers: z.record(McpServer) });
 
 - A server with both `command` and `url` is an error, and so is a `type` that does not match its transport (`"sse"`, or `"stdio"` with a `url`): `type must be http or stdio`. Globs support `*` only and are case-sensitive.
 - stdio children start in the session cwd and inherit its environment plus `env`. HTTP adds `Accept: application/json, text/event-stream` and echoes `Mcp-Session-Id`.
-- Timeouts: `initialize` 30 s (`mcp.initializeTimeoutMs`), every other call 60 s. Only `initialize`, `tools/list` (paginated) and `tools/call` are used; OAuth 2.1 for HTTP servers (below), no resources or prompts.
+- Timeouts: `initialize` 60 s (`mcp.initializeTimeoutMs`), every other call 60 s. Only `initialize`, `tools/list` (paginated) and `tools/call` are used; OAuth 2.1 for HTTP servers (below), no resources or prompts.
 - Tools register as `mcp__<server>__<tool>`. The server segment is sanitised to `^[a-z][a-z0-9_]*$` (lowercased, other characters → `_`), so `tree-memory-local` becomes `tree_memory_local` and every tool is a valid `tools.<name>` property in scripts.
 - `/mcp` in the TUI lists each configured server with its tool counts per exposure and its connection state.
 
@@ -260,7 +260,7 @@ With this file and the memory stack up (`make local-start`), the model sees `rea
 make harness-run PROMPT="what is in my memory about agents?" ARGS="--cwd ../.. --trust"
 ```
 
-A server that does not answer `initialize` within 30 s logs `mcp "<name>": initialize timed out after 30 s (settings.json: mcp.initializeTimeoutMs)` and the session starts without its tools. The memory server answers in ~11–17 s warm and up to ~28 s on a slow start (Python imports, Opik setup), longer on a cold `uv` sync; when you see this warning, raise `mcp.initializeTimeoutMs` in `~/.tree-agent/settings.json` (e.g. `{"mcp": {"initializeTimeoutMs": 60000}}`).
+A server that does not answer `initialize` within 60 s logs `mcp "<name>": initialize timed out after 60 s (settings.json: mcp.initializeTimeoutMs)` and the session starts without its tools. The memory server answers in ~11–17 s warm and up to ~28 s on a slow start (Python imports, Opik setup), longer on a cold `uv` sync; when you see this warning, raise `mcp.initializeTimeoutMs` in `~/.tree-agent/settings.json` (e.g. `{"mcp": {"initializeTimeoutMs": 120000}}`).
 
 The memory server's tools declare no `readOnlyHint`, so the gate treats them as writes: `search_memory` goes to the classifier in `auto` and prompts once in `ask` (answer `s` to allow it for the session).
 
@@ -280,7 +280,8 @@ server, registers itself once, and opens your browser (printing the URL on stder
 one-time Horizon login; the token and the registered client are stored in
 `~/.tree-agent/mcp-auth/tree-memory.json` (mode 0600) and refreshed silently afterwards. Log in once
 with `tree-agent --mcp-login tree-memory` (no `OPENROUTER_API_KEY` needed); every later run — TUI or
-headless — reuses the token. Headless runs without a terminal (piped stdin, CI) never wait for a login:
+headless — reuses the token. The first request after idle can take tens of seconds while Horizon
+cold-starts the server (hence the 60 s `mcp.initializeTimeoutMs` default). Headless runs without a terminal (piped stdin, CI) never wait for a login:
 a server that needs one is skipped with `mcp "tree-memory": needs a login; run tree-agent --mcp-login
 tree-memory once, then re-run`. The interactive wait is bounded at 5 minutes. Log out with
 `tree-agent --mcp-logout tree-memory` (it deletes the file). Its tools register as
