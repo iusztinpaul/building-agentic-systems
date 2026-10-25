@@ -19,7 +19,9 @@ const DEFAULTS = {
   codemode: {
     inlineBudgetTokens: 3_000,
     timeoutMs: 60_000,
+    memoryMb: 256,
     maxToolCalls: 50,
+    outputMaxBytes: 20_000,
     concurrency: 4,
     llm: {
       depth: 1,
@@ -126,6 +128,20 @@ describe("loadSettings", () => {
 
     await expect(loadSettings({ env: env() })).rejects.toThrow(
       "  - compaction.triggerRatio: Number must be greater than or equal to 0.3",
+    );
+  });
+
+  it("reads the codemode sandbox limits and rejects a concurrency of 0 (it would hang)", async () => {
+    writeSettings({ codemode: { memoryMb: 128, outputMaxBytes: 5_000 } });
+    expect((await loadSettings({ env: env() })).codemode).toMatchObject({
+      memoryMb: 128,
+      outputMaxBytes: 5_000,
+      timeoutMs: 60_000,
+    });
+
+    writeSettings({ codemode: { concurrency: 0 } });
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      "  - codemode.concurrency: Number must be greater than 0",
     );
   });
 

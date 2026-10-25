@@ -28,10 +28,13 @@ export const Settings = z
       .default({}),
     codemode: z
       .object({
-        inlineBudgetTokens: z.number().default(3_000),
-        timeoutMs: z.number().default(60_000),
-        maxToolCalls: z.number().default(50),
-        concurrency: z.number().default(4),
+        // Sandbox limits (spec §10.4); 0 would hang or never run.
+        inlineBudgetTokens: z.number().int().nonnegative().default(3_000),
+        timeoutMs: z.number().int().positive().default(60_000),
+        memoryMb: z.number().int().positive().default(256),
+        maxToolCalls: z.number().int().positive().default(50),
+        outputMaxBytes: z.number().int().positive().default(20_000),
+        concurrency: z.number().int().positive().default(4),
         llm: z
           .object({
             model: z.string().optional(),

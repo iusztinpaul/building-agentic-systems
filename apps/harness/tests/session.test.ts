@@ -9,7 +9,7 @@ import { AgentSession, type SessionOptions } from "../src/session.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import { discoverSkills } from "../src/skills/skills.ts";
 import { builtinRegistry } from "../src/tools/builtins.ts";
-import type { ToolRegistry } from "../src/tools/registry.ts";
+import type { Exposure, ToolRegistry } from "../src/tools/registry.ts";
 import { registerToolSearch } from "../src/tools/tool-search.ts";
 import type { AgentEvent, Message, PermissionPrompter, ToolCall } from "../src/types.ts";
 import { useTmpDir } from "./helpers/tmp.ts";
@@ -1239,5 +1239,329 @@ describe("AgentSession with MCP tools and tool_search", () => {
     await t.session.prompt("two");
 
     expect(t.events.filter((e) => e.type === "tool_activation")).toHaveLength(2);
+  });
+});
+
+describe("AgentSession with codemode", () => {
+  const LIMITS = {
+    inlineBudgetTokens: 3_000,
+    timeoutMs: 5_000,
+    memoryMb: 64,
+    maxToolCalls: 50,
+    outputMaxBytes: 20_000,
+    concurrency: 4,
+  };
+  const codemode = () => ({ ...LIMITS, tmpDir: join(root(), "home", "tmp") });
+  // A registry with the built-ins and one codemode-exposed MCP tool.
+  const withMcp = (server = memoryLike()) => {
+    const tools = builtinRegistry({ tmpDir: join(root(), "home", "tmp") });
+    const mcpServers = registerMcpTools(tools, [server], { tmpDir: join(root(), "home", "tmp") });
+    registerToolSearch(tools);
+    return { tools, mcpServers, codemode: codemode() };
+  };
+  const memoryLike = (toolExposure: Record<string, Exposure> = {}): RegistrableClient => ({
+    name: "tree-memory-local",
+    server: { command: "uv", args: [], env: {}, toolExposure },
+    connected: true,
+    tools: [
+      "search_memory",
+      "visualize_memory_structure",
+      "visualize_memory_embeddings",
+      "search_web",
+      "scrape_web",
+      "ingest_url",
+      "ingest_file",
+      "ingest_conversation",
+    ].map((name) => ({ name, description: `${name} tool.`, inputSchema: { type: "object" } })),
+    callTool: async (name) => ({
+      content: [{ type: "text", text: `${name} ran` }],
+      isError: false,
+    }),
+  });
+  const script = (source: string): ToolCall => ({
+    id: "cm",
+    name: "codemode",
+    arguments: { script: source, description: "write some files" },
+  });
+  const toolResult = (messages: readonly Message[]) =>
+    messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
+  const safe = { dangerous: false, risk: "low", reason: "cwd-scoped" };
+
+  it("with the committed .tree-agent/mcp.json the direct set is exactly the 4 built-ins, search_memory, tool_search, codemode", async () => {
+    const committed = JSON.parse(
+      readFileSync(new URL("../../../.tree-agent/mcp.json", import.meta.url), "utf8"),
+    ) as { mcpServers: Record<string, { toolExposure: Record<string, Exposure> }> };
+    const exposure = committed.mcpServers["tree-memory-local"]?.toolExposure ?? {};
+    const t = await setup([textTurn("ok")], withMcp(memoryLike(exposure)));
+
+    await t.session.prompt("hi");
+
+    expect(t.fake.requests[0]?.tools.map((s) => s.name)).toEqual([
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "mcp__tree_memory_local__search_memory",
+      "tool_search",
+      "codemode",
+    ]);
+  });
+
+  it("ask: prompts for codemode, then for a write inside it; a deny rejects and the script's catch goes on", async () => {
+    const asked: { call: ToolCall; summary: string }[] = [];
+    const t = await setup(
+      [
+        toolTurn(
+          script(`
+            try { await tools.write({ path: "a.md", content: "a" }); }
+            catch (e) { console.log("skipped:", e.message); }
+            return "partial";
+          `),
+        ),
+        textTurn("I skipped a.md"),
+      ],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call, summary) => {
+            asked.push({ call, summary });
+            return call.name === "write" ? "deny" : "once";
+          },
+        },
+      },
+    );
+
+    const reason = await t.session.prompt("write a.md");
+
+    expect(reason).toBe("completed");
+    expect(asked.map((a) => a.call.name)).toEqual(["codemode", "write"]);
+    expect(asked[0]?.summary).toContain("write some files\n");
+    expect(asked[1]).toMatchObject({ call: { origin: "codemode" }, summary: "a.md" });
+    expect(toolResult(t.session.messages)).toEqual([
+      'skipped: Blocked: denied by the user\n"partial"',
+    ]);
+    expect(existsSync(join(t.cwd, "a.md"))).toBe(false);
+    expect(t.events.filter((e) => e.type === "permission")).toMatchObject([
+      { call: { name: "codemode" }, decision: "allow", source: "user" },
+      { call: { name: "write", origin: "codemode" }, decision: "deny", source: "user" },
+    ]);
+  });
+
+  it("ask: the script waits on the prompt (answered after 100 ms) and the call then runs", async () => {
+    const t = await setup(
+      [
+        toolTurn(script('return await tools.write({ path: "b.md", content: "b" });')),
+        textTurn("ok"),
+      ],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            if (call.name === "write") await new Promise((r) => setTimeout(r, 100));
+            return "once";
+          },
+        },
+        codemode: { ...codemode(), timeoutMs: 50 }, // the prompt does not count
+      },
+    );
+
+    await t.session.prompt("write b.md");
+
+    expect(readFileSync(join(t.cwd, "b.md"), "utf8")).toBe("b");
+    expect(toolResult(t.session.messages)).toEqual(['"Wrote 1 bytes to b.md"']);
+  });
+
+  it("a read-only tool inside a script never prompts", async () => {
+    const asked: string[] = [];
+    const t = await setup(
+      [toolTurn(script('return (await tools.read({ path: "n.md" })).lines;')), textTurn("ok")],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.name);
+            return "once";
+          },
+        },
+      },
+    );
+    writeFileSync(join(t.cwd, "n.md"), "one\ntwo\n");
+
+    await t.session.prompt("read n.md");
+
+    expect(asked).toEqual(["codemode"]);
+    expect(t.events).toContainEqual(
+      expect.objectContaining({
+        type: "permission",
+        call: expect.objectContaining({ name: "read" }),
+        source: "readOnly",
+      }),
+    );
+  });
+
+  it("parallel calls get one dialog at a time, first come first asked", async () => {
+    let open = 0;
+    let peak = 0;
+    const asked: string[] = [];
+    const t = await setup(
+      [
+        toolTurn(
+          script(
+            'await Promise.all(["a", "b", "c"].map((p) => tools.write({ path: p + ".md", content: p })));',
+          ),
+        ),
+        textTurn("ok"),
+      ],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            peak = Math.max(peak, ++open);
+            asked.push(String(call.arguments.path ?? call.name));
+            await new Promise((r) => setTimeout(r, 20));
+            open--;
+            return "once";
+          },
+        },
+      },
+    );
+
+    await t.session.prompt("write three");
+
+    expect(peak).toBe(1);
+    expect(asked).toEqual(["codemode", "a.md", "b.md", "c.md"]);
+    for (const p of ["a", "b", "c"]) expect(existsSync(join(t.cwd, `${p}.md`))).toBe(true);
+  });
+
+  it("a `session` answer covers the parallel calls queued behind it", async () => {
+    const asked: string[] = [];
+    const t = await setup(
+      [
+        toolTurn(
+          script(
+            'await Promise.all(["a", "b"].map((p) => tools.write({ path: p + ".md", content: p })));',
+          ),
+        ),
+        textTurn("ok"),
+      ],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.name);
+            return call.name === "write" ? "session" : "once";
+          },
+        },
+      },
+    );
+
+    await t.session.prompt("write two");
+
+    expect(asked).toEqual(["codemode", "write"]);
+    expect(
+      t.events
+        .filter((e) => e.type === "permission")
+        .map((e) => e.type === "permission" && e.source),
+    ).toEqual(["user", "user", "session"]);
+  });
+
+  it("headless: a dangerous call inside a script ends the run blocked, even inside try/catch", async () => {
+    const sessions = join(root(), "sessions");
+    const t = await setup(
+      [
+        toolTurn(
+          script(`
+            try { await tools.write({ path: "~/.ssh/config", content: "x" }); }
+            catch (e) { console.log("caught"); await tools.write({ path: "after.md", content: "x" }); }
+            return "never";
+          `),
+        ),
+        textTurn("never"),
+      ],
+      {
+        ...withMcp(),
+        store: SessionStore.jsonl(sessions),
+        prompter: null,
+        permissionMode: "auto",
+      },
+      [safe, { dangerous: true, risk: "high", reason: "writes ~/.ssh/config" }, safe],
+    );
+
+    const reason = await t.session.prompt("configure ssh");
+
+    expect(reason).toBe("blocked");
+    expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "blocked" });
+    expect(toolResult(t.session.messages)).toEqual([
+      "Error: the script was stopped: a tool call was blocked",
+    ]);
+    expect(existsSync(join(t.cwd, "after.md"))).toBe(false);
+    expect(t.fake.requests).toHaveLength(1);
+    expect(t.fake.structuredRequests).toHaveLength(2); // codemode + the write; never the second
+    const [dir = ""] = readdirSync(sessions);
+    const [file = ""] = readdirSync(join(sessions, dir));
+    const entries = readFileSync(join(sessions, dir, file), "utf8")
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Entry);
+    expect(entries.filter((e) => e.type === "permission")).toMatchObject([
+      { call: { name: "codemode" }, decision: "allow", source: "classifier" },
+      {
+        call: { name: "write", origin: "codemode" },
+        decision: "deny",
+        source: "headless",
+        reason: "dangerous: writes ~/.ssh/config",
+      },
+    ]);
+  });
+
+  it("headless with onBlocked continue: the script catches the deny and the run completes", async () => {
+    const t = await setup(
+      [
+        toolTurn(
+          script(
+            'try { await tools.write({ path: "x.md", content: "x" }); } catch (e) { return e.message; }',
+          ),
+        ),
+        textTurn("skipped"),
+      ],
+      { ...withMcp(), prompter: null, permissionMode: "auto", onBlocked: "continue" },
+      [safe, { dangerous: true, risk: "high", reason: "nope" }],
+    );
+
+    expect(await t.session.prompt("go")).toBe("completed");
+    expect(toolResult(t.session.messages)).toEqual(['"Blocked: dangerous: nope"']);
+  });
+
+  it("a codemode-only MCP tool is reachable from a script and gated like any other", async () => {
+    const asked: string[] = [];
+    const t = await setup(
+      [
+        toolTurn(script("return await tools.mcp__tree_memory_local__scrape_web({ url: 'x' });")),
+        textTurn("ok"),
+      ],
+      {
+        ...withMcp(),
+        permissionMode: "ask",
+        prompter: {
+          ask: async (call) => {
+            asked.push(call.name);
+            return "once";
+          },
+        },
+      },
+    );
+
+    await t.session.prompt("scrape");
+
+    expect(t.fake.requests[0]?.tools.map((s) => s.name)).not.toContain(
+      "mcp__tree_memory_local__scrape_web",
+    );
+    expect(asked).toEqual(["codemode", "mcp__tree_memory_local__scrape_web"]);
+    expect(toolResult(t.session.messages)).toEqual(['"scrape_web ran"']);
   });
 });

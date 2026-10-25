@@ -28,6 +28,15 @@ describe("PermissionPrompt", () => {
     expect(text).not.toContain("classifier:");
   });
 
+  it("says when the call comes from a codemode script", () => {
+    const fromScript: ToolCall = { ...write, origin: "codemode" };
+    const p = new PermissionPrompt(fromScript, "src/a.ts", undefined, () => {});
+
+    expect(p.render(80).map(stripTerminalSequences).join("\n")).toContain(
+      "Allow write (in a codemode script)?",
+    );
+  });
+
   it("shows the classifier's reason when there is one", () => {
     expect(prompt("~/.zshrc", "edits a shell rc file").text()).toContain(
       "classifier: edits a shell rc file",

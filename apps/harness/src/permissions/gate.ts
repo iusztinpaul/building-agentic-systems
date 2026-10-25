@@ -35,6 +35,9 @@ export interface GateDeps {
   classifier: Classifier;
   sessionAllow: Set<string>; // tool names answered `session`
   signal?: AbortSignal; // the run's
+  // One dialog at a time when a codemode script's calls are gated
+  // concurrently; classifier calls still overlap.
+  prompts?: PromptQueue;
 }
 
 export interface Resolution {
@@ -79,13 +82,33 @@ export async function resolve(
       reason: reason ? `dangerous: ${reason}` : HEADLESS_ASK,
     };
   }
-  const summary = primaryArgument(req.call, req.cwd);
-  const answer = await deps.prompter.ask(req.call, summary, reason);
-  if (answer === "deny") {
-    return { decision: "deny", source: "user", reason: USER_DENIED };
+  const { prompter } = deps;
+  const ask = async (): Promise<Resolution> => {
+    // A `session` answer given while this call waited covers it.
+    if (deps.sessionAllow.has(tool.name)) {
+      return { decision: "allow", source: "session" };
+    }
+    deps.signal?.throwIfAborted(); // no dialog for a stopped run
+    const summary = primaryArgument(req.call, req.cwd);
+    const answer = await prompter.ask(req.call, summary, reason);
+    if (answer === "deny") {
+      return { decision: "deny", source: "user", reason: USER_DENIED };
+    }
+    if (answer === "session") deps.sessionAllow.add(tool.name);
+    return { decision: "allow", source: "user", reason };
+  };
+  return deps.prompts ? deps.prompts.run(ask) : ask();
+}
+
+// A FIFO: each task starts when the previous one has settled.
+export class PromptQueue {
+  #tail: Promise<unknown> = Promise.resolve();
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.#tail.then(task);
+    this.#tail = next.catch(() => {});
+    return next;
   }
-  if (answer === "session") deps.sessionAllow.add(tool.name);
-  return { decision: "allow", source: "user", reason };
 }
 
 // Fail-closed: an error, a parse failure or a timeout is dangerous.

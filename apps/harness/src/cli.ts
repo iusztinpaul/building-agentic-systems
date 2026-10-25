@@ -166,6 +166,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         model: settings.model,
         tools,
         mcpServers,
+        codemode: { ...settings.codemode, tmpDir },
         cwd,
         maxTurns: args.maxTurns,
         trusted: projectTrusted,

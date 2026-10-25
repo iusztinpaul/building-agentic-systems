@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Classifier, DangerCheck } from "../../src/permissions/decision-model.ts";
-import { type GateDeps, HEADLESS_ASK, resolve, USER_DENIED } from "../../src/permissions/gate.ts";
+import {
+  type GateDeps,
+  HEADLESS_ASK,
+  PromptQueue,
+  resolve,
+  USER_DENIED,
+} from "../../src/permissions/gate.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
 import type { ToolDefinition } from "../../src/tools/registry.ts";
 import type { PermissionMode, ToolCall } from "../../src/types.ts";
@@ -266,5 +272,79 @@ describe("resolve", () => {
       cwd: "/work",
       recentUserMessages: ["make x.ts"],
     });
+  });
+});
+
+describe("resolve with a PromptQueue (parallel codemode calls)", () => {
+  it("shows one dialog at a time, in arrival order, while classifier calls overlap", async () => {
+    let open = 0;
+    let peak = 0;
+    let classifying = 0;
+    let classifyPeak = 0;
+    const order: string[] = [];
+    const d: GateDeps = {
+      mode: "auto",
+      prompter: {
+        ask: async (call) => {
+          peak = Math.max(peak, ++open);
+          order.push(call.id);
+          await new Promise((r) => setTimeout(r, 10));
+          open--;
+          return "once";
+        },
+      },
+      classifier: async () => {
+        classifyPeak = Math.max(classifyPeak, ++classifying);
+        await new Promise((r) => setTimeout(r, 10));
+        classifying--;
+        return rcEdit;
+      },
+      sessionAllow: new Set(),
+      prompts: new PromptQueue(),
+    };
+    const req = (id: string) => ({
+      call: { ...(calls.bash as ToolCall), id },
+      tool: tool("bash"),
+      cwd: "/work",
+      recentUserMessages: [],
+    });
+
+    const answers = await Promise.all(["1", "2", "3"].map((id) => resolve(req(id), d)));
+
+    expect(answers.map((a) => a.decision)).toEqual(["allow", "allow", "allow"]);
+    expect(peak).toBe(1);
+    expect(classifyPeak).toBe(3);
+    expect(order).toEqual(["1", "2", "3"]);
+  });
+
+  it("a queued prompt of an aborted run is never shown", async () => {
+    const controller = new AbortController();
+    const asked: string[] = [];
+    const d: GateDeps = {
+      mode: "ask",
+      prompter: {
+        ask: async (call) => {
+          asked.push(call.id);
+          controller.abort(); // e.g. Esc while the first dialog is open
+          return "once";
+        },
+      },
+      classifier: async () => safe,
+      sessionAllow: new Set(),
+      signal: controller.signal,
+      prompts: new PromptQueue(),
+    };
+    const req = (id: string) => ({
+      call: { ...(calls.write as ToolCall), id },
+      tool: tool("write"),
+      cwd: "/work",
+      recentUserMessages: [],
+    });
+
+    const [first, second] = await Promise.allSettled([resolve(req("a"), d), resolve(req("b"), d)]);
+
+    expect(first).toMatchObject({ status: "fulfilled" });
+    expect(second).toMatchObject({ status: "rejected" });
+    expect(asked).toEqual(["a"]);
   });
 });

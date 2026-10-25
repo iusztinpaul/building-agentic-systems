@@ -45,6 +45,29 @@ describe("ToolCard", () => {
     ]);
   });
 
+  it("a codemode card shows the description, the script collapsed under it, then the result", () => {
+    const card = new ToolCard(
+      call("codemode", {
+        script: "const a = await tools.read({ path: 'x' });\nreturn a.lines;",
+        description: "read x and count its lines",
+      }),
+      "/r",
+    );
+    expect(plain(card.render(80))).toEqual([
+      " … codemode read x and count its lines",
+      "    const a = await tools.read({ path: 'x' }); (+1 lines, Tab)",
+    ]);
+
+    card.setResult("12", false);
+    card.expanded = true;
+    expect(plain(card.render(80))).toEqual([
+      " ✓ codemode read x and count its lines",
+      "    const a = await tools.read({ path: 'x' });",
+      "    return a.lines;",
+      "    12",
+    ]);
+  });
+
   it("marks an error result", () => {
     const card = new ToolCard(call("bash", { command: "false" }), "/r");
     card.setResult("Command exited with code 1", true);

@@ -61,7 +61,7 @@ export class PermissionPrompt implements Component {
     }
     const lines = [
       "",
-      ...wrapTextWithAnsi(bold(`Allow ${this.#call.name}?`), w),
+      ...wrapTextWithAnsi(bold(title(this.#call)), w),
       ...shown.flatMap((l) => wrapTextWithAnsi(`  ${l}`, w)),
     ];
     if (this.#reason) {
@@ -75,11 +75,18 @@ export class PermissionPrompt implements Component {
   invalidate(): void {}
 }
 
+// A call from a codemode script says so: the user approved the
+// script, now one of its calls.
+function title(call: ToolCall): string {
+  const from = call.origin === "codemode" ? " (in a codemode script)" : "";
+  return `Allow ${call.name}${from}?`;
+}
+
 // TUI's interface lacks the getter its implementations have.
 export type FocusTui = TUI & { getFocusedComponent(): Component | null };
 
-// Asks on the TUI's screen; one question at a time is the loop's
-// order (tool calls run sequentially).
+// Asks on the TUI's screen. One question at a time: the loop runs
+// tool calls in order and the gate queues a script's parallel ones.
 export function tuiPrompter(tui: FocusTui): PermissionPrompter {
   return {
     ask: (call, summary, reason) =>

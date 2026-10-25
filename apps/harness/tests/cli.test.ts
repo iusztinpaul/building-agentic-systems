@@ -1315,16 +1315,55 @@ describe("main (mcp)", () => {
     );
   });
 
-  it("the default exposure is codemode: no MCP tool and no tool_search reach the model", async () => {
+  it("the default exposure is codemode: no MCP tool and no tool_search reach the model, codemode does", async () => {
     writeMcp(join(home, "mcp.json"), { mcpServers: { fake: fakeServer() } });
     const fake = new FakeProvider({ streams: [textTurn("ok")] });
 
     await run(["hi", "--cwd", project()], fake);
 
-    expect(names(fake)).toEqual(BUILTINS);
+    expect(names(fake)).toEqual([...BUILTINS, "codemode"]);
+    const codemode = fake.requests[0]?.tools.find((t) => t.name === "codemode");
+    expect(codemode?.description).toContain(
+      "mcp__fake__echo(params: {}): Echo the arguments back as JSON text.",
+    );
     expect(fake.requests[0]?.context.system).toContain(
       "- fake: 2 tools; direct 0, deferred 0, codemode 2",
     );
+  });
+
+  it("headless: a dangerous tools.x() inside a codemode script exits 2 even when the script catches", async () => {
+    writeMcp(join(home, "mcp.json"), { mcpServers: { fake: fakeServer() } });
+    const script = `
+      try { await tools.mcp__fake__echo({ wipe: true }); }
+      catch (e) { console.log("caught"); }
+      return "never";
+    `;
+    const fake = new FakeProvider({
+      streams: [
+        toolTurn({ id: "cm", name: "codemode", arguments: { script, description: "echo" } }),
+        textTurn("never"),
+      ],
+      answers: [
+        { dangerous: false, risk: "low", reason: "runs a script" },
+        { dangerous: true, risk: "high", reason: "wipes the server" },
+      ],
+    });
+
+    const result = await run(["wipe it", "--cwd", project(), "--json"], fake);
+
+    expect(result.code).toBe(2);
+    const events = result.stdout
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as AgentEvent);
+    expect(events.at(-1)).toEqual({ type: "agent_end", reason: "blocked" });
+    expect(events).toContainEqual({
+      type: "tool_result",
+      callId: "cm",
+      content: "Error: the script was stopped: a tool call was blocked",
+      isError: true,
+    });
+    expect(fake.requests).toHaveLength(1);
   });
 
   it("--no-mcp: exactly the 4 built-ins, no tool_search, no mcp_servers section", async () => {

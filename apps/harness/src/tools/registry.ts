@@ -86,11 +86,20 @@ export class ToolRegistry {
     );
   }
 
+  // What a codemode script may call: codemode ∪ direct ∪ activated,
+  // in registration order (hidden tools are never registered).
+  scriptable(): ToolDefinition[] {
+    const declared = new Set(this.declared());
+    return this.list().filter(
+      (t) => t.exposure === "codemode" || declared.has(t),
+    );
+  }
+
   schemasForRequest(): ToolSchema[] {
     return this.declared().map((tool) => ({
       name: tool.name,
       description: tool.description,
-      parameters: tool.inputSchema ?? toJsonSchema(tool.parameters),
+      parameters: parametersOf(tool),
     }));
   }
 
@@ -124,6 +133,11 @@ export class ToolRegistry {
     if (origin === "codemode") return true;
     return tool.exposure === "direct" || this.#activated.has(tool.name);
   }
+}
+
+// A tool's parameters as JSON Schema: an MCP tool's own, else zod's.
+export function parametersOf(tool: ToolDefinition): JsonSchema {
+  return tool.inputSchema ?? toJsonSchema(tool.parameters);
 }
 
 // The default JSON Schema target keeps `.optional()` params optional

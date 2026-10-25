@@ -23,6 +23,9 @@ export interface ToolCall {
   // loop answers the call with an isError result carrying this
   // message instead of running the tool. `arguments` is then {}.
   parseError?: string;
+  // Set on a `tools.x()` call from a codemode script; absent on the
+  // model's own calls.
+  origin?: "codemode";
 }
 
 export type Message =

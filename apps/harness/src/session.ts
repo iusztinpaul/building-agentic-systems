@@ -14,7 +14,7 @@ import {
   type DangerCheck,
   dangerClassifier,
 } from "./permissions/decision-model.ts";
-import { resolve, USER_DENIED } from "./permissions/gate.ts";
+import { PromptQueue, resolve, USER_DENIED } from "./permissions/gate.ts";
 import {
   type ContextFile,
   formatContextFiles,
@@ -37,6 +37,7 @@ import {
   type Skill,
   skillMessage,
 } from "./skills/skills.ts";
+import { type CodemodeLimits, registerCodemode } from "./tools/codemode.ts";
 import type { ToolRegistry, ToolResult } from "./tools/registry.ts";
 import { headTail } from "./tools/truncate.ts";
 import type {
@@ -74,6 +75,9 @@ export interface SessionOptions {
   skills?: { budgetRatio: number; discover?: DiscoverSkills } | null;
   // The configured MCP servers, their tools already in `tools`.
   mcpServers?: readonly McpServerInfo[];
+  // Registers `codemode` (when a codemode tool exists) with this
+  // session's gate; absent: no codemode.
+  codemode?: CodemodeLimits & { tmpDir: string };
 
   now?: () => Date;
 }
@@ -117,6 +121,7 @@ export class AgentSession {
   readonly #sessionAllow = new Set<string>();
   readonly #verdicts = new Map<string, DangerCheck>();
   readonly #classifier: Classifier;
+  readonly #prompts = new PromptQueue();
   // Activations already saved and shown (restored ones included).
   readonly #announced = new Set<string>();
 
@@ -134,6 +139,10 @@ export class AgentSession {
   // Throws for an unknown `resume` id (SessionNotFound) or model.
   static async create(o: SessionOptions): Promise<AgentSession> {
     const session = new AgentSession(o);
+    if (o.codemode) {
+      const gate = (call: ToolCall) => session.#gate(call);
+      registerCodemode(o.tools, { ...o.codemode, gate });
+    }
     if (o.resume) await session.#restore(o.resume);
     session.#info = await o.provider.modelInfo(session.#model);
     await session.reload();
@@ -410,11 +419,16 @@ export class AgentSession {
   }
 
   // Every resolution is saved, then emitted, before the call runs.
-  // A tool the model cannot call (unknown, not activated, hidden) is
-  // not gated: the registry answers it. An abort while resolving
-  // records nothing: no decision was made (the loop answers it).
+  // A tool the caller cannot call (unknown, not activated, hidden) is
+  // not gated: the registry answers it. A codemode script's calls
+  // take the same path over the tools a script may call. An abort
+  // while resolving records nothing: no decision was made.
   async #gate(call: ToolCall): Promise<GateResult> {
-    const tool = this.#o.tools.declared().find((t) => t.name === call.name);
+    const tools =
+      call.origin === "codemode"
+        ? this.#o.tools.scriptable()
+        : this.#o.tools.declared();
+    const tool = tools.find((t) => t.name === call.name);
     if (!tool) return { run: true };
     const users = this.#context.messages.flatMap((m) =>
       m.role === "user" ? [m.content] : [],
@@ -428,6 +442,7 @@ export class AgentSession {
         classifier: this.#classifier,
         sessionAllow: this.#sessionAllow,
         signal,
+        prompts: this.#prompts,
       },
     ).catch((err: unknown) => {
       if (signal?.aborted) return undefined;
