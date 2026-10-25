@@ -343,7 +343,7 @@ says so).
       `client` and `tokens: null`, and a second `--mcp-login` shows the SAME `client_id` and port (no second
       registration); headless `echo "say ok" | tree-agent` with the same config → the one skip warning, `ok`,
       exit 0.
-- [ ] [HUMAN] On the human's machine: `tree-agent --mcp-login tree-memory` opens the browser, the Horizon login
+- [x] [HUMAN] On the human's machine: `tree-agent --mcp-login tree-memory` opens the browser, the Horizon login
       completes, the tab shows "you are logged in", the command prints `logged in to "tree-memory" (…)` and
       exits 0; then headless `tree-agent "search my memory for agents"` (repo root, `--trust`) calls
       `mcp__tree_memory__search_memory` and answers with NO browser and no URL line; a third run after
@@ -653,7 +653,7 @@ but not for pasting — `headless.out`, `headless.err`).
 - [x] PASS — `--mcp-login` / `--mcp-logout` / `--help` without `OPENROUTER_API_KEY` (`env -i`) — messages and exit codes as specified (`cli2.sh`).
 - [x] PASS — no token / verifier / `Authorization` value in any log call or stderr line — spy + scan above, `auth.test.ts::secrets never reach the log`, `cli.test.ts::no token, code, code_verifier or Authorization value…`.
 - [x] PASS — live (see Live section; second login reuses client_id and port; headless skip warning, `ok`, exit 0).
-- [ ] [HUMAN] — browser login on the owner's machine: awaiting human verification (not attempted, as instructed).
+- [x] [HUMAN] — browser login on the owner's machine: verified 2026-10-25 with the owner (see the orchestrator entry below).
 - [x] PASS — docs: ADR-016 amendment, README hosted-server section and glossary rows are verbatim the task text (diff read); spec §1/§2/§10.1/§10.2.1/§15/§17 in the diff; the SWE log records the SDK findings; `.tree-agent/mcp.json` unchanged.
 - [x] PASS — cadence green, no new runtime dependency, `agent-loop.ts` untouched.
 
@@ -673,3 +673,6 @@ Folded in the Tester's issues 1–5, each with a test: `expires_in` coerced (mis
 
 ### [SWE] 2026-10-25 12:25 — Post-login handshake fix
 `--mcp-login` now exits 0 with `logged in to "<server>" (<file>)` once the tokens are stored, turning a failed follow-up `initialize` (the hosted server cold-starting past 30 s) into one `logged in, but …` warning; it also honours `settings.json` `mcp.initializeTimeoutMs`, whose default rose 30 000 → 60 000 (Horizon's 60 s readiness window) — `tests/cli.test.ts` "stored tokens, then an initialize that never answers".
+
+### [Orchestrator + HUMAN] 2026-10-25 12:40 — Hosted login verified against the real server
+Scratch `TREE_AGENT_HOME`, `mcp.json` = the owner's exact `{"type": "http", "url": "https://tree-memory.fastmcp.app/mcp"}` entry. (1) `--mcp-login tree-memory` printed the authorize URL; the owner signed in to Horizon in Chrome and the tab ended on `127.0.0.1:63391/callback`; tokens were stored (0600). On the pre-fix build the follow-up `initialize` timed out at 30 s (hosted cold start), which is what motivated `3cf3f83`; on the fixed build a second login (auto-approved by the existing Horizon session) printed `logged in to "tree-memory" (…)` and exited 0 within 12 s with no warning. (2) Two headless `--json` runs reused the cached token with no browser and no URL line: `mcp__tree_memory__search_memory` was called through the hosted server (classifier `allow`, `p(dangerous)=0.04`), `agent_end completed`, exit 0; the hosted memory answered `nothing_found` for every query, so the owner's cloud memory looks empty (a memory-content matter, not a harness one). (3) `--mcp-logout tree-memory` printed `logged out of …`, exit 0, and a piped `say ok` run then printed `ok` with exactly one `needs a login; run tree-agent --mcp-login tree-memory once, then re-run` warning, exit 0.
