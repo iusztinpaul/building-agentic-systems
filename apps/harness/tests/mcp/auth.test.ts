@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { readFileSync, statSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { Agent, createServer, request, type Server } from "node:http";
+import { type AddressInfo, connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type Logger } from "../../src/log.ts";
@@ -330,6 +331,52 @@ describe("McpAuth.login against the fake AS", () => {
     expect(bad?.status).toBe(400);
     expect(fake.tokenRequests.map((r) => r.grant_type)).toEqual(["authorization_code"]);
     expect(stored().tokens.access_token).toBe(fake.issued[0]);
+  });
+
+  // server.close() alone (Node >= 19) drops only idle sockets; one
+  // mid-request (a favicon fetch still arriving) needs closeAllConnections.
+  it("a browser's keep-alive and mid-request sockets are closed with the loopback server", async () => {
+    const agent = new Agent({ keepAlive: true });
+    const sockets: Socket[] = [];
+    const closed: Promise<unknown>[] = [];
+    const track = (s: Socket) => {
+      sockets.push(s);
+      closed.push(once(s, "close"));
+    };
+    let port = 0;
+    const { ui } = browser(async (url) => {
+      const first = await fake.fetch(url, { redirect: "manual" });
+      const location = new URL(first.headers.get("location") ?? "");
+      port = Number(location.port);
+      const partial = connect(port, "127.0.0.1");
+      partial.on("error", () => {});
+      track(partial);
+      await once(partial, "connect");
+      partial.write("GET /favicon.ico HTTP/1.1\r\nhost: 127.0.0.1\r\n");
+      await new Promise<void>((resolve, reject) => {
+        const req = request(location, { agent }, (res) => {
+          res.resume();
+          res.on("end", resolve);
+        });
+        req.on("socket", track);
+        req.on("error", reject);
+        req.end();
+      });
+    });
+
+    await auth().login(challenge(), ui);
+
+    let timer: NodeJS.Timeout | undefined;
+    const bound = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("still open 1 s after login"), 1_000);
+    });
+    expect(await Promise.race([Promise.all(closed).then(() => "closed"), bound])).toBe("closed");
+    clearTimeout(timer);
+    expect(sockets).toHaveLength(2);
+    const refused = connect(port, "127.0.0.1");
+    const [err] = (await once(refused, "error")) as NodeJS.ErrnoException[];
+    expect(err?.code).toBe("ECONNREFUSED");
+    agent.destroy();
   });
 
   it("an error= redirect ends the wait with the error_description", async () => {
