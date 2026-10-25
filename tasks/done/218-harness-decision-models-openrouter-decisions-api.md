@@ -609,3 +609,9 @@ $ node tests/fixtures/fake-mcp-server.mjs  (5 cold starts): real 0.28 0.32 0.24 
 
 ### [SWE] 2026-10-25 11:20 — Tester fold-ins
 - Decisions `usage` is now non-negative (`cost`; `input_tokens`/`output_tokens` non-negative ints) with an offline negative-cost → `invalid_response` test; the two timing-fragile tests are widened (`initializeTimeoutMs` 200 ms → 2 s in `tests/mcp/client.test.ts`; `codemode.timeoutMs` 50 ms → 1 s with the prompt answered after 1.5 s in `tests/session.test.ts`, so it still proves the prompt does not count) — each file 3× serially green.
+
+### [PA] 2026-10-25 12:50 — Acceptance Review
+
+**VERDICT: REJECT** (one wording item, folded into the round's single rollup)
+
+All acceptance criteria verified from the user POV: the `checkModels` messages, the generated `decision model: p(dangerous)=…, risk … (…)` reason, the settings rows, Permissions step 4, the cost note, the glossary **Decision model** / **Small model** rows and spec §11.1 (`DANGER_QUESTIONS` toEqual, green in `make harness-tests` 995/995). The one defect is in the ADR-016 amendment text: "destructive ones 0.95–0.99" contradicts the recorded 0.87 (spec/README say 0.87–0.99). Filed in `tasks/220-pa-rejection-harness-mcp-oauth-streamable-http.md` (Issue 2) with 219's issues; re-run acceptance on this task with 219's.

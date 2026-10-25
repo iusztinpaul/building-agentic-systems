@@ -676,3 +676,11 @@ Folded in the Tester's issues 1–5, each with a test: `expires_in` coerced (mis
 
 ### [Orchestrator + HUMAN] 2026-10-25 12:40 — Hosted login verified against the real server
 Scratch `TREE_AGENT_HOME`, `mcp.json` = the owner's exact `{"type": "http", "url": "https://tree-memory.fastmcp.app/mcp"}` entry. (1) `--mcp-login tree-memory` printed the authorize URL; the owner signed in to Horizon in Chrome and the tab ended on `127.0.0.1:63391/callback`; tokens were stored (0600). On the pre-fix build the follow-up `initialize` timed out at 30 s (hosted cold start), which is what motivated `3cf3f83`; on the fixed build a second login (auto-approved by the existing Horizon session) printed `logged in to "tree-memory" (…)` and exited 0 within 12 s with no warning. (2) Two headless `--json` runs reused the cached token with no browser and no URL line: `mcp__tree_memory__search_memory` was called through the hosted server (classifier `allow`, `p(dangerous)=0.04`), `agent_end completed`, exit 0; the hosted memory answered `nothing_found` for every query, so the owner's cloud memory looks empty (a memory-content matter, not a harness one). (3) `--mcp-logout tree-memory` printed `logged out of …`, exit 0, and a piped `say ok` run then printed `ok` with exactly one `needs a login; run tree-agent --mcp-login tree-memory once, then re-run` warning, exit 0.
+
+### [PA] 2026-10-25 12:50 — Acceptance Review
+
+**VERDICT: REJECT**
+
+Found 5 issues (1 product, 4 wording). Filed rollup task: `tasks/220-pa-rejection-harness-mcp-oauth-streamable-http.md`.
+Lead issue: story 1 "First login from the TUI" does not hold — `runTui` starts the TUI before `open()`, so the `log in at <url>` line (and the timeout / skip warnings) land on a stderr the TUI overdraws, and with nothing focused during `open()` Ctrl+C is swallowed for the whole 5-minute wait (`tui/app.ts:39`, `cli.ts` `loginUi`). The `--mcp-login` path, the headless TTY rule, the messages, the token file and the docs' hosted-server walkthrough are right from the user POV; `make harness-tests` 995/995 (4 live) on my run.
+Pipeline re-runs from the inner loop with the rollup task; on green, re-run acceptance on this task.
