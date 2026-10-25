@@ -161,8 +161,10 @@ describe("runTui", () => {
     const screen = t.screen();
     expect(screen).toContain("› hello");
     expect(screen).toContain("answer 1");
+    // The gauge is estimateTokens (chars / 4 × the usage ratio).
+    const { tokens } = t.session().status();
     expect(screen.at(-1)).toBe(
-      "test/model · ask · 5k / 100k (5 %) · $0.0500 · 0 MCP · 0 activated",
+      `test/model · ask · ${tokens} / 100k (1 %) · $0.0500 · 0 MCP · 0 activated`,
     );
     t.terminal.send("\x03");
     expect(await t.exit).toBe(0);
@@ -200,6 +202,64 @@ describe("runTui", () => {
     await t.exit;
   });
 
+  it("/compact during a run is refused with one line and the run keeps its spinner", async () => {
+    const provider = new HeldProvider();
+    const t = await start(provider);
+    t.terminal.type("hello");
+    t.terminal.send("\r");
+    await until(() => t.session().running);
+
+    t.terminal.type("/compact");
+    t.terminal.send("\r");
+    await until(() => t.screen().some((l) => l.includes("cannot compact")));
+
+    expect(t.screen().some((l) => l.includes("working…"))).toBe(true);
+    provider.release();
+    await until(() => !t.session().running);
+    await settle(50);
+    expect(t.screen().some((l) => l.includes("working…") || l.includes("compacting…"))).toBe(false);
+    t.terminal.send("\x03");
+    expect(await t.exit).toBe(0);
+  });
+
+  it("refuses text typed during /compact with one line instead of steering", async () => {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const summary = {
+      goal: "ship",
+      constraints: [],
+      progress: [],
+      decisions: [],
+      nextSteps: [],
+      criticalContext: [],
+    };
+    const provider = new FakeProvider({
+      streams: [[fakeDone("one")], [fakeDone("two")]],
+      answers: [async () => (await held, summary)],
+    });
+    const t = await start(provider, { compaction: { triggerRatio: 0.8, keepRecentTokens: 1 } });
+    for (const text of ["first", "second"]) {
+      t.terminal.type(text);
+      t.terminal.send("\r");
+      await until(() => !t.session().running && t.screen().some((l) => l.includes(text)));
+    }
+    t.terminal.type("/compact");
+    t.terminal.send("\r");
+    await until(() => t.screen().some((l) => l.includes("compacting…")));
+
+    t.terminal.type("and then?");
+    t.terminal.send("\r");
+    await until(() => t.screen().some((l) => l.includes("send it when done")));
+    release();
+    await until(() => !t.session().running);
+
+    expect(t.screen().some((l) => l.includes("and then?"))).toBe(false);
+    expect(t.events.some((e) => e.type === "compaction")).toBe(true);
+    expect(provider.requests).toHaveLength(2); // no prompt was sent
+    t.terminal.send("\x03");
+    expect(await t.exit).toBe(0);
+  });
+
   it("aborts on Esc: the partial text stays, the input is live again, the gauge stays", async () => {
     const provider = new HeldProvider();
     const store = SessionStore.inMemory();
@@ -217,7 +277,8 @@ describe("runTui", () => {
     await until(() => !t.session().running);
 
     expect(t.screen()).toContain("(aborted)");
-    expect(t.screen().at(-1)).toContain("5k / 100k (5 %) · $0.0500");
+    const { tokens } = t.session().status();
+    expect(t.screen().at(-1)).toContain(`${tokens} / 100k (1 %) · $0.0500`);
     const saved = store.load(t.session().id ?? "").messages.at(-1);
     expect(saved).toMatchObject({ content: "ans", stopReason: "aborted" });
     t.terminal.type("/exit");

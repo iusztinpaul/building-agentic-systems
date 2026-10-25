@@ -448,6 +448,84 @@ describe("main (headless)", () => {
     );
   });
 
+  it("parses --compact-at and rejects a ratio outside 0.3–0.95 at parse time", async () => {
+    expect(resolveMode(["x", "--compact-at", "0.5"], true, false)).toMatchObject({
+      args: { compactAt: 0.5 },
+    });
+    for (const bad of ["0.2", "0.99", "half"]) {
+      expect(resolveMode(["x", "--compact-at", bad], true, false)).toEqual({
+        kind: "usage",
+        error: `--compact-at must be from 0.3 to 0.95: ${bad}`,
+      });
+    }
+    const rejected = await run(["hi", "--compact-at", "0.2"], new FakeProvider());
+    expect(rejected.code).toBe(1);
+    expect(rejected.created).toEqual([]);
+  });
+
+  it("--compact-at 0.5 compacts a 10 000 window at 5 000; --json prints the compaction event", async () => {
+    const cwd = join(home, "big");
+    mkdirSync(cwd);
+    for (const name of ["a.txt", "b.txt"]) {
+      writeFileSync(join(cwd, name), `${"y".repeat(99)}\n`.repeat(120)); // ≈ 3 000 tokens
+    }
+    // No usage on the answers: the estimate stays chars / 4.
+    const answer = (content: string, toolCalls: ToolCall[] = []): StreamEvent => ({
+      type: "done",
+      message: {
+        role: "assistant",
+        content,
+        toolCalls,
+        stopReason: toolCalls.length ? "tool_calls" : "stop",
+      },
+    });
+    const fake = () =>
+      new FakeProvider({
+        streams: [
+          [answer("", [{ id: "a", name: "read", arguments: { path: "a.txt" } }])],
+          [answer("", [{ id: "b", name: "read", arguments: { path: "b.txt" } }])],
+          [answer("done")],
+        ],
+        answers: [
+          {
+            goal: "read both",
+            constraints: [],
+            progress: [],
+            decisions: [],
+            nextSteps: [],
+            criticalContext: [],
+          },
+        ],
+        models: [
+          fakeModel("anthropic/claude-sonnet-5.5", { contextLength: 10_000 }),
+          fakeModel("anthropic/claude-haiku-5.5"),
+        ],
+      });
+    const events = (stdout: string) =>
+      stdout
+        .trimEnd()
+        .split("\n")
+        .map((l) => JSON.parse(l) as AgentEvent);
+
+    const half = await run(["read both", "--json", "--cwd", cwd, "--compact-at", "0.5"], fake);
+    const base = await run(["read both", "--json", "--cwd", cwd], fake);
+
+    expect(half.code).toBe(0);
+    const compaction = events(half.stdout).filter((e) => e.type === "compaction");
+    expect(compaction).toEqual([
+      { type: "compaction", before: expect.any(Number), after: expect.any(Number) },
+    ]);
+    const [{ before, after } = { before: 0, after: 0 }] = compaction as {
+      before: number;
+      after: number;
+    }[];
+    expect(before).toBeGreaterThanOrEqual(5_000);
+    expect(before).toBeLessThan(8_000);
+    expect(after).toBeLessThan(before);
+    expect(base.code).toBe(0);
+    expect(events(base.stdout).filter((e) => e.type === "compaction")).toEqual([]);
+  });
+
   it("exits 1 naming a --cwd that is not a directory", async () => {
     const result = await run(["hi", "--cwd", join(home, "missing")], new FakeProvider());
 

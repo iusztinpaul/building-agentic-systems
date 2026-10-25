@@ -6,6 +6,12 @@
 // loop produces it, so an aborted or crashed run is on disk too.
 
 import type { LlmCallEvent } from "./codemode/llm.ts";
+import {
+  type CompactionSettings,
+  Compactor,
+  retryOnOverflow,
+} from "./compaction/compaction.ts";
+import { Settings } from "./config/settings.ts";
 import { DEFAULT_MODEL } from "./decision/decide.ts";
 import { log } from "./log.ts";
 import { BLOCKED, runLoop } from "./loop/agent-loop.ts";
@@ -32,7 +38,12 @@ import {
   toolsSection,
 } from "./prompt/system-prompt.ts";
 import type { ModelInfo, Provider } from "./provider/types.ts";
-import { type EntryBody, SessionStore } from "./session-store/jsonl.ts";
+import {
+  type Entry,
+  type EntryBody,
+  SessionStore,
+  summaryMessage,
+} from "./session-store/jsonl.ts";
 import {
   type DiscoverSkills,
   discoverSkills,
@@ -80,6 +91,9 @@ export interface SessionOptions {
   // Registers `codemode` (when a codemode tool exists) with this
   // session's gate, provider and cost; absent: no codemode.
   codemode?: CodemodeLimits & { tmpDir: string };
+  // settings.compaction (triggerRatio from --compact-at too);
+  // default: the settings defaults.
+  compaction?: CompactionSettings;
 
   now?: () => Date;
 }
@@ -88,9 +102,9 @@ export interface SessionOptions {
 export interface SessionStatus {
   model: string;
   mode: PermissionMode;
-  // The last request's input tokens (usage.inputTokens) until the
-  // estimator of task 212; undefined before the first answer.
-  tokens: number | undefined;
+  // estimateTokens of the context (system prompt + messages), the
+  // number the compaction trigger compares to triggerRatio × this.
+  tokens: number;
   contextLength: number;
   cost: number; // USD, usage × pricing, llm() calls included
   mcpServers: number; // connected now
@@ -110,7 +124,12 @@ export class AgentSession {
   #info: ModelInfo | undefined;
   #context: Context = { system: "", messages: [] };
   #saved = 0; // messages of #context already in the store
-  #tokens: number | undefined;
+  // The `message` entry id of each of #context.messages (the summary
+  // has none), for the compaction entry's firstKeptEntryId.
+  #entryIds: (string | undefined)[] = [];
+  readonly #compactor: Compactor;
+  // The loop's provider: o.provider plus the overflow retry.
+  readonly #provider: Provider;
   #cost = 0;
   #preamble = "";
   #contextFiles: ContextFile[] = [];
@@ -137,6 +156,13 @@ export class AgentSession {
       model: o.decisionModel,
       cache: this.#verdicts,
     });
+    this.#compactor = new Compactor({
+      provider: o.provider,
+      decisionModel: o.decisionModel ?? DEFAULT_MODEL,
+      settings: o.compaction ?? Settings.parse({}).compaction,
+      emit: (event) => this.#emit(event),
+    });
+    this.#provider = retryOnOverflow(o.provider, () => this.#recover());
   }
 
   // Throws for an unknown `resume` id (SessionNotFound) or model.
@@ -163,9 +189,9 @@ export class AgentSession {
     this.#model = restored.model;
     this.#context = { system: "", messages: restored.messages };
     this.#saved = restored.messages.length;
+    this.#entryIds = restored.entryIds;
     this.#o.tools.activate(restored.activated);
     for (const name of this.#o.tools.activated()) this.#announced.add(name);
-    this.#tokens = lastInputTokens(restored.messages);
     const prices = new Map<string, ModelInfo["pricing"]>();
     for (const { model, usage } of restored.spend) {
       if (!prices.has(model)) {
@@ -278,10 +304,15 @@ export class AgentSession {
   }
 
   status(): SessionStatus {
+    const system = this.#context.system || this.systemPrompt();
+    const { messages } = this.#context;
     return {
       model: this.#model,
       mode: this.#mode,
-      tokens: this.#tokens,
+      tokens: this.#compactor.estimator.estimateTokens({
+        system,
+        messages,
+      }),
       contextLength: this.#info?.contextLength ?? 0,
       cost: this.#cost,
       mcpServers: this.mcpServers.filter((s) => s.client.connected).length,
@@ -326,11 +357,12 @@ export class AgentSession {
     this.#id = undefined;
     this.#context = { system: "", messages: [] };
     this.#saved = 0;
+    this.#entryIds = [];
+    this.#compactor.reset();
     this.#steering.length = 0;
     this.#followUps.length = 0;
     this.#o.tools.deactivateAll();
     this.#announced.clear();
-    this.#tokens = undefined;
     this.#cost = 0;
     this.#sessionAllow.clear();
     this.#verdicts.clear();
@@ -362,7 +394,7 @@ export class AgentSession {
     });
     try {
       this.#context = await runLoop(this.#context, {
-        provider: this.#o.provider,
+        provider: this.#provider,
         model: this.#model,
         tools: this.#o.tools,
         hooks: this.#hooks(),
@@ -379,6 +411,21 @@ export class AgentSession {
       this.#persist();
     }
     return reason;
+  }
+
+  // /compact [instructions]: summarise now, with extra guidance for
+  // the summariser. False when there is nothing to summarise (the
+  // context fits in the kept tail); rejects when the summary fails.
+  // While it runs, `running` is true and abort() cancels it.
+  async compact(instructions?: string): Promise<boolean> {
+    this.#idle("compact");
+    const run = new AbortController();
+    this.#run = run;
+    try {
+      return await this.#compact(instructions?.trim() || undefined);
+    } finally {
+      this.#run = undefined;
+    }
   }
 
   steer(text: string): void {
@@ -409,11 +456,15 @@ export class AgentSession {
   #hooks(): LoopHooks {
     return {
       // Rebuilt every turn: activation changes the tools section.
-      // Task 212 adds compaction here.
+      // Then the compaction trigger, against the current model.
       // The returned context is the one the loop pushes to, so the
       // session keeps it to save each message as it lands.
       prepareTurn: async (ctx) => {
         this.#context = { ...ctx, system: this.systemPrompt() };
+        const contextLength = this.#info?.contextLength ?? 0;
+        if (this.#compactor.due(this.#context, contextLength)) {
+          await this.#compact().catch(() => false); // logged; go on
+        }
         return this.#context;
       },
       beforeToolCall: (call) => this.#gate(call),
@@ -483,6 +534,35 @@ export class AgentSession {
     if (!this.#ended) this.#emit(event);
   }
 
+  // Rewrites #context.messages in place (the loop holds the same
+  // array) to [summary, ...tail]: every message is saved first, so the
+  // tail's entries precede the compaction entry that points at them.
+  async #compact(instructions?: string): Promise<boolean> {
+    this.#persist();
+    const result = await this.#compactor.compact(
+      this.#context,
+      this.#info?.contextLength ?? 0,
+      { instructions, signal: this.#run?.signal },
+    );
+    if (!result) return false;
+    const { cut, summary, before, after } = result;
+    const { messages } = this.#context;
+    const firstKeptEntryId = this.#entryIds[cut] ?? "";
+    messages.splice(0, cut, summaryMessage(summary));
+    this.#entryIds = [undefined, ...this.#entryIds.slice(cut)];
+    this.#saved = messages.length;
+    this.#append({ type: "compaction", summary, firstKeptEntryId });
+    this.#emit({ type: "compaction", before, after });
+    return true;
+  }
+
+  // A request over the window: compact once (if automatic compaction
+  // is still on) and let retryOnOverflow send it again.
+  async #recover(): Promise<boolean> {
+    if (this.#compactor.disabled) return false;
+    return this.#compact().catch(() => false);
+  }
+
   // tool_search activated tools: saved (restored by --resume) and
   // shown once, before the result that reports them.
   #announceActivation(): void {
@@ -504,8 +584,12 @@ export class AgentSession {
     if (event.type === "agent_end") this.#ended = true;
     this.#persist();
     if (event.type === "turn_end" && event.message.usage) {
-      this.#tokens = event.message.usage.inputTokens;
-      this.#cost += costOf(event.message.usage, this.#info?.pricing);
+      const { usage } = event.message;
+      // What was sent: everything before the answer just pushed.
+      const { system, messages } = this.#context;
+      const sent = { system, messages: messages.slice(0, -1) };
+      this.#compactor.estimator.observe(sent, usage.inputTokens);
+      this.#cost += costOf(usage, this.#info?.pricing);
     }
     for (const listener of this.#listeners) listener(event);
   }
@@ -513,14 +597,14 @@ export class AgentSession {
   #persist(): void {
     const fresh = this.#context.messages.slice(this.#saved);
     for (const message of fresh) {
-      this.#append({ type: "message", message });
+      this.#entryIds.push(this.#append({ type: "message", message }).id);
     }
     this.#saved = this.#context.messages.length;
   }
 
-  #append(body: EntryBody): void {
+  #append(body: EntryBody): Entry {
     this.#id ??= this.#store.create(this.#o.cwd, this.#model);
-    this.#store.append(this.#id, body);
+    return this.#store.append(this.#id, body);
   }
 
   #idle(action: string): void {
@@ -539,14 +623,6 @@ function costOf(
     usage.inputTokens * pricing.prompt +
     usage.outputTokens * pricing.completion
   );
-}
-
-function lastInputTokens(messages: Message[]): number | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m?.role === "assistant" && m.usage) return m.usage.inputTokens;
-  }
-  return undefined;
 }
 
 // The truncation point: the built-in tools cap their own output at

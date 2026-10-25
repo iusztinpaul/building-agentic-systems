@@ -18,6 +18,7 @@ async function setup(
   streams: StreamEvent[][] = [],
   trusted = true,
   mcpServers: McpServerInfo[] = [],
+  answers: unknown[] = [], // complete(): the compaction summaries
 ) {
   const home = join(root(), "home");
   const cwd = join(root(), "repo");
@@ -25,6 +26,7 @@ async function setup(
   mkdirSync(cwd, { recursive: true });
   const fake = new FakeProvider({
     streams,
+    answers,
     models: [fakeModel("test/model"), fakeModel("anthropic/claude-haiku-5.5")],
   });
   const tools = builtinRegistry({ tmpDir: join(home, "tmp") });
@@ -130,6 +132,40 @@ describe("runCommand", () => {
         "  down: 0 tools; direct 0, deferred 0, codemode 0 · not connected",
       ],
     });
+  });
+
+  it("/compact <instructions> passes them to the summariser and writes the compaction entry", async () => {
+    const summary = {
+      goal: "g",
+      constraints: [],
+      progress: [],
+      decisions: [],
+      nextSteps: [],
+      criticalContext: ["test_parser_rejects_empty"],
+    };
+    const t = await setup([textTurn("x".repeat(200_000))], true, [], [summary]);
+    await t.session.prompt("one");
+
+    const result = await runCommand(t.session, "compact", "focus on the test failures");
+
+    expect(result).toEqual({ lines: [] }); // the compaction event draws the line
+    const input = t.fake.structuredRequests[0]?.input ?? "";
+    expect(input.endsWith("Additional focus: focus on the test failures")).toBe(true);
+    const [file = ""] = t.files();
+    expect(t.entries(file).filter((e) => e.type === "compaction")).toMatchObject([
+      { summary: expect.stringContaining("- test_parser_rejects_empty") },
+    ]);
+    expect(COMMANDS.map((c) => c.name)).toContain("compact");
+  });
+
+  it("/compact with a context inside the kept tail says there is nothing to compact", async () => {
+    const t = await setup([textTurn("short")]);
+    await t.session.prompt("one");
+
+    expect(await runCommand(t.session, "compact", "")).toEqual({
+      lines: ["nothing to compact: the context fits in the kept tail"],
+    });
+    expect(t.fake.structuredRequests).toEqual([]);
   });
 
   it("/mcp with no servers says 0", async () => {

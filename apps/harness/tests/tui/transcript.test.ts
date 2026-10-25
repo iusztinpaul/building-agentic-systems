@@ -136,7 +136,7 @@ describe("Transcript", () => {
     expect(screen(t)).toEqual([
       "bash: deny (user)",
       "activated: mcp__a__b",
-      "compacted: 900 → 100 tokens",
+      "compacted 900 → 100 tokens",
       "boom",
       "run ended: max_turns",
     ]);

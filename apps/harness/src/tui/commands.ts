@@ -1,6 +1,5 @@
-// The slash commands of this milestone. Each one is a call on
-// AgentSession's public API plus the lines the TUI shows; /compact
-// (212) joins later. /skill:<name> [args] answers with
+// The slash commands. Each one is a call on AgentSession's public
+// API plus the lines the TUI shows. /skill:<name> [args] answers with
 // the prompt to run (the SKILL.md body + args) instead of lines.
 
 import type { SlashCommand } from "@earendil-works/pi-tui";
@@ -10,6 +9,11 @@ import type { AgentSession } from "../session.ts";
 export const COMMANDS: SlashCommand[] = [
   { name: "help", description: "commands, keys, context files" },
   { name: "model", description: "switch the model", argumentHint: "<id>" },
+  {
+    name: "compact",
+    description: "summarise the context now, with optional guidance",
+    argumentHint: "[instructions]",
+  },
   {
     name: "mode",
     description: "permission mode for this session",
@@ -74,6 +78,12 @@ async function run(
       if (!arg) return { lines: [`model: ${session.model}`] };
       await session.setModel(arg);
       return { lines: [`model: ${session.model}`] };
+    case "compact":
+      // The `compaction` event draws the "compacted …" line.
+      if (await session.compact(arg)) return { lines: [] };
+      return {
+        lines: ["nothing to compact: the context fits in the kept tail"],
+      };
     case "mode":
       if (arg === "ask" || arg === "auto") session.setPermissionMode(arg);
       else if (arg) {

@@ -60,6 +60,15 @@ describe("textSink", () => {
     expect(s.err).toEqual(["activated: mcp__m__a, mcp__m__b\n"]);
   });
 
+  it("prints a compaction on stderr, stdout stays the answers", () => {
+    const s = sinks();
+
+    s.text({ type: "compaction", before: 8_100, after: 2_300 });
+
+    expect(s.err).toEqual(["compacted 8100 → 2300 tokens\n"]);
+    expect(s.out).toEqual([]);
+  });
+
   it("prints errors and a non-completed end to stderr", () => {
     const s = sinks();
 

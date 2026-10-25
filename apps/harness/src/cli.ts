@@ -39,7 +39,8 @@ flags: --resume <id> | --continue  --model <id>  --cwd <dir>
        --max-turns <n> (${DEFAULT_MAX_TURNS})  --trust  --json
        --no-skills  --no-mcp (no mcp.json read, no server started)
        --permission-mode ask|auto (TUI: settings, ask; headless: auto)
-       --on-blocked stop|continue (headless deny: exit 2, or go on)`;
+       --on-blocked stop|continue (headless deny: exit 2, or go on)
+       --compact-at <ratio> (0.3–0.95; compact at ratio × context)`;
 
 export interface CliArgs {
   prompt: string;
@@ -54,6 +55,7 @@ export interface CliArgs {
   onBlocked: "stop" | "continue";
   skills: boolean; // false: --no-skills
   mcp: boolean; // false: --no-mcp
+  compactAt?: number; // settings.compaction.triggerRatio
 }
 
 export type Mode =
@@ -145,7 +147,13 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
       const projectTrusted = trusted || trustNow;
       const settings = await loadSettings({
         env,
-        flags: { model: args.model },
+        flags: {
+          model: args.model,
+          compaction:
+            args.compactAt === undefined
+              ? undefined
+              : { triggerRatio: args.compactAt },
+        },
         projectDir: projectTrusted ? cwd : undefined,
       });
       const provider = (deps.createProvider ?? openRouter)(apiKey);
@@ -167,6 +175,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         tools,
         mcpServers,
         codemode: { ...settings.codemode, tmpDir },
+        compaction: settings.compaction,
         cwd,
         maxTurns: args.maxTurns,
         trusted: projectTrusted,
@@ -236,6 +245,7 @@ function parseCli(argv: string[]): CliArgs {
       "on-blocked": { type: "string", default: "stop" },
       "no-skills": { type: "boolean", default: false },
       "no-mcp": { type: "boolean", default: false },
+      "compact-at": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -259,6 +269,11 @@ function parseCli(argv: string[]): CliArgs {
   if (onBlocked !== "stop" && onBlocked !== "continue") {
     throw new Error(`--on-blocked must be stop or continue: ${onBlocked}`);
   }
+  const compactAt = values["compact-at"];
+  const ratio = Number(compactAt);
+  if (compactAt !== undefined && !(ratio >= 0.3 && ratio <= 0.95)) {
+    throw new Error(`--compact-at must be from 0.3 to 0.95: ${compactAt}`);
+  }
   return {
     prompt: positionals.join(" ").trim(),
     model: values.model,
@@ -272,6 +287,7 @@ function parseCli(argv: string[]): CliArgs {
     onBlocked,
     skills: !values["no-skills"],
     mcp: !values["no-mcp"],
+    ...(compactAt !== undefined && { compactAt: ratio }),
   };
 }
 

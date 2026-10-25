@@ -95,6 +95,9 @@ export function textSink(
       stderr.write(`! ${clip(first, 200)}\n`);
     } else if (event.type === "tool_activation") {
       stderr.write(`activated: ${event.names.join(", ")}\n`);
+    } else if (event.type === "compaction") {
+      const { before, after } = event;
+      stderr.write(`compacted ${before} → ${after} tokens\n`);
     } else if (event.type === "error") {
       stderr.write(`${event.message}\n`);
     } else if (event.type === "agent_end") {

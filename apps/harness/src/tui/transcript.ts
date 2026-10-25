@@ -70,9 +70,7 @@ export class Transcript extends Container {
         this.addNotice(`activated: ${event.names.join(", ")}`);
         break;
       case "compaction":
-        this.addNotice(
-          `compacted: ${event.before} → ${event.after} tokens`,
-        );
+        this.addNotice(`compacted ${event.before} → ${event.after} tokens`);
         break;
       case "error":
         this.addNotice(event.message, true);

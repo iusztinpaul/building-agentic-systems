@@ -53,6 +53,9 @@ export interface RestoredSession {
   cwd: string;
   model: string; // the header's, or the last model_change's
   messages: Message[]; // after the last compaction, summary first
+  // The `message` entry id of each of `messages` (the summary has
+  // none): the next compaction's firstKeptEntryId comes from here.
+  entryIds: (string | undefined)[];
   activated: string[];
   // Every assistant and llm() usage on the chain with the model that
   // ran it, so the session cost survives a resume.
@@ -138,6 +141,11 @@ export function restore(id: string, entries: Entry[]): RestoredSession {
       }
     } else if (e.type === "compaction") {
       const from = kept.findIndex((k) => k.entryId === e.firstKeptEntryId);
+      if (from === -1) {
+        log.warn(
+          `session ${id}: compaction ${e.id} keeps from unknown entry ${e.firstKeptEntryId}; its tail is dropped`,
+        );
+      }
       kept = from === -1 ? [] : kept.slice(from);
       summary = summaryMessage(e.summary);
     } else if (e.type === "tool_activation") {
@@ -151,11 +159,13 @@ export function restore(id: string, entries: Entry[]): RestoredSession {
     }
   }
   const messages = kept.map((k) => k.message);
+  const entryIds = kept.map((k) => k.entryId);
   return {
     id,
     cwd: header.cwd,
     model,
     messages: summary ? [summary, ...messages] : messages,
+    entryIds: summary ? [undefined, ...entryIds] : entryIds,
     activated: [...activated],
     spend,
   };

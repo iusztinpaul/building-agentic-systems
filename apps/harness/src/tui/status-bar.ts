@@ -1,4 +1,5 @@
-// The one-line footer: model · permission mode · context gauge ·
+// The one-line footer: model · permission mode · context gauge
+// (estimateTokens / contextLength, what compaction compares) ·
 // session cost · MCP servers · activated tools. Every number comes
 // from AgentSession.status(), so headless could print the same.
 
@@ -7,7 +8,7 @@ import type { SessionStatus } from "../session.ts";
 import { dim } from "./style.ts";
 
 export function formatStatus(s: SessionStatus): string {
-  const tokens = s.tokens ?? 0;
+  const { tokens } = s;
   const ratio = s.contextLength > 0 ? tokens / s.contextLength : 0;
   const gauge =
     `${compact(tokens)} / ${compact(s.contextLength)} ` +

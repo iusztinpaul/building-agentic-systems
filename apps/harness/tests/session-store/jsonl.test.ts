@@ -187,6 +187,35 @@ describe("JsonlSessionStore", () => {
     expect(restored.activated).toEqual(["mcp__x__find"]);
   });
 
+  it("warns, naming the id, when a compaction keeps from an unknown entry, and drops its tail", () => {
+    const dir = join(root(), "sessions");
+    const store = SessionStore.jsonl(dir);
+    store.create("/w", "m");
+    const id = craft(dir, "/w", [
+      { id: "s", parentId: null, type: "session", version: 1, cwd: "/w", model: "m" },
+      { id: "a", parentId: "s", type: "message", message: user("old") },
+      {
+        id: "d",
+        parentId: "a",
+        type: "compaction",
+        summary: "## Goal\nship",
+        firstKeptEntryId: "zz",
+      },
+      { id: "f", parentId: "d", type: "message", message: user("after") },
+    ]);
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    try {
+      const restored = store.load(id);
+
+      expect(restored.messages).toEqual([summaryMessage("## Goal\nship"), user("after")]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("unknown entry zz");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("appends a resumed session to the same file, chained to its last line", () => {
     const dir = join(root(), "sessions");
     const id = SessionStore.jsonl(dir).create("/w", "m");

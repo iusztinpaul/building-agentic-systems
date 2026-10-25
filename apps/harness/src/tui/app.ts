@@ -69,6 +69,7 @@ class App {
   readonly #status = new StatusBar();
   #loader: Loader | undefined;
   #run: Promise<unknown> | undefined;
+  #compacting = false; // a /compact runs: typed text is refused
   #exit: (code: number) => void = () => {};
 
   constructor(tui: TUI, session: AgentSession, cwd: string) {
@@ -126,7 +127,13 @@ class App {
 
   #submit(text: string, alt: boolean): void {
     const action = route(text, this.#session.running, alt);
-    if (action) this.#act(action);
+    // No run would answer a steer or a follow-up made mid-/compact.
+    if (this.#compacting && action && action.kind !== "command") {
+      this.#transcript.addNotice(
+        "compacting… send it when done (Esc aborts)",
+        true,
+      );
+    } else if (action) this.#act(action);
     this.#render();
   }
 
@@ -152,15 +159,18 @@ class App {
   }
 
   async #prompt(text: string): Promise<void> {
-    this.#loader = new Loader(
-      this.#tui,
-      cyan,
-      dim,
+    await this.#busy(
       "working… (Esc aborts, Enter steers, Alt+Enter queues)",
+      () => this.#session.prompt(text),
     );
+  }
+
+  // A spinner with `label` while `work` runs.
+  async #busy<T>(label: string, work: () => Promise<T>): Promise<T> {
+    this.#loader = new Loader(this.#tui, cyan, dim, label);
     this.#spinner.addChild(this.#loader);
     try {
-      await this.#session.prompt(text);
+      return await work();
     } finally {
       this.#loader.stop();
       this.#spinner.clear();
@@ -170,7 +180,15 @@ class App {
 
   async #command(name: string, arg: string): Promise<void> {
     if (name === "exit") return this.#quit();
-    const result = await runCommand(this.#session, name, arg);
+    const run = () => runCommand(this.#session, name, arg);
+    // Mid-run, /compact is refused at once: the run keeps its spinner.
+    const compacting = name === "compact" && !this.#session.running;
+    this.#compacting ||= compacting;
+    const result = compacting
+      ? await this.#busy("compacting… (Esc aborts)", run).finally(() => {
+          this.#compacting = false;
+        })
+      : await run();
     if (result.prompt !== undefined) {
       // The transcript shows what was typed; the model gets the body.
       const typed = `/${name}${arg ? ` ${arg}` : ""}`;

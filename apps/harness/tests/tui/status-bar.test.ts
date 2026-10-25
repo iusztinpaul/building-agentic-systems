@@ -20,10 +20,8 @@ describe("formatStatus", () => {
     );
   });
 
-  it("shows a zero gauge before the first answer", () => {
-    expect(formatStatus({ ...status, tokens: undefined, cost: 0 })).toContain(
-      "· 0 / 1M (0 %) · $0.0000 ·",
-    );
+  it("shows a zero gauge for an empty context", () => {
+    expect(formatStatus({ ...status, tokens: 0, cost: 0 })).toContain("· 0 / 1M (0 %) · $0.0000 ·");
   });
 
   it("rounds the percentage", () => {

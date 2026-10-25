@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { contextChars } from "../src/compaction/estimate.ts";
 import { Settings } from "../src/config/settings.ts";
 import { type RegistrableClient, registerMcpTools } from "../src/mcp/register.ts";
 import { FakeProvider, type FakeScript, fakeDone, fakeModel } from "../src/provider/fake.ts";
@@ -504,7 +505,7 @@ describe("AgentSession persistence", () => {
     expect(t.session.toolNames()).not.toContain("mcp__x__lookup");
   });
 
-  it("reports model, mode, the last input tokens, context length and cost in status()", async () => {
+  it("reports model, mode, estimateTokens, context length and cost in status()", async () => {
     const fake = new FakeProvider({
       streams: [
         [fakeDone("a", [], { inputTokens: 1000, outputTokens: 100 })],
@@ -521,7 +522,8 @@ describe("AgentSession persistence", () => {
     expect(t.session.status()).toEqual({
       model: "test/model",
       mode: "auto",
-      tokens: undefined,
+      // The system prompt alone, chars / 4 (no usage yet: ratio 1).
+      tokens: Math.ceil(t.session.systemPrompt().length / 4),
       contextLength: 10_000,
       cost: 0,
       mcpServers: 0,
@@ -531,12 +533,17 @@ describe("AgentSession persistence", () => {
     await t.session.prompt("one");
     await t.session.prompt("two");
 
+    // The last request's usage (3000) over its estimate is the ratio
+    // (clamped 0.5–2); the gauge is ratio × chars / 4 of the context.
+    const sent = fake.requests[1]?.context ?? { system: "", messages: [] };
+    const ratio = Math.min(2, Math.max(0.5, 3000 / (contextChars(sent) / 4)));
+    const now = { system: sent.system, messages: [...t.session.messages] };
     const status = t.session.status();
-    expect(status.tokens).toBe(3000);
+    expect(status.tokens).toBe(Math.ceil((contextChars(now) / 4) * ratio));
     expect(status.cost).toBeCloseTo(1000 * 0.001 + 100 * 0.01 + 3000 * 0.001 + 200 * 0.01);
   });
 
-  it("keeps the gauge and the cost after an aborted turn, and restores the cost on resume", async () => {
+  it("keeps the cost after an aborted turn and restores it on resume, the gauge at ratio 1", async () => {
     const streams = [
       [fakeDone("a", [], { inputTokens: 1000, outputTokens: 100 })],
       [{ type: "text_delta", text: "par" }, { type: "text_delta", text: "tial" }, fakeDone("x")],
@@ -549,13 +556,18 @@ describe("AgentSession persistence", () => {
     await t.session.prompt("two");
     off();
 
-    expect(t.session.status()).toMatchObject({ tokens: 1000, cost: 2 });
+    expect(t.session.status()).toMatchObject({ cost: 2 });
     const resumed = await setup([], {
       provider: new FakeProvider({ models: [priced] }),
       store: jsonl(),
       resume: t.session.id,
     });
-    expect(resumed.session.status()).toMatchObject({ tokens: 1000, cost: 2 });
+    const system = resumed.session.systemPrompt();
+    const messages = [...resumed.session.messages];
+    expect(resumed.session.status()).toMatchObject({
+      tokens: Math.ceil(contextChars({ system, messages }) / 4),
+      cost: 2,
+    });
   });
 });
 
@@ -1827,11 +1839,21 @@ describe("AgentSession with codemode", () => {
   });
 
   it("an llm() call settling after an abort reports nothing after agent_end, but is still saved", async () => {
-    // Notices the abort late, as a hung request torn down by fetch.
+    // Notices the abort late, as a hung request torn down by fetch:
+    // it settles only when the test says so, after agent_end.
+    const deferred = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => (resolve = r));
+      return { promise, resolve };
+    };
+    const started = deferred();
+    const late = deferred();
     class LateAbort extends FakeProvider {
       override async completeText(_req: TextRequest, signal?: AbortSignal): Promise<never> {
-        await new Promise((resolve) => signal?.addEventListener("abort", resolve));
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        const aborted = new Promise((resolve) => signal?.addEventListener("abort", resolve));
+        started.resolve();
+        await aborted;
+        await late.promise;
         throw new Error("This operation was aborted");
       }
     }
@@ -1840,21 +1862,326 @@ describe("AgentSession with codemode", () => {
     });
     const store = SessionStore.inMemory();
     const saved: string[] = [];
+    const llmCallSaved = deferred();
     const append = store.append.bind(store);
     store.append = (id, body) => {
       saved.push(body.type);
+      if (body.type === "llm_call") llmCallSaved.resolve();
       return append(id, body);
     };
     const t = await setup([], { ...withMcp(), provider, store });
-    t.session.on((e) => {
-      if (e.type === "tool_call") setTimeout(() => t.session.abort(), 10);
-    });
 
-    expect(await t.session.prompt("hang")).toBe("aborted");
-    await new Promise((resolve) => setTimeout(resolve, 60)); // the late settle
+    const run = t.session.prompt("hang");
+    await started.promise; // the llm() request is in flight
+    t.session.abort();
+    expect(await run).toBe("aborted");
+    expect(saved).not.toContain("llm_call"); // still in flight
+    late.resolve(); // the late settle, strictly after agent_end
+    await llmCallSaved.promise;
+    await new Promise((resolve) => setImmediate(resolve)); // any stray event lands
 
     expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "aborted" });
     expect(t.events.filter((e) => e.type === "llm_call")).toEqual([]);
     expect(saved).toContain("llm_call"); // the --resume cost stays true
+  });
+});
+
+describe("AgentSession compaction", () => {
+  const tokens = (n: number) => "x".repeat(n * 4); // n estimated tokens
+  // A done without usage: the estimate stays chars / 4 (ratio 1).
+  const bare = (content: string, calls: ToolCall[] = []): StreamEvent => ({
+    type: "done",
+    message: {
+      role: "assistant",
+      content,
+      toolCalls: calls,
+      stopReason: calls.length > 0 ? "tool_calls" : "stop",
+    },
+  });
+  // One turn whose write call carries n tokens of arguments.
+  const writeTurn = (id: string, n: number) => [bare("", [writeCall(id, `${id}.md`, tokens(n))])];
+  const answerTurn = (text: string) => [bare(text)];
+  const writes = (n: number, each: number) =>
+    Array.from({ length: n }, (_, i) => writeTurn(`c${i + 1}`, each));
+  const summary = (goal: string) => ({
+    goal,
+    constraints: [],
+    progress: [],
+    decisions: [],
+    nextSteps: [],
+    criticalContext: ["c1.md"],
+  });
+  const small = fakeModel("test/model", { contextLength: 10_000 });
+  const isSummary = (m?: Message) => m?.role === "user" && m.content.startsWith("<summary>\n");
+  const compactions = (events: AgentEvent[]) => events.filter((e) => e.type === "compaction");
+  const overflow: StreamEvent = {
+    type: "error",
+    code: "context_length_exceeded",
+    message: "This endpoint's maximum context length is 10000 tokens",
+  };
+  const sessionsDir = () => join(root(), "home", "sessions");
+  const lines = (): Entry[] =>
+    readdirSync(sessionsDir()).flatMap((d) =>
+      readdirSync(join(sessionsDir(), d)).flatMap((f) =>
+        readFileSync(join(sessionsDir(), d, f), "utf8")
+          .trimEnd()
+          .split("\n")
+          .map((l) => JSON.parse(l) as Entry),
+      ),
+    );
+
+  it("compacts in prepareTurn past 80 % of a 10 000 window: [summary, …tail], same system prompt, activated tools sent", async () => {
+    const tools = builtinRegistry({ tmpDir: join(root(), "tmp") });
+    registerDeferred(tools);
+    tools.activate(["mcp__x__lookup"]);
+    const t = await setup(
+      [...writes(3, 3_000), answerTurn("done")],
+      { tools },
+      [summary("write three notes")],
+      { models: [small] },
+    );
+
+    expect(await t.session.prompt("write three notes")).toBe("completed");
+
+    const [, , third, fourth] = t.fake.requests;
+    expect(third?.context.messages.some(isSummary)).toBe(false);
+    const sent = fourth?.context.messages ?? [];
+    expect(isSummary(sent[0])).toBe(true);
+    expect(sent.filter(isSummary)).toHaveLength(1);
+    // The tail starts at an assistant turn: c2's call, then its result.
+    expect(sent.slice(1).map((m) => m.role)).toEqual(["assistant", "tool", "assistant", "tool"]);
+    expect(sent[1]).toMatchObject({ toolCalls: [{ id: "c2" }] });
+    expect(sent[2]).toMatchObject({ role: "tool", toolCallId: "c2" });
+    expect(fourth?.context.system).toBe(third?.context.system);
+    expect(fourth?.tools.map((s) => s.name)).toContain("mcp__x__lookup");
+    expect(fourth?.context.system).toContain("- mcp__x__lookup: look things up");
+    const [event] = compactions(t.events);
+    expect(compactions(t.events)).toHaveLength(1);
+    expect(event).toMatchObject({ type: "compaction" });
+    if (event?.type !== "compaction") throw new Error("no compaction");
+    expect(event.before).toBeGreaterThanOrEqual(8_000);
+    expect(event.after).toBeLessThan(event.before);
+    // Between the third answer and the fourth request.
+    const at = t.events.indexOf(event);
+    expect(t.events.slice(at + 1).filter((e) => e.type === "turn_start")).toHaveLength(1);
+    const request = t.fake.structuredRequests[0];
+    expect(request?.name).toBe("compaction_summary");
+    expect(request?.model).toBe("anthropic/claude-haiku-5.5");
+    expect(request?.input).toContain("[User]: write three notes");
+  });
+
+  it("triggerRatio 0.5 (--compact-at 0.5) compacts at 5 000 where 0.8 does not", async () => {
+    const streams = () => [...writes(3, 1_800), answerTurn("done")];
+    const at = await setup(
+      streams(),
+      { compaction: { triggerRatio: 0.5, keepRecentTokens: 20_000 } },
+      [summary("g")],
+      {
+        models: [small],
+      },
+    );
+    const base = await setup(streams(), {}, [], { models: [small] });
+
+    await at.session.prompt("go");
+    await base.session.prompt("go");
+
+    const firstSummary = at.fake.requests.findIndex((r) => isSummary(r.context.messages[0]));
+    expect(firstSummary).toBe(3);
+    expect(compactions(at.events)).toHaveLength(1);
+    expect(compactions(base.events)).toEqual([]);
+    expect(base.session.status().tokens).toBeGreaterThan(5_000);
+    expect(base.session.status().tokens).toBeLessThan(8_000);
+  });
+
+  it("re-evaluates the trigger after /model: a smaller window compacts on the next turn", async () => {
+    const models = [fakeModel("test/model"), fakeModel("test/small", { contextLength: 10_000 })];
+    const t = await setup(
+      [...writes(3, 3_000), answerTurn("done"), answerTurn("ok")],
+      {},
+      [summary("g")],
+      {
+        models,
+      },
+    );
+    await t.session.prompt("write");
+    expect(compactions(t.events)).toEqual([]);
+
+    await t.session.setModel("test/small");
+    await t.session.prompt("next");
+
+    const next = t.fake.requests[4];
+    expect(next?.model).toBe("test/small");
+    expect(isSummary(next?.context.messages[0])).toBe(true);
+    expect(next?.context.messages.at(-1)).toEqual({ role: "user", content: "next" });
+    expect(compactions(t.events)).toHaveLength(1);
+  });
+
+  it("merges the previous summary on a second compaction: one <summary> block", async () => {
+    const t = await setup(
+      [...writes(4, 3_000), answerTurn("done")],
+      {},
+      [summary("first goal"), summary("second goal")],
+      { models: [small] },
+    );
+
+    await t.session.prompt("go");
+
+    expect(compactions(t.events)).toHaveLength(2);
+    const second = t.fake.structuredRequests[1]?.input ?? "";
+    expect(second).toContain("<previous-summary>\n## Goal\nfirst goal\n");
+    expect(second).toContain("Update the existing structured summary");
+    expect(second).not.toContain("[User]: go"); // summarised the first time
+    const sent = t.fake.requests[4]?.context.messages ?? [];
+    expect(sent.filter((m) => m.content.includes("<summary>"))).toHaveLength(1);
+    expect(sent[0]?.content).toContain("second goal");
+    expect(sent[0]?.content).not.toContain("first goal");
+  });
+
+  it("/compact <instructions> runs now and passes them to the summariser; nothing to do is false", async () => {
+    const t = await setup(
+      [answerTurn(tokens(3_000)), answerTurn("ok")],
+      {
+        compaction: { triggerRatio: 0.8, keepRecentTokens: 1_000 },
+      },
+      [summary("g")],
+    );
+    expect(await t.session.compact()).toBe(false); // empty context
+    await t.session.prompt("one");
+    await t.session.prompt("two");
+
+    expect(await t.session.compact("focus on the test failures")).toBe(true);
+
+    const input = t.fake.structuredRequests[0]?.input ?? "";
+    expect(input.endsWith("Additional focus: focus on the test failures")).toBe(true);
+    expect(t.session.messages.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+    expect(isSummary(t.session.messages[0])).toBe(true);
+    expect(compactions(t.events)).toHaveLength(1);
+    expect(t.session.running).toBe(false);
+  });
+
+  it("refuses /compact while a prompt runs", async () => {
+    const t = await setup([textTurn("a")]);
+    const run = t.session.prompt("go");
+
+    await expect(t.session.compact()).rejects.toThrow("cannot compact while a prompt is running");
+    await run;
+  });
+
+  it("context_length_exceeded: compacts and retries the request once; nothing is lost on disk", async () => {
+    const store = SessionStore.jsonl(sessionsDir());
+    const t = await setup(
+      [answerTurn(tokens(3_000)), [overflow], answerTurn("ok")],
+      { store, compaction: { triggerRatio: 0.8, keepRecentTokens: 1_000 } },
+      [summary("g")],
+    );
+    await t.session.prompt("one");
+
+    expect(await t.session.prompt("two")).toBe("completed");
+
+    expect(t.fake.requests).toHaveLength(3);
+    const retry = t.fake.requests[2]?.context.messages ?? [];
+    expect(retry.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(isSummary(retry[0])).toBe(true);
+    expect(retry[1]).toEqual({ role: "user", content: "two" });
+    expect(t.events.filter((e) => e.type === "error")).toEqual([]);
+    expect(compactions(t.events)).toHaveLength(1);
+    const saved = lines().flatMap((e) => (e.type === "message" ? [e.message.content] : []));
+    expect(saved).toEqual(["one", tokens(3_000), "two", "ok"]);
+  });
+
+  it("a second overflow after the retry ends with agent_end(error)", async () => {
+    const t = await setup(
+      [answerTurn(tokens(3_000)), [overflow], [overflow]],
+      { compaction: { triggerRatio: 0.8, keepRecentTokens: 1_000 } },
+      [summary("g")],
+    );
+    await t.session.prompt("one");
+
+    expect(await t.session.prompt("two")).toBe("error");
+
+    expect(t.fake.requests).toHaveLength(3);
+    expect(t.events).toContainEqual({ type: "error", message: overflow.message });
+    expect(t.events.at(-1)).toEqual({ type: "agent_end", reason: "error" });
+  });
+
+  it("three failed summaries: one error event, no more attempts, the run goes on", async () => {
+    const fail = (n: number) => new Error(`not JSON ${n}`);
+    const t = await setup(
+      [...writes(6, 3_000), answerTurn("done")],
+      {},
+      [fail(1), fail(2), fail(3)],
+      {
+        models: [small],
+      },
+    );
+
+    expect(await t.session.prompt("go")).toBe("completed");
+
+    // Due before requests 3, 4, 5 and 6; tried 3 times, never again.
+    expect(t.fake.structuredRequests).toHaveLength(3);
+    const errors = t.events.filter((e) => e.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({
+      message: expect.stringContaining("compaction failed 3 times"),
+    });
+    expect(compactions(t.events)).toEqual([]);
+    expect(t.fake.requests).toHaveLength(7);
+  });
+
+  it("the session figure: a compaction entry loads as [summary][tail] + activations, the originals stay on disk", async () => {
+    const tools = builtinRegistry({ tmpDir: join(root(), "tmp") });
+    registerDeferred(tools);
+    tools.activate(["mcp__x__lookup"]);
+    const t = await setup(
+      [...writes(3, 3_000), answerTurn("done")],
+      { tools, store: SessionStore.jsonl(sessionsDir()) },
+      [summary("write three notes")],
+      { models: [small] },
+    );
+    await t.session.prompt("write three notes");
+
+    const restored = SessionStore.jsonl(sessionsDir()).load(t.session.id ?? "");
+
+    expect(restored.messages).toEqual(t.session.messages);
+    expect(restored.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(isSummary(restored.messages[0])).toBe(true);
+    expect(restored.activated).toEqual(["mcp__x__lookup"]);
+    const entries = lines();
+    const messages = entries.filter((e) => e.type === "message");
+    expect(messages).toHaveLength(8); // the prompt, 4 answers, 3 results
+    const compaction = entries.find((e) => e.type === "compaction");
+    const firstKept = messages.find(
+      (e) => e.message.role === "assistant" && e.message.toolCalls[0]?.id === "c2",
+    );
+    expect(compaction).toMatchObject({ firstKeptEntryId: firstKept?.id });
+    expect(entries.findIndex((e) => e.type === "tool_activation")).toBeLessThan(
+      entries.indexOf(compaction as Entry),
+    );
+
+    // Resumed, it sends the figure and compacts again from the right entry.
+    const resumedTools = builtinRegistry({ tmpDir: join(root(), "tmp") });
+    registerDeferred(resumedTools);
+    const resumed = await setup(
+      [writeTurn("d1", 3_000), writeTurn("d2", 3_000), answerTurn("again")],
+      { tools: resumedTools, store: SessionStore.jsonl(sessionsDir()), resume: t.session.id },
+      [summary("second")],
+      { models: [small] },
+    );
+    await resumed.session.prompt("more");
+    const first = resumed.fake.requests[0];
+    expect(isSummary(first?.context.messages[0])).toBe(true);
+    expect(first?.tools.map((s) => s.name)).toContain("mcp__x__lookup");
+    expect(compactions(resumed.events)).toHaveLength(1);
+    const reloaded = SessionStore.jsonl(sessionsDir()).load(t.session.id ?? "");
+    expect(reloaded.messages).toEqual(resumed.session.messages);
+    expect(reloaded.messages[0]?.content).toContain("second");
+    expect(reloaded.messages.length).toBeGreaterThan(1);
   });
 });
