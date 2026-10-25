@@ -229,11 +229,19 @@ export const McpConfig = z.object({ mcpServers: z.record(McpServer) });
 
 ### The committed `.tree-agent/mcp.json`
 
-The repo commits one server, the local stdio memory server (the same command as `.mcp.json`'s `tree-memory-local`):
+The repo commits two servers: the hosted `tree-memory` (streamable HTTP behind an [MCP login](#the-hosted-tree-memory-server)) and the local stdio memory server (the same command as `.mcp.json`'s `tree-memory-local`):
 
 ```json
 {
   "mcpServers": {
+    "tree-memory": {
+      "type": "http",
+      "url": "https://tree-memory.fastmcp.app/mcp",
+      "toolExposure": {
+        "search_memory": "direct",
+        "visualize_*": "deferred"
+      }
+    },
     "tree-memory-local": {
       "command": "uv",
       "args": ["--directory", "apps/memory", "run", "--env-file", "../../.env",
@@ -254,7 +262,7 @@ The paths are relative to the repo root, so the session cwd must be the repo roo
 - `visualize_*: deferred` — `visualize_memory_structure` and `visualize_memory_embeddings` are rarely needed; they stay out of the tool list until `tool_search` finds them, which also exercises `tool_search` against a real server.
 - everything else (`search_web`, `scrape_web`, `ingest_*`, the graphrag-only tools): the default `codemode` — bulk data and many small calls, reached from scripts at zero prompt cost.
 
-With this file and the memory stack up (`make local-start`), the model sees `read`, `bash`, `edit`, `write`, `mcp__tree_memory_local__search_memory`, `tool_search` and `codemode`:
+With this file and the memory stack up (`make local-start`), the model sees `read`, `bash`, `edit`, `write`, `mcp__tree_memory_local__search_memory`, `tool_search` and `codemode`, plus `mcp__tree_memory__search_memory` once you are logged in to the hosted server (a headless run without a login skips it with one warning; the TUI asks for the login on its startup screen):
 
 ```bash
 make harness-run PROMPT="what is in my memory about agents?" ARGS="--cwd ../.. --trust"
@@ -266,9 +274,9 @@ The memory server's tools declare no `readOnlyHint`, so the gate treats them as 
 
 ### The hosted `tree-memory` server
 
-The hosted server sits behind Prefect Horizon OAuth. Add it to your user file `~/.tree-agent/mcp.json`
-(it is not committed to the repo's `.tree-agent/mcp.json`: a repo-root run by someone not logged in
-would warn or wait every time, and its tools would duplicate `tree-memory-local`'s):
+The hosted server sits behind Prefect Horizon OAuth. It is the `tree-memory` entry of the committed
+`.tree-agent/mcp.json` (above), so every trusted repo-root run tries it; for other cwds add the same
+entry to your user file `~/.tree-agent/mcp.json`:
 
 ```json
 { "mcpServers": { "tree-memory": { "type": "http", "url": "https://tree-memory.fastmcp.app/mcp",

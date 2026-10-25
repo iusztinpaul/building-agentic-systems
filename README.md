@@ -20,7 +20,7 @@ This is a monorepo. Each app owns its own build files; cross-app concerns stay a
 - `docker/` — shared infra (MongoDB replica-set config, `mongot` search config).
 - `docker-compose.yml` — spins up MongoDB + mongot + Prefect server + a Prefect worker.
 - `.mcp.json` — Claude Code's MCP config (hosted `tree-memory`, `tree-memory-local`, `mongodb-mcp-server`); `tree-agent` never reads it.
-- `.tree-agent/mcp.json` — `tree-agent`'s project MCP config: the stdio `tree-memory-local` server and its tool exposure (see [MCP](apps/harness/README.md#mcp)).
+- `.tree-agent/mcp.json` — `tree-agent`'s project MCP config: the hosted `tree-memory` server (OAuth login) and the stdio `tree-memory-local` server with their tool exposure (see [MCP](apps/harness/README.md#mcp)).
 - `.env` — shared secrets and infra settings (see `.env.example`).
 - `Makefile` — thin root that delegates per-app (`make memory-<t>` / `make harness-<t>`) and owns infra + aggregate targets.
 
