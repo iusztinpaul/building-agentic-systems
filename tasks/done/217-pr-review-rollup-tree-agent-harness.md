@@ -20,8 +20,8 @@ The one Blocker is documentation discipline and routes to **PA**, not SWE: the g
 
 - [x] Blocker 1 (`[PA]`): `docs/glossary.md` has a **Skill** row (the `SKILL.md` directory format, the discovery roots and their nearest-wins precedence, the prompt listing + `skills.listingBudgetRatio` budget, `disable-model-invocation`, the `/skill:<name> [args]` message shape with its `# <SKILL.md path>` header and `$ARGUMENTS`, `--no-skills`), citing the owning module (`skills/skills.ts`) and spec §9, in the table's existing Term / Definition / Notes style. Strongly recommended in the same pass (not gating): a **Trusted directory** row (`~/.tree-agent/trusted.json`, `--trust`, `TREE_AGENT_TRUST=1`, the TUI's one-time question, what loads only when trusted; `config/trust.ts`, spec §16), today only a parenthetical inside the **Context file** row.
 - [x] Tester re-runs the harness cadence (`make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests && make pre-commit`) and PASSES.
-- [ ] PA re-runs acceptance review and ACCEPTS.
-- [ ] PR Reviewer re-runs and reports `NO BLOCKERS`.
+- [x] PA re-runs acceptance review and ACCEPTS.
+- [x] PR Reviewer re-runs and reports `NO BLOCKERS`.
 
 ## Blockers (detail)
 
@@ -217,3 +217,39 @@ $ mutation 1: Tests 1 failed | 40 passed (registry);  mutation 2: Tests 2 failed
 - Nit 7 follow-ups: `--resume <id>` re-run 3 more times from fresh crash-cut copies: exit 0, 1 warning each (the one earlier exit 1 was my zsh word-splitting of `$args`, not the harness). Mended file reloaded with `--continue`: exit 0, 1 warning (the cut line is still in the file), file grew 7 → 9 lines. Nit 14: README:93 names the unknown-option exception. Nit 15: `tasks/done/206-…md` gained exactly two "(superseded by 215 Issue 4 …)" lines. Recommendation: route the two-line `child.stdout?.destroy(); child.stderr?.destroy()` fix (lingering process after the give-up, above) to the SWE in this uncommitted pass; it does not block the 217 ACs.
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-25 07:03 — Acceptance Review (round 3, post-rollup)
+
+**VERDICT: ACCEPT**
+
+Scope of this round: confirm the 217 rollup (head 36f1208) did not regress the feature accepted in round 2 (9524e49) and that the `[PA]` doc items landed as committed. Everything run, not only read.
+
+- Commit footprint: `git show 36f1208 --stat` — 31 files: `apps/harness/{src,tests,README.md}`, `docs/glossary.md`, `docs/notes/tree-agent-harness-spec.md`, `tasks/done/{206,215,217}`. No `apps/memory`, no `.env*`.
+- `[PA]` items as committed: `docs/glossary.md:77` **Skill**, `:78` **Trusted directory**, `:76` Context-file cross-reference, `:69` Codemode-script row says `llm()` 64 calls; spec §9 walk reads "git root down to `cwd` (the nearest wins)" in a trusted `cwd` only; spec §16 snippet lists `mcp.initializeTimeoutMs` (30_000), `codemode.memoryMb`, `codemode.outputMaxBytes`. All match the 06:21 PA log above; working tree clean against HEAD.
+- User-visible behaviour (fake `TREE_AGENT_HOME`, scratch cwd, `--no-mcp`): a real session cut mid-line (25 bytes + newline dropped) → `--continue "Reply with the single word ok."` exit 0, stdout `ok`, exactly 1 `warn:` line; `--resume <id>` on a second fresh cut: exit 0, `ok`, 1 warning. The file grows 2 → 5 lines with only the cut line (3) unparsable, so the next entry starts on a fresh line. `tree-agent --help` exit 0 (usage on stdout); `--help --bogus` exit 1 (error + usage on stderr, empty stdout), matching README:93.
+- Headless against `tree-memory-local` (env local, repo root, `--trust --json`, fake home): exit 0 in 10 s; the model called `mcp__tree_memory_local__search_memory` (classifier allow, `source: classifier`), got passages back and answered in one sentence; `pgrep -f serve_mcp` empty before and after (no leftover MCP child; the process-group cleanup holds).
+- `make harness-lint-check`: "Checked 104 files … No fixes applied" (0 warnings). `make harness-tests`: 47 files / 876 tests passed.
+- PR #48 body: task table carries 215, 216, 217 rows with their commits; counts 876 / 47; `maxCalls` 64; last line is the Claude Code attribution.
+
+No regression found; the unticked `[HUMAN]` ACs and the Tester's non-blocking notes (SIGHUP, inactive-deferred `TypeError` wording) stay as filed. Hand off to the PR Reviewer.
+
+### [PR Reviewer] 2026-10-25 07:25 — Re-review (round 2)
+
+**VERDICT: NO BLOCKERS**
+
+Reviewed `36f1208` against `origin/main` (merge-base f38d664): the commit's 31 files, +581/−100 (the whole PR stays 187 files, +30 849/−5 559). Every `apps/harness/src` and `tests` hunk read in full, plus the glossary / spec / README / task-206 hunks and the PR body. Blockers: 0; Nits: 6 (4 carried, 2 new).
+
+- Blocker 1 fixed: `docs/glossary.md:77` **Skill**, `:78` **Trusted directory**, `:76` cross-reference. Claims re-checked against `skills/skills.ts:4-6, 47-49, 149`, `config/paths.ts:20-27`, `config/trust.ts:16-61` (exact `resolve(cwd)` match, warn-and-trust-nothing on read, throw on write) and `cli.ts:143-181` (settings / mcp / context-files / skills all keyed on `projectTrusted`). `[PA]` Nits 3, 4, 5 landed (`glossary.md:69` 64 calls; spec `:385` git root → `cwd`, nearest wins; spec `:704-712` `mcp.initializeTimeoutMs`, `codemode.memoryMb`, `codemode.outputMaxBytes`).
+- Code Nits verified in the diff: 1 (Biome 0 warnings); 2 (`src/display-path.ts`, a leaf importing `node:path` only, used by `tui/tool-card.ts` and `permissions/summary.ts`; 3 tests); 7 (one `store.load` in `cli.ts:149-150`, the `RestoredSession` handed to `create()`; `session.ts:80, 189-192`; unknown id still exits 1 through the same `catch`; 2 red-then-green `it.each` tests); 9 (`registry.ts:133-136` is now exactly `scriptable()`; `activate()` admits only `deferred`, so `hidden` can never enter `#activated`; test replaced 1-for-1, `register.test.ts` activates first); 11 (`detached: true`, `signalGroup(-pid)`, `closedWithin` caps every wait — `close()`: EOF, TERM 1 s, KILL 3 s, give up 4 s; signal hook: TERM now, KILL 2 s, give up 3 s then `exit`; `close()` memoised; readers + stdout/stderr released on give-up so the loop drains; `#exited()` still used by `send()`; 3 new tests with group/stray `afterEach` cleanup); 12 (23 symbols: no import of any in `src` or `tests`; each has a real second in-file use — `style.ts` `italic` / `underline` / `strike` feed the markdown theme at `:28-40` — so the sweep introduced no dead code); 14 (`README.md:93`, `cli.ts:247-248`); 15 (two "superseded by 215 Issue 4" lines in task 206).
+- Cadence (env local): `make harness-lint-check` "Checked 104 files … No fixes applied" (0 warnings); `make harness-typecheck` clean; `make harness-tests` 47 files / 876 passed in 7.95 s; `pgrep -fl "sleep 30|fake-mcp-server|vitest"` empty afterwards.
+- Caveman plugin: installed project-scoped for two other repos only, not this one and not user-wide → no PR comments (Step 3b n/a).
+- Not re-litigated: Nits 8, 10, 13, 16 (accepted judgement calls), the unticked `[HUMAN]` ACs, commit trailers.
+- **Nits** (appended to PR #48 under `## Review nits`, before the attribution line):
+  1. [Simplicity] — `src/mcp/config.ts:117-157` — Nit 8, prose formatter → reuse the settings one.
+  2. [Standards] — `src/compaction/compaction.ts:108-129` — Nit 10, `cutPoint` forward.
+  3. [Untested] — `tests/cli.test.ts:673` (was 670 before this commit's imports) — Nit 13, reads the real `tree-memory` SKILL.md.
+  4. [Standards] — session JSONL — Nit 16, raw tool output; one README sentence.
+  5. [Standards] — NEW — `src/mcp/transport-stdio.ts:83` `SIGNALS` has no SIGHUP and `src/tools/bash.ts:99` own-group child: on SIGHUP the harness exits 129 with no `exit` event; the now-detached MCP child relies on stdin EOF (~1.3 s; an EOF-ignoring server is orphaned) and the bash group is orphaned (pre-existing). Add `"SIGHUP"` to `SIGNALS` and end the bash group on the same hook.
+  6. [Standards] — NEW — `src/codemode/` — an unactivated `deferred` tool called from a script reads `TypeError: tools.x is not a function` (Tester note); correct and safe; optional `tools` Proxy answering `unknown tool "x"; call searchTools()`.
+
+Pipeline may advance to hand-off.
