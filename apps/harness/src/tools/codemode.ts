@@ -45,7 +45,7 @@ export interface CodemodeOptions extends CodemodeLimits {
   // llm(): its provider, the default model's fallback and the
   // session's cost and event sink.
   provider: LlmOptions["provider"];
-  decisionModel: string;
+  smallModel: string;
   onLlmCall?: LlmOptions["onCall"];
 }
 
@@ -84,7 +84,7 @@ export function codemodeTool(
       const llm = createLlm({
         provider: o.provider,
         settings: o.llm,
-        decisionModel: o.decisionModel,
+        smallModel: o.smallModel,
         registry,
         gate: o.gate,
         ctx,

@@ -28,7 +28,7 @@ Guiding principle, from pi: **minimal core, everything else in files the user ow
 | Compaction trigger | `triggerRatio` (default 0.8) × `contextLength` of the **current** model, always; configurable via settings and `--compact-at` | User decision. No decision-model trigger. |
 | Tool execution | Sequential, in call order | Parallel batches are an optimization, not a concept. |
 | Token counting | `chars / 4`, corrected by the ratio from the last `usage.prompt_tokens` | Good enough for an 80% trigger. |
-| Default models | main `anthropic/claude-sonnet-5.5`, decision + sandbox `llm()` default `anthropic/claude-haiku-5.5` | Verify IDs against `GET /api/v1/models` at build time. |
+| Default models | main `anthropic/claude-sonnet-5.5`; `decisionModel` `typesafe/jev-1.14`, a decision model (output modality `decisions`) for the `auto` classifier; `smallModel` `anthropic/claude-haiku-5.5` for compaction + the sandbox `llm()` default | Verify IDs at build time: chat models against `GET /api/v1/models`, decision models against `GET /api/v1/models?output_modalities=decisions`. Amended 2026-10-25 (ADR-016). |
 | Config dirs | `~/.tree-agent/` (user), `.tree-agent/` (project) | Mirrors `~/.pi/agent/` + `.pi/`. |
 | Book code style | ≤ 76 chars/line (≤ 55 when a line carries an annotation); listings > 4 lines are introduced in prose | `requirements/code-formatting-rules.md`. Snippets here are sketches; the factory formats real code to the rule. |
 
@@ -173,9 +173,11 @@ export type AgentEvent =
 
 ```ts
 export interface ModelInfo { id: string; contextLength: number; maxOutputTokens: number;
-  supported: Set<string>; pricing: { prompt: number; completion: number } }
-  // from GET /api/v1/models: context_length, top_provider.max_completion_tokens,
-  // supported_parameters, pricing
+  supported: Set<string>; pricing: { prompt: number; completion: number };
+  isDecisionModel: boolean }
+  // from GET /api/v1/models and GET /api/v1/models?output_modalities=decisions (two GETs,
+  // once per process, one cache; an id from the second list only is a decision model):
+  // context_length, top_provider.max_completion_tokens, supported_parameters, pricing
 
 export interface ToolSchema { name: string; description: string; parameters: JsonSchema }
 
@@ -198,7 +200,23 @@ export interface Provider {
   complete<T>(req: StructuredRequest<T>, signal?: AbortSignal): Promise<T>;
   completeText(req: { model: string; system?: string; input: string; maxOutputTokens?: number },
     signal?: AbortSignal): Promise<{ text: string; usage: Usage }>;   // sandbox llm() without schema
+  decisions(req: DecisionsRequest, signal?: AbortSignal): Promise<DecisionsResponse>; // decision models
 }
+
+export type DecisionQuestion =
+  | { type: "noul"; instructions: string; criteria?: { true: string; false: string } }
+  | { type: "choice"; instructions: string; criteria: Record<string, string | null> }
+  | { type: "score"; instructions: string; criteria: string[] };
+export interface DecisionsRequest { model: string;
+  state: string | Record<string, unknown> | unknown[]; questions: Record<string, DecisionQuestion> }
+export type DecisionAnswer =
+  | { type: "noul"; noul: number }
+  | { type: "choice"; choice: string; confidence: number; probabilities: Record<string, number> }
+  | { type: "score"; score: number; confidence: number; probabilities: Record<string, number>;
+      legend: Record<string, string> };
+export interface DecisionsResponse { id: string; model: string; provider: string;
+  answers: Record<string, DecisionAnswer>;
+  usage: { inputTokens: number; outputTokens: number; cost: number } }  // cost: USD, usage.cost
 ```
 
 ### OpenRouter wire contract (`POST https://openrouter.ai/api/v1/chat/completions`)
@@ -208,11 +226,20 @@ export interface Provider {
 - SSE rules (`sse.ts`): split on blank lines; skip lines starting with `:` (OpenRouter sends `: OPENROUTER PROCESSING` keep-alives); `data: [DONE]` ends the stream; a chunk with a top-level `error` object is terminal → emit `error` and stop; the last chunk before `[DONE]` carries `usage` and repeats `finish_reason` → treat as accounting, not a second turn end.
 - Tool-call deltas arrive as `choices[0].delta.tool_calls[{index, id?, function:{name?, arguments?}}]`; reassemble by `index`, concatenate `arguments`, `JSON.parse` only at `done`. A parse failure makes that call `{isError:true}` with the parser message, never a crash.
 - `finish_reason` → `StopReason`: `stop`→`stop`, `tool_calls`→`tool_calls`, `length`→`length`, `error`→`error`. The loop ignores `stopReason === "tool_calls"` as a signal and uses `toolCalls.length > 0` (unreliable upstream).
-- `complete<T>()`: non-streaming, `response_format: {type:"json_schema", json_schema:{name, strict:true, schema}}`, `provider: {require_parameters: true}`. Parse → `schema.parse()`. One retry on parse failure with the error appended to the input. Only models whose `supported_parameters` include `structured_outputs` are accepted for `decisionModel`; fail fast at startup otherwise.
+- `complete<T>()`: non-streaming, `response_format: {type:"json_schema", json_schema:{name, strict:true, schema}}`, `provider: {require_parameters: true}`. Parse → `schema.parse()`. One retry on parse failure with the error appended to the input. Only models whose `supported_parameters` include `structured_outputs` (and that are not decision models) are accepted for `smallModel`; `decisionModel` must be a decision model. `checkModels` fails fast at startup otherwise.
 - Errors: HTTP 4xx/5xx before streaming → `error` event with `code` from body. Context overflow (HTTP 400 with "context length" in message, or `finish_reason: "length"` on the first chunk) → the loop triggers compact-and-retry once (§13).
 - The `tools` array changes when `tool_search` activates a tool (§8.1). Accept the prompt-cache miss; do not try to keep the array stable.
 
-`FakeProvider` replays scripted `StreamEvent[]` per call and records requests; all loop, permission, tool-search and compaction tests run on it.
+### OpenRouter Decisions wire contract (`POST https://openrouter.ai/api/alpha/decisions`)
+
+Verified live 2026-10-25. Decision models (output modality `decisions`) are listed only by `GET /api/v1/models?output_modalities=decisions` (30 models, e.g. `typesafe/jev-1.14`, `liquid/d1-ultra`), with `supported_parameters: []` and prompt pricing `0.000000042` USD/token, completion `0` (input billed, output free).
+
+- Endpoint: NOT under `/api/v1`; the provider takes a second injectable `decisionsUrl` (default above) beside `baseUrl`. Same headers as chat (`Authorization: Bearer $OPENROUTER_API_KEY`, `HTTP-Referer`, `X-Title: tree-agent`) plus `Content-Type: application/json`, same injectable `fetch`, the caller's `AbortSignal`.
+- Body: `{model, state, questions}` (the optional `provider`, `session_id`, `trace`, `user` are not sent). `state` is a string, an object or an array (strings and `{type: "image_url", …}` parts). `questions` maps a name → `{type, instructions, criteria?}`: `noul` (yes/no probability; optional `criteria` with the keys `true` and `false`), `choice` (`criteria` required: option → guidance or `null`), `score` (`criteria` required: an ordered array of level descriptions); `box` (images) is not built.
+- 200: `{id: "gen-dec-…", model: "<dated snapshot, e.g. typesafe/jev-1.14-20261014>", provider, answers: {<name>: answer}, usage: {input_tokens, output_tokens, cost}}`. Answers: noul `{type: "noul", noul: p(yes)}`; choice `{type: "choice", choice, confidence, probabilities}`; score `{type: "score", score, confidence, probabilities, legend}`. No text, reasoning or explanation. Several questions in one request are answered in parallel. Parsed with a strict zod schema (`provider/decisions.ts`, shared with `FakeProvider`): an unknown `type`, a probability outside `[0, 1]`, or a question without its answer → `ProviderError("invalid_response")`.
+- Errors through `httpError()`: HTTP 400 `{"error":{"message":"Model x/y does not exist","code":400}}` → `ProviderError("unknown_model")`; an invalid question `type` → 400 with the zod issue list as the message; 401, 402 (credits), 413, 429, 5xx → `ProviderError(<status>)`. An abort rejects with the signal's reason.
+
+`FakeProvider` replays scripted `StreamEvent[]` per call, scripted `complete`/`completeText`/`decisions` answers (decisions as wire bodies, validated by the same schema), and records requests; all loop, permission, tool-search and compaction tests run on it.
 
 ## 6. Agent loop and queues (`src/loop/`)
 
@@ -465,7 +492,7 @@ Every `tools.x()` call becomes a `ToolCall` with `origin: "codemode"` and goes t
 ```ts
 interface LlmOptions {
   schema?: object;      // JSON Schema → provider.complete<T>, result is parsed JSON
-  model?: string;       // default settings.codemode.llm.model (= decisionModel)
+  model?: string;       // default settings.codemode.llm.model (= smallModel)
   system?: string;      // default: "You are a sub-task worker. Answer only what is asked."
   maxTokens?: number;   // default 2 048
   tools?: boolean;      // default false; only honoured when depth > 1 is configured (below)
@@ -554,7 +581,7 @@ export async function resolve(req: PermissionRequest, deps: { mode; prompter; cl
 1. `tool.isReadOnly` → `allow` (`read`, `tool_search`, MCP `readOnlyHint`). Server-asserted for MCP; put untrusted servers' tools on `hidden`.
 2. `sessionAllow` has `tool.name` (user answered `session` earlier) → `allow`.
 3. Mode `ask` → prompt.
-4. Mode `auto` → classifier (§11.1): `dangerous: false` → `allow`; `dangerous: true` or classifier failure → prompt with the classifier's `reason`.
+4. Mode `auto` → classifier (§11.1): `dangerous: false` → `allow`; `dangerous: true` (`p(dangerous) ≥ permissions.dangerThreshold`) or classifier failure → prompt with the classifier's `reason`.
 5. Prompt: prompter present → `once` → `allow`, `session` → `allow` + add to `sessionAllow`, `deny` → `deny`. No prompter (headless) → `deny`, `source: "headless"`.
 
 What the prompt shows: tool name and its **primary argument** (`bash.command`, `read/edit/write.path` relative to `cwd`, `codemode`: `description` plus the first 2 KB of `script`, MCP tools: the input JSON ≤ 2 KB), plus the classifier's reason in `auto`. Every resolution is appended to the session JSONL as a `permission` entry (audit) and emitted as an `AgentEvent`. Codemode-originated calls take the same gate; `codemode` itself is a normal non-read-only tool, so in `ask` mode the user is asked once per script (or once per session with `session`), and each `tools.x()` inside is asked again unless read-only.
@@ -565,23 +592,48 @@ Nothing is persisted across sessions: no allow lists in settings, no `settings.l
 
 ### 11.1 Auto mode: the decision model (`decision-model.ts`)
 
-Built on `decide<T>()` (§12). Runs for every non-read-only call that is not session-allowed.
+Asks `settings.decisionModel` (default `typesafe/jev-1.14`, a decision model) two questions through `provider.decisions()` (§5) for every non-read-only call that is not session-allowed. The output keeps the shape the gate, the prompt dialog and the `permission` entry use:
 
 ```ts
-const DangerCheck = z.object({
-  dangerous: z.boolean(),
-  risk: z.enum(["low", "medium", "high"]),
-  reason: z.string().max(200),
-});
-// input: tool name, primary argument + full input (≤ 2 KB), cwd, last 3 user messages.
-// system: "You are a safety classifier for a coding/personal agent. An action is dangerous
-//   when it deletes or overwrites files outside cwd, touches .git internals or shell rc files,
-//   exfiltrates secrets or credentials, changes permissions, installs software, or has an
-//   effect the user did not ask for. Reversible, cwd-scoped actions that serve the user's
-//   last request are not dangerous. When unsure, answer dangerous: true."
+interface DangerCheck { dangerous: boolean; risk: "low" | "medium" | "high"; reason: string }
+state = {
+  tool: call.name,
+  primary_argument: primaryArgument(call, cwd),            // permissions/summary.ts
+  input: cutBytes(JSON.stringify(call.arguments), 2048),   // ≤ 2 KB, with the cut marker
+  cwd,
+  recent_user_messages: recentUserMessages.slice(-3).map((m) => cutBytes(m, 2048)), // oldest first
+}
 ```
 
-Fail-closed: provider error, parse error, timeout (10 s) → treated as `dangerous` (→ prompt, or `deny` headless). Results are cached per session on `hash(tool, input)`. The classifier never auto-denies; the human does.
+The question set, exported as `DANGER_QUESTIONS` (the test compares it with this block, parsed):
+
+```json
+{
+  "dangerous": {
+    "type": "noul",
+    "instructions": "You are a safety classifier for a coding/personal agent. Is this tool call dangerous? An action is dangerous when it deletes or overwrites files outside cwd, touches .git internals or shell rc files, exfiltrates secrets or credentials, changes permissions, installs software, or has an effect the user did not ask for. Reversible, cwd-scoped actions that serve the user's last request are not dangerous. When unsure, answer yes.",
+    "criteria": {
+      "true": "The call deletes or overwrites files outside cwd, touches .git internals or shell rc files, reads or sends secrets or credentials, changes permissions, installs software, or does something the user's last messages did not ask for.",
+      "false": "The call stays inside cwd, is reversible, and serves the user's last request."
+    }
+  },
+  "risk": {
+    "type": "choice",
+    "instructions": "How severe is the worst plausible outcome of this tool call if it runs as written?",
+    "criteria": {
+      "low": "Reversible and scoped to cwd: reading, creating or editing project files, running tests or builds.",
+      "medium": "Hard to undo but contained: overwriting uncommitted work, bulk edits, network calls that send project data, installing packages into the project.",
+      "high": "Destructive or security-relevant: deleting or overwriting files outside cwd, .git internals, shell rc files, credentials, permission changes, system-wide installs, force-pushes."
+    }
+  }
+}
+```
+
+- `dangerous = answers.dangerous.noul >= settings.permissions.dangerThreshold` (default **0.3**, range 0.05–0.95). "When unsure, dangerous" read as a probability: `p ≥ 0.5` would allow a 0.45 call. Live safe calls score 0.01–0.02 and destructive ones 0.87–0.995 on both `typesafe/jev-1.14` and `liquid/d1-ultra`; OpenRouter warns probabilities differ per model, so operators retune it per model (never past 0.5).
+- `risk = answers.risk.choice`; `reason` is generated (decision models return no text): `decision model: p(dangerous)=0.95, risk high (0.98)` — `p` and the choice's confidence with two decimals.
+- `usage.cost` (≈ $0.00002 per check on jev) is added to the session cost through `onCost` (in memory: the `permission` entry is unchanged, so a resume rebuilds the cost without it).
+
+Fail-closed: provider error, a missing or invalid answer, timeout (10 s; the deadline and the run's signal abort one controller, as in `decide`) → treated as `dangerous` (→ prompt, or `deny` headless). Results are cached per session on `hash(tool, input)`; an aborted call caches nothing. The classifier never auto-denies; the human does.
 
 ```mermaid
 flowchart TD
@@ -601,16 +653,16 @@ flowchart TD
 
 ## 12. Decision models (`src/decision/decide.ts`)
 
-One primitive:
+Two primitives, one per output kind: `decide<T>()` for structured JSON on a chat model (`settings.smallModel`), `provider.decisions()` (§5) for probabilities on a decision model (`settings.decisionModel`, the §11.1 classifier).
 
 ```ts
 export interface DecideOptions<T> { name: string; system: string; input: string;
   schema: z.ZodType<T>; model?: string; timeoutMs?: number; cache?: Map<string, T> }
 export async function decide<T>(provider: Provider, o: DecideOptions<T>): Promise<T>;
-// = provider.complete with settings.decisionModel, timeout, one parse-retry, optional cache.
+// = provider.complete on settings.smallModel, timeout, one parse-retry, optional cache.
 ```
 
-Consumers in `tree-agent`: the `auto` permission classifier (§11.1) and the compaction summarizer (§13). ToC 5.5's other applications (clarification, compaction trigger, chunk ranking, memory write) are discussed in the chapter as further consumers of the same primitive but are not built. `decide` knows nothing about its consumers.
+One consumer of `decide<T>()` in `tree-agent`: the compaction summarizer (§13); the `auto` permission classifier (§11.1) asks a decision model through `decisions()` instead. ToC 5.5's other applications (clarification, compaction trigger, chunk ranking, memory write) are discussed in the chapter as further consumers of the same primitive but are not built. `decide` knows nothing about its consumers.
 
 ## 13. Compaction (`src/compaction/`)
 
@@ -625,7 +677,7 @@ export async function compact(ctx: Context, instructions?: string, deps): Promis
 
 - **Trigger**: `estimateTokens(ctx) >= triggerRatio * model.contextLength`, where `model` is the current main model (re-read after `/model`, so switching to a smaller model can compact on the next turn). `triggerRatio` comes from `settings.compaction.triggerRatio` or `--compact-at <0.3–0.95>`; it is the only knob. `estimate.ts`: `chars/4 × k`, where `k = lastUsage.inputTokens / estimateAtThatTime` (default 1, clamped 0.5–2).
 - **Cut point**: walk back from the end until the kept tail is ≈ `keepRecentTokens`, then move the cut forward to the nearest `user` message so an assistant `tool_calls` message is never separated from its `tool` results.
-- **Summary**: `complete<T>()` on the decision model (cheaper, big input) with the pi template; a previous summary, if present, is merged ("update the summary"):
+- **Summary**: `complete<T>()` through `decide<T>()` on the small model (`settings.smallModel`; cheaper, big input; uncosted) with the pi template; a previous summary, if present, is merged ("update the summary"):
 
 ```ts
 const Summary = z.object({ goal: z.string(), constraints: z.string().array(),
@@ -698,8 +750,10 @@ Mode resolution: a positional prompt, piped stdin, or `--json` → headless; oth
 ```ts
 export const Settings = z.object({
   model: z.string().default("anthropic/claude-sonnet-5.5"),
-  decisionModel: z.string().default("anthropic/claude-haiku-5.5"),
-  permissions: z.object({ mode: z.enum(["ask", "auto"]).default("ask") }).default({}),  // TUI only; headless is auto unless --permission-mode
+  decisionModel: z.string().default("typesafe/jev-1.14"),        // a decision model: the auto classifier
+  smallModel: z.string().default("anthropic/claude-haiku-5.5"),  // chat + structured_outputs: compaction, llm()
+  permissions: z.object({ mode: z.enum(["ask", "auto"]).default("ask"),  // TUI only; headless is auto unless --permission-mode
+    dangerThreshold: z.number().min(0.05).max(0.95).default(0.3) }).default({}),  // p(dangerous) ≥ this → dangerous
   compaction: z.object({ triggerRatio: z.number().min(0.3).max(0.95).default(0.8),
     keepRecentTokens: z.number().default(20_000) }).default({}),
   codemode: z.object({
@@ -720,19 +774,19 @@ Merge order: defaults → `~/.tree-agent/settings.json` → `.tree-agent/setting
 
 ## 17. Testing and acceptance
 
-All on `FakeProvider` except the two marked *live* (skipped without `OPENROUTER_API_KEY`).
+All on `FakeProvider` except the four marked *live* (skipped without `OPENROUTER_API_KEY`; CI has none).
 
 | Module | Tests |
 |---|---|
 | `sse.ts` | skips `:` comment lines; `[DONE]`; mid-stream `error` chunk terminates with `error`; usage chunk does not emit a second `done`; tool-call deltas reassembled by `index` across chunks; invalid JSON args → error result. |
-| `openrouter.ts` *live* | one streamed turn with a tool call; `complete<T>` returns schema-valid JSON on the decision model. |
+| `openrouter.ts` *live* | one streamed turn with a tool call; `complete<T>` returns schema-valid JSON on the small model; `decisions()` with `DANGER_QUESTIONS` on `typesafe/jev-1.14` and on `liquid/d1-ultra`: `rm -rf ~/Downloads/*` → `noul ≥ 0.7` + `risk high`, `ls -la` → `noul ≤ 0.3` + `risk low` (the jev test also checks `modelInfo(…).isDecisionModel`). |
 | loop | `toolCalls.length` not `finish_reason` drives continuation; `length` stop fails all calls; blocked tool returns error and loop continues; `maxTurns`; abort keeps partial text; steering lands before the next model call and keeps the loop alive; follow-up re-enters after a completed turn; queues survive abort. |
 | prompt | section order stable; base prompt ≤ 900 est. tokens; `AGENTS.md` walk picks root→cwd order, truncates at cap, prefers `AGENTS.md` over `CLAUDE.md` in the same dir; `tools` section reflects activation. |
 | tools | `read` paging; `bash` output spill to tmp with path; `edit` uniqueness; zod errors as results; `tool_search` absent with zero deferred tools; BM25 ranks exact name above description match; activation changes `schemasForRequest()`. |
 | skills | discovery order and override; 250-char cap; listing budget drop; `disable-model-invocation`; `/skill:name` injection. |
 | mcp | config union parses both transports; glob exposure incl. `deferred`; default `codemode`; `readOnlyHint` → `isReadOnly`; 20 KB truncation; `codemode` tool absent with zero codemode tools; stdio handshake against a fake server script; HTTP JSON and SSE responses; `nextCursor` pagination. |
 | codemode | script calling two fake tools returns only `console.log` + return value; `tools.x` passes the gate (deny rejects the promise, ask pauses); `llm()` depth-1 has no tools; `maxCalls` and `maxTotalTokens` caps; depth 2 runs a sub-loop that can `read`; depth beyond config → script error; `Promise.all` respects `concurrency`; timeout kills the sandbox; no `fetch`/`require`. |
-| permissions | read-only never prompts; `session` answer skips later prompts for that tool; `ask` prompts on `bash`/`edit`/`write`/`codemode`/non-read-only MCP; `auto` allows `dangerous:false`, prompts on `true` and on classifier failure; headless defaults to `auto` and TUI to `ask`; headless prompt → `deny` → exit 2; `--on-blocked continue`; audit entry written; cache hit. |
+| permissions | read-only never prompts; `session` answer skips later prompts for that tool; `ask` prompts on `bash`/`edit`/`write`/`codemode`/non-read-only MCP; `auto` allows `p(dangerous) < dangerThreshold` (0.29 at 0.3), prompts at `≥` (0.30) and on classifier failure; headless defaults to `auto` and TUI to `ask`; headless prompt → `deny` → exit 2; `--on-blocked continue`; audit entry written; cache hit. |
 | compaction | trigger at `triggerRatio`; `--compact-at 0.5` honoured; trigger re-evaluated after `/model`; cut never splits tool calls from results; summary merged on second compaction; overflow retry once; breaker after 3 failures; resumed session reconstructs `[summary][tail]` + activations. |
 | cli | mode resolution matrix (positional, stdin, `--json`, TTY); `--json` emits valid JSONL; exit codes; multi-line stdin → follow-ups. |
 

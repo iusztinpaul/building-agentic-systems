@@ -208,3 +208,24 @@ flowchart LR
   from activations → a stable `tools` array; a 60-tool server where BM25 misranks → a semantic
   `tool_search`; a measured case where the 80 % ratio is wrong for a model → the decision-model trigger from
   ToC 5.5.2; a reader's need for forks → pi's session tree.
+
+## Amendment (2026-10-25) — Decision models are real decision models; the small chat model is its own setting
+
+Amends §2 (defaults) and §6 (the decision primitive); §5 (the gate, fail-closed, no auto-deny) and §7
+(compaction) are unchanged in behaviour. OpenRouter now serves decision models (output modality
+`decisions`, listed only by `GET /api/v1/models?output_modalities=decisions`) that answer typed `noul` /
+`choice` / `score` questions about a `state` through `POST /api/alpha/decisions`, return probabilities and
+no text, and cost ≈ $0.00002 per danger check (input billed at $0.042 per million tokens, output free).
+**Decision:** `settings.decisionModel` (default `typesafe/jev-1.14`) is such a model and is used by the
+`auto` classifier alone, through a new `Provider.decisions()` on the same raw `fetch`; the classifier asks
+two questions (`dangerous` noul, `risk` choice) and flags `dangerous` when `p ≥
+permissions.dangerThreshold` (default 0.3 — the spec's "when unsure, dangerous" read as a probability;
+live safe calls score 0.01–0.02, destructive ones 0.95–0.99 on both tested models). A new
+`settings.smallModel` (default `anthropic/claude-haiku-5.5`, must support `structured_outputs`) takes the
+text/JSON-schema jobs: the compaction summary through `decide<T>()` and the sandbox `llm()` default. Two
+primitives, one per output kind: `decide<T>()` for structured JSON on a chat model, `decisions()` for
+probabilities on a decision model. *Why not keep one chat model for the check:* a chat model's
+`dangerous: true` is a token, not a calibrated probability, and costs ~50× more per call. *Upgrade
+trigger:* a measured misclassification rate on a real model → per-model thresholds; a `score` question
+replacing `risk` once a model's `legend` is stable. The §6 diagram label "one primitive · decisionModel"
+reads "decide<T>() on smallModel · decisions() on decisionModel".

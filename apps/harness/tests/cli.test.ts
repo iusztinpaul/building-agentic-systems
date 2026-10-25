@@ -18,12 +18,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
 import { log } from "../src/log.ts";
 import { startMcp } from "../src/mcp/client.ts";
-import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
+import { FakeProvider, fakeDecisionModel, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
 import { type Provider, ProviderError, type StreamEvent } from "../src/provider/types.ts";
 import { type Entry, SessionStore } from "../src/session-store/jsonl.ts";
 import { discoverSkills } from "../src/skills/skills.ts";
 import type { AgentEvent, ToolCall } from "../src/types.ts";
+import { safe, verdict } from "./helpers/decisions.ts";
 import { fakeFetch, fixture, jsonResponse, sseResponse } from "./helpers/http.ts";
 import { FakeTerminal, settle } from "./helpers/terminal.ts";
 import { gone } from "./helpers/tmp.ts";
@@ -175,21 +176,58 @@ describe("main", () => {
     });
   });
 
-  it("exits 1 naming a settings.json decisionModel that lacks structured_outputs", async () => {
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ decisionModel: "weak/model" }));
+  it.each([
+    [
+      { decisionModel: "anthropic/claude-haiku-5.5" },
+      "decisionModel anthropic/claude-haiku-5.5 is not a decision model (output modality " +
+        '"decisions"); see https://openrouter.ai/models?output_modalities=decisions',
+    ],
+    [
+      { smallModel: "typesafe/jev-1.14" },
+      "smallModel typesafe/jev-1.14 is a decision model; it must be a chat model with " +
+        "structured_outputs",
+    ],
+    [{ smallModel: "weak/model" }, "smallModel weak/model does not support structured_outputs"],
+  ])("exits 1 before any session on settings.json %j", async (settings, line) => {
+    writeFileSync(join(home, "settings.json"), JSON.stringify(settings));
     const fake = new FakeProvider({
-      models: [fakeModel("weak/model", { supported: new Set(["tools"]) })],
+      models: [
+        fakeModel("anthropic/claude-haiku-5.5"),
+        fakeDecisionModel("typesafe/jev-1.14"),
+        fakeModel("weak/model", { supported: new Set(["tools"]) }),
+      ],
       streams: [[fakeDone("never")]],
     });
 
     const result = await run(["hi"], fake);
 
-    expect(result).toMatchObject({
-      code: 1,
-      stdout: "",
-      stderr: "decisionModel weak/model does not support structured_outputs\n",
-    });
+    expect(result).toMatchObject({ code: 1, stdout: "", stderr: `${line}\n` });
     expect(fake.requests).toEqual([]);
+    expect(existsSync(join(home, "sessions"))).toBe(false);
+  });
+
+  it("starts on liquid/d1-ultra with a retuned threshold from settings.json", async () => {
+    const cwd = join(home, "work");
+    mkdirSync(cwd);
+    writeFileSync(
+      join(home, "settings.json"),
+      JSON.stringify({ decisionModel: "liquid/d1-ultra", permissions: { dangerThreshold: 0.4 } }),
+    );
+    const write: ToolCall = { id: "w", name: "write", arguments: { path: "a.md", content: "a" } };
+    const fake = new FakeProvider({
+      models: [
+        fakeModel("anthropic/claude-sonnet-5.5"),
+        fakeModel("anthropic/claude-haiku-5.5"),
+        fakeDecisionModel("liquid/d1-ultra", { contextLength: 32_768 }),
+      ],
+      streams: [[fakeDone("", [write])], [fakeDone("done")]],
+      decisions: [verdict(0.35, "medium")],
+    });
+
+    const result = await run(["write a.md", "--cwd", cwd], fake);
+
+    expect(result.code).toBe(0);
+    expect(fake.decisionRequests.map((r) => r.model)).toEqual(["liquid/d1-ultra"]);
   });
 
   it("prints a provider error's message and exits 1", async () => {
@@ -228,9 +266,21 @@ describe("main", () => {
         },
       ],
     };
-    const http = fakeFetch((call) =>
-      call.method === "GET" ? jsonResponse(models) : sseResponse(fixture("say-hi.recorded.sse")),
-    );
+    const decisionModels = {
+      data: [
+        {
+          id: "typesafe/jev-1.14",
+          context_length: 262_144,
+          top_provider: { max_completion_tokens: 235_929 },
+          supported_parameters: [],
+          pricing: { prompt: "0.000000042", completion: "0" },
+        },
+      ],
+    };
+    const http = fakeFetch((call) => {
+      if (call.method === "POST") return sseResponse(fixture("say-hi.recorded.sse"));
+      return jsonResponse(call.url.includes("output_modalities") ? decisionModels : models);
+    });
 
     const result = await run(
       ["say hi"],
@@ -240,6 +290,7 @@ describe("main", () => {
     expect(result).toMatchObject({ code: 0, stdout: "Hi.\n", stderr: "", created: ["test-key"] });
     expect(http.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
       "GET https://openrouter.ai/api/v1/models",
+      "GET https://openrouter.ai/api/v1/models?output_modalities=decisions",
       "POST https://openrouter.ai/api/v1/chat/completions",
     ]);
   });
@@ -250,8 +301,6 @@ const tty: Stdin = { isTTY: true, isPipe: false, read: async () => "" };
 const textTurn = (text: string): StreamEvent[] => [{ type: "text_delta", text }, fakeDone(text)];
 const toolTurn = (...calls: ToolCall[]): StreamEvent[] => [fakeDone("", calls)];
 const bashCall = (id: string): ToolCall => ({ id, name: "bash", arguments: { command: "true" } });
-// The auto-mode classifier's answer for a harmless call.
-const safe = { dangerous: false, risk: "low", reason: "cwd-scoped and asked for" };
 
 describe("resolveMode", () => {
   it.each([
@@ -389,7 +438,7 @@ describe("main (headless)", () => {
   it("emits JSONL with --json: every line parses to an AgentEvent", async () => {
     const fake = new FakeProvider({
       streams: [toolTurn(bashCall("c1")), textTurn("done")],
-      answers: [safe],
+      decisions: [safe],
     });
 
     const result = await run(["go", "--json", "--cwd", home], fake);
@@ -433,7 +482,7 @@ describe("main (headless)", () => {
       };
       const fake = new FakeProvider({
         streams: [toolTurn(sleep), textTurn("never")],
-        answers: [safe],
+        decisions: [safe],
       });
       const signals = new EventEmitter();
       const started = Date.now();
@@ -458,7 +507,7 @@ describe("main (headless)", () => {
   it("exits 1 on max_turns", async () => {
     const fake = new FakeProvider({
       streams: [toolTurn(bashCall("c1")), toolTurn(bashCall("c2"))],
-      answers: [safe],
+      decisions: [safe],
     });
 
     const result = await run(["loop", "--max-turns", "1", "--cwd", home], fake);
@@ -526,6 +575,7 @@ describe("main (headless)", () => {
         models: [
           fakeModel("anthropic/claude-sonnet-5.5", { contextLength: 10_000 }),
           fakeModel("anthropic/claude-haiku-5.5"),
+          fakeDecisionModel("typesafe/jev-1.14"),
         ],
       });
     const events = (stdout: string) =>
@@ -573,7 +623,7 @@ describe("main (headless)", () => {
         }),
         textTurn("Created notes.md with two bullets."),
       ],
-      answers: [safe, safe],
+      decisions: [safe, safe],
     });
 
     const result = await run(["--json", "--trust", "--cwd", cwd], fake, {
@@ -1145,16 +1195,15 @@ describe("main (permissions)", () => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({ permissions: { mode: "ask" } }));
     const fake = new FakeProvider({
       streams: [toolTurn(writeA), textTurn("done")],
-      answers: [safe],
+      decisions: [safe],
     });
 
     const result = await run(["write a.md", "--cwd", cwd], fake);
 
     expect(result.code).toBe(0);
     expect(readFileSync(join(cwd, "a.md"), "utf8")).toBe("a");
-    expect(fake.structuredRequests.map((r) => [r.name, r.model])).toEqual([
-      ["danger_check", "anthropic/claude-haiku-5.5"],
-    ]);
+    expect(fake.decisionRequests.map((r) => r.model)).toEqual(["typesafe/jev-1.14"]);
+    expect(fake.structuredRequests).toEqual([]);
   });
 
   it("--permission-mode ask headless: the first write is denied (headless), blocked, exit 2", async () => {
@@ -1167,7 +1216,7 @@ describe("main (permissions)", () => {
     expect(result.stderr).toContain("run ended: blocked\n");
     expect(existsSync(join(cwd, "a.md"))).toBe(false);
     expect(fake.requests).toHaveLength(1);
-    expect(fake.structuredRequests).toEqual([]);
+    expect(fake.decisionRequests).toEqual([]);
     expect(sessionEntries().filter((e) => e.type === "permission")).toMatchObject([
       { type: "permission", call: writeA, decision: "deny", source: "headless" },
     ]);
@@ -1193,12 +1242,12 @@ describe("main (permissions)", () => {
     });
   });
 
-  it("--permission-mode auto with a classifier answering dangerous: true exits 2", async () => {
+  it("--permission-mode auto with a classifier answering p(dangerous) 0.95 exits 2", async () => {
     const cwd = work();
     const push: ToolCall = { id: "p", name: "bash", arguments: { command: "git push --force" } };
     const fake = new FakeProvider({
       streams: [toolTurn(push), textTurn("never")],
-      answers: [{ dangerous: true, risk: "high", reason: "force-push rewrites remote history" }],
+      decisions: [verdict(0.95, "high", { confidence: 0.98 })],
     });
 
     const result = await run(
@@ -1207,12 +1256,14 @@ describe("main (permissions)", () => {
     );
 
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("! Blocked: dangerous: force-push rewrites remote history\n");
+    expect(result.stderr).toContain(
+      "! Blocked: dangerous: decision model: p(dangerous)=0.95, risk high (0.98)\n",
+    );
     expect(sessionEntries().filter((e) => e.type === "permission")).toMatchObject([
       {
         decision: "deny",
         source: "headless",
-        reason: "dangerous: force-push rewrites remote history",
+        reason: "dangerous: decision model: p(dangerous)=0.95, risk high (0.98)",
       },
     ]);
   });
@@ -1221,7 +1272,7 @@ describe("main (permissions)", () => {
     const cwd = work();
     const fake = new FakeProvider({
       streams: [toolTurn(writeA), textTurn("never")],
-      answers: [new ProviderError("network_error", "fetch failed")],
+      decisions: [new ProviderError("network_error", "fetch failed")],
     });
 
     const result = await run(["write a.md", "--cwd", cwd], fake);
@@ -1237,7 +1288,7 @@ describe("main (permissions)", () => {
         toolTurn({ id: "r", name: "read", arguments: { path: "." } }, writeA),
         textTurn("done"),
       ],
-      answers: [safe],
+      decisions: [safe],
     });
 
     const result = await run(["go", "--json", "--cwd", cwd], fake);
@@ -1315,7 +1366,7 @@ describe("main (TUI permissions)", () => {
     expect(fake.requests[1]?.context.messages.at(-1)).toMatchObject({
       content: "Blocked: denied by the user",
     });
-    expect(fake.structuredRequests).toEqual([]);
+    expect(fake.decisionRequests).toEqual([]);
   });
 
   it.each([
@@ -1335,7 +1386,7 @@ describe("main (TUI permissions)", () => {
       writeFileSync(settingsFile, settings);
       const fake = new FakeProvider({
         streams: [toolTurn(writeCall("w", "a.md")), textTurn("written")],
-        answers: [safe],
+        decisions: [safe],
       });
       const t = await tui(fake);
 
@@ -1348,7 +1399,7 @@ describe("main (TUI permissions)", () => {
       await t.result;
 
       expect(t.terminal.written.join("")).not.toContain("Allow write?");
-      expect(fake.structuredRequests).toHaveLength(1);
+      expect(fake.decisionRequests).toHaveLength(1);
       expect(readFileSync(join(t.cwd, "a.md"), "utf8")).toBe("w");
       expect(readFileSync(settingsFile, "utf8")).toBe(settings);
     },
@@ -1516,10 +1567,7 @@ describe("main (mcp)", () => {
         toolTurn({ id: "cm", name: "codemode", arguments: { script, description: "echo" } }),
         textTurn("never"),
       ],
-      answers: [
-        { dangerous: false, risk: "low", reason: "runs a script" },
-        { dangerous: true, risk: "high", reason: "wipes the server" },
-      ],
+      decisions: [safe, verdict(0.97, "high")],
     });
 
     const result = await run(["wipe it", "--cwd", project(), "--json"], fake);

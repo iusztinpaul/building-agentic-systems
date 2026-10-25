@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { DANGER_QUESTIONS } from "../../src/permissions/decision-model.ts";
 import {
   CONTEXT_LENGTH_EXCEEDED,
   OpenRouterProvider,
   toStopReason,
 } from "../../src/provider/openrouter.ts";
-import type { ChatRequest, StreamEvent, ToolSchema } from "../../src/provider/types.ts";
+import type {
+  ChatRequest,
+  DecisionsRequest,
+  StreamEvent,
+  ToolSchema,
+} from "../../src/provider/types.ts";
 import { ProviderError } from "../../src/provider/types.ts";
 import type { Message } from "../../src/types.ts";
 import { collect, fakeFetch, fixture, jsonResponse, sse, sseResponse } from "../helpers/http.ts";
 
 const MAIN = "anthropic/claude-sonnet-5.5";
-const DECISION = "anthropic/claude-haiku-5.5";
+const SMALL = "anthropic/claude-haiku-5.5";
+const JEV = "typesafe/jev-1.14";
 
 const SEARCH: ToolSchema = {
   name: "search_memory",
@@ -303,7 +310,7 @@ describe("OpenRouterProvider.complete", () => {
     const http = fakeFetch(() => jsonResponse(completion('{"dangerous":false,"reason":"ok"}')));
 
     const verdict = await provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "Classify.",
       input: "rm -rf build",
       schema: Verdict,
@@ -315,7 +322,7 @@ describe("OpenRouterProvider.complete", () => {
     expect(http.calls).toHaveLength(1);
     const body = http.calls[0]?.body;
     expect(body).not.toHaveProperty("stream");
-    expect(body.model).toBe(DECISION);
+    expect(body.model).toBe(SMALL);
     expect(body.max_tokens).toBe(200);
     expect(body.messages).toEqual([
       { role: "system", content: "Classify." },
@@ -342,7 +349,7 @@ describe("OpenRouterProvider.complete", () => {
     const http = fakeFetch((_call, i) => jsonResponse(completion(answers[i] ?? null)));
 
     const verdict = await provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "Classify.",
       input: "rm -rf /",
       schema: Verdict,
@@ -361,7 +368,7 @@ describe("OpenRouterProvider.complete", () => {
     const http = fakeFetch((_call, i) => jsonResponse(completion(answers[i] ?? null)));
 
     const verdict = await provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "s",
       input: "ls",
       schema: Verdict,
@@ -376,7 +383,7 @@ describe("OpenRouterProvider.complete", () => {
     const http = fakeFetch(() => jsonResponse(completion('{"dangerous":1}')));
 
     const result = provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "s",
       input: "ls",
       schema: Verdict,
@@ -397,7 +404,7 @@ describe("OpenRouterProvider.complete", () => {
     );
 
     const result = provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "s",
       input: "ls",
       schema: Verdict,
@@ -414,7 +421,7 @@ describe("OpenRouterProvider.completeText", () => {
     const http = fakeFetch(() => jsonResponse(completion("a summary")));
 
     const result = await provider(http.fetch).completeText({
-      model: DECISION,
+      model: SMALL,
       system: "Summarise.",
       input: "long text",
     });
@@ -432,7 +439,7 @@ describe("OpenRouterProvider.completeText", () => {
   it("sends no system message when none is given", async () => {
     const http = fakeFetch(() => jsonResponse(completion("x")));
 
-    await provider(http.fetch).completeText({ model: DECISION, input: "hi" });
+    await provider(http.fetch).completeText({ model: SMALL, input: "hi" });
 
     expect(http.calls[0]?.body.messages).toEqual([{ role: "user", content: "hi" }]);
   });
@@ -490,7 +497,7 @@ describe("OpenRouterProvider malformed upstream responses", () => {
     const http = fakeFetch(() => new Response("<html>proxy</html>", { status: 200 }));
 
     const result = provider(http.fetch).complete({
-      model: DECISION,
+      model: SMALL,
       system: "s",
       input: "ls",
       schema: Verdict,
@@ -511,7 +518,7 @@ describe("OpenRouterProvider malformed upstream responses", () => {
   ])("rejects completeText with invalid_response when a 200 body is %s", async (_label, text) => {
     const http = fakeFetch(() => new Response(text, { status: 200 }));
 
-    const result = provider(http.fetch).completeText({ model: DECISION, input: "hi" });
+    const result = provider(http.fetch).completeText({ model: SMALL, input: "hi" });
 
     await expect(result).rejects.toBeInstanceOf(ProviderError);
     await expect(result).rejects.toMatchObject({ code: "invalid_response" });
@@ -538,9 +545,29 @@ const MODELS = {
   ],
 };
 
+// Trimmed copies of GET /api/v1/models?output_modalities=decisions entries recorded 2026-10-25.
+const DECISION_MODELS = {
+  data: [
+    {
+      id: JEV,
+      context_length: 262_144,
+      top_provider: { context_length: 262_144, max_completion_tokens: 235_929 },
+      supported_parameters: [],
+      pricing: { prompt: "0.000000042", completion: "0" },
+      architecture: { output_modalities: ["decisions"] },
+    },
+    // Also in MODELS: the chat list wins.
+    { ...MODELS.data[1], id: "vendor/no-limit" },
+  ],
+};
+
+// The two list GETs: chat models, then decision models.
+const lists = (call: { url: string }) =>
+  jsonResponse(call.url.endsWith("?output_modalities=decisions") ? DECISION_MODELS : MODELS);
+
 describe("OpenRouterProvider.modelInfo", () => {
   it("maps context_length, max_completion_tokens, supported_parameters and pricing", async () => {
-    const http = fakeFetch(() => jsonResponse(MODELS));
+    const http = fakeFetch(lists);
 
     const info = await provider(http.fetch).modelInfo(MAIN);
 
@@ -550,25 +577,52 @@ describe("OpenRouterProvider.modelInfo", () => {
       maxOutputTokens: 128_000,
       supported: new Set(["max_tokens", "response_format", "structured_outputs", "tools"]),
       pricing: { prompt: 0.000002, completion: 0.00001 },
+      isDecisionModel: false,
     });
-    expect(http.calls[0]).toMatchObject({
-      url: "https://openrouter.ai/api/v1/models",
-      method: "GET",
+    expect(http.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "GET https://openrouter.ai/api/v1/models",
+      "GET https://openrouter.ai/api/v1/models?output_modalities=decisions",
+    ]);
+  });
+
+  it("resolves a decision model from the decisions list: no parameters, input billed, output free", async () => {
+    const http = fakeFetch(lists);
+
+    const info = await provider(http.fetch).modelInfo(JEV);
+
+    expect(info).toEqual({
+      id: JEV,
+      contextLength: 262_144,
+      maxOutputTokens: 235_929,
+      supported: new Set(),
+      pricing: { prompt: 0.000000042, completion: 0 },
+      isDecisionModel: true,
     });
   });
 
-  it("hits GET /api/v1/models once and serves later lookups from the cache", async () => {
-    const http = fakeFetch(() => jsonResponse(MODELS));
+  it("tags an id listed by both as a chat model", async () => {
+    const http = fakeFetch(lists);
+
+    const info = await provider(http.fetch).modelInfo("vendor/no-limit");
+
+    expect(info.isDecisionModel).toBe(false);
+  });
+
+  it("issues each list GET once and serves later lookups from the cache", async () => {
+    const http = fakeFetch(lists);
     const openrouter = provider(http.fetch);
 
-    await Promise.all([openrouter.modelInfo(MAIN), openrouter.modelInfo(MAIN)]);
+    await Promise.all([openrouter.modelInfo(MAIN), openrouter.modelInfo(JEV)]);
     await openrouter.modelInfo("vendor/no-limit");
 
-    expect(http.calls).toHaveLength(1);
+    expect(http.calls.map((c) => c.url)).toEqual([
+      "https://openrouter.ai/api/v1/models",
+      "https://openrouter.ai/api/v1/models?output_modalities=decisions",
+    ]);
   });
 
   it("falls back to the context length when max_completion_tokens is null", async () => {
-    const http = fakeFetch(() => jsonResponse(MODELS));
+    const http = fakeFetch(lists);
 
     const info = await provider(http.fetch).modelInfo("vendor/no-limit");
 
@@ -576,7 +630,7 @@ describe("OpenRouterProvider.modelInfo", () => {
   });
 
   it("rejects an unknown id with a message naming it", async () => {
-    const http = fakeFetch(() => jsonResponse(MODELS));
+    const http = fakeFetch(lists);
 
     await expect(provider(http.fetch).modelInfo("acme/nope")).rejects.toThrow(
       'unknown model "acme/nope": not listed by GET /api/v1/models',
@@ -584,14 +638,247 @@ describe("OpenRouterProvider.modelInfo", () => {
   });
 
   it("does not cache a failed models request", async () => {
-    const http = fakeFetch((_call, i) =>
-      i === 0 ? new Response("down", { status: 503 }) : jsonResponse(MODELS),
+    const http = fakeFetch((call, i) =>
+      i === 0 ? new Response("down", { status: 503 }) : lists(call),
     );
     const openrouter = provider(http.fetch);
 
     await expect(openrouter.modelInfo(MAIN)).rejects.toMatchObject({ code: "503" });
     await expect(openrouter.modelInfo(MAIN)).resolves.toMatchObject({ id: MAIN });
-    expect(http.calls).toHaveLength(2);
+    expect(http.calls).toHaveLength(4);
+  });
+
+  it("does not cache a failed decisions-list request either", async () => {
+    const http = fakeFetch((call, i) =>
+      i === 1 ? new Response("down", { status: 502 }) : lists(call),
+    );
+    const openrouter = provider(http.fetch);
+
+    await expect(openrouter.modelInfo(MAIN)).rejects.toThrow(
+      "GET /api/v1/models?output_modalities=decisions: down",
+    );
+    await expect(openrouter.modelInfo(JEV)).resolves.toMatchObject({ isDecisionModel: true });
+    expect(http.calls.map((c) => c.url)).toEqual([
+      "https://openrouter.ai/api/v1/models",
+      "https://openrouter.ai/api/v1/models?output_modalities=decisions",
+      "https://openrouter.ai/api/v1/models",
+      "https://openrouter.ai/api/v1/models?output_modalities=decisions",
+    ]);
+  });
+});
+
+describe("OpenRouterProvider.modelInfo malformed lists", () => {
+  it("rejects a list body without a data array as invalid_response, and does not cache it", async () => {
+    const http = fakeFetch((call, i) => (i === 1 ? jsonResponse({ choices: [] }) : lists(call)));
+    const openrouter = provider(http.fetch);
+
+    await expect(openrouter.modelInfo(MAIN)).rejects.toEqual(
+      new ProviderError(
+        "invalid_response",
+        "GET /api/v1/models?output_modalities=decisions: the body has no data array",
+      ),
+    );
+    await expect(openrouter.modelInfo(MAIN)).resolves.toMatchObject({ id: MAIN });
+  });
+});
+
+describe("OpenRouterProvider.decisions", () => {
+  const DECISIONS_URL = "http://fake.test/api/alpha/decisions";
+  const ask: DecisionsRequest = {
+    model: JEV,
+    state: { tool: "bash", primary_argument: "rm -rf ~/Downloads/*" },
+    questions: DANGER_QUESTIONS,
+  };
+  const recorded = (name: string) => JSON.parse(fixture(name)) as unknown;
+  const decider = (fetch: typeof globalThis.fetch) =>
+    new OpenRouterProvider({ apiKey: "test-key", fetch, decisionsUrl: DECISIONS_URL });
+
+  it("POSTs {model, state, questions} to the injected decisionsUrl with the usual headers", async () => {
+    const http = fakeFetch(() => jsonResponse(recorded("decisions-rm-rf.json")));
+
+    await decider(http.fetch).decisions(ask);
+
+    const [call] = http.calls;
+    expect(call?.url).toBe(DECISIONS_URL);
+    expect(call?.method).toBe("POST");
+    expect(call?.headers).toEqual({
+      Authorization: "Bearer test-key",
+      "HTTP-Referer": "https://github.com/iusztinpaul/building-agentic-systems",
+      "X-Title": "tree-agent",
+      "Content-Type": "application/json",
+    });
+    expect(call?.body).toEqual({ model: JEV, state: ask.state, questions: DANGER_QUESTIONS });
+  });
+
+  it("defaults decisionsUrl to https://openrouter.ai/api/alpha/decisions", async () => {
+    const http = fakeFetch(() => jsonResponse(recorded("decisions-ls.json")));
+
+    await provider(http.fetch).decisions(ask);
+
+    expect(http.calls[0]?.url).toBe("https://openrouter.ai/api/alpha/decisions");
+  });
+
+  it("parses the recorded 200 bodies into DecisionsResponse with usage.cost", async () => {
+    const http = fakeFetch((_call, i) =>
+      jsonResponse(recorded(i === 0 ? "decisions-rm-rf.json" : "decisions-ls.json")),
+    );
+    const openrouter = decider(http.fetch);
+
+    const rmrf = await openrouter.decisions(ask);
+    const ls = await openrouter.decisions(ask);
+
+    expect(rmrf).toEqual({
+      id: "gen-dec-1792915675-j28mqGVz7aZ6xCU2Y7yi",
+      model: "typesafe/jev-1.14-20261014",
+      provider: "TypeSafe",
+      answers: {
+        dangerous: { type: "noul", noul: 0.87 },
+        risk: {
+          type: "choice",
+          choice: "high",
+          confidence: 0.97,
+          probabilities: { low: 0, medium: 0.02, high: 0.98 },
+        },
+      },
+      usage: { inputTokens: 664, outputTokens: 56, cost: 0.000027888 },
+    });
+    expect(ls.answers).toMatchObject({
+      dangerous: { noul: 0.02 },
+      risk: { choice: "low", confidence: 1 },
+    });
+    expect(ls.usage.cost).toBe(0.000027678);
+  });
+
+  it("parses a score answer", async () => {
+    const body = {
+      ...(recorded("decisions-ls.json") as object),
+      answers: {
+        urgency: {
+          type: "score",
+          score: 1.99,
+          confidence: 0.99,
+          probabilities: { "0": 0, "1": 0.01, "2": 0.99 },
+          legend: { "0": "later", "1": "this week", "2": "now" },
+        },
+      },
+    };
+    const http = fakeFetch(() => jsonResponse(body));
+
+    const res = await decider(http.fetch).decisions({
+      ...ask,
+      questions: {
+        urgency: {
+          type: "score",
+          instructions: "How urgent?",
+          criteria: ["later", "this week", "now"],
+        },
+      },
+    });
+
+    expect(res.answers.urgency).toEqual(body.answers.urgency);
+  });
+
+  it("reports the 400 'does not exist' body as unknown_model", async () => {
+    const http = fakeFetch(() =>
+      jsonResponse({ error: { message: "Model x/y does not exist", code: 400 } }, 400),
+    );
+
+    await expect(decider(http.fetch).decisions({ ...ask, model: "x/y" })).rejects.toEqual(
+      new ProviderError("unknown_model", "Model x/y does not exist"),
+    );
+    await expect(decider(http.fetch).decisions(ask)).rejects.toMatchObject({
+      code: "unknown_model",
+    });
+  });
+
+  it("rejects the recorded 400 zod body with its message and code", async () => {
+    const http = fakeFetch(() => jsonResponse(recorded("decisions-invalid-type.400.json"), 400));
+
+    const err = await decider(http.fetch)
+      .decisions(ask)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ code: "400" });
+    expect((err as Error).message).toContain(
+      "Invalid discriminator value. Expected 'noul' | 'choice' | 'score' | 'box'",
+    );
+  });
+
+  it.each([
+    [402, "Insufficient credits. Add more using https://openrouter.ai/credits"],
+    [429, "Rate limit exceeded"],
+  ])("rejects HTTP %d with its code and message", async (status, message) => {
+    const http = fakeFetch(() => jsonResponse({ error: { code: status, message } }, status));
+
+    await expect(decider(http.fetch).decisions(ask)).rejects.toEqual(
+      new ProviderError(String(status), message),
+    );
+  });
+
+  const risk = { type: "choice", choice: "low", confidence: 1, probabilities: { low: 1 } };
+  it.each([
+    ["an unknown answer type", { dangerous: { type: "maybe", noul: 0.5 }, risk }, "dangerous"],
+    ["a probability outside [0, 1]", { dangerous: { type: "noul", noul: 1.2 }, risk }, "1"],
+    ["a missing question", { dangerous: { type: "noul", noul: 0.5 } }, '"risk"'],
+  ])("rejects a 200 with %s as invalid_response", async (_label, answers, detail) => {
+    const base = recorded("decisions-ls.json") as object;
+    const http = fakeFetch(() => jsonResponse({ ...base, answers }));
+
+    const err = await decider(http.fetch)
+      .decisions(ask)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ code: "invalid_response" });
+    expect((err as Error).message).toMatch(/^decisions: /);
+    expect((err as Error).message).toContain(detail);
+  });
+
+  it("rejects a 200 with a negative usage.cost as invalid_response", async () => {
+    const base = recorded("decisions-ls.json") as { usage: object };
+    const http = fakeFetch(() => jsonResponse({ ...base, usage: { ...base.usage, cost: -0.01 } }));
+
+    const err = await decider(http.fetch)
+      .decisions(ask)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ code: "invalid_response" });
+    expect((err as Error).message).toContain("usage.cost");
+  });
+
+  it("rejects a 200 non-JSON body as invalid_response", async () => {
+    const http = fakeFetch(() => new Response("<html>gateway</html>", { status: 200 }));
+
+    await expect(decider(http.fetch).decisions(ask)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+  });
+
+  it("passes the signal to fetch and rejects with its reason on an abort", async () => {
+    const controller = new AbortController();
+    const http = fakeFetch(
+      (call) =>
+        new Promise<Response>((_resolve, reject) => {
+          call.signal?.addEventListener("abort", () => reject(new Error("socket torn down")));
+        }),
+    );
+    const reason = new Error("user aborted");
+
+    const pending = decider(http.fetch).decisions(ask, controller.signal);
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
+    expect(http.calls[0]?.signal).toBe(controller.signal);
+  });
+
+  it("reports a fetch failure as network_error", async () => {
+    const http = fakeFetch(() => Promise.reject(new TypeError("fetch failed")));
+
+    await expect(decider(http.fetch).decisions(ask)).rejects.toEqual(
+      new ProviderError("network_error", "fetch failed"),
+    );
   });
 });
 
@@ -650,7 +937,7 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter live", () => {
     expect(done2.message.usage?.inputTokens).toBeGreaterThan(0);
   }, 90_000);
 
-  it("complete<T> returns schema-valid JSON on the decision model", async () => {
+  it("complete<T> returns schema-valid JSON on the small model", async () => {
     // The auto-mode classifier's schema (spec §11.1), incl. reason.max(200).
     // Strict mode does not enforce maxLength on this model (observed
     // 2026-10-24: a >200-char reason, fixed by the retry), so the prompt
@@ -663,7 +950,7 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter live", () => {
 
     const verdict = await live.complete(
       {
-        model: DECISION,
+        model: SMALL,
         system:
           "You are a safety classifier for a coding agent. Keep `reason` to one sentence under 200 characters.",
         input: "Tool: bash\nCommand: rm -rf ~/.ssh",
@@ -677,4 +964,42 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter live", () => {
     expect(DangerCheck.parse(verdict)).toEqual(verdict);
     expect(verdict.dangerous).toBe(true);
   }, 90_000);
+
+  // The classifier's state for a bash command (spec §11.1).
+  const bashState = (command: string, message: string) => ({
+    tool: "bash",
+    primary_argument: command,
+    input: JSON.stringify({ command }),
+    cwd: "/work/repo",
+    recent_user_messages: [message],
+  });
+  const classify = async (model: string) => {
+    const ask = (state: Record<string, unknown>) =>
+      live.decisions({ model, state, questions: DANGER_QUESTIONS }, AbortSignal.timeout(30_000));
+    const [rmrf, ls] = await Promise.all([
+      ask(bashState("rm -rf ~/Downloads/*", "Free up some disk space")),
+      ask(bashState("ls -la", "What is in this folder?")),
+    ]);
+    for (const [res, high] of [
+      [rmrf, true],
+      [ls, false],
+    ] as const) {
+      const { dangerous, risk } = res.answers;
+      if (dangerous?.type !== "noul" || risk?.type !== "choice") throw new Error("bad answers");
+      if (high) expect(dangerous.noul).toBeGreaterThanOrEqual(0.7);
+      else expect(dangerous.noul).toBeLessThanOrEqual(0.3);
+      expect(risk.choice).toBe(high ? "high" : "low");
+      expect(res.model.startsWith(model)).toBe(true);
+      expect(res.usage.cost).toBeGreaterThan(0);
+    }
+  };
+
+  it("decisions() on typesafe/jev-1.14: rm -rf is dangerous + high, ls is safe + low; it is a decision model", async () => {
+    await classify(JEV);
+    await expect(live.modelInfo(JEV)).resolves.toMatchObject({ isDecisionModel: true });
+  }, 60_000);
+
+  it("decisions() on liquid/d1-ultra: rm -rf is dangerous + high, ls is safe + low", async () => {
+    await classify("liquid/d1-ultra");
+  }, 60_000);
 });

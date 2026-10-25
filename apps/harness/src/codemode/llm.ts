@@ -38,7 +38,7 @@ export type LlmSettings = Settings["codemode"]["llm"];
 export interface LlmOptions {
   provider: Provider;
   settings: LlmSettings;
-  decisionModel: string; // the model when settings.model is unset
+  smallModel: string; // the model when settings.model is unset
   registry: ToolRegistry; // depth 2: the sub-loop's tools
   gate: (call: ToolCall) => Promise<GateResult>;
   ctx: ToolContext; // the codemode call's
@@ -115,7 +115,7 @@ export function createLlm(o: LlmOptions): AsyncHostFn {
           "again with the answer and a schema",
       );
     }
-    const model = opts.model ?? s.model ?? o.decisionModel;
+    const model = opts.model ?? s.model ?? o.smallModel;
     // Up front: an unknown model fails before anything is sent, and
     // the event carries the price the session cost needs.
     const { pricing, maxOutputTokens } = await o.provider.modelInfo(model);

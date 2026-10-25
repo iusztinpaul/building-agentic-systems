@@ -1,7 +1,7 @@
 // Compaction (spec §13): when the estimate reaches triggerRatio × the
 // current model's contextLength, cut the messages at a turn boundary
 // keeping ≈ keepRecentTokens of tail, summarise the head on the
-// decision model (decide<T>(), merging any earlier summary) and go on
+// small model (decide<T>(), merging any earlier summary) and go on
 // with [system][summary][tail]. The session applies the result (one
 // `compaction` entry, one event); this module owns the trigger, the
 // cut, the summariser and the overflow retry.
@@ -201,7 +201,7 @@ export interface Compacted {
 
 export interface CompactorOptions {
   provider: Provider;
-  decisionModel: string;
+  smallModel: string; // the summariser's
   settings: CompactionSettings;
   // The breaker's one `error` event.
   emit: (event: AgentEvent) => void;
@@ -263,7 +263,7 @@ export class Compactor {
         system: SUMMARY_SYSTEM,
         input: summaryInput(head, previous, o.instructions),
         schema: Summary,
-        model: this.#o.decisionModel,
+        model: this.#o.smallModel,
         timeoutMs: SUMMARY_TIMEOUT_MS,
         signal: o.signal,
       });
@@ -313,6 +313,7 @@ export function retryOnOverflow(
     modelInfo: (id) => provider.modelInfo(id),
     complete: (req, signal) => provider.complete(req, signal),
     completeText: (req, signal) => provider.completeText(req, signal),
+    decisions: (req, signal) => provider.decisions(req, signal),
     async *stream(req, signal) {
       for (let attempt = 1; ; attempt++) {
         let first = true;

@@ -115,7 +115,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 
 ### TUI
 
-Built on [`@earendil-works/pi-tui`](https://www.npmjs.com/package/@earendil-works/pi-tui): a streamed transcript with one tool card per call (`llm_call` rows nested under a `codemode` card), the permission prompt, and a status bar with model · mode · `tokens / contextLength (NN %)` · session cost (including `llm()` calls) · MCP servers · activated tools.
+Built on [`@earendil-works/pi-tui`](https://www.npmjs.com/package/@earendil-works/pi-tui): a streamed transcript with one tool card per call (`llm_call` rows nested under a `codemode` card), the permission prompt, and a status bar with model · mode · `tokens / contextLength (NN %)` · session cost (including `llm()` calls and danger checks) · MCP servers · activated tools.
 
 | Key | Action |
 |---|---|
@@ -164,8 +164,10 @@ Layers merge key by key, later wins: defaults → `~/.tree-agent/settings.json` 
 | Key | Default | Meaning |
 |---|---|---|
 | `model` | `anthropic/claude-sonnet-5.5` | main model |
-| `decisionModel` | `anthropic/claude-haiku-5.5` | `auto` classifier, compaction summary, default `llm()` model; must support `structured_outputs` (checked at start) |
+| `decisionModel` | `typesafe/jev-1.14` | the `auto` classifier's decision model (output modality `decisions`, checked at start); see [Permissions](#permissions) |
+| `smallModel` | `anthropic/claude-haiku-5.5` | compaction summary and default `llm()` model; must support `structured_outputs` (checked at start) |
 | `permissions.mode` | `ask` | the TUI's starting mode; headless is `auto` unless `--permission-mode` |
+| `permissions.dangerThreshold` | 0.3 | 0.05–0.95; a call is dangerous when the decision model's `p(dangerous)` ≥ this |
 | `compaction.triggerRatio` | 0.8 | 0.3–0.95; `--compact-at` overrides it |
 | `compaction.keepRecentTokens` | 20 000 | tail kept verbatim, capped at half the trigger budget |
 | `codemode.inlineBudgetTokens` | 3 000 | tool declarations inlined in the `codemode` tool's description |
@@ -174,7 +176,7 @@ Layers merge key by key, later wins: defaults → `~/.tree-agent/settings.json` 
 | `codemode.maxToolCalls` | 50 | `tools.*()` calls per script |
 | `codemode.outputMaxBytes` | 20 000 | script output to the model, middle-truncated, full copy in `tmp/` |
 | `codemode.concurrency` | 4 | parallel host calls (`tools.*`, `llm()`) per script |
-| `codemode.llm.model` | unset (= `decisionModel`) | default model of `llm()` |
+| `codemode.llm.model` | unset (= `smallModel`) | default model of `llm()` |
 | `codemode.llm.depth` | 1 | 1 or 2 (see [Codemode and `llm()`](#codemode-and-llm)) |
 | `codemode.llm.maxCalls` | 64 | `llm()` calls per script |
 | `codemode.llm.maxInputChars` | 200 000 | per call |
@@ -279,7 +281,7 @@ Every tool call (from the model or from a codemode script) passes one gate, firs
 1. Read-only tool → allow, in both modes: `read`, `tool_search`, MCP tools with `readOnlyHint: true`.
 2. Tool name already allowed for this session (`s`) → allow.
 3. Mode `ask` → prompt.
-4. Mode `auto` → the decision model classifies the call; `dangerous: false` → allow, `dangerous: true` or any failure (provider error, parse error, 10 s timeout) → prompt with the classifier's reason. The classifier never denies on its own.
+4. Mode `auto` → the decision model (`decisionModel`, through OpenRouter's Decisions API) answers two questions about the call: `dangerous` as a probability and `risk` as `low`/`medium`/`high`. `p(dangerous)` < `permissions.dangerThreshold` (0.3) → allow; ≥ the threshold, or any failure (provider error, invalid answer, 10 s timeout) → prompt with the reason. Decision models return no text, so the reason is generated: `decision model: p(dangerous)=0.95, risk high (0.98)`. The classifier never denies on its own. Probabilities differ between models: both `typesafe/jev-1.14` and `liquid/d1-ultra` are tested (safe calls ≈ 0.01–0.02, `rm -rf ~/Downloads/*` ≈ 0.87–0.99); retune the threshold per model — raise it if a model prompts on benign writes, never past 0.5.
 5. Prompt: TUI `y` once, `s` this tool name for the rest of the session, `n` deny. Headless has no prompter: the prompt is a deny.
 
 | | TUI | Headless |
@@ -287,6 +289,8 @@ Every tool call (from the model or from a codemode script) passes one gate, firs
 | Default mode | `settings.permissions.mode` (`ask`) | `auto` |
 | Override | `--permission-mode`, `/mode`, `Shift+Tab` | `--permission-mode` |
 | A prompt | dialog | deny → exit 2, or with `--on-blocked continue` the model gets the blocked error and goes on |
+
+A danger check costs ≈ $0.00002 on `typesafe/jev-1.14` — input billed, output free — and is added to the session cost (in memory only: a `--resume` rebuilds the cost without the classifier's share, a few cents at most). A cached verdict (the same tool and input again in the session) costs nothing.
 
 Every decision is written to the session JSONL as a `permission` entry. Nothing else persists across sessions: no allow lists, only `permissions.mode` in `settings.json`. The classifier is told that writes outside the cwd are dangerous, so a write to `/tmp` can be flagged and prompted; that is expected.
 
@@ -365,11 +369,12 @@ The main context grows by the script and the result; the 40 hits and 40 sub-answ
 
 ## Compaction
 
-Between turns, when the estimated context reaches `triggerRatio` (default 0.8) × the current model's `contextLength`, the head of the conversation is summarised on the decision model and the context becomes `[system prompt][summary][tail]`. The kept tail is about `keepRecentTokens` (20 000, capped at half the trigger budget), cut at a user message so tool calls stay with their results; a previous summary is merged into the new one. The original messages stay on disk, and a `compaction` entry is appended to the session.
+Between turns, when the estimated context reaches `triggerRatio` (default 0.8) × the current model's `contextLength`, the head of the conversation is summarised on the small model (`smallModel`) and the context becomes `[system prompt][summary][tail]`. The kept tail is about `keepRecentTokens` (20 000, capped at half the trigger budget), cut at a user message so tool calls stay with their results; a previous summary is merged into the new one. The original messages stay on disk, and a `compaction` entry is appended to the session.
 
 - Knobs: `compaction.triggerRatio` and `compaction.keepRecentTokens` in `settings.json`, `--compact-at <0.3–0.95>` per run. The trigger is re-evaluated after `/model`.
 - `/compact [instructions]` compacts now, with optional guidance for the summary.
 - A provider context-overflow error compacts and retries the request once.
+- Summaries are not added to the session cost.
 - After 3 consecutive failed summaries automatic compaction stops (one error); a manual `/compact` still works.
 - Both front ends print `compacted <before> → <after> tokens`.
 
@@ -403,7 +408,7 @@ The prompt lists only name, description (capped at 250 characters) and path; the
 ## Tests
 
 - `apps/harness/tests/` mirrors `src/`: one vitest file per module (`tests/<module>/<file>.test.ts`), plus `tests/fixtures/` (recorded OpenRouter streams, a fake MCP server) and `tests/helpers/`.
-- Everything runs offline on `FakeProvider` (`src/provider/fake.ts`) except two live OpenRouter tests in `tests/provider/openrouter.test.ts`, which skip when `OPENROUTER_API_KEY` is unset. CI sets no key.
+- Everything runs offline on `FakeProvider` (`src/provider/fake.ts`) except four live OpenRouter tests in `tests/provider/openrouter.test.ts` (a streamed tool turn, `complete<T>` on the small model, the danger questions on `typesafe/jev-1.14` and on `liquid/d1-ultra`), which skip when `OPENROUTER_API_KEY` is unset. CI sets no key.
 - `make harness-build` compiles all of `src/`; `tsconfig.build.json` excludes nothing, so `dist/provider/fake.js` is emitted too. No runtime code imports it.
 - There is no integration suite; e2e is a real headless run (below).
 

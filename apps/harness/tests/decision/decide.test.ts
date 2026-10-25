@@ -20,12 +20,12 @@ describe("decide", () => {
     ]);
   });
 
-  it("defaults to the settings' default decisionModel", async () => {
+  it("defaults to the settings' default smallModel", async () => {
     const fake = new FakeProvider({ answers: [{ ok: true, why: "" }] });
 
     await decide(fake, base);
 
-    expect(fake.structuredRequests[0]?.model).toBe(Settings.parse({}).decisionModel);
+    expect(fake.structuredRequests[0]?.model).toBe(Settings.parse({}).smallModel);
     expect(fake.structuredRequests[0]?.model).toBe("anthropic/claude-haiku-5.5");
   });
 

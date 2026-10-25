@@ -189,7 +189,7 @@ describe("Compactor", () => {
     const events: AgentEvent[] = [];
     const c = new Compactor({
       provider: fake,
-      decisionModel: "test/decider",
+      smallModel: "test/small",
       settings,
       emit: (e) => events.push(e),
     });
@@ -217,7 +217,7 @@ describe("Compactor", () => {
     }
   });
 
-  it("summarises the head on the decision model with the Summary schema", async () => {
+  it("summarises the head on the small model with the Summary schema", async () => {
     const { c, fake } = compactor([summary]);
 
     const done = await c.compact(long, 100_000);
@@ -231,7 +231,7 @@ describe("Compactor", () => {
     expect(done?.after).toBeLessThan(done?.before ?? 0);
     expect(fake.structuredRequests[0]).toMatchObject({
       name: "compaction_summary",
-      model: "test/decider",
+      model: "test/small",
     });
   });
 

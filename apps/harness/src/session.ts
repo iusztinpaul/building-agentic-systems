@@ -85,7 +85,12 @@ export interface SessionOptions {
   // A headless deny ends the run `blocked` (stop, the default) or
   // only answers the model `Blocked: …` (continue).
   onBlocked?: "stop" | "continue";
-  decisionModel?: string; // the auto classifier's; settings default
+  // The settings defaults when absent: the auto classifier's
+  // decision model and threshold, and the small model of the
+  // compaction summary and llm().
+  decisionModel?: string;
+  dangerThreshold?: number;
+  smallModel?: string;
   // Absent or null (--no-skills): no discovery, no `skills` section.
   // The listing may take budgetRatio × the model's contextLength.
   skills?: { budgetRatio: number; discover?: DiscoverSkills } | null;
@@ -109,7 +114,8 @@ export interface SessionStatus {
   // number the compaction trigger compares to triggerRatio × this.
   tokens: number;
   contextLength: number;
-  cost: number; // USD, usage × pricing, llm() calls included
+  // USD: usage × pricing, llm() calls and the classifier included
+  cost: number;
   mcpServers: number; // connected now
   activatedTools: number;
 }
@@ -157,11 +163,16 @@ export class AgentSession {
     this.#mode = o.permissionMode ?? "ask";
     this.#classifier = dangerClassifier(o.provider, {
       model: o.decisionModel,
+      threshold: o.dangerThreshold,
       cache: this.#verdicts,
+      // In memory only: a resume rebuilds the cost without it.
+      onCost: (usd) => {
+        this.#cost += usd;
+      },
     });
     this.#compactor = new Compactor({
       provider: o.provider,
-      decisionModel: o.decisionModel ?? DEFAULT_MODEL,
+      smallModel: o.smallModel ?? DEFAULT_MODEL,
       settings: o.compaction ?? Settings.parse({}).compaction,
       emit: (event) => this.#emit(event),
     });
@@ -176,7 +187,7 @@ export class AgentSession {
         ...o.codemode,
         gate: (call) => session.#gate(call),
         provider: o.provider,
-        decisionModel: o.decisionModel ?? DEFAULT_MODEL,
+        smallModel: o.smallModel ?? DEFAULT_MODEL,
         onLlmCall: (event, pricing) => session.#llmCall(event, pricing),
       });
     }

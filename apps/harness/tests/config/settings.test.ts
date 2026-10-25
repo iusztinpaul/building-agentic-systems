@@ -3,19 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  checkDecisionModel,
+  checkModels,
   loadSettings,
   requireApiKey,
   Settings,
   SettingsError,
 } from "../../src/config/settings.ts";
 import { INITIALIZE_TIMEOUT_MS } from "../../src/mcp/client.ts";
-import { FakeProvider, fakeModel } from "../../src/provider/fake.ts";
+import { FakeProvider, fakeDecisionModel, fakeModel } from "../../src/provider/fake.ts";
 
 const DEFAULTS = {
   model: "anthropic/claude-sonnet-5.5",
-  decisionModel: "anthropic/claude-haiku-5.5",
-  permissions: { mode: "ask" },
+  decisionModel: "typesafe/jev-1.14",
+  smallModel: "anthropic/claude-haiku-5.5",
+  permissions: { mode: "ask", dangerThreshold: 0.3 },
   compaction: { triggerRatio: 0.8, keepRecentTokens: 20_000 },
   codemode: {
     inlineBudgetTokens: 3_000,
@@ -133,6 +134,18 @@ describe("loadSettings", () => {
     );
   });
 
+  it.each([
+    [0.04, "Number must be greater than or equal to 0.05"],
+    [0.96, "Number must be less than or equal to 0.95"],
+    ["0.3", "Expected number, received string"],
+  ])("rejects permissions.dangerThreshold %j with the key path", async (value, issue) => {
+    writeSettings({ permissions: { dangerThreshold: value } });
+
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      `  - permissions.dangerThreshold: ${issue}`,
+    );
+  });
+
   it("reads the codemode sandbox limits and rejects a concurrency of 0 (it would hang)", async () => {
     writeSettings({ codemode: { memoryMb: 128, outputMaxBytes: 5_000 } });
     expect((await loadSettings({ env: env() })).codemode).toMatchObject({
@@ -198,21 +211,42 @@ describe("requireApiKey", () => {
   });
 });
 
-describe("checkDecisionModel", () => {
-  it("fails with one line naming a decisionModel that lacks structured_outputs", async () => {
-    const provider = new FakeProvider({
-      models: [fakeModel("weak/model", { supported: new Set(["tools", "max_tokens"]) })],
+describe("checkModels", () => {
+  const provider = () =>
+    new FakeProvider({
+      models: [
+        fakeModel("anthropic/claude-haiku-5.5"),
+        fakeDecisionModel("typesafe/jev-1.14"),
+        fakeModel("weak/model", { supported: new Set(["tools", "max_tokens"]) }),
+      ],
     });
-    const settings = Settings.parse({ decisionModel: "weak/model" });
 
-    await expect(checkDecisionModel(provider, settings)).rejects.toThrow(
-      new SettingsError("decisionModel weak/model does not support structured_outputs"),
-    );
+  it.each([
+    [
+      { decisionModel: "anthropic/claude-haiku-5.5" },
+      "decisionModel anthropic/claude-haiku-5.5 is not a decision model (output modality " +
+        '"decisions"); see https://openrouter.ai/models?output_modalities=decisions',
+    ],
+    [
+      { smallModel: "typesafe/jev-1.14" },
+      "smallModel typesafe/jev-1.14 is a decision model; it must be a chat model with " +
+        "structured_outputs",
+    ],
+    [{ smallModel: "weak/model" }, "smallModel weak/model does not support structured_outputs"],
+  ])("fails with one exact line for %j", async (layer, message) => {
+    const check = checkModels(provider(), Settings.parse(layer));
+
+    await expect(check).rejects.toThrow(new SettingsError(message));
+    await expect(check).rejects.toBeInstanceOf(SettingsError);
   });
 
-  it("passes for a model that supports structured_outputs", async () => {
-    const provider = new FakeProvider({ models: [fakeModel("anthropic/claude-haiku-5.5")] });
+  it("passes on the defaults: a decision model and a chat model with structured_outputs", async () => {
+    await expect(checkModels(provider(), Settings.parse({}))).resolves.toBeUndefined();
+  });
 
-    await expect(checkDecisionModel(provider, Settings.parse({}))).resolves.toBeUndefined();
+  it("surfaces the provider's unknown model error for an unlisted id", async () => {
+    const settings = Settings.parse({ decisionModel: "acme/nope" });
+
+    await expect(checkModels(provider(), settings)).rejects.toThrow('unknown model "acme/nope"');
   });
 });

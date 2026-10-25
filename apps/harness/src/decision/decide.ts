@@ -1,7 +1,7 @@
-// decide<T>() (spec §12): the one decision-model primitive. A
-// structured provider.complete on the decision model with a deadline,
-// the provider's one parse retry and an optional cache. The caller
-// owns the prompt and the schema; decide knows none of its consumers.
+// decide<T>() (spec §12): the structured-output primitive. A
+// provider.complete on the small model with a deadline, the
+// provider's one parse retry and an optional cache. The caller owns
+// the prompt and the schema; decide knows none of its consumers.
 
 import type { z } from "zod";
 import { Settings } from "../config/settings.ts";
@@ -12,7 +12,7 @@ export interface DecideOptions<T> {
   system: string;
   input: string;
   schema: z.ZodType<T>;
-  model?: string; // default: the settings default decisionModel
+  model?: string; // default: the settings default smallModel
   timeoutMs?: number; // reject (and cancel the request) at the deadline
   cache?: Map<string, T>;
   cacheKey?: string; // default: `input`
@@ -23,7 +23,7 @@ export class DecisionTimeout extends Error {
   override name = "DecisionTimeout";
 }
 
-export const DEFAULT_MODEL = Settings.parse({}).decisionModel;
+export const DEFAULT_MODEL = Settings.parse({}).smallModel;
 
 // Rejects on a provider error, a second invalid answer, the deadline
 // or `signal` (with its reason; the request is cancelled too); only
@@ -34,9 +34,28 @@ export async function decide<T>(
 ): Promise<T> {
   const key = o.cacheKey ?? o.input;
   if (o.cache?.has(key)) return o.cache.get(key) as T;
+  const request = {
+    model: o.model ?? DEFAULT_MODEL,
+    system: o.system,
+    input: o.input,
+    schema: o.schema,
+    name: o.name,
+  };
+  const answer = await withDeadline(o, (signal) =>
+    provider.complete(request, signal),
+  );
+  o.cache?.set(key, answer);
+  return answer;
+}
+
+// Runs `request` under one controller that the deadline and the
+// caller's signal both abort; either one rejects with its reason
+// (the classifier's decisions() call shares it).
+export async function withDeadline<T>(
+  o: { name: string; timeoutMs?: number; signal?: AbortSignal },
+  request: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   o.signal?.throwIfAborted();
-  // The deadline and the caller's signal both cancel the request;
-  // either one rejects with its reason.
   const abort = new AbortController();
   const cancel = (): void => abort.abort(o.signal?.reason);
   o.signal?.addEventListener("abort", cancel, { once: true });
@@ -55,20 +74,8 @@ export async function decide<T>(
       once: true,
     });
   });
-  const request = {
-    model: o.model ?? DEFAULT_MODEL,
-    system: o.system,
-    input: o.input,
-    schema: o.schema,
-    name: o.name,
-  };
   try {
-    const answer = await Promise.race([
-      provider.complete(request, abort.signal),
-      stopped,
-    ]);
-    o.cache?.set(key, answer);
-    return answer;
+    return await Promise.race([request(abort.signal), stopped]);
   } finally {
     clearTimeout(timer);
     o.signal?.removeEventListener("abort", cancel);

@@ -22,7 +22,7 @@ import { toolCtx, useTmpDir } from "../helpers/tmp.ts";
 
 const tmp = useTmpDir("llm");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const DECISION = "test/decision";
+const SMALL = "test/small";
 const LLM = Settings.parse({}).codemode.llm;
 
 // A codemode-only tool, so codemode registers; `delay` keeps it in flight.
@@ -65,7 +65,7 @@ function setup(o: Setup = {}) {
     concurrency: o.concurrency ?? 4,
     llm: { ...LLM, ...o.llm },
     provider,
-    decisionModel: DECISION,
+    smallModel: SMALL,
     onLlmCall: (event, pricing) => calls.push({ event, pricing }),
     tmpDir: join(tmp(), "tmp"),
     gate: async (call) => {
@@ -112,14 +112,14 @@ describe("llm() at depth 1", () => {
 
     expect(result).toEqual({ content: '"an answer"', isError: false });
     expect((t.provider as FakeProvider).textRequests).toEqual([
-      { model: DECISION, system: DEFAULT_SYSTEM, input: "x", maxOutputTokens: DEFAULT_MAX_TOKENS },
+      { model: SMALL, system: DEFAULT_SYSTEM, input: "x", maxOutputTokens: DEFAULT_MAX_TOKENS },
     ]);
     expect(DEFAULT_SYSTEM).toBe("You are a sub-task worker. Answer only what is asked.");
     expect(DEFAULT_MAX_TOKENS).toBe(2_048);
     expect((t.provider as FakeProvider).requests).toHaveLength(0); // no sub-loop stream
   });
 
-  it("takes model, system and maxTokens from the call, and codemode.llm.model over decisionModel", async () => {
+  it("takes model, system and maxTokens from the call, and codemode.llm.model over smallModel", async () => {
     const t = setup({ script: { texts: ["a", "b"] }, llm: { model: "cheap/model" } });
 
     await t.run(
@@ -134,7 +134,7 @@ describe("llm() at depth 1", () => {
 
   it("clamps maxTokens to the model's output cap", async () => {
     const t = setup({
-      script: { texts: ["a"], models: [fakeModel(DECISION, { maxOutputTokens: 100 })] },
+      script: { texts: ["a"], models: [fakeModel(SMALL, { maxOutputTokens: 100 })] },
     });
 
     await t.run('return await llm("x", {maxTokens: 5000})');
@@ -153,7 +153,7 @@ describe("llm() at depth 1", () => {
     expect(result).toEqual({ content: "2", isError: false });
     const [req] = (t.provider as FakeProvider).structuredRequests;
     expect(req).toMatchObject({
-      model: DECISION,
+      model: SMALL,
       system: DEFAULT_SYSTEM,
       input: "merge",
       name: "llm",
@@ -165,7 +165,7 @@ describe("llm() at depth 1", () => {
     const models = {
       data: [
         {
-          id: DECISION,
+          id: SMALL,
           context_length: 1000,
           top_provider: {},
           pricing: { prompt: "0", completion: "0" },
@@ -173,7 +173,7 @@ describe("llm() at depth 1", () => {
       ],
     };
     const http = fakeFetch((call) =>
-      call.url.endsWith("/models")
+      call.method === "GET"
         ? jsonResponse(models)
         : jsonResponse({
             choices: [{ message: { role: "assistant", content: '{"facts":"not a list"}' } }],
@@ -364,7 +364,7 @@ describe("llm() at depth 2 (codemode.llm.depth: 2)", () => {
     const names = fake.requests[0]?.tools.map((s) => s.name);
     expect(names).toEqual(["read", "bash", "edit", "write"]);
     expect(names).not.toContain(CODEMODE);
-    expect(fake.requests[0]?.model).toBe(DECISION);
+    expect(fake.requests[0]?.model).toBe(SMALL);
     expect(fake.requests[0]?.context).toEqual({
       system: DEFAULT_SYSTEM,
       messages: [{ role: "user", content: "Summarise CHANGELOG.md" }],
@@ -377,7 +377,7 @@ describe("llm() at depth 2 (codemode.llm.depth: 2)", () => {
       {
         type: "llm_call",
         depth: 2,
-        model: DECISION,
+        model: SMALL,
         usage: { inputTokens: 200, outputTokens: 40 },
       },
     ]);
@@ -475,7 +475,7 @@ describe("llm_call events", () => {
       script: {
         texts: ["abcd"],
         answers: [{ ok: true }],
-        models: [fakeModel(DECISION, { pricing }), fakeModel("other/m")],
+        models: [fakeModel(SMALL, { pricing }), fakeModel("other/m")],
       },
     });
 
@@ -487,7 +487,7 @@ describe("llm_call events", () => {
         event: {
           type: "llm_call",
           depth: 1,
-          model: DECISION,
+          model: SMALL,
           usage: { inputTokens: 2, outputTokens: 1 },
         },
         pricing,
@@ -505,7 +505,7 @@ describe("llm_call events", () => {
   });
 
   it("an unknown model fails before anything is sent and reports no call", async () => {
-    const t = setup({ script: { texts: ["never"], models: [fakeModel(DECISION)] } });
+    const t = setup({ script: { texts: ["never"], models: [fakeModel(SMALL)] } });
 
     const result = await t.run(
       'try { await llm("x", {model: "nope/m"}) } catch (e) { return e.message }',
@@ -522,7 +522,7 @@ describe("llm_call events", () => {
     const result = await t.run('try { await llm("x") } catch (e) { return e.message }');
 
     expect(result.content).toBe('"upstream 500"');
-    expect(t.calls.map((c) => c.event)).toEqual([{ type: "llm_call", depth: 1, model: DECISION }]);
+    expect(t.calls.map((c) => c.event)).toEqual([{ type: "llm_call", depth: 1, model: SMALL }]);
   });
 });
 
@@ -619,7 +619,7 @@ describe("llm() schema constraints on the wire", () => {
   const models = {
     data: [
       {
-        id: DECISION,
+        id: SMALL,
         context_length: 1000,
         top_provider: {},
         pricing: { prompt: "0", completion: "0" },
@@ -628,7 +628,7 @@ describe("llm() schema constraints on the wire", () => {
   };
   const openRouter = (answer: string) => {
     const http = fakeFetch((call) =>
-      call.url.endsWith("/models")
+      call.method === "GET"
         ? jsonResponse(models)
         : jsonResponse({
             choices: [{ message: { role: "assistant", content: answer } }],

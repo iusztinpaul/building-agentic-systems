@@ -14,6 +14,7 @@ import { builtinRegistry } from "../src/tools/builtins.ts";
 import type { Exposure, ToolRegistry } from "../src/tools/registry.ts";
 import { registerToolSearch } from "../src/tools/tool-search.ts";
 import type { AgentEvent, Message, PermissionPrompter, ToolCall } from "../src/types.ts";
+import { verdict } from "./helpers/decisions.ts";
 import { useTmpDir } from "./helpers/tmp.ts";
 
 const root = useTmpDir("session");
@@ -36,8 +37,9 @@ const approveAll: PermissionPrompter = { ask: async () => "once" };
 async function setup(
   streams: StreamEvent[][],
   o: Partial<SessionOptions> = {},
-  answers: unknown[] = [], // the classifier's, in auto; llm()'s schema answers
-  more: Pick<FakeScript, "texts" | "models"> = {}, // llm() answers, prices
+  answers: unknown[] = [], // schema answers: llm()'s, the compaction summary's
+  // the classifier's (auto), llm()'s texts, prices
+  more: Pick<FakeScript, "decisions" | "texts" | "models"> = {},
 ) {
   const home = join(root(), "home");
   const cwd = join(root(), "repo", "sub");
@@ -577,7 +579,7 @@ describe("AgentSession permissions", () => {
     name: "bash",
     arguments: { command },
   });
-  const safe = { dangerous: false, risk: "low", reason: "cwd-scoped" };
+  const safe = verdict(0.02, "low");
   const results = (messages: readonly Message[]) =>
     messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
 
@@ -587,7 +589,8 @@ describe("AgentSession permissions", () => {
     const t = await setup(
       [toolTurn({ id: "r", name: "read", arguments: { path: "x" } }, bash("b")), textTurn("ok")],
       { store, permissionMode: "auto" },
-      [safe],
+      [],
+      { decisions: [safe] },
     );
 
     await t.session.prompt("go");
@@ -614,7 +617,7 @@ describe("AgentSession permissions", () => {
         call: bash("b"),
         decision: "allow",
         source: "classifier",
-        reason: "cwd-scoped",
+        reason: "decision model: p(dangerous)=0.02, risk low (1.00)",
       },
     ]);
     const [dir = ""] = readdirSync(sessions);
@@ -639,7 +642,7 @@ describe("AgentSession permissions", () => {
       call: bash("b"),
       decision: "allow",
       source: "classifier",
-      reason: "cwd-scoped",
+      reason: "decision model: p(dangerous)=0.02, risk low (1.00)",
     });
     expect(entries[3]).not.toHaveProperty("reason");
   });
@@ -663,14 +666,15 @@ describe("AgentSession permissions", () => {
       expect.objectContaining({ decision: "deny", source: "headless" }),
     ]);
     expect(t.fake.requests).toHaveLength(1);
-    expect(t.fake.structuredRequests).toEqual([]);
+    expect(t.fake.decisionRequests).toEqual([]);
   });
 
   it("with onBlocked continue: the model gets Blocked: … and the run completes", async () => {
     const t = await setup(
       [toolTurn(writeCall("w", "a.md", "a")), textTurn("I could not write it.")],
       { prompter: null, permissionMode: "auto", onBlocked: "continue" },
-      [{ dangerous: true, risk: "high", reason: "overwrites a file" }],
+      [],
+      { decisions: [verdict(0.91, "high", { confidence: 0.97 })] },
     );
 
     const reason = await t.session.prompt("write a.md");
@@ -680,7 +684,7 @@ describe("AgentSession permissions", () => {
       role: "tool",
       toolCallId: "w",
       name: "write",
-      content: "Blocked: dangerous: overwrites a file",
+      content: "Blocked: dangerous: decision model: p(dangerous)=0.91, risk high (0.97)",
       isError: true,
     });
   });
@@ -689,14 +693,64 @@ describe("AgentSession permissions", () => {
     const t = await setup(
       [textTurn("1"), textTurn("2"), textTurn("3"), toolTurn(bash("b")), textTurn("ok")],
       { permissionMode: "auto", decisionModel: "test/decider" },
-      [safe],
+      [],
+      { decisions: [safe] },
     );
 
     for (const text of ["one", "two", "three", "four"]) await t.session.prompt(text);
 
-    const [sent] = t.fake.structuredRequests;
+    const [sent] = t.fake.decisionRequests;
     expect(sent?.model).toBe("test/decider");
-    expect(sent?.input).toContain("1. two\n2. three\n3. four\n");
+    expect(sent?.state).toMatchObject({ recent_user_messages: ["two", "three", "four"] });
+    expect(t.fake.structuredRequests).toEqual([]);
+  });
+
+  it("defaults the classifier to the settings' decisionModel and dangerThreshold", async () => {
+    const t = await setup(
+      [toolTurn(bash("b1", "ls"), bash("b2", "pwd")), textTurn("ok")],
+      { permissionMode: "auto", prompter: null, onBlocked: "continue" },
+      [],
+      { decisions: [verdict(0.29, "low"), verdict(0.3, "medium")] },
+    );
+
+    await t.session.prompt("go");
+
+    expect(t.fake.decisionRequests.map((r) => r.model)).toEqual([
+      "typesafe/jev-1.14",
+      "typesafe/jev-1.14",
+    ]);
+    expect(t.events.flatMap((e) => (e.type === "permission" ? [e.decision] : []))).toEqual([
+      "allow",
+      "deny",
+    ]);
+  });
+
+  it("honours a session dangerThreshold", async () => {
+    const t = await setup(
+      [toolTurn(bash("b")), textTurn("ok")],
+      { permissionMode: "auto", prompter: null, dangerThreshold: 0.5 },
+      [],
+      { decisions: [verdict(0.45, "medium")] },
+    );
+
+    expect(await t.session.prompt("go")).toBe("completed");
+  });
+
+  it("adds each classifier call's usage.cost to the session cost; a cached verdict adds nothing", async () => {
+    const t = await setup(
+      [toolTurn(bash("b1")), toolTurn(bash("b2")), textTurn("ok")],
+      { permissionMode: "auto" },
+      [],
+      {
+        decisions: [verdict(0.02, "low", { cost: 0.000027888 })],
+        models: [fakeModel("test/model", { pricing: { prompt: 0, completion: 0 } })],
+      },
+    );
+
+    await t.session.prompt("go");
+
+    expect(t.fake.decisionRequests).toHaveLength(1); // b2 is the same (tool, input)
+    expect(t.session.status().cost).toBeCloseTo(0.000027888, 12);
   });
 
   it("switches the mode for the rest of the session: the next call is classified", async () => {
@@ -713,13 +767,14 @@ describe("AgentSession permissions", () => {
           },
         },
       },
-      [safe],
+      [],
+      { decisions: [safe] },
     );
 
     await t.session.prompt("go");
 
     expect(asked).toEqual(["b1"]);
-    expect(t.fake.structuredRequests).toHaveLength(1);
+    expect(t.fake.decisionRequests).toHaveLength(1);
     expect(t.session.status().mode).toBe("auto");
   });
 
@@ -757,15 +812,18 @@ describe("AgentSession permissions", () => {
     const t = await setup(
       [toolTurn(writeCall("w", "a.txt", "x")), textTurn("never")],
       { permissionMode: "auto", prompter: null },
-      [
-        // Ignores the abort and answers "safe" late, as a slow
-        // upstream would.
-        async (_req: unknown, signal?: AbortSignal) => {
-          classifierSignal = signal;
-          await new Promise((r) => setTimeout(r, 150));
-          return safe;
-        },
-      ],
+      [],
+      {
+        decisions: [
+          // Ignores the abort and answers "safe" late, as a slow
+          // upstream would.
+          async (_req: unknown, signal?: AbortSignal) => {
+            classifierSignal = signal;
+            await new Promise((r) => setTimeout(r, 150));
+            return safe;
+          },
+        ],
+      },
     );
     t.session.on((e) => {
       if (e.type === "tool_call") setTimeout(() => t.session.abort(), 20);
@@ -849,6 +907,9 @@ describe("AgentSession with a provider that streams until aborted", () => {
         throw new Error("unused");
       },
       completeText: async () => {
+        throw new Error("unused");
+      },
+      decisions: async () => {
         throw new Error("unused");
       },
     };
@@ -1303,7 +1364,7 @@ describe("AgentSession with codemode", () => {
   });
   const toolResult = (messages: readonly Message[]) =>
     messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
-  const safe = { dangerous: false, risk: "low", reason: "cwd-scoped" };
+  const safe = verdict(0.02, "low");
 
   it("with the committed .tree-agent/mcp.json the direct set is exactly the 4 built-ins, search_memory, tool_search, codemode", async () => {
     const committed = JSON.parse(
@@ -1366,7 +1427,7 @@ describe("AgentSession with codemode", () => {
     ]);
   });
 
-  it("ask: the script waits on the prompt (answered after 100 ms) and the call then runs", async () => {
+  it("ask: the script waits on the prompt (answered after 1.5 s, past its 1 s budget) and the call then runs", async () => {
     const t = await setup(
       [
         toolTurn(script('return await tools.write({ path: "b.md", content: "b" });')),
@@ -1377,11 +1438,11 @@ describe("AgentSession with codemode", () => {
         permissionMode: "ask",
         prompter: {
           ask: async (call) => {
-            if (call.name === "write") await new Promise((r) => setTimeout(r, 100));
+            if (call.name === "write") await new Promise((r) => setTimeout(r, 1_500));
             return "once";
           },
         },
-        codemode: { ...codemode(), timeoutMs: 50 }, // the prompt does not count
+        codemode: { ...codemode(), timeoutMs: 1_000 }, // the prompt does not count
       },
     );
 
@@ -1507,7 +1568,8 @@ describe("AgentSession with codemode", () => {
         prompter: null,
         permissionMode: "auto",
       },
-      [safe, { dangerous: true, risk: "high", reason: "writes ~/.ssh/config" }, safe],
+      [],
+      { decisions: [safe, verdict(0.97, "high"), safe] },
     );
 
     const reason = await t.session.prompt("configure ssh");
@@ -1519,7 +1581,7 @@ describe("AgentSession with codemode", () => {
     ]);
     expect(existsSync(join(t.cwd, "after.md"))).toBe(false);
     expect(t.fake.requests).toHaveLength(1);
-    expect(t.fake.structuredRequests).toHaveLength(2); // codemode + the write; never the second
+    expect(t.fake.decisionRequests).toHaveLength(2); // codemode + the write; never the second
     const [dir = ""] = readdirSync(sessions);
     const [file = ""] = readdirSync(join(sessions, dir));
     const entries = readFileSync(join(sessions, dir, file), "utf8")
@@ -1532,7 +1594,7 @@ describe("AgentSession with codemode", () => {
         call: { name: "write", origin: "codemode" },
         decision: "deny",
         source: "headless",
-        reason: "dangerous: writes ~/.ssh/config",
+        reason: "dangerous: decision model: p(dangerous)=0.97, risk high (1.00)",
       },
     ]);
   });
@@ -1548,11 +1610,14 @@ describe("AgentSession with codemode", () => {
         textTurn("skipped"),
       ],
       { ...withMcp(), prompter: null, permissionMode: "auto", onBlocked: "continue" },
-      [safe, { dangerous: true, risk: "high", reason: "nope" }],
+      [],
+      { decisions: [safe, verdict(0.97, "high")] },
     );
 
     expect(await t.session.prompt("go")).toBe("completed");
-    expect(toolResult(t.session.messages)).toEqual(['"Blocked: dangerous: nope"']);
+    expect(toolResult(t.session.messages)).toEqual([
+      '"Blocked: dangerous: decision model: p(dangerous)=0.97, risk high (1.00)"',
+    ]);
   });
 
   it("a codemode-only MCP tool is reachable from a script and gated like any other", async () => {
@@ -1595,10 +1660,10 @@ describe("AgentSession with codemode", () => {
           facts: { type: "array", items: { type: "string" } } },
         required: ["facts"] } });
     return answer.facts;`;
-  const DECISION = "anthropic/claude-haiku-5.5"; // the settings default
+  const SMALL = "anthropic/claude-haiku-5.5"; // the settings default smallModel
   const PRICES = [
     fakeModel("test/model", { pricing: { prompt: 0.000003, completion: 0.000015 } }),
-    fakeModel(DECISION, { pricing: { prompt: 0.000001, completion: 0.000002 } }),
+    fakeModel(SMALL, { pricing: { prompt: 0.000001, completion: 0.000002 } }),
   ];
   const withHits = () => {
     const hits = Array.from({ length: 40 }, (_, i) => ({ text: `HIT-${i}: pricing note ${i}` }));
@@ -1664,7 +1729,7 @@ describe("AgentSession with codemode", () => {
     expect(t.fake.structuredRequests).toHaveLength(1);
     const llmCalls = t.events.filter((e) => e.type === "llm_call");
     expect(llmCalls).toHaveLength(41);
-    expect(llmCalls.every((e) => e.depth === 1 && e.model === DECISION && e.usage)).toBe(true);
+    expect(llmCalls.every((e) => e.depth === 1 && e.model === SMALL && e.usage)).toBe(true);
   });
 
   it("ask mode: llm() never prompts; the only question is the codemode call itself", async () => {
@@ -1705,7 +1770,7 @@ describe("AgentSession with codemode", () => {
     expect(t.session.status().cost).toBeCloseTo(main + sub, 12);
 
     const id = t.session.id ?? "";
-    expect(store.load(id).spend.filter((s) => s.model === DECISION)).toHaveLength(41);
+    expect(store.load(id).spend.filter((s) => s.model === SMALL)).toHaveLength(41);
     const resumed = await setup([], { store, resume: id }, [], { models: PRICES });
     expect(resumed.session.status().cost).toBeCloseTo(main + sub, 12);
   });
@@ -1744,7 +1809,8 @@ describe("AgentSession with codemode", () => {
         prompter: null,
         permissionMode: "auto",
       },
-      [safe, { dangerous: true, risk: "high", reason: "writes ~/.ssh/config" }],
+      [],
+      { decisions: [safe, verdict(0.97, "high")] },
     );
 
     const reason = await t.session.prompt("configure ssh");

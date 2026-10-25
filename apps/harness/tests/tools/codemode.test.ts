@@ -67,7 +67,7 @@ function setup(tools: ToolDefinition[], o: Partial<CodemodeOptions> = {}) {
     concurrency: 4,
     llm: LLM,
     provider: new FakeProvider(),
-    decisionModel: "test/decision",
+    smallModel: "test/small",
     tmpDir: join(tmp(), "tmp"),
     gate: async (call) => {
       gated.push(call);
@@ -507,7 +507,7 @@ describe("codemodeTool", () => {
       concurrency: 1,
       llm: LLM,
       provider: new FakeProvider(),
-      decisionModel: "test/decision",
+      smallModel: "test/small",
       tmpDir: "/tmp",
       gate: allow,
     });

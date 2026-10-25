@@ -11,6 +11,7 @@ import { SessionStore } from "../../src/session-store/jsonl.ts";
 import { builtinRegistry } from "../../src/tools/builtins.ts";
 import { runTui } from "../../src/tui/app.ts";
 import type { AgentEvent } from "../../src/types.ts";
+import { verdict } from "../helpers/decisions.ts";
 import { FakeTerminal, settle } from "../helpers/terminal.ts";
 import { useTmpDir } from "../helpers/tmp.ts";
 
@@ -62,6 +63,10 @@ class HeldProvider implements Provider {
   }
 
   completeText(): Promise<never> {
+    throw new Error("unused");
+  }
+
+  decisions(): Promise<never> {
     throw new Error("unused");
   }
 }
@@ -362,14 +367,14 @@ describe("runTui", () => {
     };
     const fake = new FakeProvider({
       streams: [[fakeDone("", [edit])], [fakeDone("ok, I will not")]],
-      answers: [{ dangerous: true, risk: "high", reason: "edits a shell rc file" }],
+      decisions: [verdict(0.95, "high", { confidence: 0.98 })],
     });
     const t = await start(fake, { permissionMode: "auto" });
     t.terminal.type("add an alias");
     t.terminal.send("\r");
     await until(() => t.screen().includes("Allow edit?"));
 
-    expect(t.screen()).toContain("classifier: edits a shell rc file");
+    expect(t.screen()).toContain("classifier: decision model: p(dangerous)=0.95, risk high (0.98)");
     expect(t.screen()).toContain("~/.zshrc");
     t.terminal.send("n");
     await until(() => t.screen().includes("ok, I will not"));

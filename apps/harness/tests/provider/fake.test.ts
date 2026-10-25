@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { FakeProvider, fakeDone, fakeModel } from "../../src/provider/fake.ts";
-import type { ChatRequest, StreamEvent } from "../../src/provider/types.ts";
+import { FakeProvider, fakeDecisionModel, fakeDone, fakeModel } from "../../src/provider/fake.ts";
+import type { ChatRequest, DecisionsRequest, StreamEvent } from "../../src/provider/types.ts";
+import { verdict } from "../helpers/decisions.ts";
 import { collect } from "../helpers/http.ts";
 
 function request(content: string): ChatRequest {
@@ -128,12 +129,98 @@ describe("FakeProvider.complete / completeText", () => {
   });
 });
 
+describe("FakeProvider.decisions", () => {
+  const ask: DecisionsRequest = {
+    model: "typesafe/jev-1.14",
+    state: { tool: "bash" },
+    questions: {
+      dangerous: { type: "noul", instructions: "Dangerous?" },
+      risk: { type: "choice", instructions: "Risk?", criteria: { low: null, high: null } },
+    },
+  };
+
+  it("returns scripted wire bodies parsed into DecisionsResponse and records each request", async () => {
+    const fake = new FakeProvider({ decisions: [verdict(0.95, "high", { cost: 0.00002 })] });
+
+    const res = await fake.decisions(ask);
+
+    expect(res).toEqual({
+      id: "gen-dec-fake",
+      model: "typesafe/jev-1.14-20261014",
+      provider: "TypeSafe",
+      answers: {
+        dangerous: { type: "noul", noul: 0.95 },
+        risk: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } },
+      },
+      usage: { inputTokens: 500, outputTokens: 0, cost: 0.00002 },
+    });
+    expect(fake.decisionRequests).toEqual([ask]);
+  });
+
+  it("rejects a scripted Error, an invalid shape and a missing answer with invalid_response", async () => {
+    const fake = new FakeProvider({
+      decisions: [
+        new Error("503"),
+        { ...verdict(0.5), answers: { ...verdict(0.5).answers, dangerous: { noul: 1.2 } } },
+        { ...verdict(0.5), answers: { dangerous: { type: "noul", noul: 0.5 } } },
+      ],
+    });
+
+    await expect(fake.decisions(ask)).rejects.toThrow("503");
+    await expect(fake.decisions(ask)).rejects.toMatchObject({ code: "invalid_response" });
+    await expect(fake.decisions(ask)).rejects.toThrow('decisions: no choice answer for "risk"');
+  });
+
+  it("computes a function answer from the request and its signal; one may never settle", async () => {
+    const seen: unknown[] = [];
+    const fake = new FakeProvider({
+      decisions: [
+        async (req: DecisionsRequest, signal?: AbortSignal) => {
+          seen.push(req.model, signal);
+          await new Promise((r) => setTimeout(r, 10));
+          return verdict(0.02);
+        },
+        () => new Promise(() => {}),
+      ],
+    });
+    const signal = new AbortController().signal;
+
+    await expect(fake.decisions(ask, signal)).resolves.toMatchObject({
+      answers: { dangerous: { noul: 0.02 } },
+    });
+    const never = await Promise.race([
+      fake.decisions(ask).then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("pending"), 20)),
+    ]);
+    expect(never).toBe("pending");
+    expect(seen).toEqual(["typesafe/jev-1.14", signal]);
+  });
+
+  it("throws when no decisions answer is scripted", async () => {
+    await expect(new FakeProvider().decisions(ask)).rejects.toThrow(
+      "FakeProvider: no decisions() answer scripted",
+    );
+  });
+});
+
 describe("FakeProvider.modelInfo", () => {
-  it("resolves any id to a capable fake model by default", async () => {
+  it("resolves any id to a capable fake chat model by default", async () => {
     const info = await new FakeProvider().modelInfo("any/model");
 
     expect(info.id).toBe("any/model");
     expect(info.supported.has("structured_outputs")).toBe(true);
+    expect(info.isDecisionModel).toBe(false);
+  });
+
+  it("resolves the default decisionModel to a fake decision model by default", async () => {
+    const info = await new FakeProvider().modelInfo("typesafe/jev-1.14");
+
+    expect(info).toEqual(fakeDecisionModel("typesafe/jev-1.14"));
+    expect(info).toMatchObject({
+      isDecisionModel: true,
+      supported: new Set(),
+      pricing: { prompt: 0.000000042, completion: 0 },
+    });
   });
 
   it("serves only the scripted models when given a list", async () => {

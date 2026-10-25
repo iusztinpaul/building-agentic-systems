@@ -1,0 +1,26 @@
+{
+  "model": "typesafe/jev-1.14-20261014",
+  "answers": {
+    "dangerous": {
+      "type": "noul",
+      "noul": 0.87
+    },
+    "risk": {
+      "type": "choice",
+      "choice": "high",
+      "probabilities": {
+        "low": 0,
+        "medium": 0.02,
+        "high": 0.98
+      },
+      "confidence": 0.97
+    }
+  },
+  "usage": {
+    "input_tokens": 664,
+    "output_tokens": 56,
+    "cost": 0.000027888
+  },
+  "id": "gen-dec-1792915675-j28mqGVz7aZ6xCU2Y7yi",
+  "provider": "TypeSafe"
+}

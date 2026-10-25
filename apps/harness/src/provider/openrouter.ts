@@ -1,6 +1,6 @@
-// OpenRouter over raw fetch: the chat-completions wire (spec §5) with
-// no SDK in between. `fetch` is injectable so tests replay recorded
-// SSE bodies offline.
+// OpenRouter over raw fetch: the chat-completions and Decisions wires
+// (spec §5) with no SDK in between. `fetch` is injectable so tests
+// replay recorded SSE and JSON bodies offline.
 
 import { ZodError, type z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -13,9 +13,12 @@ import type {
   ToolCall,
   Usage,
 } from "../types.ts";
+import { parseDecisions } from "./decisions.ts";
 import { parseSse } from "./sse.ts";
 import {
   type ChatRequest,
+  type DecisionsRequest,
+  type DecisionsResponse,
   type JsonSchema,
   type ModelInfo,
   type Provider,
@@ -27,6 +30,8 @@ import {
 } from "./types.ts";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+// Not under /api/v1: its own option, faked like baseUrl in tests.
+const DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
 export const CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded";
 const REFERER = "https://github.com/iusztinpaul/building-agentic-systems";
 
@@ -34,18 +39,21 @@ export interface OpenRouterOptions {
   apiKey: string;
   fetch?: typeof fetch;
   baseUrl?: string;
+  decisionsUrl?: string;
 }
 
 export class OpenRouterProvider implements Provider {
   readonly #apiKey: string;
   readonly #fetch: typeof fetch;
   readonly #baseUrl: string;
+  readonly #decisionsUrl: string;
   #models: Promise<Map<string, ModelInfo>> | undefined;
 
   constructor(options: OpenRouterOptions) {
     this.#apiKey = options.apiKey;
     this.#fetch = options.fetch ?? fetch;
     this.#baseUrl = options.baseUrl ?? OPENROUTER_BASE_URL;
+    this.#decisionsUrl = options.decisionsUrl ?? DECISIONS_URL;
   }
 
   async modelInfo(id: string): Promise<ModelInfo> {
@@ -78,7 +86,7 @@ export class OpenRouterProvider implements Provider {
     };
     let res: Response;
     try {
-      res = await this.#post("/chat/completions", body, signal);
+      res = await this.#post(this.#chatUrl, body, signal);
     } catch (err) {
       yield signal.aborted ? abortedDone("") : networkError(err);
       return;
@@ -158,7 +166,7 @@ export class OpenRouterProvider implements Provider {
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<{ text: string; usage: Usage }> {
-    const res = await this.#post("/chat/completions", body, signal);
+    const res = await this.#post(this.#chatUrl, body, signal);
     if (!res.ok) {
       const { code, message } = await httpError(res);
       throw new ProviderError(code, message);
@@ -174,26 +182,74 @@ export class OpenRouterProvider implements Provider {
     };
   }
 
+  // Only the body's {model, state, questions}; a decision model
+  // returns probabilities and no text.
+  async decisions(
+    req: DecisionsRequest,
+    signal?: AbortSignal,
+  ): Promise<DecisionsResponse> {
+    const { model, state, questions } = req;
+    try {
+      const body = { model, state, questions };
+      const res = await this.#post(this.#decisionsUrl, body, signal);
+      if (!res.ok) {
+        const { code, message } = await httpError(res);
+        const unknown =
+          res.status === 400 && /does not exist/.test(message);
+        throw new ProviderError(unknown ? "unknown_model" : code, message);
+      }
+      return parseDecisions(req, await readJson<unknown>(res));
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason;
+      if (err instanceof ProviderError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ProviderError("network_error", message);
+    }
+  }
+
+  // Chat models and decision models come from two lists, fetched
+  // together; an id in both is a chat model.
   async #loadModels(): Promise<Map<string, ModelInfo>> {
-    log.debug("GET /models");
-    const res = await this.#fetch(`${this.#baseUrl}/models`, {
+    const [chat, decision] = await Promise.all([
+      this.#listModels("/models"),
+      this.#listModels("/models?output_modalities=decisions"),
+    ]);
+    const models = new Map<string, ModelInfo>();
+    for (const m of decision) models.set(m.id, toModelInfo(m, true));
+    for (const m of chat) models.set(m.id, toModelInfo(m, false));
+    return models;
+  }
+
+  async #listModels(path: string): Promise<WireModel[]> {
+    log.debug(`GET ${path}`);
+    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
       headers: this.#headers(),
     });
     if (!res.ok) {
       const { code, message } = await httpError(res);
-      throw new ProviderError(code, `GET /api/v1/models: ${message}`);
+      throw new ProviderError(code, `GET /api/v1${path}: ${message}`);
     }
-    const { data } = await readJson<{ data: WireModel[] }>(res);
-    return new Map(data.map((m) => [m.id, toModelInfo(m)]));
+    const { data } = await readJson<{ data?: WireModel[] }>(res);
+    if (!Array.isArray(data)) {
+      throw new ProviderError(
+        "invalid_response",
+        `GET /api/v1${path}: the body has no data array`,
+      );
+    }
+    return data;
+  }
+
+  get #chatUrl(): string {
+    return `${this.#baseUrl}/chat/completions`;
   }
 
   #post(
-    path: string,
+    url: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<Response> {
-    log.debug(`POST ${path} model=${String(body.model)}`);
-    return this.#fetch(`${this.#baseUrl}${path}`, {
+    log.debug(`POST ${new URL(url).pathname} model=${String(body.model)}`);
+    return this.#fetch(url, {
       method: "POST",
       headers: {
         ...this.#headers(),
@@ -525,7 +581,10 @@ function toUsage(usage: WireUsage | undefined): Usage {
   };
 }
 
-function toModelInfo(model: WireModel): ModelInfo {
+function toModelInfo(
+  model: WireModel,
+  isDecisionModel: boolean,
+): ModelInfo {
   return {
     id: model.id,
     contextLength: model.context_length,
@@ -536,6 +595,7 @@ function toModelInfo(model: WireModel): ModelInfo {
       prompt: Number(model.pricing?.prompt ?? 0),
       completion: Number(model.pricing?.completion ?? 0),
     },
+    isDecisionModel,
   };
 }
 

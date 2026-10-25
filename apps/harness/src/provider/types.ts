@@ -6,7 +6,8 @@ import type { AssistantMessage, Context, Usage } from "../types.ts";
 
 export type JsonSchema = Record<string, unknown>;
 
-// From GET /api/v1/models: context_length,
+// From GET /api/v1/models (chat) and GET /api/v1/models
+// ?output_modalities=decisions (decision models): context_length,
 // top_provider.max_completion_tokens, supported_parameters, pricing
 // (USD per token).
 export interface ModelInfo {
@@ -15,6 +16,7 @@ export interface ModelInfo {
   maxOutputTokens: number;
   supported: Set<string>;
   pricing: { prompt: number; completion: number };
+  isDecisionModel: boolean; // listed by the decisions list only
 }
 
 export interface ToolSchema {
@@ -56,6 +58,56 @@ export interface TextRequest {
   maxOutputTokens?: number;
 }
 
+// The Decisions API (POST /api/alpha/decisions): typed questions
+// about a `state`, answered with probabilities and no text.
+export type DecisionQuestion =
+  | {
+      type: "noul"; // p(yes)
+      instructions: string;
+      criteria?: { true: string; false: string };
+    }
+  | {
+      type: "choice";
+      instructions: string;
+      criteria: Record<string, string | null>; // option → guidance
+    }
+  | {
+      type: "score";
+      instructions: string;
+      criteria: string[]; // ordered level descriptions
+    };
+
+export interface DecisionsRequest {
+  model: string;
+  state: string | Record<string, unknown> | unknown[];
+  questions: Record<string, DecisionQuestion>;
+}
+
+export type DecisionAnswer =
+  | { type: "noul"; noul: number }
+  | {
+      type: "choice";
+      choice: string;
+      confidence: number;
+      probabilities: Record<string, number>;
+    }
+  | {
+      type: "score";
+      score: number;
+      confidence: number;
+      probabilities: Record<string, number>;
+      legend: Record<string, string>;
+    };
+
+export interface DecisionsResponse {
+  id: string;
+  model: string; // the dated snapshot that answered
+  provider: string;
+  answers: Record<string, DecisionAnswer>; // one per question
+  // cost: USD, from the body's usage.cost
+  usage: { inputTokens: number; outputTokens: number; cost: number };
+}
+
 export interface Provider {
   // Cached for the provider's lifetime (one provider per process).
   modelInfo(id: string): Promise<ModelInfo>;
@@ -66,10 +118,15 @@ export interface Provider {
     req: TextRequest,
     signal?: AbortSignal,
   ): Promise<{ text: string; usage: Usage }>;
+  // A decision model's answers; rejects with ProviderError.
+  decisions(
+    req: DecisionsRequest,
+    signal?: AbortSignal,
+  ): Promise<DecisionsResponse>;
 }
 
-// complete/completeText/modelInfo reject with this; `code` matches
-// the `error` StreamEvent's code.
+// complete/completeText/decisions/modelInfo reject with this; `code`
+// matches the `error` StreamEvent's code.
 export class ProviderError extends Error {
   readonly code: string;
 

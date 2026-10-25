@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
 import { userPaths } from "./config/paths.ts";
 import {
-  checkDecisionModel,
+  checkModels,
   loadSettings,
   requireApiKey,
 } from "./config/settings.ts";
@@ -166,7 +166,7 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         projectDir: projectTrusted ? cwd : undefined,
       });
       const provider = (deps.createProvider ?? openRouter)(apiKey);
-      await checkDecisionModel(provider, settings);
+      await checkModels(provider, settings);
       const { tmp: tmpDir } = userPaths(env);
       const tools = builtinRegistry({ tmpDir, env });
       let mcpServers: McpServerInfo[] = [];
@@ -204,6 +204,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
         prompter,
         onBlocked: args.onBlocked,
         decisionModel: settings.decisionModel,
+        dangerThreshold: settings.permissions.dangerThreshold,
+        smallModel: settings.smallModel,
         skills: args.skills
           ? {
               budgetRatio: settings.skills.listingBudgetRatio,

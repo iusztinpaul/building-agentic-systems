@@ -16,10 +16,19 @@ const MAX_TIMER_MS = 2_147_483_647;
 export const Settings = z
   .object({
     model: z.string().default("anthropic/claude-sonnet-5.5"),
-    decisionModel: z.string().default("anthropic/claude-haiku-5.5"),
-    // TUI only; headless is auto unless --permission-mode.
+    // The auto classifier's: output modality "decisions".
+    decisionModel: z.string().default("typesafe/jev-1.14"),
+    // Compaction summaries and llm(): a chat model with
+    // structured_outputs.
+    smallModel: z.string().default("anthropic/claude-haiku-5.5"),
     permissions: z
-      .object({ mode: z.enum(["ask", "auto"]).default("ask") })
+      .object({
+        // TUI only; headless is auto unless --permission-mode.
+        mode: z.enum(["ask", "auto"]).default("ask"),
+        // dangerous when the decision model's p(dangerous) ≥ this;
+        // "when unsure, dangerous": keep it under 0.5.
+        dangerThreshold: z.number().min(0.05).max(0.95).default(0.3),
+      })
       .strict()
       .default({}),
     compaction: z
@@ -43,7 +52,7 @@ export const Settings = z
         maxToolCalls: z.number().int().positive().default(50),
         outputMaxBytes: z.number().int().positive().default(20_000),
         concurrency: z.number().int().positive().default(4),
-        // llm() in a script (spec §10.6); model unset: decisionModel.
+        // llm() in a script (spec §10.6); model unset: smallModel.
         llm: z
           .object({
             model: z.string().optional(),
@@ -119,15 +128,30 @@ export function requireApiKey(
   return key;
 }
 
-// Fail fast: the decision model must do structured outputs.
-export async function checkDecisionModel(
+// Fail fast: decisionModel must be a decision model, smallModel a
+// chat model with structured outputs.
+export async function checkModels(
   provider: Provider,
   settings: Settings,
 ): Promise<void> {
-  const info = await provider.modelInfo(settings.decisionModel);
-  if (!info.supported.has("structured_outputs")) {
+  const decision = await provider.modelInfo(settings.decisionModel);
+  if (!decision.isDecisionModel) {
     throw new SettingsError(
-      `decisionModel ${info.id} does not support structured_outputs`,
+      `decisionModel ${decision.id} is not a decision model ` +
+        '(output modality "decisions"); see ' +
+        "https://openrouter.ai/models?output_modalities=decisions",
+    );
+  }
+  const small = await provider.modelInfo(settings.smallModel);
+  if (small.isDecisionModel) {
+    throw new SettingsError(
+      `smallModel ${small.id} is a decision model; it must be a ` +
+        "chat model with structured_outputs",
+    );
+  }
+  if (!small.supported.has("structured_outputs")) {
+    throw new SettingsError(
+      `smallModel ${small.id} does not support structured_outputs`,
     );
   }
 }

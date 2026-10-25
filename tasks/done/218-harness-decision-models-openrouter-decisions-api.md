@@ -1,6 +1,6 @@
 ---
 id: 218-harness-decision-models-openrouter-decisions-api
-status: pending
+status: done
 feature: tree-agent-harness
 ---
 
@@ -324,31 +324,31 @@ facts above, the facts win.
 
 ## Acceptance Criteria
 
-- [ ] `provider.decisions()` POSTs `{model, state, questions}` to the injected `decisionsUrl` (default
+- [x] `provider.decisions()` POSTs `{model, state, questions}` to the injected `decisionsUrl` (default
       `https://openrouter.ai/api/alpha/decisions`) with the `Authorization`, `HTTP-Referer` and `X-Title`
       headers; the recorded 200 bodies parse into `DecisionsResponse` with `usage.cost`; HTTP 400
       "does not exist" → `ProviderError("unknown_model")`; an invalid answer shape → `invalid_response`; an abort
       rejects with the signal's reason; `FakeProvider` scripts and records the same calls.
-- [ ] `modelInfo` issues `GET /models` and `GET /models?output_modalities=decisions` once each per process,
+- [x] `modelInfo` issues `GET /models` and `GET /models?output_modalities=decisions` once each per process,
       answers `isDecisionModel: true` (empty `supported`, prompt price `0.000000042`, completion `0`) for a
       decision model and `false` for a chat model, and does not cache a failed load.
-- [ ] `Settings.parse({})` gives `decisionModel: "typesafe/jev-1.14"`, `smallModel:
+- [x] `Settings.parse({})` gives `decisionModel: "typesafe/jev-1.14"`, `smallModel:
       "anthropic/claude-haiku-5.5"`, `permissions.dangerThreshold: 0.3`; `dangerThreshold` 0.04, 0.96 and
       `"0.3"` are rejected naming `permissions.dangerThreshold`; `checkModels` throws the three exact messages
       of Scope 3 and passes on the defaults (fake models).
-- [ ] The classifier sends `DANGER_QUESTIONS` (`toEqual` the spec §11.1 fenced `json` block, parsed from the
+- [x] The classifier sends `DANGER_QUESTIONS` (`toEqual` the spec §11.1 fenced `json` block, parsed from the
       spec file)
       and the state of Scope 6 (input and messages cut at 2 048 bytes); `noul` 0.29 → allow, 0.30 → prompt
       with reason `decision model: p(dangerous)=0.30, risk <choice> (<conf>)`; a missing `risk` answer, a
       provider error and the 10 s deadline all reject and the gate treats them as dangerous (unchanged
       tests still green); the same `(tool, input)` twice costs one `decisions` call; an abort mid-flight
       cancels the request and caches nothing; `usage.cost` reaches the session cost.
-- [ ] Compaction summaries and `llm()` (no `codemode.llm.model`) run on `smallModel`; the classifier runs on
+- [x] Compaction summaries and `llm()` (no `codemode.llm.model`) run on `smallModel`; the classifier runs on
       `decisionModel`; `tests/cli.test.ts` asserts the headless default classifies on `typesafe/jev-1.14`.
-- [ ] Live (skipped without the key): on `typesafe/jev-1.14` AND `liquid/d1-ultra`, `DANGER_QUESTIONS` over the
+- [x] Live (skipped without the key): on `typesafe/jev-1.14` AND `liquid/d1-ultra`, `DANGER_QUESTIONS` over the
       `rm -rf ~/Downloads/*` state answers `noul ≥ 0.7` + `risk high`, and over `ls -la` answers `noul ≤ 0.3`
       + `risk low`; `modelInfo("typesafe/jev-1.14").isDecisionModel` is `true`.
-- [ ] Live e2e, scratch cwd, fake `HOME` and `TREE_AGENT_HOME`, for EACH of the two models written to
+- [x] Live e2e, scratch cwd, fake `HOME` and `TREE_AGENT_HOME`, for EACH of the two models written to
       `$TREE_AGENT_HOME/settings.json` as `decisionModel`: headless `--permission-mode auto --json "Create a
       file named note.txt containing hi"` → `permission{allow, classifier, reason: "decision model:
       p(dangerous)=0.0x, …"}`, the file exists, exit 0; headless `--permission-mode auto --json --on-blocked
@@ -360,10 +360,10 @@ facts above, the facts win.
       (`Shift+Tab`) on `rm -rf ~/Downloads/*` shows the prompt with a reason of the form `decision model:
       p(dangerous)=0.9x, risk high (0.9x)`; answer `n`; the junk files remain. Then `/mode ask`: `echo hi >
       note.txt` prompts as before (the gate is unchanged). Never run this against the real `HOME`.
-- [ ] Spec §1/§5/§11.1/§12/§16/§17, ADR-016 (the amendment section verbatim), the glossary rows (verbatim)
+- [x] Spec §1/§5/§11.1/§12/§16/§17, ADR-016 (the amendment section verbatim), the glossary rows (verbatim)
       and the README sections of Scope 8 are in the diff; `grep -rn "decisionModel" apps/harness/src` shows
       only the classifier path, `checkModels`, settings and the session option.
-- [ ] `make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests &&
+- [x] `make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests &&
       make pre-commit` green; `agent-loop.ts` untouched (180 lines).
 
 ## User Stories
@@ -452,3 +452,160 @@ setting; `modelInfo` learns decision models; startup checks both ids.
   when the gate works, and the `[HUMAN]` decoy-home AC covers the `rm -rf` case the Tester declined in 206.
 
 Ready for implementation.
+
+### [SWE] 2026-10-25 10:45 — Implementation
+
+**Files modified**
+- `apps/harness/src/provider/types.ts` — `ModelInfo.isDecisionModel`; `DecisionQuestion` / `DecisionsRequest` / `DecisionAnswer` / `DecisionsResponse`; `Provider.decisions(req, signal?)`.
+- `apps/harness/src/provider/decisions.ts` (new) — the strict zod schema of the Decisions 200 body + `parseDecisions(req, body)`: unknown `type`, probability outside [0, 1], or a question without its answer (or with another type) → `ProviderError("invalid_response", "decisions: …")`; maps `usage` to camelCase. Shared by the real and the fake provider.
+- `apps/harness/src/provider/openrouter.ts` — `decisions()` POSTs `{model, state, questions}` to the injectable `decisionsUrl` (default `https://openrouter.ai/api/alpha/decisions`) with the chat headers; 400 `/does not exist/` → `unknown_model`; other HTTP errors via `httpError()`; an abort rethrows `signal.reason`; a fetch failure → `network_error`. `#loadModels` = two parallel GETs (`/models`, `/models?output_modalities=decisions`), one cache, chat list wins on a duplicate id, failed load not cached; `#listModels` now rejects a body without a `data` array as `invalid_response` (exposed by the llm tests' GET routing). `#post` takes a full URL.
+- `apps/harness/src/provider/fake.ts` — `decisions` script (wire bodies / `Error` / function), `decisionRequests`, scripted bodies validated by `parseDecisions`; `fakeModel()` gains `isDecisionModel: false`; new `fakeDecisionModel(id)`; without a `models` list the default `decisionModel` id resolves to `fakeDecisionModel`.
+- `apps/harness/src/permissions/decision-model.ts` — rewritten: `DANGER_QUESTIONS` (verbatim, `as const satisfies`), `dangerState()`, `provider.decisions()` under the 10 s deadline, `dangerous = noul >= threshold`, `risk = choice` (must be low/medium/high), generated reason `decision model: p(dangerous)=0.95, risk high (0.98)`, `onCost(usage.cost)`, same per-session sha256 cache. `DangerCheck` is now a plain interface (same `{dangerous, risk, reason}` shape); `shortReason` kept for the gate. `gate.ts` untouched.
+- `apps/harness/src/decision/decide.ts` — `DEFAULT_MODEL = smallModel` default; the deadline+signal controller extracted as `withDeadline()` (reused by the classifier, behaviour of `decide` unchanged — its tests are untouched apart from the default-model name).
+- `apps/harness/src/config/settings.ts` — `decisionModel` default `typesafe/jev-1.14`, new `smallModel` (`anthropic/claude-haiku-5.5`), new `permissions.dangerThreshold` (0.05–0.95, default 0.3); `checkDecisionModel` → `checkModels` with the three exact messages.
+- `apps/harness/src/session.ts` — `SessionOptions.decisionModel` / `dangerThreshold` / `smallModel`; the classifier gets threshold + `onCost` (adds to `#cost`, in memory only); compactor and codemode `llm()` on `smallModel`.
+- `apps/harness/src/cli.ts` — `checkModels`; passes `decisionModel`, `dangerThreshold`, `smallModel`.
+- `apps/harness/src/compaction/compaction.ts`, `src/codemode/llm.ts`, `src/tools/codemode.ts` — option renamed `smallModel`; `retryOnOverflow` forwards `decisions`.
+- Tests: `tests/provider/openrouter.test.ts` (decisions wire, recorded fixtures, 400 unknown-model, recorded 400 zod body, 402/429, invalid_response ×3 + non-JSON, abort, network_error, score answer; modelInfo two GETs, decision model tagging, duplicate id, both failure-not-cached cases, no-data-array; 2 new live tests), `tests/provider/fake.test.ts`, `tests/permissions/decision-model.test.ts` (rewritten), `tests/config/settings.test.ts`, `tests/decision/decide.test.ts`, `tests/compaction/compaction.test.ts`, `tests/codemode/llm.test.ts`, `tests/tools/codemode.test.ts`, `tests/session.test.ts`, `tests/cli.test.ts`, `tests/tui/app.test.ts`; new `tests/helpers/decisions.ts` (`verdict(p, risk)` wire body); new fixtures `tests/fixtures/openrouter/decisions-rm-rf.json`, `decisions-ls.json` (recorded live on jev-1.14 today, real id/model/usage), `decisions-invalid-type.400.json` (recorded, `user_id` redacted).
+- Docs: `docs/notes/tree-agent-harness-spec.md` §1/§5 (+ the Decisions wire-contract subsection)/§10.6/§11/§11.1 (the `json` block)/§12/§13/§16/§17; `docs/adrs/016_tree_agent_harness.md` (the amendment appended verbatim); `docs/glossary.md` (Decision model + Small model rows verbatim, Compaction + Permission mode edits); `apps/harness/README.md` (settings rows, Permissions step 4 + cost note, Compaction, Tests, status bar).
+
+**Tests**
+- Baseline (HEAD, `make harness-tests`): 876 tests, 13–15 failing (load avg 15–18 on 12 cores; names below), 2 live.
+- Now (`make harness-tests`, last run): 917 tests — 906 passed, 11 failed, all 11 pre-existing (see Notes); 4 live tests, all green.
+- `make harness-lint-fix && make harness-lint-check` clean; `make harness-typecheck` clean; `make pre-commit` passed (prettier, ruff, biome). `agent-loop.ts` untouched (180 lines).
+- Integration: N/A (no integration suite).
+
+**Acceptance criteria**
+- [x] `provider.decisions()` wire / parse / errors / abort / fake — `tests/provider/openrouter.test.ts > OpenRouterProvider.decisions`, `tests/provider/fake.test.ts > FakeProvider.decisions`
+- [x] `modelInfo` two GETs once, `isDecisionModel`, no failed-load cache — `tests/provider/openrouter.test.ts > OpenRouterProvider.modelInfo`
+- [x] Settings defaults, `dangerThreshold` 0.04/0.96/"0.3" rejected with the key path, `checkModels` three messages + passing case — `tests/config/settings.test.ts`
+- [x] Classifier: `DANGER_QUESTIONS` toEqual the spec §11.1 json block, state (2 KB cuts, last 3 messages), 0.29/0.30 threshold, custom threshold, reason, missing `risk` rejects, provider error, 10 s deadline, cache, abort caches nothing, `onCost` — `tests/permissions/decision-model.test.ts`; gate fail-closed tests unchanged and green; session cost — `tests/session.test.ts > adds each classifier call's usage.cost …`
+- [x] `smallModel` reaches the summariser (`tests/session.test.ts` compaction, model `anthropic/claude-haiku-5.5`) and `llm()` (worked example, `e.model === SMALL`); classifier on `decisionModel`; `tests/cli.test.ts > headless defaults to auto …` asserts `decisionRequests` model `typesafe/jev-1.14`
+- [x] Live on jev-1.14 AND d1-ultra (+ `modelInfo(jev).isDecisionModel`) — `OpenRouter live > decisions() on …` (both green under `make harness-tests`)
+- [x] Live e2e per model — evidence below
+- [ ] [HUMAN] decoy-home TUI `rm -rf ~/Downloads/*` — not run (human only)
+- [x] Docs in the diff; `grep -rn decisionModel apps/harness/src` — see Notes for the one extra hit (`fake.ts`)
+- [ ] Cadence — lint, typecheck, pre-commit green; `make harness-tests` still has 11 pre-existing failures (Notes), so left unticked
+
+**Evidence**
+```
+# Recorded live (scratch script, key from env, never printed), state {tool, primary_argument, input, cwd: /work/repo, recent_user_messages}
+typesafe/jev-1.14  rm -rf ~/Downloads/*  noul 0.87    risk high (conf 0.97)  cost 0.000027888  model typesafe/jev-1.14-20261014
+typesafe/jev-1.14  ls -la                noul 0.02    risk low  (conf 1.00)  cost 0.000027678
+liquid/d1-ultra    rm -rf ~/Downloads/*  noul 0.9917  risk high (conf 0.9886) cost 0.000016254 model liquid/d1-ultra-20261015
+liquid/d1-ultra    ls -la                noul 0.0079  risk low  (conf 0.9884) cost 0.000015918
+unknown model x/y → 400 {"error":{"message":"Model x/y does not exist","code":400}}
+GET /api/v1/models?output_modalities=decisions → 200, 30 models (jev-1.14: context 262144, supported_parameters [], prompt 0.000000042, completion 0)
+
+# Live e2e: scratch cwd, env -i with fake HOME + fake TREE_AGENT_HOME (settings.json {"decisionModel": …}),
+# a stub `chmod` first on PATH that only writes a marker file and exits 1
+$ run.sh jev --permission-mode auto --json "Create a file named note.txt containing hi"
+exit=0; permission{allow, classifier, "decision model: p(dangerous)=0.03, risk low (0.98)"}; agent_end completed; note.txt = "hi"
+$ run.sh d1  --permission-mode auto --json "Create a file named note.txt containing hi"
+exit=0; permission{allow, classifier, "decision model: p(dangerous)=0.01, risk low (0.90)"}; agent_end completed; note.txt = "hi"
+$ run.sh jev --permission-mode auto --json --on-blocked stop "Run exactly this bash command: chmod 777 /etc/hosts"
+exit=2; tool_call → permission{deny, headless, "dangerous: decision model: p(dangerous)=0.96, risk high (1.00)"} → tool_result "Blocked: dangerous: …" isError → agent_end blocked; stub marker absent
+$ run.sh d1  --permission-mode auto --json --on-blocked stop "Run exactly this bash command: chmod 777 /etc/hosts"
+exit=2; tool_call → permission{deny, headless, "dangerous: decision model: p(dangerous)=0.99, risk high (0.98)"} → tool_result "Blocked: dangerous: …" isError → agent_end blocked; stub marker absent
+/etc/hosts: 644 root before and after (uid 501, not root)
+# Startup checks (same isolation)
+{"decisionModel": "anthropic/claude-haiku-5.5"} → stderr "decisionModel anthropic/claude-haiku-5.5 is not a decision model (output modality "decisions"); see https://openrouter.ai/models?output_modalities=decisions", exit 1, 0 B stdout, no sessions/
+{"smallModel": "typesafe/jev-1.14"} → stderr "smallModel typesafe/jev-1.14 is a decision model; it must be a chat model with structured_outputs", exit 1, 0 B stdout, no sessions/
+{"decisionModel": "liquid/d1-ultra", "permissions": {"dangerThreshold": 0.4}} → starts, answers "Hi"
+
+# make harness-tests (final)
+✓ OpenRouter live > streams a turn with a tool call on the main model, then answers from the result
+✓ OpenRouter live > complete<T> returns schema-valid JSON on the small model
+✓ OpenRouter live > decisions() on typesafe/jev-1.14: rm -rf is dangerous + high, ls is safe + low; it is a decision model
+✓ OpenRouter live > decisions() on liquid/d1-ultra: rm -rf is dangerous + high, ls is safe + low
+Test Files  5 failed | 42 passed (47)
+Tests  11 failed | 906 passed (917)
+
+# Mutation probes (each restored afterwards)
+threshold >= → >                         : 3 failing (decision-model ×2, session ×1)
+second GET dropped                       : 8 failing (modelInfo ×6, live jev, cli OpenRouter e2e)
+llm() default smallModel → decisionModel : 3 failing (session worked example, cost, cost-rises) — mutated in session.ts's codemode wiring; LlmOptions no longer has a decisionModel to fall back to
+onCost not wired                         : 1 failing (session classifier cost)
+```
+
+**Notes**
+- Pre-existing failures (none in a module this task changed): two reproduce serially on a clean HEAD worktree — `AgentSession with codemode > ask: the script waits on the prompt …` (ENOENT on `b.md`) and `connectMcpServers / startMcp > a server silent on initialize …` (3 log lines vs 1). The rest are load-dependent timeouts that pass serially: `runSandbox` OOM `.then` chain / 10 MB console cap, `bash` 80 MB stream, `StdioTransport close()` ×2, `McpClient` per-call timeout / respawn, `tree-agent (spawned)` usage/`--help` ×5–6 (node cold start 8–15 s under load avg 15–18). The same names fail on the HEAD baseline.
+- `grep -rn decisionModel apps/harness/src` also hits `src/provider/fake.ts`: the test double reads `Settings.parse({}).decisionModel` so a default `FakeProvider` resolves that id as a decision model and `checkModels` passes on default settings in every CLI test. A hard-coded id would drift from the settings default.
+- The ADR amendment, pasted verbatim, says destructive calls score "0.95–0.99"; the jev-1.14 recording scored 0.87 on `rm -rf ~/Downloads/*` (last user message "Free up some disk space", which makes the command look requested). The verbatim text is unchanged; spec §11.1 and the README say 0.87–0.99. The live assertion `≥ 0.7` passed on every run; if it ever flakes, a neutral last message widens the margin.
+- The ADR §6 diagram label is not edited; the amendment states how it reads.
+- The decisions response objects are not `.strict()` (an extra field OpenRouter adds later is ignored, not a failure); types, ranges and the per-question answer are strict.
+- `toFixed(2)` in the reason can show `0.30` for a p of 0.2999 that is allowed; cosmetic only, the comparison uses the raw p.
+- No key material in any fixture, log or this entry; `.env*` untouched; `apps/memory` untouched; the untracked `docs/Tree-Agent Harness Implementation Spec.md` untouched.
+
+### [Tester] 2026-10-25 11:10 — QA
+
+**Test summary**
+- Format / lint / typecheck / pre-commit: PASS (`make harness-lint-check`, `harness-typecheck`, `harness-format-check`, `make pre-commit` all exit 0; `agent-loop.ts` untouched, 180 lines)
+- Unit tests: `make harness-tests` at load ~3.8 (machine quiet): **917 passed / 0 failed (47 files, 8 s)**, 4 live tests ran (not skipped) and passed. Clean HEAD worktree at the same moment: 876 / 876.
+- Integration tests: N/A (no suite, per AGENTS.md)
+- Warnings: 0
+
+**The 11-15 failures: environment artefacts, not regressions**
+- `make harness-tests` under load 12-24 failed 15 (run 1) with: 6x `tree-agent (spawned)` usage/`--help`, 2x `runSandbox` (OOM chain, 10 MB console), 2x `bash` (80 MB stream, orphan on abort), 2x `StdioTransport close()`, 1x `McpClient` respawn, plus the two in question. Same names as the SWE's baseline list.
+- Same files with `--no-file-parallelism` (load ~10): 917/917, 47/47 files. At load ~3.8 the plain `make harness-tests` is 917/917.
+- `connectMcpServers / startMcp > a server silent on initialize…` (tests/mcp/client.test.ts:358): gives the good server only `initializeTimeoutMs: 200`. Failure output: extra warns `mcp "good": initialize timed out after 0.2 s` + `ignored a response to unknown id 1`. Cold start of `node tests/fixtures/fake-mcp-server.mjs` measured 0.21-0.32 s here (5 runs, `/usr/bin/time`), i.e. above the 200 ms budget. Fails on a clean `git worktree add` of HEAD (73de787): 6/6 under load 11-17 (default and serial), and on the SWE tree 4/4 in parallel-file mode, 0/4 in serial mode. Passes in the quiet full runs on both trees. `src/mcp` and `tests/mcp` are not in the diff. Pre-existing timing-fragile test, not a 218 regression.
+- `AgentSession with codemode > ask: the script waits on the prompt…` (tests/session.test.ts:1430): `codemode.timeoutMs: 50` — the first sandbox slice in a cold process exceeds 50 ms, so the script times out before `write` and `b.md` is never created (ENOENT). Reproduced with `-t "waits on the prompt"` (isolated, cold) on BOTH the clean HEAD worktree (3/3) and the SWE tree (3/3). Passes when the whole `session.test.ts` runs (warm) on the SWE tree (4/4 file runs) and in both full quiet runs. Pre-existing cold-start sensitivity in a 50 ms budget; not caused by 218.
+- Not a leftover file, port, or `TREE_AGENT_HOME` issue: each run uses mkdtemp dirs; no fixed ports.
+- Follow-up (not a 218 blocker): widen `initializeTimeoutMs: 200` and `timeoutMs: 50` (or warm up) so CI/loaded machines stay green.
+
+**E2E adversarial pass** (scratch `qa218/`, `env -i` with fake HOME + TREE_AGENT_HOME, key passed by expansion only, stub `chmod` first on PATH)
+- Happy path, both models: `--permission-mode auto --json "Create a file named note.txt containing hi"` → jev-1.14 `permission{allow, classifier, "decision model: p(dangerous)=0.03, risk low (0.98)"}`; d1-ultra `p=0.00, risk low (0.88)`; note.txt = `hi`; `agent_end completed`; exit 0 (PASS)
+- Gate: `--on-blocked stop "Run exactly this bash command: chmod 777 /etc/hosts"` → jev `deny headless "dangerous: decision model: p(dangerous)=0.96, risk high (1.00)"`; d1-ultra `p=0.99, risk high (0.99)`; `tool_result` Blocked, `agent_end blocked`, exit 2, stub marker file absent, `/etc/hosts` still `-rw-r--r-- root` (PASS)
+- Break 1 (config, chat model as decisionModel `anthropic/claude-haiku-5.5`; also `typesafe/jev-router`): stderr exactly `decisionModel … is not a decision model (output modality "decisions"); see https://openrouter.ai/models?output_modalities=decisions`, exit 1, 0 B stdout, no `sessions/` dir (PASS)
+- Break 2 (decision model `typesafe/jev-1.14` as smallModel): `smallModel typesafe/jev-1.14 is a decision model; it must be a chat model with structured_outputs`, exit 1, 0 B stdout, no session file (PASS)
+- Break 3 (unknown ids; bad threshold): `unknown model "x/nonexistent": not listed by GET /api/v1/models` exit 1 for both settings; `dangerThreshold` 0.04 → `permissions.dangerThreshold: Number must be greater than or equal to 0.05`, `"0.3"` → `Expected number, received string`, exit 1 (PASS)
+- Break 4 (threshold boundary, real provider via fake fetch): p=0.3 → dangerous true; 0.2999999 → false; 0.30000001 → true; with threshold 0.05: p 0.05 true / 0.0499 false; threshold 0.95: 0.95 true / 0.9499 false; p 0 false, p 1 true (PASS; mutation `>=`→`>` fails 3 tests, file restored, sha unchanged)
+- Break 5 (malformed decisions bodies, each `ProviderError invalid_response`, nothing cached, gate = dangerous): missing `risk`, missing `dangerous`, `answers: {}`/`null`, unknown answer type `boxes`, dangerous answered as `choice`, risk answered as `noul`, `noul` 1.2 / -0.1 / `"0.9"` / `null`, `usage` missing, `{}`, `{error:…}` with 200, non-JSON 200 (`response body is not a JSON object`). Risk level `critical`/`HIGH` → rejects (cost counted, not cached). An extra unrequested answer is ignored (PASS)
+- Break 6 (HTTP failures via CLI with real chat provider and local fake decisions server, `--on-blocked stop`): 503 → `dangerous: the safety classifier failed (upstream down)`, exit 2, 2.4 s; body missing `risk` → `failed (decisions: no choice answer for "risk")`, exit 2; server never answers → `failed (danger_check: no answer within 10000 ms)`, exit 2 after 12.4 s. Stub marker absent in all three (PASS). Direct provider: 400 does-not-exist → `unknown_model`, 401/402/429/503 → status code, fetch throw → `network_error` (PASS)
+- Break 7 (abort mid-classifier, SIGINT after 6 s with the decisions server hanging): no tool ran (`tool_result "Not run: aborted."`, `agent_end aborted`), no `permission` entry in the session JSONL, marker absent. Provider-level: rejects with the signal's reason, fetch signal aborted, cache size 0, no `onCost`; pre-aborted signal makes no fetch call (PASS)
+- Break 8 (`/models?output_modalities=decisions` fails): 503 → `modelInfo` rejects `503 GET /api/v1/models?output_modalities=decisions: boom`, not cached (the retry issues both GETs again and succeeds); `{}` body → `invalid_response … the body has no data array`; 3 concurrent `modelInfo` calls → exactly 2 GETs; id in both lists → chat entry wins (`isDecisionModel:false`). Consequence: an outage of the new list endpoint fails startup for everyone, as the task specifies (PASS, see note)
+- Break 9 (secrets/fixtures): `grep -rlF "$OPENROUTER_API_KEY"` over `apps/harness`, `docs`, `tasks`, `AGENTS.md` and the whole scratchpad (including full1/full2/full3 logs and the SWE's e2e dirs) → no match. Fixture `decisions-invalid-type.400.json` has `"user_id": "user_redacted"`; it is the only `user_id` in fixtures. `.env*` and `apps/memory` untouched; the untracked "Tree-Agent Harness Implementation Spec.md" untouched (PASS)
+- Spec §11.1: one ```json block in the spec; parsed and `isDeepStrictEqual` to `DANGER_QUESTIONS` (and the repo test does the same) (PASS)
+- Verbatim docs: ADR-016 amendment text equals the task's blockquote (whitespace-normalised); both glossary rows equal the task's rows; README rows (`smallModel`, `dangerThreshold`, `codemode.llm.model = smallModel`), cost note ($0.00002), "four live OpenRouter tests" present; `grep -rn decisionModel apps/harness/src` shows only cli.ts:206, session.ts (option + classifier), settings.ts, decision-model.ts, and the `fake.ts` default-id lookup (PASS)
+
+**Acceptance criteria**
+- [x] PASS — decisions() wire/parse/errors/abort/Fake — `tests/provider/openrouter.test.ts > OpenRouterProvider.decisions`, `tests/provider/fake.test.ts`; adversarial runs above
+- [x] PASS — modelInfo two GETs once, flags, no failed-load cache — Break 8 + `OpenRouterProvider.modelInfo` tests
+- [x] PASS — settings defaults, threshold rejection with key path, `checkModels` three exact messages — Breaks 1-3 and script run on fake models; `tests/config/settings.test.ts`
+- [x] PASS — classifier questions/state/threshold/fail-closed/cache/abort/cost — `tests/permissions/decision-model.test.ts`, `tests/session.test.ts` cost test; Breaks 4-7
+- [x] PASS — compaction and `llm()` on smallModel; classifier on decisionModel; cli test asserts `typesafe/jev-1.14`
+- [x] PASS — live on jev-1.14 and d1-ultra (4 live tests ran green in full3 run)
+- [x] PASS — live e2e per model (re-run by Tester; p values: jev write 0.03 / chmod 0.96; d1-ultra write 0.00 / chmod 0.99)
+- [ ] Awaiting human verification — [HUMAN] decoy-home TUI `rm -rf` (not run, by instruction)
+- [x] PASS — docs in the diff, verbatim checks above
+- [x] PASS — lint/format/typecheck/tests/pre-commit green; `agent-loop.ts` untouched (180 lines). `make harness-tests` is green (917/917) when the machine is not saturated; under load it shows the pre-existing timing failures listed above
+
+**Evidence**
+```
+$ make harness-tests            # load 3.8
+ Test Files  47 passed (47)
+      Tests  917 passed (917)
+   Duration  8.16s
+$ (clean HEAD worktree) pnpm exec vitest run     # load 5
+      Tests  876 passed (876)
+$ pnpm exec vitest run --no-file-parallelism     # load ~10
+ Test Files  47 passed (47) | Tests  917 passed (917)
+$ (HEAD worktree, load 15-17) vitest run tests/mcp/client.test.ts tests/session.test.ts -t "silent on initialize|waits on the prompt"
+   × connectMcpServers / startMcp > a server silent on initialize …
+   × AgentSession with codemode > ask: the script waits on the prompt …
+      Tests  2 failed | 103 skipped      (3 of 3 runs; same two on the SWE tree)
+$ node tests/fixtures/fake-mcp-server.mjs  (5 cold starts): real 0.28 0.32 0.24 0.21 0.25 s   # test budget 0.2 s
+```
+
+**Other issues found (not blocking)**
+- `usage.cost` in the decisions schema is an unbounded number: a body with `cost: -1` is accepted and would reduce the session cost (`src/provider/decisions.ts`, `usage.cost: z.number()`); `.nonnegative()` is a one-word fix. Non-hostile OpenRouter never sends it.
+- A decisions body rejected as invalid (or a `risk` of `critical`) still bills OpenRouter, but a body rejected inside `parseDecisions` never reaches `onCost`, so that cost is dropped from the session total; trivial amounts.
+- ADR-016 amendment (verbatim from the task) says destructive calls score "0.95-0.99"; the recorded jev-1.14 fixture scores 0.87. Spec/README say 0.87-0.99. Wording only.
+- Reason text rounds with `toFixed(2)`: p=0.2999999 is allowed but displays `p(dangerous)=0.30` (SWE already noted). The `ask`-time prompt on 0.30 is correct.
+- Two fragile timing tests (`initializeTimeoutMs: 200`, `codemode.timeoutMs: 50`) should be widened in a separate task so loaded machines/CI stay green.
+- `FakeProvider` imports `Settings` to learn the default decision-model id (design choice noted by the SWE; fine).
+
+**VERDICT: PASS**
+
+### [SWE] 2026-10-25 11:20 — Tester fold-ins
+- Decisions `usage` is now non-negative (`cost`; `input_tokens`/`output_tokens` non-negative ints) with an offline negative-cost → `invalid_response` test; the two timing-fragile tests are widened (`initializeTimeoutMs` 200 ms → 2 s in `tests/mcp/client.test.ts`; `codemode.timeoutMs` 50 ms → 1 s with the prompt answered after 1.5 s in `tests/session.test.ts`, so it still proves the prompt does not count) — each file 3× serially green.

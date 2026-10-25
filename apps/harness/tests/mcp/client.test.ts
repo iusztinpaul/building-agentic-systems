@@ -358,14 +358,14 @@ describe("connectMcpServers / startMcp", () => {
     const { log, lines } = sink();
     const connected = await connectMcpServers(
       { silent: SILENT_STDIO, good: stdio() },
-      { log, timeoutMs: 60_000, initializeTimeoutMs: 200 },
+      { log, timeoutMs: 60_000, initializeTimeoutMs: 2_000 }, // ~6x the healthy boot
     );
     clients.push(...connected);
 
     expect(lines[0]).toBe("[tree-agent] info: connecting to 2 MCP server(s)…\n");
     const warns = lines.filter((l) => l.includes("warn:"));
     expect(warns).toEqual([
-      '[tree-agent] warn: mcp "silent": initialize timed out after 0.2 s (settings.json: mcp.initializeTimeoutMs)\n',
+      '[tree-agent] warn: mcp "silent": initialize timed out after 2 s (settings.json: mcp.initializeTimeoutMs)\n',
     ]);
     expect(connected.map((c) => [c.name, c.connected])).toEqual([
       ["silent", false],
