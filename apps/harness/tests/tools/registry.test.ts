@@ -153,14 +153,24 @@ describe("ToolRegistry", () => {
     expect(activated.isError).toBeUndefined();
   });
 
-  it("lets a codemode script call every tool except hidden ones", async () => {
-    const r = registry(tool("b", "deferred"), tool("c", "codemode"), tool("d", "hidden"));
-    const script = { ...ctx, origin: "codemode" as const };
-
-    const results = await Promise.all(
-      ["b", "c", "d"].map((name) => r.execute({ id: "1", name, arguments: { path: "x" } }, script)),
+  it("lets a codemode script call only codemode ∪ direct ∪ activated tools", async () => {
+    const r = registry(
+      tool("a"),
+      tool("b", "deferred"),
+      tool("c", "codemode"),
+      tool("d", "hidden"),
     );
+    const script = { ...ctx, origin: "codemode" as const };
+    const runs = () =>
+      Promise.all(
+        ["a", "b", "c", "d"].map(async (name) => {
+          const res = await r.execute({ id: "1", name, arguments: { path: "x" } }, script);
+          return res.isError ? res.content : "ran";
+        }),
+      );
 
-    expect(results.map((res) => res.isError ?? false)).toEqual([false, false, true]);
+    expect(await runs()).toEqual(["ran", "Unknown tool: b", "ran", "Unknown tool: d"]);
+    r.activate(["b"]);
+    expect(await runs()).toEqual(["ran", "ran", "ran", "Unknown tool: d"]);
   });
 });

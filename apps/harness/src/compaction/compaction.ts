@@ -24,7 +24,7 @@ export interface CompactionSettings {
 // Consecutive failed summaries before compaction stops for the
 // session (one `error` event, no loop of retries).
 export const MAX_CONSECUTIVE_FAILURES = 3;
-export const SUMMARY_TIMEOUT_MS = 120_000;
+const SUMMARY_TIMEOUT_MS = 120_000;
 // Each tool result enters the summariser input as head + tail of at
 // most this many bytes (pi's serializer truncates them the same way).
 export const TOOL_RESULT_BYTES = 2_000;
@@ -42,7 +42,7 @@ export type Summary = z.infer<typeof Summary>;
 
 // pi's summarisation prompts (core/compaction), with its markdown
 // sections as the Summary schema's fields.
-export const SUMMARY_SYSTEM =
+const SUMMARY_SYSTEM =
   "You are a context summarization assistant. Your task is to read a " +
   "conversation between a user and an AI coding assistant, then " +
   "produce a structured summary following the exact format " +
@@ -62,7 +62,7 @@ const FIELDS = [
     "continue: exact file paths, function names and error messages.",
 ].join("\n");
 
-export const SUMMARY_PROMPT = [
+const SUMMARY_PROMPT = [
   "The messages above are a conversation to summarize. Create a " +
     "structured context checkpoint summary that another LLM will use " +
     "to continue the work.",
@@ -155,9 +155,7 @@ export function renderSummary(s: Summary): string {
 }
 
 // pi's serializer: one tagged line per message, tool results cut.
-export function serializeConversation(
-  messages: readonly Message[],
-): string {
+function serializeConversation(messages: readonly Message[]): string {
   return messages
     .map((m) => {
       if (m.role === "user") return `[User]: ${m.content}`;

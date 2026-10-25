@@ -1,14 +1,18 @@
 // The stdio transport: spawn `command args` (cwd = the session's,
 // `env` merged over the base env), one JSON-RPC frame per line on
 // stdin/stdout. The child's stderr goes to the harness log at info,
-// never to the user's stdout. close() ends stdin, then escalates to
-// SIGTERM and SIGKILL; a harness exit or an unhandled SIGINT /
-// SIGTERM kills every live child.
+// never to the user's stdout. The child gets its own process group,
+// so a signal also reaches what it started (`uv run` → python), and
+// close() ends stdin, then escalates to SIGTERM and SIGKILL of the
+// group; a harness exit or an unhandled SIGINT / SIGTERM kills every
+// live group. No wait is unbounded: a pipe held by a process that
+// left the group would otherwise keep "close" from ever firing, so
+// close() then drops the harness's ends and the event loop drains.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
 import { constants } from "node:os";
-import { createInterface } from "node:readline";
+import { createInterface, type Interface } from "node:readline";
 import { log as defaultLog, type Logger } from "../log.ts";
 import type {
   JsonRpcMessage,
@@ -28,9 +32,35 @@ export interface StdioOptions {
 
 const TERM_AFTER_MS = 1_000; // stdin closed, still running
 const KILL_AFTER_MS = 3_000;
+const GIVE_UP_AFTER_KILL_MS = 1_000; // then stop waiting for "close"
+
+// Spawned detached, the child leads its own group (pgid = pid), so
+// the group outlives it while a grandchild still runs.
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (child.pid) process.kill(-child.pid, signal);
+  } catch {
+    // the group is gone
+  }
+}
+
+// Resolves on the child's "close" or after `ms`, whichever is first.
+async function closedWithin(
+  child: ChildProcess,
+  ms: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    once(child, "close").catch(() => {}),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  clearTimeout(timer);
+}
 
 // One set of process hooks for all children (one per transport
-// would trip MaxListeners): an exit SIGKILLs every live child, and a
+// would trip MaxListeners): an exit SIGKILLs every live group, and a
 // signal nobody else handles (a second Ctrl+C, after the headless
 // abort's `once` is spent) ends them before the harness dies, since
 // Node's default signal death fires no "exit" event.
@@ -42,7 +72,7 @@ function track(child: ChildProcess): void {
   if (hooked) return;
   hooked = true;
   process.once("exit", () => {
-    for (const each of live) each.kill("SIGKILL");
+    for (const each of live) signalGroup(each, "SIGKILL");
   });
   // Prepended: it must run while a headless `once` is still counted.
   for (const signal of SIGNALS) {
@@ -67,16 +97,15 @@ export async function handleSignal(
   target: SignalTarget = process,
 ): Promise<void> {
   if (target.listenerCount(signal) > 1) return;
-  const children = [...live];
+  const children = [...live]; // none has fired "close" yet
+  const grace = KILL_AFTER_MS - TERM_AFTER_MS;
   const closed = children.map((child) =>
-    child.exitCode !== null || child.signalCode !== null
-      ? Promise.resolve()
-      : once(child, "close").then(() => {}),
+    closedWithin(child, grace + GIVE_UP_AFTER_KILL_MS),
   );
-  for (const child of children) child.kill("SIGTERM");
+  for (const child of children) signalGroup(child, "SIGTERM");
   const kill = setTimeout(() => {
-    for (const child of children) child.kill("SIGKILL");
-  }, KILL_AFTER_MS - TERM_AFTER_MS);
+    for (const child of children) signalGroup(child, "SIGKILL");
+  }, grace);
   await Promise.all(closed);
   clearTimeout(kill);
   target.exit(128 + constants.signals[signal]);
@@ -87,7 +116,10 @@ export class StdioTransport implements Transport {
   readonly #log: Logger;
   readonly #label: string;
   #child: ChildProcess | undefined;
+  #readers: Interface[] = [];
   #closing = false;
+  #closed = false; // "close" fired: the pipes are shut
+  #closeDone: Promise<void> | undefined; // a second close() waits on it
 
   constructor(options: StdioOptions) {
     this.#o = options;
@@ -105,6 +137,7 @@ export class StdioTransport implements Transport {
     const child = spawn(command, args, {
       cwd,
       env,
+      detached: true, // own process group: see signalGroup
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.#child = child;
@@ -116,11 +149,16 @@ export class StdioTransport implements Transport {
     child.stdin?.on("error", (err) =>
       this.#log.debug(`${this.#label}stdin: ${err.message}`),
     );
-    lines(child.stdout, (line) => this.#frame(line, handlers));
-    lines(child.stderr, (line) => this.#log.info(`${this.#label}${line}`));
+    this.#readers = [
+      lines(child.stdout, (line) => this.#frame(line, handlers)),
+      lines(child.stderr, (line) =>
+        this.#log.info(`${this.#label}${line}`),
+      ),
+    ].filter((reader) => reader !== undefined);
     // "close", not "exit": stdout is drained first, so a reply
     // written just before exiting still reaches its call.
     child.once("close", (code, signal) => {
+      this.#closed = true;
       const how = signal ? `signal ${signal}` : `code ${code}`;
       const error = new Error(`${this.#label}server exited (${how})`);
       if (spawned && !this.#closing) this.#log.warn(error.message);
@@ -148,17 +186,40 @@ export class StdioTransport implements Transport {
     );
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (!this.#child) return Promise.resolve(); // never started
+    this.#closeDone ??= this.#close();
+    return this.#closeDone;
+  }
+
+  async #close(): Promise<void> {
     this.#closing = true;
     const child = this.#child;
-    if (!child || this.#exited()) return;
-    const closed = once(child, "close");
+    // Not #exited(): the child may be gone while its group holds the
+    // pipes. No pid: it never started.
+    if (!child?.pid || this.#closed) return;
+    const closed = closedWithin(
+      child,
+      KILL_AFTER_MS + GIVE_UP_AFTER_KILL_MS,
+    );
     child.stdin?.end();
-    const term = setTimeout(() => child.kill("SIGTERM"), TERM_AFTER_MS);
-    const kill = setTimeout(() => child.kill("SIGKILL"), KILL_AFTER_MS);
+    const term = setTimeout(
+      () => signalGroup(child, "SIGTERM"),
+      TERM_AFTER_MS,
+    );
+    const kill = setTimeout(
+      () => signalGroup(child, "SIGKILL"),
+      KILL_AFTER_MS,
+    );
     await closed;
     clearTimeout(term);
     clearTimeout(kill);
+    if (this.#closed) return;
+    // Given up: an orphan holds the pipes. Release our ends, or their
+    // handles keep the harness alive until the orphan exits.
+    for (const reader of this.#readers) reader.close();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
   }
 
   #exited(): boolean {
@@ -184,6 +245,8 @@ export class StdioTransport implements Transport {
 function lines(
   stream: NodeJS.ReadableStream | null,
   onLine: (line: string) => void,
-): void {
-  if (stream) createInterface({ input: stream }).on("line", onLine);
+): Interface | undefined {
+  return stream
+    ? createInterface({ input: stream }).on("line", onLine)
+    : undefined;
 }

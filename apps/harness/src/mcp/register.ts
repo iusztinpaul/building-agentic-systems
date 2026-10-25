@@ -18,9 +18,9 @@ import { spillOver } from "../tools/truncate.ts";
 import type { McpCallResult, McpClient, McpTool } from "./client.ts";
 
 export const TOOL_NAME = /^[a-z][a-z0-9_]*$/; // spec §8
-export const MAX_TOOL_NAME = 64; // the providers' function-name cap
+const MAX_TOOL_NAME = 64; // the providers' function-name cap
 export const MAX_DESCRIPTION = 2_048; // chars
-export const MAX_RESULT_BYTES = 20 * 1024; // more is spilled to tmp
+const MAX_RESULT_BYTES = 20 * 1024; // more is spilled to tmp
 
 // What registration reads from a client; tests pass stubs.
 export type RegistrableClient = Pick<

@@ -85,7 +85,7 @@ value and a header line in a user message are not architectural decisions. No ne
       make pre-commit` green; `agent-loop.ts` still ≤ 200 lines; `grep -rn "apps/memory\|tree\.memory\|tree\.mcp"
       apps/harness/src` still matches nothing.
 - [x] Tester re-runs the full QA suite and PASSES.
-- [ ] PA re-runs the acceptance review on the feature (`/squid-review` on PR #48) and ACCEPTS.
+- [x] PA re-runs the acceptance review on the feature (`/squid-review` on PR #48) and ACCEPTS.
 
 ## Issues (detail)
 
@@ -303,3 +303,41 @@ $ mutation 1 -> 4 failed | 865 passed; mutation 2 -> 4 failed | 865 passed; both
 - The symlinked skill header is the as-found path, not the realpath (see Break 6).
 
 **VERDICT: PASS**
+
+### [PA] 2026-10-25 05:58 — Acceptance Review (round 2, PR #48 head 9524e49)
+
+**VERDICT: ACCEPT**
+
+Re-verified each of the four 215 issues by running, not reading, plus two round-1 regression probes.
+All acceptance criteria verified from the user's POV. Hand off to the PR Reviewer.
+
+**Evidence** (scratch cwd + fake `TREE_AGENT_HOME`, `env -i`, no API key; FakeProvider via `main`)
+```
+$ make harness-tests                       -> Test Files 46 passed (46) / Tests 869 passed (869), exit 0
+$ node <repo>/apps/harness/src/cli.ts --help      -> exit=0 stdout_lines=10 stderr_bytes=0 files_in_home=0
+$ ... -h | hi --help | --json -h | -h --max-turns 0 -> exit=0 stdout_lines=10 stderr_bytes=0 (all four)
+$ ... --bogus | --help --bogus             -> exit=1 stdout_bytes=0, stderr = Unknown option '--bogus'... + usage
+$ main(["/skill:tree-memory what do I know about Modal?","--cwd",<repo>,"--trust","--no-mcp"])
+  exit 0; line 1 = "# <repo>/.agents/skills/tree-memory/SKILL.md"; body line
+  "The query or instruction to run is: what do I know about Modal?"; contains $ARGUMENTS = false
+$ grep -rn maxCalls apps/harness/src README spec -> settings.ts default(64); README table 64, budgets 64,
+  worked-example sentence "fit the default maxCalls (64)"; spec §10.6 64, §16 default(64); no "16 per script"
+$ tasks/done/206 auto clause                -> verbatim per 215 Issue 4 (git show 9b94fc9)
+regression 1: main(["hi","--trust","--no-mcp"])            -> exit 0, stdout "ok\n"
+regression 2: main(["write a.md","--permission-mode","ask","--json"]) -> exit 2, a.md not written,
+  --json: turn_start > turn_end > tool_call > permission(deny/headless) > tool_result > agent_end
+guards: agent-loop.ts 180 lines; grep apps/memory|tree.memory|tree.mcp in apps/harness/src -> 0
+```
+
+**Non-blocking notes** (for the PR Reviewer; no product change needed)
+- `apps/harness/README.md:93` flag-table cell says `--help` wins "whatever else is on the line"; an unknown option still wins (`--help --bogus` -> stderr, exit 1), as line 61 correctly states. One-cell wording overclaim.
+- `tasks/done/206-…md:196` and `:243` are historical SWE notes that still describe the old "`/tmp/x` unprompted" expectation; the AC itself is now correct.
+
+### [PR Reviewer] 2026-10-25 06:20 — Review (PR #48 head 9524e49)
+
+**VERDICT: BLOCKERS**
+
+Reviewed 184 files, +30 368 / −5 559 lines (every `apps/harness/src` and `tests` file, the config/meta files, ADR-016, the spec, the glossary, the READMEs). Blockers: 1; Nits: 16.
+
+- BLOCKERS: filed rollup task `tasks/217-pr-review-rollup-tree-agent-harness.md`. The one Blocker is `[PA] [Documentation discipline]`: `docs/glossary.md` has no row for **Skill** (nor **Trusted directory**) although the diff adds `src/skills/`, the `skills` prompt section, `/skill:`, `--no-skills` and `skills.listingBudgetRatio`. Cure is a PA glossary pass (fold the three `[PA]` doc-drift Nits — glossary `llm()` "16 calls", spec §9 skills precedence wording, spec §16 missing `mcp.initializeTimeoutMs` — into the same pass). No code Blocker. Pipeline re-runs from PA grooming on the rollup; re-invoke me after PA ACCEPT + re-push.
+- Verified green: `make harness-lint-check` (1 Biome warning, Nit 1), `make harness-typecheck`, `make harness-tests` (46 files / 869 tests), `pnpm install --frozen-lockfile --offline`; `agent-loop.ts` 180 lines / type-only imports; TUI import boundary; spec §9 / §10.3 / §11.1 texts byte-equal; README flag + settings tables match the code; sandbox globals, fail-closed gate, uncatchable headless deny, no `.mcp.json` read, trust gating, no secret logged, `.env.example` key name only; 20 KB MCP / codemode spill tested; JSONL crash-cut recovery, PromptQueue, abort-during-classifier tested.

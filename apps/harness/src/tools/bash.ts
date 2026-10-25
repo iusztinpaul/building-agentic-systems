@@ -13,8 +13,8 @@ import { z } from "zod";
 import type { ToolDefinition, ToolResult } from "./registry.ts";
 import { HeadTailBuffer, MAX_OUTPUT_BYTES } from "./truncate.ts";
 
-export const DEFAULT_TIMEOUT_S = 120;
-export const MAX_TIMEOUT_S = 3_600;
+const DEFAULT_TIMEOUT_S = 120;
+const MAX_TIMEOUT_S = 3_600;
 // The spill file stops growing here, so a runaway command (`yes`)
 // cannot fill the disk before its timeout.
 export const MAX_SPILL_BYTES = 100 * 1024 * 1024;

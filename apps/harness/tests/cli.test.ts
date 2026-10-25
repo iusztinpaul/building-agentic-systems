@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CliDeps, main, resolveMode, type Stdin } from "../src/cli.ts";
+import { log } from "../src/log.ts";
 import { startMcp } from "../src/mcp/client.ts";
 import { FakeProvider, fakeDone, fakeModel } from "../src/provider/fake.ts";
 import { OpenRouterProvider } from "../src/provider/openrouter.ts";
@@ -35,6 +37,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -908,6 +911,40 @@ describe("main (sessions)", () => {
 
     expect(fake.requests[0]?.context.messages.map((m) => m.content)).toEqual(["newer", "go on"]);
   });
+
+  it.each([
+    ["--continue", () => ["--continue"]],
+    ["--resume <id>", (id: string) => ["--resume", id]],
+  ])(
+    "a crash-cut session resumed via %s warns exactly once and mends the file",
+    async (_flag, flags) => {
+      const cwd = scratch("repo");
+      await run(["first", "--cwd", cwd], new FakeProvider({ streams: [textTurn("one")] }));
+      const [file = ""] = filesOf(cwd);
+      const id = /_(.+)\.jsonl$/.exec(file)?.[1] ?? "";
+      appendFileSync(file, '{"id":"cut","type":"mess');
+      const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
+      const fake = new FakeProvider({ streams: [textTurn("two")] });
+
+      const result = await run(["second", "--cwd", cwd, ...flags(id)], fake);
+
+      expect(result.code).toBe(0);
+      const cut = warn.mock.calls.filter(([m]) => m.includes("not a session entry"));
+      expect(cut).toHaveLength(1);
+      expect(fake.requests[0]?.context.messages.map((m) => m.content)).toEqual([
+        "first",
+        "one",
+        "second",
+      ]);
+      const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+      expect(lines.filter((l) => l.startsWith('{"id":"cut"'))).toEqual([
+        '{"id":"cut","type":"mess',
+      ]);
+      expect(
+        lines.filter((l) => !l.startsWith('{"id":"cut"')).map((l) => JSON.parse(l).type),
+      ).toEqual(["session", "message", "message", "message", "message"]);
+    },
+  );
 
   it("--continue with no session for this cwd starts a new one", async () => {
     const cwd = scratch("fresh");

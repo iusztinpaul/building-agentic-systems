@@ -189,7 +189,7 @@ interface Open {
   last: string | null; // the id the next entry points to
 }
 
-export class InMemorySessionStore implements SessionStore {
+class InMemorySessionStore implements SessionStore {
   readonly #now: Now;
   readonly #sessions = new Map<
     string,

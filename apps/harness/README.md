@@ -90,7 +90,7 @@ A positional prompt wins over stdin. Headless text mode prints each final answer
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--help`, `-h` | — | print the usage text on stdout and exit 0, whatever else is on the line |
+| `--help`, `-h` | — | print the usage text on stdout and exit 0, whatever else is on the line, except an unknown option (its error and the usage text on stderr, exit 1) |
 | `--model <id>` | `settings.model` | OpenRouter model id, checked against `GET /api/v1/models` (unknown id: exit 1). On a resumed session it replaces the recorded model. |
 | `--permission-mode ask\|auto` | TUI: `settings.permissions.mode` (`ask`); headless: `auto` | see [Permissions](#permissions) |
 | `--on-blocked stop\|continue` | `stop` | headless only: on a permission deny, stop with exit 2, or hand the model the blocked error and go on |
@@ -385,7 +385,7 @@ Every session (TUI and headless) is one append-only JSONL file:
 - The file name's timestamp is ISO 8601 UTC with `:` and `.` mapped to `-` (`2026-10-24T12-00-00-000Z_<uuid>.jsonl`); the entries' own `timestamp` fields stay ISO 8601.
 - Entries use pi's envelope (`id`, `parentId`, `timestamp`, `type`), written linearly: `session` (first line), `message`, `compaction`, `permission`, `tool_activation`, `model_change`, `llm_call`. Read them with `jq`.
 - `--resume <id>` takes the id after the `_` and searches every slug directory; `--continue` takes the newest session of this cwd. A resume restores the messages after the last compaction (prefixed by its summary), the activated tools, the model and the cost.
-- A last line cut by a crash is skipped with a warning on every load; `--continue` warns twice (once while picking the session, once while loading it).
+- A last line cut by a crash is skipped with one warning when the session is loaded (`--resume` and `--continue` alike); the next entry is written on a fresh line.
 
 ## Skills
 

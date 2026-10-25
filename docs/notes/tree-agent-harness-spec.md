@@ -382,7 +382,7 @@ Validation failures (`zod`) return `{isError:true}` with the issue list. `struct
 
 ## 9. Skills (`src/skills/`)
 
-Agent Skills format: a directory containing `SKILL.md` with YAML frontmatter `name`, `description`, optional `disable-model-invocation: true`. Discovery, in order, later wins on name clash: `~/.tree-agent/skills/*/`, `~/.agents/skills/*/`, every `.agents/skills/*/` from `cwd` up to the git root, `.tree-agent/skills/*/`. Symlinks followed.
+Agent Skills format: a directory containing `SKILL.md` with YAML frontmatter `name`, `description`, optional `disable-model-invocation: true`. Discovery, in order, later wins on name clash: `~/.tree-agent/skills/*/`, `~/.agents/skills/*/`, then — in a trusted `cwd` only — every `.agents/skills/*/` from the git root down to `cwd` (the nearest wins), `.tree-agent/skills/*/`. Symlinks followed.
 
 Prompt section (`skills`), only name + description + path per skill (progressive disclosure):
 
@@ -704,11 +704,13 @@ export const Settings = z.object({
     keepRecentTokens: z.number().default(20_000) }).default({}),
   codemode: z.object({
     inlineBudgetTokens: z.number().default(3_000), timeoutMs: z.number().default(60_000),
-    maxToolCalls: z.number().default(50), concurrency: z.number().default(4),
+    memoryMb: z.number().default(256), maxToolCalls: z.number().default(50),
+    outputMaxBytes: z.number().default(20_000), concurrency: z.number().default(4),
     llm: z.object({ model: z.string().optional(), depth: z.union([z.literal(1), z.literal(2)]).default(1),
       maxCalls: z.number().default(64), maxInputChars: z.number().default(200_000),
       maxTotalTokens: z.number().default(400_000), maxSubTurns: z.number().default(8) }).default({}),
   }).default({}),
+  mcp: z.object({ initializeTimeoutMs: z.number().default(30_000) }).default({}),  // one `initialize` wait per server; the memory server takes 11–28 s
   contextFiles: z.object({ maxChars: z.number().default(40_000) }).default({}),
   skills: z.object({ listingBudgetRatio: z.number().default(0.01) }).default({}),
 });

@@ -143,8 +143,10 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     const trusted = await isTrusted(cwd, { env, flag: args.trust });
     const store = SessionStore.jsonl(userPaths(env).sessions);
     // Before the TUI starts: an unknown id is one line and exit 1.
-    const resume = args.continue ? store.list(cwd)[0]?.id : args.resume;
-    if (resume) store.load(resume);
+    // Loaded once here and handed to the session (one warning per
+    // crash-cut line, not two).
+    const resumeId = args.continue ? store.list(cwd)[0]?.id : args.resume;
+    const resume = resumeId ? store.load(resumeId) : undefined;
 
     const open = async (
       trustNow: boolean,
@@ -242,7 +244,8 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
   }
 }
 
-// "help" for --help / -h, whatever else is on the line.
+// "help" for --help / -h, whatever else is on the line (an unknown
+// option still throws first: parseArgs is strict).
 function parseCli(argv: string[]): CliArgs | "help" {
   const { values, positionals } = parseArgs({
     args: argv,

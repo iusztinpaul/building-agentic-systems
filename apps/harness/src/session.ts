@@ -41,6 +41,7 @@ import type { ModelInfo, Provider } from "./provider/types.ts";
 import {
   type Entry,
   type EntryBody,
+  type RestoredSession,
   SessionStore,
   summaryMessage,
 } from "./session-store/jsonl.ts";
@@ -74,7 +75,9 @@ export interface SessionOptions {
   contextMaxChars: number;
   env?: NodeJS.ProcessEnv;
   store?: SessionStore; // default: SessionStore.inMemory()
-  resume?: string; // a session id in `store`
+  // A session id in `store`, or that session already loaded from it
+  // (the CLI's fail-fast check), so it is read (and warns) once.
+  resume?: string | RestoredSession;
   permissionMode?: PermissionMode; // default "ask"
   // The TUI's dialog; none (the default) is headless: a call that
   // needs a prompt is denied.
@@ -183,9 +186,10 @@ export class AgentSession {
     return session;
   }
 
-  async #restore(id: string): Promise<void> {
-    const restored = this.#store.load(id);
-    this.#id = id;
+  async #restore(resume: string | RestoredSession): Promise<void> {
+    const restored =
+      typeof resume === "string" ? this.#store.load(resume) : resume;
+    this.#id = restored.id;
     this.#model = restored.model;
     this.#context = { system: "", messages: restored.messages };
     this.#saved = restored.messages.length;
@@ -627,7 +631,7 @@ function costOf(
 
 // The truncation point: the built-in tools cap their own output at
 // 50 KB; this backstop keeps head + tail of anything over 64 KB.
-export const RESULT_CAP_BYTES = 64 * 1024;
+const RESULT_CAP_BYTES = 64 * 1024;
 
 function capResult(result: ToolResult): ToolResult {
   const content = headTail(result.content, RESULT_CAP_BYTES);

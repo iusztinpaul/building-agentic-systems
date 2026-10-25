@@ -235,7 +235,12 @@ describe("runTui", () => {
     };
     const provider = new FakeProvider({
       streams: [[fakeDone("one")], [fakeDone("two")]],
-      answers: [async () => (await held, summary)],
+      answers: [
+        async () => {
+          await held;
+          return summary;
+        },
+      ],
     });
     const t = await start(provider, { compaction: { triggerRatio: 0.8, keepRecentTokens: 1 } });
     for (const text of ["first", "second"]) {

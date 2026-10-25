@@ -11,9 +11,9 @@ import { cutBytes } from "../tools/truncate.ts";
 import type { ToolCall } from "../types.ts";
 import { primaryArgument } from "./summary.ts";
 
-export const REASON_MAX = 200;
+const REASON_MAX = 200;
 export const CLASSIFIER_TIMEOUT_MS = 10_000;
-export const INPUT_CAP_BYTES = 2 * 1024;
+const INPUT_CAP_BYTES = 2 * 1024;
 
 export const DangerCheck = z.object({
   dangerous: z.boolean(),

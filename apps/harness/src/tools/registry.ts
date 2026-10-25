@@ -128,9 +128,10 @@ export class ToolRegistry {
     }
   }
 
+  // The model: direct ∪ activated; a script also codemode (the same
+  // set as scriptable()). Never an unactivated deferred or hidden tool.
   #callable(tool: ToolDefinition, origin: ToolContext["origin"]) {
-    if (tool.exposure === "hidden") return false;
-    if (origin === "codemode") return true;
+    if (origin === "codemode" && tool.exposure === "codemode") return true;
     return tool.exposure === "direct" || this.#activated.has(tool.name);
   }
 }

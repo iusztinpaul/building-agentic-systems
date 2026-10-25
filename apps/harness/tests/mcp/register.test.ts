@@ -434,6 +434,7 @@ describe("MCP registration against the stdio fixture", () => {
     ]);
     expect(servers[0]).toMatchObject({ tools: 2, direct: 1, deferred: 1, codemode: 0 });
     expect(servers[0]?.client.connected).toBe(true);
+    registry.activate(["mcp__fake_server__read_note"]); // deferred: activated first
     const note = await registry.execute(
       { id: "c", name: "mcp__fake_server__read_note", arguments: { id: "7" } },
       { ...toolCtx(tmp()), origin: "codemode" },

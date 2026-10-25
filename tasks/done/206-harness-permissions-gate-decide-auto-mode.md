@@ -194,6 +194,7 @@ notes.md still -rw-r--r--; the session JSONL has the same permission entry. Live
 - Stale `apps/harness/README.md` ("Today it is a project skeleton") is out of scope; flag for 213.
 - Known placement: `tuiPrompter` uses `tui.addChild`, so the dialog renders below the status bar (the footer is not the last line while a prompt is up). A later task can move it above the input.
 - AC tension for the [HUMAN] auto walkthrough: the AC expects `echo hi > /tmp/x` to run unprompted, but the verbatim §11.1 prompt calls writes outside cwd dangerous, so the classifier may prompt on it. That comes from the spec text; it is not a gate bug.
+  (superseded by 215 Issue 4: the AC now expects a prompt for writes outside cwd)
 - Ctrl+C or Esc on a permission prompt is a deny, not an abort; the run continues, with the model told it was blocked. To quit, press Ctrl+C again once the prompt is gone (it aborts a running turn, or quits when idle).
 
 ### [Tester] 2026-10-25 01:15 — QA
@@ -241,6 +242,7 @@ notes.md still -rw-r--r--; the session JSONL has the same permission entry. Live
 4. Note: the gate runs for registered-but-inactive (`deferred`/`hidden`) tools, so the user is prompted (or the classifier is paid, or a headless run exits 2) for a call the registry then answers `Unknown tool`; an `s` answer would also add that name to `sessionAllow` before it is ever activated. No bypass (verified), only noise.
 5. Note: `reason.slice(0, 199)` can split a surrogate pair (an emoji at the cut → lone surrogate); `write` to `~/.zshrc` is shown as `~/.zshrc` though the tool treats `~` as a literal directory in cwd.
 6. Note (SWE's own flag): the verbatim §11.1 prompt calls writes outside cwd dangerous, so the [HUMAN] `echo hi > /tmp/x` unprompted expectation may not hold; spec text, not a gate bug.
+   (superseded by 215 Issue 4: the AC now expects a prompt for writes outside cwd)
 7. Hygiene: I ran the live `chmod 777 /etc/hosts` probe; it was denied by the gate (exit 2) and nothing outside the scratch dir changed.
 
 **VERDICT: FAIL** — one blocking finding (#1: a write/edit/bash can execute after the user aborted while the auto classifier was in flight). Everything else passes; the six non-HUMAN ACs are met on the happy and failure paths and will tick PASS again once #1 is fixed and re-verified.

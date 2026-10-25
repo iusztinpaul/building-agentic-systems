@@ -4,13 +4,13 @@
 // under it, the script and one row per llm() call the script made,
 // collapsed the same way.
 
-import { isAbsolute, relative, resolve } from "node:path";
 import {
   type Component,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { displayPath } from "../display-path.ts";
 import type { AgentEvent, ToolCall } from "../types.ts";
 import { compact } from "./status-bar.ts";
 import { bold, dim, green, red, sanitize, yellow } from "./style.ts";
@@ -22,12 +22,7 @@ export function primaryArgument(call: ToolCall, cwd: string): string {
   if (call.name === "codemode" && typeof args.description === "string") {
     return args.description;
   }
-  if (typeof args.path === "string") {
-    const rel = relative(cwd, resolve(cwd, args.path));
-    if (rel === "") return ".";
-    const outside = rel.startsWith("..") || isAbsolute(rel);
-    return outside ? args.path : rel;
-  }
+  if (typeof args.path === "string") return displayPath(args.path, cwd);
   if (typeof args.command === "string") {
     return args.command.split("\n")[0] ?? "";
   }

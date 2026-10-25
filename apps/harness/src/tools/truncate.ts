@@ -42,11 +42,7 @@ export function headTail(text: string, maxBytes: number): string {
 // Head and tail around the omission marker. Both cuts move to a
 // character boundary (the bytes they drop count as omitted), so no
 // U+FFFD appears next to the marker.
-export function joinHeadTail(
-  head: Buffer,
-  tail: Buffer,
-  omitted: number,
-): string {
+function joinHeadTail(head: Buffer, tail: Buffer, omitted: number): string {
   const headEnd = charEnd(head);
   let tailStart = 0;
   while (tailStart < tail.length && isContinuation(tail[tailStart])) {

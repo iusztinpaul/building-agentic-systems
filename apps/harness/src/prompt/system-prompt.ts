@@ -96,7 +96,7 @@ export const SKILLS_INTRO =
   "on a skill's file\nwhen the task matches its description. Resolve " +
   "relative paths against the skill dir.";
 
-export const DESCRIPTION_CAP = 250; // chars, the last one `…`
+const DESCRIPTION_CAP = 250; // chars, the last one `…`
 
 // Spec §9, progressive disclosure: name + description + location per
 // model-invocable skill, in the given order, until the section would

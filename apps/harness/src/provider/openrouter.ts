@@ -26,7 +26,7 @@ import {
   type ToolSchema,
 } from "./types.ts";
 
-export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded";
 const REFERER = "https://github.com/iusztinpaul/building-agentic-systems";
 
@@ -215,7 +215,7 @@ export class OpenRouterProvider implements Provider {
 
 // ---- request side ------------------------------------------------
 
-export function toWireMessages(context: Context): WireMessage[] {
+function toWireMessages(context: Context): WireMessage[] {
   return [
     { role: "system", content: context.system },
     ...context.messages.map(toWireMessage),

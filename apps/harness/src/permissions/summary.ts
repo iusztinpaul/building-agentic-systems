@@ -4,11 +4,11 @@
 // description and the first 2 KB of the script; any other tool (MCP)
 // → the input JSON, cut at 2 KB.
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { displayPath } from "../display-path.ts";
 import { cutBytes } from "../tools/truncate.ts";
 import type { ToolCall } from "../types.ts";
 
-export const SUMMARY_CAP_BYTES = 2 * 1024;
+const SUMMARY_CAP_BYTES = 2 * 1024;
 const PATH_TOOLS = new Set(["read", "edit", "write"]);
 
 export function primaryArgument(call: ToolCall, cwd: string): string {
@@ -25,14 +25,6 @@ export function primaryArgument(call: ToolCall, cwd: string): string {
     return `${description}\n${script}`;
   }
   return clip(JSON.stringify(args));
-}
-
-// Relative to cwd when inside it ("." for cwd itself), else as given.
-export function displayPath(path: string, cwd: string): string {
-  const rel = relative(cwd, resolve(cwd, path));
-  if (rel === "") return ".";
-  const outside = rel.startsWith("..") || isAbsolute(rel);
-  return outside ? path : rel;
 }
 
 export const CLIPPED = " … (cut at 2 KB)";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLIPPED, displayPath, primaryArgument } from "../../src/permissions/summary.ts";
+import { CLIPPED, primaryArgument } from "../../src/permissions/summary.ts";
 import type { ToolCall } from "../../src/types.ts";
 
 const call = (name: string, args: Record<string, unknown>): ToolCall => ({
@@ -53,12 +53,5 @@ describe("primaryArgument", () => {
     const text = primaryArgument(call("bash", { command: `${"a".repeat(2047)}é` }), "/w");
 
     expect(text).toBe(`${"a".repeat(2047)}${CLIPPED}`);
-  });
-});
-
-describe("displayPath", () => {
-  it("is . for the cwd itself", () => {
-    expect(displayPath("/w", "/w")).toBe(".");
-    expect(displayPath("sub/../", "/w")).toBe(".");
   });
 });

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -9,10 +10,41 @@ import { gone } from "../helpers/tmp.ts";
 const SERVER = fileURLToPath(new URL("../fixtures/fake-mcp-server.mjs", import.meta.url));
 
 const open: StdioTransport[] = [];
+// Process groups and grandchildren a test started: SIGKILLed after
+// it, so a failing run leaves no grandchild behind.
+const groups: number[] = [];
+const strays: number[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(open.splice(0).map((t) => t.close()));
+  for (const pid of [...groups.splice(0).map((g) => -g), ...strays.splice(0)]) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
 });
+
+// A `uv run`-like child: it spawns a grandchild that inherits the
+// pipes (so stdout stays open after the child dies), reports the
+// grandchild's pid as one frame, and exits on stdin EOF.
+const SPAWNS_PIPE_HOLDER =
+  "const g = require('node:child_process').spawn('sleep', ['30'], { stdio: 'inherit' });" +
+  "console.log(JSON.stringify({ jsonrpc: '2.0', method: 'spawned', params: { pid: g.pid } }));" +
+  "process.stdin.resume(); process.stdin.on('end', () => process.exit(0));";
+
+// The same, but the grandchild leaves the group (setsid): no signal
+// of close() reaches it, so only the bounded wait ends close().
+const SPAWNS_ESCAPED_PIPE_HOLDER = SPAWNS_PIPE_HOLDER.replace(
+  "{ stdio: 'inherit' }",
+  "{ stdio: 'inherit', detached: true }",
+);
+
+// The pids left in process group `pgid` (pgrep -g), none when empty.
+function inGroup(pgid: number): string {
+  return spawnSync("pgrep", ["-g", String(pgid)], { encoding: "utf8" }).stdout.trim();
+}
 
 function transport(
   args: string[],
@@ -144,6 +176,43 @@ describe("StdioTransport", () => {
     expect(await gone(pid)).toBe(true);
   });
 
+  it("close() ends a grandchild that holds the pipes open and returns promptly", async () => {
+    const { t, messages, handlers } = transport(["-e", SPAWNS_PIPE_HOLDER]);
+    await t.start(handlers);
+    const pid = t.pid as number;
+    groups.push(pid);
+    await until(() => messages.length === 1);
+    const grandchild = (messages[0] as { params: { pid: number } }).params.pid;
+    strays.push(grandchild);
+
+    const started = Date.now();
+    await t.close();
+
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(await gone(grandchild)).toBe(true);
+    expect(inGroup(pid)).toBe("");
+  });
+
+  it("close() stops waiting ~1 s after the SIGKILL when a pipe outlives the group", async () => {
+    const pipes = () => process.getActiveResourcesInfo().filter((r) => r === "PipeWrap").length;
+    const before = pipes();
+    const { t, messages, closed, handlers } = transport(["-e", SPAWNS_ESCAPED_PIPE_HOLDER]);
+    await t.start(handlers);
+    groups.push(t.pid as number);
+    await until(() => messages.length === 1);
+    strays.push((messages[0] as { params: { pid: number } }).params.pid);
+
+    const started = Date.now();
+    await t.close();
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(3900);
+    expect(Date.now() - started).toBeLessThan(6000);
+    // The orphan still holds the pipes: the harness lets go of its
+    // ends, so no handle keeps the process alive until it exits.
+    await until(() => closed.length === 1, 1000);
+    expect(pipes()).toBe(before);
+  }, 10_000);
+
   it("names the command when it cannot be started", async () => {
     const { t, handlers } = transport([], { command: "/nonexistent/mcp-server" });
 
@@ -182,6 +251,25 @@ describe("handleSignal (the process SIGINT / SIGTERM hook)", () => {
     await handleSignal("SIGINT", { listenerCount: () => 1, exit });
 
     expect(await gone(pid)).toBe(true);
+    expect(exit).toHaveBeenCalledExactlyOnceWith(130);
+  });
+
+  it("alone, it also ends a pipe-holding grandchild before exiting", async () => {
+    const { t, messages, handlers } = transport(["-e", SPAWNS_PIPE_HOLDER]);
+    await t.start(handlers);
+    const pid = t.pid as number;
+    groups.push(pid);
+    await until(() => messages.length === 1);
+    const grandchild = (messages[0] as { params: { pid: number } }).params.pid;
+    strays.push(grandchild);
+    const exit = vi.fn();
+
+    const started = Date.now();
+    await handleSignal("SIGINT", { listenerCount: () => 1, exit });
+
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(await gone(grandchild)).toBe(true);
+    expect(inGroup(pid)).toBe("");
     expect(exit).toHaveBeenCalledExactlyOnceWith(130);
   });
 

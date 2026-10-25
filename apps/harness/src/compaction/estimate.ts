@@ -8,8 +8,8 @@ import type { Context, Message } from "../types.ts";
 export const CHARS_PER_TOKEN = 4;
 // The correction never moves the estimate more than 2× either way:
 // the tools array and a provider's tokenizer are both in the usage.
-export const MIN_RATIO = 0.5;
-export const MAX_RATIO = 2;
+const MIN_RATIO = 0.5;
+const MAX_RATIO = 2;
 
 // What the provider reads of a message: its text, a tool call's name
 // and JSON arguments, a tool result's name and content.

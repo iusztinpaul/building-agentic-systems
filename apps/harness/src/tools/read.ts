@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { ToolDefinition } from "./registry.ts";
 import { cutBytes, MAX_OUTPUT_BYTES } from "./truncate.ts";
 
-export const MAX_READ_LINES = 2_000;
+const MAX_READ_LINES = 2_000;
 
 const Params = z.object({
   path: z.string().min(1).describe("File path, relative to cwd"),
