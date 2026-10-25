@@ -278,10 +278,16 @@ describe("loadMcpConfig", () => {
 describe("the committed .tree-agent/mcp.json (repo root)", () => {
   const file = fileURLToPath(new URL("../../../../.tree-agent/mcp.json", import.meta.url));
 
-  it("has tree-memory-local only: the .mcp.json command, search_memory direct, visualize_* deferred", () => {
+  it("has the hosted tree-memory (http) and tree-memory-local (the .mcp.json command), search_memory direct, visualize_* deferred", () => {
     const { mcpServers } = parseMcpConfig(JSON.parse(readFileSync(file, "utf8")), file);
 
-    expect(Object.keys(mcpServers)).toEqual(["tree-memory-local"]);
+    expect(Object.keys(mcpServers)).toEqual(["tree-memory", "tree-memory-local"]);
+    expect(mcpServers["tree-memory"]).toEqual({
+      type: "http",
+      url: "https://tree-memory.fastmcp.app/mcp",
+      headers: {},
+      toolExposure: { search_memory: "direct", "visualize_*": "deferred" },
+    });
     expect(mcpServers["tree-memory-local"]).toEqual({
       command: "uv",
       args: [
