@@ -148,7 +148,7 @@ describe("JsonRpcPeer", () => {
     });
   });
 
-  it("a per-call timeout (initialize's 10 s) overrides the 60 s default", async () => {
+  it("a per-call timeout (initialize's 30 s default) overrides the 60 s default", async () => {
     vi.useFakeTimers();
     const { rpc, sent } = peer();
 
@@ -167,7 +167,7 @@ describe("JsonRpcPeer", () => {
     await vi.advanceTimersByTimeAsync(1);
 
     expect(early).toBe("pending");
-    await expect(initOutcome).resolves.toBe("initialize timed out after 10 s");
+    await expect(initOutcome).resolves.toBe("initialize timed out after 30 s");
     expect(sent.at(-1)).toEqual({
       jsonrpc: "2.0",
       method: "notifications/cancelled",

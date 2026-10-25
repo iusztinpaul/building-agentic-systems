@@ -42,6 +42,11 @@ export class JsonRpcError extends Error {
   }
 }
 
+// A call the peer never answered within its timeout.
+export class JsonRpcTimeoutError extends Error {
+  override name = "JsonRpcTimeoutError";
+}
+
 interface Pending {
   resolve(result: unknown): void;
   reject(error: Error): void;
@@ -85,7 +90,9 @@ export class JsonRpcPeer {
         const seconds = timeoutMs / 1000;
         this.#settle(
           id,
-          new Error(`${this.#label}${method} timed out after ${seconds} s`),
+          new JsonRpcTimeoutError(
+            `${this.#label}${method} timed out after ${seconds} s`,
+          ),
         );
         const cancel = { requestId: id, reason: "timeout" };
         this.notify("notifications/cancelled", cancel).catch(() => {});

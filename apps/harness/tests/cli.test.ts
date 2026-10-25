@@ -1343,6 +1343,20 @@ describe("main (mcp)", () => {
     expect(pids()).toEqual([]);
   });
 
+  it("passes settings.json mcp.initializeTimeoutMs to startMcp (default 30 000)", async () => {
+    const spy = vi.fn(startMcp);
+    const fake = new FakeProvider({ streams: [textTurn("ok"), textTurn("ok")] });
+
+    await run(["hi", "--cwd", project()], fake, { startMcp: spy });
+    writeFileSync(
+      join(home, "settings.json"),
+      JSON.stringify({ mcp: { initializeTimeoutMs: 90_000 } }),
+    );
+    await run(["hi", "--cwd", project()], fake, { startMcp: spy });
+
+    expect(spy.mock.calls.map(([o]) => o.initializeTimeoutMs)).toEqual([30_000, 90_000]);
+  });
+
   it("a url without a scheme: one line naming the server and the key, exit 1", async () => {
     const cwd = project();
     writeMcp(join(cwd, ".tree-agent", "mcp.json"), {

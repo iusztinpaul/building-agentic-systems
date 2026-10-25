@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger, type Logger } from "../../src/log.ts";
 import {
   connectMcpServers,
@@ -30,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   // Kill every child even when an assertion failed.
   const pids = pidsOf(marker);
   await Promise.all(clients.splice(0).map((c) => c.close()));
@@ -60,6 +61,21 @@ function stdio(env: Record<string, string> = {}): McpServer {
     toolExposure: {},
   };
 }
+
+// Reads stdin, never answers, exits on EOF (so close() is quick).
+const SILENT_STDIO: McpServer = {
+  command: process.execPath,
+  args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"],
+  env: {},
+  toolExposure: {},
+};
+// An HTTP server that never answers: with fake timers, no real I/O.
+const SILENT_HTTP: McpServer = { url: "http://silent.test/mcp", headers: {}, toolExposure: {} };
+// Every request hangs until the transport aborts it (close()).
+const hangingFetch = ((_url: unknown, init?: RequestInit) =>
+  new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+  })) as typeof fetch;
 
 function client(server: McpServer, options: McpClientOptions = {}): McpClient {
   const c = new McpClient("fake", server, options);
@@ -340,29 +356,69 @@ describe("connectMcpServers / startMcp", () => {
 
   it("a server silent on initialize: an info line first, one warn after its own timeout, the client kept", async () => {
     const { log, lines } = sink();
-    // Reads stdin, never answers, exits on EOF (so close() is quick).
-    const silent: McpServer = {
-      command: process.execPath,
-      args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"],
-      env: {},
-      toolExposure: {},
-    };
-
     const connected = await connectMcpServers(
-      { silent, good: stdio() },
+      { silent: SILENT_STDIO, good: stdio() },
       { log, timeoutMs: 60_000, initializeTimeoutMs: 200 },
     );
     clients.push(...connected);
 
-    expect(INITIALIZE_TIMEOUT_MS).toBe(10_000);
     expect(lines[0]).toBe("[tree-agent] info: connecting to 2 MCP server(s)…\n");
     const warns = lines.filter((l) => l.includes("warn:"));
-    expect(warns).toEqual(['[tree-agent] warn: mcp "silent": initialize timed out after 0.2 s\n']);
+    expect(warns).toEqual([
+      '[tree-agent] warn: mcp "silent": initialize timed out after 0.2 s (settings.json: mcp.initializeTimeoutMs)\n',
+    ]);
     expect(connected.map((c) => [c.name, c.connected])).toEqual([
       ["silent", false],
       ["good", true],
     ]);
     expect(connected[0]?.tools).toEqual([]);
+  });
+
+  it("initialize waits 30 s by default: pending at 29 999 ms, a warn naming the setting at 30 000 ms", async () => {
+    vi.useFakeTimers();
+    const { log, lines } = sink();
+
+    const pending = connectMcpServers({ silent: SILENT_HTTP }, { log, fetch: hangingFetch });
+    await vi.advanceTimersByTimeAsync(INITIALIZE_TIMEOUT_MS - 1);
+    const early = lines.filter((l) => l.includes("warn:"));
+    await vi.advanceTimersByTimeAsync(1);
+    const connected = await pending;
+    clients.push(...connected);
+
+    expect(INITIALIZE_TIMEOUT_MS).toBe(30_000);
+    expect(early).toEqual([]);
+    expect(lines.filter((l) => l.includes("warn:"))).toEqual([
+      '[tree-agent] warn: mcp "silent": initialize timed out after 30 s (settings.json: mcp.initializeTimeoutMs)\n',
+    ]);
+    expect(connected[0]?.connected).toBe(false);
+  });
+
+  it("a custom initializeTimeoutMs is honoured: 45 s is still pending at 44 999 ms", async () => {
+    vi.useFakeTimers();
+    const { log, lines } = sink();
+    const warns = () => lines.filter((l) => l.includes("warn:"));
+
+    const pending = connectMcpServers(
+      { silent: SILENT_HTTP },
+      { log, fetch: hangingFetch, initializeTimeoutMs: 45_000 },
+    );
+    await vi.advanceTimersByTimeAsync(44_999);
+    const early = warns();
+    await vi.advanceTimersByTimeAsync(1);
+    clients.push(...(await pending));
+
+    expect(early).toEqual([]);
+    expect(warns()).toEqual([
+      '[tree-agent] warn: mcp "silent": initialize timed out after 45 s (settings.json: mcp.initializeTimeoutMs)\n',
+    ]);
+  });
+
+  it("a tools/call timeout carries no settings hint (only initialize's wait is a setting)", async () => {
+    const c = client(stdio(), { timeoutMs: 200 });
+
+    await expect(c.callTool("echo", { hang: true })).rejects.toThrow(
+      /^mcp "fake": tools\/call timed out after 0\.2 s$/,
+    );
   });
 
   it("logs no connecting line when there is no server", async () => {
@@ -389,5 +445,26 @@ describe("connectMcpServers / startMcp", () => {
     expect(connected.map((c) => c.name)).toEqual(["fake"]);
     expect(connected[0]?.tools).toHaveLength(2);
     expect(pidsOf(marker)).toHaveLength(1);
+  });
+
+  it("startMcp passes initializeTimeoutMs on to every client", async () => {
+    const home = join(dir, "home");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(home);
+    writeFileSync(join(home, "mcp.json"), JSON.stringify({ mcpServers: { silent: SILENT_STDIO } }));
+    const { log, lines } = sink();
+
+    const connected = await startMcp({
+      env: { ...process.env, TREE_AGENT_HOME: home },
+      cwd: dir,
+      trusted: false,
+      initializeTimeoutMs: 200,
+      log,
+    });
+    clients.push(...connected);
+
+    expect(lines.filter((l) => l.includes("warn:"))).toEqual([
+      '[tree-agent] warn: mcp "silent": initialize timed out after 0.2 s (settings.json: mcp.initializeTimeoutMs)\n',
+    ]);
   });
 });

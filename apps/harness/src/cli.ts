@@ -163,7 +163,12 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
       let mcpServers: McpServerInfo[] = [];
       if (args.mcp) {
         const start = deps.startMcp ?? startMcp;
-        const clients = await start({ env, cwd, trusted: projectTrusted });
+        const clients = await start({
+          env,
+          cwd,
+          trusted: projectTrusted,
+          initializeTimeoutMs: settings.mcp.initializeTimeoutMs,
+        });
         mcpClients.push(...clients);
         // Before create(): a resumed session re-activates by name.
         mcpServers = registerMcpTools(tools, clients, { tmpDir });

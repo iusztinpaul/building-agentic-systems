@@ -10,6 +10,9 @@ import { z } from "zod";
 import type { Provider } from "../provider/types.ts";
 import { projectPaths, userPaths } from "./paths.ts";
 
+// setTimeout's ceiling (2^31 - 1 ms); Node turns a larger delay into 1 ms.
+const MAX_TIMER_MS = 2_147_483_647;
+
 export const Settings = z
   .object({
     model: z.string().default("anthropic/claude-sonnet-5.5"),
@@ -30,7 +33,12 @@ export const Settings = z
       .object({
         // Sandbox limits (spec §10.4); 0 would hang or never run.
         inlineBudgetTokens: z.number().int().nonnegative().default(3_000),
-        timeoutMs: z.number().int().positive().default(60_000),
+        timeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(MAX_TIMER_MS)
+          .default(60_000),
         memoryMb: z.number().int().positive().default(256),
         maxToolCalls: z.number().int().positive().default(50),
         outputMaxBytes: z.number().int().positive().default(20_000),
@@ -47,6 +55,18 @@ export const Settings = z
           })
           .strict()
           .default({}),
+      })
+      .strict()
+      .default({}),
+    mcp: z
+      .object({
+        // One wait for every server; the memory server takes 11–28 s.
+        initializeTimeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(MAX_TIMER_MS)
+          .default(30_000),
       })
       .strict()
       .default({}),

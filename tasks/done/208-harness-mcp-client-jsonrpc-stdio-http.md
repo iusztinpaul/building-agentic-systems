@@ -270,3 +270,65 @@ TREE_AGENT_LOG=info stderr: "[tree-agent] info: connecting to 1 MCP server(s)…
 **Notes**
 - On the fallback path the children's exits are not `#closing`, so each one may log `server exited (signal SIGTERM)` at warn while the harness dies. This is intentional: the user asked to leave twice.
 - Tester findings #4–#8 are not addressed (out of scope for this fold-in).
+
+### [SWE] 2026-10-25 05:10 — Post-commit fix: initialize timeout → setting, 30 s default
+
+**Why**
+The fold-in hard-coded `INITIALIZE_TIMEOUT_MS = 10_000`, which is too short for the real `tree-memory-local` server: it answers `initialize` in about 11 s warm and 17–28 s on slow runs (Python imports, Opik setup). Sessions logged `initialize timed out after 10 s` and started with no memory tools. The wait is now `settings.mcp.initializeTimeoutMs` (positive integer, default 30 000). It is one global value: there is no per-server knob in `mcp.json`. `tools/call` stays at 60 s.
+
+**Files modified**
+- `apps/harness/src/config/settings.ts`: new strict `mcp: { initializeTimeoutMs }` section.
+- `apps/harness/src/mcp/jsonrpc.ts`: a timed-out call rejects with `JsonRpcTimeoutError` (an `Error` subclass, same message), so the client can tell a timeout from other failures without matching strings.
+- `apps/harness/src/mcp/client.ts`: `INITIALIZE_TIMEOUT_MS = 30_000` is the fallback. When `initialize` times out, the error gets ` (settings.json: mcp.initializeTimeoutMs)` appended. This happens in the handshake, so lazy reconnects show the hint too. `StartMcpOptions` gains `initializeTimeoutMs` and `log`, and `startMcp` forwards both to `connectMcpServers`.
+- `apps/harness/src/cli.ts`: passes `settings.mcp.initializeTimeoutMs` to `startMcp`.
+- `apps/harness/README.md` (213's uncommitted copy, edited in place): new settings row `mcp.initializeTimeoutMs | 30 000`. The MCP timeouts bullet and the memory-server paragraph now say 30 s and name the setting. The classifier's separate "10 s timeout" is unchanged.
+
+**Tests**
+- `tests/config/settings.test.ts`: `DEFAULTS` gains `mcp`. New test `reads mcp.initializeTimeoutMs (default = the client's fallback) and rejects 0 and a fraction`. It checks that the default equals `INITIALIZE_TIMEOUT_MS`, that 90 000 is read, that 0, 1.5 and an unknown `mcp.timeoutMs` are rejected, and that the issue names the key path.
+- `tests/mcp/client.test.ts` (fake timers, a silent HTTP server via an injected never-answering `fetch`, no real I/O): `initialize waits 30 s by default: pending at 29 999 ms, a warn naming the setting at 30 000 ms` and `a custom initializeTimeoutMs is honoured: 45 s is still pending at 44 999 ms`. The existing silent-stdio warn now ends with the hint. Also new: `startMcp passes initializeTimeoutMs on to every client` and `a tools/call timeout carries no settings hint`.
+- `tests/mcp/jsonrpc.test.ts`: the per-call override test now runs at 30 s (`initialize timed out after 30 s`).
+- `tests/cli.test.ts`: `passes settings.json mcp.initializeTimeoutMs to startMcp (default 30 000)` checks 30 000, then 90 000 from `settings.json`.
+- Red first: 8 failures before the change, for the right reasons (the defaults lacked `mcp`, the old 10 s constant, a missing hint). All green after.
+
+**Evidence**
+```
+$ make harness-lint-fix && make harness-lint-check && make harness-typecheck && make harness-tests && make pre-commit
+Checked 102 files … No fixes applied. Found 1 warning (pre-existing comma operator in tests/compaction, not touched)
+tsc --noEmit clean
+ Test Files  46 passed (46)
+      Tests  855 passed (855)
+biome check (harness)....Passed   prettier....Passed
+
+# Live: env local, scratch TREE_AGENT_HOME, `make harness-run PROMPT="Reply with exactly: ok" ARGS="--cwd ../.. --trust --json"`, stderr timestamped
+run 1: "connecting to 1 MCP server(s)…" at 0.97 s → server "Processing request of type ListToolsRequest" at 17.60 s  ⇒ handshake ≈ 16.6 s; 0 warns; output "ok"
+run 2: 0.96 s → 15.40 s  ⇒ handshake ≈ 14.4 s; 0 warns; output "ok"
+run 3 (prompt: call search_memory for 'agents'): tool_call mcp__tree_memory_local__search_memory → tool_result with real parents; answer "10"; 0 warns
+run 4 (settings.json {"mcp":{"initializeTimeoutMs":2000}}):
+  [tree-agent] warn: mcp "tree-memory-local": initialize timed out after 2 s (settings.json: mcp.initializeTimeoutMs)
+```
+
+**Notes**
+- Both measured handshakes (14–17 s) would have failed under the old 10 s limit. 30 s gives roughly 2× headroom over the warm case, but a cold `uv` sync can still go over it, and the README says how to raise the limit.
+
+### [Tester] 2026-10-25 05:30 — QA of the post-commit initialize-timeout fix
+
+**Test summary**
+- Cadence (`make harness-lint-fix && lint-check && typecheck && tests && make pre-commit`): all green, exit 0. Biome: 1 pre-existing warning (tests/compaction comma operator), 0 new. `git diff` checksum identical before and after lint-fix (nothing reformatted).
+- Harness suite: 46 files / 855 tests passed (live OpenRouter tests ran).
+
+**Verified**
+- Settings: default 30 000 (`Settings.parse({}).mcp.initializeTimeoutMs`, asserted equal to `INITIALIZE_TIMEOUT_MS` in `tests/config/settings.test.ts`). Through the real CLI with a scratch `TREE_AGENT_HOME`: `0` and `-5` → `mcp.initializeTimeoutMs: Number must be greater than 0`; `1.5` → `Expected integer, received float`; `"30000"` → `Expected number, received string`; `{"mcp":{"timeoutMs":1000}}` → `mcp: Unrecognized key(s) in object: 'timeoutMs'`; `{"mcp":null}` → `Expected object, received null`. Each names the file and key path, exit 1.
+- Fake-timer tests: pending at 29 999 ms, warn at 30 000 ms; custom 45 000 pending at 44 999 ms, warn at 45 s. Warn text exact: `[tree-agent] warn: mcp "silent": initialize timed out after 30 s (settings.json: mcp.initializeTimeoutMs)`.
+- `tools/call` timeout: still 60 s (`CALL_TIMEOUT_MS`), the test asserts `/^mcp "fake": tools\/call timed out after 0\.2 s$/` (no hint).
+- Reconnect (own script, silent stdio server, `initializeTimeoutMs: 300`, two consecutive `callTool`s): both reject with `JsonRpcTimeoutError` `mcp "silent": initialize timed out after 0.3 s (settings.json: mcp.initializeTimeoutMs)`. Two silent servers connect in parallel (1 009 ms for a 1 s limit), both warned.
+- `--no-mcp --no-skills` run: prints `ok`, exit 0, no server started.
+- Live, repo root via `make harness-run … ARGS="--cwd ../.. --trust --json"`, scratch `TREE_AGENT_HOME`, local infra up: "Reply with exactly: ok" → `ok`, exit 0, 19 s wall, 0 `timed out` lines. The memory prompt (`TREE_AGENT_LOG=info`) → `tool_call mcp__tree_memory_local__search_memory {"query":"agents","top_k":2}`, a real `parents` result, answer `2`, `agent_end completed`, 0 timeout lines.
+- Mutation: `INITIALIZE_TIMEOUT_MS = 30_000` → `10_000` in `src/mcp/client.ts` → 3 tests fail (settings default test, jsonrpc per-call test, the 30 s default test). Restored from a saved copy; `shasum` identical before and after (`39c75ca2…`).
+- Files changed by A: `src/cli.ts`, `src/config/settings.ts`, `src/mcp/client.ts`, `src/mcp/jsonrpc.ts` + 4 test files. No other `apps/harness/src` file moved.
+
+**Other issues found (non-blocking)**
+- `initializeTimeoutMs` has no upper bound. A value above 2 147 483 647 (e.g. `3000000000`) passes validation, Node clamps the timer to 1 ms (`TimeoutOverflowWarning`) and the handshake fails after 48 ms with the misleading `initialize timed out after 3000000 s (settings.json: mcp.initializeTimeoutMs)`. Repro: `/private/tmp/claude-501/-Users-pauliusztin-Documents-01-Projects-AI-Engineer-Handbook-building-agentic-systems-building-agentic-systems/a7886cf7-0496-410f-869e-8174a1590e03/scratchpad/qa-213/overflow.mjs`. Suggest `.max(2_147_483_647)` (the other `*Ms` settings share the gap). Follow-up, not a blocker.
+- 213's SWE log still says the fixed 10 s timeout is a BLOCKER and counts 849 tests; superseded by this fix (suggest a one-line addendum there).
+
+**VERDICT: PASS**
+- `code-review` plugin is enabled in `.claude/settings.json`, but this Tester run had no tool to invoke it. Substitute: a manual read of the whole Part A diff (`cli.ts`, `settings.ts`, `client.ts`, `jsonrpc.ts`): no defects beyond the upper-bound note above (`startMcp` forwards `env`, `cwd`, `initializeTimeoutMs`, `log` and strips only `trusted`; the rethrown `JsonRpcTimeoutError` keeps the name and message, drops the original stack, harmless).

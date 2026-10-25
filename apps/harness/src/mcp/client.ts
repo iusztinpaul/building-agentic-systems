@@ -9,14 +9,20 @@
 import { z } from "zod";
 import { log as defaultLog, type Logger } from "../log.ts";
 import { loadMcpConfig, type McpServer } from "./config.ts";
-import { JsonRpcPeer, type Transport } from "./jsonrpc.ts";
+import {
+  JsonRpcPeer,
+  JsonRpcTimeoutError,
+  type Transport,
+} from "./jsonrpc.ts";
 import { HttpTransport } from "./transport-http.ts";
 import { StdioTransport } from "./transport-stdio.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "tree-agent", version: "0.1.0" };
-// A silent server costs startup this, not the 60 s of a tools/call.
-export const INITIALIZE_TIMEOUT_MS = 10_000;
+// A silent server costs startup this, not the 60 s of a tools/call;
+// settings.mcp.initializeTimeoutMs (same default) overrides it.
+export const INITIALIZE_TIMEOUT_MS = 30_000;
+const INITIALIZE_HINT = " (settings.json: mcp.initializeTimeoutMs)";
 // With the repeated-cursor guard: a server minting endless cursors.
 export const MAX_TOOL_PAGES = 100;
 
@@ -167,15 +173,25 @@ export class McpClient {
       },
     });
     try {
-      const raw = await peer.request(
-        "initialize",
-        {
-          protocolVersion: PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: CLIENT_INFO,
-        },
-        { timeoutMs: this.#o.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS },
-      );
+      const raw = await peer
+        .request(
+          "initialize",
+          {
+            protocolVersion: PROTOCOL_VERSION,
+            capabilities: {},
+            clientInfo: CLIENT_INFO,
+          },
+          {
+            timeoutMs: this.#o.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS,
+          },
+        )
+        .catch((err: Error) => {
+          // Name the knob that raises the wait.
+          if (err instanceof JsonRpcTimeoutError) {
+            throw new JsonRpcTimeoutError(err.message + INITIALIZE_HINT);
+          }
+          throw err;
+        });
       const { protocolVersion } = this.#parse(
         InitializeResult,
         raw,
@@ -237,7 +253,8 @@ export class McpClient {
   }
 }
 
-export interface StartMcpOptions {
+export interface StartMcpOptions
+  extends Pick<McpClientOptions, "initializeTimeoutMs" | "log"> {
   env: NodeJS.ProcessEnv;
   cwd: string;
   trusted: boolean; // the project .tree-agent/mcp.json too
@@ -248,12 +265,12 @@ export type StartMcp = (options: StartMcpOptions) => Promise<McpClient[]>;
 // Startup: read the config (a bad file throws), connect every server
 // and list its tools. A server that fails to start is warned about
 // and kept: its next call retries the handshake.
-export const startMcp: StartMcp = async ({ env, cwd, trusted }) => {
+export const startMcp: StartMcp = async ({ trusted, ...options }) => {
   const servers = await loadMcpConfig({
-    env,
-    projectDir: trusted ? cwd : undefined,
+    env: options.env,
+    projectDir: trusted ? options.cwd : undefined,
   });
-  return connectMcpServers(servers, { cwd, env });
+  return connectMcpServers(servers, options);
 };
 
 export async function connectMcpServers(

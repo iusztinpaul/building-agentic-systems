@@ -9,6 +9,7 @@ import {
   Settings,
   SettingsError,
 } from "../../src/config/settings.ts";
+import { INITIALIZE_TIMEOUT_MS } from "../../src/mcp/client.ts";
 import { FakeProvider, fakeModel } from "../../src/provider/fake.ts";
 
 const DEFAULTS = {
@@ -31,6 +32,7 @@ const DEFAULTS = {
       maxSubTurns: 8,
     },
   },
+  mcp: { initializeTimeoutMs: 30_000 },
   contextFiles: { maxChars: 40_000 },
   skills: { listingBudgetRatio: 0.01 },
 };
@@ -142,6 +144,33 @@ describe("loadSettings", () => {
     writeSettings({ codemode: { concurrency: 0 } });
     await expect(loadSettings({ env: env() })).rejects.toThrow(
       "  - codemode.concurrency: Number must be greater than 0",
+    );
+  });
+
+  it("reads mcp.initializeTimeoutMs (default = the client's fallback) and rejects 0 and a fraction", async () => {
+    expect(Settings.parse({}).mcp.initializeTimeoutMs).toBe(INITIALIZE_TIMEOUT_MS);
+    writeSettings({ mcp: { initializeTimeoutMs: 90_000 } });
+    expect((await loadSettings({ env: env() })).mcp).toEqual({ initializeTimeoutMs: 90_000 });
+
+    writeSettings({ mcp: { initializeTimeoutMs: 0 } });
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      "  - mcp.initializeTimeoutMs: Number must be greater than 0",
+    );
+    writeSettings({ mcp: { initializeTimeoutMs: 1.5 } });
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      "  - mcp.initializeTimeoutMs: Expected integer, received float",
+    );
+    writeSettings({ mcp: { timeoutMs: 1_000 } });
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      "  - mcp: Unrecognized key(s) in object: 'timeoutMs'",
+    );
+  });
+
+  it("rejects an *Ms value past setTimeout's 2^31 - 1 ceiling with the key path", async () => {
+    writeSettings({ mcp: { initializeTimeoutMs: 3_000_000_000 } });
+
+    await expect(loadSettings({ env: env() })).rejects.toThrow(
+      "  - mcp.initializeTimeoutMs: Number must be less than or equal to 2147483647",
     );
   });
 
